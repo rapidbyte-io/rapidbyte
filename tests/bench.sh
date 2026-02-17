@@ -15,6 +15,7 @@ BENCH_ROWS="${BENCH_ROWS:-1000}"
 BENCH_ITERS="${BENCH_ITERS:-3}"
 BUILD_MODE="${BUILD_MODE:-release}"
 BENCH_MODE="${BENCH_MODE:-insert}"
+BENCH_AOT="${BENCH_AOT:-true}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -34,12 +35,13 @@ cleanup() {
 }
 
 usage() {
-    echo "Usage: $0 [--rows N] [--iters N] [--mode insert|copy] [--debug]"
+    echo "Usage: $0 [--rows N] [--iters N] [--mode insert|copy] [--no-aot] [--debug]"
     echo ""
     echo "Options:"
     echo "  --rows N    Number of rows to benchmark (default: 1000)"
     echo "  --iters N   Number of iterations (default: 3)"
     echo "  --mode M    Load method: insert or copy (default: insert)"
+    echo "  --no-aot    Skip AOT compilation of WASM modules"
     echo "  --debug     Use debug builds instead of release"
     exit 0
 }
@@ -50,6 +52,7 @@ while [[ $# -gt 0 ]]; do
         --rows)  BENCH_ROWS="$2"; shift 2 ;;
         --iters) BENCH_ITERS="$2"; shift 2 ;;
         --mode)  BENCH_MODE="$2"; shift 2 ;;
+        --no-aot) BENCH_AOT="false"; shift ;;
         --debug) BUILD_MODE="debug"; shift ;;
         --help)  usage ;;
         *)       fail "Unknown option: $1" ;;
@@ -59,7 +62,7 @@ done
 echo ""
 cyan "═══════════════════════════════════════════════"
 cyan "  Rapidbyte Benchmark"
-cyan "  Rows: $BENCH_ROWS | Iterations: $BENCH_ITERS | Build: $BUILD_MODE | Mode: $BENCH_MODE"
+cyan "  Rows: $BENCH_ROWS | Iterations: $BENCH_ITERS | Build: $BUILD_MODE | Mode: $BENCH_MODE | AOT: $BENCH_AOT"
 cyan "═══════════════════════════════════════════════"
 echo ""
 
@@ -85,6 +88,17 @@ mkdir -p "$CONNECTOR_DIR"
 cp "$PROJECT_ROOT/connectors/source-postgres/target/wasm32-wasip1/$TARGET_DIR/source_postgres.wasm" "$CONNECTOR_DIR/"
 cp "$PROJECT_ROOT/connectors/dest-postgres/target/wasm32-wasip1/$TARGET_DIR/dest_postgres.wasm" "$CONNECTOR_DIR/"
 info "Connectors staged in $CONNECTOR_DIR"
+
+# ── AOT-compile WASM modules ────────────────────────────────────
+if [ "$BENCH_AOT" = "true" ] && command -v wasmedge &> /dev/null; then
+    info "AOT-compiling source connector..."
+    wasmedge compile "$CONNECTOR_DIR/source_postgres.wasm" "$CONNECTOR_DIR/source_postgres.wasm" 2>&1 | tail -1
+    info "AOT-compiling dest connector..."
+    wasmedge compile "$CONNECTOR_DIR/dest_postgres.wasm" "$CONNECTOR_DIR/dest_postgres.wasm" 2>&1 | tail -1
+    info "AOT compilation complete"
+elif [ "$BENCH_AOT" = "true" ]; then
+    warn "wasmedge CLI not found, skipping AOT compilation"
+fi
 
 # ── Start PostgreSQL ──────────────────────────────────────────────
 info "Starting PostgreSQL via Docker Compose..."

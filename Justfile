@@ -56,5 +56,13 @@ bench-compare:
     @echo "=== COPY mode (10K rows) ==="
     ./tests/bench.sh --rows 10000 --iters 3 --mode copy
 
+# Compare AOT vs non-AOT module load times
+bench-aot:
+    @echo "=== With AOT (10K rows) ==="
+    ./tests/bench.sh --rows 10000 --iters 3 --mode insert
+    @echo ""
+    @echo "=== Without AOT (10K rows) ==="
+    ./tests/bench.sh --rows 10000 --iters 3 --mode insert --no-aot
+
 clean:
     cargo clean
