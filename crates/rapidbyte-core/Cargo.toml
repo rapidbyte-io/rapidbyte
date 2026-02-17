@@ -16,3 +16,6 @@ tracing = { workspace = true }
 rusqlite = { workspace = true }
 chrono = { workspace = true }
 regex = "1"
+wasmedge-sdk = { version = "0.14", features = ["standalone"] }
+wasmedge-sys = "0.19"
+wasmedge-types = "0.6"
