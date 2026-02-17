@@ -186,6 +186,12 @@ pub extern "C" fn rb_write_batch(
     batch_ptr: i32,
     batch_len: i32,
 ) -> i64 {
+    if CONFIG.get().is_none() {
+        let result = make_err_response("NO_CONFIG", "No config available. Call rb_init first.");
+        let (ptr, len) = write_guest_bytes(&result);
+        return pack_ptr_len(ptr, len);
+    }
+
     let stream_name = unsafe {
         let bytes = std::slice::from_raw_parts(stream_ptr as *const u8, stream_len as usize);
         String::from_utf8_lossy(bytes).to_string()
