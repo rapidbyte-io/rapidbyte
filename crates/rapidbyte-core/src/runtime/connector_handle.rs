@@ -241,6 +241,9 @@ impl<'a> ConnectorHandle<'a> {
             .run_func(None, "rb_close", params!())
             .map_err(|e| anyhow::anyhow!("Failed to call rb_close: {:?}", e))?;
 
+        if result.is_empty() {
+            return Ok(());
+        }
         let rc = result[0].to_i32();
         if rc == 0 {
             Ok(())

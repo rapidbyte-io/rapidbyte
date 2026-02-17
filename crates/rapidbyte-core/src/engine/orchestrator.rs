@@ -501,7 +501,7 @@ fn check_state_backend(config: &PipelineConfig) -> bool {
 /// - Per-stream channels (source emits via host_emit_batch, dest pulls via host_next_batch)
 /// - Typed summaries with batch counts and checkpoint tracking
 #[allow(dead_code)]
-pub async fn run_pipeline_v1(config: &PipelineConfig) -> Result<PipelineResult> {
+pub(crate) async fn run_pipeline_v1(config: &PipelineConfig) -> Result<PipelineResult> {
     let start = Instant::now();
 
     tracing::info!(pipeline = config.pipeline, "Starting v1 pipeline run");
@@ -535,8 +535,8 @@ pub async fn run_pipeline_v1(config: &PipelineConfig) -> Result<PipelineResult> 
             stream_name: s.name.clone(),
             schema: SchemaHint::Columns(vec![]), // discovered at runtime
             sync_mode: match s.sync_mode.as_str() {
-                "incremental" => rapidbyte_sdk::protocol::SyncMode::Incremental,
-                _ => rapidbyte_sdk::protocol::SyncMode::FullRefresh,
+                "incremental" => SyncMode::Incremental,
+                _ => SyncMode::FullRefresh,
             },
             cursor_info: None,
             limits: StreamLimits::default(),
@@ -714,6 +714,7 @@ fn run_source_v1(
     let mut handle = ConnectorHandle::new(vm);
 
     // v1 lifecycle: open
+    // TODO: derive connector_id from wasm path or module metadata
     let open_ctx = OpenContext {
         config: ConfigBlob::Json(source_config.clone()),
         connector_id: "source-postgres".to_string(),
@@ -731,24 +732,31 @@ fn run_source_v1(
         checkpoint_count: 0,
     };
 
-    for stream_ctx in stream_ctxs {
-        tracing::info!(stream = stream_ctx.stream_name, "Starting v1 source read");
-        let summary = handle.run_read(stream_ctx)?;
-        tracing::info!(
-            stream = stream_ctx.stream_name,
-            records = summary.records_read,
-            bytes = summary.bytes_read,
-            "Source read complete for stream"
-        );
-        total_summary.records_read += summary.records_read;
-        total_summary.bytes_read += summary.bytes_read;
-        total_summary.batches_emitted += summary.batches_emitted;
-        total_summary.checkpoint_count += summary.checkpoint_count;
+    let stream_result: Result<()> = (|| {
+        for stream_ctx in stream_ctxs {
+            tracing::info!(stream = stream_ctx.stream_name, "Starting v1 source read");
+            let summary = handle.run_read(stream_ctx)?;
+            tracing::info!(
+                stream = stream_ctx.stream_name,
+                records = summary.records_read,
+                bytes = summary.bytes_read,
+                "Source read complete for stream"
+            );
+            total_summary.records_read += summary.records_read;
+            total_summary.bytes_read += summary.bytes_read;
+            total_summary.batches_emitted += summary.batches_emitted;
+            total_summary.checkpoint_count += summary.checkpoint_count;
+        }
+        Ok(())
+    })();
+
+    // v1 lifecycle: close (always, even if stream loop failed)
+    tracing::info!("Closing source connector (v1)");
+    if let Err(e) = handle.close() {
+        tracing::warn!("Source close failed: {}", e);
     }
 
-    // v1 lifecycle: close
-    tracing::info!("Closing source connector (v1)");
-    handle.close()?;
+    stream_result?;
 
     // sender is dropped here -> dest sees EOF on host_next_batch
     Ok((phase_start.elapsed().as_secs_f64(), total_summary))
@@ -800,16 +808,17 @@ fn run_destination_v1(
     let mut handle = ConnectorHandle::new(vm);
 
     // v1 lifecycle: open
+    // TODO: derive connector_id from wasm path or module metadata
     let open_ctx = OpenContext {
         config: ConfigBlob::Json(dest_config.clone()),
         connector_id: "dest-postgres".to_string(),
         connector_version: "0.1.0".to_string(),
     };
 
+    let vm_setup_secs = vm_setup_start.elapsed().as_secs_f64();
+
     tracing::info!("Opening destination connector (v1)");
     let _open_info = handle.open(&open_ctx)?;
-
-    let vm_setup_secs = vm_setup_start.elapsed().as_secs_f64();
 
     // v1 lifecycle: run_write per stream (sequential)
     // The dest connector calls host_next_batch() internally to pull batches
@@ -822,30 +831,41 @@ fn run_destination_v1(
         perf: None,
     };
 
-    for stream_ctx in stream_ctxs {
-        tracing::info!(stream = stream_ctx.stream_name, "Starting v1 dest write");
-        let summary = handle.run_write(stream_ctx)?;
-        tracing::info!(
-            stream = stream_ctx.stream_name,
-            records = summary.records_written,
-            bytes = summary.bytes_written,
-            "Dest write complete for stream"
-        );
-        total_summary.records_written += summary.records_written;
-        total_summary.bytes_written += summary.bytes_written;
-        total_summary.batches_written += summary.batches_written;
-        total_summary.checkpoint_count += summary.checkpoint_count;
-        // Use the last stream's perf (in v1 there's typically one stream)
-        if summary.perf.is_some() {
-            total_summary.perf = summary.perf;
+    debug_assert!(
+        stream_ctxs.len() <= 1,
+        "v1 multi-stream perf accumulation not implemented"
+    );
+
+    let stream_result: Result<()> = (|| {
+        for stream_ctx in stream_ctxs {
+            tracing::info!(stream = stream_ctx.stream_name, "Starting v1 dest write");
+            let summary = handle.run_write(stream_ctx)?;
+            tracing::info!(
+                stream = stream_ctx.stream_name,
+                records = summary.records_written,
+                bytes = summary.bytes_written,
+                "Dest write complete for stream"
+            );
+            total_summary.records_written += summary.records_written;
+            total_summary.bytes_written += summary.bytes_written;
+            total_summary.batches_written += summary.batches_written;
+            total_summary.checkpoint_count += summary.checkpoint_count;
+            if summary.perf.is_some() {
+                total_summary.perf = summary.perf;
+            }
         }
-    }
+        Ok(())
+    })();
 
     let recv_secs = recv_start.elapsed().as_secs_f64();
 
-    // v1 lifecycle: close
+    // v1 lifecycle: close (always, even if stream loop failed)
     tracing::info!("Closing destination connector (v1)");
-    handle.close()?;
+    if let Err(e) = handle.close() {
+        tracing::warn!("Destination close failed: {}", e);
+    }
+
+    stream_result?;
 
     Ok((
         phase_start.elapsed().as_secs_f64(),
