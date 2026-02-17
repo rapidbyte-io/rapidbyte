@@ -264,11 +264,18 @@ fn run_source(
     let phase_start = Instant::now();
 
     let host_state = HostState {
-        batch_sender: sender,
-        state_backend,
         pipeline_name: pipeline_name.to_string(),
         current_stream: "source".to_string(),
+        state_backend,
         stats,
+        batch_sender: None,
+        next_batch_id: 1,
+        batch_receiver: None,
+        pending_batch: None,
+        last_error: None,
+        source_checkpoints: Vec::new(),
+        dest_checkpoint_count: 0,
+        batch_sender_v0: Some(sender),
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
@@ -320,11 +327,18 @@ fn run_destination(
     let (dummy_sender, _) = mpsc::sync_channel::<(String, Vec<u8>)>(1);
 
     let host_state = HostState {
-        batch_sender: dummy_sender,
-        state_backend,
         pipeline_name: pipeline_name.to_string(),
         current_stream: "destination".to_string(),
+        state_backend,
         stats,
+        batch_sender: None,
+        next_batch_id: 1,
+        batch_receiver: None,
+        pending_batch: None,
+        last_error: None,
+        source_checkpoints: Vec::new(),
+        dest_checkpoint_count: 0,
+        batch_sender_v0: Some(dummy_sender),
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
@@ -385,11 +399,18 @@ fn validate_connector(
     let state = Arc::new(SqliteStateBackend::in_memory()?);
 
     let host_state = HostState {
-        batch_sender: dummy_sender,
-        state_backend: state,
         pipeline_name: "check".to_string(),
         current_stream: "check".to_string(),
+        state_backend: state,
         stats: Arc::new(Mutex::new(RunStats::default())),
+        batch_sender: None,
+        next_batch_id: 1,
+        batch_receiver: None,
+        pending_batch: None,
+        last_error: None,
+        source_checkpoints: Vec::new(),
+        dest_checkpoint_count: 0,
+        batch_sender_v0: Some(dummy_sender),
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;

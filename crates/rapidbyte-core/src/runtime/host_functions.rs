@@ -4,31 +4,486 @@ use wasmedge_sdk::{CallingFrame, WasmValue};
 use wasmedge_sys::Instance as SysInstance;
 use wasmedge_types::error::CoreError;
 
+use rapidbyte_sdk::errors::ConnectorErrorV1;
+use rapidbyte_sdk::protocol::{Checkpoint, StateScope};
+
 use crate::state::backend::{RunStats, StateBackend};
 
 use super::memory_protocol;
 
 /// Shared state passed to all host functions via WasmEdge's host data mechanism.
 pub struct HostState {
-    /// Channel to send (stream_name, arrow_ipc_bytes) to the orchestrator.
-    pub batch_sender: mpsc::SyncSender<(String, Vec<u8>)>,
-    /// State backend for cursor/run persistence.
-    pub state_backend: Arc<dyn StateBackend>,
     /// Pipeline name for state operations.
     pub pipeline_name: String,
     /// Current stream name for state operations.
     pub current_stream: String,
+    /// State backend for cursor/run persistence.
+    pub state_backend: Arc<dyn StateBackend>,
     /// Accumulated stats for the current run.
     pub stats: Arc<Mutex<RunStats>>,
+
+    // --- Source-side fields ---
+    /// Channel sender for source -> orchestrator batch flow (v1: Vec<u8> only).
+    pub batch_sender: Option<mpsc::SyncSender<Vec<u8>>>,
+    /// Next batch ID (monotonically increasing per stream run, starts at 1).
+    pub next_batch_id: u64,
+
+    // --- Dest-side fields ---
+    /// Channel receiver for orchestrator -> dest batch flow.
+    pub batch_receiver: Option<mpsc::Receiver<Vec<u8>>>,
+    /// Stashed batch when guest buffer was too small.
+    pub pending_batch: Option<Vec<u8>>,
+
+    // --- Error retrieval ---
+    /// Last error from any host function (read+clear semantics).
+    pub last_error: Option<ConnectorErrorV1>,
+
+    // --- Checkpoint tracking ---
+    /// Source checkpoints received during this stream run.
+    pub source_checkpoints: Vec<Checkpoint>,
+    /// Number of dest checkpoints received.
+    pub dest_checkpoint_count: u64,
+
+    // --- v0 compat: sender that includes stream name ---
+    pub batch_sender_v0: Option<mpsc::SyncSender<(String, Vec<u8>)>>,
 }
 
-/// Host function: receive an Arrow IPC record batch from the guest.
+impl HostState {
+    fn clear_last_error(&mut self) {
+        self.last_error = None;
+    }
+
+    fn set_last_error(&mut self, err: ConnectorErrorV1) {
+        self.last_error = Some(err);
+    }
+}
+
+// ============================================================
+// v1 host functions
+// ============================================================
+
+/// Host function: emit a batch from source to host (blocking on backpressure).
 ///
-/// Signature: (stream_ptr: i32, stream_len: i32, batch_ptr: i32, batch_len: i32) -> i32
+/// Signature: (ptr: u32, len: u32) -> i32
+/// Returns: 0 = success, -1 = error (call last_error).
+pub fn host_emit_batch(
+    data: &mut HostState,
+    _inst: &mut SysInstance,
+    frame: &mut CallingFrame,
+    args: Vec<WasmValue>,
+) -> Result<Vec<WasmValue>, CoreError> {
+    data.clear_last_error();
+
+    let ptr = args[0].to_i32() as u32;
+    let len = args[1].to_i32() as u32;
+
+    let batch_bytes = match memory_protocol::read_from_guest(frame, ptr as i32, len as i32) {
+        Ok(b) => b,
+        Err(e) => {
+            let err = ConnectorErrorV1::internal("MEMORY_READ", &e.to_string());
+            data.set_last_error(err);
+            return Ok(vec![WasmValue::from_i32(-1)]);
+        }
+    };
+
+    let sender = match &data.batch_sender {
+        Some(s) => s,
+        None => {
+            let err = ConnectorErrorV1::internal("NO_SENDER", "No batch sender configured");
+            data.set_last_error(err);
+            return Ok(vec![WasmValue::from_i32(-1)]);
+        }
+    };
+
+    // Blocking send — applies backpressure when channel is full
+    match sender.send(batch_bytes) {
+        Ok(()) => {
+            data.next_batch_id += 1;
+            Ok(vec![WasmValue::from_i32(0)])
+        }
+        Err(e) => {
+            let err = ConnectorErrorV1::internal("CHANNEL_SEND", &e.to_string());
+            data.set_last_error(err);
+            Ok(vec![WasmValue::from_i32(-1)])
+        }
+    }
+}
+
+/// Host function: dest pulls next batch. Checks pending_batch first.
 ///
-/// Reads the stream name and batch bytes from guest memory,
-/// then sends them on the batch channel to the orchestrator.
-/// Returns 0 on success, -1 on error.
+/// Signature: (out_ptr: u32, out_cap: u32) -> i32
+/// Returns: >0 = bytes written, 0 = EOF, -1 = error, -N = need N bytes.
+pub fn host_next_batch(
+    data: &mut HostState,
+    _inst: &mut SysInstance,
+    frame: &mut CallingFrame,
+    args: Vec<WasmValue>,
+) -> Result<Vec<WasmValue>, CoreError> {
+    data.clear_last_error();
+
+    let out_ptr = args[0].to_i32() as u32;
+    let out_cap = args[1].to_i32() as u32;
+
+    // Check pending_batch first (stashed from previous too-small-buffer call)
+    let batch = if let Some(pending) = data.pending_batch.take() {
+        pending
+    } else {
+        // Read from channel
+        let receiver = match &data.batch_receiver {
+            Some(r) => r,
+            None => {
+                let err = ConnectorErrorV1::internal("NO_RECEIVER", "No batch receiver configured");
+                data.set_last_error(err);
+                return Ok(vec![WasmValue::from_i32(-1)]);
+            }
+        };
+        match receiver.recv() {
+            Ok(batch) => batch,
+            Err(_) => return Ok(vec![WasmValue::from_i32(0)]), // EOF — sender dropped
+        }
+    };
+
+    let batch_len = batch.len() as u32;
+
+    // Check if buffer is large enough
+    if batch_len > out_cap {
+        // Stash the batch and tell guest to resize
+        data.pending_batch = Some(batch);
+        return Ok(vec![WasmValue::from_i32(-(batch_len as i32))]);
+    }
+
+    // Write batch into guest memory
+    let mut memory = match frame.memory_mut(0) {
+        Some(m) => m,
+        None => {
+            data.pending_batch = Some(batch); // Don't lose the batch
+            let err = ConnectorErrorV1::internal("NO_MEMORY", "Guest has no memory export");
+            data.set_last_error(err);
+            return Ok(vec![WasmValue::from_i32(-1)]);
+        }
+    };
+
+    if let Err(e) = memory.set_data(&batch, out_ptr) {
+        data.pending_batch = Some(batch); // Don't lose the batch
+        let err = ConnectorErrorV1::internal("MEMORY_WRITE", &format!("{:?}", e));
+        data.set_last_error(err);
+        return Ok(vec![WasmValue::from_i32(-1)]);
+    }
+
+    Ok(vec![WasmValue::from_i32(batch_len as i32)])
+}
+
+/// Host function: retrieve and clear the last error.
+///
+/// Signature: (out_ptr: u32, out_cap: u32) -> i32
+/// Returns: >0 = bytes written, 0 = no error, -N = need N bytes.
+pub fn host_last_error(
+    data: &mut HostState,
+    _inst: &mut SysInstance,
+    frame: &mut CallingFrame,
+    args: Vec<WasmValue>,
+) -> Result<Vec<WasmValue>, CoreError> {
+    let out_ptr = args[0].to_i32() as u32;
+    let out_cap = args[1].to_i32() as u32;
+
+    let error = match data.last_error.take() {
+        Some(e) => e,
+        None => return Ok(vec![WasmValue::from_i32(0)]),
+    };
+
+    let json = match serde_json::to_vec(&error) {
+        Ok(j) => j,
+        Err(_) => return Ok(vec![WasmValue::from_i32(0)]),
+    };
+
+    let json_len = json.len() as u32;
+    if json_len > out_cap {
+        // Put error back and tell guest to resize
+        data.last_error = Some(error);
+        return Ok(vec![WasmValue::from_i32(-(json_len as i32))]);
+    }
+
+    let mut memory = match frame.memory_mut(0) {
+        Some(m) => m,
+        None => return Ok(vec![WasmValue::from_i32(0)]),
+    };
+
+    if memory.set_data(&json, out_ptr).is_err() {
+        return Ok(vec![WasmValue::from_i32(0)]);
+    }
+
+    Ok(vec![WasmValue::from_i32(json_len as i32)])
+}
+
+/// Host function: scoped state get.
+///
+/// Signature: (scope: i32, key_ptr: u32, key_len: u32, out_ptr: u32, out_cap: u32) -> i32
+/// Returns: >0 = bytes written, 0 = not found, -1 = error, -N = need N bytes.
+pub fn host_state_get(
+    data: &mut HostState,
+    _inst: &mut SysInstance,
+    frame: &mut CallingFrame,
+    args: Vec<WasmValue>,
+) -> Result<Vec<WasmValue>, CoreError> {
+    data.clear_last_error();
+
+    let scope_i32 = args[0].to_i32();
+    let key_ptr = args[1].to_i32();
+    let key_len = args[2].to_i32();
+    let out_ptr = args[3].to_i32() as u32;
+    let out_cap = args[4].to_i32() as u32;
+
+    let _scope = match StateScope::from_i32(scope_i32) {
+        Some(s) => s,
+        None => {
+            let err = ConnectorErrorV1::config(
+                "INVALID_SCOPE",
+                &format!("Invalid scope: {}", scope_i32),
+            );
+            data.set_last_error(err);
+            return Ok(vec![WasmValue::from_i32(-1)]);
+        }
+    };
+
+    let key = match memory_protocol::read_string_from_guest(frame, key_ptr, key_len) {
+        Ok(s) => s,
+        Err(e) => {
+            let err = ConnectorErrorV1::internal("MEMORY_READ", &e.to_string());
+            data.set_last_error(err);
+            return Ok(vec![WasmValue::from_i32(-1)]);
+        }
+    };
+
+    if key.len() > 1024 {
+        let err = ConnectorErrorV1::config(
+            "KEY_TOO_LONG",
+            &format!("Key length {} exceeds 1024", key.len()),
+        );
+        data.set_last_error(err);
+        return Ok(vec![WasmValue::from_i32(-1)]);
+    }
+
+    // Host anchors scope=Stream to current_stream
+    let state_key = format!("{}:{}", data.current_stream, key);
+    match data
+        .state_backend
+        .get_cursor(&data.pipeline_name, &state_key)
+    {
+        Ok(Some(cursor)) => {
+            if let Some(value) = cursor.cursor_value {
+                let value_bytes = value.as_bytes();
+                let write_len = value_bytes.len() as u32;
+
+                if write_len > out_cap {
+                    return Ok(vec![WasmValue::from_i32(-(write_len as i32))]);
+                }
+
+                let mut memory = match frame.memory_mut(0) {
+                    Some(m) => m,
+                    None => {
+                        let err =
+                            ConnectorErrorV1::internal("NO_MEMORY", "No memory export");
+                        data.set_last_error(err);
+                        return Ok(vec![WasmValue::from_i32(-1)]);
+                    }
+                };
+
+                if let Err(e) = memory.set_data(value_bytes, out_ptr) {
+                    let err = ConnectorErrorV1::internal(
+                        "MEMORY_WRITE",
+                        &format!("{:?}", e),
+                    );
+                    data.set_last_error(err);
+                    return Ok(vec![WasmValue::from_i32(-1)]);
+                }
+
+                Ok(vec![WasmValue::from_i32(write_len as i32)])
+            } else {
+                Ok(vec![WasmValue::from_i32(0)])
+            }
+        }
+        Ok(None) => Ok(vec![WasmValue::from_i32(0)]),
+        Err(e) => {
+            let err = ConnectorErrorV1::internal("STATE_BACKEND", &e.to_string());
+            data.set_last_error(err);
+            Ok(vec![WasmValue::from_i32(-1)])
+        }
+    }
+}
+
+/// Host function: scoped state put.
+///
+/// Signature: (scope: i32, key_ptr: u32, key_len: u32, val_ptr: u32, val_len: u32) -> i32
+/// Returns: 0 = success, -1 = error.
+pub fn host_state_put(
+    data: &mut HostState,
+    _inst: &mut SysInstance,
+    frame: &mut CallingFrame,
+    args: Vec<WasmValue>,
+) -> Result<Vec<WasmValue>, CoreError> {
+    data.clear_last_error();
+
+    let scope_i32 = args[0].to_i32();
+    let key_ptr = args[1].to_i32();
+    let key_len = args[2].to_i32();
+    let val_ptr = args[3].to_i32();
+    let val_len = args[4].to_i32();
+
+    let _scope = match StateScope::from_i32(scope_i32) {
+        Some(s) => s,
+        None => {
+            let err = ConnectorErrorV1::config(
+                "INVALID_SCOPE",
+                &format!("Invalid scope: {}", scope_i32),
+            );
+            data.set_last_error(err);
+            return Ok(vec![WasmValue::from_i32(-1)]);
+        }
+    };
+
+    let key = match memory_protocol::read_string_from_guest(frame, key_ptr, key_len) {
+        Ok(s) => s,
+        Err(e) => {
+            let err = ConnectorErrorV1::internal("MEMORY_READ", &e.to_string());
+            data.set_last_error(err);
+            return Ok(vec![WasmValue::from_i32(-1)]);
+        }
+    };
+
+    let value = match memory_protocol::read_string_from_guest(frame, val_ptr, val_len) {
+        Ok(s) => s,
+        Err(e) => {
+            let err = ConnectorErrorV1::internal("MEMORY_READ", &e.to_string());
+            data.set_last_error(err);
+            return Ok(vec![WasmValue::from_i32(-1)]);
+        }
+    };
+
+    let state_key = format!("{}:{}", data.current_stream, key);
+    let cursor = crate::state::backend::CursorState {
+        cursor_field: Some(key),
+        cursor_value: Some(value),
+        updated_at: chrono::Utc::now(),
+    };
+
+    match data
+        .state_backend
+        .set_cursor(&data.pipeline_name, &state_key, &cursor)
+    {
+        Ok(()) => Ok(vec![WasmValue::from_i32(0)]),
+        Err(e) => {
+            let err = ConnectorErrorV1::internal("STATE_BACKEND", &e.to_string());
+            data.set_last_error(err);
+            Ok(vec![WasmValue::from_i32(-1)])
+        }
+    }
+}
+
+/// Host function: receive a checkpoint from the connector.
+///
+/// Signature: (kind: i32, payload_ptr: u32, payload_len: u32) -> i32
+/// Returns: 0 = success, -1 = error.
+pub fn host_checkpoint(
+    data: &mut HostState,
+    _inst: &mut SysInstance,
+    frame: &mut CallingFrame,
+    args: Vec<WasmValue>,
+) -> Result<Vec<WasmValue>, CoreError> {
+    data.clear_last_error();
+
+    let kind = args[0].to_i32(); // 0=source, 1=dest
+    let payload_ptr = args[1].to_i32();
+    let payload_len = args[2].to_i32();
+
+    let payload_bytes = match memory_protocol::read_from_guest(frame, payload_ptr, payload_len) {
+        Ok(b) => b,
+        Err(e) => {
+            let err = ConnectorErrorV1::internal("MEMORY_READ", &e.to_string());
+            data.set_last_error(err);
+            return Ok(vec![WasmValue::from_i32(-1)]);
+        }
+    };
+
+    // Parse the envelope to extract the checkpoint
+    match serde_json::from_slice::<serde_json::Value>(&payload_bytes) {
+        Ok(envelope) => {
+            tracing::debug!(
+                pipeline = data.pipeline_name,
+                stream = data.current_stream,
+                "Received checkpoint: {}",
+                serde_json::to_string_pretty(&envelope).unwrap_or_default()
+            );
+            // Track checkpoint count
+            if kind == 0 {
+                // Source checkpoint — try to parse and store
+                if let Ok(cp) = serde_json::from_value::<Checkpoint>(
+                    envelope
+                        .get("payload")
+                        .cloned()
+                        .unwrap_or(envelope.clone()),
+                ) {
+                    data.source_checkpoints.push(cp);
+                }
+            } else {
+                data.dest_checkpoint_count += 1;
+            }
+            Ok(vec![WasmValue::from_i32(0)])
+        }
+        Err(e) => {
+            let err = ConnectorErrorV1::internal("PARSE_CHECKPOINT", &e.to_string());
+            data.set_last_error(err);
+            Ok(vec![WasmValue::from_i32(-1)])
+        }
+    }
+}
+
+/// Host function: receive a metric from the connector.
+///
+/// Signature: (payload_ptr: u32, payload_len: u32) -> i32
+/// Returns: 0 = success, -1 = error.
+pub fn host_metric_fn(
+    data: &mut HostState,
+    _inst: &mut SysInstance,
+    frame: &mut CallingFrame,
+    args: Vec<WasmValue>,
+) -> Result<Vec<WasmValue>, CoreError> {
+    data.clear_last_error();
+
+    let payload_ptr = args[0].to_i32();
+    let payload_len = args[1].to_i32();
+
+    let payload_bytes = match memory_protocol::read_from_guest(frame, payload_ptr, payload_len) {
+        Ok(b) => b,
+        Err(e) => {
+            let err = ConnectorErrorV1::internal("MEMORY_READ", &e.to_string());
+            data.set_last_error(err);
+            return Ok(vec![WasmValue::from_i32(-1)]);
+        }
+    };
+
+    match serde_json::from_slice::<serde_json::Value>(&payload_bytes) {
+        Ok(metric_val) => {
+            tracing::debug!(
+                pipeline = data.pipeline_name,
+                stream = data.current_stream,
+                "Received metric: {}",
+                serde_json::to_string(&metric_val).unwrap_or_default()
+            );
+            Ok(vec![WasmValue::from_i32(0)])
+        }
+        Err(e) => {
+            let err = ConnectorErrorV1::internal("PARSE_METRIC", &e.to_string());
+            data.set_last_error(err);
+            Ok(vec![WasmValue::from_i32(-1)])
+        }
+    }
+}
+
+// ============================================================
+// v0 host functions (kept during transition)
+// ============================================================
+
+/// v0: emit record batch with stream name.
 pub fn host_emit_record_batch(
     data: &mut HostState,
     _inst: &mut SysInstance,
@@ -40,7 +495,8 @@ pub fn host_emit_record_batch(
     let batch_ptr = args[2].to_i32();
     let batch_len = args[3].to_i32();
 
-    let stream_name = match memory_protocol::read_string_from_guest(frame, stream_ptr, stream_len) {
+    let stream_name = match memory_protocol::read_string_from_guest(frame, stream_ptr, stream_len)
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("host_emit_record_batch: failed to read stream name: {}", e);
@@ -56,32 +512,32 @@ pub fn host_emit_record_batch(
         }
     };
 
-    tracing::debug!(
-        stream = stream_name,
-        batch_bytes = batch_bytes.len(),
-        pipeline = data.pipeline_name,
-        "Received record batch from connector"
-    );
-
-    match data.batch_sender.send((stream_name, batch_bytes)) {
-        Ok(()) => Ok(vec![WasmValue::from_i32(0)]),
-        Err(e) => {
-            tracing::error!("host_emit_record_batch: channel send failed: {}", e);
-            Ok(vec![WasmValue::from_i32(-1)])
+    // Try v0 sender first, then v1 sender
+    if let Some(sender) = &data.batch_sender_v0 {
+        match sender.send((stream_name, batch_bytes)) {
+            Ok(()) => return Ok(vec![WasmValue::from_i32(0)]),
+            Err(e) => {
+                tracing::error!("host_emit_record_batch: channel send failed: {}", e);
+                return Ok(vec![WasmValue::from_i32(-1)]);
+            }
         }
+    }
+
+    if let Some(sender) = &data.batch_sender {
+        match sender.send(batch_bytes) {
+            Ok(()) => Ok(vec![WasmValue::from_i32(0)]),
+            Err(e) => {
+                tracing::error!("host_emit_record_batch: v1 channel send failed: {}", e);
+                Ok(vec![WasmValue::from_i32(-1)])
+            }
+        }
+    } else {
+        tracing::error!("host_emit_record_batch: no sender configured");
+        Ok(vec![WasmValue::from_i32(-1)])
     }
 }
 
-/// Host function: get connector state by key.
-///
-/// Signature: (key_ptr: i32, key_len: i32, out_ptr: i32, out_len: i32) -> i32
-///
-/// Reads the key from guest memory, queries the state backend for cursor value.
-/// If found, writes the value JSON into guest memory at the output pointers.
-/// Returns 1 if found, 0 if not found, -1 on error.
-///
-/// Note: For v0.1, state key maps to cursor_value in the state backend,
-/// using pipeline_name and current_stream as the compound key.
+/// v0: get state (broken — doesn't write value to guest memory).
 pub fn host_get_state(
     data: &mut HostState,
     _inst: &mut SysInstance,
@@ -101,21 +557,13 @@ pub fn host_get_state(
         }
     };
 
-    // Use the key as a sub-field: pipeline + stream is the primary key,
-    // the "key" param selects what field to read. For v0.1, we store
-    // arbitrary state in cursor_value keyed by "pipeline:stream:key".
     let state_key = format!("{}:{}", data.current_stream, key);
     match data
         .state_backend
         .get_cursor(&data.pipeline_name, &state_key)
     {
         Ok(Some(cursor)) => {
-            if let Some(value) = cursor.cursor_value {
-                tracing::debug!("host_get_state: found state for key '{}'", key);
-                // For v0.1, we return the length of the value.
-                // The guest needs to re-call with a buffer to receive it.
-                // This simplified protocol returns 1 to indicate "found".
-                let _ = value; // Value available but simplified protocol
+            if cursor.cursor_value.is_some() {
                 Ok(vec![WasmValue::from_i32(1)])
             } else {
                 Ok(vec![WasmValue::from_i32(0)])
@@ -129,12 +577,7 @@ pub fn host_get_state(
     }
 }
 
-/// Host function: set connector state by key.
-///
-/// Signature: (key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> i32
-///
-/// Reads key and value from guest memory, stores via state backend.
-/// Returns 0 on success, -1 on error.
+/// v0: set state.
 pub fn host_set_state(
     data: &mut HostState,
     _inst: &mut SysInstance,
@@ -173,10 +616,7 @@ pub fn host_set_state(
         .state_backend
         .set_cursor(&data.pipeline_name, &state_key, &cursor)
     {
-        Ok(()) => {
-            tracing::debug!("host_set_state: stored state for key");
-            Ok(vec![WasmValue::from_i32(0)])
-        }
+        Ok(()) => Ok(vec![WasmValue::from_i32(0)]),
         Err(e) => {
             tracing::error!("host_set_state: state backend error: {}", e);
             Ok(vec![WasmValue::from_i32(-1)])
@@ -184,12 +624,7 @@ pub fn host_set_state(
     }
 }
 
-/// Host function: log a message from the guest connector.
-///
-/// Signature: (level: i32, msg_ptr: i32, msg_len: i32) -> i32
-///
-/// Level mapping: 0=error, 1=warn, 2=info, 3=debug, 4=trace
-/// Returns 0 always.
+/// v0: log.
 pub fn host_log(
     data: &mut HostState,
     _inst: &mut SysInstance,
@@ -219,11 +654,7 @@ pub fn host_log(
     Ok(vec![WasmValue::from_i32(0)])
 }
 
-/// Host function: report progress counters from the guest.
-///
-/// Signature: (records: i64, bytes: i64) -> i32
-///
-/// Updates the accumulated stats. Returns 0 always.
+/// v0: report progress.
 pub fn host_report_progress(
     data: &mut HostState,
     _inst: &mut SysInstance,
@@ -237,14 +668,6 @@ pub fn host_report_progress(
         stats.records_read += records;
         stats.bytes_read += bytes;
     }
-
-    tracing::debug!(
-        records,
-        bytes,
-        pipeline = data.pipeline_name,
-        stream = data.current_stream,
-        "connector progress report"
-    );
 
     Ok(vec![WasmValue::from_i32(0)])
 }

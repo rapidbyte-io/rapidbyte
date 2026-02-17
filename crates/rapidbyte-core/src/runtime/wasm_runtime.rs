@@ -5,6 +5,8 @@ use wasmedge_sdk::{ImportObjectBuilder, Module};
 
 use super::host_functions::{
     host_emit_record_batch, host_get_state, host_log, host_report_progress, host_set_state,
+    host_emit_batch, host_next_batch, host_last_error, host_state_get, host_state_put,
+    host_checkpoint, host_metric_fn,
     HostState,
 };
 
@@ -74,6 +76,43 @@ pub fn create_host_imports(
     import_builder
         .with_func::<(i64, i64), i32>("rb_host_report_progress", host_report_progress)
         .context("Failed to register rb_host_report_progress")?;
+
+    // === v1 host functions ===
+
+    // rb_host_emit_batch(ptr: u32, len: u32) -> i32
+    import_builder
+        .with_func::<(i32, i32), i32>("rb_host_emit_batch", host_emit_batch)
+        .context("Failed to register rb_host_emit_batch")?;
+
+    // rb_host_next_batch(out_ptr: u32, out_cap: u32) -> i32
+    import_builder
+        .with_func::<(i32, i32), i32>("rb_host_next_batch", host_next_batch)
+        .context("Failed to register rb_host_next_batch")?;
+
+    // rb_host_last_error(out_ptr: u32, out_cap: u32) -> i32
+    import_builder
+        .with_func::<(i32, i32), i32>("rb_host_last_error", host_last_error)
+        .context("Failed to register rb_host_last_error")?;
+
+    // rb_host_state_get(scope: i32, key_ptr: u32, key_len: u32, out_ptr: u32, out_cap: u32) -> i32
+    import_builder
+        .with_func::<(i32, i32, i32, i32, i32), i32>("rb_host_state_get", host_state_get)
+        .context("Failed to register rb_host_state_get")?;
+
+    // rb_host_state_put(scope: i32, key_ptr: u32, key_len: u32, val_ptr: u32, val_len: u32) -> i32
+    import_builder
+        .with_func::<(i32, i32, i32, i32, i32), i32>("rb_host_state_put", host_state_put)
+        .context("Failed to register rb_host_state_put")?;
+
+    // rb_host_checkpoint(kind: i32, payload_ptr: u32, payload_len: u32) -> i32
+    import_builder
+        .with_func::<(i32, i32, i32), i32>("rb_host_checkpoint", host_checkpoint)
+        .context("Failed to register rb_host_checkpoint")?;
+
+    // rb_host_metric(payload_ptr: u32, payload_len: u32) -> i32
+    import_builder
+        .with_func::<(i32, i32), i32>("rb_host_metric", host_metric_fn)
+        .context("Failed to register rb_host_metric")?;
 
     Ok(import_builder.build())
 }
