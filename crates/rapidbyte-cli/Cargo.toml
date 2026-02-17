@@ -13,5 +13,6 @@ rapidbyte-sdk = { path = "../rapidbyte-sdk" }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

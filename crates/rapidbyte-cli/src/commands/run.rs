@@ -27,22 +27,27 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
     let result = orchestrator::run_pipeline(&config).await?;
 
     println!("Pipeline '{}' completed successfully.", config.pipeline);
-    println!(
-        "  Records read:    {}",
-        result.records_read
-    );
-    println!(
-        "  Records written: {}",
-        result.records_written
-    );
-    println!(
-        "  Bytes read:      {}",
-        format_bytes(result.bytes_read)
-    );
-    println!(
-        "  Duration:        {:.2}s",
-        result.duration_secs
-    );
+    println!("  Records read:    {}", result.records_read);
+    println!("  Records written: {}", result.records_written);
+    println!("  Bytes read:      {}", format_bytes(result.bytes_read));
+    println!("  Duration:        {:.2}s", result.duration_secs);
+    println!("  Source duration:  {:.2}s", result.source_duration_secs);
+    println!("  Dest duration:   {:.2}s", result.dest_duration_secs);
+    println!("  Source load:     {}ms", result.source_module_load_ms);
+    println!("  Dest load:       {}ms", result.dest_module_load_ms);
+
+    // Machine-readable JSON for benchmarking tools
+    let json = serde_json::json!({
+        "records_read": result.records_read,
+        "records_written": result.records_written,
+        "bytes_read": result.bytes_read,
+        "duration_secs": result.duration_secs,
+        "source_duration_secs": result.source_duration_secs,
+        "dest_duration_secs": result.dest_duration_secs,
+        "source_module_load_ms": result.source_module_load_ms,
+        "dest_module_load_ms": result.dest_module_load_ms,
+    });
+    println!("@@BENCH_JSON@@{}", json);
 
     Ok(())
 }
