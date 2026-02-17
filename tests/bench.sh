@@ -11,10 +11,9 @@ if [ -f "$HOME/.wasmedge/env" ]; then
 fi
 
 # Defaults
-BENCH_ROWS="${BENCH_ROWS:-1000}"
+BENCH_ROWS="${BENCH_ROWS:-10000}"
 BENCH_ITERS="${BENCH_ITERS:-3}"
 BUILD_MODE="${BUILD_MODE:-release}"
-BENCH_MODE="${BENCH_MODE:-insert}"
 BENCH_AOT="${BENCH_AOT:-true}"
 
 RED='\033[0;31m'
@@ -35,34 +34,34 @@ cleanup() {
 }
 
 usage() {
-    echo "Usage: $0 [--rows N] [--iters N] [--mode insert|copy] [--no-aot] [--debug]"
+    echo "Usage: $0 [--rows N] [--iters N] [--no-aot] [--debug]"
     echo ""
     echo "Options:"
-    echo "  --rows N    Number of rows to benchmark (default: 1000)"
-    echo "  --iters N   Number of iterations (default: 3)"
-    echo "  --mode M    Load method: insert or copy (default: insert)"
+    echo "  --rows N    Number of rows to benchmark (default: 10000)"
+    echo "  --iters N   Number of iterations per mode (default: 3)"
     echo "  --no-aot    Skip AOT compilation of WASM modules"
     echo "  --debug     Use debug builds instead of release"
+    echo ""
+    echo "Runs both INSERT and COPY modes automatically."
     exit 0
 }
 
 # Parse args
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --rows)  BENCH_ROWS="$2"; shift 2 ;;
-        --iters) BENCH_ITERS="$2"; shift 2 ;;
-        --mode)  BENCH_MODE="$2"; shift 2 ;;
+        --rows)   BENCH_ROWS="$2"; shift 2 ;;
+        --iters)  BENCH_ITERS="$2"; shift 2 ;;
         --no-aot) BENCH_AOT="false"; shift ;;
-        --debug) BUILD_MODE="debug"; shift ;;
-        --help)  usage ;;
-        *)       fail "Unknown option: $1" ;;
+        --debug)  BUILD_MODE="debug"; shift ;;
+        --help)   usage ;;
+        *)        fail "Unknown option: $1" ;;
     esac
 done
 
 echo ""
 cyan "═══════════════════════════════════════════════"
-cyan "  Rapidbyte Benchmark"
-cyan "  Rows: $BENCH_ROWS | Iterations: $BENCH_ITERS | Build: $BUILD_MODE | Mode: $BENCH_MODE | AOT: $BENCH_AOT"
+cyan "  Rapidbyte Postgres Connector Benchmark"
+cyan "  Rows: $BENCH_ROWS | Iterations: $BENCH_ITERS | Build: $BUILD_MODE | AOT: $BENCH_AOT"
 cyan "═══════════════════════════════════════════════"
 echo ""
 
@@ -131,81 +130,96 @@ info "Seeded $ROW_COUNT rows"
 
 # ── Run benchmark iterations ─────────────────────────────────────
 export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
-RESULTS_FILE=$(mktemp)
 
-info "Running $BENCH_ITERS iterations..."
+run_mode() {
+    local mode="$1"
+    local pipeline="bench_pg.yaml"
+    if [ "$mode" = "copy" ]; then
+        pipeline="bench_pg_copy.yaml"
+    fi
+    local results_file="$2"
+
+    info "Running $BENCH_ITERS iterations ($mode mode)..."
+
+    for i in $(seq 1 "$BENCH_ITERS"); do
+        # Clean destination between runs
+        docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+            psql -U postgres -d rapidbyte_test -c "DROP SCHEMA IF EXISTS raw CASCADE" > /dev/null 2>&1
+        rm -f /tmp/rapidbyte_bench_state.db
+
+        echo -n "  [$mode] Iteration $i/$BENCH_ITERS ... "
+
+        OUTPUT=$("$PROJECT_ROOT/target/$TARGET_DIR/rapidbyte" run \
+            "$PROJECT_ROOT/tests/fixtures/pipelines/$pipeline" \
+            --log-level warn 2>&1)
+
+        JSON_LINE=$(echo "$OUTPUT" | grep "@@BENCH_JSON@@" | sed 's/@@BENCH_JSON@@//')
+
+        if [ -z "$JSON_LINE" ]; then
+            echo "FAILED (no JSON output)"
+            continue
+        fi
+
+        DURATION=$(echo "$JSON_LINE" | python3 -c "import sys,json; print(f'{json.load(sys.stdin)[\"duration_secs\"]:.2f}')")
+        echo "done (${DURATION}s)"
+        echo "$JSON_LINE" >> "$results_file"
+    done
+}
+
+INSERT_RESULTS=$(mktemp)
+COPY_RESULTS=$(mktemp)
+
+echo ""
+run_mode "insert" "$INSERT_RESULTS"
+echo ""
+run_mode "copy" "$COPY_RESULTS"
 echo ""
 
-for i in $(seq 1 "$BENCH_ITERS"); do
-    # Clean destination between runs
-    docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
-        psql -U postgres -d rapidbyte_test -c "DROP SCHEMA IF EXISTS raw CASCADE" > /dev/null 2>&1
-    rm -f /tmp/rapidbyte_bench_state.db
-
-    echo -n "  Iteration $i/$BENCH_ITERS ... "
-
-    PIPELINE="bench_pg.yaml"
-    if [ "$BENCH_MODE" = "copy" ]; then
-        PIPELINE="bench_pg_copy.yaml"
-    fi
-
-    OUTPUT=$("$PROJECT_ROOT/target/$TARGET_DIR/rapidbyte" run \
-        "$PROJECT_ROOT/tests/fixtures/pipelines/$PIPELINE" \
-        --log-level warn 2>&1)
-
-    # Extract JSON line
-    JSON_LINE=$(echo "$OUTPUT" | grep "@@BENCH_JSON@@" | sed 's/@@BENCH_JSON@@//')
-
-    if [ -z "$JSON_LINE" ]; then
-        echo "FAILED (no JSON output)"
-        continue
-    fi
-
-    DURATION=$(echo "$JSON_LINE" | python3 -c "import sys,json; print(f'{json.load(sys.stdin)[\"duration_secs\"]:.2f}')")
-    echo "done (${DURATION}s)"
-    echo "$JSON_LINE" >> "$RESULTS_FILE"
-done
-
-echo ""
-
-# ── Generate report ──────────────────────────────────────────────
+# ── Generate comparison report ────────────────────────────────────
 info "Benchmark Report:"
 echo ""
 
 python3 -c "
 import json, sys
 
-results = []
-for line in open('$RESULTS_FILE'):
-    line = line.strip()
-    if line:
-        results.append(json.loads(line))
+def load_results(path):
+    results = []
+    for line in open(path):
+        line = line.strip()
+        if line:
+            results.append(json.loads(line))
+    return results
 
-if not results:
+def stats(results, key):
+    vals = [r.get(key, 0) for r in results]
+    if not vals:
+        return 0, 0, 0
+    return min(vals), sum(vals)/len(vals), max(vals)
+
+insert_results = load_results('$INSERT_RESULTS')
+copy_results = load_results('$COPY_RESULTS')
+
+if not insert_results and not copy_results:
     print('  No results collected')
     sys.exit(1)
 
-def stats(key):
-    vals = [r.get(key, 0) for r in results]
-    return min(vals), sum(vals)/len(vals), max(vals)
-
-n = len(results)
-rows = results[0].get('records_read', 0)
-bytes_read = results[0].get('bytes_read', 0)
+# Use insert results for dataset info (same data for both)
+ref = insert_results[0] if insert_results else copy_results[0]
+rows = ref.get('records_read', 0)
+bytes_read = ref.get('bytes_read', 0)
 avg_row_bytes = bytes_read // rows if rows > 0 else 0
 
-print(f'  Dataset:        {rows} rows, {bytes_read / 1048576:.2f} MB ({avg_row_bytes} B/row)')
-print(f'  Load method:    $BENCH_MODE')
-print(f'  Iterations:     {n}')
+print(f'  Dataset:     {rows} rows, {bytes_read / 1048576:.2f} MB ({avg_row_bytes} B/row)')
+print(f'  Iterations:  {len(insert_results)} per mode')
 print()
 
-fmt = '  {:<25s}  {:>10s}  {:>10s}  {:>10s}'
-print(fmt.format('Metric', 'Min', 'Avg', 'Max'))
-print(fmt.format('-' * 25, '-' * 10, '-' * 10, '-' * 10))
+# Comparison table
+hdr = '  {:<22s}  {:>10s}  {:>10s}  {:>10s}'
+print(hdr.format('Metric (avg)', 'INSERT', 'COPY', 'Speedup'))
+print(hdr.format('-' * 22, '-' * 10, '-' * 10, '-' * 10))
 
 for label, key, unit in [
     ('Total duration', 'duration_secs', 's'),
-    ('Source duration', 'source_duration_secs', 's'),
     ('Dest duration', 'dest_duration_secs', 's'),
     ('  Connect', 'dest_connect_secs', 's'),
     ('  Flush', 'dest_flush_secs', 's'),
@@ -213,30 +227,31 @@ for label, key, unit in [
     ('  VM setup', 'dest_vm_setup_secs', 's'),
     ('  Recv loop', 'dest_recv_secs', 's'),
     ('  WASM overhead', 'wasm_overhead_secs', 's'),
+    ('Source duration', 'source_duration_secs', 's'),
     ('Source module load', 'source_module_load_ms', 'ms'),
     ('Dest module load', 'dest_module_load_ms', 'ms'),
 ]:
-    lo, avg, hi = stats(key)
-    print(fmt.format(label, f'{lo:.3f}{unit}', f'{avg:.3f}{unit}', f'{hi:.3f}{unit}'))
+    _, i_avg, _ = stats(insert_results, key)
+    _, c_avg, _ = stats(copy_results, key)
+    speedup = f'{i_avg/c_avg:.1f}x' if c_avg > 0.001 else '-'
+    print(hdr.format(label, f'{i_avg:.3f}{unit}', f'{c_avg:.3f}{unit}', speedup))
 
-# Throughput
-durations = [r['duration_secs'] for r in results]
-rps = [rows / d if d > 0 else 0 for d in durations]
-mbps = [bytes_read / d / 1048576 if d > 0 else 0 for d in durations]
-
+# Throughput comparison
 print()
-print(f'  Throughput (rows/sec):   {min(rps):>10,.0f}  {sum(rps)/n:>10,.0f}  {max(rps):>10,.0f}')
-print(f'  Throughput (MB/s):       {min(mbps):>10.2f}  {sum(mbps)/n:>10.2f}  {max(mbps):>10.2f}')
+i_durations = [r['duration_secs'] for r in insert_results]
+c_durations = [r['duration_secs'] for r in copy_results]
+i_rps_avg = sum(rows / d for d in i_durations) / len(i_durations) if i_durations else 0
+c_rps_avg = sum(rows / d for d in c_durations) / len(c_durations) if c_durations else 0
+i_mbps_avg = sum(bytes_read / d / 1048576 for d in i_durations) / len(i_durations) if i_durations else 0
+c_mbps_avg = sum(bytes_read / d / 1048576 for d in c_durations) / len(c_durations) if c_durations else 0
+rps_speedup = f'{c_rps_avg/i_rps_avg:.1f}x' if i_rps_avg > 0 else '-'
+mbps_speedup = f'{c_mbps_avg/i_mbps_avg:.1f}x' if i_mbps_avg > 0 else '-'
 
-# Bytes written
-bytes_written_vals = [r.get('bytes_written', 0) for r in results]
-avg_bw = sum(bytes_written_vals) / n
-print()
-print(f'  Bytes read (avg):    {bytes_read / 1048576:.2f} MB')
-print(f'  Bytes written (avg): {avg_bw / 1048576:.2f} MB')
+print(hdr.format('Throughput (rows/s)', f'{i_rps_avg:,.0f}', f'{c_rps_avg:,.0f}', rps_speedup))
+print(hdr.format('Throughput (MB/s)', f'{i_mbps_avg:.2f}', f'{c_mbps_avg:.2f}', mbps_speedup))
 "
 
-rm -f "$RESULTS_FILE"
+rm -f "$INSERT_RESULTS" "$COPY_RESULTS"
 
 echo ""
 cyan "═══════════════════════════════════════════════"
