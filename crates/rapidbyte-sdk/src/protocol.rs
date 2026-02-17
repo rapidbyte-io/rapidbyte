@@ -202,6 +202,8 @@ pub enum NullabilityPolicy {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct SchemaEvolutionPolicy {
     pub new_column: ColumnPolicy,
+    /// Policy for columns removed at source. Note: `ColumnPolicy::Add` is not meaningful
+    /// for removed columns; use `Ignore` or `Fail`.
     pub removed_column: ColumnPolicy,
     pub type_change: TypeChangePolicy,
     pub nullability_change: NullabilityPolicy,
@@ -262,12 +264,13 @@ pub struct Checkpoint {
     pub bytes_processed: u64,
 }
 
+#[repr(i32)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum StateScope {
-    Pipeline,
-    Stream,
-    ConnectorInstance,
+    Pipeline = 0,
+    Stream = 1,
+    ConnectorInstance = 2,
 }
 
 impl StateScope {
@@ -281,11 +284,7 @@ impl StateScope {
     }
 
     pub fn to_i32(self) -> i32 {
-        match self {
-            Self::Pipeline => 0,
-            Self::Stream => 1,
-            Self::ConnectorInstance => 2,
-        }
+        self as i32
     }
 }
 

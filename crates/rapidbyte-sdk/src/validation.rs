@@ -10,6 +10,14 @@ pub fn validate_pg_identifier(name: &str) -> Result<(), String> {
         return Err("identifier must not be empty".to_string());
     }
 
+    if name.len() > 63 {
+        return Err(format!(
+            "Identifier '{}' exceeds PostgreSQL maximum length of 63 bytes (got {})",
+            name,
+            name.len()
+        ));
+    }
+
     let mut chars = name.chars();
 
     // First character must be a letter or underscore.
@@ -79,5 +87,13 @@ mod tests {
     fn test_contains_dot() {
         let err = validate_pg_identifier("schema.table").unwrap_err();
         assert!(err.contains("invalid character"), "error was: {}", err);
+    }
+
+    #[test]
+    fn test_identifier_length_limit() {
+        let long_name = "a".repeat(63);
+        assert!(validate_pg_identifier(&long_name).is_ok());
+        let too_long = "a".repeat(64);
+        assert!(validate_pg_identifier(&too_long).is_err());
     }
 }

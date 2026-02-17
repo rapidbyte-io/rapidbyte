@@ -86,6 +86,32 @@ pub enum CommitState {
     AfterCommitConfirmed,
 }
 
+impl std::fmt::Display for ErrorCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Config => write!(f, "config"),
+            Self::Auth => write!(f, "auth"),
+            Self::Permission => write!(f, "permission"),
+            Self::RateLimit => write!(f, "rate_limit"),
+            Self::TransientNetwork => write!(f, "transient_network"),
+            Self::TransientDb => write!(f, "transient_db"),
+            Self::Data => write!(f, "data"),
+            Self::Schema => write!(f, "schema"),
+            Self::Internal => write!(f, "internal"),
+        }
+    }
+}
+
+impl std::fmt::Display for ErrorScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Stream => write!(f, "stream"),
+            Self::Batch => write!(f, "batch"),
+            Self::Record => write!(f, "record"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConnectorErrorV1 {
     pub category: ErrorCategory,
@@ -276,7 +302,7 @@ impl fmt::Display for ConnectorErrorV1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "[{:?}/{:?}] {} ({}): {}",
+            "[{}/{}] {} ({}): {}",
             self.category, self.scope, self.code, if self.retryable { "retryable" } else { "fatal" }, self.message
         )
     }
@@ -424,7 +450,7 @@ mod tests {
     fn test_display_format() {
         let err = ConnectorErrorV1::config("MISSING_HOST", "host is required");
         let s = format!("{}", err);
-        assert!(s.contains("Config"));
+        assert!(s.contains("config"));
         assert!(s.contains("MISSING_HOST"));
         assert!(s.contains("fatal"));
         assert!(s.contains("host is required"));
