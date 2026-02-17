@@ -30,9 +30,23 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
     println!("  Records read:    {}", result.records_read);
     println!("  Records written: {}", result.records_written);
     println!("  Bytes read:      {}", format_bytes(result.bytes_read));
+    println!("  Bytes written:   {}", format_bytes(result.bytes_written));
+    if result.records_read > 0 {
+        let avg_row_bytes = result.bytes_read / result.records_read;
+        println!("  Avg row size:    {} B", avg_row_bytes);
+    }
     println!("  Duration:        {:.2}s", result.duration_secs);
+    println!(
+        "  Throughput:      {:.0} rows/sec, {:.2} MB/s",
+        result.records_read as f64 / result.duration_secs,
+        result.bytes_read as f64 / result.duration_secs / 1_048_576.0,
+    );
     println!("  Source duration:  {:.2}s", result.source_duration_secs);
     println!("  Dest duration:   {:.2}s", result.dest_duration_secs);
+    println!("    Connect:       {:.3}s", result.dest_connect_secs);
+    println!("    Flush:         {:.3}s", result.dest_flush_secs);
+    println!("    Commit:        {:.3}s", result.dest_commit_secs);
+    println!("    WASM overhead: {:.3}s", result.wasm_overhead_secs);
     println!("  Source load:     {}ms", result.source_module_load_ms);
     println!("  Dest load:       {}ms", result.dest_module_load_ms);
 
@@ -41,9 +55,14 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
         "records_read": result.records_read,
         "records_written": result.records_written,
         "bytes_read": result.bytes_read,
+        "bytes_written": result.bytes_written,
         "duration_secs": result.duration_secs,
         "source_duration_secs": result.source_duration_secs,
         "dest_duration_secs": result.dest_duration_secs,
+        "dest_connect_secs": result.dest_connect_secs,
+        "dest_flush_secs": result.dest_flush_secs,
+        "dest_commit_secs": result.dest_commit_secs,
+        "wasm_overhead_secs": result.wasm_overhead_secs,
         "source_module_load_ms": result.source_module_load_ms,
         "dest_module_load_ms": result.dest_module_load_ms,
     });
