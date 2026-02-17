@@ -12,7 +12,7 @@ CREATE TABLE public.bench_events (
     amount      INTEGER NOT NULL,
     is_active   BOOLEAN NOT NULL DEFAULT true,
     payload     TEXT,
-    created_at  TIMESTAMP NOT NULL DEFAULT NOW()
+    created_at  TIMESTAMP DEFAULT NOW()
 );
 
 INSERT INTO public.bench_events (event_type, user_id, amount, is_active, payload, created_at)
@@ -28,5 +28,5 @@ SELECT
     (i * 7 % 10000),
     (i % 3 != 0),
     'payload-' || i || '-' || repeat('x', 50),
-    NOW() - ((i * 37) % 86400 || ' seconds')::interval
+    NOW() - make_interval(secs => (i * 37) % 86400)
 FROM generate_series(1, :'bench_rows') AS s(i);
