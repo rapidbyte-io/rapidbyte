@@ -287,7 +287,6 @@ pub extern "C" fn rb_write_finalize(input_ptr: i32, input_len: i32) -> i64 {
                         Ok(count) => {
                             total_rows += count;
                             total_bytes += ipc_bytes.len() as u64;
-                            host_ffi::report_progress(count, ipc_bytes.len() as u64);
                         }
                         Err(e) => {
                             return make_err_response("WRITE_FAILED", &e);
@@ -305,7 +304,6 @@ pub extern "C" fn rb_write_finalize(input_ptr: i32, input_len: i32) -> i64 {
                         Ok(count) => {
                             total_rows += count;
                             total_bytes += ipc_bytes.len() as u64;
-                            host_ffi::report_progress(count, ipc_bytes.len() as u64);
                         }
                         Err(e) => {
                             let _ = client.execute("ROLLBACK", &[]).await;
