@@ -254,8 +254,10 @@ pub extern "C" fn rb_write_finalize(input_ptr: i32, input_len: i32) -> i64 {
                         return make_err_response("TX_FAILED", &format!("BEGIN failed: {}", e));
                     }
 
+                    let mut created_tables = std::collections::HashSet::new();
+
                     for (stream_name, ipc_bytes) in &batches {
-                        match sink::write_batch(&client, &config.schema, stream_name, ipc_bytes).await {
+                        match sink::write_batch_multi_value(&client, &config.schema, stream_name, ipc_bytes, &mut created_tables).await {
                             Ok(count) => {
                                 total_rows += count;
                                 total_bytes += ipc_bytes.len() as u64;
