@@ -59,8 +59,23 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
 
     // 4. Load modules
     let runtime = WasmRuntime::new()?;
+    let load_start = Instant::now();
     let source_module = runtime.load_module(&source_wasm)?;
+    tracing::info!(
+        connector = "source",
+        path = %source_wasm.display(),
+        load_ms = load_start.elapsed().as_millis() as u64,
+        "Loaded source connector module"
+    );
+
+    let load_start = Instant::now();
     let dest_module = runtime.load_module(&dest_wasm)?;
+    tracing::info!(
+        connector = "destination",
+        path = %dest_wasm.display(),
+        load_ms = load_start.elapsed().as_millis() as u64,
+        "Loaded destination connector module"
+    );
 
     // 5. Create channel for RecordBatch flow (Arrow IPC bytes)
     let (sender, receiver) = mpsc::sync_channel::<(String, Vec<u8>)>(16);
@@ -111,6 +126,11 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
 
     match (&source_result, &dest_result) {
         (Ok(()), Ok(records_written)) => {
+            tracing::debug!(
+                pipeline = config.pipeline,
+                run_id,
+                "Persisting run state to backend"
+            );
             let state_backend = create_state_backend(config)?;
             state_backend.complete_run(
                 run_id,

@@ -56,6 +56,13 @@ pub fn host_emit_record_batch(
         }
     };
 
+    tracing::debug!(
+        stream = stream_name,
+        batch_bytes = batch_bytes.len(),
+        pipeline = data.pipeline_name,
+        "Received record batch from connector"
+    );
+
     match data.batch_sender.send((stream_name, batch_bytes)) {
         Ok(()) => Ok(vec![WasmValue::from_i32(0)]),
         Err(e) => {

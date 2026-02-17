@@ -1,3 +1,257 @@
 pub mod sink;
 
-fn main() {}
+use rapidbyte_sdk::errors::{ConnectorError, ConnectorResult};
+use rapidbyte_sdk::host_ffi;
+use rapidbyte_sdk::memory::{pack_ptr_len, write_guest_bytes};
+
+use serde::Deserialize;
+use tokio_postgres::NoTls;
+
+// Re-export allocator functions from SDK so the host can call them
+pub use rapidbyte_sdk::memory::{rb_allocate, rb_deallocate};
+
+/// PostgreSQL connection config from pipeline YAML.
+#[derive(Debug, Deserialize)]
+struct PgConfig {
+    host: String,
+    #[serde(default = "default_port")]
+    port: u16,
+    user: String,
+    #[serde(default)]
+    password: String,
+    database: String,
+    #[serde(default = "default_schema")]
+    schema: String,
+}
+
+fn default_port() -> u16 {
+    5432
+}
+
+fn default_schema() -> String {
+    "public".to_string()
+}
+
+impl PgConfig {
+    fn connection_string(&self) -> String {
+        format!(
+            "host={} port={} user={} password={} dbname={}",
+            self.host, self.port, self.user, self.password, self.database
+        )
+    }
+}
+
+/// Helper: read input bytes from (ptr, len), run handler, serialize result.
+fn protocol_handler<F>(input_ptr: i32, input_len: i32, handler: F) -> i64
+where
+    F: FnOnce(&[u8]) -> Vec<u8>,
+{
+    let input = unsafe {
+        std::slice::from_raw_parts(input_ptr as *const u8, input_len as usize)
+    };
+    let result_bytes = handler(input);
+    let (ptr, len) = write_guest_bytes(&result_bytes);
+    pack_ptr_len(ptr, len)
+}
+
+fn make_ok_response<T: serde::Serialize>(data: T) -> Vec<u8> {
+    let result: ConnectorResult<T> = ConnectorResult::Ok { data };
+    serde_json::to_vec(&result).unwrap()
+}
+
+fn make_err_response(code: &str, message: &str) -> Vec<u8> {
+    let result: ConnectorResult<()> = ConnectorResult::Err {
+        error: ConnectorError {
+            code: code.to_string(),
+            message: message.to_string(),
+        },
+    };
+    serde_json::to_vec(&result).unwrap()
+}
+
+/// Create a tokio runtime suitable for the Wasm environment.
+fn create_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create tokio runtime")
+}
+
+/// Connect to PostgreSQL using the provided config.
+async fn connect(
+    config: &PgConfig,
+) -> Result<tokio_postgres::Client, String> {
+    let conn_str = config.connection_string();
+    let (client, connection) = tokio_postgres::connect(&conn_str, NoTls)
+        .await
+        .map_err(|e| format!("Connection failed: {}", e))?;
+
+    // Spawn the connection handler
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            host_ffi::log(0, &format!("PostgreSQL connection error: {}", e));
+        }
+    });
+
+    Ok(client)
+}
+
+// === Exported Protocol Functions ===
+
+#[no_mangle]
+pub extern "C" fn rb_init(config_ptr: i32, config_len: i32) -> i64 {
+    protocol_handler(config_ptr, config_len, |input| {
+        match serde_json::from_slice::<PgConfig>(input) {
+            Ok(config) => {
+                host_ffi::log(
+                    2,
+                    &format!(
+                        "dest-postgres: init with host={} db={} schema={}",
+                        config.host, config.database, config.schema
+                    ),
+                );
+
+                // Store config as state for later use by write_batch
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(input) {
+                    host_ffi::set_state("pg_config", &val);
+                }
+
+                make_ok_response(())
+            }
+            Err(e) => make_err_response("INVALID_CONFIG", &format!("Invalid config: {}", e)),
+        }
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rb_validate(config_ptr: i32, config_len: i32) -> i64 {
+    protocol_handler(config_ptr, config_len, |input| {
+        let config: PgConfig = match serde_json::from_slice(input) {
+            Ok(c) => c,
+            Err(e) => {
+                return make_err_response("INVALID_CONFIG", &format!("Invalid config: {}", e));
+            }
+        };
+
+        let rt = create_runtime();
+        rt.block_on(async {
+            match connect(&config).await {
+                Ok(client) => {
+                    match client.query_one("SELECT 1", &[]).await {
+                        Ok(_) => {
+                            // Also verify the target schema exists
+                            let schema_check = client
+                                .query_one(
+                                    "SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1",
+                                    &[&config.schema],
+                                )
+                                .await;
+
+                            let message = match schema_check {
+                                Ok(_) => format!(
+                                    "Connected to {}:{}/{} (schema: {})",
+                                    config.host, config.port, config.database, config.schema
+                                ),
+                                Err(_) => format!(
+                                    "Connected to {}:{}/{} (schema '{}' does not exist, will be created)",
+                                    config.host, config.port, config.database, config.schema
+                                ),
+                            };
+
+                            let result = rapidbyte_sdk::errors::ValidationResult {
+                                status: rapidbyte_sdk::errors::ValidationStatus::Success,
+                                message,
+                            };
+                            make_ok_response(result)
+                        }
+                        Err(e) => make_err_response(
+                            "CONNECTION_TEST_FAILED",
+                            &format!("Connection test failed: {}", e),
+                        ),
+                    }
+                }
+                Err(e) => make_err_response("CONNECTION_FAILED", &e),
+            }
+        })
+    })
+}
+
+#[no_mangle]
+pub extern "C" fn rb_write_batch(
+    stream_ptr: i32,
+    stream_len: i32,
+    batch_ptr: i32,
+    batch_len: i32,
+) -> i64 {
+    // Read stream name
+    let stream_name = unsafe {
+        let bytes = std::slice::from_raw_parts(stream_ptr as *const u8, stream_len as usize);
+        String::from_utf8_lossy(bytes).to_string()
+    };
+
+    // Read Arrow IPC bytes
+    let ipc_bytes = unsafe {
+        std::slice::from_raw_parts(batch_ptr as *const u8, batch_len as usize)
+    };
+
+    // Get config from state
+    let config_json = match host_ffi::get_state("pg_config") {
+        Some(v) => v,
+        None => {
+            let result = make_err_response(
+                "NO_CONFIG",
+                "No config available. Call rb_init first.",
+            );
+            let (ptr, len) = write_guest_bytes(&result);
+            return pack_ptr_len(ptr, len);
+        }
+    };
+
+    let config: PgConfig = match serde_json::from_value(config_json) {
+        Ok(c) => c,
+        Err(e) => {
+            let result = make_err_response(
+                "INVALID_CONFIG",
+                &format!("Invalid stored config: {}", e),
+            );
+            let (ptr, len) = write_guest_bytes(&result);
+            return pack_ptr_len(ptr, len);
+        }
+    };
+
+    let rt = create_runtime();
+    let result_bytes = rt.block_on(async {
+        match connect(&config).await {
+            Ok(client) => match sink::write_batch(&client, &config.schema, &stream_name, ipc_bytes).await {
+                Ok(count) => {
+                    host_ffi::report_progress(count, batch_len as u64);
+                    make_ok_response(())
+                }
+                Err(e) => make_err_response("WRITE_FAILED", &e),
+            },
+            Err(e) => make_err_response("CONNECTION_FAILED", &e),
+        }
+    });
+
+    let (ptr, len) = write_guest_bytes(&result_bytes);
+    pack_ptr_len(ptr, len)
+}
+
+#[no_mangle]
+pub extern "C" fn rb_write_finalize(input_ptr: i32, input_len: i32) -> i64 {
+    protocol_handler(input_ptr, input_len, |_input| {
+        host_ffi::log(2, "dest-postgres: write finalize");
+
+        // For v0.1, finalize is a no-op — each batch is committed immediately.
+        // Return summary from accumulated state.
+        let summary = rapidbyte_sdk::protocol::WriteSummary {
+            records_written: 0, // Host tracks the real count via report_progress
+            bytes_written: 0,
+        };
+        make_ok_response(summary)
+    })
+}
+
+fn main() {
+    // Wasm entry point — not used directly, protocol functions are called by the host
+}

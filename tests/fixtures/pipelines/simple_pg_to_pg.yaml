@@ -1,0 +1,30 @@
+version: "1.0"
+pipeline: test_pg_to_pg
+
+source:
+  use: source-postgres
+  config:
+    host: ${TEST_SOURCE_PG_HOST}
+    port: ${TEST_SOURCE_PG_PORT}
+    user: postgres
+    password: postgres
+    database: source_test
+  streams:
+    - name: users
+      sync_mode: full_refresh
+    - name: orders
+      sync_mode: full_refresh
+
+destination:
+  use: dest-postgres
+  config:
+    host: ${TEST_DEST_PG_HOST}
+    port: ${TEST_DEST_PG_PORT}
+    user: postgres
+    password: postgres
+    database: dest_test
+    schema: raw
+  write_mode: append
+
+state:
+  backend: sqlite
