@@ -34,7 +34,9 @@ pub struct PipelineResult {
     pub dest_connect_secs: f64,
     pub dest_flush_secs: f64,
     pub dest_commit_secs: f64,
-    // Host overhead
+    // Host overhead breakdown
+    pub dest_vm_setup_secs: f64,
+    pub dest_recv_secs: f64,
     pub wasm_overhead_secs: f64,
 }
 
@@ -120,7 +122,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
 
     // 8. Spawn destination write on a blocking thread
     let dest_pipeline = config.pipeline.clone();
-    let dest_handle = tokio::task::spawn_blocking(move || -> Result<(WriteSummary, f64)> {
+    let dest_handle = tokio::task::spawn_blocking(move || -> Result<(WriteSummary, f64, f64, f64)> {
         run_destination(
             dest_module,
             receiver,
@@ -139,10 +141,11 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
     let final_stats = stats.lock().unwrap().clone();
 
     match (&source_result, &dest_result) {
-        (Ok(source_duration), Ok((summary, dest_duration))) => {
+        (Ok(source_duration), Ok((summary, dest_duration, vm_setup_secs, recv_secs))) => {
             let connector_internal_secs =
                 summary.connect_secs + summary.flush_secs + summary.commit_secs;
-            let wasm_overhead_secs = (dest_duration - connector_internal_secs).max(0.0);
+            let wasm_overhead_secs =
+                (dest_duration - vm_setup_secs - recv_secs - connector_internal_secs).max(0.0);
 
             tracing::debug!(
                 pipeline = config.pipeline,
@@ -183,6 +186,8 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
                 dest_connect_secs: summary.connect_secs,
                 dest_flush_secs: summary.flush_secs,
                 dest_commit_secs: summary.commit_secs,
+                dest_vm_setup_secs: *vm_setup_secs,
+                dest_recv_secs: *recv_secs,
                 wasm_overhead_secs,
             })
         }
@@ -306,10 +311,12 @@ fn run_destination(
     pipeline_name: &str,
     dest_config: &serde_json::Value,
     stats: Arc<Mutex<RunStats>>,
-) -> Result<(WriteSummary, f64)> {
+) -> Result<(WriteSummary, f64, f64, f64)> {
     let phase_start = Instant::now();
 
-    // Create a dummy sender that we never use — destination doesn't emit batches
+    // Phase A: VM setup + init
+    let vm_setup_start = Instant::now();
+
     let (dummy_sender, _) = mpsc::sync_channel::<(String, Vec<u8>)>(1);
 
     let host_state = HostState {
@@ -340,7 +347,10 @@ fn run_destination(
     tracing::info!("Initializing destination connector");
     handle.init(dest_config)?;
 
-    // Receive batches from source and write to destination
+    let vm_setup_secs = vm_setup_start.elapsed().as_secs_f64();
+
+    // Phase B: Receive batches from source
+    let recv_start = Instant::now();
     while let Ok((stream_name, ipc_bytes)) = receiver.recv() {
         tracing::debug!(
             stream = stream_name,
@@ -349,7 +359,9 @@ fn run_destination(
         );
         handle.write_batch(&stream_name, &ipc_bytes)?;
     }
+    let recv_secs = recv_start.elapsed().as_secs_f64();
 
+    // Phase C: Finalize
     tracing::info!("Finalizing destination writes");
     let summary = handle.write_finalize()?;
 
@@ -358,7 +370,7 @@ fn run_destination(
         "Destination write complete"
     );
 
-    Ok((summary, phase_start.elapsed().as_secs_f64()))
+    Ok((summary, phase_start.elapsed().as_secs_f64(), vm_setup_secs, recv_secs))
 }
 
 fn validate_connector(

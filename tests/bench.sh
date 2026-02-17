@@ -196,6 +196,8 @@ for label, key, unit in [
     ('  Connect', 'dest_connect_secs', 's'),
     ('  Flush', 'dest_flush_secs', 's'),
     ('  Commit', 'dest_commit_secs', 's'),
+    ('  VM setup', 'dest_vm_setup_secs', 's'),
+    ('  Recv loop', 'dest_recv_secs', 's'),
     ('  WASM overhead', 'wasm_overhead_secs', 's'),
     ('Source module load', 'source_module_load_ms', 'ms'),
     ('Dest module load', 'dest_module_load_ms', 'ms'),

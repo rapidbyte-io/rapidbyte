@@ -43,6 +43,8 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
     );
     println!("  Source duration:  {:.2}s", result.source_duration_secs);
     println!("  Dest duration:   {:.2}s", result.dest_duration_secs);
+    println!("    VM setup:      {:.3}s", result.dest_vm_setup_secs);
+    println!("    Recv loop:     {:.3}s", result.dest_recv_secs);
     println!("    Connect:       {:.3}s", result.dest_connect_secs);
     println!("    Flush:         {:.3}s", result.dest_flush_secs);
     println!("    Commit:        {:.3}s", result.dest_commit_secs);
@@ -62,6 +64,8 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
         "dest_connect_secs": result.dest_connect_secs,
         "dest_flush_secs": result.dest_flush_secs,
         "dest_commit_secs": result.dest_commit_secs,
+        "dest_vm_setup_secs": result.dest_vm_setup_secs,
+        "dest_recv_secs": result.dest_recv_secs,
         "wasm_overhead_secs": result.wasm_overhead_secs,
         "source_module_load_ms": result.source_module_load_ms,
         "dest_module_load_ms": result.dest_module_load_ms,
