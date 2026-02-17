@@ -25,6 +25,10 @@ pub struct PipelineResult {
     pub records_written: u64,
     pub bytes_read: u64,
     pub duration_secs: f64,
+    pub source_duration_secs: f64,
+    pub dest_duration_secs: f64,
+    pub source_module_load_ms: u64,
+    pub dest_module_load_ms: u64,
 }
 
 /// Result of a pipeline check.
@@ -60,21 +64,23 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
 
     // 4. Load modules
     let runtime = WasmRuntime::new()?;
-    let load_start = Instant::now();
+    let source_load_start = Instant::now();
     let source_module = runtime.load_module(&source_wasm)?;
+    let source_module_load_ms = source_load_start.elapsed().as_millis() as u64;
     tracing::info!(
         connector = "source",
         path = %source_wasm.display(),
-        load_ms = load_start.elapsed().as_millis() as u64,
+        load_ms = source_module_load_ms,
         "Loaded source connector module"
     );
 
-    let load_start = Instant::now();
+    let dest_load_start = Instant::now();
     let dest_module = runtime.load_module(&dest_wasm)?;
+    let dest_module_load_ms = dest_load_start.elapsed().as_millis() as u64;
     tracing::info!(
         connector = "destination",
         path = %dest_wasm.display(),
-        load_ms = load_start.elapsed().as_millis() as u64,
+        load_ms = dest_module_load_ms,
         "Loaded destination connector module"
     );
 
@@ -93,7 +99,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
     let stats_dest = stats.clone();
 
     // 7. Spawn source read on a blocking thread
-    let source_handle = tokio::task::spawn_blocking(move || -> Result<()> {
+    let source_handle = tokio::task::spawn_blocking(move || -> Result<f64> {
         run_source(
             source_module,
             sender,
@@ -107,7 +113,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
 
     // 8. Spawn destination write on a blocking thread
     let dest_pipeline = config.pipeline.clone();
-    let dest_handle = tokio::task::spawn_blocking(move || -> Result<u64> {
+    let dest_handle = tokio::task::spawn_blocking(move || -> Result<(u64, f64)> {
         run_destination(
             dest_module,
             receiver,
@@ -126,7 +132,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
     let final_stats = stats.lock().unwrap().clone();
 
     match (&source_result, &dest_result) {
-        (Ok(()), Ok(records_written)) => {
+        (Ok(source_duration), Ok((records_written, dest_duration))) => {
             tracing::debug!(
                 pipeline = config.pipeline,
                 run_id,
@@ -158,6 +164,10 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
                 records_written: *records_written,
                 bytes_read: final_stats.bytes_read,
                 duration_secs: duration.as_secs_f64(),
+                source_duration_secs: *source_duration,
+                dest_duration_secs: *dest_duration,
+                source_module_load_ms,
+                dest_module_load_ms,
             })
         }
         _ => {
@@ -229,7 +239,9 @@ fn run_source(
     source_config: &serde_json::Value,
     read_request: &ReadRequest,
     stats: Arc<Mutex<RunStats>>,
-) -> Result<()> {
+) -> Result<f64> {
+    let phase_start = Instant::now();
+
     let host_state = HostState {
         batch_sender: sender,
         state_backend,
@@ -268,7 +280,7 @@ fn run_source(
     );
 
     // Sender is dropped here, signaling the destination to finish
-    Ok(())
+    Ok(phase_start.elapsed().as_secs_f64())
 }
 
 fn run_destination(
@@ -278,7 +290,9 @@ fn run_destination(
     pipeline_name: &str,
     dest_config: &serde_json::Value,
     stats: Arc<Mutex<RunStats>>,
-) -> Result<u64> {
+) -> Result<(u64, f64)> {
+    let phase_start = Instant::now();
+
     // Create a dummy sender that we never use — destination doesn't emit batches
     let (dummy_sender, _) = mpsc::sync_channel::<(String, Vec<u8>)>(1);
 
@@ -328,7 +342,7 @@ fn run_destination(
         "Destination write complete"
     );
 
-    Ok(summary.records_written)
+    Ok((summary.records_written, phase_start.elapsed().as_secs_f64()))
 }
 
 fn validate_connector(
