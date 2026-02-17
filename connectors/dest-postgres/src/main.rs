@@ -2,6 +2,7 @@ pub mod sink;
 
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use rapidbyte_sdk::errors::{ConnectorError, ConnectorResult};
 use rapidbyte_sdk::host_ffi;
@@ -223,6 +224,9 @@ pub extern "C" fn rb_write_finalize(input_ptr: i32, input_len: i32) -> i64 {
                 let summary = rapidbyte_sdk::protocol::WriteSummary {
                     records_written: 0,
                     bytes_written: 0,
+                    connect_secs: 0.0,
+                    flush_secs: 0.0,
+                    commit_secs: 0.0,
                 };
                 return make_ok_response(summary);
             }
@@ -237,6 +241,9 @@ pub extern "C" fn rb_write_finalize(input_ptr: i32, input_len: i32) -> i64 {
             let summary = rapidbyte_sdk::protocol::WriteSummary {
                 records_written: 0,
                 bytes_written: 0,
+                connect_secs: 0.0,
+                flush_secs: 0.0,
+                commit_secs: 0.0,
             };
             return make_ok_response(summary);
         }
@@ -245,45 +252,61 @@ pub extern "C" fn rb_write_finalize(input_ptr: i32, input_len: i32) -> i64 {
 
         let rt = create_runtime();
         rt.block_on(async {
-            match connect(&config).await {
-                Ok(client) => {
-                    let mut total_rows: u64 = 0;
-                    let mut total_bytes: u64 = 0;
+            // Phase 1: Connect
+            let connect_start = Instant::now();
+            let client = match connect(&config).await {
+                Ok(c) => c,
+                Err(e) => return make_err_response("CONNECTION_FAILED", &e),
+            };
+            let connect_secs = connect_start.elapsed().as_secs_f64();
 
-                    if let Err(e) = client.execute("BEGIN", &[]).await {
-                        return make_err_response("TX_FAILED", &format!("BEGIN failed: {}", e));
-                    }
+            // Phase 2: Flush (BEGIN + INSERTs)
+            let flush_start = Instant::now();
 
-                    let mut created_tables = std::collections::HashSet::new();
-
-                    for (stream_name, ipc_bytes) in &batches {
-                        match sink::write_batch(&client, &config.schema, stream_name, ipc_bytes, &mut created_tables).await {
-                            Ok(count) => {
-                                total_rows += count;
-                                total_bytes += ipc_bytes.len() as u64;
-                                host_ffi::report_progress(count, ipc_bytes.len() as u64);
-                            }
-                            Err(e) => {
-                                let _ = client.execute("ROLLBACK", &[]).await;
-                                return make_err_response("WRITE_FAILED", &e);
-                            }
-                        }
-                    }
-
-                    if let Err(e) = client.execute("COMMIT", &[]).await {
-                        return make_err_response("TX_FAILED", &format!("COMMIT failed: {}", e));
-                    }
-
-                    host_ffi::log(2, &format!("dest-postgres: flushed {} rows in {} batches", total_rows, batches.len()));
-
-                    let summary = rapidbyte_sdk::protocol::WriteSummary {
-                        records_written: total_rows,
-                        bytes_written: total_bytes,
-                    };
-                    make_ok_response(summary)
-                }
-                Err(e) => make_err_response("CONNECTION_FAILED", &e),
+            if let Err(e) = client.execute("BEGIN", &[]).await {
+                return make_err_response("TX_FAILED", &format!("BEGIN failed: {}", e));
             }
+
+            let mut total_rows: u64 = 0;
+            let mut total_bytes: u64 = 0;
+            let mut created_tables = std::collections::HashSet::new();
+
+            for (stream_name, ipc_bytes) in &batches {
+                match sink::write_batch(&client, &config.schema, stream_name, ipc_bytes, &mut created_tables).await {
+                    Ok(count) => {
+                        total_rows += count;
+                        total_bytes += ipc_bytes.len() as u64;
+                        host_ffi::report_progress(count, ipc_bytes.len() as u64);
+                    }
+                    Err(e) => {
+                        let _ = client.execute("ROLLBACK", &[]).await;
+                        return make_err_response("WRITE_FAILED", &e);
+                    }
+                }
+            }
+
+            let flush_secs = flush_start.elapsed().as_secs_f64();
+
+            // Phase 3: Commit
+            let commit_start = Instant::now();
+            if let Err(e) = client.execute("COMMIT", &[]).await {
+                return make_err_response("TX_FAILED", &format!("COMMIT failed: {}", e));
+            }
+            let commit_secs = commit_start.elapsed().as_secs_f64();
+
+            host_ffi::log(2, &format!(
+                "dest-postgres: flushed {} rows in {} batches (connect={:.3}s flush={:.3}s commit={:.3}s)",
+                total_rows, batches.len(), connect_secs, flush_secs, commit_secs
+            ));
+
+            let summary = rapidbyte_sdk::protocol::WriteSummary {
+                records_written: total_rows,
+                bytes_written: total_bytes,
+                connect_secs,
+                flush_secs,
+                commit_secs,
+            };
+            make_ok_response(summary)
         })
     })
 }
