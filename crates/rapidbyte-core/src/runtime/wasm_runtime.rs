@@ -4,10 +4,9 @@ use anyhow::{Context, Result};
 use wasmedge_sdk::{ImportObjectBuilder, Module};
 
 use super::host_functions::{
-    host_emit_record_batch, host_get_state, host_log, host_report_progress, host_set_state,
-    host_emit_batch, host_next_batch, host_last_error, host_state_get, host_state_put,
-    host_checkpoint, host_metric_fn,
-    HostState,
+    host_checkpoint, host_emit_batch, host_emit_record_batch, host_get_state, host_last_error,
+    host_log, host_metric_fn, host_next_batch, host_report_progress, host_set_state,
+    host_state_get, host_state_put, HostState,
 };
 
 /// Manages loading Wasm modules.

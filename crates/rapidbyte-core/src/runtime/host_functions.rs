@@ -145,6 +145,17 @@ pub fn host_next_batch(
 
     let batch_len = batch.len() as u32;
 
+    // Guard against batches that exceed i32 range
+    if batch_len > i32::MAX as u32 {
+        data.pending_batch = Some(batch);
+        let err = ConnectorErrorV1::internal(
+            "BATCH_TOO_LARGE",
+            &format!("Batch size {} exceeds i32::MAX", batch_len),
+        );
+        data.set_last_error(err);
+        return Ok(vec![WasmValue::from_i32(-1)]);
+    }
+
     // Check if buffer is large enough
     if batch_len > out_cap {
         // Stash the batch and tell guest to resize
@@ -350,6 +361,15 @@ pub fn host_state_put(
         }
     };
 
+    if key.len() > 1024 {
+        let err = ConnectorErrorV1::config(
+            "KEY_TOO_LONG",
+            &format!("Key length {} exceeds 1024", key.len()),
+        );
+        data.set_last_error(err);
+        return Ok(vec![WasmValue::from_i32(-1)]);
+    }
+
     let value = match memory_protocol::read_string_from_guest(frame, val_ptr, val_len) {
         Ok(s) => s,
         Err(e) => {
@@ -416,13 +436,21 @@ pub fn host_checkpoint(
             // Track checkpoint count
             if kind == 0 {
                 // Source checkpoint — try to parse and store
-                if let Ok(cp) = serde_json::from_value::<Checkpoint>(
+                match serde_json::from_value::<Checkpoint>(
                     envelope
                         .get("payload")
                         .cloned()
                         .unwrap_or(envelope.clone()),
                 ) {
-                    data.source_checkpoints.push(cp);
+                    Ok(cp) => data.source_checkpoints.push(cp),
+                    Err(e) => {
+                        tracing::warn!(
+                            pipeline = data.pipeline_name,
+                            stream = data.current_stream,
+                            "Failed to parse source checkpoint: {}",
+                            e
+                        );
+                    }
                 }
             } else {
                 data.dest_checkpoint_count += 1;
