@@ -9,7 +9,7 @@ use wasmedge_sdk::wasi::WasiModule;
 use wasmedge_sdk::{Module, Store, Vm};
 
 use rapidbyte_sdk::errors::ValidationResult;
-use rapidbyte_sdk::protocol::{ReadRequest, StreamSelection, SyncMode};
+use rapidbyte_sdk::protocol::{ReadRequest, StreamSelection, SyncMode, WriteSummary};
 
 use crate::pipeline::types::PipelineConfig;
 use crate::runtime::connector_handle::ConnectorHandle;
@@ -24,11 +24,18 @@ pub struct PipelineResult {
     pub records_read: u64,
     pub records_written: u64,
     pub bytes_read: u64,
+    pub bytes_written: u64,
     pub duration_secs: f64,
     pub source_duration_secs: f64,
     pub dest_duration_secs: f64,
     pub source_module_load_ms: u64,
     pub dest_module_load_ms: u64,
+    // Dest sub-phase timing (from connector)
+    pub dest_connect_secs: f64,
+    pub dest_flush_secs: f64,
+    pub dest_commit_secs: f64,
+    // Host overhead
+    pub wasm_overhead_secs: f64,
 }
 
 /// Result of a pipeline check.
@@ -113,7 +120,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
 
     // 8. Spawn destination write on a blocking thread
     let dest_pipeline = config.pipeline.clone();
-    let dest_handle = tokio::task::spawn_blocking(move || -> Result<(u64, f64)> {
+    let dest_handle = tokio::task::spawn_blocking(move || -> Result<(WriteSummary, f64)> {
         run_destination(
             dest_module,
             receiver,
@@ -132,7 +139,11 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
     let final_stats = stats.lock().unwrap().clone();
 
     match (&source_result, &dest_result) {
-        (Ok(source_duration), Ok((records_written, dest_duration))) => {
+        (Ok(source_duration), Ok((summary, dest_duration))) => {
+            let connector_internal_secs =
+                summary.connect_secs + summary.flush_secs + summary.commit_secs;
+            let wasm_overhead_secs = (dest_duration - connector_internal_secs).max(0.0);
+
             tracing::debug!(
                 pipeline = config.pipeline,
                 run_id,
@@ -144,7 +155,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
                 RunStatus::Completed,
                 &RunStats {
                     records_read: final_stats.records_read,
-                    records_written: *records_written,
+                    records_written: summary.records_written,
                     bytes_read: final_stats.bytes_read,
                     error_message: None,
                 },
@@ -154,20 +165,25 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
             tracing::info!(
                 pipeline = config.pipeline,
                 records_read = final_stats.records_read,
-                records_written = records_written,
+                records_written = summary.records_written,
                 duration_secs = duration.as_secs_f64(),
                 "Pipeline run completed successfully"
             );
 
             Ok(PipelineResult {
                 records_read: final_stats.records_read,
-                records_written: *records_written,
+                records_written: summary.records_written,
                 bytes_read: final_stats.bytes_read,
+                bytes_written: summary.bytes_written,
                 duration_secs: duration.as_secs_f64(),
                 source_duration_secs: *source_duration,
                 dest_duration_secs: *dest_duration,
                 source_module_load_ms,
                 dest_module_load_ms,
+                dest_connect_secs: summary.connect_secs,
+                dest_flush_secs: summary.flush_secs,
+                dest_commit_secs: summary.commit_secs,
+                wasm_overhead_secs,
             })
         }
         _ => {
@@ -290,7 +306,7 @@ fn run_destination(
     pipeline_name: &str,
     dest_config: &serde_json::Value,
     stats: Arc<Mutex<RunStats>>,
-) -> Result<(u64, f64)> {
+) -> Result<(WriteSummary, f64)> {
     let phase_start = Instant::now();
 
     // Create a dummy sender that we never use — destination doesn't emit batches
@@ -342,7 +358,7 @@ fn run_destination(
         "Destination write complete"
     );
 
-    Ok((summary.records_written, phase_start.elapsed().as_secs_f64()))
+    Ok((summary, phase_start.elapsed().as_secs_f64()))
 }
 
 fn validate_connector(
