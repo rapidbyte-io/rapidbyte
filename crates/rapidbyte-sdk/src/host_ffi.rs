@@ -3,7 +3,9 @@
 //! registers its import object under module name "rapidbyte".
 
 use crate::errors::ConnectorErrorV1;
-use crate::protocol::{Checkpoint, CheckpointKind, Metric, PayloadEnvelope, StateScope};
+use crate::protocol::{Checkpoint, Metric, StateScope};
+#[cfg(target_arch = "wasm32")]
+use crate::protocol::{CheckpointKind, PayloadEnvelope};
 
 // === v0 host function declarations (kept during transition) ===
 
@@ -64,6 +66,7 @@ extern "C" {
 
 // === v0 safe wrappers (kept during transition) ===
 
+/// Emit an Arrow IPC record batch to the host pipeline.
 #[cfg(target_arch = "wasm32")]
 pub fn emit_record_batch(stream: &str, ipc_bytes: &[u8]) -> i32 {
     unsafe {
@@ -76,6 +79,7 @@ pub fn emit_record_batch(stream: &str, ipc_bytes: &[u8]) -> i32 {
     }
 }
 
+/// Read connector state by key. Returns None if not found.
 #[cfg(target_arch = "wasm32")]
 pub fn get_state(key: &str) -> Option<serde_json::Value> {
     let mut out_buf: Vec<u8> = Vec::with_capacity(4096);
@@ -98,6 +102,7 @@ pub fn get_state(key: &str) -> Option<serde_json::Value> {
     serde_json::from_slice(&out_buf).ok()
 }
 
+/// Write connector state.
 #[cfg(target_arch = "wasm32")]
 pub fn set_state(key: &str, value: &serde_json::Value) {
     let val_bytes = serde_json::to_vec(value).unwrap();
@@ -111,6 +116,7 @@ pub fn set_state(key: &str, value: &serde_json::Value) {
     }
 }
 
+/// Log a message to the host.
 #[cfg(target_arch = "wasm32")]
 pub fn log(level: i32, message: &str) {
     unsafe {
@@ -118,6 +124,7 @@ pub fn log(level: i32, message: &str) {
     }
 }
 
+/// Report progress to the host.
 #[cfg(target_arch = "wasm32")]
 pub fn report_progress(records: u64, bytes: u64) {
     unsafe {
@@ -161,7 +168,13 @@ pub fn next_batch(buf: &mut Vec<u8>, max_bytes: u64) -> Result<Option<usize>, Co
 
         if rc > 0 {
             let n = rc as usize;
-            // SAFETY: host wrote n bytes into our buffer, n <= cap
+            if n > cap {
+                return Err(ConnectorErrorV1::internal(
+                    "HOST_BUG",
+                    &format!("Host claimed {} bytes written but buffer capacity is {}", n, cap),
+                ));
+            }
+            // SAFETY: host wrote n bytes into our buffer, n <= cap (checked above)
             unsafe { buf.set_len(n) };
             return Ok(Some(n));
         } else if rc == 0 {
@@ -177,7 +190,7 @@ pub fn next_batch(buf: &mut Vec<u8>, max_bytes: u64) -> Result<Option<usize>, Co
                     &format!("Host needs {} bytes, exceeds max {}", needed, max_bytes),
                 ));
             }
-            buf.reserve_exact(needed.saturating_sub(buf.capacity()));
+            buf.reserve_exact(needed);
             // Loop will retry with larger buffer
         }
     }
@@ -216,7 +229,14 @@ pub fn state_get(scope: StateScope, key: &str) -> Result<Option<String>, Connect
         };
 
         if rc > 0 {
-            buf.truncate(rc as usize);
+            let n = rc as usize;
+            if n > buf.len() {
+                return Err(ConnectorErrorV1::internal(
+                    "HOST_BUG",
+                    &format!("Host claimed {} bytes but buffer is {}", n, buf.len()),
+                ));
+            }
+            buf.truncate(n);
             return Ok(Some(
                 String::from_utf8(buf)
                     .map_err(|_| ConnectorErrorV1::internal("UTF8_ERROR", "State value not UTF-8"))?,
