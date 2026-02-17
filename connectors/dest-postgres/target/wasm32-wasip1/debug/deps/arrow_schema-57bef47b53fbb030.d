@@ -1,0 +1,11 @@
+/Users/netf/Projects/rapidbyte/connectors/source-postgres/target/wasm32-wasip1/debug/deps/arrow_schema-57bef47b53fbb030.d: /Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/lib.rs /Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/datatype.rs /Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/datatype_parse.rs /Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/error.rs /Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/field.rs /Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/fields.rs /Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/schema.rs
+
+/Users/netf/Projects/rapidbyte/connectors/source-postgres/target/wasm32-wasip1/debug/deps/libarrow_schema-57bef47b53fbb030.rmeta: /Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/lib.rs /Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/datatype.rs /Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/datatype_parse.rs /Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/error.rs /Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/field.rs /Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/fields.rs /Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/schema.rs
+
+/Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/lib.rs:
+/Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/datatype.rs:
+/Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/datatype_parse.rs:
+/Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/error.rs:
+/Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/field.rs:
+/Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/fields.rs:
+/Users/netf/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-53.4.1/src/schema.rs:
