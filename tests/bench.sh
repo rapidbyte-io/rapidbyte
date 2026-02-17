@@ -164,35 +164,51 @@ if not results:
     sys.exit(1)
 
 def stats(key):
-    vals = [r[key] for r in results]
+    vals = [r.get(key, 0) for r in results]
     return min(vals), sum(vals)/len(vals), max(vals)
 
 n = len(results)
 rows = results[0].get('records_read', 0)
+bytes_read = results[0].get('bytes_read', 0)
+avg_row_bytes = bytes_read // rows if rows > 0 else 0
 
-print(f'  Dataset:     {rows} rows')
-print(f'  Iterations:  {n}')
+print(f'  Dataset:        {rows} rows, {bytes_read / 1048576:.2f} MB ({avg_row_bytes} B/row)')
+print(f'  Iterations:     {n}')
 print()
 
-fmt = '  {:<25s}  {:>8s}  {:>8s}  {:>8s}'
+fmt = '  {:<25s}  {:>10s}  {:>10s}  {:>10s}'
 print(fmt.format('Metric', 'Min', 'Avg', 'Max'))
-print(fmt.format('-' * 25, '-' * 8, '-' * 8, '-' * 8))
+print(fmt.format('-' * 25, '-' * 10, '-' * 10, '-' * 10))
 
 for label, key, unit in [
     ('Total duration', 'duration_secs', 's'),
     ('Source duration', 'source_duration_secs', 's'),
     ('Dest duration', 'dest_duration_secs', 's'),
+    ('  Connect', 'dest_connect_secs', 's'),
+    ('  Flush (INSERTs)', 'dest_flush_secs', 's'),
+    ('  Commit', 'dest_commit_secs', 's'),
+    ('  WASM overhead', 'wasm_overhead_secs', 's'),
     ('Source module load', 'source_module_load_ms', 'ms'),
     ('Dest module load', 'dest_module_load_ms', 'ms'),
 ]:
     lo, avg, hi = stats(key)
-    print(fmt.format(label, f'{lo:.2f}{unit}', f'{avg:.2f}{unit}', f'{hi:.2f}{unit}'))
+    print(fmt.format(label, f'{lo:.3f}{unit}', f'{avg:.3f}{unit}', f'{hi:.3f}{unit}'))
 
 # Throughput
 durations = [r['duration_secs'] for r in results]
 rps = [rows / d if d > 0 else 0 for d in durations]
+mbps = [bytes_read / d / 1048576 if d > 0 else 0 for d in durations]
+
 print()
-print(f'  Throughput:  {min(rps):.0f} - {sum(rps)/len(rps):.0f} - {max(rps):.0f} rows/sec')
+print(f'  Throughput (rows/sec):   {min(rps):>10,.0f}  {sum(rps)/n:>10,.0f}  {max(rps):>10,.0f}')
+print(f'  Throughput (MB/s):       {min(mbps):>10.2f}  {sum(mbps)/n:>10.2f}  {max(mbps):>10.2f}')
+
+# Bytes written
+bytes_written_vals = [r.get('bytes_written', 0) for r in results]
+avg_bw = sum(bytes_written_vals) / n
+print()
+print(f'  Bytes read (avg):    {bytes_read / 1048576:.2f} MB')
+print(f'  Bytes written (avg): {avg_bw / 1048576:.2f} MB')
 "
 
 rm -f "$RESULTS_FILE"
