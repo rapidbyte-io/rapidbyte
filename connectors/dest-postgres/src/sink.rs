@@ -314,6 +314,9 @@ pub async fn write_batch_multi_value(
 ///
 /// Returns "NULL" for null values, properly escapes strings,
 /// and formats numbers/booleans as literals.
+///
+/// Supported Arrow types: Int16, Int32, Int64, Float32, Float64, Boolean, Utf8.
+/// Other types fall back to "NULL" rather than panicking.
 fn format_sql_value(col: &dyn Array, row_idx: usize) -> String {
     if col.is_null(row_idx) {
         return "NULL".to_string();
@@ -358,12 +361,17 @@ fn format_sql_value(col: &dyn Array, row_idx: usize) -> String {
             let arr = col.as_any().downcast_ref::<BooleanArray>().unwrap();
             if arr.value(row_idx) { "TRUE".to_string() } else { "FALSE".to_string() }
         }
-        _ => {
-            // Utf8 and all other types → escaped string literal
+        DataType::Utf8 => {
             let arr = col.as_string::<i32>();
             let val = arr.value(row_idx);
-            // Escape single quotes by doubling them (PG standard_conforming_strings)
-            format!("'{}'", val.replace('\'', "''"))
+            // Strip null bytes (libpq treats them as string terminators) and
+            // escape single quotes by doubling them (PG standard_conforming_strings=on)
+            let cleaned = val.replace('\0', "");
+            format!("'{}'", cleaned.replace('\'', "''"))
+        }
+        _ => {
+            // Unsupported type — insert NULL rather than panic
+            "NULL".to_string()
         }
     }
 }
