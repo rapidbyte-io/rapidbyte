@@ -1,11 +1,15 @@
 pub mod sink;
 
+use std::sync::OnceLock;
+
 use rapidbyte_sdk::errors::{ConnectorError, ConnectorResult};
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::memory::{pack_ptr_len, write_guest_bytes};
 
 use serde::Deserialize;
 use tokio_postgres::NoTls;
+
+static CONFIG: OnceLock<PgConfig> = OnceLock::new();
 
 // Re-export allocator functions from SDK so the host can call them
 pub use rapidbyte_sdk::memory::{rb_allocate, rb_deallocate};
@@ -111,11 +115,8 @@ pub extern "C" fn rb_init(config_ptr: i32, config_len: i32) -> i64 {
                     ),
                 );
 
-                // Store config as state for later use by write_batch
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(input) {
-                    host_ffi::set_state("pg_config", &val);
-                }
-
+                // Store config for later use by rb_write_batch
+                let _ = CONFIG.set(config);
                 make_ok_response(())
             }
             Err(e) => make_err_response("INVALID_CONFIG", &format!("Invalid config: {}", e)),
@@ -194,25 +195,12 @@ pub extern "C" fn rb_write_batch(
         std::slice::from_raw_parts(batch_ptr as *const u8, batch_len as usize)
     };
 
-    // Get config from state
-    let config_json = match host_ffi::get_state("pg_config") {
-        Some(v) => v,
+    let config = match CONFIG.get() {
+        Some(c) => c,
         None => {
             let result = make_err_response(
                 "NO_CONFIG",
                 "No config available. Call rb_init first.",
-            );
-            let (ptr, len) = write_guest_bytes(&result);
-            return pack_ptr_len(ptr, len);
-        }
-    };
-
-    let config: PgConfig = match serde_json::from_value(config_json) {
-        Ok(c) => c,
-        Err(e) => {
-            let result = make_err_response(
-                "INVALID_CONFIG",
-                &format!("Invalid stored config: {}", e),
             );
             let (ptr, len) = write_guest_bytes(&result);
             return pack_ptr_len(ptr, len);

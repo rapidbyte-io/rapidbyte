@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use wasmedge_sdk::vm::SyncInst;
+use wasmedge_sdk::wasi::WasiModule;
 use wasmedge_sdk::{Module, Store, Vm};
 
 use rapidbyte_sdk::errors::ValidationResult;
@@ -238,9 +239,12 @@ fn run_source(
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
+    let mut wasi = WasiModule::create(None, None, None)
+        .map_err(|e| anyhow::anyhow!("Failed to create WASI module: {:?}", e))?;
 
     let mut instances: HashMap<String, &mut dyn SyncInst> = HashMap::new();
     instances.insert("rapidbyte".to_string(), &mut import);
+    instances.insert(wasi.name().to_string(), wasi.as_mut());
 
     let mut vm = Vm::new(
         Store::new(None, instances).map_err(|e| anyhow::anyhow!("Store::new failed: {:?}", e))?,
@@ -287,9 +291,12 @@ fn run_destination(
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
+    let mut wasi = WasiModule::create(None, None, None)
+        .map_err(|e| anyhow::anyhow!("Failed to create WASI module: {:?}", e))?;
 
     let mut instances: HashMap<String, &mut dyn SyncInst> = HashMap::new();
     instances.insert("rapidbyte".to_string(), &mut import);
+    instances.insert(wasi.name().to_string(), wasi.as_mut());
 
     let mut vm = Vm::new(
         Store::new(None, instances).map_err(|e| anyhow::anyhow!("Store::new failed: {:?}", e))?,
@@ -344,9 +351,12 @@ fn validate_connector(
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
+    let mut wasi = WasiModule::create(None, None, None)
+        .map_err(|e| anyhow::anyhow!("Failed to create WASI module: {:?}", e))?;
 
     let mut instances: HashMap<String, &mut dyn SyncInst> = HashMap::new();
     instances.insert("rapidbyte".to_string(), &mut import);
+    instances.insert(wasi.name().to_string(), wasi.as_mut());
 
     let mut vm = Vm::new(
         Store::new(None, instances).map_err(|e| anyhow::anyhow!("Store::new failed: {:?}", e))?,

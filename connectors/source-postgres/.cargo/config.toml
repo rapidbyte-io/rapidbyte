@@ -2,4 +2,4 @@
 target = "wasm32-wasip1"
 
 [target.wasm32-wasip1]
-rustflags = ["--cfg", "wasmedge", "--cfg", "tokio_unstable"]
+rustflags = ["--cfg", "wasmedge", "--cfg", "tokio_unstable", "--cfg", "skip_wasi_unsupported"]

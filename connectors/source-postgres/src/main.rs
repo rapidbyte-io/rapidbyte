@@ -1,6 +1,8 @@
 pub mod schema;
 pub mod source;
 
+use std::sync::OnceLock;
+
 use rapidbyte_sdk::errors::{ConnectorError, ConnectorResult};
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::memory::{pack_ptr_len, write_guest_bytes};
@@ -8,6 +10,8 @@ use rapidbyte_sdk::protocol::{Catalog, ReadRequest};
 
 use serde::Deserialize;
 use tokio_postgres::NoTls;
+
+static CONFIG: OnceLock<PgConfig> = OnceLock::new();
 
 // Re-export allocator functions from SDK so the host can call them
 pub use rapidbyte_sdk::memory::{rb_allocate, rb_deallocate};
@@ -104,7 +108,8 @@ pub extern "C" fn rb_init(config_ptr: i32, config_len: i32) -> i64 {
                     &format!("source-postgres: init with host={} db={}", config.host, config.database),
                 );
 
-                // Verify we can parse the config, but don't connect yet
+                // Store config for later use by rb_read
+                let _ = CONFIG.set(config);
                 make_ok_response(())
             }
             Err(e) => make_err_response("INVALID_CONFIG", &format!("Invalid config: {}", e)),
@@ -197,43 +202,12 @@ pub extern "C" fn rb_read(request_ptr: i32, request_len: i32) -> i64 {
             }
         };
 
-        // For v0.1, the config is passed as part of the state
-        // In practice, the host calls rb_init first, which stores the config.
-        // We need the config to connect. For now, use state or env vars.
-        // Actually, looking at the protocol flow: init stores config, read uses it.
-        // We need global state for this. For v0.1, read the config from state.
-
-        // Read config from state (set during rb_init via host)
-        let config_json = match host_ffi::get_state("pg_config") {
-            Some(v) => v,
+        let config = match CONFIG.get() {
+            Some(c) => c,
             None => {
-                // Fallback: try to read from the request's state field
-                match &request.state {
-                    Some(state) => match serde_json::from_value::<PgConfig>(state.clone()) {
-                        Ok(_) => state.clone(),
-                        Err(e) => {
-                            return make_err_response(
-                                "NO_CONFIG",
-                                &format!("No config available for read: {}", e),
-                            );
-                        }
-                    },
-                    None => {
-                        return make_err_response(
-                            "NO_CONFIG",
-                            "No config available. Call rb_init first.",
-                        );
-                    }
-                }
-            }
-        };
-
-        let config: PgConfig = match serde_json::from_value(config_json) {
-            Ok(c) => c,
-            Err(e) => {
                 return make_err_response(
-                    "INVALID_CONFIG",
-                    &format!("Invalid stored config: {}", e),
+                    "NO_CONFIG",
+                    "No config available. Call rb_init first.",
                 );
             }
         };
