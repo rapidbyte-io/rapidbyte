@@ -15,6 +15,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 arrow = { version = "53", features = ["ipc"] }
 
+[workspace]
+
 [patch.crates-io]
 tokio = { git = "https://github.com/second-state/wasi_tokio.git", branch = "v1.36.x" }
 socket2 = { git = "https://github.com/second-state/socket2.git", branch = "v0.5.x" }
