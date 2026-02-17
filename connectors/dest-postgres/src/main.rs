@@ -29,6 +29,8 @@ struct PgConfig {
     database: String,
     #[serde(default = "default_schema")]
     schema: String,
+    #[serde(default = "default_load_method")]
+    load_method: String,
 }
 
 fn default_port() -> u16 {
@@ -37,6 +39,10 @@ fn default_port() -> u16 {
 
 fn default_schema() -> String {
     "public".to_string()
+}
+
+fn default_load_method() -> String {
+    "insert".to_string()
 }
 
 impl PgConfig {
@@ -110,11 +116,18 @@ pub extern "C" fn rb_init(config_ptr: i32, config_len: i32) -> i64 {
     protocol_handler(config_ptr, config_len, |input| {
         match serde_json::from_slice::<PgConfig>(input) {
             Ok(config) => {
+                if config.load_method != "insert" && config.load_method != "copy" {
+                    return make_err_response(
+                        "INVALID_CONFIG",
+                        &format!("Invalid load_method: '{}'. Must be 'insert' or 'copy'", config.load_method),
+                    );
+                }
+
                 host_ffi::log(
                     2,
                     &format!(
-                        "dest-postgres: init with host={} db={} schema={}",
-                        config.host, config.database, config.schema
+                        "dest-postgres: init with host={} db={} schema={} load_method={}",
+                        config.host, config.database, config.schema, config.load_method
                     ),
                 );
 
@@ -260,43 +273,62 @@ pub extern "C" fn rb_write_finalize(input_ptr: i32, input_len: i32) -> i64 {
             };
             let connect_secs = connect_start.elapsed().as_secs_f64();
 
-            // Phase 2: Flush (BEGIN + INSERTs)
+            // Phase 2: Flush
             let flush_start = Instant::now();
-
-            if let Err(e) = client.execute("BEGIN", &[]).await {
-                return make_err_response("TX_FAILED", &format!("BEGIN failed: {}", e));
-            }
 
             let mut total_rows: u64 = 0;
             let mut total_bytes: u64 = 0;
             let mut created_tables = std::collections::HashSet::new();
 
-            for (stream_name, ipc_bytes) in &batches {
-                match sink::write_batch(&client, &config.schema, stream_name, ipc_bytes, &mut created_tables).await {
-                    Ok(count) => {
-                        total_rows += count;
-                        total_bytes += ipc_bytes.len() as u64;
-                        host_ffi::report_progress(count, ipc_bytes.len() as u64);
+            if config.load_method == "copy" {
+                // COPY mode: each COPY statement is atomic, no explicit transaction needed
+                for (stream_name, ipc_bytes) in &batches {
+                    match sink::write_batch_copy(&client, &config.schema, stream_name, ipc_bytes, &mut created_tables).await {
+                        Ok(count) => {
+                            total_rows += count;
+                            total_bytes += ipc_bytes.len() as u64;
+                            host_ffi::report_progress(count, ipc_bytes.len() as u64);
+                        }
+                        Err(e) => {
+                            return make_err_response("WRITE_FAILED", &e);
+                        }
                     }
-                    Err(e) => {
-                        let _ = client.execute("ROLLBACK", &[]).await;
-                        return make_err_response("WRITE_FAILED", &e);
+                }
+            } else {
+                // INSERT mode: wrap in explicit transaction
+                if let Err(e) = client.execute("BEGIN", &[]).await {
+                    return make_err_response("TX_FAILED", &format!("BEGIN failed: {}", e));
+                }
+
+                for (stream_name, ipc_bytes) in &batches {
+                    match sink::write_batch(&client, &config.schema, stream_name, ipc_bytes, &mut created_tables).await {
+                        Ok(count) => {
+                            total_rows += count;
+                            total_bytes += ipc_bytes.len() as u64;
+                            host_ffi::report_progress(count, ipc_bytes.len() as u64);
+                        }
+                        Err(e) => {
+                            let _ = client.execute("ROLLBACK", &[]).await;
+                            return make_err_response("WRITE_FAILED", &e);
+                        }
                     }
                 }
             }
 
             let flush_secs = flush_start.elapsed().as_secs_f64();
 
-            // Phase 3: Commit
+            // Phase 3: Commit (only needed for INSERT mode)
             let commit_start = Instant::now();
-            if let Err(e) = client.execute("COMMIT", &[]).await {
-                return make_err_response("TX_FAILED", &format!("COMMIT failed: {}", e));
+            if config.load_method != "copy" {
+                if let Err(e) = client.execute("COMMIT", &[]).await {
+                    return make_err_response("TX_FAILED", &format!("COMMIT failed: {}", e));
+                }
             }
             let commit_secs = commit_start.elapsed().as_secs_f64();
 
             host_ffi::log(2, &format!(
-                "dest-postgres: flushed {} rows in {} batches (connect={:.3}s flush={:.3}s commit={:.3}s)",
-                total_rows, batches.len(), connect_secs, flush_secs, commit_secs
+                "dest-postgres: flushed {} rows in {} batches via {} (connect={:.3}s flush={:.3}s commit={:.3}s)",
+                total_rows, batches.len(), config.load_method, connect_secs, flush_secs, commit_secs
             ));
 
             let summary = rapidbyte_sdk::protocol::WriteSummary {
