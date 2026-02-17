@@ -14,6 +14,7 @@ fi
 BENCH_ROWS="${BENCH_ROWS:-1000}"
 BENCH_ITERS="${BENCH_ITERS:-3}"
 BUILD_MODE="${BUILD_MODE:-release}"
+BENCH_MODE="${BENCH_MODE:-insert}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -33,11 +34,12 @@ cleanup() {
 }
 
 usage() {
-    echo "Usage: $0 [--rows N] [--iters N] [--debug]"
+    echo "Usage: $0 [--rows N] [--iters N] [--mode insert|copy] [--debug]"
     echo ""
     echo "Options:"
     echo "  --rows N    Number of rows to benchmark (default: 1000)"
     echo "  --iters N   Number of iterations (default: 3)"
+    echo "  --mode M    Load method: insert or copy (default: insert)"
     echo "  --debug     Use debug builds instead of release"
     exit 0
 }
@@ -47,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --rows)  BENCH_ROWS="$2"; shift 2 ;;
         --iters) BENCH_ITERS="$2"; shift 2 ;;
+        --mode)  BENCH_MODE="$2"; shift 2 ;;
         --debug) BUILD_MODE="debug"; shift ;;
         --help)  usage ;;
         *)       fail "Unknown option: $1" ;;
@@ -56,7 +59,7 @@ done
 echo ""
 cyan "═══════════════════════════════════════════════"
 cyan "  Rapidbyte Benchmark"
-cyan "  Rows: $BENCH_ROWS | Iterations: $BENCH_ITERS | Build: $BUILD_MODE"
+cyan "  Rows: $BENCH_ROWS | Iterations: $BENCH_ITERS | Build: $BUILD_MODE | Mode: $BENCH_MODE"
 cyan "═══════════════════════════════════════════════"
 echo ""
 
@@ -127,8 +130,13 @@ for i in $(seq 1 "$BENCH_ITERS"); do
 
     echo -n "  Iteration $i/$BENCH_ITERS ... "
 
+    PIPELINE="bench_pg.yaml"
+    if [ "$BENCH_MODE" = "copy" ]; then
+        PIPELINE="bench_pg_copy.yaml"
+    fi
+
     OUTPUT=$("$PROJECT_ROOT/target/$TARGET_DIR/rapidbyte" run \
-        "$PROJECT_ROOT/tests/fixtures/pipelines/bench_pg.yaml" \
+        "$PROJECT_ROOT/tests/fixtures/pipelines/$PIPELINE" \
         --log-level warn 2>&1)
 
     # Extract JSON line
@@ -173,6 +181,7 @@ bytes_read = results[0].get('bytes_read', 0)
 avg_row_bytes = bytes_read // rows if rows > 0 else 0
 
 print(f'  Dataset:        {rows} rows, {bytes_read / 1048576:.2f} MB ({avg_row_bytes} B/row)')
+print(f'  Load method:    $BENCH_MODE')
 print(f'  Iterations:     {n}')
 print()
 
@@ -185,7 +194,7 @@ for label, key, unit in [
     ('Source duration', 'source_duration_secs', 's'),
     ('Dest duration', 'dest_duration_secs', 's'),
     ('  Connect', 'dest_connect_secs', 's'),
-    ('  Flush (INSERTs)', 'dest_flush_secs', 's'),
+    ('  Flush', 'dest_flush_secs', 's'),
     ('  Commit', 'dest_commit_secs', 's'),
     ('  WASM overhead', 'wasm_overhead_secs', 's'),
     ('Source module load', 'source_module_load_ms', 'ms'),
