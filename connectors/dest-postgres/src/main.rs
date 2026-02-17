@@ -1,5 +1,6 @@
 pub mod sink;
 
+use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use rapidbyte_sdk::errors::{ConnectorError, ConnectorResult};
@@ -10,6 +11,7 @@ use serde::Deserialize;
 use tokio_postgres::NoTls;
 
 static CONFIG: OnceLock<PgConfig> = OnceLock::new();
+static BATCH_BUFFER: OnceLock<Mutex<Vec<(String, Vec<u8>)>>> = OnceLock::new();
 
 // Re-export allocator functions from SDK so the host can call them
 pub use rapidbyte_sdk::memory::{rb_allocate, rb_deallocate};
@@ -184,59 +186,97 @@ pub extern "C" fn rb_write_batch(
     batch_ptr: i32,
     batch_len: i32,
 ) -> i64 {
-    // Read stream name
     let stream_name = unsafe {
         let bytes = std::slice::from_raw_parts(stream_ptr as *const u8, stream_len as usize);
         String::from_utf8_lossy(bytes).to_string()
     };
 
-    // Read Arrow IPC bytes
     let ipc_bytes = unsafe {
         std::slice::from_raw_parts(batch_ptr as *const u8, batch_len as usize)
     };
 
-    let config = match CONFIG.get() {
-        Some(c) => c,
-        None => {
-            let result = make_err_response(
-                "NO_CONFIG",
-                "No config available. Call rb_init first.",
-            );
-            let (ptr, len) = write_guest_bytes(&result);
-            return pack_ptr_len(ptr, len);
-        }
-    };
+    let buffer = BATCH_BUFFER.get_or_init(|| Mutex::new(Vec::new()));
+    buffer.lock().unwrap().push((stream_name, ipc_bytes.to_vec()));
 
-    let rt = create_runtime();
-    let result_bytes = rt.block_on(async {
-        match connect(&config).await {
-            Ok(client) => match sink::write_batch(&client, &config.schema, &stream_name, ipc_bytes).await {
-                Ok(count) => {
-                    host_ffi::report_progress(count, batch_len as u64);
-                    make_ok_response(())
-                }
-                Err(e) => make_err_response("WRITE_FAILED", &e),
-            },
-            Err(e) => make_err_response("CONNECTION_FAILED", &e),
-        }
-    });
-
-    let (ptr, len) = write_guest_bytes(&result_bytes);
+    let result = make_ok_response(());
+    let (ptr, len) = write_guest_bytes(&result);
     pack_ptr_len(ptr, len)
 }
 
 #[no_mangle]
 pub extern "C" fn rb_write_finalize(input_ptr: i32, input_len: i32) -> i64 {
     protocol_handler(input_ptr, input_len, |_input| {
-        host_ffi::log(2, "dest-postgres: write finalize");
-
-        // For v0.1, finalize is a no-op — each batch is committed immediately.
-        // Return summary from accumulated state.
-        let summary = rapidbyte_sdk::protocol::WriteSummary {
-            records_written: 0, // Host tracks the real count via report_progress
-            bytes_written: 0,
+        let config = match CONFIG.get() {
+            Some(c) => c,
+            None => return make_err_response("NO_CONFIG", "No config available. Call rb_init first."),
         };
-        make_ok_response(summary)
+
+        let buffer = match BATCH_BUFFER.get() {
+            Some(b) => b,
+            None => {
+                let summary = rapidbyte_sdk::protocol::WriteSummary {
+                    records_written: 0,
+                    bytes_written: 0,
+                };
+                return make_ok_response(summary);
+            }
+        };
+
+        let batches: Vec<(String, Vec<u8>)> = {
+            let mut guard = buffer.lock().unwrap();
+            std::mem::take(&mut *guard)
+        };
+
+        if batches.is_empty() {
+            let summary = rapidbyte_sdk::protocol::WriteSummary {
+                records_written: 0,
+                bytes_written: 0,
+            };
+            return make_ok_response(summary);
+        }
+
+        host_ffi::log(2, &format!("dest-postgres: write finalize — flushing {} batches", batches.len()));
+
+        let rt = create_runtime();
+        rt.block_on(async {
+            match connect(&config).await {
+                Ok(client) => {
+                    let mut total_rows: u64 = 0;
+                    let mut total_bytes: u64 = 0;
+
+                    if let Err(e) = client.execute("BEGIN", &[]).await {
+                        return make_err_response("TX_FAILED", &format!("BEGIN failed: {}", e));
+                    }
+
+                    for (stream_name, ipc_bytes) in &batches {
+                        match sink::write_batch(&client, &config.schema, stream_name, ipc_bytes).await {
+                            Ok(count) => {
+                                total_rows += count;
+                                total_bytes += ipc_bytes.len() as u64;
+                                host_ffi::report_progress(count, ipc_bytes.len() as u64);
+                            }
+                            Err(e) => {
+                                let _ = client.execute("ROLLBACK", &[]).await;
+                                return make_err_response("WRITE_FAILED", &e);
+                            }
+                        }
+                    }
+
+                    if let Err(e) = client.execute("COMMIT", &[]).await {
+                        return make_err_response("TX_FAILED", &format!("COMMIT failed: {}", e));
+                    }
+
+                    host_ffi::log(2, &format!("dest-postgres: flushed {} rows in {} batches", total_rows, batches.len()));
+
+                    let summary = rapidbyte_sdk::protocol::WriteSummary {
+                        records_written: total_rows,
+                        bytes_written: total_bytes,
+                    };
+                    make_ok_response(summary)
+                }
+                Err(e) => make_err_response("CONNECTION_FAILED", &e),
+            }
+        })
     })
 }
 
