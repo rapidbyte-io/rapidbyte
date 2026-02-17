@@ -67,6 +67,15 @@ pub struct WriteRequest {
 pub struct WriteSummary {
     pub records_written: u64,
     pub bytes_written: u64,
+    /// Time spent establishing the database connection (seconds).
+    #[serde(default)]
+    pub connect_secs: f64,
+    /// Time spent executing INSERT statements (seconds).
+    #[serde(default)]
+    pub flush_secs: f64,
+    /// Time spent on COMMIT (seconds).
+    #[serde(default)]
+    pub commit_secs: f64,
 }
 
 #[cfg(test)]
