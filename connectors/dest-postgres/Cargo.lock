@@ -460,6 +460,8 @@ name = "dest-postgres"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "bytes",
+ "futures-util",
  "rapidbyte-sdk",
  "serde",
  "serde_json",
