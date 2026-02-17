@@ -4,7 +4,10 @@ use wasmedge_sdk::{params, Vm, WasmVal};
 use wasmedge_sys::AsInstance;
 
 use rapidbyte_sdk::errors::{ConnectorResult, ValidationResult};
-use rapidbyte_sdk::protocol::{Catalog, ReadRequest, ReadSummary, WriteSummary};
+use rapidbyte_sdk::protocol::{
+    Catalog, OpenContext, OpenInfo, ReadRequest, ReadSummary, ReadSummaryV1, StreamContext,
+    WriteSummary, WriteSummaryV1,
+};
 
 use super::memory_protocol;
 
@@ -174,6 +177,75 @@ impl<'a> ConnectorHandle<'a> {
                     error.code
                 )
             }
+        }
+    }
+
+    // === v1 lifecycle methods ===
+
+    /// Initialize the connector with v1 open context (config, connector metadata).
+    pub fn open(&mut self, ctx: &OpenContext) -> Result<OpenInfo> {
+        let result: ConnectorResult<OpenInfo> =
+            memory_protocol::call_with_json(&mut self.vm, "rb_open", ctx)
+                .context("Failed to call rb_open")?;
+
+        match result {
+            ConnectorResult::Ok { data } => Ok(data),
+            ConnectorResult::Err { error } => {
+                anyhow::bail!("Connector open failed: {} ({})", error.message, error.code)
+            }
+        }
+    }
+
+    /// Start reading data for a single stream (v1 lifecycle).
+    /// The guest emits batches via host_emit_batch during execution.
+    pub fn run_read(&mut self, ctx: &StreamContext) -> Result<ReadSummaryV1> {
+        let result: ConnectorResult<ReadSummaryV1> =
+            memory_protocol::call_with_json(&mut self.vm, "rb_run_read", ctx)
+                .context("Failed to call rb_run_read")?;
+
+        match result {
+            ConnectorResult::Ok { data } => Ok(data),
+            ConnectorResult::Err { error } => {
+                anyhow::bail!(
+                    "Connector run_read failed: {} ({})",
+                    error.message,
+                    error.code
+                )
+            }
+        }
+    }
+
+    /// Start writing data for a single stream (v1 lifecycle).
+    /// The guest pulls batches via host_next_batch during execution.
+    pub fn run_write(&mut self, ctx: &StreamContext) -> Result<WriteSummaryV1> {
+        let result: ConnectorResult<WriteSummaryV1> =
+            memory_protocol::call_with_json(&mut self.vm, "rb_run_write", ctx)
+                .context("Failed to call rb_run_write")?;
+
+        match result {
+            ConnectorResult::Ok { data } => Ok(data),
+            ConnectorResult::Err { error } => {
+                anyhow::bail!(
+                    "Connector run_write failed: {} ({})",
+                    error.message,
+                    error.code
+                )
+            }
+        }
+    }
+
+    /// Close the connector and release resources (v1 lifecycle).
+    pub fn close(&mut self) -> Result<()> {
+        let result = self
+            .vm
+            .run_func(None, "rb_close", params!())
+            .map_err(|e| anyhow::anyhow!("Failed to call rb_close: {:?}", e))?;
+
+        let rc = result[0].to_i32();
+        if rc == 0 {
+            Ok(())
+        } else {
+            anyhow::bail!("Connector close returned error code: {}", rc)
         }
     }
 }
