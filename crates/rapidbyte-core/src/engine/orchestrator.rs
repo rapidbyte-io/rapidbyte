@@ -5,13 +5,13 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use wasmedge_sdk::vm::SyncInst;
-use wasmedge_sdk::wasi::WasiModule;
 use wasmedge_sdk::{Module, Store, Vm};
 
 use rapidbyte_sdk::errors::ValidationResult;
 
 use super::checkpoint::correlate_and_persist_cursors;
 use super::errors::{compute_backoff, PipelineError};
+use super::vm_factory::create_secure_wasi_module;
 use rapidbyte_sdk::protocol::{
     Checkpoint, ConfigBlob, CursorInfo, CursorType, CursorValue, OpenContext, ReadSummary,
     SchemaHint, StreamContext, StreamLimits, StreamPolicies, SyncMode, WriteMode, WriteSummary,
@@ -358,19 +358,6 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
 }
 
 // --- Internal helpers ---
-
-/// Create a WasiModule with deny-by-default security:
-/// - No CLI args passed to guest
-/// - No environment variables leaked to guest
-/// - No filesystem preopens (connectors receive config via rb_open JSON)
-fn create_secure_wasi_module() -> Result<WasiModule> {
-    WasiModule::create(
-        Some(vec![]), // args: empty (no CLI args)
-        Some(vec![]), // envs: empty (deny all env vars)
-        None,         // preopens: no filesystem access
-    )
-    .map_err(|e| anyhow::anyhow!("Failed to create WASI module: {:?}", e))
-}
 
 fn run_source(
     module: Module,
