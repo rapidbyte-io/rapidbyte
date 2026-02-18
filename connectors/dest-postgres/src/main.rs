@@ -295,6 +295,10 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
             let mut checkpoint_count: u64 = 0;
             let mut bytes_since_commit: u64 = 0;
             let checkpoint_interval = stream_ctx.limits.checkpoint_interval_bytes;
+            let mut rows_since_commit: u64 = 0;
+            let mut last_checkpoint_time = Instant::now();
+            let checkpoint_interval_rows = stream_ctx.limits.checkpoint_interval_rows;
+            let checkpoint_interval_secs = stream_ctx.limits.checkpoint_interval_seconds;
 
             // Upsert mode is not compatible with COPY — fall back to INSERT
             let use_copy = config.load_method == "copy"
@@ -346,6 +350,7 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                                 total_rows += count;
                                 total_bytes += n as u64;
                                 bytes_since_commit += n as u64;
+                                rows_since_commit += count;
                                 batches_written += 1;
                             }
                             Err(e) => {
@@ -354,8 +359,15 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                             }
                         }
 
-                        // Chunked commit: if we've written enough bytes, commit and start new txn
-                        if checkpoint_interval > 0 && bytes_since_commit >= checkpoint_interval {
+                        // Chunked commit: checkpoint when any threshold is reached
+                        let should_checkpoint = (checkpoint_interval > 0
+                            && bytes_since_commit >= checkpoint_interval)
+                            || (checkpoint_interval_rows > 0
+                                && rows_since_commit >= checkpoint_interval_rows)
+                            || (checkpoint_interval_secs > 0
+                                && last_checkpoint_time.elapsed().as_secs() >= checkpoint_interval_secs);
+
+                        if should_checkpoint {
                             if let Err(e) = client.execute("COMMIT", &[]).await {
                                 loop_error = Some(format!("Checkpoint COMMIT failed: {}", e));
                                 break;
@@ -374,6 +386,8 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                             let _ = host_ffi::checkpoint("dest-postgres", &stream_ctx.stream_name, &cp);
                             checkpoint_count += 1;
                             bytes_since_commit = 0;
+                            rows_since_commit = 0;
+                            last_checkpoint_time = Instant::now();
 
                             host_ffi::log(3, &format!(
                                 "dest-postgres: checkpoint {} — committed {} rows, {} bytes so far",
