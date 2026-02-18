@@ -89,6 +89,7 @@ pub(crate) fn run_source(
         batch_receiver: None,
         pending_batch: None,
         last_error: None,
+        compression: None,
         source_checkpoints: source_checkpoints.clone(),
         dest_checkpoints: Arc::new(Mutex::new(Vec::new())),
     };
@@ -205,6 +206,7 @@ pub(crate) fn run_destination(
         batch_receiver: Some(receiver),
         pending_batch: None,
         last_error: None,
+        compression: None,
         source_checkpoints: Arc::new(Mutex::new(Vec::new())),
         dest_checkpoints: dest_checkpoints.clone(),
     };
@@ -327,6 +329,7 @@ pub(crate) fn run_transform(
         batch_receiver: Some(receiver),
         pending_batch: None,
         last_error: None,
+        compression: None,
         source_checkpoints: Arc::new(Mutex::new(Vec::new())),
         dest_checkpoints: Arc::new(Mutex::new(Vec::new())),
     };
@@ -424,6 +427,7 @@ pub(crate) fn validate_connector(
         batch_receiver: None,
         pending_batch: None,
         last_error: None,
+        compression: None,
         source_checkpoints: Arc::new(Mutex::new(Vec::new())),
         dest_checkpoints: Arc::new(Mutex::new(Vec::new())),
     };

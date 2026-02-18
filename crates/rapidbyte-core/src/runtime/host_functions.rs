@@ -54,6 +54,10 @@ pub struct HostState {
     /// Last error from any host function (read+clear semantics).
     pub last_error: Option<ConnectorError>,
 
+    // --- Compression ---
+    /// Optional compression codec for IPC batches on the channel.
+    pub compression: Option<super::compression::CompressionCodec>,
+
     // --- Checkpoint tracking ---
     /// Source checkpoints received during this stream run.
     /// Arc<Mutex<>> so the orchestrator can read checkpoints after the VM runs.
@@ -117,6 +121,13 @@ pub fn host_emit_batch(
         return Ok(vec![WasmValue::from_i32(-1)]);
     }
 
+    // Compress if a codec is configured
+    let batch_bytes = if let Some(codec) = data.compression {
+        super::compression::compress(codec, &batch_bytes)
+    } else {
+        batch_bytes
+    };
+
     let sender = match &data.batch_sender {
         Some(s) => s,
         None => {
@@ -173,6 +184,13 @@ pub fn host_next_batch(
             Ok(Frame::EndStream) => return Ok(vec![WasmValue::from_i32(0)]), // End-of-stream
             Err(_) => return Ok(vec![WasmValue::from_i32(0)]),               // Channel closed
         }
+    };
+
+    // Decompress if a codec is configured
+    let batch = if let Some(codec) = data.compression {
+        super::compression::decompress(codec, &batch)
+    } else {
+        batch
     };
 
     let batch_len = batch.len() as u32;
