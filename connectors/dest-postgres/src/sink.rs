@@ -10,13 +10,19 @@ use tokio_postgres::Client;
 
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::protocol::{
-    ColumnPolicy, NullabilityPolicy, SchemaEvolutionPolicy, TypeChangePolicy, WriteMode,
+    ColumnPolicy, DataErrorPolicy, NullabilityPolicy, SchemaEvolutionPolicy, TypeChangePolicy, WriteMode,
 };
 use rapidbyte_sdk::validation::validate_pg_identifier;
 
 use std::io::Write;
 use bytes::Bytes;
 use futures_util::SinkExt;
+
+/// Result of a write operation with per-row error tracking.
+pub struct WriteResult {
+    pub rows_written: u64,
+    pub rows_failed: u64,
+}
 
 /// Create the target table if it doesn't exist, based on the Arrow schema.
 ///
@@ -757,6 +763,194 @@ pub async fn write_batch_copy(
     );
 
     Ok(total_rows)
+}
+
+/// Insert rows one at a time, skipping any that fail.
+async fn write_rows_individually(
+    client: &Client,
+    target_schema: &str,
+    stream_name: &str,
+    ipc_bytes: &[u8],
+    write_mode: Option<&WriteMode>,
+) -> Result<WriteResult, String> {
+    let cursor = Cursor::new(ipc_bytes);
+    let reader = StreamReader::try_new(cursor, None)
+        .map_err(|e| format!("IPC decode failed: {}", e))?;
+    let arrow_schema = reader.schema();
+    let batches: Vec<_> = reader
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to read batches: {}", e))?;
+
+    let qualified_table = format!("\"{}\".\"{}\"", target_schema, stream_name);
+    let col_list = arrow_schema
+        .fields()
+        .iter()
+        .map(|f| format!("\"{}\"", f.name()))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let mut rows_written = 0u64;
+    let mut rows_failed = 0u64;
+
+    for batch in &batches {
+        let num_cols = batch.num_columns();
+        for row_idx in 0..batch.num_rows() {
+            let mut sql = format!("INSERT INTO {} ({}) VALUES (", qualified_table, col_list);
+            for col_idx in 0..num_cols {
+                if col_idx > 0 {
+                    sql.push_str(", ");
+                }
+                sql.push_str(&format_sql_value(batch.column(col_idx).as_ref(), row_idx));
+            }
+            sql.push(')');
+
+            // Append ON CONFLICT clause for upsert mode
+            if let Some(WriteMode::Upsert { primary_key }) = write_mode {
+                let pk_cols = primary_key
+                    .iter()
+                    .map(|k| format!("\"{}\"", k))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let update_cols: Vec<String> = arrow_schema
+                    .fields()
+                    .iter()
+                    .filter(|f| !primary_key.contains(f.name()))
+                    .map(|f| format!("\"{}\" = EXCLUDED.\"{}\"", f.name(), f.name()))
+                    .collect();
+                if update_cols.is_empty() {
+                    sql.push_str(&format!(" ON CONFLICT ({}) DO NOTHING", pk_cols));
+                } else {
+                    sql.push_str(&format!(
+                        " ON CONFLICT ({}) DO UPDATE SET {}",
+                        pk_cols,
+                        update_cols.join(", ")
+                    ));
+                }
+            }
+
+            match client.execute(&sql, &[]).await {
+                Ok(_) => rows_written += 1,
+                Err(e) => {
+                    rows_failed += 1;
+                    host_ffi::log(
+                        1,
+                        &format!(
+                            "dest-postgres: skipping row {} — INSERT failed: {}",
+                            row_idx, e
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    if rows_failed > 0 {
+        host_ffi::log(
+            1,
+            &format!(
+                "dest-postgres: per-row fallback complete — {} written, {} failed/skipped",
+                rows_written, rows_failed
+            ),
+        );
+    }
+
+    Ok(WriteResult {
+        rows_written,
+        rows_failed,
+    })
+}
+
+/// Write an Arrow IPC batch with per-row error handling policy.
+///
+/// On chunk INSERT failure with Skip/Dlq policy, falls back to single-row
+/// INSERTs for the failing batch, skipping individual bad rows.
+pub async fn write_batch_with_policy(
+    client: &Client,
+    target_schema: &str,
+    stream_name: &str,
+    ipc_bytes: &[u8],
+    created_tables: &mut std::collections::HashSet<String>,
+    write_mode: Option<&WriteMode>,
+    policies: Option<&SchemaEvolutionPolicy>,
+    on_data_error: DataErrorPolicy,
+) -> Result<WriteResult, String> {
+    match write_batch(
+        client,
+        target_schema,
+        stream_name,
+        ipc_bytes,
+        created_tables,
+        write_mode,
+        policies,
+    )
+    .await
+    {
+        Ok(count) => Ok(WriteResult {
+            rows_written: count,
+            rows_failed: 0,
+        }),
+        Err(e) => {
+            if matches!(on_data_error, DataErrorPolicy::Fail) {
+                return Err(e);
+            }
+
+            host_ffi::log(
+                1,
+                &format!(
+                    "dest-postgres: batch INSERT failed ({}), retrying per-row with skip policy",
+                    e
+                ),
+            );
+
+            write_rows_individually(client, target_schema, stream_name, ipc_bytes, write_mode).await
+        }
+    }
+}
+
+/// Write an Arrow IPC batch via COPY with per-row error handling policy.
+///
+/// On COPY failure with Skip/Dlq policy, falls back to single-row INSERTs.
+pub async fn write_batch_copy_with_policy(
+    client: &Client,
+    target_schema: &str,
+    stream_name: &str,
+    ipc_bytes: &[u8],
+    created_tables: &mut std::collections::HashSet<String>,
+    write_mode: Option<&WriteMode>,
+    policies: Option<&SchemaEvolutionPolicy>,
+    on_data_error: DataErrorPolicy,
+) -> Result<WriteResult, String> {
+    match write_batch_copy(
+        client,
+        target_schema,
+        stream_name,
+        ipc_bytes,
+        created_tables,
+        write_mode,
+        policies,
+    )
+    .await
+    {
+        Ok(count) => Ok(WriteResult {
+            rows_written: count,
+            rows_failed: 0,
+        }),
+        Err(e) => {
+            if matches!(on_data_error, DataErrorPolicy::Fail) {
+                return Err(e);
+            }
+
+            host_ffi::log(
+                1,
+                &format!(
+                    "dest-postgres: COPY failed ({}), falling back to per-row INSERT with skip",
+                    e
+                ),
+            );
+
+            write_rows_individually(client, target_schema, stream_name, ipc_bytes, write_mode).await
+        }
+    }
 }
 
 /// Format an Arrow array value at a given row index as a SQL literal.
