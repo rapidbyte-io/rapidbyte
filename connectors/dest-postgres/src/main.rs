@@ -276,6 +276,11 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
             };
             let connect_secs = connect_start.elapsed().as_secs_f64();
 
+            // Ensure watermarks table exists for exactly-once support
+            if let Err(e) = sink::ensure_watermarks_table(&client, &config.schema).await {
+                host_ffi::log(1, &format!("dest-postgres: watermarks table creation failed (non-fatal): {}", e));
+            }
+
             // Replace mode: route writes to a staging table, then swap atomically
             let is_replace = matches!(stream_ctx.write_mode, Some(WriteMode::Replace));
             let (effective_stream, effective_write_mode) = if is_replace {
@@ -393,6 +398,18 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                                 && last_checkpoint_time.elapsed().as_secs() >= checkpoint_interval_secs);
 
                         if should_checkpoint {
+                            // Update watermark before commit (atomic with data in same transaction)
+                            if let Err(e) = sink::set_watermark(
+                                &client,
+                                &config.schema,
+                                &stream_ctx.stream_name,
+                                total_rows,
+                                total_bytes,
+                            ).await {
+                                loop_error = Some(format!("Watermark update failed: {}", e));
+                                break;
+                            }
+
                             if let Err(e) = client.execute("COMMIT", &[]).await {
                                 loop_error = Some(format!("Checkpoint COMMIT failed: {}", e));
                                 break;
@@ -448,6 +465,21 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
             }
 
             // Phase 4: COMMIT
+            // Update watermark before final commit (atomic with data)
+            if let Err(e) = sink::set_watermark(
+                &client,
+                &config.schema,
+                &stream_ctx.stream_name,
+                total_rows,
+                total_bytes,
+            ).await {
+                let _ = client.execute("ROLLBACK", &[]).await;
+                return make_err_response(
+                    ConnectorError::transient_db("WATERMARK_FAILED", format!("Watermark update failed: {}", e))
+                        .with_commit_state(CommitState::BeforeCommit),
+                );
+            }
+
             let commit_start = Instant::now();
             if let Err(e) = client.execute("COMMIT", &[]).await {
                 return make_err_response(ConnectorError::transient_db("TX_FAILED", format!("COMMIT failed: {}", e)));
@@ -477,6 +509,8 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                         format!("Staging table swap failed: {}", e),
                     ));
                 }
+                // Clear watermark — replace mode is a complete refresh, no resume needed
+                let _ = sink::clear_watermark(&client, &config.schema, &stream_ctx.stream_name).await;
             }
 
             host_ffi::log(

@@ -905,3 +905,107 @@ fn format_copy_value(buf: &mut Vec<u8>, col: &dyn Array, row_idx: usize) {
         }
     }
 }
+
+/// Ensure the __rb_watermarks metadata table exists.
+pub async fn ensure_watermarks_table(
+    client: &Client,
+    target_schema: &str,
+) -> Result<(), String> {
+    let qualified = format!("\"{}\".__rb_watermarks", target_schema);
+    let ddl = format!(
+        "CREATE TABLE IF NOT EXISTS {} (
+            stream_name TEXT PRIMARY KEY,
+            records_committed BIGINT NOT NULL DEFAULT 0,
+            bytes_committed BIGINT NOT NULL DEFAULT 0,
+            committed_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )",
+        qualified
+    );
+    client
+        .execute(&ddl, &[])
+        .await
+        .map_err(|e| format!("Failed to create watermarks table: {}", e))?;
+    Ok(())
+}
+
+/// Get the watermark (records committed) for a stream. Returns 0 if none.
+pub async fn get_watermark(
+    client: &Client,
+    target_schema: &str,
+    stream_name: &str,
+) -> Result<u64, String> {
+    let qualified = format!("\"{}\".__rb_watermarks", target_schema);
+    let sql = format!(
+        "SELECT records_committed FROM {} WHERE stream_name = $1",
+        qualified
+    );
+    match client.query_opt(&sql, &[&stream_name]).await {
+        Ok(Some(row)) => {
+            let val: i64 = row.get(0);
+            Ok(val as u64)
+        }
+        Ok(None) => Ok(0),
+        Err(e) => Err(format!("Failed to get watermark: {}", e)),
+    }
+}
+
+/// Update the watermark for a stream. Called inside the same transaction as the data COMMIT.
+pub async fn set_watermark(
+    client: &Client,
+    target_schema: &str,
+    stream_name: &str,
+    records_committed: u64,
+    bytes_committed: u64,
+) -> Result<(), String> {
+    let qualified = format!("\"{}\".__rb_watermarks", target_schema);
+    let sql = format!(
+        "INSERT INTO {} (stream_name, records_committed, bytes_committed, committed_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (stream_name)
+         DO UPDATE SET records_committed = $2, bytes_committed = $3, committed_at = NOW()",
+        qualified
+    );
+    client
+        .execute(
+            &sql,
+            &[
+                &stream_name,
+                &(records_committed as i64),
+                &(bytes_committed as i64),
+            ],
+        )
+        .await
+        .map_err(|e| format!("Failed to set watermark: {}", e))?;
+    Ok(())
+}
+
+/// Count the number of rows in an Arrow IPC byte buffer without writing them.
+pub fn count_ipc_rows(ipc_bytes: &[u8]) -> Result<u64, String> {
+    let cursor = Cursor::new(ipc_bytes);
+    let reader = StreamReader::try_new(cursor, None)
+        .map_err(|e| format!("IPC decode failed: {}", e))?;
+    let mut total = 0u64;
+    for batch in reader {
+        let batch = batch.map_err(|e| format!("IPC batch read failed: {}", e))?;
+        total += batch.num_rows() as u64;
+    }
+    Ok(total)
+}
+
+/// Clear the watermark for a stream (used when Replace mode completes its swap).
+pub async fn clear_watermark(
+    client: &Client,
+    target_schema: &str,
+    stream_name: &str,
+) -> Result<(), String> {
+    let qualified = format!("\"{}\".__rb_watermarks", target_schema);
+    let sql = format!(
+        "DELETE FROM {} WHERE stream_name = $1",
+        qualified
+    );
+    client
+        .execute(&sql, &[&stream_name])
+        .await
+        .map_err(|e| format!("Failed to clear watermark: {}", e))?;
+    Ok(())
+}
