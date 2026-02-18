@@ -1003,6 +1003,7 @@ async fn write_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<Wri
             );
             write_rows_individually(
                 ctx.client, ctx.target_schema, ctx.stream_name, ipc_bytes, ctx.write_mode,
+                ctx.ignored_columns, ctx.type_null_columns,
             ).await
         }
     }
@@ -1042,11 +1043,19 @@ async fn insert_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<u6
         }
     }
 
-    // 3. Build column list
-    let col_list = arrow_schema
-        .fields()
+    // 3. Build active column indices (excluding ignored columns)
+    let active_cols: Vec<usize> = (0..arrow_schema.fields().len())
+        .filter(|&i| !ctx.ignored_columns.contains(arrow_schema.field(i).name()))
+        .collect();
+
+    if active_cols.is_empty() {
+        host_ffi::log(1, "dest-postgres: all columns ignored, skipping batch");
+        return Ok(0);
+    }
+
+    let col_list = active_cols
         .iter()
-        .map(|f| format!("\"{}\"", f.name()))
+        .map(|&i| format!("\"{}\"", arrow_schema.field(i).name()))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -1055,7 +1064,6 @@ async fn insert_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<u6
 
     for batch in &batches {
         let num_rows = batch.num_rows();
-        let num_cols = batch.num_columns();
 
         // Process in chunks
         for chunk_start in (0..num_rows).step_by(INSERT_CHUNK_SIZE) {
@@ -1069,11 +1077,15 @@ async fn insert_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<u6
                     sql.push_str(", ");
                 }
                 sql.push('(');
-                for col_idx in 0..num_cols {
-                    if col_idx > 0 {
+                for (pos, &col_idx) in active_cols.iter().enumerate() {
+                    if pos > 0 {
                         sql.push_str(", ");
                     }
-                    sql.push_str(&format_sql_value(batch.column(col_idx).as_ref(), row_idx));
+                    if ctx.type_null_columns.contains(arrow_schema.field(col_idx).name()) {
+                        sql.push_str("NULL");
+                    } else {
+                        sql.push_str(&format_sql_value(batch.column(col_idx).as_ref(), row_idx));
+                    }
                 }
                 sql.push(')');
             }
@@ -1085,13 +1097,11 @@ async fn insert_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<u6
                     .map(|k| format!("\"{}\"", k))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let update_cols: Vec<String> = arrow_schema
-                    .fields()
+                let update_cols: Vec<String> = active_cols
                     .iter()
-                    .filter(|f| !primary_key.contains(f.name()))
-                    .map(|f| {
-                        format!("\"{}\" = EXCLUDED.\"{}\"", f.name(), f.name())
-                    })
+                    .map(|&i| arrow_schema.field(i).name())
+                    .filter(|name| !primary_key.contains(name))
+                    .map(|name| format!("\"{}\" = EXCLUDED.\"{}\"", name, name))
                     .collect();
                 if update_cols.is_empty() {
                     sql.push_str(&format!(" ON CONFLICT ({}) DO NOTHING", pk_cols));
@@ -1152,11 +1162,19 @@ async fn copy_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<u64,
     // 2. Ensure schema + table exist (only on first encounter)
     ensure_table_and_schema(ctx, &arrow_schema).await?;
 
-    // 3. Build COPY statement
-    let col_list = arrow_schema
-        .fields()
+    // 3. Build active column indices (excluding ignored columns)
+    let active_cols: Vec<usize> = (0..arrow_schema.fields().len())
+        .filter(|&i| !ctx.ignored_columns.contains(arrow_schema.field(i).name()))
+        .collect();
+
+    if active_cols.is_empty() {
+        host_ffi::log(1, "dest-postgres: all columns ignored, skipping COPY batch");
+        return Ok(0);
+    }
+
+    let col_list = active_cols
         .iter()
-        .map(|f| format!("\"{}\"", f.name()))
+        .map(|&i| format!("\"{}\"", arrow_schema.field(i).name()))
         .collect::<Vec<_>>()
         .join(", ");
     let copy_stmt = format!(
@@ -1176,13 +1194,16 @@ async fn copy_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<u64,
     let mut buf = Vec::with_capacity(COPY_FLUSH_BYTES);
 
     for batch in &batches {
-        let num_cols = batch.num_columns();
         for row_idx in 0..batch.num_rows() {
-            for col_idx in 0..num_cols {
-                if col_idx > 0 {
+            for (pos, &col_idx) in active_cols.iter().enumerate() {
+                if pos > 0 {
                     buf.push(b'\t');
                 }
-                format_copy_value(&mut buf, batch.column(col_idx).as_ref(), row_idx);
+                if ctx.type_null_columns.contains(arrow_schema.field(col_idx).name()) {
+                    buf.extend_from_slice(b"\\N");
+                } else {
+                    format_copy_value(&mut buf, batch.column(col_idx).as_ref(), row_idx);
+                }
             }
             buf.push(b'\n');
             total_rows += 1;
@@ -1228,6 +1249,8 @@ async fn write_rows_individually(
     stream_name: &str,
     ipc_bytes: &[u8],
     write_mode: Option<&WriteMode>,
+    ignored_columns: &HashSet<String>,
+    type_null_columns: &HashSet<String>,
 ) -> Result<WriteResult, String> {
     let cursor = Cursor::new(ipc_bytes);
     let reader = StreamReader::try_new(cursor, None)
@@ -1238,10 +1261,20 @@ async fn write_rows_individually(
         .map_err(|e| format!("Failed to read batches: {}", e))?;
 
     let qualified_table = format!("\"{}\".\"{}\"", target_schema, stream_name);
-    let col_list = arrow_schema
-        .fields()
+
+    // Build active column indices (excluding ignored columns)
+    let active_cols: Vec<usize> = (0..arrow_schema.fields().len())
+        .filter(|&i| !ignored_columns.contains(arrow_schema.field(i).name()))
+        .collect();
+
+    if active_cols.is_empty() {
+        host_ffi::log(1, "dest-postgres: all columns ignored, skipping per-row writes");
+        return Ok(WriteResult { rows_written: 0, rows_failed: 0 });
+    }
+
+    let col_list = active_cols
         .iter()
-        .map(|f| format!("\"{}\"", f.name()))
+        .map(|&i| format!("\"{}\"", arrow_schema.field(i).name()))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -1249,14 +1282,17 @@ async fn write_rows_individually(
     let mut rows_failed = 0u64;
 
     for batch in &batches {
-        let num_cols = batch.num_columns();
         for row_idx in 0..batch.num_rows() {
             let mut sql = format!("INSERT INTO {} ({}) VALUES (", qualified_table, col_list);
-            for col_idx in 0..num_cols {
-                if col_idx > 0 {
+            for (pos, &col_idx) in active_cols.iter().enumerate() {
+                if pos > 0 {
                     sql.push_str(", ");
                 }
-                sql.push_str(&format_sql_value(batch.column(col_idx).as_ref(), row_idx));
+                if type_null_columns.contains(arrow_schema.field(col_idx).name()) {
+                    sql.push_str("NULL");
+                } else {
+                    sql.push_str(&format_sql_value(batch.column(col_idx).as_ref(), row_idx));
+                }
             }
             sql.push(')');
 
@@ -1267,11 +1303,11 @@ async fn write_rows_individually(
                     .map(|k| format!("\"{}\"", k))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let update_cols: Vec<String> = arrow_schema
-                    .fields()
+                let update_cols: Vec<String> = active_cols
                     .iter()
-                    .filter(|f| !primary_key.contains(f.name()))
-                    .map(|f| format!("\"{}\" = EXCLUDED.\"{}\"", f.name(), f.name()))
+                    .map(|&i| arrow_schema.field(i).name())
+                    .filter(|name| !primary_key.contains(name))
+                    .map(|name| format!("\"{}\" = EXCLUDED.\"{}\"", name, name))
                     .collect();
                 if update_cols.is_empty() {
                     sql.push_str(&format!(" ON CONFLICT ({}) DO NOTHING", pk_cols));
