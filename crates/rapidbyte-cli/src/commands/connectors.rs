@@ -27,26 +27,32 @@ pub async fn execute() -> Result<()> {
                 found = true;
                 match wasm_runtime::load_connector_manifest(&path)? {
                     Some(manifest) => {
-                        let roles: Vec<String> =
-                            manifest.roles.iter().map(|r| format!("{:?}", r)).collect();
-                        let features: Vec<String> = manifest
-                            .features
-                            .iter()
-                            .map(|f| format!("{:?}", f))
-                            .collect();
+                        let mut roles = Vec::new();
+                        if manifest.roles.source.is_some() {
+                            roles.push("Source");
+                        }
+                        if manifest.roles.destination.is_some() {
+                            roles.push("Destination");
+                        }
+                        if manifest.roles.transform.is_some() {
+                            roles.push("Transform");
+                        }
+                        if manifest.roles.utility.is_some() {
+                            roles.push("Utility");
+                        }
+
                         println!(
-                            "  {}@{}  {}  [{}]",
+                            "  {} ({}@{})  [{}]",
+                            manifest.name,
                             manifest.id,
                             manifest.version,
                             roles.join(", "),
-                            if features.is_empty() {
-                                "no features".to_string()
-                            } else {
-                                features.join(", ")
-                            },
                         );
                         if !manifest.description.is_empty() {
                             println!("    {}", manifest.description);
+                        }
+                        if manifest.config_schema.is_some() {
+                            println!("    Config schema: defined");
                         }
                     }
                     None => {
