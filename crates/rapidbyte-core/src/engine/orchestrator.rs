@@ -10,15 +10,15 @@ use wasmedge_sdk::{Module, Store, Vm};
 
 use rapidbyte_sdk::errors::ValidationResult;
 use rapidbyte_sdk::protocol::{
-    ConfigBlob, CursorInfo, CursorType, CursorValue, OpenContext, ReadSummary, SchemaHint,
-    StreamContext, StreamLimits, StreamPolicies, SyncMode, WriteSummary,
+    Checkpoint, ConfigBlob, CursorInfo, CursorType, CursorValue, OpenContext, ReadSummary,
+    SchemaHint, StreamContext, StreamLimits, StreamPolicies, SyncMode, WriteSummary,
 };
 
 use crate::pipeline::types::{parse_byte_size, PipelineConfig};
 use crate::runtime::connector_handle::ConnectorHandle;
 use crate::runtime::host_functions::{Frame, HostState};
 use crate::runtime::wasm_runtime::{self, WasmRuntime};
-use crate::state::backend::{RunStats, RunStatus, StateBackend};
+use crate::state::backend::{CursorState, RunStats, RunStatus, StateBackend};
 use crate::state::sqlite::SqliteStateBackend;
 
 /// Result of a pipeline run.
@@ -148,7 +148,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
     // Per-stream: create channel, source writes into tx, dest reads from rx
     let (batch_tx, batch_rx) = mpsc::sync_channel::<Frame>(16);
 
-    let source_handle = tokio::task::spawn_blocking(move || -> Result<(f64, ReadSummary)> {
+    let source_handle = tokio::task::spawn_blocking(move || -> Result<(f64, ReadSummary, Vec<Checkpoint>)> {
         run_source(
             source_module,
             batch_tx,
@@ -180,7 +180,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
     let final_stats = stats.lock().unwrap().clone();
 
     match (&source_result, &dest_result) {
-        (Ok((src_dur, read_summary)), Ok((dst_dur, write_summary, vm_setup_secs, recv_secs))) => {
+        (Ok((src_dur, read_summary, source_checkpoints)), Ok((dst_dur, write_summary, vm_setup_secs, recv_secs))) => {
             let perf = write_summary.perf.as_ref();
             let connector_internal_secs = perf
                 .map(|p| p.connect_secs + p.flush_secs + p.commit_secs)
@@ -199,6 +199,34 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
                     error_message: None,
                 },
             )?;
+
+            // Persist source cursor state for incremental sync
+            for cp in source_checkpoints {
+                if let (Some(cursor_field), Some(cursor_value)) = (&cp.cursor_field, &cp.cursor_value) {
+                    let value_str = match cursor_value {
+                        CursorValue::Utf8(s) => s.clone(),
+                        CursorValue::Int64(n) => n.to_string(),
+                        CursorValue::TimestampMillis(ms) => ms.to_string(),
+                        CursorValue::TimestampMicros(us) => us.to_string(),
+                        CursorValue::Decimal { value, .. } => value.clone(),
+                        CursorValue::Json(v) => v.to_string(),
+                        CursorValue::Null => continue,
+                    };
+                    let cursor = CursorState {
+                        cursor_field: Some(cursor_field.clone()),
+                        cursor_value: Some(value_str.clone()),
+                        updated_at: chrono::Utc::now(),
+                    };
+                    state_backend.set_cursor(&config.pipeline, &cp.stream, &cursor)?;
+                    tracing::info!(
+                        pipeline = config.pipeline,
+                        stream = cp.stream,
+                        cursor_field = cursor_field,
+                        cursor_value = value_str,
+                        "Persisted source cursor state"
+                    );
+                }
+            }
 
             let duration = start.elapsed();
             tracing::info!(
@@ -295,7 +323,7 @@ fn run_source(
     source_config: &serde_json::Value,
     stream_ctxs: &[StreamContext],
     stats: Arc<Mutex<RunStats>>,
-) -> Result<(f64, ReadSummary)> {
+) -> Result<(f64, ReadSummary, Vec<Checkpoint>)> {
     let phase_start = Instant::now();
 
     // Keep a clone for sending stream-boundary sentinels after each run_read
@@ -303,6 +331,9 @@ fn run_source(
 
     // Shared handle so we can update current_stream before each run_read
     let current_stream = Arc::new(Mutex::new(String::new()));
+
+    // Shared checkpoint store — clone the Arc so we can read checkpoints after the VM runs
+    let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
 
     let host_state = HostState {
         pipeline_name: pipeline_name.to_string(),
@@ -314,7 +345,7 @@ fn run_source(
         batch_receiver: None,
         pending_batch: None,
         last_error: None,
-        source_checkpoints: Vec::new(),
+        source_checkpoints: source_checkpoints.clone(),
         dest_checkpoint_count: 0,
     };
 
@@ -385,8 +416,11 @@ fn run_source(
 
     stream_result?;
 
+    // Extract source checkpoints collected during the run
+    let checkpoints = source_checkpoints.lock().unwrap().drain(..).collect();
+
     // sender is dropped here -> dest sees final EOF on host_next_batch
-    Ok((phase_start.elapsed().as_secs_f64(), total_summary))
+    Ok((phase_start.elapsed().as_secs_f64(), total_summary, checkpoints))
 }
 
 fn run_destination(
@@ -414,7 +448,7 @@ fn run_destination(
         batch_receiver: Some(receiver),
         pending_batch: None,
         last_error: None,
-        source_checkpoints: Vec::new(),
+        source_checkpoints: Arc::new(Mutex::new(Vec::new())),
         dest_checkpoint_count: 0,
     };
 
@@ -519,7 +553,7 @@ fn validate_connector(
         batch_receiver: None,
         pending_batch: None,
         last_error: None,
-        source_checkpoints: Vec::new(),
+        source_checkpoints: Arc::new(Mutex::new(Vec::new())),
         dest_checkpoint_count: 0,
     };
 

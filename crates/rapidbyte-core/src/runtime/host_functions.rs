@@ -56,7 +56,8 @@ pub struct HostState {
 
     // --- Checkpoint tracking ---
     /// Source checkpoints received during this stream run.
-    pub source_checkpoints: Vec<Checkpoint>,
+    /// Arc<Mutex<>> so the orchestrator can read checkpoints after the VM runs.
+    pub source_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
     /// Number of dest checkpoints received.
     pub dest_checkpoint_count: u64,
 }
@@ -475,7 +476,7 @@ pub fn host_checkpoint(
                         .cloned()
                         .unwrap_or(envelope.clone()),
                 ) {
-                    Ok(cp) => data.source_checkpoints.push(cp),
+                    Ok(cp) => data.source_checkpoints.lock().unwrap().push(cp),
                     Err(e) => {
                         tracing::warn!(
                             pipeline = data.pipeline_name,
