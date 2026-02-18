@@ -8,6 +8,7 @@ use arrow::ipc::reader::StreamReader;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::host_ffi;
+use rapidbyte_sdk::protocol::WriteMode;
 use rapidbyte_sdk::validation::validate_pg_identifier;
 
 use std::io::Write;
@@ -52,6 +53,23 @@ async fn ensure_table(
     Ok(())
 }
 
+/// Truncate a target table (used for Replace write mode).
+async fn truncate_table(
+    client: &Client,
+    qualified_table: &str,
+) -> Result<(), String> {
+    let sql = format!("TRUNCATE TABLE {} CASCADE", qualified_table);
+    client
+        .execute(&sql, &[])
+        .await
+        .map_err(|e| format!("TRUNCATE failed for {}: {}", qualified_table, e))?;
+    host_ffi::log(
+        3,
+        &format!("dest-postgres: truncated {}", qualified_table),
+    );
+    Ok(())
+}
+
 /// Map Arrow data types back to PostgreSQL column types.
 fn arrow_to_pg_type(dt: &DataType) -> &'static str {
     match dt {
@@ -85,6 +103,7 @@ pub async fn write_batch(
     stream_name: &str,
     ipc_bytes: &[u8],
     created_tables: &mut std::collections::HashSet<String>,
+    write_mode: Option<&WriteMode>,
 ) -> Result<u64, String> {
     // Caller must validate stream_name and target_schema before calling.
 
@@ -114,6 +133,18 @@ pub async fn write_batch(
 
         ensure_table(client, &qualified_table, &arrow_schema).await?;
         created_tables.insert(qualified_table.clone());
+
+        if matches!(write_mode, Some(WriteMode::Replace)) {
+            truncate_table(client, &qualified_table).await?;
+        }
+    }
+
+    // Validate upsert primary_key columns
+    if let Some(WriteMode::Upsert { primary_key }) = write_mode {
+        for pk_col in primary_key {
+            validate_pg_identifier(pk_col)
+                .map_err(|e| format!("Invalid primary key column name '{}': {}", pk_col, e))?;
+        }
     }
 
     // 3. Build column list
@@ -152,6 +183,32 @@ pub async fn write_batch(
                 sql.push(')');
             }
 
+            // Append ON CONFLICT clause for upsert mode
+            if let Some(WriteMode::Upsert { primary_key }) = write_mode {
+                let pk_cols = primary_key
+                    .iter()
+                    .map(|k| format!("\"{}\"", k))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let update_cols: Vec<String> = arrow_schema
+                    .fields()
+                    .iter()
+                    .filter(|f| !primary_key.contains(f.name()))
+                    .map(|f| {
+                        format!("\"{}\" = EXCLUDED.\"{}\"", f.name(), f.name())
+                    })
+                    .collect();
+                if update_cols.is_empty() {
+                    sql.push_str(&format!(" ON CONFLICT ({}) DO NOTHING", pk_cols));
+                } else {
+                    sql.push_str(&format!(
+                        " ON CONFLICT ({}) DO UPDATE SET {}",
+                        pk_cols,
+                        update_cols.join(", ")
+                    ));
+                }
+            }
+
             client
                 .execute(&sql, &[])
                 .await
@@ -187,6 +244,7 @@ pub async fn write_batch_copy(
     stream_name: &str,
     ipc_bytes: &[u8],
     created_tables: &mut std::collections::HashSet<String>,
+    write_mode: Option<&WriteMode>,
 ) -> Result<u64, String> {
     // Caller must validate stream_name and target_schema before calling.
 
@@ -214,6 +272,10 @@ pub async fn write_batch_copy(
             .map_err(|e| format!("Failed to create schema '{}': {}", target_schema, e))?;
         ensure_table(client, &qualified_table, &arrow_schema).await?;
         created_tables.insert(qualified_table.clone());
+
+        if matches!(write_mode, Some(WriteMode::Replace)) {
+            truncate_table(client, &qualified_table).await?;
+        }
     }
 
     // 3. Build COPY statement

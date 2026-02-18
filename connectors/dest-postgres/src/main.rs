@@ -7,7 +7,7 @@ use rapidbyte_sdk::errors::{ConnectorError, ConnectorResult};
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::memory::{pack_ptr_len, write_guest_bytes};
 use rapidbyte_sdk::protocol::{
-    ConfigBlob, Feature, OpenContext, OpenInfo, StreamContext, WritePerf, WriteSummary,
+    ConfigBlob, Feature, OpenContext, OpenInfo, StreamContext, WriteMode, WritePerf, WriteSummary,
 };
 use rapidbyte_sdk::validation::validate_pg_identifier;
 
@@ -323,6 +323,18 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
             let mut bytes_since_commit: u64 = 0;
             let checkpoint_interval = stream_ctx.limits.checkpoint_interval_bytes;
 
+            // Upsert mode is not compatible with COPY — fall back to INSERT
+            let use_copy = config.load_method == "copy"
+                && !matches!(stream_ctx.write_mode, Some(WriteMode::Upsert { .. }));
+            if config.load_method == "copy"
+                && matches!(stream_ctx.write_mode, Some(WriteMode::Upsert { .. }))
+            {
+                host_ffi::log(
+                    1,
+                    "dest-postgres: upsert mode not compatible with COPY, falling back to INSERT",
+                );
+            }
+
             loop {
                 match host_ffi::next_batch(&mut buf, stream_ctx.limits.max_batch_bytes) {
                     Ok(None) => {
@@ -332,13 +344,14 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                     Ok(Some(n)) => {
                         let ipc_bytes = &buf[..n];
 
-                        let write_result = if config.load_method == "copy" {
+                        let write_result = if use_copy {
                             sink::write_batch_copy(
                                 &client,
                                 &config.schema,
                                 &stream_ctx.stream_name,
                                 ipc_bytes,
                                 &mut created_tables,
+                                stream_ctx.write_mode.as_ref(),
                             )
                             .await
                         } else {
@@ -348,6 +361,7 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                                 &stream_ctx.stream_name,
                                 ipc_bytes,
                                 &mut created_tables,
+                                stream_ctx.write_mode.as_ref(),
                             )
                             .await
                         };
