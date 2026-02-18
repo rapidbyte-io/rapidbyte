@@ -509,7 +509,15 @@ async fn ensure_table_and_schema(
                     drift.nullability_changes.len()
                 ),
             );
-            apply_schema_policy(ctx.client, &qualified_table, &drift, policy).await?;
+            apply_schema_policy(
+                ctx.client,
+                &qualified_table,
+                &drift,
+                policy,
+                ctx.ignored_columns,
+                ctx.type_null_columns,
+            )
+            .await?;
         }
     }
 
@@ -786,6 +794,8 @@ async fn apply_schema_policy(
     qualified_table: &str,
     drift: &SchemaDrift,
     policy: &SchemaEvolutionPolicy,
+    ignored_columns: &mut HashSet<String>,
+    type_null_columns: &mut HashSet<String>,
 ) -> Result<(), String> {
     // Handle new columns
     for (col_name, pg_type) in &drift.new_columns {
@@ -813,10 +823,11 @@ async fn apply_schema_policy(
                 );
             }
             ColumnPolicy::Ignore => {
+                ignored_columns.insert(col_name.clone());
                 host_ffi::log(
                     2,
                     &format!(
-                        "dest-postgres: ignoring new column '{}' per schema policy",
+                        "dest-postgres: ignoring new column '{}' per schema policy (excluded from writes)",
                         col_name
                     ),
                 );
@@ -833,11 +844,11 @@ async fn apply_schema_policy(
                     col_name
                 ));
             }
-            _ => {
+            ColumnPolicy::Ignore | ColumnPolicy::Add => {
                 host_ffi::log(
                     2,
                     &format!(
-                        "dest-postgres: ignoring removed column '{}' per schema policy",
+                        "dest-postgres: column '{}' removed from source, keeping in table per policy",
                         col_name
                     ),
                 );
@@ -880,6 +891,7 @@ async fn apply_schema_policy(
                 );
             }
             TypeChangePolicy::Null => {
+                type_null_columns.insert(col_name.clone());
                 host_ffi::log(
                     2,
                     &format!(
