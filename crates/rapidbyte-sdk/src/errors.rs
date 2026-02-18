@@ -304,6 +304,14 @@ impl fmt::Display for ConnectorErrorV1 {
 
 impl std::error::Error for ConnectorErrorV1 {}
 
+/// V1 result type with typed errors including retry metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ConnectorResultV1<T> {
+    Ok { data: T },
+    Err { error: ConnectorErrorV1 },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,6 +438,29 @@ mod tests {
         let err = ConnectorErrorV1::transient_network("CONN_RESET", "connection reset");
         let s = format!("{}", err);
         assert!(s.contains("retryable"));
+    }
+
+    #[test]
+    fn test_connector_result_v1_ok_roundtrip() {
+        let result: ConnectorResultV1<String> = ConnectorResultV1::Ok {
+            data: "hello".to_string(),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: ConnectorResultV1<String> = serde_json::from_str(&json).unwrap();
+        assert_eq!(result, back);
+        assert!(json.contains("\"status\":\"ok\""));
+    }
+
+    #[test]
+    fn test_connector_result_v1_err_roundtrip() {
+        let result: ConnectorResultV1<()> = ConnectorResultV1::Err {
+            error: ConnectorErrorV1::config("BAD_HOST", "invalid host"),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: ConnectorResultV1<()> = serde_json::from_str(&json).unwrap();
+        assert_eq!(result, back);
+        assert!(json.contains("\"status\":\"err\""));
+        assert!(json.contains("\"category\":\"config\""));
     }
 
     #[test]

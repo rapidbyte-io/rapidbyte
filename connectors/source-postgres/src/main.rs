@@ -3,7 +3,7 @@ pub mod source;
 
 use std::sync::OnceLock;
 
-use rapidbyte_sdk::errors::{ConnectorError, ConnectorResult};
+use rapidbyte_sdk::errors::{ConnectorErrorV1, ConnectorResult, ConnectorResultV1};
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::memory::{pack_ptr_len, write_guest_bytes};
 use rapidbyte_sdk::protocol::{Catalog, ConfigBlob, OpenContext, OpenInfo, StreamContext};
@@ -59,13 +59,8 @@ fn make_ok_response<T: serde::Serialize>(data: T) -> Vec<u8> {
     serde_json::to_vec(&result).unwrap()
 }
 
-fn make_err_response(code: &str, message: &str) -> Vec<u8> {
-    let result: ConnectorResult<()> = ConnectorResult::Err {
-        error: ConnectorError {
-            code: code.to_string(),
-            message: message.to_string(),
-        },
-    };
+fn make_v1_err_response(error: ConnectorErrorV1) -> Vec<u8> {
+    let result: ConnectorResultV1<()> = ConnectorResultV1::Err { error };
     serde_json::to_vec(&result).unwrap()
 }
 
@@ -104,7 +99,7 @@ pub extern "C" fn rb_open(config_ptr: i32, config_len: i32) -> i64 {
         let open_ctx: OpenContext = match serde_json::from_slice(input) {
             Ok(ctx) => ctx,
             Err(e) => {
-                return make_err_response("INVALID_OPEN_CTX", &format!("Invalid OpenContext: {}", e));
+                return make_v1_err_response(ConnectorErrorV1::config("INVALID_OPEN_CTX", format!("Invalid OpenContext: {}", e)));
             }
         };
 
@@ -116,7 +111,7 @@ pub extern "C" fn rb_open(config_ptr: i32, config_len: i32) -> i64 {
         let pg_config: PgConfig = match serde_json::from_value(config_value) {
             Ok(c) => c,
             Err(e) => {
-                return make_err_response("INVALID_CONFIG", &format!("Invalid PG config: {}", e));
+                return make_v1_err_response(ConnectorErrorV1::config("INVALID_CONFIG", format!("Invalid PG config: {}", e)));
             }
         };
 
@@ -152,7 +147,7 @@ pub extern "C" fn rb_validate(config_ptr: i32, config_len: i32) -> i64 {
                 ConfigBlob::Json(v) => match serde_json::from_value(v.clone()) {
                     Ok(c) => c,
                     Err(e) => {
-                        return make_err_response("INVALID_CONFIG", &format!("Invalid config: {}", e));
+                        return make_v1_err_response(ConnectorErrorV1::config("INVALID_CONFIG", format!("Invalid config: {}", e)));
                     }
                 },
             }
@@ -161,7 +156,7 @@ pub extern "C" fn rb_validate(config_ptr: i32, config_len: i32) -> i64 {
             match serde_json::from_slice(input) {
                 Ok(c) => c,
                 Err(e) => {
-                    return make_err_response("INVALID_CONFIG", &format!("Invalid config: {}", e));
+                    return make_v1_err_response(ConnectorErrorV1::config("INVALID_CONFIG", format!("Invalid config: {}", e)));
                 }
             }
         };
@@ -181,13 +176,12 @@ pub extern "C" fn rb_validate(config_ptr: i32, config_len: i32) -> i64 {
                             };
                             make_ok_response(result)
                         }
-                        Err(e) => make_err_response(
-                            "CONNECTION_TEST_FAILED",
-                            &format!("Connection test failed: {}", e),
+                        Err(e) => make_v1_err_response(
+                            ConnectorErrorV1::transient_network("CONNECTION_TEST_FAILED", format!("Connection test failed: {}", e)),
                         ),
                     }
                 }
-                Err(e) => make_err_response("CONNECTION_FAILED", &e),
+                Err(e) => make_v1_err_response(ConnectorErrorV1::transient_network("CONNECTION_FAILED", e)),
             }
         })
     })
@@ -202,7 +196,7 @@ pub extern "C" fn rb_discover(config_ptr: i32, config_len: i32) -> i64 {
                 ConfigBlob::Json(v) => match serde_json::from_value(v.clone()) {
                     Ok(c) => c,
                     Err(_) => {
-                        return make_err_response("NO_CONFIG", "Discover requires valid config");
+                        return make_v1_err_response(ConnectorErrorV1::config("NO_CONFIG", "Discover requires valid config"));
                     }
                 },
             }
@@ -220,14 +214,14 @@ pub extern "C" fn rb_discover(config_ptr: i32, config_len: i32) -> i64 {
                                 match connect(c).await {
                                     Ok(client) => match schema::discover_catalog(&client).await {
                                         Ok(streams) => make_ok_response(Catalog { streams }),
-                                        Err(e) => make_err_response("DISCOVERY_FAILED", &e),
+                                        Err(e) => make_v1_err_response(ConnectorErrorV1::transient_db("DISCOVERY_FAILED", e)),
                                     },
-                                    Err(e) => make_err_response("CONNECTION_FAILED", &e),
+                                    Err(e) => make_v1_err_response(ConnectorErrorV1::transient_network("CONNECTION_FAILED", e)),
                                 }
                             });
                         }
                         None => {
-                            return make_err_response("NO_CONFIG", "Discover requires PostgreSQL config");
+                            return make_v1_err_response(ConnectorErrorV1::config("NO_CONFIG", "Discover requires PostgreSQL config"));
                         }
                     }
                 }
@@ -239,9 +233,9 @@ pub extern "C" fn rb_discover(config_ptr: i32, config_len: i32) -> i64 {
             match connect(&config).await {
                 Ok(client) => match schema::discover_catalog(&client).await {
                     Ok(streams) => make_ok_response(Catalog { streams }),
-                    Err(e) => make_err_response("DISCOVERY_FAILED", &e),
+                    Err(e) => make_v1_err_response(ConnectorErrorV1::transient_db("DISCOVERY_FAILED", e)),
                 },
-                Err(e) => make_err_response("CONNECTION_FAILED", &e),
+                Err(e) => make_v1_err_response(ConnectorErrorV1::transient_network("CONNECTION_FAILED", e)),
             }
         })
     })
@@ -253,9 +247,8 @@ pub extern "C" fn rb_run_read(request_ptr: i32, request_len: i32) -> i64 {
         let stream_ctx: StreamContext = match serde_json::from_slice(input) {
             Ok(c) => c,
             Err(e) => {
-                return make_err_response(
-                    "INVALID_STREAM_CTX",
-                    &format!("Invalid StreamContext: {}", e),
+                return make_v1_err_response(
+                    ConnectorErrorV1::config("INVALID_STREAM_CTX", format!("Invalid StreamContext: {}", e)),
                 );
             }
         };
@@ -263,9 +256,8 @@ pub extern "C" fn rb_run_read(request_ptr: i32, request_len: i32) -> i64 {
         let config = match CONFIG.get() {
             Some(c) => c,
             None => {
-                return make_err_response(
-                    "NO_CONFIG",
-                    "No config available. Call rb_open first.",
+                return make_v1_err_response(
+                    ConnectorErrorV1::config("NO_CONFIG", "No config available. Call rb_open first."),
                 );
             }
         };
@@ -275,9 +267,9 @@ pub extern "C" fn rb_run_read(request_ptr: i32, request_len: i32) -> i64 {
             match connect(config).await {
                 Ok(client) => match source::read_stream_v1(&client, &stream_ctx).await {
                     Ok(summary) => make_ok_response(summary),
-                    Err(e) => make_err_response("READ_FAILED", &e),
+                    Err(e) => make_v1_err_response(ConnectorErrorV1::internal("READ_FAILED", e)),
                 },
-                Err(e) => make_err_response("CONNECTION_FAILED", &e),
+                Err(e) => make_v1_err_response(ConnectorErrorV1::transient_network("CONNECTION_FAILED", e)),
             }
         })
     })
