@@ -346,6 +346,7 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
             let flush_start = Instant::now();
             let mut total_rows: u64 = 0;
             let mut total_bytes: u64 = 0;
+            let mut total_failed: u64 = 0;
             let mut batches_written: u64 = 0;
             let mut created_tables = std::collections::HashSet::new();
             let mut buf: Vec<u8> = Vec::new();
@@ -413,7 +414,7 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                         }
 
                         let write_result = if use_copy {
-                            sink::write_batch_copy(
+                            sink::write_batch_copy_with_policy(
                                 &client,
                                 &config.schema,
                                 &effective_stream,
@@ -421,10 +422,11 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                                 &mut created_tables,
                                 effective_write_mode.as_ref(),
                                 Some(&stream_ctx.policies.schema_evolution),
+                                stream_ctx.policies.on_data_error,
                             )
                             .await
                         } else {
-                            sink::write_batch(
+                            sink::write_batch_with_policy(
                                 &client,
                                 &config.schema,
                                 &effective_stream,
@@ -432,16 +434,18 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                                 &mut created_tables,
                                 effective_write_mode.as_ref(),
                                 Some(&stream_ctx.policies.schema_evolution),
+                                stream_ctx.policies.on_data_error,
                             )
                             .await
                         };
 
                         match write_result {
-                            Ok(count) => {
-                                total_rows += count;
+                            Ok(result) => {
+                                total_rows += result.rows_written;
+                                total_failed += result.rows_failed;
                                 total_bytes += n as u64;
                                 bytes_since_commit += n as u64;
-                                rows_since_commit += count;
+                                rows_since_commit += result.rows_written;
                                 batches_written += 1;
                             }
                             Err(e) => {
@@ -587,6 +591,7 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                 bytes_written: total_bytes,
                 batches_written,
                 checkpoint_count,
+                records_failed: total_failed,
                 perf: Some(WritePerf {
                     connect_secs,
                     flush_secs,
