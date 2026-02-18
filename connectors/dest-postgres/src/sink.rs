@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::Cursor;
 
 use arrow::array::{
@@ -103,6 +104,177 @@ fn arrow_to_pg_type(dt: &DataType) -> &'static str {
         DataType::Boolean => "BOOLEAN",
         DataType::Utf8 => "TEXT",
         _ => "TEXT",
+    }
+}
+
+/// Detected differences between an incoming Arrow schema and an existing PG table.
+#[derive(Debug, Default)]
+pub struct SchemaDrift {
+    /// Columns present in the Arrow schema but not in the existing table (name, pg_type).
+    pub new_columns: Vec<(String, String)>,
+    /// Columns present in the existing table but not in the Arrow schema.
+    pub removed_columns: Vec<String>,
+    /// Columns whose PG type differs (name, old_pg_type, new_pg_type).
+    pub type_changes: Vec<(String, String, String)>,
+    /// Columns whose nullability differs (name, was_nullable, now_nullable).
+    pub nullability_changes: Vec<(String, bool, bool)>,
+}
+
+impl SchemaDrift {
+    pub fn is_empty(&self) -> bool {
+        self.new_columns.is_empty()
+            && self.removed_columns.is_empty()
+            && self.type_changes.is_empty()
+            && self.nullability_changes.is_empty()
+    }
+}
+
+/// Fetch existing column names, types, and nullability from information_schema.
+async fn get_existing_columns(
+    client: &Client,
+    schema_name: &str,
+    table_name: &str,
+) -> Result<Vec<(String, String, bool)>, String> {
+    let rows = client
+        .query(
+            "SELECT column_name, data_type, is_nullable \
+             FROM information_schema.columns \
+             WHERE table_schema = $1 AND table_name = $2 \
+             ORDER BY ordinal_position",
+            &[&schema_name, &table_name],
+        )
+        .await
+        .map_err(|e| format!("Failed to query columns: {}", e))?;
+
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let name: String = r.get(0);
+            let dtype: String = r.get(1);
+            let nullable: String = r.get(2);
+            (name, dtype, nullable == "YES")
+        })
+        .collect())
+}
+
+/// Check if a PG information_schema type and a DDL type refer to the same type.
+///
+/// PostgreSQL's `information_schema.data_type` uses SQL-standard names (e.g.
+/// "integer", "character varying") whereas our DDL uses short forms (e.g.
+/// "INTEGER", "TEXT"). This function normalises both sides before comparing.
+fn pg_types_compatible(info_schema_type: &str, ddl_type: &str) -> bool {
+    let a = info_schema_type.to_lowercase();
+    let b = ddl_type.to_lowercase();
+
+    let norm_a = match a.as_str() {
+        "int" | "int4" | "integer" => "integer",
+        "int2" | "smallint" => "smallint",
+        "int8" | "bigint" => "bigint",
+        "float4" | "real" => "real",
+        "float8" | "double precision" => "double precision",
+        "bool" | "boolean" => "boolean",
+        "varchar" | "character varying" | "text" => "text",
+        "timestamp without time zone" | "timestamp" => "timestamp",
+        "timestamp with time zone" | "timestamptz" => "timestamptz",
+        other => other,
+    };
+    let norm_b = match b.as_str() {
+        "int" | "int4" | "integer" => "integer",
+        "int2" | "smallint" => "smallint",
+        "int8" | "bigint" => "bigint",
+        "float4" | "real" => "real",
+        "float8" | "double precision" => "double precision",
+        "bool" | "boolean" => "boolean",
+        "varchar" | "character varying" | "text" => "text",
+        "timestamp without time zone" | "timestamp" => "timestamp",
+        "timestamp with time zone" | "timestamptz" => "timestamptz",
+        other => other,
+    };
+    norm_a == norm_b
+}
+
+/// Detect schema differences between an Arrow schema and an existing PG table.
+///
+/// Returns `Ok(None)` if the table does not exist yet (no columns found in
+/// information_schema) or if the schemas are fully compatible.
+/// Returns `Ok(Some(drift))` when differences are detected.
+///
+/// NOTE: This function is not yet called from the write path. It will be
+/// integrated once schema-evolution policies are enforced (Task 5).
+pub async fn detect_schema_drift(
+    client: &Client,
+    schema_name: &str,
+    table_name: &str,
+    arrow_schema: &arrow::datatypes::Schema,
+) -> Result<Option<SchemaDrift>, String> {
+    let existing = get_existing_columns(client, schema_name, table_name).await?;
+    if existing.is_empty() {
+        return Ok(None); // Table doesn't exist yet
+    }
+
+    let existing_names: HashSet<&str> = existing.iter().map(|(n, _, _)| n.as_str()).collect();
+    let arrow_names: HashSet<&str> = arrow_schema
+        .fields()
+        .iter()
+        .map(|f| f.name().as_str())
+        .collect();
+
+    // New columns: present in Arrow schema but absent from the existing table
+    let new_columns: Vec<(String, String)> = arrow_schema
+        .fields()
+        .iter()
+        .filter(|f| !existing_names.contains(f.name().as_str()))
+        .map(|f| {
+            (
+                f.name().clone(),
+                arrow_to_pg_type(f.data_type()).to_string(),
+            )
+        })
+        .collect();
+
+    // Removed columns: present in existing table but absent from Arrow schema
+    let removed_columns: Vec<String> = existing
+        .iter()
+        .filter(|(n, _, _)| !arrow_names.contains(n.as_str()))
+        .map(|(n, _, _)| n.clone())
+        .collect();
+
+    // Type and nullability changes for columns present in both schemas
+    let mut type_changes = Vec::new();
+    let mut nullability_changes = Vec::new();
+
+    for field in arrow_schema.fields() {
+        if let Some((_, old_type, old_nullable)) =
+            existing.iter().find(|(n, _, _)| n == field.name())
+        {
+            let new_pg_type = arrow_to_pg_type(field.data_type());
+            if !pg_types_compatible(old_type, new_pg_type) {
+                type_changes.push((
+                    field.name().clone(),
+                    old_type.clone(),
+                    new_pg_type.to_string(),
+                ));
+            }
+            if *old_nullable != field.is_nullable() {
+                nullability_changes.push((
+                    field.name().clone(),
+                    *old_nullable,
+                    field.is_nullable(),
+                ));
+            }
+        }
+    }
+
+    let drift = SchemaDrift {
+        new_columns,
+        removed_columns,
+        type_changes,
+        nullability_changes,
+    };
+    if drift.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(drift))
     }
 }
 
