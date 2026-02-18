@@ -8,7 +8,7 @@ use wasmedge_sdk::{Module, Store, Vm};
 
 use rapidbyte_sdk::errors::ValidationResult;
 use rapidbyte_sdk::protocol::{
-    Checkpoint, ConfigBlob, OpenContext, ReadSummary, StreamContext, WriteSummary,
+    Checkpoint, ConfigBlob, OpenContext, ReadSummary, StreamContext, TransformSummary, WriteSummary,
 };
 
 use super::errors::PipelineError;
@@ -275,6 +275,110 @@ pub(crate) fn run_destination(
         recv_secs,
         checkpoints,
     ))
+}
+
+pub(crate) fn run_transform(
+    module: Module,
+    receiver: mpsc::Receiver<Frame>,
+    sender: mpsc::SyncSender<Frame>,
+    state_backend: Arc<dyn StateBackend>,
+    pipeline_name: &str,
+    connector_id: &str,
+    connector_version: &str,
+    transform_config: &serde_json::Value,
+    stream_ctxs: &[StreamContext],
+    stats: Arc<Mutex<RunStats>>,
+) -> Result<(f64, TransformSummary), PipelineError> {
+    let phase_start = Instant::now();
+
+    let current_stream = Arc::new(Mutex::new(String::new()));
+
+    // Clone sender for sentinel forwarding after each stream
+    let sentinel_sender = sender.clone();
+
+    let host_state = HostState {
+        pipeline_name: pipeline_name.to_string(),
+        current_stream: current_stream.clone(),
+        state_backend,
+        stats,
+        batch_sender: Some(sender),
+        next_batch_id: 1,
+        batch_receiver: Some(receiver),
+        pending_batch: None,
+        last_error: None,
+        source_checkpoints: Arc::new(Mutex::new(Vec::new())),
+        dest_checkpoints: Arc::new(Mutex::new(Vec::new())),
+    };
+
+    let mut import = wasm_runtime::create_host_imports(host_state)?;
+    let mut wasi = create_secure_wasi_module()?;
+
+    let mut instances: HashMap<String, &mut dyn SyncInst> = HashMap::new();
+    instances.insert("rapidbyte".to_string(), &mut import);
+    instances.insert(wasi.name().to_string(), wasi.as_mut());
+
+    let mut vm = Vm::new(
+        Store::new(None, instances).map_err(|e| anyhow::anyhow!("Store::new failed: {:?}", e))?,
+    );
+
+    vm.register_module(None, module)
+        .map_err(|e| anyhow::anyhow!("register_module failed: {:?}", e))?;
+
+    let mut handle = ConnectorHandle::new(vm);
+
+    // Lifecycle: open
+    let open_ctx = OpenContext {
+        config: ConfigBlob::Json(transform_config.clone()),
+        connector_id: connector_id.to_string(),
+        connector_version: connector_version.to_string(),
+    };
+
+    tracing::info!("Opening transform connector");
+    let _open_info = handle.open(&open_ctx)?;
+
+    // Lifecycle: run_transform per stream (sequential)
+    let mut total_summary = TransformSummary {
+        records_in: 0,
+        records_out: 0,
+        bytes_in: 0,
+        bytes_out: 0,
+        batches_processed: 0,
+    };
+
+    let stream_result: Result<(), PipelineError> = (|| {
+        for stream_ctx in stream_ctxs {
+            *current_stream.lock().unwrap() = stream_ctx.stream_name.clone();
+
+            tracing::info!(stream = stream_ctx.stream_name, "Starting transform");
+            let summary = handle.run_transform(stream_ctx)?;
+            tracing::info!(
+                stream = stream_ctx.stream_name,
+                records_in = summary.records_in,
+                records_out = summary.records_out,
+                "Transform complete for stream"
+            );
+            total_summary.records_in += summary.records_in;
+            total_summary.records_out += summary.records_out;
+            total_summary.bytes_in += summary.bytes_in;
+            total_summary.bytes_out += summary.bytes_out;
+            total_summary.batches_processed += summary.batches_processed;
+
+            // Forward end-of-stream sentinel downstream
+            let _ = sentinel_sender.send(Frame::EndStream);
+        }
+        Ok(())
+    })();
+
+    // Lifecycle: close (always, even if stream loop failed)
+    tracing::info!("Closing transform connector");
+    if let Err(e) = handle.close() {
+        tracing::warn!("Transform close failed: {}", e);
+    }
+
+    stream_result?;
+
+    // sender (via sentinel_sender) is dropped here -> downstream sees final EOF
+    Ok((phase_start.elapsed().as_secs_f64(), total_summary))
 }
 
 pub(crate) fn validate_connector(
