@@ -14,7 +14,7 @@ use rapidbyte_sdk::protocol::{
     SyncMode, WriteSummary,
 };
 
-use crate::pipeline::types::PipelineConfig;
+use crate::pipeline::types::{parse_byte_size, PipelineConfig};
 use crate::runtime::connector_handle::ConnectorHandle;
 use crate::runtime::host_functions::{Frame, HostState};
 use crate::runtime::wasm_runtime::{self, WasmRuntime};
@@ -78,6 +78,15 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
     let dest_module_load_ms = dest_load_start.elapsed().as_millis() as u64;
 
     // 4. Build stream contexts from config
+    let max_batch = parse_byte_size(&config.resources.max_batch_bytes);
+    let checkpoint_interval = parse_byte_size(&config.resources.checkpoint_interval_bytes);
+
+    let limits = StreamLimits {
+        max_batch_bytes: if max_batch > 0 { max_batch } else { StreamLimits::default().max_batch_bytes },
+        checkpoint_interval_bytes: checkpoint_interval,
+        ..StreamLimits::default()
+    };
+
     let stream_ctxs: Vec<StreamContext> = config
         .source
         .streams
@@ -90,7 +99,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
                 _ => SyncMode::FullRefresh,
             },
             cursor_info: None,
-            limits: StreamLimits::default(),
+            limits: limits.clone(),
             policies: StreamPolicies::default(),
             write_mode: None,
         })

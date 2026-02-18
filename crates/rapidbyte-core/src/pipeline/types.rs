@@ -65,6 +65,9 @@ pub struct ResourceConfig {
     pub max_batch_bytes: String,
     #[serde(default = "default_parallelism")]
     pub parallelism: u32,
+    /// Destination commits after writing this many bytes. "0" disables chunking.
+    #[serde(default = "default_checkpoint_interval")]
+    pub checkpoint_interval_bytes: String,
 }
 
 fn default_max_memory() -> String {
@@ -76,6 +79,9 @@ fn default_max_batch_bytes() -> String {
 fn default_parallelism() -> u32 {
     1
 }
+fn default_checkpoint_interval() -> String {
+    "64mb".to_string()
+}
 
 impl Default for ResourceConfig {
     fn default() -> Self {
@@ -83,7 +89,22 @@ impl Default for ResourceConfig {
             max_memory: default_max_memory(),
             max_batch_bytes: default_max_batch_bytes(),
             parallelism: default_parallelism(),
+            checkpoint_interval_bytes: default_checkpoint_interval(),
         }
+    }
+}
+
+/// Parse a human-readable byte size like "64mb" into bytes.
+pub fn parse_byte_size(s: &str) -> u64 {
+    let s = s.trim().to_lowercase();
+    if let Some(n) = s.strip_suffix("gb") {
+        n.trim().parse::<u64>().unwrap_or(0) * 1024 * 1024 * 1024
+    } else if let Some(n) = s.strip_suffix("mb") {
+        n.trim().parse::<u64>().unwrap_or(0) * 1024 * 1024
+    } else if let Some(n) = s.strip_suffix("kb") {
+        n.trim().parse::<u64>().unwrap_or(0) * 1024
+    } else {
+        s.parse::<u64>().unwrap_or(0)
     }
 }
 
@@ -132,6 +153,7 @@ destination:
         assert_eq!(config.state.backend, "sqlite");
         assert_eq!(config.resources.parallelism, 1);
         assert_eq!(config.resources.max_memory, "256mb");
+        assert_eq!(config.resources.checkpoint_interval_bytes, "64mb");
     }
 
     #[test]
@@ -167,6 +189,7 @@ resources:
   max_memory: 512mb
   max_batch_bytes: 128mb
   parallelism: 4
+  checkpoint_interval_bytes: 32mb
 "#;
         let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.source.streams.len(), 2);
@@ -182,5 +205,17 @@ resources:
         );
         assert_eq!(config.resources.parallelism, 4);
         assert_eq!(config.resources.max_memory, "512mb");
+        assert_eq!(config.resources.checkpoint_interval_bytes, "32mb");
+    }
+
+    #[test]
+    fn test_parse_byte_size() {
+        assert_eq!(parse_byte_size("64mb"), 64 * 1024 * 1024);
+        assert_eq!(parse_byte_size("128mb"), 128 * 1024 * 1024);
+        assert_eq!(parse_byte_size("1gb"), 1024 * 1024 * 1024);
+        assert_eq!(parse_byte_size("512kb"), 512 * 1024);
+        assert_eq!(parse_byte_size("1024"), 1024);
+        assert_eq!(parse_byte_size("0"), 0);
+        assert_eq!(parse_byte_size("  64MB  "), 64 * 1024 * 1024);
     }
 }
