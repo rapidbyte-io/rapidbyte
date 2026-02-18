@@ -32,6 +32,8 @@ enum Commands {
         /// Path to pipeline YAML file
         pipeline: PathBuf,
     },
+    /// List available connectors
+    Connectors,
 }
 
 #[tokio::main]
@@ -43,5 +45,6 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Run { pipeline } => commands::run::execute(&pipeline).await,
         Commands::Check { pipeline } => commands::check::execute(&pipeline).await,
+        Commands::Connectors => commands::connectors::execute().await,
     }
 }
