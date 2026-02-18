@@ -135,6 +135,7 @@ pub fn host_next_batch(
             }
         };
         match receiver.recv() {
+            Ok(batch) if batch.is_empty() => return Ok(vec![WasmValue::from_i32(0)]), // End-of-stream sentinel
             Ok(batch) => batch,
             Err(_) => return Ok(vec![WasmValue::from_i32(0)]), // EOF — sender dropped
         }

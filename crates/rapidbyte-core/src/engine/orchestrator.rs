@@ -263,6 +263,9 @@ fn run_source(
 ) -> Result<(f64, ReadSummary)> {
     let phase_start = Instant::now();
 
+    // Keep a clone for sending stream-boundary sentinels after each run_read
+    let sentinel_sender = sender.clone();
+
     let host_state = HostState {
         pipeline_name: pipeline_name.to_string(),
         current_stream: String::new(),
@@ -326,6 +329,9 @@ fn run_source(
             total_summary.bytes_read += summary.bytes_read;
             total_summary.batches_emitted += summary.batches_emitted;
             total_summary.checkpoint_count += summary.checkpoint_count;
+
+            // Send empty sentinel to signal end-of-stream to dest
+            let _ = sentinel_sender.send(Vec::new());
         }
         Ok(())
     })();
@@ -338,7 +344,7 @@ fn run_source(
 
     stream_result?;
 
-    // sender is dropped here -> dest sees EOF on host_next_batch
+    // sender is dropped here -> dest sees final EOF on host_next_batch
     Ok((phase_start.elapsed().as_secs_f64(), total_summary))
 }
 
@@ -407,11 +413,6 @@ fn run_destination(
         checkpoint_count: 0,
         perf: None,
     };
-
-    debug_assert!(
-        stream_ctxs.len() <= 1,
-        "multi-stream perf accumulation not implemented"
-    );
 
     let stream_result: Result<()> = (|| {
         for stream_ctx in stream_ctxs {
