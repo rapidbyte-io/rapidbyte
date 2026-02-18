@@ -144,6 +144,8 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
             StreamLimits::default().max_batch_bytes
         },
         checkpoint_interval_bytes: checkpoint_interval,
+        checkpoint_interval_rows: config.resources.checkpoint_interval_rows,
+        checkpoint_interval_seconds: config.resources.checkpoint_interval_seconds,
         ..StreamLimits::default()
     };
 

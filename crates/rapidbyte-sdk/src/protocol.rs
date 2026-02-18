@@ -119,6 +119,12 @@ pub struct StreamLimits {
     pub max_parallel_requests: u32,
     #[serde(default = "default_checkpoint_interval_bytes")]
     pub checkpoint_interval_bytes: u64,
+    /// Checkpoint after this many rows. 0 = disabled (default).
+    #[serde(default)]
+    pub checkpoint_interval_rows: u64,
+    /// Checkpoint after this many seconds. 0 = disabled (default).
+    #[serde(default)]
+    pub checkpoint_interval_seconds: u64,
 }
 
 impl Default for StreamLimits {
@@ -129,6 +135,8 @@ impl Default for StreamLimits {
             max_inflight_batches: 16,
             max_parallel_requests: 1,
             checkpoint_interval_bytes: default_checkpoint_interval_bytes(),
+            checkpoint_interval_rows: 0,
+            checkpoint_interval_seconds: 0,
         }
     }
 }
@@ -645,5 +653,26 @@ mod tests {
             r#"{"records_read":100,"bytes_read":4096,"batches_emitted":1,"checkpoint_count":1}"#;
         let s: ReadSummary = serde_json::from_str(json).unwrap();
         assert_eq!(s.records_skipped, 0);
+    }
+
+    #[test]
+    fn test_stream_limits_checkpoint_intervals() {
+        let limits = StreamLimits {
+            checkpoint_interval_rows: 5000,
+            checkpoint_interval_seconds: 30,
+            ..StreamLimits::default()
+        };
+        let json = serde_json::to_string(&limits).unwrap();
+        let back: StreamLimits = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.checkpoint_interval_rows, 5000);
+        assert_eq!(back.checkpoint_interval_seconds, 30);
+    }
+
+    #[test]
+    fn test_stream_limits_checkpoint_intervals_backwards_compat() {
+        let json = r#"{"max_batch_bytes":67108864,"max_record_bytes":16777216,"max_inflight_batches":16,"max_parallel_requests":1,"checkpoint_interval_bytes":67108864}"#;
+        let limits: StreamLimits = serde_json::from_str(json).unwrap();
+        assert_eq!(limits.checkpoint_interval_rows, 0);
+        assert_eq!(limits.checkpoint_interval_seconds, 0);
     }
 }

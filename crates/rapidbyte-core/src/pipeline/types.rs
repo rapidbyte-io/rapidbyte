@@ -77,6 +77,12 @@ pub struct ResourceConfig {
     /// Destination commits after writing this many bytes. "0" disables chunking.
     #[serde(default = "default_checkpoint_interval")]
     pub checkpoint_interval_bytes: String,
+    /// Destination commits after writing this many rows. 0 = disabled.
+    #[serde(default)]
+    pub checkpoint_interval_rows: u64,
+    /// Destination commits after this many seconds elapse. 0 = disabled.
+    #[serde(default)]
+    pub checkpoint_interval_seconds: u64,
     /// Maximum number of retry attempts for retryable errors. 0 disables retries.
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
@@ -105,6 +111,8 @@ impl Default for ResourceConfig {
             max_batch_bytes: default_max_batch_bytes(),
             parallelism: default_parallelism(),
             checkpoint_interval_bytes: default_checkpoint_interval(),
+            checkpoint_interval_rows: 0,
+            checkpoint_interval_seconds: 0,
             max_retries: default_max_retries(),
         }
     }
@@ -323,5 +331,37 @@ destination:
         assert_eq!(config.transforms.len(), 2);
         assert_eq!(config.transforms[0].use_ref, "transform-mask@v0.1.0");
         assert_eq!(config.transforms[1].use_ref, "transform-filter@v0.1.0");
+    }
+
+    #[test]
+    fn test_deserialize_checkpoint_intervals() {
+        let yaml = r#"
+version: "1"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+resources:
+  checkpoint_interval_bytes: 32mb
+  checkpoint_interval_rows: 5000
+  checkpoint_interval_seconds: 30
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.resources.checkpoint_interval_rows, 5000);
+        assert_eq!(config.resources.checkpoint_interval_seconds, 30);
+    }
+
+    #[test]
+    fn test_checkpoint_intervals_default_zero() {
+        let config = ResourceConfig::default();
+        assert_eq!(config.checkpoint_interval_rows, 0);
+        assert_eq!(config.checkpoint_interval_seconds, 0);
     }
 }
