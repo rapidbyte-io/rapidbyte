@@ -145,6 +145,15 @@ pub async fn read_stream_v1(
         64 * 1024 * 1024 // 64MB default
     };
 
+    // For incremental mode, find the cursor column index to track max value
+    let cursor_col_idx: Option<usize> = ctx.cursor_info.as_ref().map(|ci| {
+        columns
+            .iter()
+            .position(|c| c.name == ci.cursor_field)
+            .unwrap_or_else(|| panic!("Cursor field '{}' not found in schema", ci.cursor_field))
+    });
+    let mut max_cursor_value: Option<String> = None;
+
     let fetch_query = format!("FETCH {} FROM {}", FETCH_CHUNK, CURSOR_NAME);
     let mut total_records: u64 = 0;
     let mut total_bytes: u64 = 0;
@@ -167,6 +176,35 @@ pub async fn read_stream_v1(
 
         if !exhausted {
             estimated_bytes += estimate_batch_bytes(&rows, &columns);
+
+            // Track max cursor value for incremental checkpoint
+            if let Some(col_idx) = cursor_col_idx {
+                for row in &rows {
+                    // Try string first, then integer types — store as string for state backend
+                    let val: Option<String> = row
+                        .try_get::<_, String>(col_idx)
+                        .ok()
+                        .or_else(|| row.try_get::<_, i64>(col_idx).ok().map(|n| n.to_string()))
+                        .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(|n| n.to_string()));
+
+                    if let Some(val) = val {
+                        match &max_cursor_value {
+                            None => max_cursor_value = Some(val),
+                            Some(current) => {
+                                // For numeric strings, compare numerically if possible
+                                let is_greater = match (val.parse::<i64>(), current.parse::<i64>()) {
+                                    (Ok(a), Ok(b)) => a > b,
+                                    _ => val > *current, // fallback to string comparison
+                                };
+                                if is_greater {
+                                    max_cursor_value = Some(val);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             accumulated_rows.extend(rows);
         }
 
@@ -220,6 +258,32 @@ pub async fn read_stream_v1(
         return Err(e);
     }
 
+    // Emit source checkpoint with cursor position for incremental state tracking
+    let checkpoint_count = if let (Some(ref ci), Some(ref max_val)) =
+        (&ctx.cursor_info, &max_cursor_value)
+    {
+        let cp = rapidbyte_sdk::protocol::Checkpoint {
+            id: 1,
+            kind: rapidbyte_sdk::protocol::CheckpointKind::Source,
+            stream: ctx.stream_name.clone(),
+            cursor_field: Some(ci.cursor_field.clone()),
+            cursor_value: Some(rapidbyte_sdk::protocol::CursorValue::Utf8(max_val.clone())),
+            records_processed: total_records,
+            bytes_processed: total_bytes,
+        };
+        let _ = host_ffi::checkpoint("source-postgres", &ctx.stream_name, &cp);
+        host_ffi::log(
+            2,
+            &format!(
+                "Source checkpoint: stream={} cursor_field={} cursor_value={}",
+                ctx.stream_name, ci.cursor_field, max_val
+            ),
+        );
+        1u64
+    } else {
+        0u64
+    };
+
     host_ffi::log(
         2,
         &format!(
@@ -232,7 +296,7 @@ pub async fn read_stream_v1(
         records_read: total_records,
         bytes_read: total_bytes,
         batches_emitted,
-        checkpoint_count: 0,
+        checkpoint_count,
     })
 }
 
