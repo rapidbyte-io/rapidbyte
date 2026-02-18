@@ -291,6 +291,8 @@ pub struct ReadSummary {
     pub bytes_read: u64,
     pub batches_emitted: u64,
     pub checkpoint_count: u64,
+    #[serde(default)]
+    pub records_skipped: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -535,6 +537,7 @@ mod tests {
             bytes_read: 65536,
             batches_emitted: 10,
             checkpoint_count: 2,
+            records_skipped: 0,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: ReadSummary = serde_json::from_str(&json).unwrap();
@@ -570,6 +573,7 @@ mod tests {
                 bytes_read: 4096,
                 batches_emitted: 1,
                 checkpoint_count: 1,
+                records_skipped: 0,
             },
         };
         let json = serde_json::to_string(&envelope).unwrap();
@@ -617,5 +621,29 @@ mod tests {
         assert_eq!(json, "\"transform\"");
         let back: CheckpointKind = serde_json::from_str(&json).unwrap();
         assert_eq!(kind, back);
+    }
+
+    #[test]
+    fn test_read_summary_with_records_skipped() {
+        let s = ReadSummary {
+            records_read: 1000,
+            bytes_read: 65536,
+            batches_emitted: 10,
+            checkpoint_count: 2,
+            records_skipped: 5,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: ReadSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+        assert_eq!(back.records_skipped, 5);
+    }
+
+    #[test]
+    fn test_read_summary_backwards_compat_no_skipped() {
+        // Old JSON without records_skipped should deserialize with default 0
+        let json =
+            r#"{"records_read":100,"bytes_read":4096,"batches_emitted":1,"checkpoint_count":1}"#;
+        let s: ReadSummary = serde_json::from_str(json).unwrap();
+        assert_eq!(s.records_skipped, 0);
     }
 }

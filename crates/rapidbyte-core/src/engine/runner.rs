@@ -125,6 +125,7 @@ pub(crate) fn run_source(
         bytes_read: 0,
         batches_emitted: 0,
         checkpoint_count: 0,
+        records_skipped: 0,
     };
 
     let stream_result: Result<(), PipelineError> = (|| {
@@ -144,6 +145,7 @@ pub(crate) fn run_source(
             total_summary.bytes_read += summary.bytes_read;
             total_summary.batches_emitted += summary.batches_emitted;
             total_summary.checkpoint_count += summary.checkpoint_count;
+            total_summary.records_skipped += summary.records_skipped;
 
             // Signal end-of-stream to dest (typed sentinel, not magic empty vec)
             let _ = sentinel_sender.send(Frame::EndStream);
