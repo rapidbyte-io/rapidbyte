@@ -39,6 +39,10 @@ pub struct PipelineResult {
     pub dest_vm_setup_secs: f64,
     pub dest_recv_secs: f64,
     pub wasm_overhead_secs: f64,
+    // Transform timing
+    pub transform_count: usize,
+    pub transform_duration_secs: f64,
+    pub transform_module_load_ms: Vec<u64>,
 }
 
 /// Result of a pipeline check.
@@ -46,6 +50,7 @@ pub struct PipelineResult {
 pub struct CheckResult {
     pub source_validation: ValidationResult,
     pub destination_validation: ValidationResult,
+    pub transform_validations: Vec<ValidationResult>,
     pub state_ok: bool,
 }
 

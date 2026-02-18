@@ -24,6 +24,11 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
     print_validation("Source", &result.source_validation);
     print_validation("Destination", &result.destination_validation);
 
+    for (i, tv) in result.transform_validations.iter().enumerate() {
+        let label = format!("Transform[{}]", i);
+        print_validation(&label, tv);
+    }
+
     if result.state_ok {
         println!("State backend:     OK");
     } else {
@@ -33,8 +38,12 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
     // Return error if anything failed
     let source_ok = result.source_validation.status == ValidationStatus::Success;
     let dest_ok = result.destination_validation.status == ValidationStatus::Success;
+    let transforms_ok = result
+        .transform_validations
+        .iter()
+        .all(|v| v.status == ValidationStatus::Success);
 
-    if source_ok && dest_ok && result.state_ok {
+    if source_ok && dest_ok && transforms_ok && result.state_ok {
         println!("\nAll checks passed.");
         Ok(())
     } else {

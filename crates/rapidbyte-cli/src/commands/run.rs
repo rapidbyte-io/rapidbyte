@@ -49,6 +49,15 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
     println!("    Flush:         {:.3}s", result.dest_flush_secs);
     println!("    Commit:        {:.3}s", result.dest_commit_secs);
     println!("    WASM overhead: {:.3}s", result.wasm_overhead_secs);
+    if result.transform_count > 0 {
+        println!(
+            "  Transforms:      {} stage(s), {:.2}s total",
+            result.transform_count, result.transform_duration_secs,
+        );
+        for (i, ms) in result.transform_module_load_ms.iter().enumerate() {
+            println!("    Transform[{}] load: {}ms", i, ms);
+        }
+    }
     println!("  Source load:     {}ms", result.source_module_load_ms);
     println!("  Dest load:       {}ms", result.dest_module_load_ms);
 
@@ -69,6 +78,9 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
         "wasm_overhead_secs": result.wasm_overhead_secs,
         "source_module_load_ms": result.source_module_load_ms,
         "dest_module_load_ms": result.dest_module_load_ms,
+        "transform_count": result.transform_count,
+        "transform_duration_secs": result.transform_duration_secs,
+        "transform_module_load_ms": result.transform_module_load_ms,
     });
     println!("@@BENCH_JSON@@{}", json);
 

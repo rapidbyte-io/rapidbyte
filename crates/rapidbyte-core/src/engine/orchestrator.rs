@@ -219,6 +219,8 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
     });
 
     // 5b. Spawn transform threads (in pipeline order)
+    let transform_module_load_ms: Vec<u64> =
+        transform_modules.iter().map(|(_, _, _, _, ms)| *ms).collect();
     let mut transform_handles = Vec::new();
     for (module, id, ver, tconfig, _load_ms) in transform_modules.into_iter() {
         let rx = receivers.remove(0);
@@ -378,6 +380,9 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
                 dest_vm_setup_secs: *vm_setup_secs,
                 dest_recv_secs: *recv_secs,
                 wasm_overhead_secs,
+                transform_count: transform_durations.len(),
+                transform_duration_secs: transform_durations.iter().sum(),
+                transform_module_load_ms,
             })
         }
         _ => {
@@ -436,9 +441,23 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     })
     .await??;
 
+    // 5. Validate transform connectors
+    let mut transform_validations = Vec::new();
+    for tc in &config.transforms {
+        let wasm_path = wasm_runtime::resolve_connector_path(&tc.use_ref)?;
+        let config_val = tc.config.clone();
+        let (tc_id, tc_ver) = parse_connector_ref(&tc.use_ref);
+        let result = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
+            validate_connector(&wasm_path, &tc_id, &tc_ver, &config_val)
+        })
+        .await??;
+        transform_validations.push(result);
+    }
+
     Ok(CheckResult {
         source_validation,
         destination_validation: dest_validation,
+        transform_validations,
         state_ok,
     })
 }
