@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use arrow::array::{
     BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, StringArray,
@@ -41,10 +42,16 @@ fn estimate_row_bytes(row: &tokio_postgres::Row, columns: &[ColumnSchema]) -> us
 }
 
 /// Read a single stream using server-side cursors.
-pub async fn read_stream(client: &Client, ctx: &StreamContext) -> Result<ReadSummary, String> {
+pub async fn read_stream(
+    client: &Client,
+    ctx: &StreamContext,
+    connect_secs: f64,
+) -> Result<ReadSummary, String> {
     host_ffi::log(2, &format!("Reading stream: {}", ctx.stream_name));
 
     validate_pg_identifier(&ctx.stream_name).map_err(|e| format!("Invalid stream name: {}", e))?;
+
+    let query_start = Instant::now();
 
     // Discover schema using parameterized query
     let schema_query = "SELECT column_name, data_type, is_nullable \
@@ -132,6 +139,8 @@ pub async fn read_stream(client: &Client, ctx: &StreamContext) -> Result<ReadSum
         .await
         .map_err(|e| format!("DECLARE CURSOR failed: {}", e))?;
 
+    let query_secs = query_start.elapsed().as_secs_f64();
+
     // Byte-based batching
     let max_batch_bytes = if ctx.limits.max_batch_bytes > 0 {
         ctx.limits.max_batch_bytes as usize
@@ -164,6 +173,7 @@ pub async fn read_stream(client: &Client, ctx: &StreamContext) -> Result<ReadSum
 
     let mut loop_error: Option<String> = None;
 
+    let fetch_start = Instant::now();
     loop {
         let rows = match client.query(&fetch_query, &[]).await {
             Ok(r) => r,
@@ -310,6 +320,8 @@ pub async fn read_stream(client: &Client, ctx: &StreamContext) -> Result<ReadSum
         }
     }
 
+    let fetch_secs = fetch_start.elapsed().as_secs_f64();
+
     // Always clean up cursor and transaction
     let close_query = format!("CLOSE {}", CURSOR_NAME);
     let _ = client.execute(&*close_query, &[]).await;
@@ -365,7 +377,11 @@ pub async fn read_stream(client: &Client, ctx: &StreamContext) -> Result<ReadSum
         batches_emitted,
         checkpoint_count,
         records_skipped,
-        perf: None,
+        perf: Some(rapidbyte_sdk::protocol::ReadPerf {
+            connect_secs,
+            query_secs,
+            fetch_secs,
+        }),
     })
 }
 

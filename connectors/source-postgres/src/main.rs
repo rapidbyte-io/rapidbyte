@@ -2,6 +2,7 @@ pub mod schema;
 pub mod source;
 
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use rapidbyte_sdk::errors::{ConnectorError, ConnectorResult};
 use rapidbyte_sdk::host_ffi;
@@ -257,14 +258,21 @@ pub extern "C" fn rb_run_read(request_ptr: i32, request_len: i32) -> i64 {
 
         let rt = create_runtime();
         rt.block_on(async {
-            match connect(config).await {
-                Ok(client) => match source::read_stream(&client, &stream_ctx).await {
-                    Ok(summary) => make_ok_response(summary),
-                    Err(e) => make_err_response(ConnectorError::internal("READ_FAILED", e)),
-                },
+            let connect_start = Instant::now();
+            let client = match connect(config).await {
+                Ok(c) => c,
                 Err(e) => {
-                    make_err_response(ConnectorError::transient_network("CONNECTION_FAILED", e))
+                    return make_err_response(ConnectorError::transient_network(
+                        "CONNECTION_FAILED",
+                        e,
+                    ))
                 }
+            };
+            let connect_secs = connect_start.elapsed().as_secs_f64();
+
+            match source::read_stream(&client, &stream_ctx, connect_secs).await {
+                Ok(summary) => make_ok_response(summary),
+                Err(e) => make_err_response(ConnectorError::internal("READ_FAILED", e)),
             }
         })
     })
