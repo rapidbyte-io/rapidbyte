@@ -16,7 +16,7 @@ pub use super::runner::{CheckResult, PipelineResult};
 use super::runner::{run_destination, run_source, validate_connector};
 use crate::pipeline::types::{parse_byte_size, PipelineConfig};
 use crate::runtime::host_functions::Frame;
-use crate::runtime::wasm_runtime::{self, WasmRuntime};
+use crate::runtime::wasm_runtime::{self, parse_connector_ref, WasmRuntime};
 use crate::state::backend::{RunStats, RunStatus, StateBackend};
 use crate::state::sqlite::SqliteStateBackend;
 
@@ -153,6 +153,8 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
     let source_config = config.source.config.clone();
     let dest_config = config.destination.config.clone();
     let pipeline_name = config.pipeline.clone();
+    let (source_connector_id, source_connector_version) = parse_connector_ref(&config.source.use_ref);
+    let (dest_connector_id, dest_connector_version) = parse_connector_ref(&config.destination.use_ref);
     let stats = Arc::new(Mutex::new(RunStats::default()));
 
     // 5. Run source and dest on blocking threads with per-stream channels
@@ -173,6 +175,8 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
             batch_tx,
             state_src,
             &pipeline_name_src,
+            &source_connector_id,
+            &source_connector_version,
             &source_config,
             &stream_ctxs,
             stats_src,
@@ -185,6 +189,8 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
             batch_rx,
             state_dst,
             &pipeline_name_dst,
+            &dest_connector_id,
+            &dest_connector_version,
             &dest_config,
             &stream_ctxs_clone,
             stats_dst,
@@ -304,15 +310,17 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
 
     // 3. Validate source connector
     let source_config = config.source.config.clone();
+    let (src_id, src_ver) = parse_connector_ref(&config.source.use_ref);
     let source_validation = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
-        validate_connector(&source_wasm, &source_config)
+        validate_connector(&source_wasm, &src_id, &src_ver, &source_config)
     })
     .await??;
 
     // 4. Validate destination connector
     let dest_config = config.destination.config.clone();
+    let (dst_id, dst_ver) = parse_connector_ref(&config.destination.use_ref);
     let dest_validation = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
-        validate_connector(&dest_wasm, &dest_config)
+        validate_connector(&dest_wasm, &dst_id, &dst_ver, &dest_config)
     })
     .await??;
 

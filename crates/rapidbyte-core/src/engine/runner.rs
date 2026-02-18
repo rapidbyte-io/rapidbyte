@@ -54,6 +54,8 @@ pub(crate) fn run_source(
     sender: mpsc::SyncSender<Frame>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
+    connector_id: &str,
+    connector_version: &str,
     source_config: &serde_json::Value,
     stream_ctxs: &[StreamContext],
     stats: Arc<Mutex<RunStats>>,
@@ -102,8 +104,8 @@ pub(crate) fn run_source(
     // Lifecycle: open
     let open_ctx = OpenContext {
         config: ConfigBlob::Json(source_config.clone()),
-        connector_id: "source-postgres".to_string(),
-        connector_version: "0.1.0".to_string(),
+        connector_id: connector_id.to_string(),
+        connector_version: connector_version.to_string(),
     };
 
     tracing::info!("Opening source connector");
@@ -161,6 +163,8 @@ pub(crate) fn run_destination(
     receiver: mpsc::Receiver<Frame>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
+    connector_id: &str,
+    connector_version: &str,
     dest_config: &serde_json::Value,
     stream_ctxs: &[StreamContext],
     stats: Arc<Mutex<RunStats>>,
@@ -207,8 +211,8 @@ pub(crate) fn run_destination(
     // Lifecycle: open
     let open_ctx = OpenContext {
         config: ConfigBlob::Json(dest_config.clone()),
-        connector_id: "dest-postgres".to_string(),
-        connector_version: "0.1.0".to_string(),
+        connector_id: connector_id.to_string(),
+        connector_version: connector_version.to_string(),
     };
 
     let vm_setup_secs = vm_setup_start.elapsed().as_secs_f64();
@@ -275,6 +279,8 @@ pub(crate) fn run_destination(
 
 pub(crate) fn validate_connector(
     wasm_path: &std::path::Path,
+    connector_id: &str,
+    connector_version: &str,
     config: &serde_json::Value,
 ) -> Result<ValidationResult> {
     let runtime = WasmRuntime::new()?;
@@ -315,8 +321,8 @@ pub(crate) fn validate_connector(
     // Use v1 lifecycle: wrap config in OpenContext for rb_validate
     let open_ctx = OpenContext {
         config: ConfigBlob::Json(config.clone()),
-        connector_id: "check".to_string(),
-        connector_version: "0.0.0".to_string(),
+        connector_id: connector_id.to_string(),
+        connector_version: connector_version.to_string(),
     };
     handle.validate(&serde_json::to_value(&open_ctx).unwrap())
 }

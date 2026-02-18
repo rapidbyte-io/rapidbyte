@@ -90,6 +90,26 @@ pub fn create_host_imports(
     Ok(import_builder.build())
 }
 
+/// Parse a connector reference into (connector_id, connector_version).
+///
+/// Examples:
+/// - "rapidbyte/source-postgres@v0.1.0" -> ("source-postgres", "0.1.0")
+/// - "source-postgres@v0.1.0"           -> ("source-postgres", "0.1.0")
+/// - "source-postgres"                  -> ("source-postgres", "unknown")
+pub fn parse_connector_ref(connector_ref: &str) -> (String, String) {
+    let after_slash = connector_ref
+        .split('/')
+        .last()
+        .unwrap_or(connector_ref);
+
+    let (name, version) = match after_slash.split_once('@') {
+        Some((n, v)) => (n.to_string(), v.strip_prefix('v').unwrap_or(v).to_string()),
+        None => (after_slash.to_string(), "unknown".to_string()),
+    };
+
+    (name, version)
+}
+
 /// Resolve a connector reference (e.g. "rapidbyte/source-postgres@v0.1.0")
 /// to a .wasm file path on disk.
 ///
@@ -138,6 +158,33 @@ pub fn resolve_connector_path(connector_ref: &str) -> Result<std::path::PathBuf>
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_connector_ref() {
+        assert_eq!(
+            parse_connector_ref("rapidbyte/source-postgres@v0.1.0"),
+            ("source-postgres".to_string(), "0.1.0".to_string())
+        );
+        assert_eq!(
+            parse_connector_ref("dest-postgres@v0.1.0"),
+            ("dest-postgres".to_string(), "0.1.0".to_string())
+        );
+        assert_eq!(
+            parse_connector_ref("source-postgres"),
+            ("source-postgres".to_string(), "unknown".to_string())
+        );
+        assert_eq!(
+            parse_connector_ref("rapidbyte/my-connector"),
+            ("my-connector".to_string(), "unknown".to_string())
+        );
+        // Version without v prefix
+        assert_eq!(
+            parse_connector_ref("conn@1.2.3"),
+            ("conn".to_string(), "1.2.3".to_string())
+        );
+    }
+
     #[test]
     fn test_resolve_connector_name_parsing() {
         let refs_and_expected = vec![
