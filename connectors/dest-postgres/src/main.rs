@@ -303,9 +303,10 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
             };
             let connect_secs = connect_start.elapsed().as_secs_f64();
 
-            // Phase 2: BEGIN transaction
-            // Both INSERT and COPY modes use an explicit transaction for atomicity.
-            // This ensures all-or-nothing semantics for multi-batch writes.
+            // Phase 2: BEGIN first transaction
+            // Chunked commits: when bytes_since_commit exceeds checkpoint_interval_bytes,
+            // we COMMIT, emit a checkpoint, and BEGIN a new transaction.
+            // If checkpoint_interval_bytes is 0, the entire stream stays in one transaction.
             if let Err(e) = client.execute("BEGIN", &[]).await {
                 return make_err_response("TX_FAILED", &format!("BEGIN failed: {}", e));
             }
@@ -318,6 +319,9 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
             let mut created_tables = std::collections::HashSet::new();
             let mut buf: Vec<u8> = Vec::new();
             let mut loop_error: Option<String> = None;
+            let mut checkpoint_count: u64 = 0;
+            let mut bytes_since_commit: u64 = 0;
+            let checkpoint_interval = stream_ctx.limits.checkpoint_interval_bytes;
 
             loop {
                 match host_ffi::next_batch(&mut buf, stream_ctx.limits.max_batch_bytes) {
@@ -352,10 +356,47 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                             Ok(count) => {
                                 total_rows += count;
                                 total_bytes += n as u64;
+                                bytes_since_commit += n as u64;
                                 batches_written += 1;
                             }
                             Err(e) => {
                                 loop_error = Some(e);
+                                break;
+                            }
+                        }
+
+                        // Chunked commit: if we've written enough bytes, commit and start new txn
+                        if checkpoint_interval > 0 && bytes_since_commit >= checkpoint_interval {
+                            if let Err(e) = client.execute("COMMIT", &[]).await {
+                                loop_error = Some(format!("Checkpoint COMMIT failed: {}", e));
+                                break;
+                            }
+
+                            // Emit checkpoint so host can track progress
+                            let cp = rapidbyte_sdk::protocol::Checkpoint {
+                                id: checkpoint_count + 1,
+                                kind: rapidbyte_sdk::protocol::CheckpointKind::Dest,
+                                stream: stream_ctx.stream_name.clone(),
+                                cursor_field: None,
+                                cursor_value: None,
+                                records_processed: total_rows,
+                                bytes_processed: total_bytes,
+                            };
+                            let _ = host_ffi::checkpoint("dest-postgres", &stream_ctx.stream_name, &cp);
+                            checkpoint_count += 1;
+                            bytes_since_commit = 0;
+
+                            host_ffi::log(3, &format!(
+                                "dest-postgres: checkpoint {} — committed {} rows, {} bytes so far",
+                                checkpoint_count, total_rows, total_bytes
+                            ));
+
+                            // Begin new transaction for next chunk
+                            if let Err(e) = client.execute("BEGIN", &[]).await {
+                                loop_error = Some(format!(
+                                    "Post-checkpoint BEGIN failed after {} bytes committed: {}",
+                                    total_bytes - bytes_since_commit, e
+                                ));
                                 break;
                             }
                         }
@@ -382,6 +423,21 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
             }
             let commit_secs = commit_start.elapsed().as_secs_f64();
 
+            // Final checkpoint for the remaining data (only if this chunk has uncommitted data)
+            if bytes_since_commit > 0 {
+                let cp = rapidbyte_sdk::protocol::Checkpoint {
+                    id: checkpoint_count + 1,
+                    kind: rapidbyte_sdk::protocol::CheckpointKind::Dest,
+                    stream: stream_ctx.stream_name.clone(),
+                    cursor_field: None,
+                    cursor_value: None,
+                    records_processed: total_rows,
+                    bytes_processed: total_bytes,
+                };
+                let _ = host_ffi::checkpoint("dest-postgres", &stream_ctx.stream_name, &cp);
+                checkpoint_count += 1;
+            }
+
             host_ffi::log(
                 2,
                 &format!(
@@ -394,7 +450,7 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                 records_written: total_rows,
                 bytes_written: total_bytes,
                 batches_written,
-                checkpoint_count: 0,
+                checkpoint_count,
                 perf: Some(WritePerf {
                     connect_secs,
                     flush_secs,
