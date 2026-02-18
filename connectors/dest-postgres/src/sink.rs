@@ -20,9 +20,19 @@ use bytes::Bytes;
 use futures_util::SinkExt;
 
 /// Result of a write operation with per-row error tracking.
-pub struct WriteResult {
-    pub rows_written: u64,
-    pub rows_failed: u64,
+struct WriteResult {
+    rows_written: u64,
+    rows_failed: u64,
+}
+
+/// Configuration for a write session, bundling stream-level settings.
+pub struct SessionConfig {
+    pub stream_name: String,
+    pub write_mode: Option<WriteMode>,
+    pub load_method: String,
+    pub schema_policy: SchemaEvolutionPolicy,
+    pub on_data_error: DataErrorPolicy,
+    pub checkpoint: CheckpointConfig,
 }
 
 /// Checkpoint threshold configuration extracted from StreamLimits.
@@ -55,9 +65,8 @@ pub struct WriteSession<'a> {
     stream_name: String,
     /// Effective stream name (differs from stream_name in Replace mode).
     effective_stream: String,
-    write_mode: Option<WriteMode>,
     effective_write_mode: Option<WriteMode>,
-    load_method: &'a str,
+    load_method: String,
     schema_policy: SchemaEvolutionPolicy,
     on_data_error: DataErrorPolicy,
     checkpoint_config: CheckpointConfig,
@@ -90,13 +99,10 @@ impl<'a> WriteSession<'a> {
     pub async fn begin(
         client: &'a Client,
         target_schema: &'a str,
-        stream_name: &str,
-        write_mode: Option<WriteMode>,
-        load_method: &'a str,
-        schema_policy: SchemaEvolutionPolicy,
-        on_data_error: DataErrorPolicy,
-        checkpoint_config: CheckpointConfig,
+        config: SessionConfig,
     ) -> Result<WriteSession<'a>, String> {
+        let stream_name = &config.stream_name;
+        let write_mode = config.write_mode;
         // Ensure watermarks table exists (non-fatal if it fails)
         if let Err(e) = ensure_watermarks_table(client, target_schema).await {
             host_ffi::log(
@@ -158,14 +164,13 @@ impl<'a> WriteSession<'a> {
         Ok(WriteSession {
             client,
             target_schema,
-            stream_name: stream_name.to_string(),
+            stream_name: config.stream_name,
             effective_stream,
-            write_mode,
             effective_write_mode,
-            load_method,
-            schema_policy,
-            on_data_error,
-            checkpoint_config,
+            load_method: config.load_method,
+            schema_policy: config.schema_policy,
+            on_data_error: config.on_data_error,
+            checkpoint_config: config.checkpoint,
             is_replace,
             watermark_records,
             cumulative_records: 0,
@@ -220,7 +225,7 @@ impl<'a> WriteSession<'a> {
             write_mode: self.effective_write_mode.as_ref(),
             schema_policy: Some(&self.schema_policy),
             on_data_error: self.on_data_error,
-            load_method: self.load_method,
+            load_method: &self.load_method,
         };
 
         let result = write_batch(&mut write_ctx, ipc_bytes).await?;
@@ -376,15 +381,15 @@ impl<'a> WriteSession<'a> {
 ///
 /// Groups the common arguments needed by `write_batch`
 /// to keep function signatures under clippy's argument limit.
-pub struct WriteContext<'a> {
-    pub client: &'a Client,
-    pub target_schema: &'a str,
-    pub stream_name: &'a str,
-    pub created_tables: &'a mut HashSet<String>,
-    pub write_mode: Option<&'a WriteMode>,
-    pub schema_policy: Option<&'a SchemaEvolutionPolicy>,
-    pub on_data_error: DataErrorPolicy,
-    pub load_method: &'a str,
+struct WriteContext<'a> {
+    client: &'a Client,
+    target_schema: &'a str,
+    stream_name: &'a str,
+    created_tables: &'a mut HashSet<String>,
+    write_mode: Option<&'a WriteMode>,
+    schema_policy: Option<&'a SchemaEvolutionPolicy>,
+    on_data_error: DataErrorPolicy,
+    load_method: &'a str,
 }
 
 /// Create the target table if it doesn't exist, based on the Arrow schema.
@@ -523,7 +528,7 @@ async fn drop_staging_table(
 ///
 /// Uses PostgreSQL's transactional DDL: DROP target + RENAME staging -> target
 /// inside a single transaction. Readers see either old data or new data, never partial.
-pub async fn swap_staging_table(
+async fn swap_staging_table(
     client: &Client,
     target_schema: &str,
     stream_name: &str,
@@ -572,7 +577,7 @@ pub async fn swap_staging_table(
 ///
 /// Drops any leftover staging table (from a previous failed run) and returns
 /// the staging stream name to use for writes.
-pub async fn prepare_staging(
+async fn prepare_staging(
     client: &Client,
     target_schema: &str,
     stream_name: &str,
@@ -598,19 +603,19 @@ fn arrow_to_pg_type(dt: &DataType) -> &'static str {
 
 /// Detected differences between an incoming Arrow schema and an existing PG table.
 #[derive(Debug, Default)]
-pub struct SchemaDrift {
+struct SchemaDrift {
     /// Columns present in the Arrow schema but not in the existing table (name, pg_type).
-    pub new_columns: Vec<(String, String)>,
+    new_columns: Vec<(String, String)>,
     /// Columns present in the existing table but not in the Arrow schema.
-    pub removed_columns: Vec<String>,
+    removed_columns: Vec<String>,
     /// Columns whose PG type differs (name, old_pg_type, new_pg_type).
-    pub type_changes: Vec<(String, String, String)>,
+    type_changes: Vec<(String, String, String)>,
     /// Columns whose nullability differs (name, was_nullable, now_nullable).
-    pub nullability_changes: Vec<(String, bool, bool)>,
+    nullability_changes: Vec<(String, bool, bool)>,
 }
 
 impl SchemaDrift {
-    pub fn is_empty(&self) -> bool {
+    fn is_empty(&self) -> bool {
         self.new_columns.is_empty()
             && self.removed_columns.is_empty()
             && self.type_changes.is_empty()
@@ -687,7 +692,7 @@ fn pg_types_compatible(info_schema_type: &str, ddl_type: &str) -> bool {
 /// Returns `Ok(None)` if the table does not exist yet (no columns found in
 /// information_schema) or if the schemas are fully compatible.
 /// Returns `Ok(Some(drift))` when differences are detected.
-pub async fn detect_schema_drift(
+async fn detect_schema_drift(
     client: &Client,
     schema_name: &str,
     table_name: &str,
@@ -765,7 +770,7 @@ pub async fn detect_schema_drift(
 }
 
 /// Apply schema evolution policy to detected drift, executing DDL as needed.
-pub async fn apply_schema_policy(
+async fn apply_schema_policy(
     client: &Client,
     qualified_table: &str,
     drift: &SchemaDrift,
@@ -887,7 +892,7 @@ const COPY_FLUSH_BYTES: usize = 4 * 1024 * 1024; // 4MB
 /// is "copy" but the write mode is Upsert, automatically falls back to INSERT
 /// (COPY cannot handle ON CONFLICT). On batch failure with Skip/Dlq error
 /// policy, falls back to single-row INSERTs.
-pub async fn write_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<WriteResult, String> {
+async fn write_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<WriteResult, String> {
     let use_copy = ctx.load_method == "copy"
         && !matches!(ctx.write_mode, Some(WriteMode::Upsert { .. }));
 
@@ -1376,7 +1381,7 @@ fn format_copy_value(buf: &mut Vec<u8>, col: &dyn Array, row_idx: usize) {
 ///
 /// Also creates the target schema if it doesn't exist yet, since the watermark
 /// table must live in the same schema as the data tables.
-pub async fn ensure_watermarks_table(
+async fn ensure_watermarks_table(
     client: &Client,
     target_schema: &str,
 ) -> Result<(), String> {
@@ -1404,7 +1409,7 @@ pub async fn ensure_watermarks_table(
 }
 
 /// Get the watermark (records committed) for a stream. Returns 0 if none.
-pub async fn get_watermark(
+async fn get_watermark(
     client: &Client,
     target_schema: &str,
     stream_name: &str,
@@ -1425,7 +1430,7 @@ pub async fn get_watermark(
 }
 
 /// Update the watermark for a stream. Called inside the same transaction as the data COMMIT.
-pub async fn set_watermark(
+async fn set_watermark(
     client: &Client,
     target_schema: &str,
     stream_name: &str,
@@ -1455,7 +1460,7 @@ pub async fn set_watermark(
 }
 
 /// Count the number of rows in an Arrow IPC byte buffer without writing them.
-pub fn count_ipc_rows(ipc_bytes: &[u8]) -> Result<u64, String> {
+fn count_ipc_rows(ipc_bytes: &[u8]) -> Result<u64, String> {
     let cursor = Cursor::new(ipc_bytes);
     let reader = StreamReader::try_new(cursor, None)
         .map_err(|e| format!("IPC decode failed: {}", e))?;
@@ -1468,7 +1473,7 @@ pub fn count_ipc_rows(ipc_bytes: &[u8]) -> Result<u64, String> {
 }
 
 /// Clear the watermark for a stream (used when Replace mode completes its swap).
-pub async fn clear_watermark(
+async fn clear_watermark(
     client: &Client,
     target_schema: &str,
     stream_name: &str,

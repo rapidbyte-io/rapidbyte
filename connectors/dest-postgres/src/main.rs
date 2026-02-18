@@ -279,15 +279,17 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
             let mut session = match sink::WriteSession::begin(
                 &client,
                 &config.schema,
-                &stream_ctx.stream_name,
-                stream_ctx.write_mode.clone(),
-                &config.load_method,
-                stream_ctx.policies.schema_evolution.clone(),
-                stream_ctx.policies.on_data_error,
-                sink::CheckpointConfig {
-                    interval_bytes: stream_ctx.limits.checkpoint_interval_bytes,
-                    interval_rows: stream_ctx.limits.checkpoint_interval_rows,
-                    interval_seconds: stream_ctx.limits.checkpoint_interval_seconds,
+                sink::SessionConfig {
+                    stream_name: stream_ctx.stream_name.clone(),
+                    write_mode: stream_ctx.write_mode.clone(),
+                    load_method: config.load_method.clone(),
+                    schema_policy: stream_ctx.policies.schema_evolution,
+                    on_data_error: stream_ctx.policies.on_data_error,
+                    checkpoint: sink::CheckpointConfig {
+                        interval_bytes: stream_ctx.limits.checkpoint_interval_bytes,
+                        interval_rows: stream_ctx.limits.checkpoint_interval_rows,
+                        interval_seconds: stream_ctx.limits.checkpoint_interval_seconds,
+                    },
                 },
             )
             .await
