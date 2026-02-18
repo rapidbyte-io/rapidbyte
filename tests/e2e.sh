@@ -26,6 +26,7 @@ cleanup() {
     info "Stopping Docker Compose..."
     docker compose -f "$PROJECT_ROOT/docker-compose.yml" down -v 2>/dev/null || true
     rm -f /tmp/rapidbyte_e2e_state.db
+    rm -f /tmp/rapidbyte_e2e_incr_state.db
 }
 
 # ── Step 1: Build everything ────────────────────────────────────────
@@ -151,11 +152,82 @@ else
     warn "State DB not found at /tmp/rapidbyte_e2e_state.db (state not persisted)"
 fi
 
-# ── Done ────────────────────────────────────────────────────────────
+# ── Full Refresh Done ──────────────────────────────────────────────
 
 echo ""
 echo -e "${GREEN}═══════════════════════════════════════════${NC}"
-echo -e "${GREEN}  E2E TEST PASSED                          ${NC}"
+echo -e "${GREEN}  FULL REFRESH E2E TEST PASSED             ${NC}"
 echo -e "${GREEN}  Source: public.users(3) + public.orders(3)${NC}"
 echo -e "${GREEN}  Dest:   raw.users($DEST_USERS) + raw.orders($DEST_ORDERS) ${NC}"
+echo -e "${GREEN}═══════════════════════════════════════════${NC}"
+
+# ══════════════════════════════════════════════════════════════════════
+# ── Incremental Sync Test ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+
+info "=== Incremental Sync Test ==="
+
+# Clean up any previous incremental state
+rm -f /tmp/rapidbyte_e2e_incr_state.db
+
+# Create the raw_incr schema
+docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -c "CREATE SCHEMA IF NOT EXISTS raw_incr;" -q
+
+# Run 1: Full initial load (incremental with no prior cursor = read all)
+info "Running incremental pipeline (run 1 — initial load)..."
+"$PROJECT_ROOT/target/debug/rapidbyte" run \
+    "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_incremental.yaml" \
+    --log-level debug 2>&1
+
+# Verify: raw_incr.users should have 3 rows
+INCR_COUNT_1=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -t -A -c "SELECT COUNT(*) FROM raw_incr.users")
+info "After run 1: raw_incr.users=$INCR_COUNT_1"
+if [ "$INCR_COUNT_1" -ne 3 ]; then
+    fail "Expected 3 rows after run 1, got $INCR_COUNT_1"
+fi
+
+# Verify cursor was persisted in state DB
+if [ -f /tmp/rapidbyte_e2e_incr_state.db ]; then
+    CURSOR_VAL=$(sqlite3 /tmp/rapidbyte_e2e_incr_state.db \
+        "SELECT cursor_value FROM sync_cursors WHERE pipeline='e2e_incremental' AND stream='users'" 2>/dev/null || echo "")
+    info "Cursor value after run 1: '$CURSOR_VAL'"
+    if [ -z "$CURSOR_VAL" ]; then
+        fail "No cursor value found in state DB after run 1"
+    fi
+else
+    fail "Incremental state DB not found after run 1"
+fi
+
+# Insert 2 more rows into source
+docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -c \
+    "INSERT INTO users (name, email) VALUES ('Dave', 'dave@example.com'), ('Eve', 'eve@example.com');" -q
+
+# Run 2: Incremental (should only read new rows with id > 3)
+info "Running incremental pipeline (run 2 — should read only new rows)..."
+"$PROJECT_ROOT/target/debug/rapidbyte" run \
+    "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_incremental.yaml" \
+    --log-level debug 2>&1
+
+# Verify: raw_incr.users should have 5 rows (3 from run 1 + 2 new)
+INCR_COUNT_2=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -t -A -c "SELECT COUNT(*) FROM raw_incr.users")
+info "After run 2: raw_incr.users=$INCR_COUNT_2"
+if [ "$INCR_COUNT_2" -ne 5 ]; then
+    fail "Expected 5 rows after run 2, got $INCR_COUNT_2"
+fi
+
+# Verify cursor was updated
+CURSOR_VAL_2=$(sqlite3 /tmp/rapidbyte_e2e_incr_state.db \
+    "SELECT cursor_value FROM sync_cursors WHERE pipeline='e2e_incremental' AND stream='users'" 2>/dev/null || echo "")
+info "Cursor value after run 2: '$CURSOR_VAL_2'"
+
+echo ""
+echo -e "${GREEN}═══════════════════════════════════════════${NC}"
+echo -e "${GREEN}  INCREMENTAL SYNC TEST PASSED             ${NC}"
+echo -e "${GREEN}  Run 1: 3 rows (initial load)             ${NC}"
+echo -e "${GREEN}  Run 2: 5 rows total (2 new appended)     ${NC}"
+echo -e "${GREEN}  Cursor: $CURSOR_VAL -> $CURSOR_VAL_2     ${NC}"
 echo -e "${GREEN}═══════════════════════════════════════════${NC}"
