@@ -107,12 +107,18 @@ pub struct CursorInfo {
     pub last_value: Option<CursorValue>,
 }
 
+fn default_checkpoint_interval_bytes() -> u64 {
+    64 * 1024 * 1024 // 64 MB
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StreamLimits {
     pub max_batch_bytes: u64,
     pub max_record_bytes: u64,
     pub max_inflight_batches: u32,
     pub max_parallel_requests: u32,
+    #[serde(default = "default_checkpoint_interval_bytes")]
+    pub checkpoint_interval_bytes: u64,
 }
 
 impl Default for StreamLimits {
@@ -122,6 +128,7 @@ impl Default for StreamLimits {
             max_record_bytes: 16 * 1024 * 1024,   // 16 MB
             max_inflight_batches: 16,
             max_parallel_requests: 1,
+            checkpoint_interval_bytes: default_checkpoint_interval_bytes(),
         }
     }
 }
@@ -417,6 +424,7 @@ mod tests {
         assert_eq!(limits.max_record_bytes, 16 * 1024 * 1024);
         assert_eq!(limits.max_inflight_batches, 16);
         assert_eq!(limits.max_parallel_requests, 1);
+        assert_eq!(limits.checkpoint_interval_bytes, 64 * 1024 * 1024);
     }
 
     #[test]
