@@ -7,7 +7,7 @@ use rapidbyte_sdk::errors::{CommitState, ConnectorError, ConnectorResult};
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::memory::{pack_ptr_len, write_guest_bytes};
 use rapidbyte_sdk::protocol::{
-    ConfigBlob, Feature, OpenContext, OpenInfo, StreamContext, WriteMode, WritePerf, WriteSummary,
+    ConfigBlob, Feature, OpenContext, OpenInfo, StreamContext, WritePerf, WriteSummary,
 };
 use rapidbyte_sdk::validation::validate_pg_identifier;
 
@@ -275,215 +275,40 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
             };
             let connect_secs = connect_start.elapsed().as_secs_f64();
 
-            // Ensure watermarks table exists for exactly-once support
-            if let Err(e) = sink::ensure_watermarks_table(&client, &config.schema).await {
-                host_ffi::log(1, &format!("dest-postgres: watermarks table creation failed (non-fatal): {}", e));
-            }
-
-            // Replace mode: route writes to a staging table, then swap atomically
-            let is_replace = matches!(stream_ctx.write_mode, Some(WriteMode::Replace));
-            let (effective_stream, effective_write_mode) = if is_replace {
-                match sink::prepare_staging(&client, &config.schema, &stream_ctx.stream_name).await {
-                    Ok(staging_name) => {
-                        host_ffi::log(
-                            2,
-                            &format!(
-                                "dest-postgres: Replace mode — writing to staging table '{}'",
-                                staging_name
-                            ),
-                        );
-                        (staging_name, Some(WriteMode::Append))
-                    }
-                    Err(e) => {
-                        return make_err_response(ConnectorError::transient_db(
-                            "STAGING_PREPARE_FAILED",
-                            format!("Failed to prepare staging table: {}", e),
-                        ));
-                    }
+            // Phase 2: Session lifecycle
+            let mut session = match sink::WriteSession::begin(
+                &client,
+                &config.schema,
+                &stream_ctx.stream_name,
+                stream_ctx.write_mode.clone(),
+                &config.load_method,
+                stream_ctx.policies.schema_evolution.clone(),
+                stream_ctx.policies.on_data_error,
+                sink::CheckpointConfig {
+                    interval_bytes: stream_ctx.limits.checkpoint_interval_bytes,
+                    interval_rows: stream_ctx.limits.checkpoint_interval_rows,
+                    interval_seconds: stream_ctx.limits.checkpoint_interval_seconds,
+                },
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    return make_err_response(ConnectorError::transient_db("SESSION_BEGIN_FAILED", e));
                 }
-            } else {
-                (stream_ctx.stream_name.clone(), stream_ctx.write_mode.clone())
             };
 
-            // Exactly-once: query watermark for resume position
-            let watermark_records = if !is_replace {
-                match sink::get_watermark(&client, &config.schema, &stream_ctx.stream_name).await {
-                    Ok(w) => {
-                        if w > 0 {
-                            host_ffi::log(
-                                2,
-                                &format!(
-                                    "dest-postgres: resuming from watermark — {} records already committed for stream '{}'",
-                                    w, stream_ctx.stream_name
-                                ),
-                            );
-                        }
-                        w
-                    }
-                    Err(e) => {
-                        host_ffi::log(
-                            1,
-                            &format!("dest-postgres: watermark query failed (starting fresh): {}", e),
-                        );
-                        0
-                    }
-                }
-            } else {
-                0 // Replace mode doesn't use watermarks
-            };
-
-            let mut cumulative_records: u64 = 0;
-
-            // Phase 2: BEGIN first transaction
-            // Chunked commits: when bytes_since_commit exceeds checkpoint_interval_bytes,
-            // we COMMIT, emit a checkpoint, and BEGIN a new transaction.
-            // If checkpoint_interval_bytes is 0, the entire stream stays in one transaction.
-            if let Err(e) = client.execute("BEGIN", &[]).await {
-                return make_err_response(ConnectorError::transient_db("TX_FAILED", format!("BEGIN failed: {}", e)));
-            }
-
-            // Phase 3: Pull loop — read batches from host and write immediately
-            let flush_start = Instant::now();
-            let mut total_rows: u64 = 0;
-            let mut total_bytes: u64 = 0;
-            let mut total_failed: u64 = 0;
-            let mut batches_written: u64 = 0;
-            let mut created_tables = std::collections::HashSet::new();
+            // Phase 3: Pull loop — read batches from host
             let mut buf: Vec<u8> = Vec::new();
             let mut loop_error: Option<String> = None;
-            let mut checkpoint_count: u64 = 0;
-            let mut bytes_since_commit: u64 = 0;
-            let checkpoint_interval = stream_ctx.limits.checkpoint_interval_bytes;
-            let mut rows_since_commit: u64 = 0;
-            let mut last_checkpoint_time = Instant::now();
-            let checkpoint_interval_rows = stream_ctx.limits.checkpoint_interval_rows;
-            let checkpoint_interval_secs = stream_ctx.limits.checkpoint_interval_seconds;
 
             loop {
                 match host_ffi::next_batch(&mut buf, stream_ctx.limits.max_batch_bytes) {
-                    Ok(None) => {
-                        // EOF — no more batches
-                        break;
-                    }
+                    Ok(None) => break,
                     Ok(Some(n)) => {
-                        let ipc_bytes = &buf[..n];
-
-                        // Exactly-once: skip already-committed batches
-                        if watermark_records > 0 && cumulative_records < watermark_records {
-                            let batch_rows = match sink::count_ipc_rows(ipc_bytes) {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    loop_error = Some(format!("IPC row count failed: {}", e));
-                                    break;
-                                }
-                            };
-                            cumulative_records += batch_rows;
-                            if cumulative_records <= watermark_records {
-                                // Entire batch already committed — skip it
-                                host_ffi::log(
-                                    3,
-                                    &format!(
-                                        "dest-postgres: skipping batch ({}/{} records already committed)",
-                                        cumulative_records, watermark_records
-                                    ),
-                                );
-                                continue;
-                            }
-                            // This batch straddles the watermark — write it anyway.
-                            // For Upsert mode, ON CONFLICT deduplicates. For Append mode,
-                            // the overlap is bounded to at most one batch worth of rows.
-                            host_ffi::log(
-                                2,
-                                &format!(
-                                    "dest-postgres: resuming writes at cumulative record {}",
-                                    cumulative_records
-                                ),
-                            );
-                        }
-
-                        let mut write_ctx = sink::WriteContext {
-                            client: &client,
-                            target_schema: &config.schema,
-                            stream_name: &effective_stream,
-                            created_tables: &mut created_tables,
-                            write_mode: effective_write_mode.as_ref(),
-                            schema_policy: Some(&stream_ctx.policies.schema_evolution),
-                            on_data_error: stream_ctx.policies.on_data_error,
-                            load_method: &config.load_method,
-                        };
-
-                        let write_result = sink::write_batch(&mut write_ctx, ipc_bytes).await;
-
-                        match write_result {
-                            Ok(result) => {
-                                total_rows += result.rows_written;
-                                total_failed += result.rows_failed;
-                                total_bytes += n as u64;
-                                bytes_since_commit += n as u64;
-                                rows_since_commit += result.rows_written;
-                                batches_written += 1;
-                            }
-                            Err(e) => {
-                                loop_error = Some(e);
-                                break;
-                            }
-                        }
-
-                        // Chunked commit: checkpoint when any threshold is reached
-                        let should_checkpoint = (checkpoint_interval > 0
-                            && bytes_since_commit >= checkpoint_interval)
-                            || (checkpoint_interval_rows > 0
-                                && rows_since_commit >= checkpoint_interval_rows)
-                            || (checkpoint_interval_secs > 0
-                                && last_checkpoint_time.elapsed().as_secs() >= checkpoint_interval_secs);
-
-                        if should_checkpoint {
-                            // Update watermark before commit (atomic with data in same transaction)
-                            if let Err(e) = sink::set_watermark(
-                                &client,
-                                &config.schema,
-                                &stream_ctx.stream_name,
-                                total_rows,
-                                total_bytes,
-                            ).await {
-                                loop_error = Some(format!("Watermark update failed: {}", e));
-                                break;
-                            }
-
-                            if let Err(e) = client.execute("COMMIT", &[]).await {
-                                loop_error = Some(format!("Checkpoint COMMIT failed: {}", e));
-                                break;
-                            }
-
-                            // Emit checkpoint so host can track progress
-                            let cp = rapidbyte_sdk::protocol::Checkpoint {
-                                id: checkpoint_count + 1,
-                                kind: rapidbyte_sdk::protocol::CheckpointKind::Dest,
-                                stream: stream_ctx.stream_name.clone(),
-                                cursor_field: None,
-                                cursor_value: None,
-                                records_processed: total_rows,
-                                bytes_processed: total_bytes,
-                            };
-                            let _ = host_ffi::checkpoint("dest-postgres", &stream_ctx.stream_name, &cp);
-                            checkpoint_count += 1;
-                            bytes_since_commit = 0;
-                            rows_since_commit = 0;
-                            last_checkpoint_time = Instant::now();
-
-                            host_ffi::log(3, &format!(
-                                "dest-postgres: checkpoint {} — committed {} rows, {} bytes so far",
-                                checkpoint_count, total_rows, total_bytes
-                            ));
-
-                            // Begin new transaction for next chunk
-                            if let Err(e) = client.execute("BEGIN", &[]).await {
-                                loop_error = Some(format!(
-                                    "Post-checkpoint BEGIN failed after {} bytes committed: {}",
-                                    total_bytes - bytes_since_commit, e
-                                ));
-                                break;
-                            }
+                        if let Err(e) = session.process_batch(&buf[..n]).await {
+                            loop_error = Some(e);
+                            break;
                         }
                     }
                     Err(e) => {
@@ -493,84 +318,36 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                 }
             }
 
-            let flush_secs = flush_start.elapsed().as_secs_f64();
-
-            // If there was an error during the loop, ROLLBACK and return
+            // Handle errors
             if let Some(err) = loop_error {
-                let _ = client.execute("ROLLBACK", &[]).await;
+                session.rollback().await;
                 return make_err_response(
                     ConnectorError::transient_db("WRITE_FAILED", err)
                         .with_commit_state(CommitState::BeforeCommit),
                 );
             }
 
-            // Phase 4: COMMIT
-            // Update watermark before final commit (atomic with data)
-            if let Err(e) = sink::set_watermark(
-                &client,
-                &config.schema,
-                &stream_ctx.stream_name,
-                total_rows,
-                total_bytes,
-            ).await {
-                let _ = client.execute("ROLLBACK", &[]).await;
-                return make_err_response(
-                    ConnectorError::transient_db("WATERMARK_FAILED", format!("Watermark update failed: {}", e))
-                        .with_commit_state(CommitState::BeforeCommit),
-                );
-            }
-
-            let commit_start = Instant::now();
-            if let Err(e) = client.execute("COMMIT", &[]).await {
-                return make_err_response(ConnectorError::transient_db("TX_FAILED", format!("COMMIT failed: {}", e)));
-            }
-            let commit_secs = commit_start.elapsed().as_secs_f64();
-
-            // Final checkpoint for the remaining data (only if this chunk has uncommitted data)
-            if bytes_since_commit > 0 {
-                let cp = rapidbyte_sdk::protocol::Checkpoint {
-                    id: checkpoint_count + 1,
-                    kind: rapidbyte_sdk::protocol::CheckpointKind::Dest,
-                    stream: stream_ctx.stream_name.clone(),
-                    cursor_field: None,
-                    cursor_value: None,
-                    records_processed: total_rows,
-                    bytes_processed: total_bytes,
-                };
-                let _ = host_ffi::checkpoint("dest-postgres", &stream_ctx.stream_name, &cp);
-                checkpoint_count += 1;
-            }
-
-            // Replace mode: atomically swap staging table into target position
-            if is_replace {
-                if let Err(e) = sink::swap_staging_table(&client, &config.schema, &stream_ctx.stream_name).await {
-                    return make_err_response(ConnectorError::transient_db(
-                        "SWAP_FAILED",
-                        format!("Staging table swap failed: {}", e),
-                    ));
+            // Phase 4: Commit
+            let result = match session.commit().await {
+                Ok(r) => r,
+                Err(e) => {
+                    return make_err_response(
+                        ConnectorError::transient_db("COMMIT_FAILED", e)
+                            .with_commit_state(CommitState::BeforeCommit),
+                    );
                 }
-                // Clear watermark — replace mode is a complete refresh, no resume needed
-                let _ = sink::clear_watermark(&client, &config.schema, &stream_ctx.stream_name).await;
-            }
-
-            host_ffi::log(
-                2,
-                &format!(
-                    "dest-postgres: flushed {} rows in {} batches via {} (connect={:.3}s flush={:.3}s commit={:.3}s)",
-                    total_rows, batches_written, config.load_method, connect_secs, flush_secs, commit_secs
-                ),
-            );
+            };
 
             let summary = WriteSummary {
-                records_written: total_rows,
-                bytes_written: total_bytes,
-                batches_written,
-                checkpoint_count,
-                records_failed: total_failed,
+                records_written: result.total_rows,
+                bytes_written: result.total_bytes,
+                batches_written: result.batches_written,
+                checkpoint_count: result.checkpoint_count,
+                records_failed: result.total_failed,
                 perf: Some(WritePerf {
                     connect_secs,
-                    flush_secs,
-                    commit_secs,
+                    flush_secs: result.flush_secs,
+                    commit_secs: result.commit_secs,
                 }),
             };
             make_ok_response(summary)
