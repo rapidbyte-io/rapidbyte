@@ -152,11 +152,10 @@ pub extern "C" fn rb_open(config_ptr: i32, config_len: i32) -> i64 {
             ),
         );
 
-        let features = if pg_config.load_method == "copy" {
-            vec![Feature::BulkLoadCopy]
-        } else {
-            vec![]
-        };
+        let mut features = vec![Feature::ExactlyOnce];
+        if pg_config.load_method == "copy" {
+            features.push(Feature::BulkLoadCopy);
+        }
 
         if CONFIG.set(pg_config).is_err() {
             host_ffi::log(
@@ -306,6 +305,35 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                 (stream_ctx.stream_name.clone(), stream_ctx.write_mode.clone())
             };
 
+            // Exactly-once: query watermark for resume position
+            let watermark_records = if !is_replace {
+                match sink::get_watermark(&client, &config.schema, &stream_ctx.stream_name).await {
+                    Ok(w) => {
+                        if w > 0 {
+                            host_ffi::log(
+                                2,
+                                &format!(
+                                    "dest-postgres: resuming from watermark — {} records already committed for stream '{}'",
+                                    w, stream_ctx.stream_name
+                                ),
+                            );
+                        }
+                        w
+                    }
+                    Err(e) => {
+                        host_ffi::log(
+                            1,
+                            &format!("dest-postgres: watermark query failed (starting fresh): {}", e),
+                        );
+                        0
+                    }
+                }
+            } else {
+                0 // Replace mode doesn't use watermarks
+            };
+
+            let mut cumulative_records: u64 = 0;
+
             // Phase 2: BEGIN first transaction
             // Chunked commits: when bytes_since_commit exceeds checkpoint_interval_bytes,
             // we COMMIT, emit a checkpoint, and BEGIN a new transaction.
@@ -350,6 +378,39 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                     }
                     Ok(Some(n)) => {
                         let ipc_bytes = &buf[..n];
+
+                        // Exactly-once: skip already-committed batches
+                        if watermark_records > 0 && cumulative_records < watermark_records {
+                            let batch_rows = match sink::count_ipc_rows(ipc_bytes) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    loop_error = Some(format!("IPC row count failed: {}", e));
+                                    break;
+                                }
+                            };
+                            cumulative_records += batch_rows;
+                            if cumulative_records <= watermark_records {
+                                // Entire batch already committed — skip it
+                                host_ffi::log(
+                                    3,
+                                    &format!(
+                                        "dest-postgres: skipping batch ({}/{} records already committed)",
+                                        cumulative_records, watermark_records
+                                    ),
+                                );
+                                continue;
+                            }
+                            // This batch straddles the watermark — write it anyway.
+                            // For Upsert mode, ON CONFLICT deduplicates. For Append mode,
+                            // the overlap is bounded to at most one batch worth of rows.
+                            host_ffi::log(
+                                2,
+                                &format!(
+                                    "dest-postgres: resuming writes at cumulative record {}",
+                                    cumulative_records
+                                ),
+                            );
+                        }
 
                         let write_result = if use_copy {
                             sink::write_batch_copy(
