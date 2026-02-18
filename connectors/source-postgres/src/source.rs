@@ -42,15 +42,30 @@ fn estimate_batch_bytes(rows: &[tokio_postgres::Row], columns: &[ColumnSchema]) 
     total
 }
 
+/// Estimate byte size of a single row for max_record_bytes checking.
+fn estimate_row_bytes(row: &tokio_postgres::Row, columns: &[ColumnSchema]) -> usize {
+    let mut total = 0usize;
+    for (col_idx, col) in columns.iter().enumerate() {
+        total += match col.data_type.as_str() {
+            "Int16" => 2,
+            "Int32" | "Float32" => 4,
+            "Int64" | "Float64" => 8,
+            "Boolean" => 1,
+            _ => row
+                .try_get::<_, String>(col_idx)
+                .map(|s| s.len() + 4)
+                .unwrap_or(4),
+        };
+        total += 1; // null bitmap overhead per column
+    }
+    total
+}
+
 /// Read a single stream using server-side cursors.
-pub async fn read_stream(
-    client: &Client,
-    ctx: &StreamContext,
-) -> Result<ReadSummary, String> {
+pub async fn read_stream(client: &Client, ctx: &StreamContext) -> Result<ReadSummary, String> {
     host_ffi::log(2, &format!("Reading stream: {}", ctx.stream_name));
 
-    validate_pg_identifier(&ctx.stream_name)
-        .map_err(|e| format!("Invalid stream name: {}", e))?;
+    validate_pg_identifier(&ctx.stream_name).map_err(|e| format!("Invalid stream name: {}", e))?;
 
     // Discover schema using parameterized query
     let schema_query = "SELECT column_name, data_type, is_nullable \
@@ -145,6 +160,13 @@ pub async fn read_stream(
         64 * 1024 * 1024 // 64MB default
     };
 
+    let max_record_bytes = if ctx.limits.max_record_bytes > 0 {
+        ctx.limits.max_record_bytes as usize
+    } else {
+        16 * 1024 * 1024 // 16MB default
+    };
+    let mut records_skipped: u64 = 0;
+
     // For incremental mode, find the cursor column index to track max value
     let cursor_col_idx: Option<usize> = ctx.cursor_info.as_ref().map(|ci| {
         columns
@@ -175,37 +197,101 @@ pub async fn read_stream(
         let exhausted = rows.is_empty();
 
         if !exhausted {
-            estimated_bytes += estimate_batch_bytes(&rows, &columns);
+            // Per-row max_record_bytes enforcement (spec § Data Exchange Format)
+            let mut valid_rows: Vec<tokio_postgres::Row> = Vec::with_capacity(rows.len());
+            for row in rows {
+                let row_bytes = estimate_row_bytes(&row, &columns);
+                if row_bytes > max_record_bytes {
+                    match ctx.policies.on_data_error {
+                        rapidbyte_sdk::protocol::DataErrorPolicy::Fail => {
+                            loop_error = Some(format!(
+                                "Record exceeds max_record_bytes ({} > {})",
+                                row_bytes, max_record_bytes,
+                            ));
+                            break;
+                        }
+                        _ => {
+                            // Skip (or DLQ — treated as skip for now)
+                            records_skipped += 1;
+                            host_ffi::log(
+                                1, // warn
+                                &format!(
+                                    "Skipping oversized record: {} bytes > max_record_bytes {}",
+                                    row_bytes, max_record_bytes,
+                                ),
+                            );
+                            continue;
+                        }
+                    }
+                }
+                valid_rows.push(row);
+            }
 
-            // Track max cursor value for incremental checkpoint
-            if let Some(col_idx) = cursor_col_idx {
-                for row in &rows {
-                    // Try string first, then integer types — store as string for state backend
-                    let val: Option<String> = row
-                        .try_get::<_, String>(col_idx)
-                        .ok()
-                        .or_else(|| row.try_get::<_, i64>(col_idx).ok().map(|n| n.to_string()))
-                        .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(|n| n.to_string()));
+            if loop_error.is_some() {
+                break;
+            }
 
-                    if let Some(val) = val {
-                        match &max_cursor_value {
-                            None => max_cursor_value = Some(val),
-                            Some(current) => {
-                                // For numeric strings, compare numerically if possible
-                                let is_greater = match (val.parse::<i64>(), current.parse::<i64>()) {
-                                    (Ok(a), Ok(b)) => a > b,
-                                    _ => val > *current, // fallback to string comparison
-                                };
-                                if is_greater {
-                                    max_cursor_value = Some(val);
+            if !valid_rows.is_empty() {
+                let chunk_bytes = estimate_batch_bytes(&valid_rows, &columns);
+
+                // Pre-flush: if adding this chunk would exceed max_batch_bytes,
+                // emit the current batch first (spec: max_batch_bytes is a hard limit)
+                if !accumulated_rows.is_empty() && estimated_bytes + chunk_bytes >= max_batch_bytes
+                {
+                    match rows_to_record_batch(&accumulated_rows, &columns, &arrow_schema)
+                        .and_then(|batch| batch_to_ipc(&batch))
+                    {
+                        Ok(ipc_bytes) => {
+                            total_records += accumulated_rows.len() as u64;
+                            total_bytes += ipc_bytes.len() as u64;
+                            batches_emitted += 1;
+
+                            if let Err(e) = host_ffi::emit_batch(&ipc_bytes) {
+                                loop_error = Some(format!("emit_batch failed: {}", e));
+                                break;
+                            }
+
+                            accumulated_rows.clear();
+                            estimated_bytes = 256; // IPC framing overhead
+                        }
+                        Err(e) => {
+                            loop_error = Some(e);
+                            break;
+                        }
+                    }
+                }
+
+                estimated_bytes += chunk_bytes;
+
+                // Track max cursor value for incremental checkpoint
+                if let Some(col_idx) = cursor_col_idx {
+                    for row in &valid_rows {
+                        let val: Option<String> = row
+                            .try_get::<_, String>(col_idx)
+                            .ok()
+                            .or_else(|| row.try_get::<_, i64>(col_idx).ok().map(|n| n.to_string()))
+                            .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(|n| n.to_string()));
+
+                        if let Some(val) = val {
+                            match &max_cursor_value {
+                                None => max_cursor_value = Some(val),
+                                Some(current) => {
+                                    let is_greater =
+                                        match (val.parse::<i64>(), current.parse::<i64>()) {
+                                            (Ok(a), Ok(b)) => a > b,
+                                            _ => val > *current,
+                                        };
+                                    if is_greater {
+                                        max_cursor_value = Some(val);
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
 
-            accumulated_rows.extend(rows);
+                accumulated_rows.extend(valid_rows);
+            }
         }
 
         let should_emit = !accumulated_rows.is_empty()
@@ -259,30 +345,29 @@ pub async fn read_stream(
     }
 
     // Emit source checkpoint with cursor position for incremental state tracking
-    let checkpoint_count = if let (Some(ref ci), Some(ref max_val)) =
-        (&ctx.cursor_info, &max_cursor_value)
-    {
-        let cp = rapidbyte_sdk::protocol::Checkpoint {
-            id: 1,
-            kind: rapidbyte_sdk::protocol::CheckpointKind::Source,
-            stream: ctx.stream_name.clone(),
-            cursor_field: Some(ci.cursor_field.clone()),
-            cursor_value: Some(rapidbyte_sdk::protocol::CursorValue::Utf8(max_val.clone())),
-            records_processed: total_records,
-            bytes_processed: total_bytes,
+    let checkpoint_count =
+        if let (Some(ref ci), Some(ref max_val)) = (&ctx.cursor_info, &max_cursor_value) {
+            let cp = rapidbyte_sdk::protocol::Checkpoint {
+                id: 1,
+                kind: rapidbyte_sdk::protocol::CheckpointKind::Source,
+                stream: ctx.stream_name.clone(),
+                cursor_field: Some(ci.cursor_field.clone()),
+                cursor_value: Some(rapidbyte_sdk::protocol::CursorValue::Utf8(max_val.clone())),
+                records_processed: total_records,
+                bytes_processed: total_bytes,
+            };
+            let _ = host_ffi::checkpoint("source-postgres", &ctx.stream_name, &cp);
+            host_ffi::log(
+                2,
+                &format!(
+                    "Source checkpoint: stream={} cursor_field={} cursor_value={}",
+                    ctx.stream_name, ci.cursor_field, max_val
+                ),
+            );
+            1u64
+        } else {
+            0u64
         };
-        let _ = host_ffi::checkpoint("source-postgres", &ctx.stream_name, &cp);
-        host_ffi::log(
-            2,
-            &format!(
-                "Source checkpoint: stream={} cursor_field={} cursor_value={}",
-                ctx.stream_name, ci.cursor_field, max_val
-            ),
-        );
-        1u64
-    } else {
-        0u64
-    };
 
     host_ffi::log(
         2,
@@ -297,6 +382,7 @@ pub async fn read_stream(
         bytes_read: total_bytes,
         batches_emitted,
         checkpoint_count,
+        records_skipped,
     })
 }
 
@@ -327,65 +413,67 @@ fn rows_to_record_batch(
     let arrays: Vec<Arc<dyn arrow::array::Array>> = columns
         .iter()
         .enumerate()
-        .map(|(col_idx, col)| -> Result<Arc<dyn arrow::array::Array>, String> {
-            match col.data_type.as_str() {
-                "Int16" => {
-                    let values: Vec<Option<i16>> = rows
-                        .iter()
-                        .map(|row| row.try_get::<_, i16>(col_idx).ok())
-                        .collect();
-                    Ok(Arc::new(Int16Array::from(values)))
-                }
-                "Int32" => {
-                    let values: Vec<Option<i32>> = rows
-                        .iter()
-                        .map(|row| row.try_get::<_, i32>(col_idx).ok())
-                        .collect();
-                    Ok(Arc::new(Int32Array::from(values)))
-                }
-                "Int64" => {
-                    let values: Vec<Option<i64>> = rows
-                        .iter()
-                        .map(|row| row.try_get::<_, i64>(col_idx).ok())
-                        .collect();
-                    Ok(Arc::new(Int64Array::from(values)))
-                }
-                "Float32" => {
-                    let values: Vec<Option<f32>> = rows
-                        .iter()
-                        .map(|row| row.try_get::<_, f32>(col_idx).ok())
-                        .collect();
-                    Ok(Arc::new(Float32Array::from(values)))
-                }
-                "Float64" => {
-                    let values: Vec<Option<f64>> = rows
-                        .iter()
-                        .map(|row| row.try_get::<_, f64>(col_idx).ok())
-                        .collect();
-                    Ok(Arc::new(Float64Array::from(values)))
-                }
-                "Boolean" => {
-                    let values: Vec<Option<bool>> = rows
-                        .iter()
-                        .map(|row| row.try_get::<_, bool>(col_idx).ok())
-                        .collect();
-                    Ok(Arc::new(BooleanArray::from(values)))
-                }
-                _ => {
-                    // Utf8 fallback — try to get as String
-                    let values: Vec<Option<String>> = rows
-                        .iter()
-                        .map(|row| row.try_get::<_, String>(col_idx).ok())
-                        .collect();
-                    Ok(Arc::new(StringArray::from(
-                        values
+        .map(
+            |(col_idx, col)| -> Result<Arc<dyn arrow::array::Array>, String> {
+                match col.data_type.as_str() {
+                    "Int16" => {
+                        let values: Vec<Option<i16>> = rows
                             .iter()
-                            .map(|v| v.as_deref())
-                            .collect::<Vec<Option<&str>>>(),
-                    )))
+                            .map(|row| row.try_get::<_, i16>(col_idx).ok())
+                            .collect();
+                        Ok(Arc::new(Int16Array::from(values)))
+                    }
+                    "Int32" => {
+                        let values: Vec<Option<i32>> = rows
+                            .iter()
+                            .map(|row| row.try_get::<_, i32>(col_idx).ok())
+                            .collect();
+                        Ok(Arc::new(Int32Array::from(values)))
+                    }
+                    "Int64" => {
+                        let values: Vec<Option<i64>> = rows
+                            .iter()
+                            .map(|row| row.try_get::<_, i64>(col_idx).ok())
+                            .collect();
+                        Ok(Arc::new(Int64Array::from(values)))
+                    }
+                    "Float32" => {
+                        let values: Vec<Option<f32>> = rows
+                            .iter()
+                            .map(|row| row.try_get::<_, f32>(col_idx).ok())
+                            .collect();
+                        Ok(Arc::new(Float32Array::from(values)))
+                    }
+                    "Float64" => {
+                        let values: Vec<Option<f64>> = rows
+                            .iter()
+                            .map(|row| row.try_get::<_, f64>(col_idx).ok())
+                            .collect();
+                        Ok(Arc::new(Float64Array::from(values)))
+                    }
+                    "Boolean" => {
+                        let values: Vec<Option<bool>> = rows
+                            .iter()
+                            .map(|row| row.try_get::<_, bool>(col_idx).ok())
+                            .collect();
+                        Ok(Arc::new(BooleanArray::from(values)))
+                    }
+                    _ => {
+                        // Utf8 fallback — try to get as String
+                        let values: Vec<Option<String>> = rows
+                            .iter()
+                            .map(|row| row.try_get::<_, String>(col_idx).ok())
+                            .collect();
+                        Ok(Arc::new(StringArray::from(
+                            values
+                                .iter()
+                                .map(|v| v.as_deref())
+                                .collect::<Vec<Option<&str>>>(),
+                        )))
+                    }
                 }
-            }
-        })
+            },
+        )
         .collect::<Result<Vec<_>, _>>()?;
 
     RecordBatch::try_new(schema.clone(), arrays)
