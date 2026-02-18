@@ -9,7 +9,7 @@ use rapidbyte_sdk::protocol::{
 };
 
 use super::memory_protocol;
-use crate::engine::orchestrator::PipelineError;
+use crate::engine::errors::PipelineError;
 
 /// High-level typed wrapper around raw Wasm VM calls.
 ///
