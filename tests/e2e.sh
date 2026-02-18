@@ -27,6 +27,8 @@ cleanup() {
     docker compose -f "$PROJECT_ROOT/docker-compose.yml" down -v 2>/dev/null || true
     rm -f /tmp/rapidbyte_e2e_state.db
     rm -f /tmp/rapidbyte_e2e_incr_state.db
+    rm -f /tmp/rapidbyte_e2e_replace_state.db
+    rm -f /tmp/rapidbyte_e2e_upsert_state.db
 }
 
 # ── Step 1: Build everything ────────────────────────────────────────
@@ -230,4 +232,101 @@ echo -e "${GREEN}  INCREMENTAL SYNC TEST PASSED             ${NC}"
 echo -e "${GREEN}  Run 1: 3 rows (initial load)             ${NC}"
 echo -e "${GREEN}  Run 2: 5 rows total (2 new appended)     ${NC}"
 echo -e "${GREEN}  Cursor: $CURSOR_VAL -> $CURSOR_VAL_2     ${NC}"
+echo -e "${GREEN}═══════════════════════════════════════════${NC}"
+
+# ══════════════════════════════════════════════════════════════════════
+# ── Replace Write Mode Test ─────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+
+info "=== Replace Write Mode Test ==="
+
+rm -f /tmp/rapidbyte_e2e_replace_state.db
+
+# Run 1: Initial load
+info "Running replace pipeline (run 1 — initial load)..."
+"$PROJECT_ROOT/target/debug/rapidbyte" run \
+    "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_replace.yaml" \
+    --log-level debug 2>&1
+
+REPLACE_COUNT_1=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -t -A -c "SELECT COUNT(*) FROM raw_replace.users")
+info "After run 1: raw_replace.users=$REPLACE_COUNT_1"
+if [ "$REPLACE_COUNT_1" -ne 5 ]; then
+    fail "Expected 5 rows after replace run 1, got $REPLACE_COUNT_1"
+fi
+
+# Run 2: Should TRUNCATE then re-insert (still 5 rows, not 10)
+info "Running replace pipeline (run 2 — should truncate and re-insert)..."
+"$PROJECT_ROOT/target/debug/rapidbyte" run \
+    "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_replace.yaml" \
+    --log-level debug 2>&1
+
+REPLACE_COUNT_2=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -t -A -c "SELECT COUNT(*) FROM raw_replace.users")
+info "After run 2: raw_replace.users=$REPLACE_COUNT_2"
+if [ "$REPLACE_COUNT_2" -ne 5 ]; then
+    fail "Replace mode failed: expected 5 rows after run 2, got $REPLACE_COUNT_2 (data was duplicated)"
+fi
+
+echo ""
+echo -e "${GREEN}═══════════════════════════════════════════${NC}"
+echo -e "${GREEN}  REPLACE WRITE MODE TEST PASSED           ${NC}"
+echo -e "${GREEN}  Run 1: 5 rows (initial)                  ${NC}"
+echo -e "${GREEN}  Run 2: 5 rows (truncated + re-inserted)  ${NC}"
+echo -e "${GREEN}═══════════════════════════════════════════${NC}"
+
+# ══════════════════════════════════════════════════════════════════════
+# ── Upsert Write Mode Test ──────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+
+info "=== Upsert Write Mode Test ==="
+
+rm -f /tmp/rapidbyte_e2e_upsert_state.db
+
+# Run 1: Initial load (upsert into empty table = plain insert)
+info "Running upsert pipeline (run 1 — initial load)..."
+"$PROJECT_ROOT/target/debug/rapidbyte" run \
+    "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_upsert.yaml" \
+    --log-level debug 2>&1
+
+UPSERT_COUNT_1=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -t -A -c "SELECT COUNT(*) FROM raw_upsert.users")
+info "After run 1: raw_upsert.users=$UPSERT_COUNT_1"
+if [ "$UPSERT_COUNT_1" -ne 5 ]; then
+    fail "Expected 5 rows after upsert run 1, got $UPSERT_COUNT_1"
+fi
+
+# Modify source data (update Alice's email)
+docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -c \
+    "UPDATE users SET email = 'alice-updated@example.com' WHERE name = 'Alice';" -q
+
+# Run 2: Should upsert (update existing rows, no duplicates)
+info "Running upsert pipeline (run 2 — should update existing rows)..."
+"$PROJECT_ROOT/target/debug/rapidbyte" run \
+    "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_upsert.yaml" \
+    --log-level debug 2>&1
+
+UPSERT_COUNT_2=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -t -A -c "SELECT COUNT(*) FROM raw_upsert.users")
+info "After run 2: raw_upsert.users=$UPSERT_COUNT_2"
+if [ "$UPSERT_COUNT_2" -ne 5 ]; then
+    fail "Upsert mode failed: expected 5 rows after run 2, got $UPSERT_COUNT_2 (data was duplicated)"
+fi
+
+# Verify the update was applied
+ALICE_EMAIL_UPSERT=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -t -A -c \
+    "SELECT email FROM raw_upsert.users WHERE name = 'Alice'")
+info "Alice's email after upsert: $ALICE_EMAIL_UPSERT"
+if [ "$ALICE_EMAIL_UPSERT" != "alice-updated@example.com" ]; then
+    fail "Upsert did not update Alice's email: got '$ALICE_EMAIL_UPSERT'"
+fi
+
+echo ""
+echo -e "${GREEN}═══════════════════════════════════════════${NC}"
+echo -e "${GREEN}  UPSERT WRITE MODE TEST PASSED            ${NC}"
+echo -e "${GREEN}  Run 1: 5 rows (initial insert)           ${NC}"
+echo -e "${GREEN}  Run 2: 5 rows (upserted, no duplicates)  ${NC}"
+echo -e "${GREEN}  Alice email: updated correctly            ${NC}"
 echo -e "${GREEN}═══════════════════════════════════════════${NC}"
