@@ -73,11 +73,8 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
     let dest_wasm = wasm_runtime::resolve_connector_path(&config.destination.use_ref)?;
 
     // 1b. Load and validate manifests (pre-flight)
-    let _source_manifest = load_and_validate_manifest(
-        &source_wasm,
-        &config.source.use_ref,
-        ConnectorRole::Source,
-    )?;
+    let _source_manifest =
+        load_and_validate_manifest(&source_wasm, &config.source.use_ref, ConnectorRole::Source)?;
     let _dest_manifest = load_and_validate_manifest(
         &dest_wasm,
         &config.destination.use_ref,
@@ -106,11 +103,8 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
         .iter()
         .map(|tc| {
             let wasm_path = wasm_runtime::resolve_connector_path(&tc.use_ref)?;
-            let _manifest = load_and_validate_manifest(
-                &wasm_path,
-                &tc.use_ref,
-                ConnectorRole::Transform,
-            )?;
+            let _manifest =
+                load_and_validate_manifest(&wasm_path, &tc.use_ref, ConnectorRole::Transform)?;
             let load_start = Instant::now();
             let module = runtime.load_module(&wasm_path)?;
             let load_ms = load_start.elapsed().as_millis() as u64;
@@ -442,11 +436,8 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     let dest_wasm = wasm_runtime::resolve_connector_path(&config.destination.use_ref)?;
 
     // 1b. Validate manifests
-    let source_manifest = load_and_validate_manifest(
-        &source_wasm,
-        &config.source.use_ref,
-        ConnectorRole::Source,
-    )?;
+    let source_manifest =
+        load_and_validate_manifest(&source_wasm, &config.source.use_ref, ConnectorRole::Source)?;
     let dest_manifest = load_and_validate_manifest(
         &dest_wasm,
         &config.destination.use_ref,
@@ -483,11 +474,8 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     let mut transform_validations = Vec::new();
     for tc in &config.transforms {
         let wasm_path = wasm_runtime::resolve_connector_path(&tc.use_ref)?;
-        let _manifest = load_and_validate_manifest(
-            &wasm_path,
-            &tc.use_ref,
-            ConnectorRole::Transform,
-        )?;
+        let _manifest =
+            load_and_validate_manifest(&wasm_path, &tc.use_ref, ConnectorRole::Transform)?;
         let config_val = tc.config.clone();
         let (tc_id, tc_ver) = parse_connector_ref(&tc.use_ref);
         let result = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {

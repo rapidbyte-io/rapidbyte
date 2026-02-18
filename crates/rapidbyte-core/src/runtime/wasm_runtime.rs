@@ -158,10 +158,7 @@ pub fn resolve_connector_path(connector_ref: &str) -> Result<std::path::PathBuf>
 /// Derive the manifest file path from a WASM binary path.
 /// `source_postgres.wasm` -> `source_postgres.manifest.json`
 pub fn manifest_path_from_wasm(wasm_path: &Path) -> std::path::PathBuf {
-    let stem = wasm_path
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy();
+    let stem = wasm_path.file_stem().unwrap_or_default().to_string_lossy();
     wasm_path.with_file_name(format!("{}.manifest.json", stem))
 }
 

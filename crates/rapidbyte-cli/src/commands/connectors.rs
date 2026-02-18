@@ -27,11 +27,8 @@ pub async fn execute() -> Result<()> {
                 found = true;
                 match wasm_runtime::load_connector_manifest(&path)? {
                     Some(manifest) => {
-                        let roles: Vec<String> = manifest
-                            .roles
-                            .iter()
-                            .map(|r| format!("{:?}", r))
-                            .collect();
+                        let roles: Vec<String> =
+                            manifest.roles.iter().map(|r| format!("{:?}", r)).collect();
                         let features: Vec<String> = manifest
                             .features
                             .iter()
