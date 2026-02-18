@@ -854,12 +854,37 @@ async fn apply_schema_policy(
                     col_name, old_type, new_type
                 ));
             }
-            TypeChangePolicy::Coerce | TypeChangePolicy::Null => {
+            TypeChangePolicy::Coerce => {
+                validate_pg_identifier(col_name)
+                    .map_err(|e| format!("Invalid column name '{}': {}", col_name, e))?;
+                let sql = format!(
+                    "ALTER TABLE {} ALTER COLUMN \"{}\" TYPE {} USING \"{}\"::{}",
+                    qualified_table, col_name, new_type, col_name, new_type
+                );
+                client
+                    .execute(&sql, &[])
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "Schema evolution: ALTER COLUMN '{}' TYPE {} failed: {}. \
+                             Existing data may not be castable to the new type.",
+                            col_name, new_type, e
+                        )
+                    })?;
                 host_ffi::log(
-                    1,
+                    2,
                     &format!(
-                        "dest-postgres: type change for '{}' ({} -> {}), policy={:?}",
-                        col_name, old_type, new_type, policy.type_change
+                        "dest-postgres: coerced '{}' from {} to {}",
+                        col_name, old_type, new_type
+                    ),
+                );
+            }
+            TypeChangePolicy::Null => {
+                host_ffi::log(
+                    2,
+                    &format!(
+                        "dest-postgres: type change for '{}' ({} -> {}), policy=Null — values will be NULL",
+                        col_name, old_type, new_type
                     ),
                 );
             }
@@ -876,13 +901,51 @@ async fn apply_schema_policy(
                 ));
             }
             NullabilityPolicy::Allow => {
-                host_ffi::log(
-                    3,
-                    &format!(
-                        "dest-postgres: allowing nullability change for '{}'",
-                        col_name
-                    ),
-                );
+                let col = col_name.as_str();
+                validate_pg_identifier(col)
+                    .map_err(|e| format!("Invalid column name '{}': {}", col, e))?;
+
+                if *was_nullable && !now_nullable {
+                    // nullable -> NOT NULL: tighten constraint
+                    let sql = format!(
+                        "ALTER TABLE {} ALTER COLUMN \"{}\" SET NOT NULL",
+                        qualified_table, col
+                    );
+                    match client.execute(&sql, &[]).await {
+                        Ok(_) => {
+                            host_ffi::log(
+                                2,
+                                &format!("dest-postgres: SET NOT NULL on '{}'", col),
+                            );
+                        }
+                        Err(e) => {
+                            // Existing NULLs prevent SET NOT NULL — log and continue
+                            host_ffi::log(
+                                1,
+                                &format!(
+                                    "dest-postgres: SET NOT NULL on '{}' failed (existing NULLs?): {}",
+                                    col, e
+                                ),
+                            );
+                        }
+                    }
+                } else if !was_nullable && *now_nullable {
+                    // NOT NULL -> nullable: relax constraint
+                    let sql = format!(
+                        "ALTER TABLE {} ALTER COLUMN \"{}\" DROP NOT NULL",
+                        qualified_table, col
+                    );
+                    client
+                        .execute(&sql, &[])
+                        .await
+                        .map_err(|e| {
+                            format!("ALTER TABLE DROP NOT NULL on '{}' failed: {}", col, e)
+                        })?;
+                    host_ffi::log(
+                        2,
+                        &format!("dest-postgres: DROP NOT NULL on '{}'", col),
+                    );
+                }
             }
         }
     }
