@@ -5,6 +5,8 @@ pub struct PipelineConfig {
     pub version: String,
     pub pipeline: String,
     pub source: SourceConfig,
+    #[serde(default)]
+    pub transforms: Vec<TransformConfig>,
     pub destination: DestinationConfig,
     #[serde(default)]
     pub state: StateConfig,
@@ -25,6 +27,13 @@ pub struct StreamConfig {
     pub name: String,
     pub sync_mode: String,
     pub cursor_field: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransformConfig {
+    #[serde(rename = "use")]
+    pub use_ref: String,
+    pub config: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,5 +234,94 @@ resources:
         assert_eq!(parse_byte_size("1024"), 1024);
         assert_eq!(parse_byte_size("0"), 0);
         assert_eq!(parse_byte_size("  64MB  "), 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_deserialize_pipeline_with_transforms() {
+        let yaml = r#"
+version: "1.0"
+pipeline: transform_test
+
+source:
+  use: source-postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: full_refresh
+
+transforms:
+  - use: rapidbyte/transform-mask@v0.1.0
+    config:
+      columns:
+        - email
+
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+  write_mode: append
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.transforms.len(), 1);
+        assert_eq!(config.transforms[0].use_ref, "rapidbyte/transform-mask@v0.1.0");
+    }
+
+    #[test]
+    fn test_deserialize_pipeline_without_transforms_defaults_empty() {
+        let yaml = r#"
+version: "1.0"
+pipeline: no_transforms
+
+source:
+  use: source-postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: full_refresh
+
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+  write_mode: append
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.transforms.is_empty());
+    }
+
+    #[test]
+    fn test_deserialize_pipeline_multiple_transforms() {
+        let yaml = r#"
+version: "1.0"
+pipeline: multi_transform
+
+source:
+  use: source-postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: full_refresh
+
+transforms:
+  - use: transform-mask@v0.1.0
+    config:
+      columns: [email]
+  - use: transform-filter@v0.1.0
+    config:
+      condition: "active = true"
+
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+  write_mode: append
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.transforms.len(), 2);
+        assert_eq!(config.transforms[0].use_ref, "transform-mask@v0.1.0");
+        assert_eq!(config.transforms[1].use_ref, "transform-filter@v0.1.0");
     }
 }
