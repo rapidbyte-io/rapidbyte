@@ -92,9 +92,46 @@ pub async fn read_stream_v1(
         .await
         .map_err(|e| format!("BEGIN failed: {}", e))?;
 
+    // Build the query based on sync mode and cursor info
+    let base_query = if let (rapidbyte_sdk::protocol::SyncMode::Incremental, Some(ref ci)) =
+        (&ctx.sync_mode, &ctx.cursor_info)
+    {
+        validate_pg_identifier(&ci.cursor_field)
+            .map_err(|e| format!("Invalid cursor field: {}", e))?;
+
+        if let Some(ref last_value) = ci.last_value {
+            let literal = cursor_value_to_sql_literal(last_value);
+            host_ffi::log(
+                2,
+                &format!(
+                    "Incremental read: {} WHERE \"{}\" > {}",
+                    ctx.stream_name, ci.cursor_field, literal
+                ),
+            );
+            format!(
+                "SELECT * FROM \"{}\" WHERE \"{}\" > {} ORDER BY \"{}\"",
+                ctx.stream_name, ci.cursor_field, literal, ci.cursor_field
+            )
+        } else {
+            host_ffi::log(
+                2,
+                &format!(
+                    "Incremental read (no prior cursor): {} ORDER BY \"{}\"",
+                    ctx.stream_name, ci.cursor_field
+                ),
+            );
+            format!(
+                "SELECT * FROM \"{}\" ORDER BY \"{}\"",
+                ctx.stream_name, ci.cursor_field
+            )
+        }
+    } else {
+        format!("SELECT * FROM \"{}\"", ctx.stream_name)
+    };
+
     let declare = format!(
-        "DECLARE {} NO SCROLL CURSOR FOR SELECT * FROM \"{}\"",
-        CURSOR_NAME, ctx.stream_name
+        "DECLARE {} NO SCROLL CURSOR FOR {}",
+        CURSOR_NAME, base_query
     );
     client
         .execute(&declare, &[])
@@ -313,5 +350,33 @@ fn pg_type_to_arrow(pg_type: &str) -> &'static str {
         "double precision" | "float8" => "Float64",
         "boolean" | "bool" => "Boolean",
         _ => "Utf8",
+    }
+}
+
+/// Convert a CursorValue to a SQL literal for use in WHERE clauses.
+fn cursor_value_to_sql_literal(value: &rapidbyte_sdk::protocol::CursorValue) -> String {
+    use rapidbyte_sdk::protocol::CursorValue;
+    match value {
+        CursorValue::Null => "NULL".to_string(),
+        CursorValue::Int64(n) => n.to_string(),
+        CursorValue::Utf8(s) => format!("'{}'", s.replace('\'', "''")),
+        CursorValue::TimestampMillis(ms) => {
+            let secs = ms / 1000;
+            let nsecs = ((ms % 1000) * 1_000_000) as u32;
+            let ts = chrono::DateTime::from_timestamp(secs, nsecs)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string())
+                .unwrap_or_else(|| ms.to_string());
+            format!("'{}'", ts)
+        }
+        CursorValue::TimestampMicros(us) => {
+            let secs = us / 1_000_000;
+            let nsecs = ((us % 1_000_000) * 1_000) as u32;
+            let ts = chrono::DateTime::from_timestamp(secs, nsecs)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
+                .unwrap_or_else(|| us.to_string());
+            format!("'{}'", ts)
+        }
+        CursorValue::Decimal { value, .. } => value.clone(),
+        CursorValue::Json(v) => format!("'{}'", v.to_string().replace('\'', "''")),
     }
 }
