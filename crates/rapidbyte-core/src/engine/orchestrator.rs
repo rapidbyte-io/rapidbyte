@@ -6,14 +6,14 @@ use anyhow::{Context, Result};
 
 use rapidbyte_sdk::errors::ValidationResult;
 use rapidbyte_sdk::protocol::{
-    CursorInfo, CursorType, CursorValue,
-    SchemaHint, StreamContext, StreamLimits, StreamPolicies, SyncMode, WriteMode,
+    CursorInfo, CursorType, CursorValue, SchemaHint, StreamContext, StreamLimits, StreamPolicies,
+    SyncMode, WriteMode,
 };
 
 use super::checkpoint::correlate_and_persist_cursors;
 use super::errors::{compute_backoff, PipelineError};
+use super::runner::{run_destination, run_source, run_transform, validate_connector};
 pub use super::runner::{CheckResult, PipelineResult};
-use super::runner::{run_destination, run_source, validate_connector};
 use crate::pipeline::types::{parse_byte_size, PipelineConfig};
 use crate::runtime::host_functions::Frame;
 use crate::runtime::wasm_runtime::{self, parse_connector_ref, WasmRuntime};
@@ -88,12 +88,30 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
     let dest_module = runtime.load_module(&dest_wasm)?;
     let dest_module_load_ms = dest_load_start.elapsed().as_millis() as u64;
 
+    // 3b. Load transform modules (in order)
+    let transform_modules = config
+        .transforms
+        .iter()
+        .map(|tc| {
+            let wasm_path = wasm_runtime::resolve_connector_path(&tc.use_ref)?;
+            let load_start = Instant::now();
+            let module = runtime.load_module(&wasm_path)?;
+            let load_ms = load_start.elapsed().as_millis() as u64;
+            let (id, ver) = parse_connector_ref(&tc.use_ref);
+            Ok((module, id, ver, tc.config.clone(), load_ms))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
     // 4. Build stream contexts from config
     let max_batch = parse_byte_size(&config.resources.max_batch_bytes);
     let checkpoint_interval = parse_byte_size(&config.resources.checkpoint_interval_bytes);
 
     let limits = StreamLimits {
-        max_batch_bytes: if max_batch > 0 { max_batch } else { StreamLimits::default().max_batch_bytes },
+        max_batch_bytes: if max_batch > 0 {
+            max_batch
+        } else {
+            StreamLimits::default().max_batch_bytes
+        },
         checkpoint_interval_bytes: checkpoint_interval,
         ..StreamLimits::default()
     };
@@ -153,21 +171,38 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
     let source_config = config.source.config.clone();
     let dest_config = config.destination.config.clone();
     let pipeline_name = config.pipeline.clone();
-    let (source_connector_id, source_connector_version) = parse_connector_ref(&config.source.use_ref);
-    let (dest_connector_id, dest_connector_version) = parse_connector_ref(&config.destination.use_ref);
+    let (source_connector_id, source_connector_version) =
+        parse_connector_ref(&config.source.use_ref);
+    let (dest_connector_id, dest_connector_version) =
+        parse_connector_ref(&config.destination.use_ref);
     let stats = Arc::new(Mutex::new(RunStats::default()));
 
-    // 5. Run source and dest on blocking threads with per-stream channels
+    // 5. Build channel chain: source -> [transforms] -> dest
+    // For N transforms we need N+1 channels.
+    // Channel i connects stage i to stage i+1.
+    let num_transforms = config.transforms.len();
+    let mut senders: Vec<mpsc::SyncSender<Frame>> = Vec::with_capacity(num_transforms + 1);
+    let mut receivers: Vec<mpsc::Receiver<Frame>> = Vec::with_capacity(num_transforms + 1);
+
+    for _ in 0..=num_transforms {
+        let (tx, rx) = mpsc::sync_channel::<Frame>(16);
+        senders.push(tx);
+        receivers.push(rx);
+    }
+
+    // Source writes to senders[0], dest reads from receivers[num_transforms].
+    // After removal:
+    //   senders  = [s1, s2, ..., s_n]   (n elements for n transforms)
+    //   receivers = [r0, r1, ..., r_{n-1}] (n elements for n transforms)
+    // Transform[i] gets (receivers[i], senders[i]) = (r_i, s_{i+1}).
+    let batch_tx = senders.remove(0);
+    let batch_rx = receivers.pop().unwrap(); // last receiver
+
+    // 5a. Spawn source
     let state_src = state.clone();
-    let state_dst = state.clone();
     let stats_src = stats.clone();
-    let stats_dst = stats.clone();
     let stream_ctxs_clone = stream_ctxs.clone();
     let pipeline_name_src = pipeline_name.clone();
-    let pipeline_name_dst = pipeline_name.clone();
-
-    // Per-stream: create channel, source writes into tx, dest reads from rx
-    let (batch_tx, batch_rx) = mpsc::sync_channel::<Frame>(16);
 
     let source_handle = tokio::task::spawn_blocking(move || {
         run_source(
@@ -183,6 +218,38 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
         )
     });
 
+    // 5b. Spawn transform threads (in pipeline order)
+    let mut transform_handles = Vec::new();
+    for (module, id, ver, tconfig, _load_ms) in transform_modules.into_iter() {
+        let rx = receivers.remove(0);
+        let tx = senders.remove(0);
+        let state_t = state.clone();
+        let stats_t = stats.clone();
+        let stream_ctxs_t = stream_ctxs_clone.clone();
+        let pipeline_name_t = pipeline_name.clone();
+
+        let handle = tokio::task::spawn_blocking(move || {
+            run_transform(
+                module,
+                rx,
+                tx,
+                state_t,
+                &pipeline_name_t,
+                &id,
+                &ver,
+                &tconfig,
+                &stream_ctxs_t,
+                stats_t,
+            )
+        });
+        transform_handles.push(handle);
+    }
+
+    // 5c. Spawn destination
+    let state_dst = state.clone();
+    let stats_dst = stats.clone();
+    let pipeline_name_dst = pipeline_name.clone();
+
     let dest_handle = tokio::task::spawn_blocking(move || {
         run_destination(
             dest_module,
@@ -197,10 +264,49 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
         )
     });
 
-    // 6. Wait for both
-    let source_result = source_handle
-        .await
-        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!("Source task panicked: {}", e)))?;
+    // 6. Wait for all stages
+    let source_result = source_handle.await.map_err(|e| {
+        PipelineError::Infrastructure(anyhow::anyhow!("Source task panicked: {}", e))
+    })?;
+
+    // 6a. Wait for transforms (in order)
+    let mut transform_durations: Vec<f64> = Vec::new();
+    for (i, handle) in transform_handles.into_iter().enumerate() {
+        let result = handle.await.map_err(|e| {
+            PipelineError::Infrastructure(anyhow::anyhow!("Transform {} task panicked: {}", i, e))
+        })?;
+        match result {
+            Ok((duration, summary)) => {
+                tracing::info!(
+                    transform_index = i,
+                    duration_secs = duration,
+                    records_in = summary.records_in,
+                    records_out = summary.records_out,
+                    "Transform stage completed"
+                );
+                transform_durations.push(duration);
+            }
+            Err(e) => {
+                tracing::error!(transform_index = i, "Transform failed: {}", e);
+                // Record failure and propagate
+                let final_stats = stats.lock().unwrap().clone();
+                let state_backend = create_state_backend(config)?;
+                state_backend.complete_run(
+                    run_id,
+                    RunStatus::Failed,
+                    &RunStats {
+                        records_read: final_stats.records_read,
+                        records_written: final_stats.records_written,
+                        bytes_read: final_stats.bytes_read,
+                        error_message: Some(format!("Transform {} error: {}", i, e)),
+                    },
+                )?;
+                return Err(e);
+            }
+        }
+    }
+
+    // 6b. Wait for destination
     let dest_result = dest_handle
         .await
         .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!("Dest task panicked: {}", e)))?;
@@ -208,7 +314,10 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
     let final_stats = stats.lock().unwrap().clone();
 
     match (&source_result, &dest_result) {
-        (Ok((src_dur, read_summary, source_checkpoints)), Ok((dst_dur, write_summary, vm_setup_secs, recv_secs, dest_checkpoints))) => {
+        (
+            Ok((src_dur, read_summary, source_checkpoints)),
+            Ok((dst_dur, write_summary, vm_setup_secs, recv_secs, dest_checkpoints)),
+        ) => {
             let perf = write_summary.perf.as_ref();
             let connector_internal_secs = perf
                 .map(|p| p.connect_secs + p.flush_secs + p.commit_secs)
@@ -299,7 +408,10 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
 
 /// Check a pipeline: validate configuration and connectivity without running.
 pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
-    tracing::info!(pipeline = config.pipeline, "Checking pipeline configuration");
+    tracing::info!(
+        pipeline = config.pipeline,
+        "Checking pipeline configuration"
+    );
 
     // 1. Resolve connector paths
     let source_wasm = wasm_runtime::resolve_connector_path(&config.source.use_ref)?;
@@ -339,9 +451,7 @@ fn create_state_backend(config: &PipelineConfig) -> Result<SqliteStateBackend> {
         None => {
             // Default: ~/.rapidbyte/state.db
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            let state_path = PathBuf::from(home)
-                .join(".rapidbyte")
-                .join("state.db");
+            let state_path = PathBuf::from(home).join(".rapidbyte").join("state.db");
             SqliteStateBackend::new(&state_path).context("Failed to open default state DB")
         }
     }
