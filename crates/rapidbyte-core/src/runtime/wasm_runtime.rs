@@ -165,6 +165,19 @@ pub fn manifest_path_from_wasm(wasm_path: &Path) -> std::path::PathBuf {
     wasm_path.with_file_name(format!("{}.manifest.json", stem))
 }
 
+/// Verify WASM binary checksum against the manifest-declared value.
+pub fn verify_wasm_checksum(wasm_path: &Path, expected_hex: &str) -> Result<bool> {
+    use sha2::{Digest, Sha256};
+
+    let bytes = std::fs::read(wasm_path)
+        .with_context(|| format!("Failed to read WASM binary: {}", wasm_path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let actual = format!("{:x}", hasher.finalize());
+
+    Ok(actual == expected_hex)
+}
+
 /// Load a connector manifest from disk. Returns None if the manifest file
 /// doesn't exist (backwards-compatible with connectors that don't have one yet).
 pub fn load_connector_manifest(wasm_path: &Path) -> Result<Option<ConnectorManifest>> {
@@ -176,6 +189,22 @@ pub fn load_connector_manifest(wasm_path: &Path) -> Result<Option<ConnectorManif
         .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
     let manifest: ConnectorManifest = serde_json::from_str(&content)
         .with_context(|| format!("Failed to parse manifest: {}", manifest_path.display()))?;
+
+    if let Some(ref expected) = manifest.checksum {
+        let valid = verify_wasm_checksum(wasm_path, expected)?;
+        if !valid {
+            anyhow::bail!(
+                "WASM checksum mismatch for {}. Expected: {}, file may be corrupted or tampered.",
+                wasm_path.display(),
+                expected,
+            );
+        }
+        tracing::debug!(
+            path = %wasm_path.display(),
+            "WASM checksum verified"
+        );
+    }
+
     Ok(Some(manifest))
 }
 
@@ -252,5 +281,23 @@ mod tests {
             manifest,
             std::path::PathBuf::from("/plugins/source_postgres.manifest.json")
         );
+    }
+
+    #[test]
+    fn test_verify_checksum_matches() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let wasm_path = dir.path().join("test.wasm");
+        let mut f = std::fs::File::create(&wasm_path).unwrap();
+        f.write_all(b"fake wasm content").unwrap();
+
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"fake wasm content");
+        let expected = format!("{:x}", hasher.finalize());
+
+        assert!(verify_wasm_checksum(&wasm_path, &expected).unwrap());
+        assert!(!verify_wasm_checksum(&wasm_path, "wrong_checksum").unwrap());
     }
 }
