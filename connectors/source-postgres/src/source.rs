@@ -43,7 +43,7 @@ fn estimate_batch_bytes(rows: &[tokio_postgres::Row], columns: &[ColumnSchema]) 
 }
 
 /// Read a single stream using server-side cursors.
-pub async fn read_stream_v1(
+pub async fn read_stream(
     client: &Client,
     ctx: &StreamContext,
 ) -> Result<ReadSummary, String> {
