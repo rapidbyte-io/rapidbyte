@@ -9,10 +9,35 @@ use arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::host_ffi;
-use rapidbyte_sdk::protocol::{ColumnSchema, ReadRequest, ReadSummary, StreamSelection};
+use rapidbyte_sdk::protocol::{ColumnSchema, ReadRequest, ReadSummary, ReadSummaryV1, StreamContext, StreamSelection};
+use rapidbyte_sdk::validation::validate_pg_identifier;
 
 /// Maximum number of rows per Arrow RecordBatch.
 const BATCH_SIZE: usize = 10_000;
+
+/// Number of rows to fetch per server-side cursor iteration.
+const FETCH_CHUNK: usize = 1_000;
+
+/// Estimate Arrow IPC byte size for a set of rows.
+fn estimate_batch_bytes(rows: &[tokio_postgres::Row], columns: &[ColumnSchema]) -> usize {
+    let mut total = 0usize;
+    for row in rows {
+        for (col_idx, col) in columns.iter().enumerate() {
+            total += match col.data_type.as_str() {
+                "Int16" => 2,
+                "Int32" | "Float32" => 4,
+                "Int64" | "Float64" => 8,
+                "Boolean" => 1,
+                _ => row
+                    .try_get::<_, String>(col_idx)
+                    .map(|s| s.len() + 4)
+                    .unwrap_or(4),
+            };
+            total += 1; // null bitmap overhead per column per row
+        }
+    }
+    total
+}
 
 /// Read data from PostgreSQL for each stream in the request,
 /// emitting Arrow IPC batches via the host function.
@@ -106,6 +131,143 @@ async fn read_single_stream(
     );
 
     Ok((total_records, total_bytes))
+}
+
+/// Read a single stream using v1 protocol with server-side cursors.
+pub async fn read_stream_v1(
+    client: &Client,
+    ctx: &StreamContext,
+) -> Result<ReadSummaryV1, String> {
+    host_ffi::log(2, &format!("Reading stream (v1): {}", ctx.stream_name));
+
+    validate_pg_identifier(&ctx.stream_name)
+        .map_err(|e| format!("Invalid stream name: {}", e))?;
+
+    // Discover schema using parameterized query
+    let schema_query = "SELECT column_name, data_type, is_nullable \
+        FROM information_schema.columns \
+        WHERE table_schema = 'public' AND table_name = $1 \
+        ORDER BY ordinal_position";
+
+    let schema_rows = client
+        .query(schema_query, &[&ctx.stream_name])
+        .await
+        .map_err(|e| format!("Schema query failed for {}: {}", ctx.stream_name, e))?;
+
+    let columns: Vec<ColumnSchema> = schema_rows
+        .iter()
+        .map(|row| {
+            let name: String = row.get(0);
+            let data_type: String = row.get(1);
+            let nullable: bool = row.get::<_, String>(2) == "YES";
+            ColumnSchema {
+                name,
+                data_type: pg_type_to_arrow(&data_type).to_string(),
+                nullable,
+            }
+        })
+        .collect();
+
+    if columns.is_empty() {
+        return Err(format!(
+            "Table '{}' not found or has no columns",
+            ctx.stream_name
+        ));
+    }
+
+    let arrow_schema = build_arrow_schema(&columns);
+
+    // Use server-side cursor for bounded memory
+    client
+        .execute("BEGIN", &[])
+        .await
+        .map_err(|e| format!("BEGIN failed: {}", e))?;
+
+    let declare = format!(
+        "DECLARE rb_cursor NO SCROLL CURSOR FOR SELECT * FROM \"{}\"",
+        ctx.stream_name
+    );
+    client
+        .execute(&declare, &[])
+        .await
+        .map_err(|e| format!("DECLARE CURSOR failed: {}", e))?;
+
+    // Byte-based batching
+    let max_batch_bytes = if ctx.limits.max_batch_bytes > 0 {
+        ctx.limits.max_batch_bytes as usize
+    } else {
+        64 * 1024 * 1024 // 64MB default
+    };
+
+    let fetch_query = format!("FETCH {} FROM rb_cursor", FETCH_CHUNK);
+    let mut total_records: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut batches_emitted: u64 = 0;
+    let mut accumulated_rows: Vec<tokio_postgres::Row> = Vec::new();
+    let mut estimated_bytes: usize = 256; // IPC framing overhead
+
+    loop {
+        let rows = client
+            .query(&fetch_query, &[])
+            .await
+            .map_err(|e| format!("FETCH failed for {}: {}", ctx.stream_name, e))?;
+
+        let exhausted = rows.is_empty();
+
+        if !exhausted {
+            estimated_bytes += estimate_batch_bytes(&rows, &columns);
+            accumulated_rows.extend(rows);
+        }
+
+        let should_emit = !accumulated_rows.is_empty()
+            && (estimated_bytes >= max_batch_bytes
+                || accumulated_rows.len() >= BATCH_SIZE
+                || exhausted);
+
+        if should_emit {
+            let batch = rows_to_record_batch(&accumulated_rows, &columns, &arrow_schema)?;
+            let ipc_bytes = batch_to_ipc(&batch)?;
+
+            total_records += accumulated_rows.len() as u64;
+            total_bytes += ipc_bytes.len() as u64;
+            batches_emitted += 1;
+
+            // v1: emit_batch (no stream name parameter)
+            host_ffi::emit_batch(&ipc_bytes)
+                .map_err(|e| format!("emit_batch failed: {}", e))?;
+
+            accumulated_rows.clear();
+            estimated_bytes = 256;
+        }
+
+        if exhausted {
+            break;
+        }
+    }
+
+    client
+        .execute("CLOSE rb_cursor", &[])
+        .await
+        .map_err(|e| format!("CLOSE CURSOR failed: {}", e))?;
+    client
+        .execute("COMMIT", &[])
+        .await
+        .map_err(|e| format!("COMMIT failed: {}", e))?;
+
+    host_ffi::log(
+        2,
+        &format!(
+            "Stream '{}' complete (v1): {} records, {} bytes, {} batches",
+            ctx.stream_name, total_records, total_bytes, batches_emitted
+        ),
+    );
+
+    Ok(ReadSummaryV1 {
+        records_read: total_records,
+        bytes_read: total_bytes,
+        batches_emitted,
+        checkpoint_count: 0,
+    })
 }
 
 fn build_arrow_schema(columns: &[ColumnSchema]) -> Arc<Schema> {

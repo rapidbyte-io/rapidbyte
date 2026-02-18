@@ -6,7 +6,9 @@ use std::sync::OnceLock;
 use rapidbyte_sdk::errors::{ConnectorError, ConnectorResult};
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::memory::{pack_ptr_len, write_guest_bytes};
-use rapidbyte_sdk::protocol::{Catalog, ReadRequest};
+use rapidbyte_sdk::protocol::{
+    Catalog, ConfigBlob, OpenContext, OpenInfo, StreamContext,
+};
 
 use serde::Deserialize;
 use tokio_postgres::NoTls;
@@ -96,34 +98,67 @@ async fn connect(
     Ok(client)
 }
 
-// === Exported Protocol Functions ===
+// === v1 Exported Protocol Functions ===
 
 #[no_mangle]
-pub extern "C" fn rb_init(config_ptr: i32, config_len: i32) -> i64 {
+pub extern "C" fn rb_open(config_ptr: i32, config_len: i32) -> i64 {
     protocol_handler(config_ptr, config_len, |input| {
-        match serde_json::from_slice::<PgConfig>(input) {
-            Ok(config) => {
-                host_ffi::log(
-                    2,
-                    &format!("source-postgres: init with host={} db={}", config.host, config.database),
-                );
-
-                // Store config for later use by rb_read
-                let _ = CONFIG.set(config);
-                make_ok_response(())
+        let open_ctx: OpenContext = match serde_json::from_slice(input) {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                return make_err_response("INVALID_OPEN_CTX", &format!("Invalid OpenContext: {}", e));
             }
-            Err(e) => make_err_response("INVALID_CONFIG", &format!("Invalid config: {}", e)),
-        }
+        };
+
+        // Extract config from ConfigBlob
+        let config_value = match &open_ctx.config {
+            ConfigBlob::Json(v) => v.clone(),
+        };
+
+        let pg_config: PgConfig = match serde_json::from_value(config_value) {
+            Ok(c) => c,
+            Err(e) => {
+                return make_err_response("INVALID_CONFIG", &format!("Invalid PG config: {}", e));
+            }
+        };
+
+        host_ffi::log(
+            2,
+            &format!(
+                "source-postgres: open with host={} db={}",
+                pg_config.host, pg_config.database
+            ),
+        );
+
+        let _ = CONFIG.set(pg_config);
+
+        make_ok_response(OpenInfo {
+            protocol_version: "1".to_string(),
+            features: vec![],
+            default_max_batch_bytes: 64 * 1024 * 1024,
+        })
     })
 }
 
 #[no_mangle]
 pub extern "C" fn rb_validate(config_ptr: i32, config_len: i32) -> i64 {
     protocol_handler(config_ptr, config_len, |input| {
-        let config: PgConfig = match serde_json::from_slice(input) {
-            Ok(c) => c,
-            Err(e) => {
-                return make_err_response("INVALID_CONFIG", &format!("Invalid config: {}", e));
+        // v1: try to parse as OpenContext first, fall back to raw PgConfig for v0 compat
+        let config: PgConfig = if let Ok(open_ctx) = serde_json::from_slice::<OpenContext>(input) {
+            match &open_ctx.config {
+                ConfigBlob::Json(v) => match serde_json::from_value(v.clone()) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return make_err_response("INVALID_CONFIG", &format!("Invalid config: {}", e));
+                    }
+                },
+            }
+        } else {
+            match serde_json::from_slice(input) {
+                Ok(c) => c,
+                Err(e) => {
+                    return make_err_response("INVALID_CONFIG", &format!("Invalid config: {}", e));
+                }
             }
         };
 
@@ -131,7 +166,6 @@ pub extern "C" fn rb_validate(config_ptr: i32, config_len: i32) -> i64 {
         rt.block_on(async {
             match connect(&config).await {
                 Ok(client) => {
-                    // Test the connection with a simple query
                     match client.query_one("SELECT 1", &[]).await {
                         Ok(_) => {
                             let result = rapidbyte_sdk::errors::ValidationResult {
@@ -158,18 +192,40 @@ pub extern "C" fn rb_validate(config_ptr: i32, config_len: i32) -> i64 {
 #[no_mangle]
 pub extern "C" fn rb_discover(config_ptr: i32, config_len: i32) -> i64 {
     protocol_handler(config_ptr, config_len, |input| {
-        // The discover input is the config (passed during init, but we re-parse here)
-        // For the protocol, discover receives a dummy {} but we need the config.
-        // We'll use the config that was passed during init.
-        // For v0.1, the host passes the config again.
-        let config: PgConfig = match serde_json::from_slice(input) {
-            Ok(c) => c,
-            Err(_) => {
-                // If input is empty/dummy, we can't discover without config
-                return make_err_response(
-                    "NO_CONFIG",
-                    "Discover requires PostgreSQL config",
-                );
+        // Try OpenContext first, fall back to raw config
+        let config: PgConfig = if let Ok(open_ctx) = serde_json::from_slice::<OpenContext>(input) {
+            match &open_ctx.config {
+                ConfigBlob::Json(v) => match serde_json::from_value(v.clone()) {
+                    Ok(c) => c,
+                    Err(_) => {
+                        return make_err_response("NO_CONFIG", "Discover requires valid config");
+                    }
+                },
+            }
+        } else {
+            match serde_json::from_slice(input) {
+                Ok(c) => c,
+                Err(_) => {
+                    // If input is empty/dummy, use stored config
+                    match CONFIG.get() {
+                        Some(c) => {
+                            // Can't clone PgConfig (no Clone), reconnect with stored config
+                            let rt = create_runtime();
+                            return rt.block_on(async {
+                                match connect(c).await {
+                                    Ok(client) => match schema::discover_catalog(&client).await {
+                                        Ok(streams) => make_ok_response(Catalog { streams }),
+                                        Err(e) => make_err_response("DISCOVERY_FAILED", &e),
+                                    },
+                                    Err(e) => make_err_response("CONNECTION_FAILED", &e),
+                                }
+                            });
+                        }
+                        None => {
+                            return make_err_response("NO_CONFIG", "Discover requires PostgreSQL config");
+                        }
+                    }
+                }
             }
         };
 
@@ -177,10 +233,7 @@ pub extern "C" fn rb_discover(config_ptr: i32, config_len: i32) -> i64 {
         rt.block_on(async {
             match connect(&config).await {
                 Ok(client) => match schema::discover_catalog(&client).await {
-                    Ok(streams) => {
-                        let catalog = Catalog { streams };
-                        make_ok_response(catalog)
-                    }
+                    Ok(streams) => make_ok_response(Catalog { streams }),
                     Err(e) => make_err_response("DISCOVERY_FAILED", &e),
                 },
                 Err(e) => make_err_response("CONNECTION_FAILED", &e),
@@ -190,14 +243,14 @@ pub extern "C" fn rb_discover(config_ptr: i32, config_len: i32) -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn rb_read(request_ptr: i32, request_len: i32) -> i64 {
+pub extern "C" fn rb_run_read(request_ptr: i32, request_len: i32) -> i64 {
     protocol_handler(request_ptr, request_len, |input| {
-        let request: ReadRequest = match serde_json::from_slice(input) {
-            Ok(r) => r,
+        let stream_ctx: StreamContext = match serde_json::from_slice(input) {
+            Ok(c) => c,
             Err(e) => {
                 return make_err_response(
-                    "INVALID_REQUEST",
-                    &format!("Invalid read request: {}", e),
+                    "INVALID_STREAM_CTX",
+                    &format!("Invalid StreamContext: {}", e),
                 );
             }
         };
@@ -207,15 +260,15 @@ pub extern "C" fn rb_read(request_ptr: i32, request_len: i32) -> i64 {
             None => {
                 return make_err_response(
                     "NO_CONFIG",
-                    "No config available. Call rb_init first.",
+                    "No config available. Call rb_open first.",
                 );
             }
         };
 
         let rt = create_runtime();
         rt.block_on(async {
-            match connect(&config).await {
-                Ok(client) => match source::read_streams(&client, &request).await {
+            match connect(config).await {
+                Ok(client) => match source::read_stream_v1(&client, &stream_ctx).await {
                     Ok(summary) => make_ok_response(summary),
                     Err(e) => make_err_response("READ_FAILED", &e),
                 },
@@ -223,6 +276,12 @@ pub extern "C" fn rb_read(request_ptr: i32, request_len: i32) -> i64 {
             }
         })
     })
+}
+
+#[no_mangle]
+pub extern "C" fn rb_close() -> i32 {
+    host_ffi::log(2, "source-postgres: close (no-op)");
+    0
 }
 
 fn main() {
