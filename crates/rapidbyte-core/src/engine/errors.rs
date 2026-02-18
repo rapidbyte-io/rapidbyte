@@ -100,10 +100,8 @@ mod tests {
 
     #[test]
     fn test_pipeline_error_connector_not_retryable() {
-        let err = PipelineError::Connector(ConnectorError::config(
-            "MISSING_HOST",
-            "host is required",
-        ));
+        let err =
+            PipelineError::Connector(ConnectorError::config("MISSING_HOST", "host is required"));
         assert!(!err.is_retryable());
         let ce = err.as_connector_error().unwrap();
         assert_eq!(ce.category, ErrorCategory::Config);

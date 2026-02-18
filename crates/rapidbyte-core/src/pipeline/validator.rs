@@ -70,10 +70,7 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
     if errors.is_empty() {
         Ok(())
     } else {
-        bail!(
-            "Pipeline validation failed:\n  - {}",
-            errors.join("\n  - ")
-        );
+        bail!("Pipeline validation failed:\n  - {}", errors.join("\n  - "));
     }
 }
 

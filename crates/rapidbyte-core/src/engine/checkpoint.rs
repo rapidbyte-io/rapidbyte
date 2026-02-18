@@ -20,7 +20,9 @@ pub(crate) fn correlate_and_persist_cursors(
         };
 
         // Check if we have a dest checkpoint confirming this stream's data
-        let dest_confirmed = dest_checkpoints.iter().any(|dcp| dcp.stream == src_cp.stream);
+        let dest_confirmed = dest_checkpoints
+            .iter()
+            .any(|dcp| dcp.stream == src_cp.stream);
 
         if !dest_confirmed {
             tracing::warn!(

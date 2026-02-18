@@ -17,16 +17,14 @@ fn test_parse_and_validate_fixture_pipeline() {
     std::env::set_var("TEST_DEST_PG_HOST", "localhost");
     std::env::set_var("TEST_DEST_PG_PORT", "5433");
 
-    let fixture_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("tests/fixtures/pipelines/simple_pg_to_pg.yaml");
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/pipelines/simple_pg_to_pg.yaml");
 
-    let config = parser::parse_pipeline(&fixture_path)
-        .expect("Failed to parse fixture pipeline");
+    let config = parser::parse_pipeline(&fixture_path).expect("Failed to parse fixture pipeline");
 
     assert_eq!(config.pipeline, "test_pg_to_pg");
     assert_eq!(config.source.use_ref, "source-postgres");
@@ -51,16 +49,15 @@ fn test_parse_and_validate_fixture_pipeline() {
 /// Test that an invalid pipeline fixture fails validation.
 #[test]
 fn test_parse_and_validate_invalid_fixture() {
-    let fixture_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("tests/fixtures/pipelines/invalid_pipeline.yaml");
+    let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("tests/fixtures/pipelines/invalid_pipeline.yaml");
 
-    let config = parser::parse_pipeline(&fixture_path)
-        .expect("Should parse even invalid pipelines");
+    let config =
+        parser::parse_pipeline(&fixture_path).expect("Should parse even invalid pipelines");
 
     let result = validator::validate_pipeline(&config);
     assert!(result.is_err(), "Invalid pipeline should fail validation");
@@ -73,8 +70,7 @@ fn test_parse_and_validate_invalid_fixture() {
 /// Test full state backend lifecycle: create run, set cursors, complete run.
 #[test]
 fn test_state_backend_full_lifecycle() {
-    let state = SqliteStateBackend::in_memory()
-        .expect("Failed to create in-memory state");
+    let state = SqliteStateBackend::in_memory().expect("Failed to create in-memory state");
 
     // Start a run
     let run_id = state
@@ -149,9 +145,11 @@ fn test_connector_path_resolution_with_env() {
 
     std::env::set_var("RAPIDBYTE_CONNECTOR_DIR", tmp.to_str().unwrap());
 
-    let result =
-        resolve_connector_path("rapidbyte/source-postgres@v0.1.0");
-    assert!(result.is_ok(), "Should resolve with RAPIDBYTE_CONNECTOR_DIR set");
+    let result = resolve_connector_path("rapidbyte/source-postgres@v0.1.0");
+    assert!(
+        result.is_ok(),
+        "Should resolve with RAPIDBYTE_CONNECTOR_DIR set"
+    );
     assert_eq!(result.unwrap(), fake_wasm);
 
     // Clean up
@@ -215,8 +213,7 @@ fn test_arrow_ipc_realistic_schema() {
     assert!(!ipc_bytes.is_empty());
 
     // Decode back
-    let decoded =
-        rapidbyte_core::arrow_utils::ipc_to_record_batches(&ipc_bytes).unwrap();
+    let decoded = rapidbyte_core::arrow_utils::ipc_to_record_batches(&ipc_bytes).unwrap();
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].num_rows(), 3);
     assert_eq!(decoded[0].num_columns(), 4);
@@ -261,8 +258,7 @@ async fn test_pg_to_pg_full_pipeline() {
         .unwrap()
         .join("tests/fixtures/pipelines/simple_pg_to_pg.yaml");
 
-    let config = parser::parse_pipeline(&fixture_path)
-        .expect("Failed to parse pipeline fixture");
+    let config = parser::parse_pipeline(&fixture_path).expect("Failed to parse pipeline fixture");
 
     validator::validate_pipeline(&config).expect("Pipeline validation failed");
 

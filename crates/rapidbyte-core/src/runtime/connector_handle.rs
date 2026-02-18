@@ -78,7 +78,12 @@ impl<'a> ConnectorHandle<'a> {
         match result {
             ConnectorResult::Ok { data } => Ok(data),
             ConnectorResult::Err { error } => {
-                anyhow::bail!("Connector open failed: [{}] {} ({})", error.category, error.message, error.code)
+                anyhow::bail!(
+                    "Connector open failed: [{}] {} ({})",
+                    error.category,
+                    error.message,
+                    error.code
+                )
             }
         }
     }
@@ -115,7 +120,10 @@ impl<'a> ConnectorHandle<'a> {
     ///
     /// Returns `PipelineError::Connector` for typed errors,
     /// preserving retry metadata for the orchestrator.
-    pub fn run_transform(&mut self, ctx: &StreamContext) -> Result<TransformSummary, PipelineError> {
+    pub fn run_transform(
+        &mut self,
+        ctx: &StreamContext,
+    ) -> Result<TransformSummary, PipelineError> {
         let raw_bytes = memory_protocol::call_with_json_raw(&mut self.vm, "rb_run_transform", ctx)
             .context("Failed to call rb_run_transform")
             .map_err(PipelineError::Infrastructure)?;
@@ -162,9 +170,7 @@ fn parse_connector_result<T: DeserializeOwned>(
             Err(PipelineError::Connector(error))
         }
         Err(_) => {
-            let snippet = String::from_utf8_lossy(
-                &raw_bytes[..raw_bytes.len().min(200)]
-            );
+            let snippet = String::from_utf8_lossy(&raw_bytes[..raw_bytes.len().min(200)]);
             Err(PipelineError::Infrastructure(anyhow::anyhow!(
                 "Failed to deserialize response from '{}': {}",
                 func_name,

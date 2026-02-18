@@ -7,10 +7,7 @@ use wasmedge_sys::AsInstance;
 
 /// Write data into guest linear memory by calling the guest's `rb_allocate` export.
 /// Returns (ptr, len) in guest address space.
-pub fn write_to_guest<T: ?Sized + SyncInst>(
-    vm: &mut Vm<'_, T>,
-    data: &[u8],
-) -> Result<(i32, i32)> {
+pub fn write_to_guest<T: ?Sized + SyncInst>(vm: &mut Vm<'_, T>, data: &[u8]) -> Result<(i32, i32)> {
     let len = data.len() as i32;
 
     // Call guest's rb_allocate to get a pointer

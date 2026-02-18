@@ -6,7 +6,11 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "rapidbyte", version, about = "The single-binary data ingestion engine")]
+#[command(
+    name = "rapidbyte",
+    version,
+    about = "The single-binary data ingestion engine"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -37,11 +41,7 @@ async fn main() -> anyhow::Result<()> {
     logging::init(&cli.log_level);
 
     match cli.command {
-        Commands::Run { pipeline } => {
-            commands::run::execute(&pipeline).await
-        }
-        Commands::Check { pipeline } => {
-            commands::check::execute(&pipeline).await
-        }
+        Commands::Run { pipeline } => commands::run::execute(&pipeline).await,
+        Commands::Check { pipeline } => commands::check::execute(&pipeline).await,
     }
 }

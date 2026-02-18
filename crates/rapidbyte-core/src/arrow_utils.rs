@@ -18,8 +18,8 @@ pub fn record_batch_to_ipc(batch: &RecordBatch) -> Result<Vec<u8>> {
 /// Deserialize Arrow IPC stream format bytes into a Vec of RecordBatches.
 pub fn ipc_to_record_batches(ipc_bytes: &[u8]) -> Result<Vec<RecordBatch>> {
     let cursor = std::io::Cursor::new(ipc_bytes);
-    let reader = StreamReader::try_new(cursor, None)
-        .context("Failed to create Arrow IPC StreamReader")?;
+    let reader =
+        StreamReader::try_new(cursor, None).context("Failed to create Arrow IPC StreamReader")?;
     let batches: Result<Vec<_>, _> = reader.collect();
     let batches = batches.context("Failed to read RecordBatches from IPC stream")?;
     Ok(batches)
@@ -78,11 +78,9 @@ mod tests {
     #[test]
     fn test_roundtrip_empty_batch() {
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
-        let batch = RecordBatch::try_new(
-            schema,
-            vec![Arc::new(Int64Array::from(Vec::<i64>::new()))],
-        )
-        .unwrap();
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(Vec::<i64>::new()))])
+                .unwrap();
 
         let ipc_bytes = record_batch_to_ipc(&batch).unwrap();
         let batches = ipc_to_record_batches(&ipc_bytes).unwrap();

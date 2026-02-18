@@ -216,10 +216,7 @@ resources:
         );
         assert!(config.source.streams[1].cursor_field.is_none());
         assert_eq!(config.destination.primary_key, vec!["id"]);
-        assert_eq!(
-            config.state.connection,
-            Some("/tmp/state.db".to_string())
-        );
+        assert_eq!(config.state.connection, Some("/tmp/state.db".to_string()));
         assert_eq!(config.resources.parallelism, 4);
         assert_eq!(config.resources.max_memory, "512mb");
         assert_eq!(config.resources.checkpoint_interval_bytes, "32mb");
@@ -264,7 +261,10 @@ destination:
 "#;
         let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.transforms.len(), 1);
-        assert_eq!(config.transforms[0].use_ref, "rapidbyte/transform-mask@v0.1.0");
+        assert_eq!(
+            config.transforms[0].use_ref,
+            "rapidbyte/transform-mask@v0.1.0"
+        );
     }
 
     #[test]

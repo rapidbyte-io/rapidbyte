@@ -8,9 +8,7 @@
 use std::collections::HashMap;
 
 use wasmedge_sdk::{
-    params,
-    vm::SyncInst,
-    CallingFrame, ImportObjectBuilder, Module, Store, Vm, WasmVal, WasmValue,
+    params, vm::SyncInst, CallingFrame, ImportObjectBuilder, Module, Store, Vm, WasmVal, WasmValue,
 };
 use wasmedge_sys::Instance as SysInstance;
 use wasmedge_types::error::CoreError;
@@ -42,9 +40,7 @@ fn host_read_memory(
     let len = args[1].to_i32() as u32;
 
     let memory = frame.memory_ref(0).expect("no memory");
-    let bytes = memory
-        .get_data(ptr, len)
-        .expect("get_data failed");
+    let bytes = memory.get_data(ptr, len).expect("get_data failed");
 
     // Sum the bytes as a simple check
     let sum: i32 = bytes.iter().map(|&b| b as i32).sum();
@@ -107,9 +103,7 @@ fn test_host_function_registration() {
     vm.register_module(None, module)
         .expect("register_module failed");
 
-    let result = vm
-        .run_func(None, "call_capture", params!(42i32))
-        .unwrap();
+    let result = vm.run_func(None, "call_capture", params!(42i32)).unwrap();
     assert_eq!(result[0].to_i32(), 0); // host_capture returns 0
 }
 

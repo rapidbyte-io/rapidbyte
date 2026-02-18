@@ -32,10 +32,7 @@ pub fn validate_pg_identifier(name: &str) -> Result<(), String> {
     // Remaining characters must be letters, digits, or underscores.
     for ch in chars {
         if !ch.is_ascii_alphanumeric() && ch != '_' {
-            return Err(format!(
-                "identifier contains invalid character '{}'",
-                ch
-            ));
+            return Err(format!("identifier contains invalid character '{}'", ch));
         }
     }
 

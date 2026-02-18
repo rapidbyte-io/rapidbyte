@@ -24,10 +24,7 @@ pub fn substitute_env_vars(input: &str) -> Result<String> {
     }
 
     if !errors.is_empty() {
-        anyhow::bail!(
-            "Missing environment variable(s): {}",
-            errors.join(", ")
-        );
+        anyhow::bail!("Missing environment variable(s): {}", errors.join(", "));
     }
 
     Ok(result)

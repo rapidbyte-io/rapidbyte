@@ -134,7 +134,7 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
                         .ok()
                         .flatten()
                         .and_then(|cs| cs.cursor_value)
-                        .map(|v| CursorValue::Utf8(v));
+                        .map(CursorValue::Utf8);
 
                     Some(CursorInfo {
                         cursor_field: cursor_field.clone(),
@@ -219,8 +219,10 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
     });
 
     // 5b. Spawn transform threads (in pipeline order)
-    let transform_module_load_ms: Vec<u64> =
-        transform_modules.iter().map(|(_, _, _, _, ms)| *ms).collect();
+    let transform_module_load_ms: Vec<u64> = transform_modules
+        .iter()
+        .map(|(_, _, _, _, ms)| *ms)
+        .collect();
     let mut transform_handles = Vec::new();
     for (module, id, ver, tconfig, _load_ms) in transform_modules.into_iter() {
         let rx = receivers.remove(0);
@@ -344,8 +346,8 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
             let cursors_advanced = correlate_and_persist_cursors(
                 &state_backend,
                 &config.pipeline,
-                &source_checkpoints,
-                &dest_checkpoints,
+                source_checkpoints,
+                dest_checkpoints,
             )?;
             if cursors_advanced > 0 {
                 tracing::info!(

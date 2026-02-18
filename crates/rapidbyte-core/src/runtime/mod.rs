@@ -1,4 +1,4 @@
-pub mod wasm_runtime;
+pub mod connector_handle;
 pub mod host_functions;
 pub mod memory_protocol;
-pub mod connector_handle;
+pub mod wasm_runtime;

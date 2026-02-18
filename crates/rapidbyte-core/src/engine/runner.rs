@@ -54,6 +54,7 @@ pub struct CheckResult {
     pub state_ok: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_source(
     module: Module,
     sender: mpsc::SyncSender<Frame>,
@@ -160,9 +161,14 @@ pub(crate) fn run_source(
     let checkpoints = source_checkpoints.lock().unwrap().drain(..).collect();
 
     // sender is dropped here -> dest sees final EOF on host_next_batch
-    Ok((phase_start.elapsed().as_secs_f64(), total_summary, checkpoints))
+    Ok((
+        phase_start.elapsed().as_secs_f64(),
+        total_summary,
+        checkpoints,
+    ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_destination(
     module: Module,
     receiver: mpsc::Receiver<Frame>,
@@ -282,6 +288,7 @@ pub(crate) fn run_destination(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_transform(
     module: Module,
     receiver: mpsc::Receiver<Frame>,

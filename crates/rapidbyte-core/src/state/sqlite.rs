@@ -16,8 +16,9 @@ impl SqliteStateBackend {
     /// Open or create a SQLite state database at the given path.
     pub fn new(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create state directory: {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create state directory: {}", parent.display())
+            })?;
         }
         let conn = Connection::open(path)
             .with_context(|| format!("Failed to open state database: {}", path.display()))?;
@@ -54,9 +55,10 @@ impl StateBackend for SqliteStateBackend {
 
         match result {
             Ok((cursor_field, cursor_value, updated_at_str)) => {
-                let updated_at = NaiveDateTime::parse_from_str(&updated_at_str, "%Y-%m-%d %H:%M:%S")
-                    .map(|ndt| DateTime::from_naive_utc_and_offset(ndt, Utc))
-                    .unwrap_or_else(|_| Utc::now());
+                let updated_at =
+                    NaiveDateTime::parse_from_str(&updated_at_str, "%Y-%m-%d %H:%M:%S")
+                        .map(|ndt| DateTime::from_naive_utc_and_offset(ndt, Utc))
+                        .unwrap_or_else(|_| Utc::now());
                 Ok(Some(CursorState {
                     cursor_field,
                     cursor_value,

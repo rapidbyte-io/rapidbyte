@@ -30,8 +30,8 @@ impl WasmRuntime {
         } else {
             bytes.into()
         };
-        let module =
-            Module::from_bytes(None, wasm_bytes).context("Failed to load Wasm module from bytes")?;
+        let module = Module::from_bytes(None, wasm_bytes)
+            .context("Failed to load Wasm module from bytes")?;
         Ok(module)
     }
 }
@@ -41,9 +41,7 @@ impl WasmRuntime {
 /// The returned ImportObject must be kept alive for the lifetime of the Vm
 /// that uses it. The caller creates a `HashMap<String, &mut dyn SyncInst>`,
 /// inserts the import object, then passes it to `Store::new` and `Vm::new`.
-pub fn create_host_imports(
-    host_state: HostState,
-) -> Result<wasmedge_sdk::ImportObject<HostState>> {
+pub fn create_host_imports(host_state: HostState) -> Result<wasmedge_sdk::ImportObject<HostState>> {
     let mut import_builder = ImportObjectBuilder::new("rapidbyte", host_state)
         .context("Failed to create import object builder")?;
 
@@ -99,7 +97,7 @@ pub fn create_host_imports(
 pub fn parse_connector_ref(connector_ref: &str) -> (String, String) {
     let after_slash = connector_ref
         .split('/')
-        .last()
+        .next_back()
         .unwrap_or(connector_ref);
 
     let (name, version) = match after_slash.split_once('@') {
@@ -122,7 +120,7 @@ pub fn parse_connector_ref(connector_ref: &str) -> (String, String) {
 pub fn resolve_connector_path(connector_ref: &str) -> Result<std::path::PathBuf> {
     let name = connector_ref
         .split('/')
-        .last()
+        .next_back()
         .unwrap_or(connector_ref)
         .split('@')
         .next()
@@ -197,7 +195,7 @@ mod tests {
         for (connector_ref, expected_filename) in refs_and_expected {
             let name = connector_ref
                 .split('/')
-                .last()
+                .next_back()
                 .unwrap_or(connector_ref)
                 .split('@')
                 .next()

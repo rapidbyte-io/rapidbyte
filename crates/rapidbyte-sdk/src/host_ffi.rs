@@ -16,20 +16,10 @@ extern "C" {
     fn rb_host_emit_batch(ptr: u32, len: u32) -> i32;
     fn rb_host_next_batch(out_ptr: u32, out_cap: u32) -> i32;
     fn rb_host_last_error(out_ptr: u32, out_cap: u32) -> i32;
-    fn rb_host_state_get(
-        scope: i32,
-        key_ptr: u32,
-        key_len: u32,
-        out_ptr: u32,
-        out_cap: u32,
-    ) -> i32;
-    fn rb_host_state_put(
-        scope: i32,
-        key_ptr: u32,
-        key_len: u32,
-        val_ptr: u32,
-        val_len: u32,
-    ) -> i32;
+    fn rb_host_state_get(scope: i32, key_ptr: u32, key_len: u32, out_ptr: u32, out_cap: u32)
+        -> i32;
+    fn rb_host_state_put(scope: i32, key_ptr: u32, key_len: u32, val_ptr: u32, val_len: u32)
+        -> i32;
     fn rb_host_checkpoint(kind: i32, payload_ptr: u32, payload_len: u32) -> i32;
     fn rb_host_metric(payload_ptr: u32, payload_len: u32) -> i32;
 }
@@ -81,7 +71,10 @@ pub fn next_batch(buf: &mut Vec<u8>, max_bytes: u64) -> Result<Option<usize>, Co
             if n > cap {
                 return Err(ConnectorError::internal(
                     "HOST_BUG",
-                    &format!("Host claimed {} bytes written but buffer capacity is {}", n, cap),
+                    &format!(
+                        "Host claimed {} bytes written but buffer capacity is {}",
+                        n, cap
+                    ),
                 ));
             }
             // SAFETY: host wrote n bytes into our buffer, n <= cap (checked above)
@@ -147,10 +140,9 @@ pub fn state_get(scope: StateScope, key: &str) -> Result<Option<String>, Connect
                 ));
             }
             buf.truncate(n);
-            return Ok(Some(
-                String::from_utf8(buf)
-                    .map_err(|_| ConnectorError::internal("UTF8_ERROR", "State value not UTF-8"))?,
-            ));
+            return Ok(Some(String::from_utf8(buf).map_err(|_| {
+                ConnectorError::internal("UTF8_ERROR", "State value not UTF-8")
+            })?));
         } else if rc == 0 {
             return Ok(None);
         } else if rc == -1 {
@@ -210,9 +202,7 @@ pub fn checkpoint(
     let payload = serde_json::to_vec(&envelope)
         .map_err(|e| ConnectorError::internal("SERIALIZE", &e.to_string()))?;
 
-    let rc = unsafe {
-        rb_host_checkpoint(kind_i32, payload.as_ptr() as u32, payload.len() as u32)
-    };
+    let rc = unsafe { rb_host_checkpoint(kind_i32, payload.as_ptr() as u32, payload.len() as u32) };
     if rc == 0 {
         Ok(())
     } else {
@@ -222,11 +212,7 @@ pub fn checkpoint(
 
 /// Emit a metric to the host.
 #[cfg(target_arch = "wasm32")]
-pub fn metric(
-    connector_id: &str,
-    stream_name: &str,
-    m: &Metric,
-) -> Result<(), ConnectorError> {
+pub fn metric(connector_id: &str, stream_name: &str, m: &Metric) -> Result<(), ConnectorError> {
     let envelope = PayloadEnvelope {
         protocol_version: "1".to_string(),
         connector_id: connector_id.to_string(),
@@ -254,10 +240,7 @@ pub fn emit_batch(_ipc_bytes: &[u8]) -> Result<(), ConnectorError> {
     Ok(())
 }
 #[cfg(not(target_arch = "wasm32"))]
-pub fn next_batch(
-    _buf: &mut Vec<u8>,
-    _max_bytes: u64,
-) -> Result<Option<usize>, ConnectorError> {
+pub fn next_batch(_buf: &mut Vec<u8>, _max_bytes: u64) -> Result<Option<usize>, ConnectorError> {
     Ok(None)
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -265,18 +248,11 @@ pub fn fetch_last_error() -> ConnectorError {
     ConnectorError::internal("STUB", "No-op stub")
 }
 #[cfg(not(target_arch = "wasm32"))]
-pub fn state_get(
-    _scope: StateScope,
-    _key: &str,
-) -> Result<Option<String>, ConnectorError> {
+pub fn state_get(_scope: StateScope, _key: &str) -> Result<Option<String>, ConnectorError> {
     Ok(None)
 }
 #[cfg(not(target_arch = "wasm32"))]
-pub fn state_put(
-    _scope: StateScope,
-    _key: &str,
-    _value: &str,
-) -> Result<(), ConnectorError> {
+pub fn state_put(_scope: StateScope, _key: &str, _value: &str) -> Result<(), ConnectorError> {
     Ok(())
 }
 #[cfg(not(target_arch = "wasm32"))]
@@ -288,10 +264,6 @@ pub fn checkpoint(
     Ok(())
 }
 #[cfg(not(target_arch = "wasm32"))]
-pub fn metric(
-    _connector_id: &str,
-    _stream_name: &str,
-    _m: &Metric,
-) -> Result<(), ConnectorError> {
+pub fn metric(_connector_id: &str, _stream_name: &str, _m: &Metric) -> Result<(), ConnectorError> {
     Ok(())
 }

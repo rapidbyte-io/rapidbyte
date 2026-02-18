@@ -124,8 +124,8 @@ pub struct StreamLimits {
 impl Default for StreamLimits {
     fn default() -> Self {
         Self {
-            max_batch_bytes: 64 * 1024 * 1024,    // 64 MB
-            max_record_bytes: 16 * 1024 * 1024,   // 16 MB
+            max_batch_bytes: 64 * 1024 * 1024,  // 64 MB
+            max_record_bytes: 16 * 1024 * 1024, // 16 MB
             max_inflight_batches: 16,
             max_parallel_requests: 1,
             checkpoint_interval_bytes: default_checkpoint_interval_bytes(),

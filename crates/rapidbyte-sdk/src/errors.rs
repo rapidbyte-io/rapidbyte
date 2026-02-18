@@ -278,7 +278,11 @@ impl fmt::Display for ConnectorError {
         write!(
             f,
             "[{}/{}] {} ({}): {}",
-            self.category, self.scope, self.code, if self.retryable { "retryable" } else { "fatal" }, self.message
+            self.category,
+            self.scope,
+            self.code,
+            if self.retryable { "retryable" } else { "fatal" },
+            self.message
         )
     }
 }
@@ -395,8 +399,7 @@ mod tests {
 
     #[test]
     fn test_builder_with_scope() {
-        let err = ConnectorError::data("INVALID_TYPE", "bad value")
-            .with_scope(ErrorScope::Batch);
+        let err = ConnectorError::data("INVALID_TYPE", "bad value").with_scope(ErrorScope::Batch);
         assert_eq!(err.scope, ErrorScope::Batch);
     }
 
@@ -449,5 +452,4 @@ mod tests {
         let back: ConnectorError = serde_json::from_str(&json).unwrap();
         assert_eq!(err, back);
     }
-
 }
