@@ -67,6 +67,18 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
         );
     }
 
+    if let Some(ref c) = config.resources.compression {
+        match c.as_str() {
+            "lz4" | "zstd" => {}
+            other => {
+                errors.push(format!(
+                    "Invalid compression codec '{}'. Must be 'lz4' or 'zstd'",
+                    other
+                ));
+            }
+        }
+    }
+
     if errors.is_empty() {
         Ok(())
     } else {
@@ -241,5 +253,84 @@ destination:
         assert!(err.contains("at least one stream"));
         assert!(err.contains("Destination connector reference"));
         assert!(err.contains("Invalid destination write_mode"));
+    }
+
+    #[test]
+    fn test_compression_lz4_passes() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test_pipeline
+source:
+  use: source-postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+  write_mode: append
+resources:
+  compression: lz4
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        assert!(validate_pipeline(&config).is_ok());
+    }
+
+    #[test]
+    fn test_compression_zstd_passes() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test_pipeline
+source:
+  use: source-postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+  write_mode: append
+resources:
+  compression: zstd
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        assert!(validate_pipeline(&config).is_ok());
+    }
+
+    #[test]
+    fn test_compression_none_passes() {
+        let config = parse_pipeline_str(valid_yaml()).unwrap();
+        assert!(validate_pipeline(&config).is_ok());
+    }
+
+    #[test]
+    fn test_compression_invalid_fails() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test_pipeline
+source:
+  use: source-postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+  write_mode: append
+resources:
+  compression: snappy
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        let err = validate_pipeline(&config).unwrap_err().to_string();
+        assert!(err.contains("Invalid compression codec 'snappy'"));
     }
 }
