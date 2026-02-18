@@ -359,18 +359,6 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
             let checkpoint_interval_rows = stream_ctx.limits.checkpoint_interval_rows;
             let checkpoint_interval_secs = stream_ctx.limits.checkpoint_interval_seconds;
 
-            // Upsert mode is not compatible with COPY — fall back to INSERT
-            let use_copy = config.load_method == "copy"
-                && !matches!(effective_write_mode, Some(WriteMode::Upsert { .. }));
-            if config.load_method == "copy"
-                && matches!(stream_ctx.write_mode, Some(WriteMode::Upsert { .. }))
-            {
-                host_ffi::log(
-                    1,
-                    "dest-postgres: upsert mode not compatible with COPY, falling back to INSERT",
-                );
-            }
-
             loop {
                 match host_ffi::next_batch(&mut buf, stream_ctx.limits.max_batch_bytes) {
                     Ok(None) => {
@@ -424,11 +412,7 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                             load_method: &config.load_method,
                         };
 
-                        let write_result = if use_copy {
-                            sink::write_batch_copy(&mut write_ctx, ipc_bytes).await
-                        } else {
-                            sink::write_batch(&mut write_ctx, ipc_bytes).await
-                        };
+                        let write_result = sink::write_batch(&mut write_ctx, ipc_bytes).await;
 
                         match write_result {
                             Ok(result) => {

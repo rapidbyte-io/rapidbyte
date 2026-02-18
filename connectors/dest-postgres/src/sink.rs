@@ -26,7 +26,7 @@ pub struct WriteResult {
 
 /// Bundled parameters for batch write operations.
 ///
-/// Groups the common arguments needed by `write_batch` and `write_batch_copy`
+/// Groups the common arguments needed by `write_batch`
 /// to keep function signatures under clippy's argument limit.
 pub struct WriteContext<'a> {
     pub client: &'a Client,
@@ -533,12 +533,23 @@ const INSERT_CHUNK_SIZE: usize = 1000;
 /// Buffer size for COPY data before flushing to the sink.
 const COPY_FLUSH_BYTES: usize = 4 * 1024 * 1024; // 4MB
 
-/// Write an Arrow IPC batch to PostgreSQL using multi-value INSERT.
+/// Write an Arrow IPC batch to PostgreSQL.
 ///
-/// On batch failure with Skip/Dlq policy, falls back to single-row
-/// INSERTs, skipping individual bad rows.
+/// Dispatches to COPY or INSERT based on `ctx.load_method`. If the load method
+/// is "copy" but the write mode is Upsert, automatically falls back to INSERT
+/// (COPY cannot handle ON CONFLICT). On batch failure with Skip/Dlq error
+/// policy, falls back to single-row INSERTs.
 pub async fn write_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<WriteResult, String> {
-    match insert_batch(ctx, ipc_bytes).await {
+    let use_copy = ctx.load_method == "copy"
+        && !matches!(ctx.write_mode, Some(WriteMode::Upsert { .. }));
+
+    let (result, method_name) = if use_copy {
+        (copy_batch(ctx, ipc_bytes).await, "COPY")
+    } else {
+        (insert_batch(ctx, ipc_bytes).await, "INSERT")
+    };
+
+    match result {
         Ok(count) => Ok(WriteResult { rows_written: count, rows_failed: 0 }),
         Err(e) => {
             if matches!(ctx.on_data_error, DataErrorPolicy::Fail) {
@@ -547,8 +558,8 @@ pub async fn write_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result
             host_ffi::log(
                 1,
                 &format!(
-                    "dest-postgres: batch INSERT failed ({}), retrying per-row with skip policy",
-                    e
+                    "dest-postgres: {} failed ({}), falling back to per-row INSERT with skip",
+                    method_name, e
                 ),
             );
             write_rows_individually(
@@ -677,37 +688,6 @@ async fn insert_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<u6
     );
 
     Ok(total_rows)
-}
-
-/// Write an Arrow IPC batch to PostgreSQL using COPY FROM STDIN (text format).
-///
-/// On COPY failure with Skip/Dlq policy, falls back to single-row INSERTs.
-pub async fn write_batch_copy(
-    ctx: &mut WriteContext<'_>,
-    ipc_bytes: &[u8],
-) -> Result<WriteResult, String> {
-    match copy_batch(ctx, ipc_bytes).await {
-        Ok(count) => Ok(WriteResult {
-            rows_written: count,
-            rows_failed: 0,
-        }),
-        Err(e) => {
-            if matches!(ctx.on_data_error, DataErrorPolicy::Fail) {
-                return Err(e);
-            }
-            host_ffi::log(
-                1,
-                &format!(
-                    "dest-postgres: COPY failed ({}), falling back to per-row INSERT with skip",
-                    e
-                ),
-            );
-            write_rows_individually(
-                ctx.client, ctx.target_schema, ctx.stream_name, ipc_bytes, ctx.write_mode,
-            )
-            .await
-        }
-    }
 }
 
 /// Internal: write via COPY FROM STDIN, returning row count.
