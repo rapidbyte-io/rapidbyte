@@ -533,10 +533,9 @@ fn load_and_validate_manifest(
     if let Some(ref m) = manifest {
         if !m.supports_role(expected_role) {
             anyhow::bail!(
-                "Connector '{}' does not support {:?} role. Declared roles: {:?}",
+                "Connector '{}' does not support {:?} role",
                 connector_ref,
                 expected_role,
-                m.roles,
             );
         }
 
@@ -552,7 +551,6 @@ fn load_and_validate_manifest(
         tracing::info!(
             connector = m.id,
             version = m.version,
-            roles = ?m.roles,
             "Loaded connector manifest"
         );
     } else {
