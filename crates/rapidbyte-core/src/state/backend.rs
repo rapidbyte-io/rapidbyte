@@ -36,6 +36,18 @@ pub struct RunStats {
 pub trait StateBackend: Send + Sync {
     fn get_cursor(&self, pipeline: &str, stream: &str) -> Result<Option<CursorState>>;
     fn set_cursor(&self, pipeline: &str, stream: &str, cursor: &CursorState) -> Result<()>;
+
+    /// Compare-and-set: atomically update cursor_value only if it matches `expected`.
+    /// Returns `true` if the update was applied, `false` if the current value didn't match.
+    /// When `expected` is `None`, succeeds only if the key does not exist (insert-if-absent).
+    fn compare_and_set(
+        &self,
+        pipeline: &str,
+        stream: &str,
+        expected: Option<&str>,
+        new_value: &str,
+    ) -> Result<bool>;
+
     fn start_run(&self, pipeline: &str, stream: &str) -> Result<i64>;
     fn complete_run(&self, run_id: i64, status: RunStatus, stats: &RunStats) -> Result<()>;
 }
