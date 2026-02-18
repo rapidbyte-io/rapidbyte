@@ -44,6 +44,12 @@ pub struct DestinationConfig {
     pub write_mode: String,
     #[serde(default)]
     pub primary_key: Vec<String>,
+    #[serde(default = "default_on_data_error")]
+    pub on_data_error: String,
+}
+
+fn default_on_data_error() -> String {
+    "fail".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,5 +369,46 @@ resources:
         let config = ResourceConfig::default();
         assert_eq!(config.checkpoint_interval_rows, 0);
         assert_eq!(config.checkpoint_interval_seconds, 0);
+    }
+
+    #[test]
+    fn test_deserialize_on_data_error_skip() {
+        let yaml = r#"
+version: "1"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+  on_data_error: skip
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.destination.on_data_error, "skip");
+    }
+
+    #[test]
+    fn test_on_data_error_defaults_to_fail() {
+        let yaml = r#"
+version: "1"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.destination.on_data_error, "fail");
     }
 }
