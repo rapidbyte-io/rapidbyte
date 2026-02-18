@@ -161,7 +161,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
     });
 
     let dest_handle =
-        tokio::task::spawn_blocking(move || -> Result<(f64, WriteSummary, f64, f64)> {
+        tokio::task::spawn_blocking(move || -> Result<(f64, WriteSummary, f64, f64, Vec<Checkpoint>)> {
             run_destination(
                 dest_module,
                 batch_rx,
@@ -180,7 +180,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
     let final_stats = stats.lock().unwrap().clone();
 
     match (&source_result, &dest_result) {
-        (Ok((src_dur, read_summary, source_checkpoints)), Ok((dst_dur, write_summary, vm_setup_secs, recv_secs))) => {
+        (Ok((src_dur, read_summary, source_checkpoints)), Ok((dst_dur, write_summary, vm_setup_secs, recv_secs, _dest_checkpoints))) => {
             let perf = write_summary.perf.as_ref();
             let connector_internal_secs = perf
                 .map(|p| p.connect_secs + p.flush_secs + p.commit_secs)
@@ -346,7 +346,7 @@ fn run_source(
         pending_batch: None,
         last_error: None,
         source_checkpoints: source_checkpoints.clone(),
-        dest_checkpoint_count: 0,
+        dest_checkpoints: Arc::new(Mutex::new(Vec::new())),
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
@@ -431,12 +431,15 @@ fn run_destination(
     dest_config: &serde_json::Value,
     stream_ctxs: &[StreamContext],
     stats: Arc<Mutex<RunStats>>,
-) -> Result<(f64, WriteSummary, f64, f64)> {
+) -> Result<(f64, WriteSummary, f64, f64, Vec<Checkpoint>)> {
     let phase_start = Instant::now();
     let vm_setup_start = Instant::now();
 
     // Shared handle so we can update current_stream before each run_write
     let current_stream = Arc::new(Mutex::new(String::new()));
+
+    // Shared checkpoint store — clone the Arc so we can read checkpoints after the VM runs
+    let dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
 
     let host_state = HostState {
         pipeline_name: pipeline_name.to_string(),
@@ -449,7 +452,7 @@ fn run_destination(
         pending_batch: None,
         last_error: None,
         source_checkpoints: Arc::new(Mutex::new(Vec::new())),
-        dest_checkpoint_count: 0,
+        dest_checkpoints: dest_checkpoints.clone(),
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
@@ -526,11 +529,15 @@ fn run_destination(
 
     stream_result?;
 
+    // Extract dest checkpoints collected during the run
+    let checkpoints = dest_checkpoints.lock().unwrap().drain(..).collect();
+
     Ok((
         phase_start.elapsed().as_secs_f64(),
         total_summary,
         vm_setup_secs,
         recv_secs,
+        checkpoints,
     ))
 }
 
@@ -554,7 +561,7 @@ fn validate_connector(
         pending_batch: None,
         last_error: None,
         source_checkpoints: Arc::new(Mutex::new(Vec::new())),
-        dest_checkpoint_count: 0,
+        dest_checkpoints: Arc::new(Mutex::new(Vec::new())),
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;

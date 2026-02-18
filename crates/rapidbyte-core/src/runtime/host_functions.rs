@@ -58,8 +58,9 @@ pub struct HostState {
     /// Source checkpoints received during this stream run.
     /// Arc<Mutex<>> so the orchestrator can read checkpoints after the VM runs.
     pub source_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
-    /// Number of dest checkpoints received.
-    pub dest_checkpoint_count: u64,
+    /// Dest checkpoints received during this stream run.
+    /// Arc<Mutex<>> so the orchestrator can read checkpoints after the VM runs.
+    pub dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
 }
 
 impl HostState {
@@ -487,7 +488,23 @@ pub fn host_checkpoint(
                     }
                 }
             } else {
-                data.dest_checkpoint_count += 1;
+                // Dest checkpoint — try to parse and store
+                match serde_json::from_value::<Checkpoint>(
+                    envelope
+                        .get("payload")
+                        .cloned()
+                        .unwrap_or(envelope.clone()),
+                ) {
+                    Ok(cp) => data.dest_checkpoints.lock().unwrap().push(cp),
+                    Err(e) => {
+                        tracing::warn!(
+                            pipeline = data.pipeline_name,
+                            stream = %current_stream,
+                            "Failed to parse dest checkpoint: {}",
+                            e
+                        );
+                    }
+                }
             }
             Ok(vec![WasmValue::from_i32(0)])
         }
