@@ -24,6 +24,20 @@ pub struct WriteResult {
     pub rows_failed: u64,
 }
 
+/// Bundled parameters for batch write operations.
+///
+/// Groups the common arguments needed by `write_batch` and `write_batch_copy`
+/// to keep function signatures under clippy's argument limit.
+pub struct WriteContext<'a> {
+    pub client: &'a Client,
+    pub target_schema: &'a str,
+    pub stream_name: &'a str,
+    pub created_tables: &'a mut HashSet<String>,
+    pub write_mode: Option<&'a WriteMode>,
+    pub schema_policy: Option<&'a SchemaEvolutionPolicy>,
+    pub on_data_error: DataErrorPolicy,
+}
+
 /// Create the target table if it doesn't exist, based on the Arrow schema.
 ///
 /// When `primary_key` is provided with non-empty column names, a PRIMARY KEY
@@ -467,21 +481,36 @@ const COPY_FLUSH_BYTES: usize = 4 * 1024 * 1024; // 4MB
 
 /// Write an Arrow IPC batch to PostgreSQL using multi-value INSERT.
 ///
+/// On batch failure with Skip/Dlq policy, falls back to single-row
+/// INSERTs, skipping individual bad rows.
+pub async fn write_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<WriteResult, String> {
+    match insert_batch(ctx, ipc_bytes).await {
+        Ok(count) => Ok(WriteResult { rows_written: count, rows_failed: 0 }),
+        Err(e) => {
+            if matches!(ctx.on_data_error, DataErrorPolicy::Fail) {
+                return Err(e);
+            }
+            host_ffi::log(
+                1,
+                &format!(
+                    "dest-postgres: batch INSERT failed ({}), retrying per-row with skip policy",
+                    e
+                ),
+            );
+            write_rows_individually(
+                ctx.client, ctx.target_schema, ctx.stream_name, ipc_bytes, ctx.write_mode,
+            ).await
+        }
+    }
+}
+
+/// Internal: write via multi-value INSERT, returning row count.
+///
 /// Builds batched statements:
 ///   INSERT INTO t (c1, c2) VALUES (v1, v2), (v3, v4), ...
 ///
 /// Chunks at INSERT_CHUNK_SIZE rows to keep SQL size bounded.
-pub async fn write_batch(
-    client: &Client,
-    target_schema: &str,
-    stream_name: &str,
-    ipc_bytes: &[u8],
-    created_tables: &mut std::collections::HashSet<String>,
-    write_mode: Option<&WriteMode>,
-    policies: Option<&SchemaEvolutionPolicy>,
-) -> Result<u64, String> {
-    // Caller must validate stream_name and target_schema before calling.
-
+async fn insert_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<u64, String> {
     // 1. Decode Arrow IPC
     let cursor = Cursor::new(ipc_bytes);
     let reader = StreamReader::try_new(cursor, None)
@@ -496,27 +525,28 @@ pub async fn write_batch(
         return Ok(0);
     }
 
-    let qualified_table = format!("\"{}\".\"{}\"", target_schema, stream_name);
+    let qualified_table = format!("\"{}\".\"{}\"", ctx.target_schema, ctx.stream_name);
 
     // 2. Ensure schema + table exist (only on first encounter)
-    if !created_tables.contains(&qualified_table) {
-        let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", target_schema);
-        client
+    if !ctx.created_tables.contains(&qualified_table) {
+        let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", ctx.target_schema);
+        ctx.client
             .execute(&create_schema, &[])
             .await
-            .map_err(|e| format!("Failed to create schema '{}': {}", target_schema, e))?;
+            .map_err(|e| format!("Failed to create schema '{}': {}", ctx.target_schema, e))?;
 
-        let pk = match write_mode {
+        let pk = match ctx.write_mode {
             Some(WriteMode::Upsert { primary_key }) => Some(primary_key.as_slice()),
             _ => None,
         };
-        ensure_table(client, &qualified_table, &arrow_schema, pk).await?;
-        created_tables.insert(qualified_table.clone());
+        ensure_table(ctx.client, &qualified_table, &arrow_schema, pk).await?;
+        ctx.created_tables.insert(qualified_table.clone());
 
         // Detect schema drift and apply policy
-        if let Some(policy) = policies {
+        if let Some(policy) = ctx.schema_policy {
             if let Some(drift) =
-                detect_schema_drift(client, target_schema, stream_name, &arrow_schema).await?
+                detect_schema_drift(ctx.client, ctx.target_schema, ctx.stream_name, &arrow_schema)
+                    .await?
             {
                 host_ffi::log(
                     2,
@@ -529,14 +559,13 @@ pub async fn write_batch(
                         drift.nullability_changes.len()
                     ),
                 );
-                apply_schema_policy(client, &qualified_table, &drift, policy).await?;
+                apply_schema_policy(ctx.client, &qualified_table, &drift, policy).await?;
             }
         }
-
     }
 
     // Validate upsert primary_key columns
-    if let Some(WriteMode::Upsert { primary_key }) = write_mode {
+    if let Some(WriteMode::Upsert { primary_key }) = ctx.write_mode {
         for pk_col in primary_key {
             validate_pg_identifier(pk_col)
                 .map_err(|e| format!("Invalid primary key column name '{}': {}", pk_col, e))?;
@@ -580,7 +609,7 @@ pub async fn write_batch(
             }
 
             // Append ON CONFLICT clause for upsert mode
-            if let Some(WriteMode::Upsert { primary_key }) = write_mode {
+            if let Some(WriteMode::Upsert { primary_key }) = ctx.write_mode {
                 let pk_cols = primary_key
                     .iter()
                     .map(|k| format!("\"{}\"", k))
@@ -605,13 +634,13 @@ pub async fn write_batch(
                 }
             }
 
-            client
+            ctx.client
                 .execute(&sql, &[])
                 .await
                 .map_err(|e| {
                     format!(
                         "Multi-value INSERT failed for {}, rows {}-{}: {}",
-                        stream_name, chunk_start, chunk_end, e
+                        ctx.stream_name, chunk_start, chunk_end, e
                     )
                 })?;
 
@@ -632,19 +661,40 @@ pub async fn write_batch(
 
 /// Write an Arrow IPC batch to PostgreSQL using COPY FROM STDIN (text format).
 ///
+/// On COPY failure with Skip/Dlq policy, falls back to single-row INSERTs.
+pub async fn write_batch_copy(
+    ctx: &mut WriteContext<'_>,
+    ipc_bytes: &[u8],
+) -> Result<WriteResult, String> {
+    match copy_batch(ctx, ipc_bytes).await {
+        Ok(count) => Ok(WriteResult {
+            rows_written: count,
+            rows_failed: 0,
+        }),
+        Err(e) => {
+            if matches!(ctx.on_data_error, DataErrorPolicy::Fail) {
+                return Err(e);
+            }
+            host_ffi::log(
+                1,
+                &format!(
+                    "dest-postgres: COPY failed ({}), falling back to per-row INSERT with skip",
+                    e
+                ),
+            );
+            write_rows_individually(
+                ctx.client, ctx.target_schema, ctx.stream_name, ipc_bytes, ctx.write_mode,
+            )
+            .await
+        }
+    }
+}
+
+/// Internal: write via COPY FROM STDIN, returning row count.
+///
 /// Streams rows as tab-separated text directly to PostgreSQL's COPY protocol,
 /// bypassing SQL parsing for significantly higher throughput.
-pub async fn write_batch_copy(
-    client: &Client,
-    target_schema: &str,
-    stream_name: &str,
-    ipc_bytes: &[u8],
-    created_tables: &mut std::collections::HashSet<String>,
-    write_mode: Option<&WriteMode>,
-    policies: Option<&SchemaEvolutionPolicy>,
-) -> Result<u64, String> {
-    // Caller must validate stream_name and target_schema before calling.
-
+async fn copy_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<u64, String> {
     // 1. Decode Arrow IPC
     let cursor = Cursor::new(ipc_bytes);
     let reader = StreamReader::try_new(cursor, None)
@@ -658,27 +708,28 @@ pub async fn write_batch_copy(
         return Ok(0);
     }
 
-    let qualified_table = format!("\"{}\".\"{}\"", target_schema, stream_name);
+    let qualified_table = format!("\"{}\".\"{}\"", ctx.target_schema, ctx.stream_name);
 
     // 2. Ensure schema + table exist (only on first encounter)
-    if !created_tables.contains(&qualified_table) {
-        let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", target_schema);
-        client
+    if !ctx.created_tables.contains(&qualified_table) {
+        let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", ctx.target_schema);
+        ctx.client
             .execute(&create_schema, &[])
             .await
-            .map_err(|e| format!("Failed to create schema '{}': {}", target_schema, e))?;
+            .map_err(|e| format!("Failed to create schema '{}': {}", ctx.target_schema, e))?;
 
-        let pk = match write_mode {
+        let pk = match ctx.write_mode {
             Some(WriteMode::Upsert { primary_key }) => Some(primary_key.as_slice()),
             _ => None,
         };
-        ensure_table(client, &qualified_table, &arrow_schema, pk).await?;
-        created_tables.insert(qualified_table.clone());
+        ensure_table(ctx.client, &qualified_table, &arrow_schema, pk).await?;
+        ctx.created_tables.insert(qualified_table.clone());
 
         // Detect schema drift and apply policy
-        if let Some(policy) = policies {
+        if let Some(policy) = ctx.schema_policy {
             if let Some(drift) =
-                detect_schema_drift(client, target_schema, stream_name, &arrow_schema).await?
+                detect_schema_drift(ctx.client, ctx.target_schema, ctx.stream_name, &arrow_schema)
+                    .await?
             {
                 host_ffi::log(
                     2,
@@ -691,10 +742,9 @@ pub async fn write_batch_copy(
                         drift.nullability_changes.len()
                     ),
                 );
-                apply_schema_policy(client, &qualified_table, &drift, policy).await?;
+                apply_schema_policy(ctx.client, &qualified_table, &drift, policy).await?;
             }
         }
-
     }
 
     // 3. Build COPY statement
@@ -710,7 +760,8 @@ pub async fn write_batch_copy(
     );
 
     // 4. Start COPY and stream data
-    let sink = client
+    let sink = ctx
+        .client
         .copy_in(&copy_stmt)
         .await
         .map_err(|e| format!("COPY start failed: {}", e))?;
@@ -858,101 +909,6 @@ async fn write_rows_individually(
         rows_written,
         rows_failed,
     })
-}
-
-/// Write an Arrow IPC batch with per-row error handling policy.
-///
-/// On chunk INSERT failure with Skip/Dlq policy, falls back to single-row
-/// INSERTs for the failing batch, skipping individual bad rows.
-#[allow(clippy::too_many_arguments)]
-pub async fn write_batch_with_policy(
-    client: &Client,
-    target_schema: &str,
-    stream_name: &str,
-    ipc_bytes: &[u8],
-    created_tables: &mut std::collections::HashSet<String>,
-    write_mode: Option<&WriteMode>,
-    policies: Option<&SchemaEvolutionPolicy>,
-    on_data_error: DataErrorPolicy,
-) -> Result<WriteResult, String> {
-    match write_batch(
-        client,
-        target_schema,
-        stream_name,
-        ipc_bytes,
-        created_tables,
-        write_mode,
-        policies,
-    )
-    .await
-    {
-        Ok(count) => Ok(WriteResult {
-            rows_written: count,
-            rows_failed: 0,
-        }),
-        Err(e) => {
-            if matches!(on_data_error, DataErrorPolicy::Fail) {
-                return Err(e);
-            }
-
-            host_ffi::log(
-                1,
-                &format!(
-                    "dest-postgres: batch INSERT failed ({}), retrying per-row with skip policy",
-                    e
-                ),
-            );
-
-            write_rows_individually(client, target_schema, stream_name, ipc_bytes, write_mode).await
-        }
-    }
-}
-
-/// Write an Arrow IPC batch via COPY with per-row error handling policy.
-///
-/// On COPY failure with Skip/Dlq policy, falls back to single-row INSERTs.
-#[allow(clippy::too_many_arguments)]
-pub async fn write_batch_copy_with_policy(
-    client: &Client,
-    target_schema: &str,
-    stream_name: &str,
-    ipc_bytes: &[u8],
-    created_tables: &mut std::collections::HashSet<String>,
-    write_mode: Option<&WriteMode>,
-    policies: Option<&SchemaEvolutionPolicy>,
-    on_data_error: DataErrorPolicy,
-) -> Result<WriteResult, String> {
-    match write_batch_copy(
-        client,
-        target_schema,
-        stream_name,
-        ipc_bytes,
-        created_tables,
-        write_mode,
-        policies,
-    )
-    .await
-    {
-        Ok(count) => Ok(WriteResult {
-            rows_written: count,
-            rows_failed: 0,
-        }),
-        Err(e) => {
-            if matches!(on_data_error, DataErrorPolicy::Fail) {
-                return Err(e);
-            }
-
-            host_ffi::log(
-                1,
-                &format!(
-                    "dest-postgres: COPY failed ({}), falling back to per-row INSERT with skip",
-                    e
-                ),
-            );
-
-            write_rows_individually(client, target_schema, stream_name, ipc_bytes, write_mode).await
-        }
-    }
 }
 
 /// Format an Arrow array value at a given row index as a SQL literal.
@@ -1103,10 +1059,19 @@ fn format_copy_value(buf: &mut Vec<u8>, col: &dyn Array, row_idx: usize) {
 }
 
 /// Ensure the __rb_watermarks metadata table exists.
+///
+/// Also creates the target schema if it doesn't exist yet, since the watermark
+/// table must live in the same schema as the data tables.
 pub async fn ensure_watermarks_table(
     client: &Client,
     target_schema: &str,
 ) -> Result<(), String> {
+    let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", target_schema);
+    client
+        .execute(&create_schema, &[])
+        .await
+        .map_err(|e| format!("Failed to create schema '{}': {}", target_schema, e))?;
+
     let qualified = format!("\"{}\".__rb_watermarks", target_schema);
     let ddl = format!(
         "CREATE TABLE IF NOT EXISTS {} (

@@ -413,30 +413,20 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                             );
                         }
 
+                        let mut write_ctx = sink::WriteContext {
+                            client: &client,
+                            target_schema: &config.schema,
+                            stream_name: &effective_stream,
+                            created_tables: &mut created_tables,
+                            write_mode: effective_write_mode.as_ref(),
+                            schema_policy: Some(&stream_ctx.policies.schema_evolution),
+                            on_data_error: stream_ctx.policies.on_data_error,
+                        };
+
                         let write_result = if use_copy {
-                            sink::write_batch_copy_with_policy(
-                                &client,
-                                &config.schema,
-                                &effective_stream,
-                                ipc_bytes,
-                                &mut created_tables,
-                                effective_write_mode.as_ref(),
-                                Some(&stream_ctx.policies.schema_evolution),
-                                stream_ctx.policies.on_data_error,
-                            )
-                            .await
+                            sink::write_batch_copy(&mut write_ctx, ipc_bytes).await
                         } else {
-                            sink::write_batch_with_policy(
-                                &client,
-                                &config.schema,
-                                &effective_stream,
-                                ipc_bytes,
-                                &mut created_tables,
-                                effective_write_mode.as_ref(),
-                                Some(&stream_ctx.policies.schema_evolution),
-                                stream_ctx.policies.on_data_error,
-                            )
-                            .await
+                            sink::write_batch(&mut write_ctx, ipc_bytes).await
                         };
 
                         match write_result {

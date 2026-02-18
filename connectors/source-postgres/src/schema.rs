@@ -12,9 +12,10 @@ fn pg_type_to_arrow(pg_type: &str) -> &'static str {
         "boolean" | "bool" => "Boolean",
         "text" | "varchar" | "character varying" | "char" | "character" | "name" => "Utf8",
         // For v0.1, represent complex types as strings
-        "timestamp without time zone" | "timestamp with time zone" | "timestamp" | "timestamptz" => {
-            "Utf8"
-        }
+        "timestamp without time zone"
+        | "timestamp with time zone"
+        | "timestamp"
+        | "timestamptz" => "Utf8",
         "date" => "Utf8",
         "time" | "time without time zone" | "time with time zone" => "Utf8",
         "numeric" | "decimal" => "Utf8",

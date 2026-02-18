@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 
 use rapidbyte_sdk::errors::ValidationResult;
 use rapidbyte_sdk::protocol::{
-    ConnectorRole, CursorInfo, CursorType, CursorValue, DataErrorPolicy, SchemaHint,
-    StreamContext, StreamLimits, StreamPolicies, SyncMode, WriteMode,
+    ConnectorRole, CursorInfo, CursorType, CursorValue, DataErrorPolicy, SchemaHint, StreamContext,
+    StreamLimits, StreamPolicies, SyncMode, WriteMode,
 };
 
 use super::checkpoint::correlate_and_persist_cursors;
@@ -202,7 +202,7 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
                 cursor_info,
                 limits: limits.clone(),
                 policies: StreamPolicies {
-                    on_data_error: on_data_error.clone(),
+                    on_data_error,
                     ..StreamPolicies::default()
                 },
                 write_mode: Some(write_mode),
