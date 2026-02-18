@@ -16,10 +16,15 @@ use bytes::Bytes;
 use futures_util::SinkExt;
 
 /// Create the target table if it doesn't exist, based on the Arrow schema.
+///
+/// When `primary_key` is provided with non-empty column names, a PRIMARY KEY
+/// constraint is appended to the CREATE TABLE DDL. This is required for
+/// upsert mode (`INSERT ... ON CONFLICT (pk)`).
 async fn ensure_table(
     client: &Client,
     qualified_table: &str,
     arrow_schema: &arrow::datatypes::Schema,
+    primary_key: Option<&[String]>,
 ) -> Result<(), String> {
     // Validate all column names before interpolating into DDL
     for field in arrow_schema.fields() {
@@ -37,10 +42,27 @@ async fn ensure_table(
         })
         .collect();
 
+    let mut ddl_parts: Vec<String> = columns_ddl;
+
+    if let Some(pk_cols) = primary_key {
+        if !pk_cols.is_empty() {
+            for pk in pk_cols {
+                validate_pg_identifier(pk)
+                    .map_err(|e| format!("Invalid primary key column: {}", e))?;
+            }
+            let pk = pk_cols
+                .iter()
+                .map(|k| format!("\"{}\"", k))
+                .collect::<Vec<_>>()
+                .join(", ");
+            ddl_parts.push(format!("PRIMARY KEY ({})", pk));
+        }
+    }
+
     let ddl = format!(
         "CREATE TABLE IF NOT EXISTS {} ({})",
         qualified_table,
-        columns_ddl.join(", ")
+        ddl_parts.join(", ")
     );
 
     host_ffi::log(3, &format!("dest-postgres: ensuring table: {}", ddl));
@@ -131,7 +153,11 @@ pub async fn write_batch(
             .await
             .map_err(|e| format!("Failed to create schema '{}': {}", target_schema, e))?;
 
-        ensure_table(client, &qualified_table, &arrow_schema).await?;
+        let pk = match write_mode {
+            Some(WriteMode::Upsert { primary_key }) => Some(primary_key.as_slice()),
+            _ => None,
+        };
+        ensure_table(client, &qualified_table, &arrow_schema, pk).await?;
         created_tables.insert(qualified_table.clone());
 
         if matches!(write_mode, Some(WriteMode::Replace)) {
@@ -270,7 +296,12 @@ pub async fn write_batch_copy(
             .execute(&create_schema, &[])
             .await
             .map_err(|e| format!("Failed to create schema '{}': {}", target_schema, e))?;
-        ensure_table(client, &qualified_table, &arrow_schema).await?;
+
+        let pk = match write_mode {
+            Some(WriteMode::Upsert { primary_key }) => Some(primary_key.as_slice()),
+            _ => None,
+        };
+        ensure_table(client, &qualified_table, &arrow_schema, pk).await?;
         created_tables.insert(qualified_table.clone());
 
         if matches!(write_mode, Some(WriteMode::Replace)) {
