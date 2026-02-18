@@ -16,7 +16,7 @@ use rapidbyte_sdk::protocol::{
 
 use crate::pipeline::types::PipelineConfig;
 use crate::runtime::connector_handle::ConnectorHandle;
-use crate::runtime::host_functions::HostState;
+use crate::runtime::host_functions::{Frame, HostState};
 use crate::runtime::wasm_runtime::{self, WasmRuntime};
 use crate::state::backend::{RunStats, RunStatus, StateBackend};
 use crate::state::sqlite::SqliteStateBackend;
@@ -111,7 +111,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
     let pipeline_name_dst = pipeline_name.clone();
 
     // Per-stream: create channel, source writes into tx, dest reads from rx
-    let (batch_tx, batch_rx) = mpsc::sync_channel::<Vec<u8>>(16);
+    let (batch_tx, batch_rx) = mpsc::sync_channel::<Frame>(16);
 
     let source_handle = tokio::task::spawn_blocking(move || -> Result<(f64, ReadSummary)> {
         run_source(
@@ -254,7 +254,7 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
 
 fn run_source(
     module: Module,
-    sender: mpsc::SyncSender<Vec<u8>>,
+    sender: mpsc::SyncSender<Frame>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
     source_config: &serde_json::Value,
@@ -266,9 +266,12 @@ fn run_source(
     // Keep a clone for sending stream-boundary sentinels after each run_read
     let sentinel_sender = sender.clone();
 
+    // Shared handle so we can update current_stream before each run_read
+    let current_stream = Arc::new(Mutex::new(String::new()));
+
     let host_state = HostState {
         pipeline_name: pipeline_name.to_string(),
-        current_stream: String::new(),
+        current_stream: current_stream.clone(),
         state_backend,
         stats,
         batch_sender: Some(sender),
@@ -317,6 +320,9 @@ fn run_source(
 
     let stream_result: Result<()> = (|| {
         for stream_ctx in stream_ctxs {
+            // Update current_stream so host functions use the correct scope
+            *current_stream.lock().unwrap() = stream_ctx.stream_name.clone();
+
             tracing::info!(stream = stream_ctx.stream_name, "Starting source read");
             let summary = handle.run_read(stream_ctx)?;
             tracing::info!(
@@ -330,8 +336,8 @@ fn run_source(
             total_summary.batches_emitted += summary.batches_emitted;
             total_summary.checkpoint_count += summary.checkpoint_count;
 
-            // Send empty sentinel to signal end-of-stream to dest
-            let _ = sentinel_sender.send(Vec::new());
+            // Signal end-of-stream to dest (typed sentinel, not magic empty vec)
+            let _ = sentinel_sender.send(Frame::EndStream);
         }
         Ok(())
     })();
@@ -350,7 +356,7 @@ fn run_source(
 
 fn run_destination(
     module: Module,
-    receiver: mpsc::Receiver<Vec<u8>>,
+    receiver: mpsc::Receiver<Frame>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
     dest_config: &serde_json::Value,
@@ -360,9 +366,12 @@ fn run_destination(
     let phase_start = Instant::now();
     let vm_setup_start = Instant::now();
 
+    // Shared handle so we can update current_stream before each run_write
+    let current_stream = Arc::new(Mutex::new(String::new()));
+
     let host_state = HostState {
         pipeline_name: pipeline_name.to_string(),
-        current_stream: String::new(),
+        current_stream: current_stream.clone(),
         state_backend,
         stats,
         batch_sender: None,
@@ -416,6 +425,9 @@ fn run_destination(
 
     let stream_result: Result<()> = (|| {
         for stream_ctx in stream_ctxs {
+            // Update current_stream so host functions use the correct scope
+            *current_stream.lock().unwrap() = stream_ctx.stream_name.clone();
+
             tracing::info!(stream = stream_ctx.stream_name, "Starting dest write");
             let summary = handle.run_write(stream_ctx)?;
             tracing::info!(
@@ -464,7 +476,7 @@ fn validate_connector(
 
     let host_state = HostState {
         pipeline_name: "check".to_string(),
-        current_stream: "check".to_string(),
+        current_stream: Arc::new(Mutex::new("check".to_string())),
         state_backend: state,
         stats: Arc::new(Mutex::new(RunStats::default())),
         batch_sender: None,

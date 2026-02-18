@@ -11,26 +11,42 @@ use crate::state::backend::{RunStats, StateBackend};
 
 use super::memory_protocol;
 
+/// Channel frame type for batch routing between source and destination.
+///
+/// Explicitly distinguishes data batches from stream boundary signals,
+/// replacing the previous convention of "empty Vec<u8> = end-of-stream".
+pub enum Frame {
+    /// IPC-encoded Arrow RecordBatch. Must be non-empty;
+    /// the host rejects zero-length data frames as a protocol violation.
+    Data(Vec<u8>),
+    /// Signals end of the current stream. The destination's pull loop
+    /// sees this as EOF, returns from `run_write`, and the orchestrator
+    /// can start the next stream.
+    EndStream,
+}
+
 /// Shared state passed to all host functions via WasmEdge's host data mechanism.
 pub struct HostState {
     /// Pipeline name for state operations.
     pub pipeline_name: String,
     /// Current stream name for state operations.
-    pub current_stream: String,
+    /// Shared with the orchestrator loop so it can be updated per-stream
+    /// before each `run_read`/`run_write` call.
+    pub current_stream: Arc<Mutex<String>>,
     /// State backend for cursor/run persistence.
     pub state_backend: Arc<dyn StateBackend>,
     /// Accumulated stats for the current run.
     pub stats: Arc<Mutex<RunStats>>,
 
     // --- Source-side fields ---
-    /// Channel sender for source -> orchestrator batch flow (Vec<u8> only).
-    pub batch_sender: Option<mpsc::SyncSender<Vec<u8>>>,
+    /// Channel sender for source -> orchestrator batch flow.
+    pub batch_sender: Option<mpsc::SyncSender<Frame>>,
     /// Next batch ID (monotonically increasing per stream run, starts at 1).
     pub next_batch_id: u64,
 
     // --- Dest-side fields ---
     /// Channel receiver for orchestrator -> dest batch flow.
-    pub batch_receiver: Option<mpsc::Receiver<Vec<u8>>>,
+    pub batch_receiver: Option<mpsc::Receiver<Frame>>,
     /// Stashed batch when guest buffer was too small.
     pub pending_batch: Option<Vec<u8>>,
 
@@ -52,6 +68,11 @@ impl HostState {
 
     fn set_last_error(&mut self, err: ConnectorErrorV1) {
         self.last_error = Some(err);
+    }
+
+    /// Read the current stream name (locks briefly).
+    fn current_stream(&self) -> String {
+        self.current_stream.lock().unwrap().clone()
     }
 }
 
@@ -83,6 +104,17 @@ pub fn host_emit_batch(
         }
     };
 
+    // Reject zero-length batches — connectors must never emit empty data.
+    // Empty frames are reserved for the EndStream sentinel (sent by the host).
+    if batch_bytes.is_empty() {
+        let err = ConnectorErrorV1::internal(
+            "EMPTY_BATCH",
+            "Connector emitted a zero-length batch; this is a protocol violation",
+        );
+        data.set_last_error(err);
+        return Ok(vec![WasmValue::from_i32(-1)]);
+    }
+
     let sender = match &data.batch_sender {
         Some(s) => s,
         None => {
@@ -93,7 +125,7 @@ pub fn host_emit_batch(
     };
 
     // Blocking send — applies backpressure when channel is full
-    match sender.send(batch_bytes) {
+    match sender.send(Frame::Data(batch_bytes)) {
         Ok(()) => {
             data.next_batch_id += 1;
             Ok(vec![WasmValue::from_i32(0)])
@@ -135,9 +167,9 @@ pub fn host_next_batch(
             }
         };
         match receiver.recv() {
-            Ok(batch) if batch.is_empty() => return Ok(vec![WasmValue::from_i32(0)]), // End-of-stream sentinel
-            Ok(batch) => batch,
-            Err(_) => return Ok(vec![WasmValue::from_i32(0)]), // EOF — sender dropped
+            Ok(Frame::Data(batch)) => batch,
+            Ok(Frame::EndStream) => return Ok(vec![WasmValue::from_i32(0)]), // End-of-stream
+            Err(_) => return Ok(vec![WasmValue::from_i32(0)]),               // Channel closed
         }
     };
 
@@ -273,7 +305,8 @@ pub fn host_state_get(
     }
 
     // Host anchors scope=Stream to current_stream
-    let state_key = format!("{}:{}", data.current_stream, key);
+    let current_stream = data.current_stream();
+    let state_key = format!("{}:{}", current_stream, key);
     match data
         .state_backend
         .get_cursor(&data.pipeline_name, &state_key)
@@ -377,7 +410,8 @@ pub fn host_state_put(
         }
     };
 
-    let state_key = format!("{}:{}", data.current_stream, key);
+    let current_stream = data.current_stream();
+    let state_key = format!("{}:{}", current_stream, key);
     let cursor = crate::state::backend::CursorState {
         cursor_field: Some(key),
         cursor_value: Some(value),
@@ -423,11 +457,12 @@ pub fn host_checkpoint(
     };
 
     // Parse the envelope to extract the checkpoint
+    let current_stream = data.current_stream();
     match serde_json::from_slice::<serde_json::Value>(&payload_bytes) {
         Ok(envelope) => {
             tracing::debug!(
                 pipeline = data.pipeline_name,
-                stream = data.current_stream,
+                stream = %current_stream,
                 "Received checkpoint: {}",
                 serde_json::to_string_pretty(&envelope).unwrap_or_default()
             );
@@ -444,7 +479,7 @@ pub fn host_checkpoint(
                     Err(e) => {
                         tracing::warn!(
                             pipeline = data.pipeline_name,
-                            stream = data.current_stream,
+                            stream = %current_stream,
                             "Failed to parse source checkpoint: {}",
                             e
                         );
@@ -487,11 +522,12 @@ pub fn host_metric_fn(
         }
     };
 
+    let current_stream = data.current_stream();
     match serde_json::from_slice::<serde_json::Value>(&payload_bytes) {
         Ok(metric_val) => {
             tracing::debug!(
                 pipeline = data.pipeline_name,
-                stream = data.current_stream,
+                stream = %current_stream,
                 "Received metric: {}",
                 serde_json::to_string(&metric_val).unwrap_or_default()
             );
@@ -525,14 +561,14 @@ pub fn host_log(
     };
 
     let pipeline = &data.pipeline_name;
-    let stream = &data.current_stream;
+    let stream = data.current_stream();
 
     match level {
-        0 => tracing::error!(pipeline, stream, "[connector] {}", message),
-        1 => tracing::warn!(pipeline, stream, "[connector] {}", message),
-        2 => tracing::info!(pipeline, stream, "[connector] {}", message),
-        3 => tracing::debug!(pipeline, stream, "[connector] {}", message),
-        _ => tracing::trace!(pipeline, stream, "[connector] {}", message),
+        0 => tracing::error!(pipeline, stream = %stream, "[connector] {}", message),
+        1 => tracing::warn!(pipeline, stream = %stream, "[connector] {}", message),
+        2 => tracing::info!(pipeline, stream = %stream, "[connector] {}", message),
+        3 => tracing::debug!(pipeline, stream = %stream, "[connector] {}", message),
+        _ => tracing::trace!(pipeline, stream = %stream, "[connector] {}", message),
     }
 
     Ok(vec![WasmValue::from_i32(0)])
