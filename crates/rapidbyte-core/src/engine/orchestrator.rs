@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 
 use rapidbyte_sdk::errors::ValidationResult;
 use rapidbyte_sdk::protocol::{
-    CursorInfo, CursorType, CursorValue, SchemaHint, StreamContext, StreamLimits, StreamPolicies,
-    SyncMode, WriteMode,
+    ConnectorRole, CursorInfo, CursorType, CursorValue, SchemaHint, StreamContext, StreamLimits,
+    StreamPolicies, SyncMode, WriteMode,
 };
 
 use super::checkpoint::correlate_and_persist_cursors;
@@ -72,6 +72,18 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
     let source_wasm = wasm_runtime::resolve_connector_path(&config.source.use_ref)?;
     let dest_wasm = wasm_runtime::resolve_connector_path(&config.destination.use_ref)?;
 
+    // 1b. Load and validate manifests (pre-flight)
+    let _source_manifest = load_and_validate_manifest(
+        &source_wasm,
+        &config.source.use_ref,
+        ConnectorRole::Source,
+    )?;
+    let _dest_manifest = load_and_validate_manifest(
+        &dest_wasm,
+        &config.destination.use_ref,
+        ConnectorRole::Destination,
+    )?;
+
     // 2. Initialize state backend
     let state = create_state_backend(config)?;
     let state = Arc::new(state);
@@ -94,6 +106,11 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
         .iter()
         .map(|tc| {
             let wasm_path = wasm_runtime::resolve_connector_path(&tc.use_ref)?;
+            let _manifest = load_and_validate_manifest(
+                &wasm_path,
+                &tc.use_ref,
+                ConnectorRole::Transform,
+            )?;
             let load_start = Instant::now();
             let module = runtime.load_module(&wasm_path)?;
             let load_ms = load_start.elapsed().as_millis() as u64;
@@ -424,6 +441,25 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     let source_wasm = wasm_runtime::resolve_connector_path(&config.source.use_ref)?;
     let dest_wasm = wasm_runtime::resolve_connector_path(&config.destination.use_ref)?;
 
+    // 1b. Validate manifests
+    let source_manifest = load_and_validate_manifest(
+        &source_wasm,
+        &config.source.use_ref,
+        ConnectorRole::Source,
+    )?;
+    let dest_manifest = load_and_validate_manifest(
+        &dest_wasm,
+        &config.destination.use_ref,
+        ConnectorRole::Destination,
+    )?;
+
+    if source_manifest.is_some() {
+        println!("Source manifest:    OK");
+    }
+    if dest_manifest.is_some() {
+        println!("Dest manifest:      OK");
+    }
+
     // 2. Check state backend
     let state_ok = check_state_backend(config);
 
@@ -447,6 +483,11 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     let mut transform_validations = Vec::new();
     for tc in &config.transforms {
         let wasm_path = wasm_runtime::resolve_connector_path(&tc.use_ref)?;
+        let _manifest = load_and_validate_manifest(
+            &wasm_path,
+            &tc.use_ref,
+            ConnectorRole::Transform,
+        )?;
         let config_val = tc.config.clone();
         let (tc_id, tc_ver) = parse_connector_ref(&tc.use_ref);
         let result = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
@@ -489,4 +530,50 @@ fn check_state_backend(config: &PipelineConfig) -> bool {
             false
         }
     }
+}
+
+/// Load and validate a connector manifest against the expected role.
+/// Returns the manifest if found, or None if no manifest exists (backwards compat).
+/// Fails if manifest exists but declares incompatible role or protocol version.
+fn load_and_validate_manifest(
+    wasm_path: &std::path::Path,
+    connector_ref: &str,
+    expected_role: ConnectorRole,
+) -> Result<Option<rapidbyte_sdk::manifest::ConnectorManifest>> {
+    let manifest = wasm_runtime::load_connector_manifest(wasm_path)?;
+
+    if let Some(ref m) = manifest {
+        if !m.supports_role(expected_role) {
+            anyhow::bail!(
+                "Connector '{}' does not support {:?} role. Declared roles: {:?}",
+                connector_ref,
+                expected_role,
+                m.roles,
+            );
+        }
+
+        if m.protocol_version != "1" {
+            tracing::warn!(
+                connector = connector_ref,
+                manifest_protocol = m.protocol_version,
+                host_protocol = "1",
+                "Protocol version mismatch"
+            );
+        }
+
+        tracing::info!(
+            connector = m.id,
+            version = m.version,
+            roles = ?m.roles,
+            features = ?m.features,
+            "Loaded connector manifest"
+        );
+    } else {
+        tracing::debug!(
+            connector = connector_ref,
+            "No manifest found, skipping pre-flight validation"
+        );
+    }
+
+    Ok(manifest)
 }
