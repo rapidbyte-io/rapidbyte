@@ -1,0 +1,14 @@
+{
+    "id": "dest-postgres",
+    "version": "0.1.0",
+    "description": "Writes data to PostgreSQL using INSERT or COPY",
+    "protocol_version": "1",
+    "roles": ["destination"],
+    "features": ["bulk_load_copy", "bulk_load_copy_binary"],
+    "network": {
+        "tls": "optional",
+        "runtime_resolved_hosts": true
+    },
+    "entry_point": "dest_postgres.wasm",
+    "write_modes": ["append", "replace"]
+}

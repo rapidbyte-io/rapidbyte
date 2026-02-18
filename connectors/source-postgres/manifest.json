@@ -1,0 +1,13 @@
+{
+    "id": "source-postgres",
+    "version": "0.1.0",
+    "description": "Reads data from PostgreSQL tables using streaming queries",
+    "protocol_version": "1",
+    "roles": ["source"],
+    "features": ["bulk_load_copy"],
+    "network": {
+        "tls": "optional",
+        "runtime_resolved_hosts": true
+    },
+    "entry_point": "source_postgres.wasm"
+}

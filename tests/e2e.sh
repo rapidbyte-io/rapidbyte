@@ -47,6 +47,8 @@ info "Building dest-postgres connector..."
 mkdir -p "$CONNECTOR_DIR"
 cp "$PROJECT_ROOT/connectors/source-postgres/target/wasm32-wasip1/debug/source_postgres.wasm" "$CONNECTOR_DIR/"
 cp "$PROJECT_ROOT/connectors/dest-postgres/target/wasm32-wasip1/debug/dest_postgres.wasm" "$CONNECTOR_DIR/"
+cp "$PROJECT_ROOT/connectors/source-postgres/manifest.json" "$CONNECTOR_DIR/source_postgres.manifest.json"
+cp "$PROJECT_ROOT/connectors/dest-postgres/manifest.json" "$CONNECTOR_DIR/dest_postgres.manifest.json"
 info "Connectors staged in $CONNECTOR_DIR"
 ls -lh "$CONNECTOR_DIR"/*.wasm
 
