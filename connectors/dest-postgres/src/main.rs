@@ -421,6 +421,7 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                             write_mode: effective_write_mode.as_ref(),
                             schema_policy: Some(&stream_ctx.policies.schema_evolution),
                             on_data_error: stream_ctx.policies.on_data_error,
+                            load_method: &config.load_method,
                         };
 
                         let write_result = if use_copy {

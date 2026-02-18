@@ -36,6 +36,7 @@ pub struct WriteContext<'a> {
     pub write_mode: Option<&'a WriteMode>,
     pub schema_policy: Option<&'a SchemaEvolutionPolicy>,
     pub on_data_error: DataErrorPolicy,
+    pub load_method: &'a str,
 }
 
 /// Create the target table if it doesn't exist, based on the Arrow schema.
