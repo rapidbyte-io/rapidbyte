@@ -318,7 +318,7 @@ pub(crate) fn validate_connector(
 
     let mut handle = ConnectorHandle::new(vm);
 
-    // Use v1 lifecycle: wrap config in OpenContext for rb_validate
+    // Wrap config in OpenContext for rb_validate
     let open_ctx = OpenContext {
         config: ConfigBlob::Json(config.clone()),
         connector_id: connector_id.to_string(),

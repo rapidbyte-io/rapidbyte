@@ -182,10 +182,10 @@ mod tests {
 
     #[test]
     fn test_parse_error_response_preserves_metadata() {
-        let v1_err = ConnectorError::transient_db("DEADLOCK", "deadlock detected");
+        let err = ConnectorError::transient_db("DEADLOCK", "deadlock detected");
         let json = serde_json::json!({
             "status": "err",
-            "error": v1_err,
+            "error": err,
         });
         let bytes = serde_json::to_vec(&json).unwrap();
 

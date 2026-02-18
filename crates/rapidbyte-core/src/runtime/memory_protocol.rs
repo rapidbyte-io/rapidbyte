@@ -109,8 +109,8 @@ pub fn call_with_json<S: Serialize, R: DeserializeOwned, T: ?Sized + SyncInst>(
 }
 
 /// Like `call_with_json`, but returns the raw JSON bytes instead of deserializing.
-/// Useful when the caller needs to attempt multiple deserialization strategies
-/// (e.g., trying ConnectorResult before falling back to legacy formats).
+/// Useful when the caller needs to parse the ConnectorResult envelope before
+/// extracting the inner payload.
 pub fn call_with_json_raw<S: Serialize, T: ?Sized + SyncInst>(
     vm: &mut Vm<'_, T>,
     func_name: &str,
