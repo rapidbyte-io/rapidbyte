@@ -553,7 +553,6 @@ fn load_and_validate_manifest(
             connector = m.id,
             version = m.version,
             roles = ?m.roles,
-            features = ?m.features,
             "Loaded connector manifest"
         );
     } else {

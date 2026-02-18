@@ -163,8 +163,11 @@ pub fn manifest_path_from_wasm(wasm_path: &Path) -> std::path::PathBuf {
 }
 
 /// Verify WASM binary checksum against the manifest-declared value.
-pub fn verify_wasm_checksum(wasm_path: &Path, expected_hex: &str) -> Result<bool> {
+pub fn verify_wasm_checksum(wasm_path: &Path, expected: &str) -> Result<bool> {
     use sha2::{Digest, Sha256};
+
+    // Strip algorithm prefix (e.g., "sha256:abcd..." -> "abcd...")
+    let expected_hex = expected.strip_prefix("sha256:").unwrap_or(expected);
 
     let bytes = std::fs::read(wasm_path)
         .with_context(|| format!("Failed to read WASM binary: {}", wasm_path.display()))?;
@@ -187,7 +190,7 @@ pub fn load_connector_manifest(wasm_path: &Path) -> Result<Option<ConnectorManif
     let manifest: ConnectorManifest = serde_json::from_str(&content)
         .with_context(|| format!("Failed to parse manifest: {}", manifest_path.display()))?;
 
-    if let Some(ref expected) = manifest.checksum {
+    if let Some(ref expected) = manifest.artifact.checksum {
         let valid = verify_wasm_checksum(wasm_path, expected)?;
         if !valid {
             anyhow::bail!(
@@ -296,5 +299,9 @@ mod tests {
 
         assert!(verify_wasm_checksum(&wasm_path, &expected).unwrap());
         assert!(!verify_wasm_checksum(&wasm_path, "wrong_checksum").unwrap());
+
+        // Also test with sha256: prefix
+        let prefixed = format!("sha256:{}", expected);
+        assert!(verify_wasm_checksum(&wasm_path, &prefixed).unwrap());
     }
 }
