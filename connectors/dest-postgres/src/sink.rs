@@ -91,6 +91,11 @@ pub struct WriteSession<'a> {
 
     // Table creation tracking
     created_tables: HashSet<String>,
+
+    /// Columns present in Arrow but excluded from writes (new_column: Ignore policy).
+    ignored_columns: HashSet<String>,
+    /// Columns with type mismatches written as NULL (type_change: Null policy).
+    type_null_columns: HashSet<String>,
 }
 
 impl<'a> WriteSession<'a> {
@@ -184,6 +189,8 @@ impl<'a> WriteSession<'a> {
             rows_since_commit: 0,
             last_checkpoint_time: now,
             created_tables: HashSet::new(),
+            ignored_columns: HashSet::new(),
+            type_null_columns: HashSet::new(),
         })
     }
 
@@ -226,6 +233,8 @@ impl<'a> WriteSession<'a> {
             schema_policy: Some(&self.schema_policy),
             on_data_error: self.on_data_error,
             load_method: &self.load_method,
+            ignored_columns: &mut self.ignored_columns,
+            type_null_columns: &mut self.type_null_columns,
         };
 
         let result = write_batch(&mut write_ctx, ipc_bytes).await?;
@@ -390,6 +399,8 @@ struct WriteContext<'a> {
     schema_policy: Option<&'a SchemaEvolutionPolicy>,
     on_data_error: DataErrorPolicy,
     load_method: &'a str,
+    ignored_columns: &'a mut HashSet<String>,
+    type_null_columns: &'a mut HashSet<String>,
 }
 
 /// Create the target table if it doesn't exist, based on the Arrow schema.
