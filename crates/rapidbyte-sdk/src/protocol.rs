@@ -294,6 +294,13 @@ pub struct WritePerf {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReadPerf {
+    pub connect_secs: f64,
+    pub query_secs: f64,
+    pub fetch_secs: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReadSummary {
     pub records_read: u64,
     pub bytes_read: u64,
@@ -301,6 +308,8 @@ pub struct ReadSummary {
     pub checkpoint_count: u64,
     #[serde(default)]
     pub records_skipped: u64,
+    #[serde(default)]
+    pub perf: Option<ReadPerf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -548,6 +557,7 @@ mod tests {
             batches_emitted: 10,
             checkpoint_count: 2,
             records_skipped: 0,
+            perf: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: ReadSummary = serde_json::from_str(&json).unwrap();
@@ -585,6 +595,7 @@ mod tests {
                 batches_emitted: 1,
                 checkpoint_count: 1,
                 records_skipped: 0,
+                perf: None,
             },
         };
         let json = serde_json::to_string(&envelope).unwrap();
@@ -642,6 +653,7 @@ mod tests {
             batches_emitted: 10,
             checkpoint_count: 2,
             records_skipped: 5,
+            perf: None,
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: ReadSummary = serde_json::from_str(&json).unwrap();
@@ -677,6 +689,45 @@ mod tests {
         let limits: StreamLimits = serde_json::from_str(json).unwrap();
         assert_eq!(limits.checkpoint_interval_rows, 0);
         assert_eq!(limits.checkpoint_interval_seconds, 0);
+    }
+
+    #[test]
+    fn test_read_perf_roundtrip() {
+        let perf = ReadPerf {
+            connect_secs: 0.05,
+            query_secs: 0.8,
+            fetch_secs: 2.3,
+        };
+        let json = serde_json::to_string(&perf).unwrap();
+        let back: ReadPerf = serde_json::from_str(&json).unwrap();
+        assert_eq!(perf, back);
+    }
+
+    #[test]
+    fn test_read_summary_with_perf() {
+        let s = ReadSummary {
+            records_read: 1000,
+            bytes_read: 65536,
+            batches_emitted: 10,
+            checkpoint_count: 2,
+            records_skipped: 0,
+            perf: Some(ReadPerf {
+                connect_secs: 0.1,
+                query_secs: 1.0,
+                fetch_secs: 3.0,
+            }),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: ReadSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+    }
+
+    #[test]
+    fn test_read_summary_perf_backwards_compat() {
+        // Old JSON without perf should deserialize with None
+        let json = r#"{"records_read":100,"bytes_read":4096,"batches_emitted":1,"checkpoint_count":1,"records_skipped":0}"#;
+        let s: ReadSummary = serde_json::from_str(json).unwrap();
+        assert!(s.perf.is_none());
     }
 
     #[test]

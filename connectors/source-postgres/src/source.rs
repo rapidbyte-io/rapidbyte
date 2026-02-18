@@ -365,6 +365,7 @@ pub async fn read_stream(client: &Client, ctx: &StreamContext) -> Result<ReadSum
         batches_emitted,
         checkpoint_count,
         records_skipped,
+        perf: None,
     })
 }
 
