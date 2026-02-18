@@ -3,7 +3,7 @@ use serde::de::DeserializeOwned;
 use wasmedge_sdk::vm::SyncInst;
 use wasmedge_sdk::{params, Vm};
 
-use rapidbyte_sdk::errors::{ConnectorResult, ConnectorResultV1, ValidationResult};
+use rapidbyte_sdk::errors::{ConnectorResult, ValidationResult};
 use rapidbyte_sdk::protocol::{
     Catalog, OpenContext, OpenInfo, ReadSummary, StreamContext, WriteSummary,
 };
@@ -128,8 +128,8 @@ impl<'a> ConnectorHandle<'a> {
     }
 }
 
-/// Try to parse the raw JSON response as V1 first (ConnectorResultV1), then
-/// fall back to legacy ConnectorResult. This preserves ConnectorErrorV1
+/// Try to parse the raw JSON response as V1 first (ConnectorResult), then
+/// fall back to legacy ConnectorResult. This preserves ConnectorError
 /// metadata for retry decisions while remaining backward-compatible with
 /// older connectors.
 fn parse_v1_or_legacy<T: DeserializeOwned>(
@@ -137,10 +137,10 @@ fn parse_v1_or_legacy<T: DeserializeOwned>(
     func_name: &str,
 ) -> Result<T, PipelineError> {
     // Attempt 1: Try V1 format (has typed error with retry metadata)
-    if let Ok(v1_result) = serde_json::from_slice::<ConnectorResultV1<T>>(raw_bytes) {
+    if let Ok(v1_result) = serde_json::from_slice::<ConnectorResult<T>>(raw_bytes) {
         return match v1_result {
-            ConnectorResultV1::Ok { data } => Ok(data),
-            ConnectorResultV1::Err { error } => {
+            ConnectorResult::Ok { data } => Ok(data),
+            ConnectorResult::Err { error } => {
                 tracing::warn!(
                     func = func_name,
                     category = %error.category,
@@ -187,7 +187,7 @@ fn parse_v1_or_legacy<T: DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapidbyte_sdk::errors::{ConnectorErrorV1, ErrorCategory};
+    use rapidbyte_sdk::errors::{ConnectorError, ErrorCategory};
 
     #[test]
     fn test_parse_v1_ok_response() {
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn test_parse_v1_error_response_preserves_metadata() {
-        let v1_err = ConnectorErrorV1::transient_db("DEADLOCK", "deadlock detected");
+        let v1_err = ConnectorError::transient_db("DEADLOCK", "deadlock detected");
         let json = serde_json::json!({
             "status": "err",
             "error": v1_err,

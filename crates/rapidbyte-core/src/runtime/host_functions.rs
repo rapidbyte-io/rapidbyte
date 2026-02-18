@@ -4,7 +4,7 @@ use wasmedge_sdk::{CallingFrame, WasmValue};
 use wasmedge_sys::Instance as SysInstance;
 use wasmedge_types::error::CoreError;
 
-use rapidbyte_sdk::errors::ConnectorErrorV1;
+use rapidbyte_sdk::errors::ConnectorError;
 use rapidbyte_sdk::protocol::{Checkpoint, StateScope};
 
 use crate::state::backend::{RunStats, StateBackend};
@@ -52,7 +52,7 @@ pub struct HostState {
 
     // --- Error retrieval ---
     /// Last error from any host function (read+clear semantics).
-    pub last_error: Option<ConnectorErrorV1>,
+    pub last_error: Option<ConnectorError>,
 
     // --- Checkpoint tracking ---
     /// Source checkpoints received during this stream run.
@@ -68,7 +68,7 @@ impl HostState {
         self.last_error = None;
     }
 
-    fn set_last_error(&mut self, err: ConnectorErrorV1) {
+    fn set_last_error(&mut self, err: ConnectorError) {
         self.last_error = Some(err);
     }
 
@@ -100,7 +100,7 @@ pub fn host_emit_batch(
     let batch_bytes = match memory_protocol::read_from_guest(frame, ptr as i32, len as i32) {
         Ok(b) => b,
         Err(e) => {
-            let err = ConnectorErrorV1::internal("MEMORY_READ", &e.to_string());
+            let err = ConnectorError::internal("MEMORY_READ", &e.to_string());
             data.set_last_error(err);
             return Ok(vec![WasmValue::from_i32(-1)]);
         }
@@ -109,7 +109,7 @@ pub fn host_emit_batch(
     // Reject zero-length batches — connectors must never emit empty data.
     // Empty frames are reserved for the EndStream sentinel (sent by the host).
     if batch_bytes.is_empty() {
-        let err = ConnectorErrorV1::internal(
+        let err = ConnectorError::internal(
             "EMPTY_BATCH",
             "Connector emitted a zero-length batch; this is a protocol violation",
         );
@@ -120,7 +120,7 @@ pub fn host_emit_batch(
     let sender = match &data.batch_sender {
         Some(s) => s,
         None => {
-            let err = ConnectorErrorV1::internal("NO_SENDER", "No batch sender configured");
+            let err = ConnectorError::internal("NO_SENDER", "No batch sender configured");
             data.set_last_error(err);
             return Ok(vec![WasmValue::from_i32(-1)]);
         }
@@ -133,7 +133,7 @@ pub fn host_emit_batch(
             Ok(vec![WasmValue::from_i32(0)])
         }
         Err(e) => {
-            let err = ConnectorErrorV1::internal("CHANNEL_SEND", &e.to_string());
+            let err = ConnectorError::internal("CHANNEL_SEND", &e.to_string());
             data.set_last_error(err);
             Ok(vec![WasmValue::from_i32(-1)])
         }
@@ -163,7 +163,7 @@ pub fn host_next_batch(
         let receiver = match &data.batch_receiver {
             Some(r) => r,
             None => {
-                let err = ConnectorErrorV1::internal("NO_RECEIVER", "No batch receiver configured");
+                let err = ConnectorError::internal("NO_RECEIVER", "No batch receiver configured");
                 data.set_last_error(err);
                 return Ok(vec![WasmValue::from_i32(-1)]);
             }
@@ -180,7 +180,7 @@ pub fn host_next_batch(
     // Guard against batches that exceed i32 range
     if batch_len > i32::MAX as u32 {
         data.pending_batch = Some(batch);
-        let err = ConnectorErrorV1::internal(
+        let err = ConnectorError::internal(
             "BATCH_TOO_LARGE",
             &format!("Batch size {} exceeds i32::MAX", batch_len),
         );
@@ -200,7 +200,7 @@ pub fn host_next_batch(
         Some(m) => m,
         None => {
             data.pending_batch = Some(batch); // Don't lose the batch
-            let err = ConnectorErrorV1::internal("NO_MEMORY", "Guest has no memory export");
+            let err = ConnectorError::internal("NO_MEMORY", "Guest has no memory export");
             data.set_last_error(err);
             return Ok(vec![WasmValue::from_i32(-1)]);
         }
@@ -208,7 +208,7 @@ pub fn host_next_batch(
 
     if let Err(e) = memory.set_data(&batch, out_ptr) {
         data.pending_batch = Some(batch); // Don't lose the batch
-        let err = ConnectorErrorV1::internal("MEMORY_WRITE", &format!("{:?}", e));
+        let err = ConnectorError::internal("MEMORY_WRITE", &format!("{:?}", e));
         data.set_last_error(err);
         return Ok(vec![WasmValue::from_i32(-1)]);
     }
@@ -279,7 +279,7 @@ pub fn host_state_get(
     let _scope = match StateScope::from_i32(scope_i32) {
         Some(s) => s,
         None => {
-            let err = ConnectorErrorV1::config(
+            let err = ConnectorError::config(
                 "INVALID_SCOPE",
                 &format!("Invalid scope: {}", scope_i32),
             );
@@ -291,14 +291,14 @@ pub fn host_state_get(
     let key = match memory_protocol::read_string_from_guest(frame, key_ptr, key_len) {
         Ok(s) => s,
         Err(e) => {
-            let err = ConnectorErrorV1::internal("MEMORY_READ", &e.to_string());
+            let err = ConnectorError::internal("MEMORY_READ", &e.to_string());
             data.set_last_error(err);
             return Ok(vec![WasmValue::from_i32(-1)]);
         }
     };
 
     if key.len() > 1024 {
-        let err = ConnectorErrorV1::config(
+        let err = ConnectorError::config(
             "KEY_TOO_LONG",
             &format!("Key length {} exceeds 1024", key.len()),
         );
@@ -326,14 +326,14 @@ pub fn host_state_get(
                     Some(m) => m,
                     None => {
                         let err =
-                            ConnectorErrorV1::internal("NO_MEMORY", "No memory export");
+                            ConnectorError::internal("NO_MEMORY", "No memory export");
                         data.set_last_error(err);
                         return Ok(vec![WasmValue::from_i32(-1)]);
                     }
                 };
 
                 if let Err(e) = memory.set_data(value_bytes, out_ptr) {
-                    let err = ConnectorErrorV1::internal(
+                    let err = ConnectorError::internal(
                         "MEMORY_WRITE",
                         &format!("{:?}", e),
                     );
@@ -348,7 +348,7 @@ pub fn host_state_get(
         }
         Ok(None) => Ok(vec![WasmValue::from_i32(0)]),
         Err(e) => {
-            let err = ConnectorErrorV1::internal("STATE_BACKEND", &e.to_string());
+            let err = ConnectorError::internal("STATE_BACKEND", &e.to_string());
             data.set_last_error(err);
             Ok(vec![WasmValue::from_i32(-1)])
         }
@@ -376,7 +376,7 @@ pub fn host_state_put(
     let _scope = match StateScope::from_i32(scope_i32) {
         Some(s) => s,
         None => {
-            let err = ConnectorErrorV1::config(
+            let err = ConnectorError::config(
                 "INVALID_SCOPE",
                 &format!("Invalid scope: {}", scope_i32),
             );
@@ -388,14 +388,14 @@ pub fn host_state_put(
     let key = match memory_protocol::read_string_from_guest(frame, key_ptr, key_len) {
         Ok(s) => s,
         Err(e) => {
-            let err = ConnectorErrorV1::internal("MEMORY_READ", &e.to_string());
+            let err = ConnectorError::internal("MEMORY_READ", &e.to_string());
             data.set_last_error(err);
             return Ok(vec![WasmValue::from_i32(-1)]);
         }
     };
 
     if key.len() > 1024 {
-        let err = ConnectorErrorV1::config(
+        let err = ConnectorError::config(
             "KEY_TOO_LONG",
             &format!("Key length {} exceeds 1024", key.len()),
         );
@@ -406,7 +406,7 @@ pub fn host_state_put(
     let value = match memory_protocol::read_string_from_guest(frame, val_ptr, val_len) {
         Ok(s) => s,
         Err(e) => {
-            let err = ConnectorErrorV1::internal("MEMORY_READ", &e.to_string());
+            let err = ConnectorError::internal("MEMORY_READ", &e.to_string());
             data.set_last_error(err);
             return Ok(vec![WasmValue::from_i32(-1)]);
         }
@@ -426,7 +426,7 @@ pub fn host_state_put(
     {
         Ok(()) => Ok(vec![WasmValue::from_i32(0)]),
         Err(e) => {
-            let err = ConnectorErrorV1::internal("STATE_BACKEND", &e.to_string());
+            let err = ConnectorError::internal("STATE_BACKEND", &e.to_string());
             data.set_last_error(err);
             Ok(vec![WasmValue::from_i32(-1)])
         }
@@ -452,7 +452,7 @@ pub fn host_checkpoint(
     let payload_bytes = match memory_protocol::read_from_guest(frame, payload_ptr, payload_len) {
         Ok(b) => b,
         Err(e) => {
-            let err = ConnectorErrorV1::internal("MEMORY_READ", &e.to_string());
+            let err = ConnectorError::internal("MEMORY_READ", &e.to_string());
             data.set_last_error(err);
             return Ok(vec![WasmValue::from_i32(-1)]);
         }
@@ -509,7 +509,7 @@ pub fn host_checkpoint(
             Ok(vec![WasmValue::from_i32(0)])
         }
         Err(e) => {
-            let err = ConnectorErrorV1::internal("PARSE_CHECKPOINT", &e.to_string());
+            let err = ConnectorError::internal("PARSE_CHECKPOINT", &e.to_string());
             data.set_last_error(err);
             Ok(vec![WasmValue::from_i32(-1)])
         }
@@ -534,7 +534,7 @@ pub fn host_metric_fn(
     let payload_bytes = match memory_protocol::read_from_guest(frame, payload_ptr, payload_len) {
         Ok(b) => b,
         Err(e) => {
-            let err = ConnectorErrorV1::internal("MEMORY_READ", &e.to_string());
+            let err = ConnectorError::internal("MEMORY_READ", &e.to_string());
             data.set_last_error(err);
             return Ok(vec![WasmValue::from_i32(-1)]);
         }
@@ -552,7 +552,7 @@ pub fn host_metric_fn(
             Ok(vec![WasmValue::from_i32(0)])
         }
         Err(e) => {
-            let err = ConnectorErrorV1::internal("PARSE_METRIC", &e.to_string());
+            let err = ConnectorError::internal("PARSE_METRIC", &e.to_string());
             data.set_last_error(err);
             Ok(vec![WasmValue::from_i32(-1)])
         }

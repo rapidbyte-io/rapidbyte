@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use rapidbyte_sdk::errors::{BackoffClass, ConnectorErrorV1};
+use rapidbyte_sdk::errors::{BackoffClass, ConnectorError};
 
 // ---------------------------------------------------------------------------
 // PipelineError — categorised errors for retry decisions
@@ -8,7 +8,7 @@ use rapidbyte_sdk::errors::{BackoffClass, ConnectorErrorV1};
 
 /// Categorized pipeline error for retry decisions.
 ///
-/// `Connector` wraps a typed `ConnectorErrorV1` with retry metadata
+/// `Connector` wraps a typed `ConnectorError` with retry metadata
 /// (`retryable`, `backoff_class`, `retry_after_ms`, etc.).
 ///
 /// `Infrastructure` wraps opaque host-side errors (WASM load failures,
@@ -17,7 +17,7 @@ use rapidbyte_sdk::errors::{BackoffClass, ConnectorErrorV1};
 #[derive(Debug)]
 pub enum PipelineError {
     /// Typed connector error with retry metadata.
-    Connector(ConnectorErrorV1),
+    Connector(ConnectorError),
     /// Infrastructure error (WASM load, channel, state backend, etc.)
     Infrastructure(anyhow::Error),
 }
@@ -50,7 +50,7 @@ impl PipelineError {
     }
 
     /// Returns the typed connector error if this is a `Connector` variant.
-    pub fn as_connector_error(&self) -> Option<&ConnectorErrorV1> {
+    pub fn as_connector_error(&self) -> Option<&ConnectorError> {
         match self {
             Self::Connector(e) => Some(e),
             Self::Infrastructure(_) => None,
@@ -59,7 +59,7 @@ impl PipelineError {
 }
 
 /// Compute retry delay based on error hints and attempt number.
-pub(crate) fn compute_backoff(err: &ConnectorErrorV1, attempt: u32) -> Duration {
+pub(crate) fn compute_backoff(err: &ConnectorError, attempt: u32) -> Duration {
     // If connector specified a retry_after, use it
     if let Some(ms) = err.retry_after_ms {
         return Duration::from_millis(ms);
@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_error_connector_is_retryable() {
-        let err = PipelineError::Connector(ConnectorErrorV1::transient_network(
+        let err = PipelineError::Connector(ConnectorError::transient_network(
             "CONN_RESET",
             "connection reset by peer",
         ));
@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_error_connector_not_retryable() {
-        let err = PipelineError::Connector(ConnectorErrorV1::config(
+        let err = PipelineError::Connector(ConnectorError::config(
             "MISSING_HOST",
             "host is required",
         ));
@@ -126,7 +126,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_error_display_connector() {
-        let err = PipelineError::Connector(ConnectorErrorV1::rate_limit(
+        let err = PipelineError::Connector(ConnectorError::rate_limit(
             "TOO_MANY",
             "slow down",
             Some(5000),
@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_backoff_fast() {
-        let mut err = ConnectorErrorV1::transient_network("X", "y");
+        let mut err = ConnectorError::transient_network("X", "y");
         err.backoff_class = BackoffClass::Fast;
         assert_eq!(compute_backoff(&err, 1), Duration::from_millis(100));
         assert_eq!(compute_backoff(&err, 2), Duration::from_millis(200));
@@ -159,28 +159,28 @@ mod tests {
 
     #[test]
     fn test_backoff_normal() {
-        let err = ConnectorErrorV1::transient_network("X", "y");
+        let err = ConnectorError::transient_network("X", "y");
         assert_eq!(compute_backoff(&err, 1), Duration::from_millis(1000));
         assert_eq!(compute_backoff(&err, 2), Duration::from_millis(2000));
     }
 
     #[test]
     fn test_backoff_slow() {
-        let err = ConnectorErrorV1::rate_limit("X", "y", None);
+        let err = ConnectorError::rate_limit("X", "y", None);
         assert_eq!(compute_backoff(&err, 1), Duration::from_millis(5000));
         assert_eq!(compute_backoff(&err, 2), Duration::from_millis(10000));
     }
 
     #[test]
     fn test_backoff_respects_retry_after() {
-        let err = ConnectorErrorV1::rate_limit("X", "y", Some(7500));
+        let err = ConnectorError::rate_limit("X", "y", Some(7500));
         assert_eq!(compute_backoff(&err, 1), Duration::from_millis(7500));
         assert_eq!(compute_backoff(&err, 5), Duration::from_millis(7500));
     }
 
     #[test]
     fn test_backoff_capped_at_60s() {
-        let err = ConnectorErrorV1::transient_db("X", "y");
+        let err = ConnectorError::transient_db("X", "y");
         assert_eq!(compute_backoff(&err, 20), Duration::from_millis(60_000));
     }
 }
