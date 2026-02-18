@@ -99,6 +99,59 @@ async fn ensure_table(
     Ok(())
 }
 
+/// Ensure the target schema, table, and schema drift handling are complete.
+///
+/// This is a shared helper for both `insert_batch` and `copy_batch` to avoid
+/// duplicating the ~35-line DDL + drift detection block. It is a no-op when
+/// the table has already been created in this session (tracked via
+/// `ctx.created_tables`).
+async fn ensure_table_and_schema(
+    ctx: &mut WriteContext<'_>,
+    arrow_schema: &arrow::datatypes::Schema,
+) -> Result<(), String> {
+    let qualified_table = format!("\"{}\".\"{}\"", ctx.target_schema, ctx.stream_name);
+
+    if ctx.created_tables.contains(&qualified_table) {
+        return Ok(());
+    }
+
+    let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", ctx.target_schema);
+    ctx.client
+        .execute(&create_schema, &[])
+        .await
+        .map_err(|e| format!("Failed to create schema '{}': {}", ctx.target_schema, e))?;
+
+    let pk = match ctx.write_mode {
+        Some(WriteMode::Upsert { primary_key }) => Some(primary_key.as_slice()),
+        _ => None,
+    };
+    ensure_table(ctx.client, &qualified_table, arrow_schema, pk).await?;
+    ctx.created_tables.insert(qualified_table.clone());
+
+    // Detect schema drift and apply policy
+    if let Some(policy) = ctx.schema_policy {
+        if let Some(drift) =
+            detect_schema_drift(ctx.client, ctx.target_schema, ctx.stream_name, arrow_schema)
+                .await?
+        {
+            host_ffi::log(
+                2,
+                &format!(
+                    "dest-postgres: schema drift detected for {}: {} new, {} removed, {} type changes, {} nullability changes",
+                    qualified_table,
+                    drift.new_columns.len(),
+                    drift.removed_columns.len(),
+                    drift.type_changes.len(),
+                    drift.nullability_changes.len()
+                ),
+            );
+            apply_schema_policy(ctx.client, &qualified_table, &drift, policy).await?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Drop an existing staging table if it exists.
 async fn drop_staging_table(
     client: &Client,
@@ -529,41 +582,7 @@ async fn insert_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<u6
     let qualified_table = format!("\"{}\".\"{}\"", ctx.target_schema, ctx.stream_name);
 
     // 2. Ensure schema + table exist (only on first encounter)
-    if !ctx.created_tables.contains(&qualified_table) {
-        let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", ctx.target_schema);
-        ctx.client
-            .execute(&create_schema, &[])
-            .await
-            .map_err(|e| format!("Failed to create schema '{}': {}", ctx.target_schema, e))?;
-
-        let pk = match ctx.write_mode {
-            Some(WriteMode::Upsert { primary_key }) => Some(primary_key.as_slice()),
-            _ => None,
-        };
-        ensure_table(ctx.client, &qualified_table, &arrow_schema, pk).await?;
-        ctx.created_tables.insert(qualified_table.clone());
-
-        // Detect schema drift and apply policy
-        if let Some(policy) = ctx.schema_policy {
-            if let Some(drift) =
-                detect_schema_drift(ctx.client, ctx.target_schema, ctx.stream_name, &arrow_schema)
-                    .await?
-            {
-                host_ffi::log(
-                    2,
-                    &format!(
-                        "dest-postgres: schema drift detected for {}: {} new, {} removed, {} type changes, {} nullability changes",
-                        qualified_table,
-                        drift.new_columns.len(),
-                        drift.removed_columns.len(),
-                        drift.type_changes.len(),
-                        drift.nullability_changes.len()
-                    ),
-                );
-                apply_schema_policy(ctx.client, &qualified_table, &drift, policy).await?;
-            }
-        }
-    }
+    ensure_table_and_schema(ctx, &arrow_schema).await?;
 
     // Validate upsert primary_key columns
     if let Some(WriteMode::Upsert { primary_key }) = ctx.write_mode {
@@ -712,41 +731,7 @@ async fn copy_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<u64,
     let qualified_table = format!("\"{}\".\"{}\"", ctx.target_schema, ctx.stream_name);
 
     // 2. Ensure schema + table exist (only on first encounter)
-    if !ctx.created_tables.contains(&qualified_table) {
-        let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", ctx.target_schema);
-        ctx.client
-            .execute(&create_schema, &[])
-            .await
-            .map_err(|e| format!("Failed to create schema '{}': {}", ctx.target_schema, e))?;
-
-        let pk = match ctx.write_mode {
-            Some(WriteMode::Upsert { primary_key }) => Some(primary_key.as_slice()),
-            _ => None,
-        };
-        ensure_table(ctx.client, &qualified_table, &arrow_schema, pk).await?;
-        ctx.created_tables.insert(qualified_table.clone());
-
-        // Detect schema drift and apply policy
-        if let Some(policy) = ctx.schema_policy {
-            if let Some(drift) =
-                detect_schema_drift(ctx.client, ctx.target_schema, ctx.stream_name, &arrow_schema)
-                    .await?
-            {
-                host_ffi::log(
-                    2,
-                    &format!(
-                        "dest-postgres: schema drift detected for {}: {} new, {} removed, {} type changes, {} nullability changes",
-                        qualified_table,
-                        drift.new_columns.len(),
-                        drift.removed_columns.len(),
-                        drift.type_changes.len(),
-                        drift.nullability_changes.len()
-                    ),
-                );
-                apply_schema_policy(ctx.client, &qualified_table, &drift, policy).await?;
-            }
-        }
-    }
+    ensure_table_and_schema(ctx, &arrow_schema).await?;
 
     // 3. Build COPY statement
     let col_list = arrow_schema
