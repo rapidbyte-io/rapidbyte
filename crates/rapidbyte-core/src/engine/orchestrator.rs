@@ -8,7 +8,7 @@ use wasmedge_sdk::vm::SyncInst;
 use wasmedge_sdk::wasi::WasiModule;
 use wasmedge_sdk::{Module, Store, Vm};
 
-use rapidbyte_sdk::errors::ValidationResult;
+use rapidbyte_sdk::errors::{ConnectorErrorV1, ValidationResult};
 use rapidbyte_sdk::protocol::{
     Checkpoint, ConfigBlob, CursorInfo, CursorType, CursorValue, OpenContext, ReadSummary,
     SchemaHint, StreamContext, StreamLimits, StreamPolicies, SyncMode, WriteMode, WriteSummary,
@@ -20,6 +20,62 @@ use crate::runtime::host_functions::{Frame, HostState};
 use crate::runtime::wasm_runtime::{self, WasmRuntime};
 use crate::state::backend::{CursorState, RunStats, RunStatus, StateBackend};
 use crate::state::sqlite::SqliteStateBackend;
+
+// ---------------------------------------------------------------------------
+// PipelineError — categorised errors for retry decisions
+// ---------------------------------------------------------------------------
+
+/// Categorized pipeline error for retry decisions.
+///
+/// `Connector` wraps a typed `ConnectorErrorV1` with retry metadata
+/// (`retryable`, `backoff_class`, `retry_after_ms`, etc.).
+///
+/// `Infrastructure` wraps opaque host-side errors (WASM load failures,
+/// channel errors, state backend issues, etc.) that are never retryable
+/// at the connector level.
+#[derive(Debug)]
+pub enum PipelineError {
+    /// Typed connector error with retry metadata.
+    Connector(ConnectorErrorV1),
+    /// Infrastructure error (WASM load, channel, state backend, etc.)
+    Infrastructure(anyhow::Error),
+}
+
+impl std::fmt::Display for PipelineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Connector(e) => write!(f, "{}", e),
+            Self::Infrastructure(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl std::error::Error for PipelineError {}
+
+impl From<anyhow::Error> for PipelineError {
+    fn from(e: anyhow::Error) -> Self {
+        Self::Infrastructure(e)
+    }
+}
+
+impl PipelineError {
+    /// Returns `true` if this is a typed connector error that the connector
+    /// has marked as retryable.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Connector(e) => e.retryable,
+            Self::Infrastructure(_) => false,
+        }
+    }
+
+    /// Returns the typed connector error if this is a `Connector` variant.
+    pub fn as_connector_error(&self) -> Option<&ConnectorErrorV1> {
+        match self {
+            Self::Connector(e) => Some(e),
+            Self::Infrastructure(_) => None,
+        }
+    }
+}
 
 /// Result of a pipeline run.
 #[derive(Debug)]
@@ -52,7 +108,7 @@ pub struct CheckResult {
 }
 
 /// Run a full pipeline: source -> destination with state tracking.
-pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
+pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult, PipelineError> {
     let start = Instant::now();
 
     tracing::info!(pipeline = config.pipeline, "Starting pipeline run");
@@ -156,7 +212,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
     // Per-stream: create channel, source writes into tx, dest reads from rx
     let (batch_tx, batch_rx) = mpsc::sync_channel::<Frame>(16);
 
-    let source_handle = tokio::task::spawn_blocking(move || -> Result<(f64, ReadSummary, Vec<Checkpoint>)> {
+    let source_handle = tokio::task::spawn_blocking(move || {
         run_source(
             source_module,
             batch_tx,
@@ -168,22 +224,25 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
         )
     });
 
-    let dest_handle =
-        tokio::task::spawn_blocking(move || -> Result<(f64, WriteSummary, f64, f64, Vec<Checkpoint>)> {
-            run_destination(
-                dest_module,
-                batch_rx,
-                state_dst,
-                &pipeline_name_dst,
-                &dest_config,
-                &stream_ctxs_clone,
-                stats_dst,
-            )
-        });
+    let dest_handle = tokio::task::spawn_blocking(move || {
+        run_destination(
+            dest_module,
+            batch_rx,
+            state_dst,
+            &pipeline_name_dst,
+            &dest_config,
+            &stream_ctxs_clone,
+            stats_dst,
+        )
+    });
 
     // 6. Wait for both
-    let source_result = source_handle.await?;
-    let dest_result = dest_handle.await?;
+    let source_result = source_handle
+        .await
+        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!("Source task panicked: {}", e)))?;
+    let dest_result = dest_handle
+        .await
+        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!("Dest task panicked: {}", e)))?;
 
     let final_stats = stats.lock().unwrap().clone();
 
@@ -311,6 +370,19 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
 
 // --- Internal helpers ---
 
+/// Create a WasiModule with deny-by-default security:
+/// - No CLI args passed to guest
+/// - No environment variables leaked to guest
+/// - No filesystem preopens (connectors receive config via rb_open JSON)
+fn create_secure_wasi_module() -> Result<WasiModule> {
+    WasiModule::create(
+        Some(vec![]), // args: empty (no CLI args)
+        Some(vec![]), // envs: empty (deny all env vars)
+        None,         // preopens: no filesystem access
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to create WASI module: {:?}", e))
+}
+
 fn run_source(
     module: Module,
     sender: mpsc::SyncSender<Frame>,
@@ -319,7 +391,7 @@ fn run_source(
     source_config: &serde_json::Value,
     stream_ctxs: &[StreamContext],
     stats: Arc<Mutex<RunStats>>,
-) -> Result<(f64, ReadSummary, Vec<Checkpoint>)> {
+) -> Result<(f64, ReadSummary, Vec<Checkpoint>), PipelineError> {
     let phase_start = Instant::now();
 
     // Keep a clone for sending stream-boundary sentinels after each run_read
@@ -346,8 +418,7 @@ fn run_source(
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
-    let mut wasi = WasiModule::create(None, None, None)
-        .map_err(|e| anyhow::anyhow!("Failed to create WASI module: {:?}", e))?;
+    let mut wasi = create_secure_wasi_module()?;
 
     let mut instances: HashMap<String, &mut dyn SyncInst> = HashMap::new();
     instances.insert("rapidbyte".to_string(), &mut import);
@@ -380,7 +451,7 @@ fn run_source(
         checkpoint_count: 0,
     };
 
-    let stream_result: Result<()> = (|| {
+    let stream_result: Result<(), PipelineError> = (|| {
         for stream_ctx in stream_ctxs {
             // Update current_stream so host functions use the correct scope
             *current_stream.lock().unwrap() = stream_ctx.stream_name.clone();
@@ -427,7 +498,7 @@ fn run_destination(
     dest_config: &serde_json::Value,
     stream_ctxs: &[StreamContext],
     stats: Arc<Mutex<RunStats>>,
-) -> Result<(f64, WriteSummary, f64, f64, Vec<Checkpoint>)> {
+) -> Result<(f64, WriteSummary, f64, f64, Vec<Checkpoint>), PipelineError> {
     let phase_start = Instant::now();
     let vm_setup_start = Instant::now();
 
@@ -452,8 +523,7 @@ fn run_destination(
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
-    let mut wasi = WasiModule::create(None, None, None)
-        .map_err(|e| anyhow::anyhow!("Failed to create WASI module: {:?}", e))?;
+    let mut wasi = create_secure_wasi_module()?;
 
     let mut instances: HashMap<String, &mut dyn SyncInst> = HashMap::new();
     instances.insert("rapidbyte".to_string(), &mut import);
@@ -491,7 +561,7 @@ fn run_destination(
         perf: None,
     };
 
-    let stream_result: Result<()> = (|| {
+    let stream_result: Result<(), PipelineError> = (|| {
         for stream_ctx in stream_ctxs {
             // Update current_stream so host functions use the correct scope
             *current_stream.lock().unwrap() = stream_ctx.stream_name.clone();
@@ -561,8 +631,7 @@ fn validate_connector(
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
-    let mut wasi = WasiModule::create(None, None, None)
-        .map_err(|e| anyhow::anyhow!("Failed to create WASI module: {:?}", e))?;
+    let mut wasi = create_secure_wasi_module()?;
 
     let mut instances: HashMap<String, &mut dyn SyncInst> = HashMap::new();
     instances.insert("rapidbyte".to_string(), &mut import);
@@ -676,6 +745,7 @@ fn check_state_backend(config: &PipelineConfig) -> bool {
 mod tests {
     use super::*;
     use crate::state::sqlite::SqliteStateBackend;
+    use rapidbyte_sdk::errors::{BackoffClass, ErrorCategory};
     use rapidbyte_sdk::protocol::{CheckpointKind, CursorValue};
 
     fn make_source_checkpoint(stream: &str, cursor_field: &str, cursor_value: &str) -> Checkpoint {
@@ -799,5 +869,67 @@ mod tests {
 
         let advanced = correlate_and_persist_cursors(&backend, "test_pipe", &src, &dst).unwrap();
         assert_eq!(advanced, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // PipelineError tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pipeline_error_connector_is_retryable() {
+        let err = PipelineError::Connector(ConnectorErrorV1::transient_network(
+            "CONN_RESET",
+            "connection reset by peer",
+        ));
+        assert!(err.is_retryable());
+        let ce = err.as_connector_error().unwrap();
+        assert_eq!(ce.category, ErrorCategory::TransientNetwork);
+        assert_eq!(ce.backoff_class, BackoffClass::Normal);
+    }
+
+    #[test]
+    fn test_pipeline_error_connector_not_retryable() {
+        let err = PipelineError::Connector(ConnectorErrorV1::config(
+            "MISSING_HOST",
+            "host is required",
+        ));
+        assert!(!err.is_retryable());
+        let ce = err.as_connector_error().unwrap();
+        assert_eq!(ce.category, ErrorCategory::Config);
+    }
+
+    #[test]
+    fn test_pipeline_error_infrastructure_not_retryable() {
+        let err = PipelineError::Infrastructure(anyhow::anyhow!("WASM module load failed"));
+        assert!(!err.is_retryable());
+        assert!(err.as_connector_error().is_none());
+    }
+
+    #[test]
+    fn test_pipeline_error_from_anyhow() {
+        let anyhow_err = anyhow::anyhow!("something went wrong");
+        let pe: PipelineError = anyhow_err.into();
+        assert!(matches!(pe, PipelineError::Infrastructure(_)));
+        assert!(!pe.is_retryable());
+    }
+
+    #[test]
+    fn test_pipeline_error_display_connector() {
+        let err = PipelineError::Connector(ConnectorErrorV1::rate_limit(
+            "TOO_MANY",
+            "slow down",
+            Some(5000),
+        ));
+        let msg = format!("{}", err);
+        assert!(msg.contains("rate_limit"));
+        assert!(msg.contains("TOO_MANY"));
+        assert!(msg.contains("retryable"));
+    }
+
+    #[test]
+    fn test_pipeline_error_display_infrastructure() {
+        let err = PipelineError::Infrastructure(anyhow::anyhow!("Store::new failed"));
+        let msg = format!("{}", err);
+        assert!(msg.contains("Store::new failed"));
     }
 }
