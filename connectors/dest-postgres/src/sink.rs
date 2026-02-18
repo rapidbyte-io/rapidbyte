@@ -8,6 +8,7 @@ use arrow::ipc::reader::StreamReader;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::host_ffi;
+use rapidbyte_sdk::validation::validate_pg_identifier;
 
 use std::io::Write;
 use bytes::Bytes;
@@ -19,6 +20,12 @@ async fn ensure_table(
     qualified_table: &str,
     arrow_schema: &arrow::datatypes::Schema,
 ) -> Result<(), String> {
+    // Validate all column names before interpolating into DDL
+    for field in arrow_schema.fields() {
+        validate_pg_identifier(field.name())
+            .map_err(|e| format!("Invalid column name: {}", e))?;
+    }
+
     let columns_ddl: Vec<String> = arrow_schema
         .fields()
         .iter()
@@ -79,6 +86,8 @@ pub async fn write_batch(
     ipc_bytes: &[u8],
     created_tables: &mut std::collections::HashSet<String>,
 ) -> Result<u64, String> {
+    // Caller must validate stream_name and target_schema before calling.
+
     // 1. Decode Arrow IPC
     let cursor = Cursor::new(ipc_bytes);
     let reader = StreamReader::try_new(cursor, None)
@@ -179,6 +188,8 @@ pub async fn write_batch_copy(
     ipc_bytes: &[u8],
     created_tables: &mut std::collections::HashSet<String>,
 ) -> Result<u64, String> {
+    // Caller must validate stream_name and target_schema before calling.
+
     // 1. Decode Arrow IPC
     let cursor = Cursor::new(ipc_bytes);
     let reader = StreamReader::try_new(cursor, None)
