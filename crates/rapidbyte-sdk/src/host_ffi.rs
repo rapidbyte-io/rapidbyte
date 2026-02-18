@@ -198,6 +198,7 @@ pub fn checkpoint(
     let kind_i32 = match cp.kind {
         CheckpointKind::Source => 0,
         CheckpointKind::Dest => 1,
+        CheckpointKind::Transform => 2,
     };
 
     let envelope = PayloadEnvelope {

@@ -213,9 +213,19 @@ pub struct StreamContext {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
+pub enum ConnectorRole {
+    Source,
+    Destination,
+    Transform,
+    Utility,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
 pub enum CheckpointKind {
     Source,
     Dest,
+    Transform,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -290,6 +300,15 @@ pub struct WriteSummary {
     pub batches_written: u64,
     pub checkpoint_count: u64,
     pub perf: Option<WritePerf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TransformSummary {
+    pub records_in: u64,
+    pub records_out: u64,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
+    pub batches_processed: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -560,5 +579,43 @@ mod tests {
         assert!(v.get("records_read").is_some());
         let back: PayloadEnvelope<ReadSummary> = serde_json::from_str(&json).unwrap();
         assert_eq!(envelope, back);
+    }
+
+    #[test]
+    fn test_connector_role_roundtrip() {
+        let roles = vec![
+            ConnectorRole::Source,
+            ConnectorRole::Destination,
+            ConnectorRole::Transform,
+            ConnectorRole::Utility,
+        ];
+        for role in roles {
+            let json = serde_json::to_string(&role).unwrap();
+            let back: ConnectorRole = serde_json::from_str(&json).unwrap();
+            assert_eq!(role, back);
+        }
+    }
+
+    #[test]
+    fn test_transform_summary_roundtrip() {
+        let s = TransformSummary {
+            records_in: 1000,
+            records_out: 950,
+            bytes_in: 65536,
+            bytes_out: 60000,
+            batches_processed: 10,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: TransformSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
+    }
+
+    #[test]
+    fn test_checkpoint_kind_transform_roundtrip() {
+        let kind = CheckpointKind::Transform;
+        let json = serde_json::to_string(&kind).unwrap();
+        assert_eq!(json, "\"transform\"");
+        let back: CheckpointKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(kind, back);
     }
 }

@@ -445,7 +445,7 @@ pub fn host_checkpoint(
 ) -> Result<Vec<WasmValue>, CoreError> {
     data.clear_last_error();
 
-    let kind = args[0].to_i32(); // 0=source, 1=dest
+    let kind = args[0].to_i32(); // 0=source, 1=dest, 2=transform
     let payload_ptr = args[1].to_i32();
     let payload_len = args[2].to_i32();
 
@@ -487,8 +487,15 @@ pub fn host_checkpoint(
                         );
                     }
                 }
+            } else if kind == 2 {
+                // Transform checkpoint — log for now (no dedicated storage yet)
+                tracing::debug!(
+                    pipeline = data.pipeline_name,
+                    stream = %current_stream,
+                    "Received transform checkpoint (kind=2)"
+                );
             } else {
-                // Dest checkpoint — try to parse and store
+                // Dest checkpoint (kind=1) — try to parse and store
                 match serde_json::from_value::<Checkpoint>(
                     envelope
                         .get("payload")
