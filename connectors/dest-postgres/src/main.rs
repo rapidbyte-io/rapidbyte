@@ -276,6 +276,31 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
             };
             let connect_secs = connect_start.elapsed().as_secs_f64();
 
+            // Replace mode: route writes to a staging table, then swap atomically
+            let is_replace = matches!(stream_ctx.write_mode, Some(WriteMode::Replace));
+            let (effective_stream, effective_write_mode) = if is_replace {
+                match sink::prepare_staging(&client, &config.schema, &stream_ctx.stream_name).await {
+                    Ok(staging_name) => {
+                        host_ffi::log(
+                            2,
+                            &format!(
+                                "dest-postgres: Replace mode — writing to staging table '{}'",
+                                staging_name
+                            ),
+                        );
+                        (staging_name, Some(WriteMode::Append))
+                    }
+                    Err(e) => {
+                        return make_err_response(ConnectorError::transient_db(
+                            "STAGING_PREPARE_FAILED",
+                            format!("Failed to prepare staging table: {}", e),
+                        ));
+                    }
+                }
+            } else {
+                (stream_ctx.stream_name.clone(), stream_ctx.write_mode.clone())
+            };
+
             // Phase 2: BEGIN first transaction
             // Chunked commits: when bytes_since_commit exceeds checkpoint_interval_bytes,
             // we COMMIT, emit a checkpoint, and BEGIN a new transaction.
@@ -302,7 +327,7 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
 
             // Upsert mode is not compatible with COPY — fall back to INSERT
             let use_copy = config.load_method == "copy"
-                && !matches!(stream_ctx.write_mode, Some(WriteMode::Upsert { .. }));
+                && !matches!(effective_write_mode, Some(WriteMode::Upsert { .. }));
             if config.load_method == "copy"
                 && matches!(stream_ctx.write_mode, Some(WriteMode::Upsert { .. }))
             {
@@ -325,10 +350,10 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                             sink::write_batch_copy(
                                 &client,
                                 &config.schema,
-                                &stream_ctx.stream_name,
+                                &effective_stream,
                                 ipc_bytes,
                                 &mut created_tables,
-                                stream_ctx.write_mode.as_ref(),
+                                effective_write_mode.as_ref(),
                                 Some(&stream_ctx.policies.schema_evolution),
                             )
                             .await
@@ -336,10 +361,10 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                             sink::write_batch(
                                 &client,
                                 &config.schema,
-                                &stream_ctx.stream_name,
+                                &effective_stream,
                                 ipc_bytes,
                                 &mut created_tables,
-                                stream_ctx.write_mode.as_ref(),
+                                effective_write_mode.as_ref(),
                                 Some(&stream_ctx.policies.schema_evolution),
                             )
                             .await
@@ -442,6 +467,16 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                 };
                 let _ = host_ffi::checkpoint("dest-postgres", &stream_ctx.stream_name, &cp);
                 checkpoint_count += 1;
+            }
+
+            // Replace mode: atomically swap staging table into target position
+            if is_replace {
+                if let Err(e) = sink::swap_staging_table(&client, &config.schema, &stream_ctx.stream_name).await {
+                    return make_err_response(ConnectorError::transient_db(
+                        "SWAP_FAILED",
+                        format!("Staging table swap failed: {}", e),
+                    ));
+                }
             }
 
             host_ffi::log(
