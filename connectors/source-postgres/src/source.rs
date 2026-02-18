@@ -18,6 +18,9 @@ const BATCH_SIZE: usize = 10_000;
 /// Number of rows to fetch per server-side cursor iteration.
 const FETCH_CHUNK: usize = 1_000;
 
+/// Server-side cursor name used for streaming reads.
+const CURSOR_NAME: &str = "rb_cursor";
+
 /// Estimate Arrow IPC byte size for a set of rows.
 fn estimate_batch_bytes(rows: &[tokio_postgres::Row], columns: &[ColumnSchema]) -> usize {
     let mut total = 0usize;
@@ -179,13 +182,13 @@ pub async fn read_stream_v1(
 
     // Use server-side cursor for bounded memory
     client
-        .execute("BEGIN", &[])
+        .execute("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ", &[])
         .await
         .map_err(|e| format!("BEGIN failed: {}", e))?;
 
     let declare = format!(
-        "DECLARE rb_cursor NO SCROLL CURSOR FOR SELECT * FROM \"{}\"",
-        ctx.stream_name
+        "DECLARE {} NO SCROLL CURSOR FOR SELECT * FROM \"{}\"",
+        CURSOR_NAME, ctx.stream_name
     );
     client
         .execute(&declare, &[])
@@ -199,18 +202,23 @@ pub async fn read_stream_v1(
         64 * 1024 * 1024 // 64MB default
     };
 
-    let fetch_query = format!("FETCH {} FROM rb_cursor", FETCH_CHUNK);
+    let fetch_query = format!("FETCH {} FROM {}", FETCH_CHUNK, CURSOR_NAME);
     let mut total_records: u64 = 0;
     let mut total_bytes: u64 = 0;
     let mut batches_emitted: u64 = 0;
     let mut accumulated_rows: Vec<tokio_postgres::Row> = Vec::new();
     let mut estimated_bytes: usize = 256; // IPC framing overhead
 
+    let mut loop_error: Option<String> = None;
+
     loop {
-        let rows = client
-            .query(&fetch_query, &[])
-            .await
-            .map_err(|e| format!("FETCH failed for {}: {}", ctx.stream_name, e))?;
+        let rows = match client.query(&fetch_query, &[]).await {
+            Ok(r) => r,
+            Err(e) => {
+                loop_error = Some(format!("FETCH failed for {}: {}", ctx.stream_name, e));
+                break;
+            }
+        };
 
         let exhausted = rows.is_empty();
 
@@ -225,19 +233,27 @@ pub async fn read_stream_v1(
                 || exhausted);
 
         if should_emit {
-            let batch = rows_to_record_batch(&accumulated_rows, &columns, &arrow_schema)?;
-            let ipc_bytes = batch_to_ipc(&batch)?;
+            match rows_to_record_batch(&accumulated_rows, &columns, &arrow_schema)
+                .and_then(|batch| batch_to_ipc(&batch))
+            {
+                Ok(ipc_bytes) => {
+                    total_records += accumulated_rows.len() as u64;
+                    total_bytes += ipc_bytes.len() as u64;
+                    batches_emitted += 1;
 
-            total_records += accumulated_rows.len() as u64;
-            total_bytes += ipc_bytes.len() as u64;
-            batches_emitted += 1;
+                    if let Err(e) = host_ffi::emit_batch(&ipc_bytes) {
+                        loop_error = Some(format!("emit_batch failed: {}", e));
+                        break;
+                    }
 
-            // v1: emit_batch (no stream name parameter)
-            host_ffi::emit_batch(&ipc_bytes)
-                .map_err(|e| format!("emit_batch failed: {}", e))?;
-
-            accumulated_rows.clear();
-            estimated_bytes = 256;
+                    accumulated_rows.clear();
+                    estimated_bytes = 256;
+                }
+                Err(e) => {
+                    loop_error = Some(e);
+                    break;
+                }
+            }
         }
 
         if exhausted {
@@ -245,14 +261,21 @@ pub async fn read_stream_v1(
         }
     }
 
-    client
-        .execute("CLOSE rb_cursor", &[])
-        .await
-        .map_err(|e| format!("CLOSE CURSOR failed: {}", e))?;
-    client
-        .execute("COMMIT", &[])
-        .await
-        .map_err(|e| format!("COMMIT failed: {}", e))?;
+    // Always clean up cursor and transaction
+    let close_query = format!("CLOSE {}", CURSOR_NAME);
+    let _ = client.execute(&*close_query, &[]).await;
+    if loop_error.is_some() {
+        let _ = client.execute("ROLLBACK", &[]).await;
+    } else {
+        client
+            .execute("COMMIT", &[])
+            .await
+            .map_err(|e| format!("COMMIT failed: {}", e))?;
+    }
+
+    if let Some(e) = loop_error {
+        return Err(e);
+    }
 
     host_ffi::log(
         2,

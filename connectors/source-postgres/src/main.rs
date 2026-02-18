@@ -130,7 +130,12 @@ pub extern "C" fn rb_open(config_ptr: i32, config_len: i32) -> i64 {
             ),
         );
 
-        let _ = CONFIG.set(pg_config);
+        if CONFIG.set(pg_config).is_err() {
+            host_ffi::log(
+                1,
+                "source-postgres: rb_open called more than once; using first config",
+            );
+        }
 
         make_ok_response(OpenInfo {
             protocol_version: "1".to_string(),
@@ -154,6 +159,7 @@ pub extern "C" fn rb_validate(config_ptr: i32, config_len: i32) -> i64 {
                 },
             }
         } else {
+            host_ffi::log(1, "source-postgres: rb_validate received non-OpenContext input (v0 compat)");
             match serde_json::from_slice(input) {
                 Ok(c) => c,
                 Err(e) => {
@@ -203,6 +209,7 @@ pub extern "C" fn rb_discover(config_ptr: i32, config_len: i32) -> i64 {
                 },
             }
         } else {
+            host_ffi::log(1, "source-postgres: rb_discover received non-OpenContext input (v0 compat)");
             match serde_json::from_slice(input) {
                 Ok(c) => c,
                 Err(_) => {
