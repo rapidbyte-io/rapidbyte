@@ -21,27 +21,6 @@ const FETCH_CHUNK: usize = 1_000;
 /// Server-side cursor name used for streaming reads.
 const CURSOR_NAME: &str = "rb_cursor";
 
-/// Estimate Arrow IPC byte size for a set of rows.
-fn estimate_batch_bytes(rows: &[tokio_postgres::Row], columns: &[ColumnSchema]) -> usize {
-    let mut total = 0usize;
-    for row in rows {
-        for (col_idx, col) in columns.iter().enumerate() {
-            total += match col.data_type.as_str() {
-                "Int16" => 2,
-                "Int32" | "Float32" => 4,
-                "Int64" | "Float64" => 8,
-                "Boolean" => 1,
-                _ => row
-                    .try_get::<_, String>(col_idx)
-                    .map(|s| s.len() + 4)
-                    .unwrap_or(4),
-            };
-            total += 1; // null bitmap overhead per column per row
-        }
-    }
-    total
-}
-
 /// Estimate byte size of a single row for max_record_bytes checking.
 fn estimate_row_bytes(row: &tokio_postgres::Row, columns: &[ColumnSchema]) -> usize {
     let mut total = 0usize;
@@ -231,13 +210,14 @@ pub async fn read_stream(client: &Client, ctx: &StreamContext) -> Result<ReadSum
                 break;
             }
 
-            if !valid_rows.is_empty() {
-                let chunk_bytes = estimate_batch_bytes(&valid_rows, &columns);
+            // Accumulate valid rows with per-row max_batch_bytes enforcement.
+            // Flush before adding any row that would push the batch over the limit
+            // (spec: max_batch_bytes is a hard ceiling, not a soft trigger).
+            for row in valid_rows {
+                let row_bytes = estimate_row_bytes(&row, &columns);
 
-                // Pre-flush: if adding this chunk would exceed max_batch_bytes,
-                // emit the current batch first (spec: max_batch_bytes is a hard limit)
-                if !accumulated_rows.is_empty() && estimated_bytes + chunk_bytes >= max_batch_bytes
-                {
+                // Flush if adding this row would exceed max_batch_bytes
+                if !accumulated_rows.is_empty() && estimated_bytes + row_bytes >= max_batch_bytes {
                     match rows_to_record_batch(&accumulated_rows, &columns, &arrow_schema)
                         .and_then(|batch| batch_to_ipc(&batch))
                     {
@@ -261,36 +241,38 @@ pub async fn read_stream(client: &Client, ctx: &StreamContext) -> Result<ReadSum
                     }
                 }
 
-                estimated_bytes += chunk_bytes;
+                if loop_error.is_some() {
+                    break;
+                }
+
+                estimated_bytes += row_bytes;
 
                 // Track max cursor value for incremental checkpoint
                 if let Some(col_idx) = cursor_col_idx {
-                    for row in &valid_rows {
-                        let val: Option<String> = row
-                            .try_get::<_, String>(col_idx)
-                            .ok()
-                            .or_else(|| row.try_get::<_, i64>(col_idx).ok().map(|n| n.to_string()))
-                            .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(|n| n.to_string()));
+                    let val: Option<String> = row
+                        .try_get::<_, String>(col_idx)
+                        .ok()
+                        .or_else(|| row.try_get::<_, i64>(col_idx).ok().map(|n| n.to_string()))
+                        .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(|n| n.to_string()));
 
-                        if let Some(val) = val {
-                            match &max_cursor_value {
-                                None => max_cursor_value = Some(val),
-                                Some(current) => {
-                                    let is_greater =
-                                        match (val.parse::<i64>(), current.parse::<i64>()) {
-                                            (Ok(a), Ok(b)) => a > b,
-                                            _ => val > *current,
-                                        };
-                                    if is_greater {
-                                        max_cursor_value = Some(val);
-                                    }
+                    if let Some(val) = val {
+                        match &max_cursor_value {
+                            None => max_cursor_value = Some(val),
+                            Some(current) => {
+                                let is_greater = match (val.parse::<i64>(), current.parse::<i64>())
+                                {
+                                    (Ok(a), Ok(b)) => a > b,
+                                    _ => val > *current,
+                                };
+                                if is_greater {
+                                    max_cursor_value = Some(val);
                                 }
                             }
                         }
                     }
                 }
 
-                accumulated_rows.extend(valid_rows);
+                accumulated_rows.push(row);
             }
         }
 
