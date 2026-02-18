@@ -102,6 +102,20 @@ pub fn call_with_json<S: Serialize, R: DeserializeOwned, T: ?Sized + SyncInst>(
     func_name: &str,
     arg: &S,
 ) -> Result<R> {
+    let result_bytes = call_with_json_raw(vm, func_name, arg)?;
+
+    serde_json::from_slice(&result_bytes)
+        .with_context(|| format!("Failed to deserialize response from '{}'", func_name))
+}
+
+/// Like `call_with_json`, but returns the raw JSON bytes instead of deserializing.
+/// Useful when the caller needs to attempt multiple deserialization strategies
+/// (e.g., trying ConnectorResultV1 before falling back to ConnectorResult).
+pub fn call_with_json_raw<S: Serialize, T: ?Sized + SyncInst>(
+    vm: &mut Vm<'_, T>,
+    func_name: &str,
+    arg: &S,
+) -> Result<Vec<u8>> {
     let arg_bytes = serde_json::to_vec(arg).context("Failed to serialize function argument")?;
 
     // Write argument to guest memory
@@ -121,8 +135,7 @@ pub fn call_with_json<S: Serialize, R: DeserializeOwned, T: ?Sized + SyncInst>(
     // Deallocate the result buffer in guest memory
     let _ = vm.run_func(None, "rb_deallocate", params!(result_ptr, result_len));
 
-    serde_json::from_slice(&result_bytes)
-        .with_context(|| format!("Failed to deserialize response from '{}'", func_name))
+    Ok(result_bytes)
 }
 
 #[cfg(test)]
