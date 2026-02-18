@@ -11,7 +11,7 @@ use wasmedge_sdk::{Module, Store, Vm};
 use rapidbyte_sdk::errors::ValidationResult;
 use rapidbyte_sdk::protocol::{
     Checkpoint, ConfigBlob, CursorInfo, CursorType, CursorValue, OpenContext, ReadSummary,
-    SchemaHint, StreamContext, StreamLimits, StreamPolicies, SyncMode, WriteSummary,
+    SchemaHint, StreamContext, StreamLimits, StreamPolicies, SyncMode, WriteMode, WriteSummary,
 };
 
 use crate::pipeline::types::{parse_byte_size, PipelineConfig};
@@ -119,6 +119,14 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
                 None
             };
 
+            let write_mode = match config.destination.write_mode.as_str() {
+                "replace" => WriteMode::Replace,
+                "upsert" => WriteMode::Upsert {
+                    primary_key: config.destination.primary_key.clone(),
+                },
+                _ => WriteMode::Append,
+            };
+
             StreamContext {
                 stream_name: s.name.clone(),
                 schema: SchemaHint::Columns(vec![]),
@@ -126,7 +134,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
                 cursor_info,
                 limits: limits.clone(),
                 policies: StreamPolicies::default(),
-                write_mode: None,
+                write_mode: Some(write_mode),
             }
         })
         .collect();
