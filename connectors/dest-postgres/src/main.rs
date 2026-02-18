@@ -337,6 +337,7 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                                 ipc_bytes,
                                 &mut created_tables,
                                 stream_ctx.write_mode.as_ref(),
+                                Some(&stream_ctx.policies.schema_evolution),
                             )
                             .await
                         } else {
@@ -347,6 +348,7 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                                 ipc_bytes,
                                 &mut created_tables,
                                 stream_ctx.write_mode.as_ref(),
+                                Some(&stream_ctx.policies.schema_evolution),
                             )
                             .await
                         };

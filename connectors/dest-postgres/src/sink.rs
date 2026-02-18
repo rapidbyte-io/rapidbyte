@@ -9,7 +9,9 @@ use arrow::ipc::reader::StreamReader;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::host_ffi;
-use rapidbyte_sdk::protocol::WriteMode;
+use rapidbyte_sdk::protocol::{
+    ColumnPolicy, NullabilityPolicy, SchemaEvolutionPolicy, TypeChangePolicy, WriteMode,
+};
 use rapidbyte_sdk::validation::validate_pg_identifier;
 
 use std::io::Write;
@@ -198,9 +200,6 @@ fn pg_types_compatible(info_schema_type: &str, ddl_type: &str) -> bool {
 /// Returns `Ok(None)` if the table does not exist yet (no columns found in
 /// information_schema) or if the schemas are fully compatible.
 /// Returns `Ok(Some(drift))` when differences are detected.
-///
-/// NOTE: This function is not yet called from the write path. It will be
-/// integrated once schema-evolution policies are enforced (Task 5).
 pub async fn detect_schema_drift(
     client: &Client,
     schema_name: &str,
@@ -278,6 +277,116 @@ pub async fn detect_schema_drift(
     }
 }
 
+/// Apply schema evolution policy to detected drift, executing DDL as needed.
+pub async fn apply_schema_policy(
+    client: &Client,
+    qualified_table: &str,
+    drift: &SchemaDrift,
+    policy: &SchemaEvolutionPolicy,
+) -> Result<(), String> {
+    // Handle new columns
+    for (col_name, pg_type) in &drift.new_columns {
+        match policy.new_column {
+            ColumnPolicy::Fail => {
+                return Err(format!(
+                    "Schema evolution: new column '{}' detected but policy is 'fail'",
+                    col_name
+                ));
+            }
+            ColumnPolicy::Add => {
+                validate_pg_identifier(col_name)
+                    .map_err(|e| format!("Invalid new column name '{}': {}", col_name, e))?;
+                let sql = format!(
+                    "ALTER TABLE {} ADD COLUMN \"{}\" {}",
+                    qualified_table, col_name, pg_type
+                );
+                client
+                    .execute(&sql, &[])
+                    .await
+                    .map_err(|e| format!("ALTER TABLE ADD COLUMN '{}' failed: {}", col_name, e))?;
+                host_ffi::log(
+                    2,
+                    &format!("dest-postgres: added column '{}' {}", col_name, pg_type),
+                );
+            }
+            ColumnPolicy::Ignore => {
+                host_ffi::log(
+                    2,
+                    &format!(
+                        "dest-postgres: ignoring new column '{}' per schema policy",
+                        col_name
+                    ),
+                );
+            }
+        }
+    }
+
+    // Handle removed columns
+    for col_name in &drift.removed_columns {
+        match policy.removed_column {
+            ColumnPolicy::Fail => {
+                return Err(format!(
+                    "Schema evolution: column '{}' removed but policy is 'fail'",
+                    col_name
+                ));
+            }
+            _ => {
+                host_ffi::log(
+                    2,
+                    &format!(
+                        "dest-postgres: ignoring removed column '{}' per schema policy",
+                        col_name
+                    ),
+                );
+            }
+        }
+    }
+
+    // Handle type changes
+    for (col_name, old_type, new_type) in &drift.type_changes {
+        match policy.type_change {
+            TypeChangePolicy::Fail => {
+                return Err(format!(
+                    "Schema evolution: type change for '{}' ({} -> {}) but policy is 'fail'",
+                    col_name, old_type, new_type
+                ));
+            }
+            TypeChangePolicy::Coerce | TypeChangePolicy::Null => {
+                host_ffi::log(
+                    1,
+                    &format!(
+                        "dest-postgres: type change for '{}' ({} -> {}), policy={:?}",
+                        col_name, old_type, new_type, policy.type_change
+                    ),
+                );
+            }
+        }
+    }
+
+    // Handle nullability changes
+    for (col_name, was_nullable, now_nullable) in &drift.nullability_changes {
+        match policy.nullability_change {
+            NullabilityPolicy::Fail => {
+                return Err(format!(
+                    "Schema evolution: nullability change for '{}' ({} -> {}) but policy is 'fail'",
+                    col_name, was_nullable, now_nullable
+                ));
+            }
+            NullabilityPolicy::Allow => {
+                host_ffi::log(
+                    3,
+                    &format!(
+                        "dest-postgres: allowing nullability change for '{}'",
+                        col_name
+                    ),
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Maximum rows per multi-value INSERT statement.
 /// Keeps SQL string size manageable (~350KB for 7 columns).
 const INSERT_CHUNK_SIZE: usize = 1000;
@@ -298,6 +407,7 @@ pub async fn write_batch(
     ipc_bytes: &[u8],
     created_tables: &mut std::collections::HashSet<String>,
     write_mode: Option<&WriteMode>,
+    policies: Option<&SchemaEvolutionPolicy>,
 ) -> Result<u64, String> {
     // Caller must validate stream_name and target_schema before calling.
 
@@ -331,6 +441,26 @@ pub async fn write_batch(
         };
         ensure_table(client, &qualified_table, &arrow_schema, pk).await?;
         created_tables.insert(qualified_table.clone());
+
+        // Detect schema drift and apply policy
+        if let Some(policy) = policies {
+            if let Some(drift) =
+                detect_schema_drift(client, target_schema, stream_name, &arrow_schema).await?
+            {
+                host_ffi::log(
+                    2,
+                    &format!(
+                        "dest-postgres: schema drift detected for {}: {} new, {} removed, {} type changes, {} nullability changes",
+                        qualified_table,
+                        drift.new_columns.len(),
+                        drift.removed_columns.len(),
+                        drift.type_changes.len(),
+                        drift.nullability_changes.len()
+                    ),
+                );
+                apply_schema_policy(client, &qualified_table, &drift, policy).await?;
+            }
+        }
 
         if matches!(write_mode, Some(WriteMode::Replace)) {
             truncate_table(client, &qualified_table).await?;
@@ -443,6 +573,7 @@ pub async fn write_batch_copy(
     ipc_bytes: &[u8],
     created_tables: &mut std::collections::HashSet<String>,
     write_mode: Option<&WriteMode>,
+    policies: Option<&SchemaEvolutionPolicy>,
 ) -> Result<u64, String> {
     // Caller must validate stream_name and target_schema before calling.
 
@@ -475,6 +606,26 @@ pub async fn write_batch_copy(
         };
         ensure_table(client, &qualified_table, &arrow_schema, pk).await?;
         created_tables.insert(qualified_table.clone());
+
+        // Detect schema drift and apply policy
+        if let Some(policy) = policies {
+            if let Some(drift) =
+                detect_schema_drift(client, target_schema, stream_name, &arrow_schema).await?
+            {
+                host_ffi::log(
+                    2,
+                    &format!(
+                        "dest-postgres: schema drift detected for {}: {} new, {} removed, {} type changes, {} nullability changes",
+                        qualified_table,
+                        drift.new_columns.len(),
+                        drift.removed_columns.len(),
+                        drift.type_changes.len(),
+                        drift.nullability_changes.len()
+                    ),
+                );
+                apply_schema_policy(client, &qualified_table, &drift, policy).await?;
+            }
+        }
 
         if matches!(write_mode, Some(WriteMode::Replace)) {
             truncate_table(client, &qualified_table).await?;
