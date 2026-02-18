@@ -389,10 +389,7 @@ mod tests {
             manifest.artifact.checksum,
             Some("sha256:abcd1234".to_string())
         );
-        assert_eq!(
-            manifest.permissions.env.allowed_vars,
-            vec!["PGSSLROOTCERT"]
-        );
+        assert_eq!(manifest.permissions.env.allowed_vars, vec!["PGSSLROOTCERT"]);
         assert!(manifest.config_schema.is_some());
         let schema = manifest.config_schema.unwrap();
         let required = schema.get("required").unwrap().as_array().unwrap();

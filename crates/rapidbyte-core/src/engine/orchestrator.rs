@@ -86,8 +86,16 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
         validate_config_against_schema(&config.source.use_ref, &config.source.config, sm)?;
     }
     if let Some(ref dm) = dest_manifest {
-        validate_config_against_schema(&config.destination.use_ref, &config.destination.config, dm)?;
+        validate_config_against_schema(
+            &config.destination.use_ref,
+            &config.destination.config,
+            dm,
+        )?;
     }
+
+    // 1d. Extract permissions from manifests (for WASI sandbox configuration)
+    let source_permissions = source_manifest.as_ref().map(|m| m.permissions.clone());
+    let dest_permissions = dest_manifest.as_ref().map(|m| m.permissions.clone());
 
     // 2. Initialize state backend
     let state = create_state_backend(config)?;
@@ -116,11 +124,12 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
             if let Some(ref m) = manifest {
                 validate_config_against_schema(&tc.use_ref, &tc.config, m)?;
             }
+            let transform_perms = manifest.as_ref().map(|m| m.permissions.clone());
             let load_start = Instant::now();
             let module = runtime.load_module(&wasm_path)?;
             let load_ms = load_start.elapsed().as_millis() as u64;
             let (id, ver) = parse_connector_ref(&tc.use_ref);
-            Ok((module, id, ver, tc.config.clone(), load_ms))
+            Ok((module, id, ver, tc.config.clone(), load_ms, transform_perms))
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -237,16 +246,17 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
             &source_config,
             &stream_ctxs,
             stats_src,
+            source_permissions.as_ref(),
         )
     });
 
     // 5b. Spawn transform threads (in pipeline order)
     let transform_module_load_ms: Vec<u64> = transform_modules
         .iter()
-        .map(|(_, _, _, _, ms)| *ms)
+        .map(|(_, _, _, _, ms, _)| *ms)
         .collect();
     let mut transform_handles = Vec::new();
-    for (module, id, ver, tconfig, _load_ms) in transform_modules.into_iter() {
+    for (module, id, ver, tconfig, _load_ms, transform_perms) in transform_modules.into_iter() {
         let rx = receivers.remove(0);
         let tx = senders.remove(0);
         let state_t = state.clone();
@@ -266,6 +276,7 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
                 &tconfig,
                 &stream_ctxs_t,
                 stats_t,
+                transform_perms.as_ref(),
             )
         });
         transform_handles.push(handle);
@@ -287,6 +298,7 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
             &dest_config,
             &stream_ctxs_clone,
             stats_dst,
+            dest_permissions.as_ref(),
         )
     });
 

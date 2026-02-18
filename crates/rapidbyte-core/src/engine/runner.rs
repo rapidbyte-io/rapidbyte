@@ -7,6 +7,7 @@ use wasmedge_sdk::vm::SyncInst;
 use wasmedge_sdk::{Module, Store, Vm};
 
 use rapidbyte_sdk::errors::ValidationResult;
+use rapidbyte_sdk::manifest::Permissions;
 use rapidbyte_sdk::protocol::{
     Checkpoint, ConfigBlob, OpenContext, ReadSummary, StreamContext, TransformSummary, WriteSummary,
 };
@@ -65,6 +66,7 @@ pub(crate) fn run_source(
     source_config: &serde_json::Value,
     stream_ctxs: &[StreamContext],
     stats: Arc<Mutex<RunStats>>,
+    permissions: Option<&Permissions>,
 ) -> Result<(f64, ReadSummary, Vec<Checkpoint>), PipelineError> {
     let phase_start = Instant::now();
 
@@ -92,7 +94,7 @@ pub(crate) fn run_source(
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
-    let mut wasi = create_secure_wasi_module()?;
+    let mut wasi = create_secure_wasi_module(permissions)?;
 
     let mut instances: HashMap<String, &mut dyn SyncInst> = HashMap::new();
     instances.insert("rapidbyte".to_string(), &mut import);
@@ -179,6 +181,7 @@ pub(crate) fn run_destination(
     dest_config: &serde_json::Value,
     stream_ctxs: &[StreamContext],
     stats: Arc<Mutex<RunStats>>,
+    permissions: Option<&Permissions>,
 ) -> Result<(f64, WriteSummary, f64, f64, Vec<Checkpoint>), PipelineError> {
     let phase_start = Instant::now();
     let vm_setup_start = Instant::now();
@@ -204,7 +207,7 @@ pub(crate) fn run_destination(
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
-    let mut wasi = create_secure_wasi_module()?;
+    let mut wasi = create_secure_wasi_module(permissions)?;
 
     let mut instances: HashMap<String, &mut dyn SyncInst> = HashMap::new();
     instances.insert("rapidbyte".to_string(), &mut import);
@@ -300,6 +303,7 @@ pub(crate) fn run_transform(
     transform_config: &serde_json::Value,
     stream_ctxs: &[StreamContext],
     stats: Arc<Mutex<RunStats>>,
+    permissions: Option<&Permissions>,
 ) -> Result<(f64, TransformSummary), PipelineError> {
     let phase_start = Instant::now();
 
@@ -323,7 +327,7 @@ pub(crate) fn run_transform(
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
-    let mut wasi = create_secure_wasi_module()?;
+    let mut wasi = create_secure_wasi_module(permissions)?;
 
     let mut instances: HashMap<String, &mut dyn SyncInst> = HashMap::new();
     instances.insert("rapidbyte".to_string(), &mut import);
@@ -419,7 +423,7 @@ pub(crate) fn validate_connector(
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
-    let mut wasi = create_secure_wasi_module()?;
+    let mut wasi = create_secure_wasi_module(None)?;
 
     let mut instances: HashMap<String, &mut dyn SyncInst> = HashMap::new();
     instances.insert("rapidbyte".to_string(), &mut import);
