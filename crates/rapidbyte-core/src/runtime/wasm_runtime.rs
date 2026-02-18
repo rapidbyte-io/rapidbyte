@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use rapidbyte_sdk::manifest::ConnectorManifest;
 use wasmedge_sdk::{ImportObjectBuilder, Module};
 
 use super::host_functions::{
@@ -154,6 +155,30 @@ pub fn resolve_connector_path(connector_ref: &str) -> Result<std::path::PathBuf>
     )
 }
 
+/// Derive the manifest file path from a WASM binary path.
+/// `source_postgres.wasm` -> `source_postgres.manifest.json`
+pub fn manifest_path_from_wasm(wasm_path: &Path) -> std::path::PathBuf {
+    let stem = wasm_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
+    wasm_path.with_file_name(format!("{}.manifest.json", stem))
+}
+
+/// Load a connector manifest from disk. Returns None if the manifest file
+/// doesn't exist (backwards-compatible with connectors that don't have one yet).
+pub fn load_connector_manifest(wasm_path: &Path) -> Result<Option<ConnectorManifest>> {
+    let manifest_path = manifest_path_from_wasm(wasm_path);
+    if !manifest_path.exists() {
+        return Ok(None);
+    }
+    let content = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
+    let manifest: ConnectorManifest = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse manifest: {}", manifest_path.display()))?;
+    Ok(Some(manifest))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +232,25 @@ mod tests {
                 connector_ref
             );
         }
+    }
+
+    #[test]
+    fn test_manifest_path_from_wasm_path() {
+        let wasm = std::path::PathBuf::from("/plugins/source_postgres.wasm");
+        let manifest = manifest_path_from_wasm(&wasm);
+        assert_eq!(
+            manifest,
+            std::path::PathBuf::from("/plugins/source_postgres.manifest.json")
+        );
+    }
+
+    #[test]
+    fn test_manifest_path_from_wasm_path_aot() {
+        let wasm = std::path::PathBuf::from("/plugins/source_postgres.so");
+        let manifest = manifest_path_from_wasm(&wasm);
+        assert_eq!(
+            manifest,
+            std::path::PathBuf::from("/plugins/source_postgres.manifest.json")
+        );
     }
 }
