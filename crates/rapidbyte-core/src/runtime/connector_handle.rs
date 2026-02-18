@@ -5,7 +5,7 @@ use wasmedge_sdk::{params, Vm};
 
 use rapidbyte_sdk::errors::{ConnectorResult, ValidationResult};
 use rapidbyte_sdk::protocol::{
-    Catalog, OpenContext, OpenInfo, ReadSummary, StreamContext, WriteSummary,
+    Catalog, OpenContext, OpenInfo, ReadSummary, StreamContext, TransformSummary, WriteSummary,
 };
 
 use super::memory_protocol;
@@ -109,6 +109,20 @@ impl<'a> ConnectorHandle<'a> {
         parse_connector_result(&raw_bytes, "rb_run_write")
     }
 
+    /// Run a transform on batches for a single stream.
+    /// The guest pulls batches via host_next_batch and emits transformed
+    /// batches via host_emit_batch.
+    ///
+    /// Returns `PipelineError::Connector` for typed errors,
+    /// preserving retry metadata for the orchestrator.
+    pub fn run_transform(&mut self, ctx: &StreamContext) -> Result<TransformSummary, PipelineError> {
+        let raw_bytes = memory_protocol::call_with_json_raw(&mut self.vm, "rb_run_transform", ctx)
+            .context("Failed to call rb_run_transform")
+            .map_err(PipelineError::Infrastructure)?;
+
+        parse_connector_result(&raw_bytes, "rb_run_transform")
+    }
+
     /// Close the connector and release resources.
     pub fn close(&mut self) -> Result<()> {
         let result = self
@@ -210,5 +224,27 @@ mod tests {
 
         assert!(matches!(err, PipelineError::Infrastructure(_)));
         assert!(format!("{}", err).contains("Failed to deserialize"));
+    }
+
+    #[test]
+    fn test_parse_transform_summary_ok() {
+        let json = serde_json::json!({
+            "status": "ok",
+            "data": {
+                "records_in": 1000,
+                "records_out": 950,
+                "bytes_in": 65536,
+                "bytes_out": 60000,
+                "batches_processed": 10,
+            }
+        });
+        let bytes = serde_json::to_vec(&json).unwrap();
+
+        let result: Result<rapidbyte_sdk::protocol::TransformSummary, PipelineError> =
+            parse_connector_result(&bytes, "rb_run_transform");
+        let summary = result.unwrap();
+        assert_eq!(summary.records_in, 1000);
+        assert_eq!(summary.records_out, 950);
+        assert_eq!(summary.batches_processed, 10);
     }
 }
