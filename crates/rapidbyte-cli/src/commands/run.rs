@@ -42,6 +42,9 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
         result.bytes_read as f64 / result.duration_secs / 1_048_576.0,
     );
     println!("  Source duration:  {:.2}s", result.source_duration_secs);
+    println!("    Connect:       {:.3}s", result.source_connect_secs);
+    println!("    Query:         {:.3}s", result.source_query_secs);
+    println!("    Fetch:         {:.3}s", result.source_fetch_secs);
     println!("  Dest duration:   {:.2}s", result.dest_duration_secs);
     println!("    VM setup:      {:.3}s", result.dest_vm_setup_secs);
     println!("    Recv loop:     {:.3}s", result.dest_recv_secs);
@@ -76,6 +79,9 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
         "dest_vm_setup_secs": result.dest_vm_setup_secs,
         "dest_recv_secs": result.dest_recv_secs,
         "wasm_overhead_secs": result.wasm_overhead_secs,
+        "source_connect_secs": result.source_connect_secs,
+        "source_query_secs": result.source_query_secs,
+        "source_fetch_secs": result.source_fetch_secs,
         "source_module_load_ms": result.source_module_load_ms,
         "dest_module_load_ms": result.dest_module_load_ms,
         "transform_count": result.transform_count,

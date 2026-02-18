@@ -37,6 +37,10 @@ pub struct PipelineResult {
     pub dest_connect_secs: f64,
     pub dest_flush_secs: f64,
     pub dest_commit_secs: f64,
+    // Source sub-phase timing (from connector)
+    pub source_connect_secs: f64,
+    pub source_query_secs: f64,
+    pub source_fetch_secs: f64,
     // Host overhead breakdown
     pub dest_vm_setup_secs: f64,
     pub dest_recv_secs: f64,
@@ -150,6 +154,9 @@ pub(crate) fn run_source(
             total_summary.batches_emitted += summary.batches_emitted;
             total_summary.checkpoint_count += summary.checkpoint_count;
             total_summary.records_skipped += summary.records_skipped;
+            if summary.perf.is_some() {
+                total_summary.perf = summary.perf;
+            }
 
             // Signal end-of-stream to dest (typed sentinel, not magic empty vec)
             let _ = sentinel_sender.send(Frame::EndStream);

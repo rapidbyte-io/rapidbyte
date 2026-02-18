@@ -374,6 +374,7 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
             Ok((dst_dur, write_summary, vm_setup_secs, recv_secs, dest_checkpoints)),
         ) => {
             let perf = write_summary.perf.as_ref();
+            let src_perf = read_summary.perf.as_ref();
             let connector_internal_secs = perf
                 .map(|p| p.connect_secs + p.flush_secs + p.commit_secs)
                 .unwrap_or(0.0);
@@ -427,6 +428,9 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
                 dest_duration_secs: *dst_dur,
                 source_module_load_ms,
                 dest_module_load_ms,
+                source_connect_secs: src_perf.map(|p| p.connect_secs).unwrap_or(0.0),
+                source_query_secs: src_perf.map(|p| p.query_secs).unwrap_or(0.0),
+                source_fetch_secs: src_perf.map(|p| p.fetch_secs).unwrap_or(0.0),
                 dest_connect_secs: perf.map(|p| p.connect_secs).unwrap_or(0.0),
                 dest_flush_secs: perf.map(|p| p.flush_secs).unwrap_or(0.0),
                 dest_commit_secs: perf.map(|p| p.commit_secs).unwrap_or(0.0),

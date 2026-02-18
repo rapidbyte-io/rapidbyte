@@ -228,6 +228,9 @@ for label, key, unit in [
     ('  Recv loop', 'dest_recv_secs', 's'),
     ('  WASM overhead', 'wasm_overhead_secs', 's'),
     ('Source duration', 'source_duration_secs', 's'),
+    ('  Connect', 'source_connect_secs', 's'),
+    ('  Query', 'source_query_secs', 's'),
+    ('  Fetch', 'source_fetch_secs', 's'),
     ('Source module load', 'source_module_load_ms', 'ms'),
     ('Dest module load', 'dest_module_load_ms', 'ms'),
 ]:
