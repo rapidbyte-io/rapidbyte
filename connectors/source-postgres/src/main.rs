@@ -6,9 +6,7 @@ use std::sync::OnceLock;
 use rapidbyte_sdk::errors::{ConnectorError, ConnectorResult};
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::memory::{pack_ptr_len, write_guest_bytes};
-use rapidbyte_sdk::protocol::{
-    Catalog, ConfigBlob, OpenContext, OpenInfo, StreamContext,
-};
+use rapidbyte_sdk::protocol::{Catalog, ConfigBlob, OpenContext, OpenInfo, StreamContext};
 
 use serde::Deserialize;
 use tokio_postgres::NoTls;

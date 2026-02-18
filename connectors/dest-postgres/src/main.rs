@@ -7,7 +7,7 @@ use rapidbyte_sdk::errors::{ConnectorError, ConnectorResult};
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::memory::{pack_ptr_len, write_guest_bytes};
 use rapidbyte_sdk::protocol::{
-    ConfigBlob, Feature, OpenContext, OpenInfo, StreamContext, WritePerf, WriteSummaryV1,
+    ConfigBlob, Feature, OpenContext, OpenInfo, StreamContext, WritePerf, WriteSummary,
 };
 use rapidbyte_sdk::validation::validate_pg_identifier;
 
@@ -390,7 +390,7 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                 ),
             );
 
-            let summary = WriteSummaryV1 {
+            let summary = WriteSummary {
                 records_written: total_rows,
                 bytes_written: total_bytes,
                 batches_written,

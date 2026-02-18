@@ -29,26 +29,6 @@ pub struct Catalog {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct StreamSelection {
-    pub name: String,
-    pub sync_mode: SyncMode,
-    pub cursor_field: Option<String>,
-    pub max_batch_bytes: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ReadRequest {
-    pub streams: Vec<StreamSelection>,
-    pub state: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ReadSummary {
-    pub records_read: u64,
-    pub bytes_read: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum WriteMode {
     Append,
@@ -56,30 +36,8 @@ pub enum WriteMode {
     Upsert { primary_key: Vec<String> },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct WriteRequest {
-    pub stream: String,
-    pub schema: Vec<ColumnSchema>,
-    pub write_mode: WriteMode,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct WriteSummary {
-    pub records_written: u64,
-    pub bytes_written: u64,
-    /// Time spent establishing the database connection (seconds).
-    #[serde(default)]
-    pub connect_secs: f64,
-    /// Time spent executing INSERT statements (seconds).
-    #[serde(default)]
-    pub flush_secs: f64,
-    /// Time spent on COMMIT (seconds).
-    #[serde(default)]
-    pub commit_secs: f64,
-}
-
 // ---------------------------------------------------------------------------
-// V1 protocol types (additive — old types above are preserved)
+// Protocol types
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -311,7 +269,7 @@ pub struct WritePerf {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ReadSummaryV1 {
+pub struct ReadSummary {
     pub records_read: u64,
     pub bytes_read: u64,
     pub batches_emitted: u64,
@@ -319,7 +277,7 @@ pub struct ReadSummaryV1 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct WriteSummaryV1 {
+pub struct WriteSummary {
     pub records_written: u64,
     pub bytes_written: u64,
     pub batches_written: u64,
@@ -369,22 +327,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_request_roundtrip() {
-        let req = ReadRequest {
-            streams: vec![StreamSelection {
-                name: "orders".to_string(),
-                sync_mode: SyncMode::FullRefresh,
-                cursor_field: None,
-                max_batch_bytes: 64 * 1024 * 1024,
-            }],
-            state: None,
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        let back: ReadRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(req, back);
-    }
-
-    #[test]
     fn test_write_mode_upsert_roundtrip() {
         let mode = WriteMode::Upsert {
             primary_key: vec!["id".to_string()],
@@ -393,26 +335,6 @@ mod tests {
         let back: WriteMode = serde_json::from_str(&json).unwrap();
         assert_eq!(mode, back);
     }
-
-    #[test]
-    fn test_write_request_roundtrip() {
-        let req = WriteRequest {
-            stream: "users".to_string(),
-            schema: vec![ColumnSchema {
-                name: "name".to_string(),
-                data_type: "Utf8".to_string(),
-                nullable: true,
-            }],
-            write_mode: WriteMode::Append,
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        let back: WriteRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(req, back);
-    }
-
-    // -----------------------------------------------------------------------
-    // V1 protocol type tests
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_config_blob_roundtrip() {
@@ -580,21 +502,21 @@ mod tests {
     }
 
     #[test]
-    fn test_read_summary_v1_roundtrip() {
-        let s = ReadSummaryV1 {
+    fn test_read_summary_roundtrip() {
+        let s = ReadSummary {
             records_read: 1000,
             bytes_read: 65536,
             batches_emitted: 10,
             checkpoint_count: 2,
         };
         let json = serde_json::to_string(&s).unwrap();
-        let back: ReadSummaryV1 = serde_json::from_str(&json).unwrap();
+        let back: ReadSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
     }
 
     #[test]
-    fn test_write_summary_v1_roundtrip() {
-        let s = WriteSummaryV1 {
+    fn test_write_summary_roundtrip() {
+        let s = WriteSummary {
             records_written: 1000,
             bytes_written: 65536,
             batches_written: 10,
@@ -606,7 +528,7 @@ mod tests {
             }),
         };
         let json = serde_json::to_string(&s).unwrap();
-        let back: WriteSummaryV1 = serde_json::from_str(&json).unwrap();
+        let back: WriteSummary = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
     }
 
@@ -616,7 +538,7 @@ mod tests {
             protocol_version: "1".to_string(),
             connector_id: "source-postgres".to_string(),
             stream_name: "users".to_string(),
-            payload: ReadSummaryV1 {
+            payload: ReadSummary {
                 records_read: 100,
                 bytes_read: 4096,
                 batches_emitted: 1,
@@ -628,7 +550,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(v.get("protocol_version").is_some());
         assert!(v.get("records_read").is_some());
-        let back: PayloadEnvelope<ReadSummaryV1> = serde_json::from_str(&json).unwrap();
+        let back: PayloadEnvelope<ReadSummary> = serde_json::from_str(&json).unwrap();
         assert_eq!(envelope, back);
     }
 }

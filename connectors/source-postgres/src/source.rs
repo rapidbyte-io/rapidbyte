@@ -9,7 +9,7 @@ use arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::host_ffi;
-use rapidbyte_sdk::protocol::{ColumnSchema, ReadRequest, ReadSummary, ReadSummaryV1, StreamContext, StreamSelection};
+use rapidbyte_sdk::protocol::{ColumnSchema, ReadSummary, StreamContext};
 use rapidbyte_sdk::validation::validate_pg_identifier;
 
 /// Maximum number of rows per Arrow RecordBatch.
@@ -42,106 +42,12 @@ fn estimate_batch_bytes(rows: &[tokio_postgres::Row], columns: &[ColumnSchema]) 
     total
 }
 
-/// Read data from PostgreSQL for each stream in the request,
-/// emitting Arrow IPC batches via the host function.
-pub async fn read_streams(
-    client: &Client,
-    request: &ReadRequest,
-) -> Result<ReadSummary, String> {
-    let mut total_records: u64 = 0;
-    let mut total_bytes: u64 = 0;
-
-    for stream_sel in &request.streams {
-        let (records, bytes) = read_single_stream(client, stream_sel).await?;
-        total_records += records;
-        total_bytes += bytes;
-    }
-
-    Ok(ReadSummary {
-        records_read: total_records,
-        bytes_read: total_bytes,
-    })
-}
-
-async fn read_single_stream(
-    client: &Client,
-    stream: &StreamSelection,
-) -> Result<(u64, u64), String> {
-    host_ffi::log(2, &format!("Reading stream: {}", stream.name));
-
-    // Discover schema for this table
-    let schema_query = format!(
-        "SELECT column_name, data_type, is_nullable FROM information_schema.columns \
-         WHERE table_schema = 'public' AND table_name = '{}' ORDER BY ordinal_position",
-        stream.name
-    );
-
-    let schema_rows = client
-        .query(&schema_query, &[])
-        .await
-        .map_err(|e| format!("Schema query failed for {}: {}", stream.name, e))?;
-
-    let columns: Vec<ColumnSchema> = schema_rows
-        .iter()
-        .map(|row| {
-            let name: String = row.get(0);
-            let data_type: String = row.get(1);
-            let nullable: bool = row.get::<_, String>(2) == "YES";
-            ColumnSchema {
-                name,
-                data_type: pg_type_to_arrow(&data_type).to_string(),
-                nullable,
-            }
-        })
-        .collect();
-
-    if columns.is_empty() {
-        return Err(format!("Table '{}' not found or has no columns", stream.name));
-    }
-
-    // Build Arrow schema
-    let arrow_schema = build_arrow_schema(&columns);
-
-    // Query all rows
-    let query = format!("SELECT * FROM \"{}\"", stream.name);
-    let rows = client
-        .query(&query, &[])
-        .await
-        .map_err(|e| format!("Data query failed for {}: {}", stream.name, e))?;
-
-    let mut total_records: u64 = 0;
-    let mut total_bytes: u64 = 0;
-
-    // Process rows in batches
-    for chunk in rows.chunks(BATCH_SIZE) {
-        let batch = rows_to_record_batch(chunk, &columns, &arrow_schema)?;
-        let ipc_bytes = batch_to_ipc(&batch)?;
-
-        total_records += chunk.len() as u64;
-        total_bytes += ipc_bytes.len() as u64;
-
-        // Emit via host function
-        host_ffi::emit_record_batch(&stream.name, &ipc_bytes);
-        host_ffi::report_progress(chunk.len() as u64, ipc_bytes.len() as u64);
-    }
-
-    host_ffi::log(
-        2,
-        &format!(
-            "Stream '{}' complete: {} records, {} bytes",
-            stream.name, total_records, total_bytes
-        ),
-    );
-
-    Ok((total_records, total_bytes))
-}
-
-/// Read a single stream using v1 protocol with server-side cursors.
+/// Read a single stream using server-side cursors.
 pub async fn read_stream_v1(
     client: &Client,
     ctx: &StreamContext,
-) -> Result<ReadSummaryV1, String> {
-    host_ffi::log(2, &format!("Reading stream (v1): {}", ctx.stream_name));
+) -> Result<ReadSummary, String> {
+    host_ffi::log(2, &format!("Reading stream: {}", ctx.stream_name));
 
     validate_pg_identifier(&ctx.stream_name)
         .map_err(|e| format!("Invalid stream name: {}", e))?;
@@ -280,12 +186,12 @@ pub async fn read_stream_v1(
     host_ffi::log(
         2,
         &format!(
-            "Stream '{}' complete (v1): {} records, {} bytes, {} batches",
+            "Stream '{}' complete: {} records, {} bytes, {} batches",
             ctx.stream_name, total_records, total_bytes, batches_emitted
         ),
     );
 
-    Ok(ReadSummaryV1 {
+    Ok(ReadSummary {
         records_read: total_records,
         bytes_read: total_bytes,
         batches_emitted,

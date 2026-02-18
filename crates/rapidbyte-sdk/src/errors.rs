@@ -20,11 +20,11 @@ pub struct ValidationResult {
 }
 
 // ---------------------------------------------------------------------------
-// V0 error types (renamed from originals, preserved for compatibility)
+// Transport error types (JSON envelope for host-guest protocol)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ConnectorErrorV0 {
+pub struct ConnectorError {
     pub code: String,
     pub message: String,
 }
@@ -33,16 +33,10 @@ pub struct ConnectorErrorV0 {
 /// Serialized as JSON for host-guest transport.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub enum ConnectorResultV0<T> {
+pub enum ConnectorResult<T> {
     Ok { data: T },
-    Err { error: ConnectorErrorV0 },
+    Err { error: ConnectorError },
 }
-
-/// Alias so existing code using `ConnectorError` continues to compile.
-pub type ConnectorError = ConnectorErrorV0;
-
-/// Alias so existing code using `ConnectorResult<T>` continues to compile.
-pub type ConnectorResult<T> = ConnectorResultV0<T>;
 
 // ---------------------------------------------------------------------------
 // V1 typed error model
@@ -325,31 +319,6 @@ mod tests {
         assert_eq!(result, back);
     }
 
-    #[test]
-    fn test_connector_result_ok() {
-        let result: ConnectorResult<String> = ConnectorResult::Ok {
-            data: "hello".to_string(),
-        };
-        let json = serde_json::to_string(&result).unwrap();
-        assert!(json.contains("\"status\":\"ok\""));
-        let back: ConnectorResult<String> = serde_json::from_str(&json).unwrap();
-        assert_eq!(result, back);
-    }
-
-    #[test]
-    fn test_connector_result_err() {
-        let result: ConnectorResult<String> = ConnectorResult::Err {
-            error: ConnectorError {
-                code: "CONNECTION_FAILED".to_string(),
-                message: "Could not connect to database".to_string(),
-            },
-        };
-        let json = serde_json::to_string(&result).unwrap();
-        assert!(json.contains("\"status\":\"err\""));
-        let back: ConnectorResult<String> = serde_json::from_str(&json).unwrap();
-        assert_eq!(result, back);
-    }
-
     // -----------------------------------------------------------------------
     // V1 error model tests
     // -----------------------------------------------------------------------
@@ -473,21 +442,4 @@ mod tests {
         assert_eq!(err, back);
     }
 
-    #[test]
-    fn test_v0_aliases_work() {
-        // Verify that the type aliases compile and work with pattern matching
-        let result: ConnectorResult<String> = ConnectorResult::Ok {
-            data: "test".to_string(),
-        };
-        match result {
-            ConnectorResult::Ok { data } => assert_eq!(data, "test"),
-            ConnectorResult::Err { .. } => panic!("unexpected error"),
-        }
-
-        let err = ConnectorError {
-            code: "TEST".to_string(),
-            message: "test".to_string(),
-        };
-        assert_eq!(err.code, "TEST");
-    }
 }

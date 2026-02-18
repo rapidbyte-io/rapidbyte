@@ -4,8 +4,7 @@ use anyhow::{Context, Result};
 use wasmedge_sdk::{ImportObjectBuilder, Module};
 
 use super::host_functions::{
-    host_checkpoint, host_emit_batch, host_emit_record_batch, host_get_state, host_last_error,
-    host_log, host_metric_fn, host_next_batch, host_report_progress, host_set_state,
+    host_checkpoint, host_emit_batch, host_last_error, host_log, host_metric_fn, host_next_batch,
     host_state_get, host_state_put, HostState,
 };
 
@@ -48,35 +47,10 @@ pub fn create_host_imports(
     let mut import_builder = ImportObjectBuilder::new("rapidbyte", host_state)
         .context("Failed to create import object builder")?;
 
-    // rb_host_emit_record_batch(stream_ptr, stream_len, batch_ptr, batch_len) -> i32
-    import_builder
-        .with_func::<(i32, i32, i32, i32), i32>(
-            "rb_host_emit_record_batch",
-            host_emit_record_batch,
-        )
-        .context("Failed to register rb_host_emit_record_batch")?;
-
-    // rb_host_get_state(key_ptr, key_len, out_ptr, out_len) -> i32
-    import_builder
-        .with_func::<(i32, i32, i32, i32), i32>("rb_host_get_state", host_get_state)
-        .context("Failed to register rb_host_get_state")?;
-
-    // rb_host_set_state(key_ptr, key_len, val_ptr, val_len) -> i32
-    import_builder
-        .with_func::<(i32, i32, i32, i32), i32>("rb_host_set_state", host_set_state)
-        .context("Failed to register rb_host_set_state")?;
-
     // rb_host_log(level, msg_ptr, msg_len) -> i32
     import_builder
         .with_func::<(i32, i32, i32), i32>("rb_host_log", host_log)
         .context("Failed to register rb_host_log")?;
-
-    // rb_host_report_progress(records: i64, bytes: i64) -> i32
-    import_builder
-        .with_func::<(i64, i64), i32>("rb_host_report_progress", host_report_progress)
-        .context("Failed to register rb_host_report_progress")?;
-
-    // === v1 host functions ===
 
     // rb_host_emit_batch(ptr: u32, len: u32) -> i32
     import_builder
