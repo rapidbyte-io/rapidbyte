@@ -10,8 +10,8 @@ use wasmedge_sdk::{Module, Store, Vm};
 
 use rapidbyte_sdk::errors::ValidationResult;
 use rapidbyte_sdk::protocol::{
-    ConfigBlob, OpenContext, ReadSummary, SchemaHint, StreamContext, StreamLimits, StreamPolicies,
-    SyncMode, WriteSummary,
+    ConfigBlob, CursorInfo, CursorType, CursorValue, OpenContext, ReadSummary, SchemaHint,
+    StreamContext, StreamLimits, StreamPolicies, SyncMode, WriteSummary,
 };
 
 use crate::pipeline::types::{parse_byte_size, PipelineConfig};
@@ -91,17 +91,43 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult> {
         .source
         .streams
         .iter()
-        .map(|s| StreamContext {
-            stream_name: s.name.clone(),
-            schema: SchemaHint::Columns(vec![]), // discovered at runtime
-            sync_mode: match s.sync_mode.as_str() {
+        .map(|s| {
+            let sync_mode = match s.sync_mode.as_str() {
                 "incremental" => SyncMode::Incremental,
                 _ => SyncMode::FullRefresh,
-            },
-            cursor_info: None,
-            limits: limits.clone(),
-            policies: StreamPolicies::default(),
-            write_mode: None,
+            };
+
+            // For incremental streams, load cursor from state backend
+            let cursor_info = if sync_mode == SyncMode::Incremental {
+                if let Some(cursor_field) = &s.cursor_field {
+                    let last_value = state
+                        .get_cursor(&config.pipeline, &s.name)
+                        .ok()
+                        .flatten()
+                        .and_then(|cs| cs.cursor_value)
+                        .map(|v| CursorValue::Utf8(v));
+
+                    Some(CursorInfo {
+                        cursor_field: cursor_field.clone(),
+                        cursor_type: CursorType::Utf8,
+                        last_value,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            StreamContext {
+                stream_name: s.name.clone(),
+                schema: SchemaHint::Columns(vec![]),
+                sync_mode,
+                cursor_info,
+                limits: limits.clone(),
+                policies: StreamPolicies::default(),
+                write_mode: None,
+            }
         })
         .collect();
 
