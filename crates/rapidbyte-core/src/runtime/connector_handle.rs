@@ -40,7 +40,8 @@ impl<'a> ConnectorHandle<'a> {
             ConnectorResult::Ok { data } => Ok(data),
             ConnectorResult::Err { error } => {
                 anyhow::bail!(
-                    "Connector validate failed: {} ({})",
+                    "Connector validate failed: [{}] {} ({})",
+                    error.category,
                     error.message,
                     error.code
                 )
@@ -59,7 +60,8 @@ impl<'a> ConnectorHandle<'a> {
             ConnectorResult::Ok { data } => Ok(data),
             ConnectorResult::Err { error } => {
                 anyhow::bail!(
-                    "Connector discover failed: {} ({})",
+                    "Connector discover failed: [{}] {} ({})",
+                    error.category,
                     error.message,
                     error.code
                 )
@@ -67,9 +69,7 @@ impl<'a> ConnectorHandle<'a> {
         }
     }
 
-    // === v1 lifecycle methods ===
-
-    /// Initialize the connector with v1 open context (config, connector metadata).
+    /// Initialize the connector with open context (config, connector metadata).
     pub fn open(&mut self, ctx: &OpenContext) -> Result<OpenInfo> {
         let result: ConnectorResult<OpenInfo> =
             memory_protocol::call_with_json(&mut self.vm, "rb_open", ctx)
@@ -78,7 +78,7 @@ impl<'a> ConnectorHandle<'a> {
         match result {
             ConnectorResult::Ok { data } => Ok(data),
             ConnectorResult::Err { error } => {
-                anyhow::bail!("Connector open failed: {} ({})", error.message, error.code)
+                anyhow::bail!("Connector open failed: [{}] {} ({})", error.category, error.message, error.code)
             }
         }
     }
@@ -86,27 +86,27 @@ impl<'a> ConnectorHandle<'a> {
     /// Start reading data for a single stream.
     /// The guest emits batches via host_emit_batch during execution.
     ///
-    /// Returns `PipelineError::Connector` for V1 typed errors,
+    /// Returns `PipelineError::Connector` for typed errors,
     /// preserving retry metadata for the orchestrator.
     pub fn run_read(&mut self, ctx: &StreamContext) -> Result<ReadSummary, PipelineError> {
         let raw_bytes = memory_protocol::call_with_json_raw(&mut self.vm, "rb_run_read", ctx)
             .context("Failed to call rb_run_read")
             .map_err(PipelineError::Infrastructure)?;
 
-        parse_v1_or_legacy(&raw_bytes, "rb_run_read")
+        parse_connector_result(&raw_bytes, "rb_run_read")
     }
 
     /// Start writing data for a single stream.
     /// The guest pulls batches via host_next_batch during execution.
     ///
-    /// Returns `PipelineError::Connector` for V1 typed errors,
+    /// Returns `PipelineError::Connector` for typed errors,
     /// preserving retry metadata for the orchestrator.
     pub fn run_write(&mut self, ctx: &StreamContext) -> Result<WriteSummary, PipelineError> {
         let raw_bytes = memory_protocol::call_with_json_raw(&mut self.vm, "rb_run_write", ctx)
             .context("Failed to call rb_run_write")
             .map_err(PipelineError::Infrastructure)?;
 
-        parse_v1_or_legacy(&raw_bytes, "rb_run_write")
+        parse_connector_result(&raw_bytes, "rb_run_write")
     }
 
     /// Close the connector and release resources.
@@ -128,60 +128,36 @@ impl<'a> ConnectorHandle<'a> {
     }
 }
 
-/// Try to parse the raw JSON response as V1 first (ConnectorResult), then
-/// fall back to legacy ConnectorResult. This preserves ConnectorError
-/// metadata for retry decisions while remaining backward-compatible with
-/// older connectors.
-fn parse_v1_or_legacy<T: DeserializeOwned>(
+/// Parse the raw JSON response as a ConnectorResult.
+/// Returns `PipelineError::Connector` for typed errors (preserving retry metadata),
+/// or `PipelineError::Infrastructure` for deserialization failures.
+fn parse_connector_result<T: DeserializeOwned>(
     raw_bytes: &[u8],
     func_name: &str,
 ) -> Result<T, PipelineError> {
-    // Attempt 1: Try V1 format (has typed error with retry metadata)
-    if let Ok(v1_result) = serde_json::from_slice::<ConnectorResult<T>>(raw_bytes) {
-        return match v1_result {
-            ConnectorResult::Ok { data } => Ok(data),
-            ConnectorResult::Err { error } => {
-                tracing::warn!(
-                    func = func_name,
-                    category = %error.category,
-                    retryable = error.retryable,
-                    code = %error.code,
-                    "Connector returned V1 error"
-                );
-                Err(PipelineError::Connector(error))
-            }
-        };
+    match serde_json::from_slice::<ConnectorResult<T>>(raw_bytes) {
+        Ok(ConnectorResult::Ok { data }) => Ok(data),
+        Ok(ConnectorResult::Err { error }) => {
+            tracing::warn!(
+                func = func_name,
+                category = %error.category,
+                retryable = error.retryable,
+                code = %error.code,
+                "Connector returned error"
+            );
+            Err(PipelineError::Connector(error))
+        }
+        Err(_) => {
+            let snippet = String::from_utf8_lossy(
+                &raw_bytes[..raw_bytes.len().min(200)]
+            );
+            Err(PipelineError::Infrastructure(anyhow::anyhow!(
+                "Failed to deserialize response from '{}': {}",
+                func_name,
+                snippet
+            )))
+        }
     }
-
-    // Attempt 2: Fall back to legacy V0 format
-    if let Ok(legacy_result) = serde_json::from_slice::<ConnectorResult<T>>(raw_bytes) {
-        return match legacy_result {
-            ConnectorResult::Ok { data } => Ok(data),
-            ConnectorResult::Err { error } => {
-                tracing::warn!(
-                    func = func_name,
-                    code = %error.code,
-                    "Connector returned legacy V0 error (no retry metadata)"
-                );
-                Err(PipelineError::Infrastructure(anyhow::anyhow!(
-                    "Connector {} failed: {} ({})",
-                    func_name,
-                    error.message,
-                    error.code
-                )))
-            }
-        };
-    }
-
-    // Neither format worked — deserialization failure
-    let snippet = String::from_utf8_lossy(
-        &raw_bytes[..raw_bytes.len().min(200)]
-    );
-    Err(PipelineError::Infrastructure(anyhow::anyhow!(
-        "Failed to deserialize response from '{}': {}",
-        func_name,
-        snippet
-    )))
 }
 
 #[cfg(test)]
@@ -190,7 +166,7 @@ mod tests {
     use rapidbyte_sdk::errors::{ConnectorError, ErrorCategory};
 
     #[test]
-    fn test_parse_v1_ok_response() {
+    fn test_parse_ok_response() {
         let json = serde_json::json!({
             "status": "ok",
             "data": { "records_read": 42, "bytes_read": 1024, "batches_emitted": 1, "checkpoint_count": 0 }
@@ -198,14 +174,14 @@ mod tests {
         let bytes = serde_json::to_vec(&json).unwrap();
 
         let result: Result<rapidbyte_sdk::protocol::ReadSummary, PipelineError> =
-            parse_v1_or_legacy(&bytes, "rb_run_read");
+            parse_connector_result(&bytes, "rb_run_read");
         let summary = result.unwrap();
         assert_eq!(summary.records_read, 42);
         assert_eq!(summary.bytes_read, 1024);
     }
 
     #[test]
-    fn test_parse_v1_error_response_preserves_metadata() {
+    fn test_parse_error_response_preserves_metadata() {
         let v1_err = ConnectorError::transient_db("DEADLOCK", "deadlock detected");
         let json = serde_json::json!({
             "status": "err",
@@ -214,7 +190,7 @@ mod tests {
         let bytes = serde_json::to_vec(&json).unwrap();
 
         let result: Result<rapidbyte_sdk::protocol::ReadSummary, PipelineError> =
-            parse_v1_or_legacy(&bytes, "rb_run_read");
+            parse_connector_result(&bytes, "rb_run_read");
         let err = result.unwrap_err();
 
         assert!(err.is_retryable());
@@ -225,46 +201,11 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_legacy_ok_response() {
-        // Legacy V0 format has the same "ok" envelope
-        let json = serde_json::json!({
-            "status": "ok",
-            "data": { "records_read": 10, "bytes_read": 500, "batches_emitted": 1, "checkpoint_count": 0 }
-        });
-        let bytes = serde_json::to_vec(&json).unwrap();
-
-        let result: Result<rapidbyte_sdk::protocol::ReadSummary, PipelineError> =
-            parse_v1_or_legacy(&bytes, "rb_run_read");
-        let summary = result.unwrap();
-        assert_eq!(summary.records_read, 10);
-    }
-
-    #[test]
-    fn test_parse_legacy_error_becomes_infrastructure() {
-        // Legacy V0 error has only code + message, no category/retryable etc.
-        let json = serde_json::json!({
-            "status": "err",
-            "error": { "code": "PG_ERROR", "message": "connection refused" }
-        });
-        let bytes = serde_json::to_vec(&json).unwrap();
-
-        let result: Result<rapidbyte_sdk::protocol::ReadSummary, PipelineError> =
-            parse_v1_or_legacy(&bytes, "rb_run_read");
-        let err = result.unwrap_err();
-
-        // Legacy errors become Infrastructure (not retryable, no typed metadata)
-        assert!(!err.is_retryable());
-        assert!(err.as_connector_error().is_none());
-        assert!(matches!(err, PipelineError::Infrastructure(_)));
-        assert!(format!("{}", err).contains("connection refused"));
-    }
-
-    #[test]
     fn test_parse_garbage_becomes_infrastructure_error() {
         let bytes = b"this is not json at all";
 
         let result: Result<rapidbyte_sdk::protocol::ReadSummary, PipelineError> =
-            parse_v1_or_legacy(bytes, "rb_run_read");
+            parse_connector_result(bytes, "rb_run_read");
         let err = result.unwrap_err();
 
         assert!(matches!(err, PipelineError::Infrastructure(_)));
