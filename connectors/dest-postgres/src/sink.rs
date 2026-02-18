@@ -864,6 +864,7 @@ async fn write_rows_individually(
 ///
 /// On chunk INSERT failure with Skip/Dlq policy, falls back to single-row
 /// INSERTs for the failing batch, skipping individual bad rows.
+#[allow(clippy::too_many_arguments)]
 pub async fn write_batch_with_policy(
     client: &Client,
     target_schema: &str,
@@ -910,6 +911,7 @@ pub async fn write_batch_with_policy(
 /// Write an Arrow IPC batch via COPY with per-row error handling policy.
 ///
 /// On COPY failure with Skip/Dlq policy, falls back to single-row INSERTs.
+#[allow(clippy::too_many_arguments)]
 pub async fn write_batch_copy_with_policy(
     client: &Client,
     target_schema: &str,
