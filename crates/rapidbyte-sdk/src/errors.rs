@@ -20,26 +20,7 @@ pub struct ValidationResult {
 }
 
 // ---------------------------------------------------------------------------
-// Transport error types (JSON envelope for host-guest protocol)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ConnectorError {
-    pub code: String,
-    pub message: String,
-}
-
-/// Result type returned by connector protocol functions.
-/// Serialized as JSON for host-guest transport.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum ConnectorResult<T> {
-    Ok { data: T },
-    Err { error: ConnectorError },
-}
-
-// ---------------------------------------------------------------------------
-// V1 typed error model
+// Typed error model
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -107,7 +88,7 @@ impl std::fmt::Display for ErrorScope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ConnectorErrorV1 {
+pub struct ConnectorError {
     pub category: ErrorCategory,
     pub scope: ErrorScope,
     pub code: String,
@@ -120,7 +101,7 @@ pub struct ConnectorErrorV1 {
     pub details: Option<serde_json::Value>,
 }
 
-impl ConnectorErrorV1 {
+impl ConnectorError {
     // -- Category constructors that enforce invariants --
 
     /// Configuration error (not retryable).
@@ -292,7 +273,7 @@ impl ConnectorErrorV1 {
     }
 }
 
-impl fmt::Display for ConnectorErrorV1 {
+impl fmt::Display for ConnectorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -302,14 +283,14 @@ impl fmt::Display for ConnectorErrorV1 {
     }
 }
 
-impl std::error::Error for ConnectorErrorV1 {}
+impl std::error::Error for ConnectorError {}
 
-/// V1 result type with typed errors including retry metadata.
+/// Result type with typed errors including retry metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
-pub enum ConnectorResultV1<T> {
+pub enum ConnectorResult<T> {
     Ok { data: T },
-    Err { error: ConnectorErrorV1 },
+    Err { error: ConnectorError },
 }
 
 #[cfg(test)]
@@ -327,13 +308,9 @@ mod tests {
         assert_eq!(result, back);
     }
 
-    // -----------------------------------------------------------------------
-    // V1 error model tests
-    // -----------------------------------------------------------------------
-
     #[test]
     fn test_config_error_not_retryable() {
-        let err = ConnectorErrorV1::config("MISSING_HOST", "host is required");
+        let err = ConnectorError::config("MISSING_HOST", "host is required");
         assert_eq!(err.category, ErrorCategory::Config);
         assert!(!err.retryable);
         assert!(!err.safe_to_retry);
@@ -341,21 +318,21 @@ mod tests {
 
     #[test]
     fn test_auth_error_not_retryable() {
-        let err = ConnectorErrorV1::auth("INVALID_CREDS", "bad password");
+        let err = ConnectorError::auth("INVALID_CREDS", "bad password");
         assert_eq!(err.category, ErrorCategory::Auth);
         assert!(!err.retryable);
     }
 
     #[test]
     fn test_permission_error_not_retryable() {
-        let err = ConnectorErrorV1::permission("NO_SELECT", "no SELECT privilege");
+        let err = ConnectorError::permission("NO_SELECT", "no SELECT privilege");
         assert_eq!(err.category, ErrorCategory::Permission);
         assert!(!err.retryable);
     }
 
     #[test]
     fn test_rate_limit_retryable_slow_backoff() {
-        let err = ConnectorErrorV1::rate_limit("TOO_MANY_REQUESTS", "slow down", Some(5000));
+        let err = ConnectorError::rate_limit("TOO_MANY_REQUESTS", "slow down", Some(5000));
         assert_eq!(err.category, ErrorCategory::RateLimit);
         assert!(err.retryable);
         assert!(err.safe_to_retry);
@@ -365,7 +342,7 @@ mod tests {
 
     #[test]
     fn test_transient_network_retryable() {
-        let err = ConnectorErrorV1::transient_network("CONN_RESET", "connection reset");
+        let err = ConnectorError::transient_network("CONN_RESET", "connection reset");
         assert_eq!(err.category, ErrorCategory::TransientNetwork);
         assert!(err.retryable);
         assert_eq!(err.backoff_class, BackoffClass::Normal);
@@ -373,7 +350,7 @@ mod tests {
 
     #[test]
     fn test_transient_db_retryable() {
-        let err = ConnectorErrorV1::transient_db("DEADLOCK", "deadlock detected");
+        let err = ConnectorError::transient_db("DEADLOCK", "deadlock detected");
         assert_eq!(err.category, ErrorCategory::TransientDb);
         assert!(err.retryable);
         assert_eq!(err.backoff_class, BackoffClass::Normal);
@@ -381,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_data_error_record_scope() {
-        let err = ConnectorErrorV1::data("INVALID_TYPE", "expected int, got string");
+        let err = ConnectorError::data("INVALID_TYPE", "expected int, got string");
         assert_eq!(err.category, ErrorCategory::Data);
         assert_eq!(err.scope, ErrorScope::Record);
         assert!(!err.retryable);
@@ -389,21 +366,21 @@ mod tests {
 
     #[test]
     fn test_schema_error_not_retryable() {
-        let err = ConnectorErrorV1::schema("COLUMN_MISSING", "column 'foo' not found");
+        let err = ConnectorError::schema("COLUMN_MISSING", "column 'foo' not found");
         assert_eq!(err.category, ErrorCategory::Schema);
         assert!(!err.retryable);
     }
 
     #[test]
     fn test_internal_error_not_retryable() {
-        let err = ConnectorErrorV1::internal("BUG", "unexpected state");
+        let err = ConnectorError::internal("BUG", "unexpected state");
         assert_eq!(err.category, ErrorCategory::Internal);
         assert!(!err.retryable);
     }
 
     #[test]
     fn test_builder_with_details() {
-        let err = ConnectorErrorV1::data("INVALID_TYPE", "bad value")
+        let err = ConnectorError::data("INVALID_TYPE", "bad value")
             .with_details(serde_json::json!({"column": "age", "value": "abc"}));
         assert!(err.details.is_some());
         assert_eq!(err.details.unwrap()["column"], "age");
@@ -411,21 +388,21 @@ mod tests {
 
     #[test]
     fn test_builder_with_commit_state() {
-        let err = ConnectorErrorV1::transient_db("TIMEOUT", "query timeout")
+        let err = ConnectorError::transient_db("TIMEOUT", "query timeout")
             .with_commit_state(CommitState::BeforeCommit);
         assert_eq!(err.commit_state, Some(CommitState::BeforeCommit));
     }
 
     #[test]
     fn test_builder_with_scope() {
-        let err = ConnectorErrorV1::data("INVALID_TYPE", "bad value")
+        let err = ConnectorError::data("INVALID_TYPE", "bad value")
             .with_scope(ErrorScope::Batch);
         assert_eq!(err.scope, ErrorScope::Batch);
     }
 
     #[test]
     fn test_display_format() {
-        let err = ConnectorErrorV1::config("MISSING_HOST", "host is required");
+        let err = ConnectorError::config("MISSING_HOST", "host is required");
         let s = format!("{}", err);
         assert!(s.contains("config"));
         assert!(s.contains("MISSING_HOST"));
@@ -435,41 +412,41 @@ mod tests {
 
     #[test]
     fn test_display_retryable() {
-        let err = ConnectorErrorV1::transient_network("CONN_RESET", "connection reset");
+        let err = ConnectorError::transient_network("CONN_RESET", "connection reset");
         let s = format!("{}", err);
         assert!(s.contains("retryable"));
     }
 
     #[test]
-    fn test_connector_result_v1_ok_roundtrip() {
-        let result: ConnectorResultV1<String> = ConnectorResultV1::Ok {
+    fn test_connector_result_ok_roundtrip() {
+        let result: ConnectorResult<String> = ConnectorResult::Ok {
             data: "hello".to_string(),
         };
         let json = serde_json::to_string(&result).unwrap();
-        let back: ConnectorResultV1<String> = serde_json::from_str(&json).unwrap();
+        let back: ConnectorResult<String> = serde_json::from_str(&json).unwrap();
         assert_eq!(result, back);
         assert!(json.contains("\"status\":\"ok\""));
     }
 
     #[test]
-    fn test_connector_result_v1_err_roundtrip() {
-        let result: ConnectorResultV1<()> = ConnectorResultV1::Err {
-            error: ConnectorErrorV1::config("BAD_HOST", "invalid host"),
+    fn test_connector_result_err_roundtrip() {
+        let result: ConnectorResult<()> = ConnectorResult::Err {
+            error: ConnectorError::config("BAD_HOST", "invalid host"),
         };
         let json = serde_json::to_string(&result).unwrap();
-        let back: ConnectorResultV1<()> = serde_json::from_str(&json).unwrap();
+        let back: ConnectorResult<()> = serde_json::from_str(&json).unwrap();
         assert_eq!(result, back);
         assert!(json.contains("\"status\":\"err\""));
         assert!(json.contains("\"category\":\"config\""));
     }
 
     #[test]
-    fn test_connector_error_v1_roundtrip() {
-        let err = ConnectorErrorV1::rate_limit("TOO_MANY", "slow down", Some(1000))
+    fn test_connector_error_roundtrip() {
+        let err = ConnectorError::rate_limit("TOO_MANY", "slow down", Some(1000))
             .with_details(serde_json::json!({"endpoint": "/api/data"}))
             .with_commit_state(CommitState::BeforeCommit);
         let json = serde_json::to_string(&err).unwrap();
-        let back: ConnectorErrorV1 = serde_json::from_str(&json).unwrap();
+        let back: ConnectorError = serde_json::from_str(&json).unwrap();
         assert_eq!(err, back);
     }
 
