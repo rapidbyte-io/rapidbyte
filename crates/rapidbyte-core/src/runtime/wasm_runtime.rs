@@ -6,7 +6,7 @@ use wasmedge_sdk::{ImportObjectBuilder, Module};
 
 use super::host_functions::{
     host_checkpoint, host_emit_batch, host_last_error, host_log, host_metric_fn, host_next_batch,
-    host_state_get, host_state_put, HostState,
+    host_state_cas, host_state_get, host_state_put, HostState,
 };
 
 /// Manages loading Wasm modules.
@@ -75,6 +75,11 @@ pub fn create_host_imports(host_state: HostState) -> Result<wasmedge_sdk::Import
     import_builder
         .with_func::<(i32, i32, i32, i32, i32), i32>("rb_host_state_put", host_state_put)
         .context("Failed to register rb_host_state_put")?;
+
+    // rb_host_state_cas(scope, key_ptr, key_len, expected_ptr, expected_len, new_ptr, new_len) -> i32
+    import_builder
+        .with_func::<(i32, i32, i32, i32, i32, i32, i32), i32>("rb_host_state_cas", host_state_cas)
+        .context("Failed to register rb_host_state_cas")?;
 
     // rb_host_checkpoint(kind: i32, payload_ptr: u32, payload_len: u32) -> i32
     import_builder

@@ -425,6 +425,96 @@ pub fn host_state_put(
     }
 }
 
+/// Host function: scoped state compare-and-set.
+///
+/// Signature: (scope: i32, key_ptr: u32, key_len: u32, expected_ptr: u32, expected_len: u32, new_ptr: u32, new_len: u32) -> i32
+/// Returns: 1 = CAS succeeded, 0 = CAS failed (mismatch), -1 = error.
+pub fn host_state_cas(
+    data: &mut HostState,
+    _inst: &mut SysInstance,
+    frame: &mut CallingFrame,
+    args: Vec<WasmValue>,
+) -> Result<Vec<WasmValue>, CoreError> {
+    data.clear_last_error();
+
+    let scope_i32 = args[0].to_i32();
+    let key_ptr = args[1].to_i32();
+    let key_len = args[2].to_i32();
+    let expected_ptr = args[3].to_i32();
+    let expected_len = args[4].to_i32();
+    let new_ptr = args[5].to_i32();
+    let new_len = args[6].to_i32();
+
+    let _scope = match StateScope::from_i32(scope_i32) {
+        Some(s) => s,
+        None => {
+            let err =
+                ConnectorError::config("INVALID_SCOPE", format!("Invalid scope: {}", scope_i32));
+            data.set_last_error(err);
+            return Ok(vec![WasmValue::from_i32(-1)]);
+        }
+    };
+
+    let key = match memory_protocol::read_string_from_guest(frame, key_ptr, key_len) {
+        Ok(s) => s,
+        Err(e) => {
+            let err = ConnectorError::internal("MEMORY_READ", e.to_string());
+            data.set_last_error(err);
+            return Ok(vec![WasmValue::from_i32(-1)]);
+        }
+    };
+
+    if key.len() > 1024 {
+        let err = ConnectorError::config(
+            "KEY_TOO_LONG",
+            format!("Key length {} exceeds 1024", key.len()),
+        );
+        data.set_last_error(err);
+        return Ok(vec![WasmValue::from_i32(-1)]);
+    }
+
+    // expected: if ptr=0 and len=0, treat as None (insert-if-absent)
+    let expected = if expected_ptr == 0 && expected_len == 0 {
+        None
+    } else {
+        match memory_protocol::read_string_from_guest(frame, expected_ptr, expected_len) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                let err = ConnectorError::internal("MEMORY_READ", e.to_string());
+                data.set_last_error(err);
+                return Ok(vec![WasmValue::from_i32(-1)]);
+            }
+        }
+    };
+
+    let new_value = match memory_protocol::read_string_from_guest(frame, new_ptr, new_len) {
+        Ok(s) => s,
+        Err(e) => {
+            let err = ConnectorError::internal("MEMORY_READ", e.to_string());
+            data.set_last_error(err);
+            return Ok(vec![WasmValue::from_i32(-1)]);
+        }
+    };
+
+    let current_stream = data.current_stream();
+    let state_key = format!("{}:{}", current_stream, key);
+
+    match data.state_backend.compare_and_set(
+        &data.pipeline_name,
+        &state_key,
+        expected.as_deref(),
+        &new_value,
+    ) {
+        Ok(true) => Ok(vec![WasmValue::from_i32(1)]),
+        Ok(false) => Ok(vec![WasmValue::from_i32(0)]),
+        Err(e) => {
+            let err = ConnectorError::internal("STATE_BACKEND", e.to_string());
+            data.set_last_error(err);
+            Ok(vec![WasmValue::from_i32(-1)])
+        }
+    }
+}
+
 /// Host function: receive a checkpoint from the connector.
 ///
 /// Signature: (kind: i32, payload_ptr: u32, payload_len: u32) -> i32

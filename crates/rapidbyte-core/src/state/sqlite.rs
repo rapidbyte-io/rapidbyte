@@ -377,7 +377,10 @@ mod tests {
         let result = backend
             .compare_and_set("pipe", "stream1", None, "50")
             .unwrap();
-        assert!(result, "CAS from None should succeed when key doesn't exist");
+        assert!(
+            result,
+            "CAS from None should succeed when key doesn't exist"
+        );
 
         let got = backend.get_cursor("pipe", "stream1").unwrap().unwrap();
         assert_eq!(got.cursor_value, Some("50".to_string()));

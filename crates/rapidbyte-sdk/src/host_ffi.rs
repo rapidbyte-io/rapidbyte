@@ -22,6 +22,15 @@ extern "C" {
         -> i32;
     fn rb_host_checkpoint(kind: i32, payload_ptr: u32, payload_len: u32) -> i32;
     fn rb_host_metric(payload_ptr: u32, payload_len: u32) -> i32;
+    fn rb_host_state_cas(
+        scope: i32,
+        key_ptr: u32,
+        key_len: u32,
+        expected_ptr: u32,
+        expected_len: u32,
+        new_ptr: u32,
+        new_len: u32,
+    ) -> i32;
 }
 
 // === Safe wrappers ===
@@ -180,6 +189,40 @@ pub fn state_put(scope: StateScope, key: &str, value: &str) -> Result<(), Connec
     }
 }
 
+/// Compare-and-set state: atomically update value only if current value matches `expected`.
+/// When `expected` is `None`, succeeds only if the key doesn't exist yet.
+/// Returns `Ok(true)` if set, `Ok(false)` if value didn't match.
+#[cfg(target_arch = "wasm32")]
+pub fn state_compare_and_set(
+    scope: StateScope,
+    key: &str,
+    expected: Option<&str>,
+    new_value: &str,
+) -> Result<bool, ConnectorError> {
+    let (exp_ptr, exp_len) = match expected {
+        Some(s) => (s.as_ptr() as u32, s.len() as u32),
+        None => (0u32, 0u32),
+    };
+
+    let rc = unsafe {
+        rb_host_state_cas(
+            scope.to_i32(),
+            key.as_ptr() as u32,
+            key.len() as u32,
+            exp_ptr,
+            exp_len,
+            new_value.as_ptr() as u32,
+            new_value.len() as u32,
+        )
+    };
+
+    match rc {
+        1 => Ok(true),
+        0 => Ok(false),
+        _ => Err(fetch_last_error()),
+    }
+}
+
 /// Emit a checkpoint to the host.
 #[cfg(target_arch = "wasm32")]
 pub fn checkpoint(
@@ -254,6 +297,15 @@ pub fn state_get(_scope: StateScope, _key: &str) -> Result<Option<String>, Conne
 #[cfg(not(target_arch = "wasm32"))]
 pub fn state_put(_scope: StateScope, _key: &str, _value: &str) -> Result<(), ConnectorError> {
     Ok(())
+}
+#[cfg(not(target_arch = "wasm32"))]
+pub fn state_compare_and_set(
+    _scope: StateScope,
+    _key: &str,
+    _expected: Option<&str>,
+    _new_value: &str,
+) -> Result<bool, ConnectorError> {
+    Ok(false)
 }
 #[cfg(not(target_arch = "wasm32"))]
 pub fn checkpoint(
