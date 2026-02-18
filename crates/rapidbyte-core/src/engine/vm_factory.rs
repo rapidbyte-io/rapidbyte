@@ -25,11 +25,22 @@ pub(crate) fn create_secure_wasi_module(permissions: Option<&Permissions>) -> Re
                 .collect();
 
             // Map preopens to the WasiModule format: "guest_dir:host_dir"
+            // Skip non-existent paths with a warning so sandbox misconfiguration is visible.
             let preopened: Vec<String> = perms
                 .fs
                 .preopens
                 .iter()
-                .map(|dir| format!("{}:{}", dir, dir))
+                .filter_map(|dir| {
+                    if !std::path::Path::new(dir).exists() {
+                        tracing::warn!(
+                            path = dir,
+                            "Declared preopen path does not exist on host, skipping"
+                        );
+                        None
+                    } else {
+                        Some(format!("{}:{}", dir, dir))
+                    }
+                })
                 .collect();
 
             (allowed_envs, preopened)

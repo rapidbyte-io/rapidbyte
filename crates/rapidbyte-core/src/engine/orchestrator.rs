@@ -497,17 +497,31 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
 
     // 3. Validate source connector
     let source_config = config.source.config.clone();
+    let source_permissions = source_manifest.as_ref().map(|m| m.permissions.clone());
     let (src_id, src_ver) = parse_connector_ref(&config.source.use_ref);
     let source_validation = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
-        validate_connector(&source_wasm, &src_id, &src_ver, &source_config)
+        validate_connector(
+            &source_wasm,
+            &src_id,
+            &src_ver,
+            &source_config,
+            source_permissions.as_ref(),
+        )
     })
     .await??;
 
     // 4. Validate destination connector
     let dest_config = config.destination.config.clone();
+    let dest_permissions = dest_manifest.as_ref().map(|m| m.permissions.clone());
     let (dst_id, dst_ver) = parse_connector_ref(&config.destination.use_ref);
     let dest_validation = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
-        validate_connector(&dest_wasm, &dst_id, &dst_ver, &dest_config)
+        validate_connector(
+            &dest_wasm,
+            &dst_id,
+            &dst_ver,
+            &dest_config,
+            dest_permissions.as_ref(),
+        )
     })
     .await??;
 
@@ -523,10 +537,17 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
                 Err(e) => println!("Transform config ({}): FAILED\n  {}", tc.use_ref, e),
             }
         }
+        let transform_perms = manifest.as_ref().map(|m| m.permissions.clone());
         let config_val = tc.config.clone();
         let (tc_id, tc_ver) = parse_connector_ref(&tc.use_ref);
         let result = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
-            validate_connector(&wasm_path, &tc_id, &tc_ver, &config_val)
+            validate_connector(
+                &wasm_path,
+                &tc_id,
+                &tc_ver,
+                &config_val,
+                transform_perms.as_ref(),
+            )
         })
         .await??;
         transform_validations.push(result);

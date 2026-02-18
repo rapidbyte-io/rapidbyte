@@ -402,6 +402,7 @@ pub(crate) fn validate_connector(
     connector_id: &str,
     connector_version: &str,
     config: &serde_json::Value,
+    permissions: Option<&Permissions>,
 ) -> Result<ValidationResult> {
     let runtime = WasmRuntime::new()?;
     let module = runtime.load_module(wasm_path)?;
@@ -423,7 +424,7 @@ pub(crate) fn validate_connector(
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
-    let mut wasi = create_secure_wasi_module(None)?;
+    let mut wasi = create_secure_wasi_module(permissions)?;
 
     let mut instances: HashMap<String, &mut dyn SyncInst> = HashMap::new();
     instances.insert("rapidbyte".to_string(), &mut import);
