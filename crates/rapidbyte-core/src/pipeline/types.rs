@@ -68,6 +68,9 @@ pub struct ResourceConfig {
     /// Destination commits after writing this many bytes. "0" disables chunking.
     #[serde(default = "default_checkpoint_interval")]
     pub checkpoint_interval_bytes: String,
+    /// Maximum number of retry attempts for retryable errors. 0 disables retries.
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
 }
 
 fn default_max_memory() -> String {
@@ -82,6 +85,9 @@ fn default_parallelism() -> u32 {
 fn default_checkpoint_interval() -> String {
     "64mb".to_string()
 }
+fn default_max_retries() -> u32 {
+    3
+}
 
 impl Default for ResourceConfig {
     fn default() -> Self {
@@ -90,6 +96,7 @@ impl Default for ResourceConfig {
             max_batch_bytes: default_max_batch_bytes(),
             parallelism: default_parallelism(),
             checkpoint_interval_bytes: default_checkpoint_interval(),
+            max_retries: default_max_retries(),
         }
     }
 }
@@ -154,6 +161,7 @@ destination:
         assert_eq!(config.resources.parallelism, 1);
         assert_eq!(config.resources.max_memory, "256mb");
         assert_eq!(config.resources.checkpoint_interval_bytes, "64mb");
+        assert_eq!(config.resources.max_retries, 3);
     }
 
     #[test]

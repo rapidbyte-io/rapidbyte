@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use wasmedge_sdk::vm::SyncInst;
 use wasmedge_sdk::wasi::WasiModule;
 use wasmedge_sdk::{Module, Store, Vm};
 
-use rapidbyte_sdk::errors::{ConnectorErrorV1, ValidationResult};
+use rapidbyte_sdk::errors::{BackoffClass, ConnectorErrorV1, ValidationResult};
 use rapidbyte_sdk::protocol::{
     Checkpoint, ConfigBlob, CursorInfo, CursorType, CursorValue, OpenContext, ReadSummary,
     SchemaHint, StreamContext, StreamLimits, StreamPolicies, SyncMode, WriteMode, WriteSummary,
@@ -77,6 +77,25 @@ impl PipelineError {
     }
 }
 
+/// Compute retry delay based on error hints and attempt number.
+fn compute_backoff(err: &ConnectorErrorV1, attempt: u32) -> Duration {
+    // If connector specified a retry_after, use it
+    if let Some(ms) = err.retry_after_ms {
+        return Duration::from_millis(ms);
+    }
+
+    // Exponential backoff based on backoff_class
+    let base_ms: u64 = match err.backoff_class {
+        BackoffClass::Fast => 100,
+        BackoffClass::Normal => 1000,
+        BackoffClass::Slow => 5000,
+    };
+
+    let delay_ms = base_ms.saturating_mul(2u64.pow(attempt.saturating_sub(1)));
+    let max_ms: u64 = 60_000; // cap at 60s
+    Duration::from_millis(delay_ms.min(max_ms))
+}
+
 /// Result of a pipeline run.
 #[derive(Debug)]
 pub struct PipelineResult {
@@ -108,7 +127,49 @@ pub struct CheckResult {
 }
 
 /// Run a full pipeline: source -> destination with state tracking.
+/// Retries on retryable connector errors up to `config.resources.max_retries` times.
 pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult, PipelineError> {
+    let max_retries = config.resources.max_retries;
+    let mut attempt = 0u32;
+
+    loop {
+        attempt += 1;
+
+        let result = execute_pipeline_once(config).await;
+
+        match result {
+            Ok(pipeline_result) => return Ok(pipeline_result),
+            Err(ref err) if err.is_retryable() && attempt <= max_retries => {
+                if let Some(connector_err) = err.as_connector_error() {
+                    let delay = compute_backoff(connector_err, attempt);
+                    tracing::warn!(
+                        attempt,
+                        max_retries,
+                        delay_ms = delay.as_millis() as u64,
+                        category = %connector_err.category,
+                        code = %connector_err.code,
+                        "Retryable error, will retry"
+                    );
+                    std::thread::sleep(delay);
+                }
+                continue;
+            }
+            Err(err) => {
+                if err.is_retryable() {
+                    tracing::error!(
+                        attempt,
+                        max_retries,
+                        "Max retries exhausted, failing pipeline"
+                    );
+                }
+                return Err(err);
+            }
+        }
+    }
+}
+
+/// Execute a single pipeline attempt: source -> destination with state tracking.
+async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult, PipelineError> {
     let start = Instant::now();
 
     tracing::info!(pipeline = config.pipeline, "Starting pipeline run");
@@ -931,5 +992,45 @@ mod tests {
         let err = PipelineError::Infrastructure(anyhow::anyhow!("Store::new failed"));
         let msg = format!("{}", err);
         assert!(msg.contains("Store::new failed"));
+    }
+
+    // -----------------------------------------------------------------------
+    // compute_backoff tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_backoff_fast() {
+        let mut err = ConnectorErrorV1::transient_network("X", "y");
+        err.backoff_class = BackoffClass::Fast;
+        assert_eq!(compute_backoff(&err, 1), Duration::from_millis(100));
+        assert_eq!(compute_backoff(&err, 2), Duration::from_millis(200));
+        assert_eq!(compute_backoff(&err, 3), Duration::from_millis(400));
+    }
+
+    #[test]
+    fn test_backoff_normal() {
+        let err = ConnectorErrorV1::transient_network("X", "y");
+        assert_eq!(compute_backoff(&err, 1), Duration::from_millis(1000));
+        assert_eq!(compute_backoff(&err, 2), Duration::from_millis(2000));
+    }
+
+    #[test]
+    fn test_backoff_slow() {
+        let err = ConnectorErrorV1::rate_limit("X", "y", None);
+        assert_eq!(compute_backoff(&err, 1), Duration::from_millis(5000));
+        assert_eq!(compute_backoff(&err, 2), Duration::from_millis(10000));
+    }
+
+    #[test]
+    fn test_backoff_respects_retry_after() {
+        let err = ConnectorErrorV1::rate_limit("X", "y", Some(7500));
+        assert_eq!(compute_backoff(&err, 1), Duration::from_millis(7500));
+        assert_eq!(compute_backoff(&err, 5), Duration::from_millis(7500));
+    }
+
+    #[test]
+    fn test_backoff_capped_at_60s() {
+        let err = ConnectorErrorV1::transient_db("X", "y");
+        assert_eq!(compute_backoff(&err, 20), Duration::from_millis(60_000));
     }
 }
