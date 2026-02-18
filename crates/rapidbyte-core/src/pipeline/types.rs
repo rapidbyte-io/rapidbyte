@@ -92,6 +92,10 @@ pub struct ResourceConfig {
     /// Maximum number of retry attempts for retryable errors. 0 disables retries.
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
+    /// IPC compression codec for data transferred between source and dest.
+    /// Valid values: "lz4", "zstd". None = no compression (default).
+    #[serde(default)]
+    pub compression: Option<String>,
 }
 
 fn default_max_memory() -> String {
@@ -120,6 +124,7 @@ impl Default for ResourceConfig {
             checkpoint_interval_rows: 0,
             checkpoint_interval_seconds: 0,
             max_retries: default_max_retries(),
+            compression: None,
         }
     }
 }
@@ -410,5 +415,55 @@ destination:
 "#;
         let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.destination.on_data_error, "fail");
+    }
+
+    #[test]
+    fn test_deserialize_compression_lz4() {
+        let yaml = r#"
+version: "1"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+resources:
+  compression: lz4
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.resources.compression, Some("lz4".to_string()));
+    }
+
+    #[test]
+    fn test_compression_defaults_to_none() {
+        let config = ResourceConfig::default();
+        assert_eq!(config.compression, None);
+    }
+
+    #[test]
+    fn test_deserialize_compression_zstd() {
+        let yaml = r#"
+version: "1"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+resources:
+  compression: zstd
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.resources.compression, Some("zstd".to_string()));
     }
 }
