@@ -244,6 +244,7 @@ pub(crate) fn run_destination(
         bytes_written: 0,
         batches_written: 0,
         checkpoint_count: 0,
+        records_failed: 0,
         perf: None,
     };
 
@@ -264,6 +265,7 @@ pub(crate) fn run_destination(
             total_summary.bytes_written += summary.bytes_written;
             total_summary.batches_written += summary.batches_written;
             total_summary.checkpoint_count += summary.checkpoint_count;
+            total_summary.records_failed += summary.records_failed;
             if summary.perf.is_some() {
                 total_summary.perf = summary.perf;
             }

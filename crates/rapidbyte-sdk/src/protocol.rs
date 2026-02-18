@@ -309,6 +309,8 @@ pub struct WriteSummary {
     pub bytes_written: u64,
     pub batches_written: u64,
     pub checkpoint_count: u64,
+    #[serde(default)]
+    pub records_failed: u64,
     pub perf: Option<WritePerf>,
 }
 
@@ -559,6 +561,7 @@ mod tests {
             bytes_written: 65536,
             batches_written: 10,
             checkpoint_count: 2,
+            records_failed: 0,
             perf: Some(WritePerf {
                 connect_secs: 0.1,
                 flush_secs: 1.5,
@@ -674,5 +677,29 @@ mod tests {
         let limits: StreamLimits = serde_json::from_str(json).unwrap();
         assert_eq!(limits.checkpoint_interval_rows, 0);
         assert_eq!(limits.checkpoint_interval_seconds, 0);
+    }
+
+    #[test]
+    fn test_write_summary_records_failed() {
+        let s = WriteSummary {
+            records_written: 990,
+            bytes_written: 65536,
+            batches_written: 10,
+            checkpoint_count: 2,
+            records_failed: 10,
+            perf: None,
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: WriteSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(s.records_failed, 10);
+        assert_eq!(s, back);
+    }
+
+    #[test]
+    fn test_write_summary_records_failed_backwards_compat() {
+        // Old JSON without records_failed should deserialize with default 0
+        let json = r#"{"records_written":100,"bytes_written":500,"batches_written":1,"checkpoint_count":0,"perf":null}"#;
+        let s: WriteSummary = serde_json::from_str(json).unwrap();
+        assert_eq!(s.records_failed, 0);
     }
 }
