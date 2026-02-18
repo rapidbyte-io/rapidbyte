@@ -15,6 +15,7 @@ use super::errors::{compute_backoff, PipelineError};
 use super::runner::{run_destination, run_source, run_transform, validate_connector};
 pub use super::runner::{CheckResult, PipelineResult};
 use crate::pipeline::types::{parse_byte_size, PipelineConfig};
+use crate::runtime::compression::CompressionCodec;
 use crate::runtime::host_functions::Frame;
 use crate::runtime::wasm_runtime::{self, parse_connector_ref, WasmRuntime};
 use crate::state::backend::{RunStats, RunStatus, StateBackend};
@@ -149,6 +150,8 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
         ..StreamLimits::default()
     };
 
+    let compression = CompressionCodec::from_str_opt(config.resources.compression.as_deref());
+
     let on_data_error = match config.destination.on_data_error.as_str() {
         "skip" => DataErrorPolicy::Skip,
         "dlq" => DataErrorPolicy::Dlq,
@@ -258,6 +261,7 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
             &stream_ctxs,
             stats_src,
             source_permissions.as_ref(),
+            compression,
         )
     });
 
@@ -288,6 +292,7 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
                 &stream_ctxs_t,
                 stats_t,
                 transform_perms.as_ref(),
+                compression,
             )
         });
         transform_handles.push(handle);
@@ -310,6 +315,7 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
             &stream_ctxs_clone,
             stats_dst,
             dest_permissions.as_ref(),
+            compression,
         )
     });
 

@@ -14,6 +14,7 @@ use rapidbyte_sdk::protocol::{
 
 use super::errors::PipelineError;
 use super::vm_factory::create_secure_wasi_module;
+use crate::runtime::compression::CompressionCodec;
 use crate::runtime::connector_handle::ConnectorHandle;
 use crate::runtime::host_functions::{Frame, HostState};
 use crate::runtime::wasm_runtime::{self, WasmRuntime};
@@ -67,6 +68,7 @@ pub(crate) fn run_source(
     stream_ctxs: &[StreamContext],
     stats: Arc<Mutex<RunStats>>,
     permissions: Option<&Permissions>,
+    compression: Option<CompressionCodec>,
 ) -> Result<(f64, ReadSummary, Vec<Checkpoint>), PipelineError> {
     let phase_start = Instant::now();
 
@@ -89,7 +91,7 @@ pub(crate) fn run_source(
         batch_receiver: None,
         pending_batch: None,
         last_error: None,
-        compression: None,
+        compression,
         source_checkpoints: source_checkpoints.clone(),
         dest_checkpoints: Arc::new(Mutex::new(Vec::new())),
     };
@@ -186,6 +188,7 @@ pub(crate) fn run_destination(
     stream_ctxs: &[StreamContext],
     stats: Arc<Mutex<RunStats>>,
     permissions: Option<&Permissions>,
+    compression: Option<CompressionCodec>,
 ) -> Result<(f64, WriteSummary, f64, f64, Vec<Checkpoint>), PipelineError> {
     let phase_start = Instant::now();
     let vm_setup_start = Instant::now();
@@ -206,7 +209,7 @@ pub(crate) fn run_destination(
         batch_receiver: Some(receiver),
         pending_batch: None,
         last_error: None,
-        compression: None,
+        compression,
         source_checkpoints: Arc::new(Mutex::new(Vec::new())),
         dest_checkpoints: dest_checkpoints.clone(),
     };
@@ -311,6 +314,7 @@ pub(crate) fn run_transform(
     stream_ctxs: &[StreamContext],
     stats: Arc<Mutex<RunStats>>,
     permissions: Option<&Permissions>,
+    compression: Option<CompressionCodec>,
 ) -> Result<(f64, TransformSummary), PipelineError> {
     let phase_start = Instant::now();
 
@@ -329,7 +333,7 @@ pub(crate) fn run_transform(
         batch_receiver: Some(receiver),
         pending_batch: None,
         last_error: None,
-        compression: None,
+        compression,
         source_checkpoints: Arc::new(Mutex::new(Vec::new())),
         dest_checkpoints: Arc::new(Mutex::new(Vec::new())),
     };
