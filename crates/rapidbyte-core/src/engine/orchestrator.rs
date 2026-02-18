@@ -73,13 +73,21 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
     let dest_wasm = wasm_runtime::resolve_connector_path(&config.destination.use_ref)?;
 
     // 1b. Load and validate manifests (pre-flight)
-    let _source_manifest =
+    let source_manifest =
         load_and_validate_manifest(&source_wasm, &config.source.use_ref, ConnectorRole::Source)?;
-    let _dest_manifest = load_and_validate_manifest(
+    let dest_manifest = load_and_validate_manifest(
         &dest_wasm,
         &config.destination.use_ref,
         ConnectorRole::Destination,
     )?;
+
+    // 1c. Validate connector config against manifest schemas (zero-boot)
+    if let Some(ref sm) = source_manifest {
+        validate_config_against_schema(&config.source.use_ref, &config.source.config, sm)?;
+    }
+    if let Some(ref dm) = dest_manifest {
+        validate_config_against_schema(&config.destination.use_ref, &config.destination.config, dm)?;
+    }
 
     // 2. Initialize state backend
     let state = create_state_backend(config)?;
@@ -103,8 +111,11 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
         .iter()
         .map(|tc| {
             let wasm_path = wasm_runtime::resolve_connector_path(&tc.use_ref)?;
-            let _manifest =
+            let manifest =
                 load_and_validate_manifest(&wasm_path, &tc.use_ref, ConnectorRole::Transform)?;
+            if let Some(ref m) = manifest {
+                validate_config_against_schema(&tc.use_ref, &tc.config, m)?;
+            }
             let load_start = Instant::now();
             let module = runtime.load_module(&wasm_path)?;
             let load_ms = load_start.elapsed().as_millis() as u64;
@@ -451,6 +462,24 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
         println!("Dest manifest:      OK");
     }
 
+    // 1c. Validate connector config against manifest schemas (zero-boot)
+    if let Some(ref sm) = source_manifest {
+        match validate_config_against_schema(&config.source.use_ref, &config.source.config, sm) {
+            Ok(()) => println!("Source config:      OK"),
+            Err(e) => println!("Source config:      FAILED\n  {}", e),
+        }
+    }
+    if let Some(ref dm) = dest_manifest {
+        match validate_config_against_schema(
+            &config.destination.use_ref,
+            &config.destination.config,
+            dm,
+        ) {
+            Ok(()) => println!("Dest config:        OK"),
+            Err(e) => println!("Dest config:        FAILED\n  {}", e),
+        }
+    }
+
     // 2. Check state backend
     let state_ok = check_state_backend(config);
 
@@ -474,8 +503,14 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     let mut transform_validations = Vec::new();
     for tc in &config.transforms {
         let wasm_path = wasm_runtime::resolve_connector_path(&tc.use_ref)?;
-        let _manifest =
+        let manifest =
             load_and_validate_manifest(&wasm_path, &tc.use_ref, ConnectorRole::Transform)?;
+        if let Some(ref m) = manifest {
+            match validate_config_against_schema(&tc.use_ref, &tc.config, m) {
+                Ok(()) => println!("Transform config ({}): OK", tc.use_ref),
+                Err(e) => println!("Transform config ({}): FAILED\n  {}", tc.use_ref, e),
+            }
+        }
         let config_val = tc.config.clone();
         let (tc_id, tc_ver) = parse_connector_ref(&tc.use_ref);
         let result = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
@@ -561,4 +596,40 @@ fn load_and_validate_manifest(
     }
 
     Ok(manifest)
+}
+
+/// Validate connector config against the manifest's config_schema.
+/// Returns Ok(()) if no schema is defined or if validation passes.
+fn validate_config_against_schema(
+    connector_ref: &str,
+    config: &serde_json::Value,
+    manifest: &rapidbyte_sdk::manifest::ConnectorManifest,
+) -> Result<()> {
+    let schema_value = match &manifest.config_schema {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+
+    let validator = jsonschema::validator_for(schema_value).with_context(|| {
+        format!(
+            "Invalid JSON Schema in manifest for connector '{}'",
+            connector_ref,
+        )
+    })?;
+
+    let errors: Vec<String> = validator
+        .iter_errors(config)
+        .map(|e| format!("  - {}", e))
+        .collect();
+
+    if !errors.is_empty() {
+        anyhow::bail!(
+            "Configuration validation failed for connector '{}':\n{}",
+            connector_ref,
+            errors.join("\n"),
+        );
+    }
+
+    tracing::debug!(connector = connector_ref, "Config schema validation passed");
+    Ok(())
 }
