@@ -3,7 +3,7 @@ pub mod sink;
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use rapidbyte_sdk::errors::{CommitState, ConnectorErrorV1, ConnectorResult, ConnectorResultV1};
+use rapidbyte_sdk::errors::{CommitState, ConnectorError, ConnectorResult};
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::memory::{pack_ptr_len, write_guest_bytes};
 use rapidbyte_sdk::protocol::{
@@ -74,8 +74,8 @@ fn make_ok_response<T: serde::Serialize>(data: T) -> Vec<u8> {
     serde_json::to_vec(&result).unwrap()
 }
 
-fn make_v1_err_response(error: ConnectorErrorV1) -> Vec<u8> {
-    let result: ConnectorResultV1<()> = ConnectorResultV1::Err { error };
+fn make_err_response(error: ConnectorError) -> Vec<u8> {
+    let result: ConnectorResult<()> = ConnectorResult::Err { error };
     serde_json::to_vec(&result).unwrap()
 }
 
@@ -106,7 +106,7 @@ async fn connect(
     Ok(client)
 }
 
-// === v1 Exported Protocol Functions ===
+// === Exported Protocol Functions ===
 
 #[no_mangle]
 pub extern "C" fn rb_open(config_ptr: i32, config_len: i32) -> i64 {
@@ -114,8 +114,8 @@ pub extern "C" fn rb_open(config_ptr: i32, config_len: i32) -> i64 {
         let open_ctx: OpenContext = match serde_json::from_slice(input) {
             Ok(ctx) => ctx,
             Err(e) => {
-                return make_v1_err_response(
-                    ConnectorErrorV1::config("INVALID_OPEN_CTX", format!("Invalid OpenContext: {}", e)),
+                return make_err_response(
+                    ConnectorError::config("INVALID_OPEN_CTX", format!("Invalid OpenContext: {}", e)),
                 );
             }
         };
@@ -128,16 +128,16 @@ pub extern "C" fn rb_open(config_ptr: i32, config_len: i32) -> i64 {
         let pg_config: PgConfig = match serde_json::from_value(config_value) {
             Ok(c) => c,
             Err(e) => {
-                return make_v1_err_response(
-                    ConnectorErrorV1::config("INVALID_CONFIG", format!("Invalid PG config: {}", e)),
+                return make_err_response(
+                    ConnectorError::config("INVALID_CONFIG", format!("Invalid PG config: {}", e)),
                 );
             }
         };
 
         // Validate load_method
         if pg_config.load_method != "insert" && pg_config.load_method != "copy" {
-            return make_v1_err_response(
-                ConnectorErrorV1::config("INVALID_CONFIG", format!(
+            return make_err_response(
+                ConnectorError::config("INVALID_CONFIG", format!(
                     "Invalid load_method: '{}'. Must be 'insert' or 'copy'",
                     pg_config.load_method
                 )),
@@ -176,31 +176,19 @@ pub extern "C" fn rb_open(config_ptr: i32, config_len: i32) -> i64 {
 #[no_mangle]
 pub extern "C" fn rb_validate(config_ptr: i32, config_len: i32) -> i64 {
     protocol_handler(config_ptr, config_len, |input| {
-        // v1: try to parse as OpenContext first, fall back to raw PgConfig for v0 compat
-        let config: PgConfig = if let Ok(open_ctx) = serde_json::from_slice::<OpenContext>(input) {
-            match &open_ctx.config {
-                ConfigBlob::Json(v) => match serde_json::from_value(v.clone()) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        return make_v1_err_response(
-                            ConnectorErrorV1::config("INVALID_CONFIG", format!("Invalid config: {}", e)),
-                        );
-                    }
-                },
+        let open_ctx: OpenContext = match serde_json::from_slice(input) {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                return make_err_response(ConnectorError::config("INVALID_OPEN_CTX", format!("Invalid OpenContext: {}", e)));
             }
-        } else {
-            host_ffi::log(
-                1,
-                "dest-postgres: rb_validate received non-OpenContext input (v0 compat)",
-            );
-            match serde_json::from_slice(input) {
+        };
+        let config: PgConfig = match &open_ctx.config {
+            ConfigBlob::Json(v) => match serde_json::from_value(v.clone()) {
                 Ok(c) => c,
                 Err(e) => {
-                    return make_v1_err_response(
-                        ConnectorErrorV1::config("INVALID_CONFIG", format!("Invalid config: {}", e)),
-                    );
+                    return make_err_response(ConnectorError::config("INVALID_CONFIG", format!("Invalid config: {}", e)));
                 }
-            }
+            },
         };
 
         let rt = create_runtime();
@@ -234,12 +222,12 @@ pub extern "C" fn rb_validate(config_ptr: i32, config_len: i32) -> i64 {
                             };
                             make_ok_response(result)
                         }
-                        Err(e) => make_v1_err_response(
-                            ConnectorErrorV1::transient_network("CONNECTION_TEST_FAILED", format!("Connection test failed: {}", e)),
+                        Err(e) => make_err_response(
+                            ConnectorError::transient_network("CONNECTION_TEST_FAILED", format!("Connection test failed: {}", e)),
                         ),
                     }
                 }
-                Err(e) => make_v1_err_response(ConnectorErrorV1::transient_network("CONNECTION_FAILED", e)),
+                Err(e) => make_err_response(ConnectorError::transient_network("CONNECTION_FAILED", e)),
             }
         })
     })
@@ -251,8 +239,8 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
         let stream_ctx: StreamContext = match serde_json::from_slice(input) {
             Ok(c) => c,
             Err(e) => {
-                return make_v1_err_response(
-                    ConnectorErrorV1::config("INVALID_STREAM_CTX", format!("Invalid StreamContext: {}", e)),
+                return make_err_response(
+                    ConnectorError::config("INVALID_STREAM_CTX", format!("Invalid StreamContext: {}", e)),
                 );
             }
         };
@@ -260,21 +248,21 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
         let config = match CONFIG.get() {
             Some(c) => c,
             None => {
-                return make_v1_err_response(
-                    ConnectorErrorV1::config("NO_CONFIG", "No config available. Call rb_open first."),
+                return make_err_response(
+                    ConnectorError::config("NO_CONFIG", "No config available. Call rb_open first."),
                 );
             }
         };
 
         // Validate identifiers before interpolating into SQL
         if let Err(e) = validate_pg_identifier(&stream_ctx.stream_name) {
-            return make_v1_err_response(
-                ConnectorErrorV1::config("INVALID_IDENTIFIER", format!("Invalid stream name: {}", e)),
+            return make_err_response(
+                ConnectorError::config("INVALID_IDENTIFIER", format!("Invalid stream name: {}", e)),
             );
         }
         if let Err(e) = validate_pg_identifier(&config.schema) {
-            return make_v1_err_response(
-                ConnectorErrorV1::config("INVALID_IDENTIFIER", format!("Invalid schema name: {}", e)),
+            return make_err_response(
+                ConnectorError::config("INVALID_IDENTIFIER", format!("Invalid schema name: {}", e)),
             );
         }
 
@@ -284,7 +272,7 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
             let connect_start = Instant::now();
             let client = match connect(config).await {
                 Ok(c) => c,
-                Err(e) => return make_v1_err_response(ConnectorErrorV1::transient_network("CONNECTION_FAILED", e)),
+                Err(e) => return make_err_response(ConnectorError::transient_network("CONNECTION_FAILED", e)),
             };
             let connect_secs = connect_start.elapsed().as_secs_f64();
 
@@ -293,7 +281,7 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
             // we COMMIT, emit a checkpoint, and BEGIN a new transaction.
             // If checkpoint_interval_bytes is 0, the entire stream stays in one transaction.
             if let Err(e) = client.execute("BEGIN", &[]).await {
-                return make_v1_err_response(ConnectorErrorV1::transient_db("TX_FAILED", format!("BEGIN failed: {}", e)));
+                return make_err_response(ConnectorError::transient_db("TX_FAILED", format!("BEGIN failed: {}", e)));
             }
 
             // Phase 3: Pull loop — read batches from host and write immediately
@@ -414,8 +402,8 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
             // If there was an error during the loop, ROLLBACK and return
             if let Some(err) = loop_error {
                 let _ = client.execute("ROLLBACK", &[]).await;
-                return make_v1_err_response(
-                    ConnectorErrorV1::transient_db("WRITE_FAILED", err)
+                return make_err_response(
+                    ConnectorError::transient_db("WRITE_FAILED", err)
                         .with_commit_state(CommitState::BeforeCommit),
                 );
             }
@@ -423,7 +411,7 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
             // Phase 4: COMMIT
             let commit_start = Instant::now();
             if let Err(e) = client.execute("COMMIT", &[]).await {
-                return make_v1_err_response(ConnectorErrorV1::transient_db("TX_FAILED", format!("COMMIT failed: {}", e)));
+                return make_err_response(ConnectorError::transient_db("TX_FAILED", format!("COMMIT failed: {}", e)));
             }
             let commit_secs = commit_start.elapsed().as_secs_f64();
 
