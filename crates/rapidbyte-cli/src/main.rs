@@ -39,6 +39,14 @@ enum Commands {
     },
     /// List available connectors
     Connectors,
+    /// Scaffold a new connector project
+    Scaffold {
+        /// Connector name (e.g., "source-mysql", "dest-snowflake")
+        name: String,
+        /// Output directory (default: ./connectors/<name>)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -52,5 +60,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Check { pipeline } => commands::check::execute(&pipeline).await,
         Commands::Discover { pipeline } => commands::discover::execute(&pipeline).await,
         Commands::Connectors => commands::connectors::execute().await,
+        Commands::Scaffold { name, output } => {
+            commands::scaffold::run(&name, output.as_deref())?;
+            Ok(())
+        }
     }
 }
