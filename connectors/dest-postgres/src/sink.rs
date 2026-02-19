@@ -1230,6 +1230,33 @@ async fn insert_batch(ctx: &mut WriteContext<'_>, arrow_schema: &Arc<Schema>, ba
             .map(|&i| ctx.type_null_columns.contains(arrow_schema.field(i).name()))
             .collect();
 
+        // Pre-compute upsert clause (same for every chunk)
+        let upsert_clause: Option<String> =
+            if let Some(WriteMode::Upsert { primary_key }) = ctx.write_mode {
+                let pk_cols = primary_key
+                    .iter()
+                    .map(|k| format!("\"{}\"", k))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let update_cols: Vec<String> = active_cols
+                    .iter()
+                    .map(|&i| arrow_schema.field(i).name())
+                    .filter(|name| !primary_key.contains(name))
+                    .map(|name| format!("\"{}\" = EXCLUDED.\"{}\"", name, name))
+                    .collect();
+                if update_cols.is_empty() {
+                    Some(format!(" ON CONFLICT ({}) DO NOTHING", pk_cols))
+                } else {
+                    Some(format!(
+                        " ON CONFLICT ({}) DO UPDATE SET {}",
+                        pk_cols,
+                        update_cols.join(", ")
+                    ))
+                }
+            } else {
+                None
+            };
+
         // Process in chunks
         for chunk_start in (0..num_rows).step_by(INSERT_CHUNK_SIZE) {
             let chunk_end = (chunk_start + INSERT_CHUNK_SIZE).min(num_rows);
@@ -1261,28 +1288,9 @@ async fn insert_batch(ctx: &mut WriteContext<'_>, arrow_schema: &Arc<Schema>, ba
                 sql.push(')');
             }
 
-            // Append ON CONFLICT clause for upsert mode
-            if let Some(WriteMode::Upsert { primary_key }) = ctx.write_mode {
-                let pk_cols = primary_key
-                    .iter()
-                    .map(|k| format!("\"{}\"", k))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let update_cols: Vec<String> = active_cols
-                    .iter()
-                    .map(|&i| arrow_schema.field(i).name())
-                    .filter(|name| !primary_key.contains(name))
-                    .map(|name| format!("\"{}\" = EXCLUDED.\"{}\"", name, name))
-                    .collect();
-                if update_cols.is_empty() {
-                    sql.push_str(&format!(" ON CONFLICT ({}) DO NOTHING", pk_cols));
-                } else {
-                    sql.push_str(&format!(
-                        " ON CONFLICT ({}) DO UPDATE SET {}",
-                        pk_cols,
-                        update_cols.join(", ")
-                    ));
-                }
+            // Append pre-computed ON CONFLICT clause for upsert mode
+            if let Some(ref clause) = upsert_clause {
+                sql.push_str(clause);
             }
 
             ctx.client

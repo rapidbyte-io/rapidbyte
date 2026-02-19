@@ -20,7 +20,7 @@ impl CompressionCodec {
 pub fn compress(codec: CompressionCodec, data: &[u8]) -> Vec<u8> {
     match codec {
         CompressionCodec::Lz4 => lz4_flex::compress_prepend_size(data),
-        CompressionCodec::Zstd => zstd::encode_all(data, 1).expect("zstd compress failed"),
+        CompressionCodec::Zstd => zstd::bulk::compress(data, 1).expect("zstd compress failed"),
     }
 }
 
