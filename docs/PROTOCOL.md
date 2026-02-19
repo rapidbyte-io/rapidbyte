@@ -238,6 +238,8 @@ All functions use the C ABI. Input is passed as `(ptr: i32, len: i32)` pointing 
 | `rb_allocate` | `(size: i32) -> i32` | Byte count | Pointer to allocated memory |
 | `rb_deallocate` | `(ptr: i32, capacity: i32)` | Pointer + capacity | — |
 
+> **Note on `rb_validate`:** Although the ABI passes `(ptr, len)` input bytes (currently `OpenContext` JSON) to `rb_validate`, the SDK-generated FFI macro **ignores the input**. The connector's `validate()` method takes no parameters and relies on state set by `rb_open()`. Connectors that need to validate against specific configuration should read it from their stored state, not from the `rb_validate` input.
+
 ### 5.2 Return Value Packing
 
 Functions returning `i64` pack a `(ptr, len)` pair:
@@ -424,12 +426,14 @@ Additionally, the host registers a `wasi_snapshot_preview1` module (via `WasiMod
 
 When the host needs to pass data to the guest (e.g., `OpenContext` for `rb_open`):
 
-1. Host calls `rb_allocate(size)` → gets pointer `ptr` in guest linear memory
-2. Host writes bytes to guest memory via `memory.set_data(bytes, ptr)`
-3. Host calls the guest function with `(ptr, len)`
-4. Guest reads from `(ptr, len)`, processes, writes result via `write_guest_bytes`
-5. Guest returns packed `i64` with result pointer and length
-6. Host reads result from guest memory, then calls `rb_deallocate(ptr, capacity)`
+1. Host calls `rb_allocate(size)` → gets pointer `ptr_in` in guest linear memory
+2. Host writes bytes to guest memory via `memory.set_data(bytes, ptr_in)`
+3. Host calls the guest function with `(ptr_in, len)`
+4. Guest reads from `(ptr_in, len)`, processes, writes result via `write_guest_bytes`
+5. Guest returns packed `i64` with result pointer `ptr_out` and length
+6. Host reads result from guest memory, then calls `rb_deallocate(ptr_out, capacity)`
+
+> **Note:** The host does **not** free the input allocation (`ptr_in` from step 1) after the guest function returns. This is a minor memory leak per call. In practice it is negligible because inputs are small JSON payloads (config, stream context) and each WASM VM instance is short-lived. Future protocol versions may require the guest to free input buffers explicitly.
 
 ### 7.2 Guest-to-Host Writes
 
@@ -451,6 +455,8 @@ For `rb_host_next_batch`, `rb_host_state_get`, and `rb_host_last_error`, the gue
 
 The SDK safe wrappers (`host_ffi.rs`) implement this resize loop automatically. For `next_batch`, a cap (`max_bytes`) prevents unbounded buffer growth. For `state_get`, the cap is 16MB.
 
+> **Edge case:** When the required buffer size is exactly 1 byte, the host returns `-1`, which collides with the error sentinel used by `host_next_batch` and `host_state_get`. The SDK interprets `-1` as an error, calls `rb_host_last_error()`, finds no error, and the caller receives a generic `UNKNOWN_ERROR`. In practice 1-byte payloads are extremely rare (a single-byte IPC batch or state value is effectively useless), but this is a protocol ambiguity that may be resolved in a future version by reserving a distinct error sentinel (e.g., `i32::MIN`).
+
 ### 7.4 Allocation Helpers
 
 **Source:** `crates/rapidbyte-sdk/src/memory.rs`
@@ -470,6 +476,8 @@ pub fn unpack_ptr_len(packed: i64) -> (i32, i32)
 ```
 
 > **Note:** These functions use `i32` pointers designed for `wasm32` linear memory. They will SIGSEGV on native 64-bit targets. Connector code MUST be tested on the `wasm32-wasip1` target.
+
+> **Capacity invariant:** `write_guest_bytes` (used by SDK macros to return results) internally calls `data.to_vec()`, producing a `Vec` where `capacity == len`. The host uses `rb_deallocate(ptr, len)` to free the result — this is correct **only** because of this invariant. If a future SDK change produces a `Vec` with `capacity > len` (e.g., from `Vec::with_capacity` followed by a partial write), the host would deallocate with the wrong capacity, causing heap corruption. SDK implementors MUST preserve this invariant.
 
 ---
 
@@ -506,6 +514,8 @@ struct ColumnSchema {
 | `max_record_bytes` | 16 MB | Maximum size of a single record within a batch |
 
 Zero-length batches are a **protocol violation**. The host rejects them with an `EMPTY_BATCH` error.
+
+**Zero-row sources:** If a source query returns 0 rows, the connector MUST NOT call `emit_batch`. Instead, it SHOULD emit a final checkpoint (if applicable for incremental mode, to record the cursor position) and return normally from `rb_run_read`. The host automatically sends an `EndStream` frame to the destination, which will receive EOF on its first `host_next_batch` call and return from `rb_run_write` with zero records written.
 
 ### 8.4 IPC Compression
 
@@ -558,10 +568,12 @@ pub enum Frame {
 
 EOF is signaled by either:
 
-1. The `EndStream` frame sentinel — `host_next_batch` returns `0`
-2. Channel closure (sender dropped) — `host_next_batch` returns `0`
+1. The `EndStream` frame sentinel — `host_next_batch` returns `0` (clean completion)
+2. Channel closure (sender dropped) — `host_next_batch` returns `0` (source error or crash)
 
 The destination's pull loop treats both as EOF and returns from `rb_run_write`.
+
+> **Caveat:** The destination cannot distinguish between clean completion and source failure — both return `0` from `host_next_batch`. This is safe under at-least-once semantics: if the source errors, `correlate_and_persist_cursors` (Section 10.4) will not advance the cursor because no source checkpoint exists for the failed run, and the next run re-reads from the previous position. However, the destination may have already committed a partial batch to the target database before learning the source failed. This produces **duplicates on retry**, which is expected and acceptable under at-least-once delivery. Destinations requiring exactly-once semantics must implement idempotent writes (e.g., upsert with primary key).
 
 ---
 
@@ -618,6 +630,14 @@ correlate_and_persist_cursors(state_backend, pipeline, source_checkpoints, dest_
 ```
 
 This gives correct at-least-once semantics even if the process crashes mid-stream. If the source emits a checkpoint but the destination hasn't confirmed, the cursor is NOT advanced — the next run will re-read from the previous position.
+
+**Checkpoint independence:** Source and destination emit checkpoints **independently** — there are no in-band checkpoint markers flowing through the channel:
+
+- **Source** checkpoints after emitting batches, recording cursor position (e.g., `updated_at` value of the last row read)
+- **Destination** checkpoints after committing data, triggered by configurable thresholds (bytes written, rows written, or elapsed seconds — see Section 10.6)
+- Correlation happens **post-hoc** in the host after both sides complete, via `correlate_and_persist_cursors`
+
+This means a source that emits data but crashes before emitting a checkpoint will still cause a re-read on retry (no source checkpoint → no cursor advance). Conversely, a destination that commits data but crashes before emitting its final checkpoint will cause the same data to be re-committed on retry (no dest checkpoint → no cursor advance → source re-reads).
 
 ### 10.5 Checkpoint Structure
 
@@ -1118,7 +1138,7 @@ The host loads `.so` files the same way as `.wasm` files. Module load time drops
 
 | Item | Status | Notes |
 |------|--------|-------|
-| **CDC** | Protocol-ready | `SyncMode::Cdc` exists; no connector implements logical replication yet |
+| **CDC** | Protocol-ready | `SyncMode::Cdc` exists; no connector implements logical replication yet. Single-table CDC works with the current one-stream-at-a-time model. Multi-table CDC (e.g., a PostgreSQL logical replication slot streaming changes for multiple tables) requires multiplexed channels or a demuxing layer, which the current architecture does not support |
 | **Exactly-once delivery** | Feature flag exists | `Feature::ExactlyOnce` declared; no commit token implementation |
 | **Dead-letter queue** | Enum variant exists | `DataErrorPolicy::Dlq` parses but routes nowhere |
 | **Network ACL enforcement** | Declarative only | Manifest declares `allowed_domains`; not enforced at WASI layer in WasmEdge v0.14 |
@@ -1129,6 +1149,9 @@ The host loads `.so` files the same way as `.wasm` files. Module load time drops
 | **Metrics backend** | Logging only | `rb_host_metric` logs via `tracing`; no Prometheus/OTLP export |
 | **Serialization format** | JSON only | Spec mentioned MessagePack/protobuf; implementation uses JSON everywhere |
 | **ConnectorInstance scope** | Reserved | `StateScope::ConnectorInstance` (value 2) exists but is not used |
+| **Crash vs clean EOF** | Indistinguishable | `host_next_batch` returns `0` for both `EndStream` (clean) and channel drop (source crash); destination cannot detect source failure. At-least-once semantics protect against data loss but duplicates are possible on retry (see §9.4) |
+| **Buffer resize `-1` collision** | Edge case | When required buffer size is exactly 1 byte, host returns `-1` which collides with the error sentinel; SDK treats this as an error. Harmless in practice — 1-byte payloads are not meaningful (see §7.3) |
+| **Input memory leak** | By design | Host allocates input via `rb_allocate` but never calls `rb_deallocate` on input buffers after the guest function returns. Negligible for small JSON inputs on short-lived VM instances (see §7.1) |
 
 ---
 
