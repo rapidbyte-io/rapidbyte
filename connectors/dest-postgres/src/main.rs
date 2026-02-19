@@ -1,6 +1,7 @@
 mod config;
 mod ddl;
 mod format;
+mod loader;
 pub mod sink;
 
 use std::time::Instant;
