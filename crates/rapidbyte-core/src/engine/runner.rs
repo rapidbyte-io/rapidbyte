@@ -189,7 +189,7 @@ pub(crate) fn run_source(
 
     // Extract source checkpoints collected during the run
     let checkpoints = source_checkpoints.lock().unwrap().drain(..).collect::<Vec<_>>();
-    tracing::info!(
+    tracing::debug!(
         source_checkpoint_count = checkpoints.len(),
         "Extracted source checkpoints after VM complete"
     );
@@ -325,7 +325,7 @@ pub(crate) fn run_destination(
 
     // Extract dest checkpoints collected during the run
     let checkpoints = dest_checkpoints.lock().unwrap().drain(..).collect::<Vec<_>>();
-    tracing::info!(
+    tracing::debug!(
         dest_checkpoint_count = checkpoints.len(),
         "Extracted dest checkpoints after VM complete"
     );

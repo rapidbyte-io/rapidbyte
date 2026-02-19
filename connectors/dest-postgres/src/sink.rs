@@ -484,8 +484,9 @@ impl<'a> WriteSession<'a> {
             .map_err(|e| format!("COMMIT failed: {}", e))?;
         let commit_secs = commit_start.elapsed().as_secs_f64();
 
-        // Final checkpoint for remaining uncommitted data
-        if self.bytes_since_commit > 0 {
+        // Final checkpoint — always emit so the host can correlate
+        // source and dest checkpoints for cursor advancement.
+        {
             let cp = rapidbyte_sdk::protocol::Checkpoint {
                 id: self.checkpoint_count + 1,
                 kind: rapidbyte_sdk::protocol::CheckpointKind::Dest,
@@ -502,8 +503,13 @@ impl<'a> WriteSession<'a> {
         // Replace mode: atomically swap staging table into target position
         if self.is_replace {
             swap_staging_table(self.client, self.target_schema, &self.stream_name).await?;
-            let _ = clear_watermark(self.client, self.target_schema, &self.stream_name).await;
         }
+
+        // Clear watermark after successful commit — the watermark is only
+        // useful for crash recovery within a single run. Between runs
+        // (especially incremental), a stale watermark would cause the next
+        // run's batches to be skipped.
+        let _ = clear_watermark(self.client, self.target_schema, &self.stream_name).await;
 
         host_ffi::log(
             2,

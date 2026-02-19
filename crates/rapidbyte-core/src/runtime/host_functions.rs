@@ -619,7 +619,7 @@ pub fn host_checkpoint(
                     Ok(cp) => {
                         data.source_checkpoints.lock().unwrap().push(cp);
                         let count = data.source_checkpoints.lock().unwrap().len();
-                        tracing::info!(
+                        tracing::debug!(
                             pipeline = data.pipeline_name,
                             stream = %current_stream,
                             checkpoint_count = count,
@@ -650,7 +650,7 @@ pub fn host_checkpoint(
                     Ok(cp) => {
                         data.dest_checkpoints.lock().unwrap().push(cp);
                         let count = data.dest_checkpoints.lock().unwrap().len();
-                        tracing::info!(
+                        tracing::debug!(
                             pipeline = data.pipeline_name,
                             stream = %current_stream,
                             checkpoint_count = count,

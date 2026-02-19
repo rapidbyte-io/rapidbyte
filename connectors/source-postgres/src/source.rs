@@ -279,12 +279,22 @@ pub async fn read_stream(
                         Some(rapidbyte_sdk::protocol::CursorType::Int64) => row
                             .try_get::<_, i64>(col_idx)
                             .ok()
-                            .map(|n| n.to_string()),
+                            .map(|n| n.to_string())
+                            .or_else(|| {
+                                row.try_get::<_, i32>(col_idx)
+                                    .ok()
+                                    .map(|n| n.to_string())
+                            }),
                         _ => row
                             .try_get::<_, String>(col_idx)
                             .ok()
                             .or_else(|| {
                                 row.try_get::<_, i64>(col_idx)
+                                    .ok()
+                                    .map(|n| n.to_string())
+                            })
+                            .or_else(|| {
+                                row.try_get::<_, i32>(col_idx)
                                     .ok()
                                     .map(|n| n.to_string())
                             }),
