@@ -11,7 +11,8 @@ use tokio_postgres::Client;
 
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::protocol::{
-    ColumnPolicy, DataErrorPolicy, NullabilityPolicy, SchemaEvolutionPolicy, TypeChangePolicy, WriteMode,
+    ColumnPolicy, DataErrorPolicy, Metric, MetricValue, NullabilityPolicy, SchemaEvolutionPolicy,
+    TypeChangePolicy, WriteMode,
 };
 use rapidbyte_sdk::validation::validate_pg_identifier;
 
@@ -246,6 +247,18 @@ impl<'a> WriteSession<'a> {
         self.bytes_since_commit += n as u64;
         self.rows_since_commit += result.rows_written;
         self.batches_written += 1;
+
+        // Emit real-time metrics per spec § Standard Metrics
+        let _ = host_ffi::metric("dest-postgres", &self.stream_name, &Metric {
+            name: "records_written".to_string(),
+            value: MetricValue::Counter(self.total_rows),
+            labels: vec![],
+        });
+        let _ = host_ffi::metric("dest-postgres", &self.stream_name, &Metric {
+            name: "bytes_written".to_string(),
+            value: MetricValue::Counter(self.total_bytes),
+            labels: vec![],
+        });
 
         // Checkpoint if any threshold is reached
         self.maybe_checkpoint().await?;

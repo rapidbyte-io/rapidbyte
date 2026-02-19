@@ -10,7 +10,7 @@ use arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::host_ffi;
-use rapidbyte_sdk::protocol::{ColumnSchema, ReadSummary, StreamContext};
+use rapidbyte_sdk::protocol::{ColumnSchema, Metric, MetricValue, ReadSummary, StreamContext};
 use rapidbyte_sdk::validation::validate_pg_identifier;
 
 /// Maximum number of rows per Arrow RecordBatch.
@@ -241,6 +241,18 @@ pub async fn read_stream(
                                 break;
                             }
 
+                            // Emit real-time metrics per spec § Standard Metrics
+                            let _ = host_ffi::metric("source-postgres", &ctx.stream_name, &Metric {
+                                name: "records_read".to_string(),
+                                value: MetricValue::Counter(total_records),
+                                labels: vec![],
+                            });
+                            let _ = host_ffi::metric("source-postgres", &ctx.stream_name, &Metric {
+                                name: "bytes_read".to_string(),
+                                value: MetricValue::Counter(total_bytes),
+                                labels: vec![],
+                            });
+
                             accumulated_rows.clear();
                             estimated_bytes = 256; // IPC framing overhead
                         }
@@ -304,6 +316,18 @@ pub async fn read_stream(
                         loop_error = Some(format!("emit_batch failed: {}", e));
                         break;
                     }
+
+                    // Emit real-time metrics per spec § Standard Metrics
+                    let _ = host_ffi::metric("source-postgres", &ctx.stream_name, &Metric {
+                        name: "records_read".to_string(),
+                        value: MetricValue::Counter(total_records),
+                        labels: vec![],
+                    });
+                    let _ = host_ffi::metric("source-postgres", &ctx.stream_name, &Metric {
+                        name: "bytes_read".to_string(),
+                        value: MetricValue::Counter(total_bytes),
+                        labels: vec![],
+                    });
 
                     accumulated_rows.clear();
                     estimated_bytes = 256;
