@@ -188,7 +188,11 @@ pub(crate) fn run_source(
     stream_result?;
 
     // Extract source checkpoints collected during the run
-    let checkpoints = source_checkpoints.lock().unwrap().drain(..).collect();
+    let checkpoints = source_checkpoints.lock().unwrap().drain(..).collect::<Vec<_>>();
+    tracing::info!(
+        source_checkpoint_count = checkpoints.len(),
+        "Extracted source checkpoints after VM complete"
+    );
 
     // Extract host function timings collected during the run
     let source_host_timings = source_timings.lock().unwrap().clone();
@@ -320,7 +324,11 @@ pub(crate) fn run_destination(
     stream_result?;
 
     // Extract dest checkpoints collected during the run
-    let checkpoints = dest_checkpoints.lock().unwrap().drain(..).collect();
+    let checkpoints = dest_checkpoints.lock().unwrap().drain(..).collect::<Vec<_>>();
+    tracing::info!(
+        dest_checkpoint_count = checkpoints.len(),
+        "Extracted dest checkpoints after VM complete"
+    );
 
     // Extract host function timings collected during the run
     let dest_host_timings = dest_timings.lock().unwrap().clone();

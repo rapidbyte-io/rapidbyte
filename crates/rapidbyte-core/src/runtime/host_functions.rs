@@ -616,7 +616,16 @@ pub fn host_checkpoint(
                 match serde_json::from_value::<Checkpoint>(
                     envelope.get("payload").cloned().unwrap_or(envelope.clone()),
                 ) {
-                    Ok(cp) => data.source_checkpoints.lock().unwrap().push(cp),
+                    Ok(cp) => {
+                        data.source_checkpoints.lock().unwrap().push(cp);
+                        let count = data.source_checkpoints.lock().unwrap().len();
+                        tracing::info!(
+                            pipeline = data.pipeline_name,
+                            stream = %current_stream,
+                            checkpoint_count = count,
+                            "Stored source checkpoint"
+                        );
+                    }
                     Err(e) => {
                         tracing::warn!(
                             pipeline = data.pipeline_name,
@@ -638,7 +647,16 @@ pub fn host_checkpoint(
                 match serde_json::from_value::<Checkpoint>(
                     envelope.get("payload").cloned().unwrap_or(envelope.clone()),
                 ) {
-                    Ok(cp) => data.dest_checkpoints.lock().unwrap().push(cp),
+                    Ok(cp) => {
+                        data.dest_checkpoints.lock().unwrap().push(cp);
+                        let count = data.dest_checkpoints.lock().unwrap().len();
+                        tracing::info!(
+                            pipeline = data.pipeline_name,
+                            stream = %current_stream,
+                            checkpoint_count = count,
+                            "Stored dest checkpoint"
+                        );
+                    }
                     Err(e) => {
                         tracing::warn!(
                             pipeline = data.pipeline_name,

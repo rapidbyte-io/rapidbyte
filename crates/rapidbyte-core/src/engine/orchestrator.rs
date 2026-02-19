@@ -422,6 +422,12 @@ async fn execute_pipeline_once(config: &PipelineConfig, attempt: u32) -> Result<
 
             // Checkpoint coordination: persist cursor only when both source and
             // dest confirm the stream data (per spec § State + Checkpointing)
+            tracing::info!(
+                pipeline = config.pipeline,
+                source_checkpoint_count = source_checkpoints.len(),
+                dest_checkpoint_count = dest_checkpoints.len(),
+                "About to correlate checkpoints"
+            );
             let cursors_advanced = correlate_and_persist_cursors(
                 &state_backend,
                 &config.pipeline,
