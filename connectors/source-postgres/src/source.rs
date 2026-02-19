@@ -17,7 +17,7 @@ use rapidbyte_sdk::validation::validate_pg_identifier;
 const BATCH_SIZE: usize = 10_000;
 
 /// Number of rows to fetch per server-side cursor iteration.
-const FETCH_CHUNK: usize = 1_000;
+const FETCH_CHUNK: usize = 10_000;
 
 /// Server-side cursor name used for streaming reads.
 const CURSOR_NAME: &str = "rb_cursor";
