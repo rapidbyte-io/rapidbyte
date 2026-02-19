@@ -7,11 +7,28 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use tokio_postgres::Client;
+use tokio_postgres::{Client, NoTls};
 
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::protocol::{ColumnSchema, Metric, MetricValue, ReadSummary, StreamContext};
 use rapidbyte_sdk::validation::validate_pg_identifier;
+
+/// Connect to PostgreSQL using the provided config.
+pub async fn connect(config: &crate::config::Config) -> Result<Client, String> {
+    let conn_str = config.connection_string();
+    let (client, connection) = tokio_postgres::connect(&conn_str, NoTls)
+        .await
+        .map_err(|e| format!("Connection failed: {}", e))?;
+
+    // Spawn the connection handler
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            host_ffi::log(0, &format!("PostgreSQL connection error: {}", e));
+        }
+    });
+
+    Ok(client)
+}
 
 /// Maximum number of rows per Arrow RecordBatch.
 const BATCH_SIZE: usize = 10_000;

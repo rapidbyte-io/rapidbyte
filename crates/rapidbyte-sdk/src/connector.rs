@@ -55,10 +55,18 @@ macro_rules! source_connector_main {
         use std::cell::RefCell;
         use std::sync::OnceLock;
 
-        static CONNECTOR: OnceLock<RefCell<$connector_type>> = OnceLock::new();
+        // WASI is single-threaded, so RefCell is safe to share.
+        // Wrap it in a newtype to implement Sync.
+        struct SyncRefCell(RefCell<$connector_type>);
+        // SAFETY: WASI connectors are single-threaded; no concurrent access is possible.
+        unsafe impl Sync for SyncRefCell {}
+
+        static CONNECTOR: OnceLock<SyncRefCell> = OnceLock::new();
 
         fn get_connector() -> &'static RefCell<$connector_type> {
-            CONNECTOR.get_or_init(|| RefCell::new(<$connector_type>::default()))
+            &CONNECTOR
+                .get_or_init(|| SyncRefCell(RefCell::new(<$connector_type>::default())))
+                .0
         }
 
         fn protocol_handler<F>(input_ptr: i32, input_len: i32, handler: F) -> i64
@@ -197,10 +205,18 @@ macro_rules! dest_connector_main {
         use std::cell::RefCell;
         use std::sync::OnceLock;
 
-        static CONNECTOR: OnceLock<RefCell<$connector_type>> = OnceLock::new();
+        // WASI is single-threaded, so RefCell is safe to share.
+        // Wrap it in a newtype to implement Sync.
+        struct SyncRefCell(RefCell<$connector_type>);
+        // SAFETY: WASI connectors are single-threaded; no concurrent access is possible.
+        unsafe impl Sync for SyncRefCell {}
+
+        static CONNECTOR: OnceLock<SyncRefCell> = OnceLock::new();
 
         fn get_connector() -> &'static RefCell<$connector_type> {
-            CONNECTOR.get_or_init(|| RefCell::new(<$connector_type>::default()))
+            &CONNECTOR
+                .get_or_init(|| SyncRefCell(RefCell::new(<$connector_type>::default())))
+                .0
         }
 
         fn protocol_handler<F>(input_ptr: i32, input_len: i32, handler: F) -> i64
