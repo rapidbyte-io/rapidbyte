@@ -280,9 +280,6 @@ pub async fn read_stream(
                             .try_get::<_, i64>(col_idx)
                             .ok()
                             .map(|n| n.to_string()),
-                        Some(rapidbyte_sdk::protocol::CursorType::Utf8) => {
-                            row.try_get::<_, String>(col_idx).ok()
-                        }
                         _ => row
                             .try_get::<_, String>(col_idx)
                             .ok()
