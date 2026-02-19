@@ -1,4 +1,5 @@
 mod config;
+mod format;
 pub mod sink;
 
 use std::time::Instant;
