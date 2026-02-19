@@ -18,7 +18,7 @@ static CONFIG: OnceLock<PgConfig> = OnceLock::new();
 pub use rapidbyte_sdk::memory::{rb_allocate, rb_deallocate};
 
 /// PostgreSQL connection config from pipeline YAML.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct PgConfig {
     host: String,
     #[serde(default = "default_port")]
@@ -194,26 +194,15 @@ pub extern "C" fn rb_validate(config_ptr: i32, config_len: i32) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn rb_discover(config_ptr: i32, config_len: i32) -> i64 {
-    protocol_handler(config_ptr, config_len, |input| {
-        let open_ctx: OpenContext = match serde_json::from_slice(input) {
-            Ok(ctx) => ctx,
-            Err(e) => {
+    protocol_handler(config_ptr, config_len, |_input| {
+        let config = match CONFIG.get() {
+            Some(c) => c.clone(),
+            None => {
                 return make_err_response(ConnectorError::config(
-                    "INVALID_OPEN_CTX",
-                    format!("Invalid OpenContext: {}", e),
+                    "NOT_OPENED",
+                    "rb_open must be called before rb_discover",
                 ));
             }
-        };
-        let config: PgConfig = match &open_ctx.config {
-            ConfigBlob::Json(v) => match serde_json::from_value(v.clone()) {
-                Ok(c) => c,
-                Err(e) => {
-                    return make_err_response(ConnectorError::config(
-                        "INVALID_CONFIG",
-                        format!("Invalid config: {}", e),
-                    ));
-                }
-            },
         };
 
         let rt = create_runtime();
