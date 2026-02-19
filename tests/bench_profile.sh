@@ -28,7 +28,8 @@ cyan()  { echo -e "${CYAN}$*${NC}"; }
 cleanup() {
     info "Stopping Docker Compose..."
     docker compose -f "$PROJECT_ROOT/docker-compose.yml" down -v 2>/dev/null || true
-    rm -f /tmp/rapidbyte_bench_state.db
+    # State db may be root-owned when profiling with --root
+    rm -f /tmp/rapidbyte_bench_state.db 2>/dev/null || sudo rm -f /tmp/rapidbyte_bench_state.db 2>/dev/null || true
 }
 
 echo ""
@@ -48,9 +49,18 @@ if ! command -v cargo-flamegraph &> /dev/null && ! cargo flamegraph --help &> /d
     fail "cargo-flamegraph not found. Install with: cargo install flamegraph"
 fi
 
+# ── Prepare rpath for sudo (macOS strips DYLD_LIBRARY_PATH) ──────
+FLAMEGRAPH_RUSTFLAGS="${RUSTFLAGS:-}"
+if [[ "$OSTYPE" == darwin* ]]; then
+    WASMEDGE_LIB_DIR="$HOME/.wasmedge/lib"
+    if [ -d "$WASMEDGE_LIB_DIR" ]; then
+        FLAMEGRAPH_RUSTFLAGS="$FLAMEGRAPH_RUSTFLAGS -C link-arg=-Wl,-rpath,$WASMEDGE_LIB_DIR"
+    fi
+fi
+
 # ── Build with debug symbols ─────────────────────────────────────
 info "Building host binary (release + debug symbols)..."
-(cd "$PROJECT_ROOT" && CARGO_PROFILE_RELEASE_DEBUG=2 cargo build --release 2>&1 | tail -1)
+(cd "$PROJECT_ROOT" && CARGO_PROFILE_RELEASE_DEBUG=2 RUSTFLAGS="$FLAMEGRAPH_RUSTFLAGS" cargo build --release 2>&1 | tail -1)
 
 info "Building source-postgres connector (release)..."
 (cd "$PROJECT_ROOT/connectors/source-postgres" && cargo build --release 2>&1 | tail -1)
@@ -63,6 +73,12 @@ mkdir -p "$CONNECTOR_DIR"
 cp "$PROJECT_ROOT/connectors/source-postgres/target/wasm32-wasip1/release/source_postgres.wasm" "$CONNECTOR_DIR/"
 cp "$PROJECT_ROOT/connectors/dest-postgres/target/wasm32-wasip1/release/dest_postgres.wasm" "$CONNECTOR_DIR/"
 info "Connectors staged in $CONNECTOR_DIR"
+
+# Also stage to default plugin dir (sudo strips RAPIDBYTE_CONNECTOR_DIR)
+PLUGIN_DIR="$HOME/.rapidbyte/plugins"
+mkdir -p "$PLUGIN_DIR"
+cp "$CONNECTOR_DIR/source_postgres.wasm" "$PLUGIN_DIR/"
+cp "$CONNECTOR_DIR/dest_postgres.wasm" "$PLUGIN_DIR/"
 
 # ── Start PostgreSQL ──────────────────────────────────────────────
 info "Starting PostgreSQL via Docker Compose..."
@@ -116,11 +132,12 @@ SVG_FILE="$PROFILE_DIR/flamegraph_${BENCH_ROWS}rows_${LOAD_METHOD}_${TIMESTAMP}.
 
 # ── Run flamegraph ────────────────────────────────────────────────
 info "Generating flamegraph ($LOAD_METHOD mode, $BENCH_ROWS rows)..."
-info "This may take a while..."
+info "This may take a while (sudo required for dtrace on macOS)..."
 
-cargo flamegraph \
+CARGO_PROFILE_RELEASE_DEBUG=2 RUSTFLAGS="$FLAMEGRAPH_RUSTFLAGS" cargo flamegraph \
     --bin rapidbyte \
     --release \
+    --root \
     -o "$SVG_FILE" \
     -- run "$PIPELINE_PATH" \
     --log-level warn 2>&1

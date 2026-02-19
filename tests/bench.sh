@@ -34,7 +34,8 @@ cyan()  { echo -e "${CYAN}$*${NC}"; }
 cleanup() {
     info "Stopping Docker Compose..."
     docker compose -f "$PROJECT_ROOT/docker-compose.yml" down -v 2>/dev/null || true
-    rm -f /tmp/rapidbyte_bench_state.db
+    # State db may be root-owned when profiling with --root
+    rm -f /tmp/rapidbyte_bench_state.db 2>/dev/null || sudo rm -f /tmp/rapidbyte_bench_state.db 2>/dev/null || true
 }
 
 usage() {
@@ -283,19 +284,33 @@ if [ "$PROFILE" = "true" ]; then
     info "Running profiling iteration with flamegraph..."
     docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
         psql -U postgres -d rapidbyte_test -c "DROP SCHEMA IF EXISTS raw CASCADE" > /dev/null 2>&1
-    rm -f /tmp/rapidbyte_bench_state.db
+    rm -f /tmp/rapidbyte_bench_state.db 2>/dev/null || sudo rm -f /tmp/rapidbyte_bench_state.db 2>/dev/null || true
+
+    # Stage connectors to default plugin dir (sudo strips RAPIDBYTE_CONNECTOR_DIR)
+    PLUGIN_DIR="$HOME/.rapidbyte/plugins"
+    mkdir -p "$PLUGIN_DIR"
+    cp "$CONNECTOR_DIR/source_postgres.wasm" "$PLUGIN_DIR/"
+    cp "$CONNECTOR_DIR/dest_postgres.wasm" "$PLUGIN_DIR/"
 
     PROFILE_DIR="$PROJECT_ROOT/target/profiles"
     mkdir -p "$PROFILE_DIR"
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
     SVG_FILE="$PROFILE_DIR/flamegraph_${BENCH_ROWS}rows_insert_${TIMESTAMP}.svg"
 
-    info "Rebuilding with debug symbols for flamegraph..."
-    CARGO_PROFILE_RELEASE_DEBUG=2 cargo build --release 2>&1 | tail -1
+    info "Generating flamegraph (sudo required for dtrace on macOS)..."
 
-    cargo flamegraph \
+    FLAMEGRAPH_RUSTFLAGS="${RUSTFLAGS:-}"
+    if [[ "$OSTYPE" == darwin* ]]; then
+        WASMEDGE_LIB_DIR="$HOME/.wasmedge/lib"
+        if [ -d "$WASMEDGE_LIB_DIR" ]; then
+            FLAMEGRAPH_RUSTFLAGS="$FLAMEGRAPH_RUSTFLAGS -C link-arg=-Wl,-rpath,$WASMEDGE_LIB_DIR"
+        fi
+    fi
+
+    CARGO_PROFILE_RELEASE_DEBUG=2 RUSTFLAGS="$FLAMEGRAPH_RUSTFLAGS" cargo flamegraph \
         --bin rapidbyte \
         --release \
+        --root \
         -o "$SVG_FILE" \
         -- run "$PROJECT_ROOT/tests/fixtures/pipelines/bench_pg.yaml" \
         --log-level warn 2>&1
