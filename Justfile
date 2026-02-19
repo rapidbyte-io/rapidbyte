@@ -34,3 +34,19 @@ bench-connector-postgres rows="10000":
 
 clean:
     cargo clean
+
+# Profile a benchmark run and generate flamegraph
+bench-profile rows="10000" mode="insert":
+    ./tests/bench_profile.sh {{rows}} {{mode}}
+
+# Benchmark with flamegraph profiling at the end
+bench-connector-postgres-profile rows="10000":
+    ./tests/bench.sh --rows {{rows}} --iters 3 --profile
+
+# Run benchmark matrix across row counts
+bench-matrix *args="":
+    ./tests/bench_matrix.sh {{args}}
+
+# Compare benchmark results across runs
+bench-compare *args="":
+    python3 tests/bench_compare.py {{args}}

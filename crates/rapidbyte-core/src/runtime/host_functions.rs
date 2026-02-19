@@ -25,6 +25,18 @@ pub enum Frame {
     EndStream,
 }
 
+/// Cumulative timing counters for host function calls.
+/// Shared via Arc<Mutex<>> so the runner can read after the VM finishes.
+#[derive(Debug, Clone, Default)]
+pub struct HostTimings {
+    pub emit_batch_nanos: u64,
+    pub next_batch_nanos: u64,
+    pub compress_nanos: u64,
+    pub decompress_nanos: u64,
+    pub emit_batch_count: u64,
+    pub next_batch_count: u64,
+}
+
 /// Shared state passed to all host functions via WasmEdge's host data mechanism.
 pub struct HostState {
     /// Pipeline name for state operations.
@@ -65,6 +77,11 @@ pub struct HostState {
     /// Dest checkpoints received during this stream run.
     /// Arc<Mutex<>> so the orchestrator can read checkpoints after the VM runs.
     pub dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
+
+    // --- Host function timing ---
+    /// Cumulative timing counters for host function calls.
+    /// Arc<Mutex<>> so the runner can read after the VM finishes.
+    pub timings: Arc<Mutex<HostTimings>>,
 }
 
 impl HostState {
@@ -97,6 +114,7 @@ pub fn host_emit_batch(
     args: Vec<WasmValue>,
 ) -> Result<Vec<WasmValue>, CoreError> {
     data.clear_last_error();
+    let fn_start = std::time::Instant::now();
 
     let ptr = args[0].to_i32() as u32;
     let len = args[1].to_i32() as u32;
@@ -122,10 +140,16 @@ pub fn host_emit_batch(
     }
 
     // Compress if a codec is configured
+    let compress_start = std::time::Instant::now();
     let batch_bytes = if let Some(codec) = data.compression {
         super::compression::compress(codec, &batch_bytes)
     } else {
         batch_bytes
+    };
+    let compress_elapsed_nanos = if data.compression.is_some() {
+        compress_start.elapsed().as_nanos() as u64
+    } else {
+        0
     };
 
     let sender = match &data.batch_sender {
@@ -141,6 +165,10 @@ pub fn host_emit_batch(
     match sender.send(Frame::Data(batch_bytes)) {
         Ok(()) => {
             data.next_batch_id += 1;
+            let mut t = data.timings.lock().unwrap();
+            t.emit_batch_nanos += fn_start.elapsed().as_nanos() as u64;
+            t.emit_batch_count += 1;
+            t.compress_nanos += compress_elapsed_nanos;
             Ok(vec![WasmValue::from_i32(0)])
         }
         Err(e) => {
@@ -162,6 +190,7 @@ pub fn host_next_batch(
     args: Vec<WasmValue>,
 ) -> Result<Vec<WasmValue>, CoreError> {
     data.clear_last_error();
+    let fn_start = std::time::Instant::now();
 
     let out_ptr = args[0].to_i32() as u32;
     let out_cap = args[1].to_i32() as u32;
@@ -187,10 +216,16 @@ pub fn host_next_batch(
     };
 
     // Decompress if a codec is configured
+    let decompress_start = std::time::Instant::now();
     let batch = if let Some(codec) = data.compression {
         super::compression::decompress(codec, &batch)
     } else {
         batch
+    };
+    let decompress_elapsed_nanos = if data.compression.is_some() {
+        decompress_start.elapsed().as_nanos() as u64
+    } else {
+        0
     };
 
     let batch_len = batch.len() as u32;
@@ -229,6 +264,13 @@ pub fn host_next_batch(
         let err = ConnectorError::internal("MEMORY_WRITE", format!("{:?}", e));
         data.set_last_error(err);
         return Ok(vec![WasmValue::from_i32(-1)]);
+    }
+
+    {
+        let mut t = data.timings.lock().unwrap();
+        t.next_batch_nanos += fn_start.elapsed().as_nanos() as u64;
+        t.next_batch_count += 1;
+        t.decompress_nanos += decompress_elapsed_nanos;
     }
 
     Ok(vec![WasmValue::from_i32(batch_len as i32)])

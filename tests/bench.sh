@@ -15,6 +15,10 @@ BENCH_ROWS="${BENCH_ROWS:-10000}"
 BENCH_ITERS="${BENCH_ITERS:-3}"
 BUILD_MODE="${BUILD_MODE:-release}"
 BENCH_AOT="${BENCH_AOT:-true}"
+PROFILE="false"
+RESULTS_DIR="$PROJECT_ROOT/target/bench_results"
+mkdir -p "$RESULTS_DIR"
+RESULTS_FILE="$RESULTS_DIR/results.jsonl"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -34,13 +38,14 @@ cleanup() {
 }
 
 usage() {
-    echo "Usage: $0 [--rows N] [--iters N] [--no-aot] [--debug]"
+    echo "Usage: $0 [--rows N] [--iters N] [--no-aot] [--debug] [--profile]"
     echo ""
     echo "Options:"
     echo "  --rows N    Number of rows to benchmark (default: 10000)"
     echo "  --iters N   Number of iterations per mode (default: 3)"
     echo "  --no-aot    Skip AOT compilation of WASM modules"
     echo "  --debug     Use debug builds instead of release"
+    echo "  --profile   Generate flamegraph after benchmark runs"
     echo ""
     echo "Runs both INSERT and COPY modes automatically."
     exit 0
@@ -53,6 +58,7 @@ while [[ $# -gt 0 ]]; do
         --iters)  BENCH_ITERS="$2"; shift 2 ;;
         --no-aot) BENCH_AOT="false"; shift ;;
         --debug)  BUILD_MODE="debug"; shift ;;
+        --profile) PROFILE="true"; shift ;;
         --help)   usage ;;
         *)        fail "Unknown option: $1" ;;
     esac
@@ -163,6 +169,22 @@ run_mode() {
         DURATION=$(echo "$JSON_LINE" | python3 -c "import sys,json; print(f'{json.load(sys.stdin)[\"duration_secs\"]:.2f}')")
         echo "done (${DURATION}s)"
         echo "$JSON_LINE" >> "$results_file"
+
+        # Persist enriched result for regression tracking
+        GIT_SHA=$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+        GIT_BRANCH=$(git -C "$PROJECT_ROOT" branch --show-current 2>/dev/null || echo "unknown")
+        ENRICHED=$(echo "$JSON_LINE" | python3 -c "
+import sys, json, datetime
+d = json.load(sys.stdin)
+d['timestamp'] = datetime.datetime.now().isoformat()
+d['mode'] = '$mode'
+d['bench_rows'] = $BENCH_ROWS
+d['aot'] = $( [ '$BENCH_AOT' = 'true' ] && echo 'True' || echo 'False' )
+d['git_sha'] = '$GIT_SHA'
+d['git_branch'] = '$GIT_BRANCH'
+print(json.dumps(d))
+")
+        echo "$ENRICHED" >> "$RESULTS_FILE"
     done
 }
 
@@ -255,6 +277,32 @@ print(hdr.format('Throughput (MB/s)', f'{i_mbps_avg:.2f}', f'{c_mbps_avg:.2f}', 
 "
 
 rm -f "$INSERT_RESULTS" "$COPY_RESULTS"
+
+# ── Optional flamegraph profiling ─────────────────────────────────
+if [ "$PROFILE" = "true" ]; then
+    info "Running profiling iteration with flamegraph..."
+    docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+        psql -U postgres -d rapidbyte_test -c "DROP SCHEMA IF EXISTS raw CASCADE" > /dev/null 2>&1
+    rm -f /tmp/rapidbyte_bench_state.db
+
+    PROFILE_DIR="$PROJECT_ROOT/target/profiles"
+    mkdir -p "$PROFILE_DIR"
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    SVG_FILE="$PROFILE_DIR/flamegraph_${BENCH_ROWS}rows_insert_${TIMESTAMP}.svg"
+
+    info "Rebuilding with debug symbols for flamegraph..."
+    CARGO_PROFILE_RELEASE_DEBUG=2 cargo build --release 2>&1 | tail -1
+
+    cargo flamegraph \
+        --bin rapidbyte \
+        --release \
+        -o "$SVG_FILE" \
+        -- run "$PROJECT_ROOT/tests/fixtures/pipelines/bench_pg.yaml" \
+        --log-level warn 2>&1
+
+    info "Flamegraph saved to: $SVG_FILE"
+    info "Open with: open $SVG_FILE"
+fi
 
 echo ""
 cyan "═══════════════════════════════════════════════"

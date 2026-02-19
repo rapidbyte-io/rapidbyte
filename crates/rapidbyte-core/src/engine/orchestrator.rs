@@ -397,8 +397,8 @@ async fn execute_pipeline_once(config: &PipelineConfig, attempt: u32) -> Result<
 
     match (&source_result, &dest_result) {
         (
-            Ok((src_dur, read_summary, source_checkpoints)),
-            Ok((dst_dur, write_summary, vm_setup_secs, recv_secs, dest_checkpoints)),
+            Ok((src_dur, read_summary, source_checkpoints, src_host_timings)),
+            Ok((dst_dur, write_summary, vm_setup_secs, recv_secs, dest_checkpoints, dst_host_timings)),
         ) => {
             let perf = write_summary.perf.as_ref();
             let src_perf = read_summary.perf.as_ref();
@@ -464,6 +464,12 @@ async fn execute_pipeline_once(config: &PipelineConfig, attempt: u32) -> Result<
                 dest_vm_setup_secs: *vm_setup_secs,
                 dest_recv_secs: *recv_secs,
                 wasm_overhead_secs,
+                source_emit_nanos: src_host_timings.emit_batch_nanos,
+                source_compress_nanos: src_host_timings.compress_nanos,
+                source_emit_count: src_host_timings.emit_batch_count,
+                dest_recv_nanos: dst_host_timings.next_batch_nanos,
+                dest_decompress_nanos: dst_host_timings.decompress_nanos,
+                dest_recv_count: dst_host_timings.next_batch_count,
                 transform_count: transform_durations.len(),
                 transform_duration_secs: transform_durations.iter().sum(),
                 transform_module_load_ms,

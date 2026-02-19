@@ -17,7 +17,7 @@ use super::errors::PipelineError;
 use super::vm_factory::create_secure_wasi_module;
 use crate::runtime::compression::CompressionCodec;
 use crate::runtime::connector_handle::ConnectorHandle;
-use crate::runtime::host_functions::{Frame, HostState};
+use crate::runtime::host_functions::{Frame, HostState, HostTimings};
 use crate::runtime::wasm_runtime::{self, WasmRuntime};
 use crate::state::backend::{RunStats, StateBackend};
 use crate::state::sqlite::SqliteStateBackend;
@@ -46,6 +46,13 @@ pub struct PipelineResult {
     pub dest_vm_setup_secs: f64,
     pub dest_recv_secs: f64,
     pub wasm_overhead_secs: f64,
+    // Host function timing
+    pub source_emit_nanos: u64,
+    pub source_compress_nanos: u64,
+    pub source_emit_count: u64,
+    pub dest_recv_nanos: u64,
+    pub dest_decompress_nanos: u64,
+    pub dest_recv_count: u64,
     // Transform timing
     pub transform_count: usize,
     pub transform_duration_secs: f64,
@@ -75,7 +82,7 @@ pub(crate) fn run_source(
     stats: Arc<Mutex<RunStats>>,
     permissions: Option<&Permissions>,
     compression: Option<CompressionCodec>,
-) -> Result<(f64, ReadSummary, Vec<Checkpoint>), PipelineError> {
+) -> Result<(f64, ReadSummary, Vec<Checkpoint>, HostTimings), PipelineError> {
     let phase_start = Instant::now();
 
     // Keep a clone for sending stream-boundary sentinels after each run_read
@@ -86,6 +93,9 @@ pub(crate) fn run_source(
 
     // Shared checkpoint store — clone the Arc so we can read checkpoints after the VM runs
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Shared timing counters — clone the Arc so we can read timings after the VM runs
+    let source_timings = Arc::new(Mutex::new(HostTimings::default()));
 
     let host_state = HostState {
         pipeline_name: pipeline_name.to_string(),
@@ -100,6 +110,7 @@ pub(crate) fn run_source(
         compression,
         source_checkpoints: source_checkpoints.clone(),
         dest_checkpoints: Arc::new(Mutex::new(Vec::new())),
+        timings: source_timings.clone(),
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
@@ -177,15 +188,19 @@ pub(crate) fn run_source(
     // Extract source checkpoints collected during the run
     let checkpoints = source_checkpoints.lock().unwrap().drain(..).collect();
 
+    // Extract host function timings collected during the run
+    let source_host_timings = source_timings.lock().unwrap().clone();
+
     // sender is dropped here -> dest sees final EOF on host_next_batch
     Ok((
         phase_start.elapsed().as_secs_f64(),
         total_summary,
         checkpoints,
+        source_host_timings,
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn run_destination(
     module: Module,
     receiver: mpsc::Receiver<Frame>,
@@ -198,7 +213,7 @@ pub(crate) fn run_destination(
     stats: Arc<Mutex<RunStats>>,
     permissions: Option<&Permissions>,
     compression: Option<CompressionCodec>,
-) -> Result<(f64, WriteSummary, f64, f64, Vec<Checkpoint>), PipelineError> {
+) -> Result<(f64, WriteSummary, f64, f64, Vec<Checkpoint>, HostTimings), PipelineError> {
     let phase_start = Instant::now();
     let vm_setup_start = Instant::now();
 
@@ -207,6 +222,9 @@ pub(crate) fn run_destination(
 
     // Shared checkpoint store — clone the Arc so we can read checkpoints after the VM runs
     let dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // Shared timing counters — clone the Arc so we can read timings after the VM runs
+    let dest_timings = Arc::new(Mutex::new(HostTimings::default()));
 
     let host_state = HostState {
         pipeline_name: pipeline_name.to_string(),
@@ -221,6 +239,7 @@ pub(crate) fn run_destination(
         compression,
         source_checkpoints: Arc::new(Mutex::new(Vec::new())),
         dest_checkpoints: dest_checkpoints.clone(),
+        timings: dest_timings.clone(),
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
@@ -301,12 +320,16 @@ pub(crate) fn run_destination(
     // Extract dest checkpoints collected during the run
     let checkpoints = dest_checkpoints.lock().unwrap().drain(..).collect();
 
+    // Extract host function timings collected during the run
+    let dest_host_timings = dest_timings.lock().unwrap().clone();
+
     Ok((
         phase_start.elapsed().as_secs_f64(),
         total_summary,
         vm_setup_secs,
         recv_secs,
         checkpoints,
+        dest_host_timings,
     ))
 }
 
@@ -345,6 +368,7 @@ pub(crate) fn run_transform(
         compression,
         source_checkpoints: Arc::new(Mutex::new(Vec::new())),
         dest_checkpoints: Arc::new(Mutex::new(Vec::new())),
+        timings: Arc::new(Mutex::new(HostTimings::default())),
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
@@ -443,6 +467,7 @@ pub(crate) fn validate_connector(
         compression: None,
         source_checkpoints: Arc::new(Mutex::new(Vec::new())),
         dest_checkpoints: Arc::new(Mutex::new(Vec::new())),
+        timings: Arc::new(Mutex::new(HostTimings::default())),
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;
@@ -498,6 +523,7 @@ pub(crate) fn run_discover(
         compression: None,
         source_checkpoints: Arc::new(Mutex::new(Vec::new())),
         dest_checkpoints: Arc::new(Mutex::new(Vec::new())),
+        timings: Arc::new(Mutex::new(HostTimings::default())),
     };
 
     let mut import = wasm_runtime::create_host_imports(host_state)?;

@@ -52,6 +52,28 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
     println!("    Flush:         {:.3}s", result.dest_flush_secs);
     println!("    Commit:        {:.3}s", result.dest_commit_secs);
     println!("    WASM overhead: {:.3}s", result.wasm_overhead_secs);
+    println!(
+        "  Host emit_batch: {:.3}s ({} calls)",
+        result.source_emit_nanos as f64 / 1e9,
+        result.source_emit_count
+    );
+    if result.source_compress_nanos > 0 {
+        println!(
+            "    Compression:   {:.3}s",
+            result.source_compress_nanos as f64 / 1e9
+        );
+    }
+    println!(
+        "  Host next_batch: {:.3}s ({} calls)",
+        result.dest_recv_nanos as f64 / 1e9,
+        result.dest_recv_count
+    );
+    if result.dest_decompress_nanos > 0 {
+        println!(
+            "    Decompression: {:.3}s",
+            result.dest_decompress_nanos as f64 / 1e9
+        );
+    }
     if result.transform_count > 0 {
         println!(
             "  Transforms:      {} stage(s), {:.2}s total",
@@ -87,6 +109,12 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
         "source_fetch_secs": result.source_fetch_secs,
         "source_module_load_ms": result.source_module_load_ms,
         "dest_module_load_ms": result.dest_module_load_ms,
+        "source_emit_nanos": result.source_emit_nanos,
+        "source_compress_nanos": result.source_compress_nanos,
+        "source_emit_count": result.source_emit_count,
+        "dest_recv_nanos": result.dest_recv_nanos,
+        "dest_decompress_nanos": result.dest_decompress_nanos,
+        "dest_recv_count": result.dest_recv_count,
         "transform_count": result.transform_count,
         "transform_duration_secs": result.transform_duration_secs,
         "transform_module_load_ms": result.transform_module_load_ms,
