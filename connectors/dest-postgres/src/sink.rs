@@ -1431,16 +1431,22 @@ async fn write_rows_individually(
     let mut rows_failed = 0u64;
 
     for batch in batches {
+        let typed_cols = downcast_columns(batch, &active_cols);
+        let type_null_flags: Vec<bool> = active_cols
+            .iter()
+            .map(|&i| type_null_columns.contains(arrow_schema.field(i).name()))
+            .collect();
+
         for row_idx in 0..batch.num_rows() {
             let mut sql = format!("INSERT INTO {} ({}) VALUES (", qualified_table, col_list);
-            for (pos, &col_idx) in active_cols.iter().enumerate() {
+            for (pos, typed_col) in typed_cols.iter().enumerate() {
                 if pos > 0 {
                     sql.push_str(", ");
                 }
-                if type_null_columns.contains(arrow_schema.field(col_idx).name()) {
+                if type_null_flags[pos] {
                     sql.push_str("NULL");
                 } else {
-                    sql.push_str(&format_sql_value(batch.column(col_idx).as_ref(), row_idx));
+                    write_sql_value(&mut sql, typed_col, row_idx);
                 }
             }
             sql.push(')');
