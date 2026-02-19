@@ -16,7 +16,9 @@ RESULTS_FILE = Path(__file__).parent.parent / "target" / "bench_results" / "resu
 
 def load_results():
     if not RESULTS_FILE.exists():
-        print(f"No results file at {RESULTS_FILE}")
+        print("No benchmark results found.")
+        print("Run a benchmark first:  just bench-connector-postgres")
+        print("Then compare runs:      just bench-compare")
         sys.exit(1)
     results = []
     for line in RESULTS_FILE.read_text().splitlines():

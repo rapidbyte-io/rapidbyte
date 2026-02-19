@@ -47,6 +47,10 @@ bench-connector-postgres-profile rows="10000":
 bench-matrix *args="":
     ./tests/bench_matrix.sh {{args}}
 
-# Compare benchmark results across runs
-bench-compare *args="":
+# Compare benchmarks between two git refs
+bench-compare ref1 ref2 *args="":
+    ./tests/bench_compare.sh {{ref1}} {{ref2}} {{args}}
+
+# View/compare past benchmark results
+bench-results *args="":
     python3 tests/bench_compare.py {{args}}
