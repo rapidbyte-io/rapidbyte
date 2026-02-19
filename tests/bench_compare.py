@@ -109,5 +109,31 @@ def main():
                 line += f"  {sign}{pct:.1f}%"
             print(line)
 
+        # Throughput summary
+        print()
+        for label, calc in [("Throughput (rows/s)", "rows"), ("Throughput (MB/s)", "mb")]:
+            line = f"  {label:<22s}"
+            vals = []
+            for sha in shas:
+                matching = [r for r in results if r.get("git_sha") == sha and r.get("mode") == mode]
+                # Filter to runs that actually processed data
+                valid = [r for r in matching if r.get("records_read", 0) > 0]
+                if not valid:
+                    vals.append(0)
+                    line += f"  {'N/A':>12s}"
+                    continue
+                if calc == "rows":
+                    v = sum(r["records_read"] / r["duration_secs"] for r in valid) / len(valid)
+                    vals.append(v)
+                    line += f"  {v:>12,.0f}"
+                else:
+                    v = sum(r.get("bytes_read", 0) / r["duration_secs"] / 1_048_576 for r in valid) / len(valid)
+                    vals.append(v)
+                    line += f"  {v:>12.2f}"
+            if len(vals) == 2 and vals[0] > 0:
+                speedup = vals[1] / vals[0]
+                line += f"  {speedup:.2f}x"
+            print(line)
+
 if __name__ == "__main__":
     main()
