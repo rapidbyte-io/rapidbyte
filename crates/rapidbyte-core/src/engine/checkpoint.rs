@@ -190,4 +190,90 @@ mod tests {
         let advanced = correlate_and_persist_cursors(&backend, "test_pipe", &src, &dst).unwrap();
         assert_eq!(advanced, 0);
     }
+
+    #[test]
+    fn test_checkpoint_envelope_roundtrip_via_host_parsing() {
+        use rapidbyte_sdk::protocol::{CursorValue, PayloadEnvelope};
+
+        // Simulate what the source connector does in host_ffi::checkpoint()
+        let source_cp = Checkpoint {
+            id: 1,
+            kind: CheckpointKind::Source,
+            stream: "users".to_string(),
+            cursor_field: Some("id".to_string()),
+            cursor_value: Some(CursorValue::Int64(42)),
+            records_processed: 100,
+            bytes_processed: 5000,
+        };
+        let envelope = PayloadEnvelope {
+            protocol_version: "1".to_string(),
+            connector_id: "source-postgres".to_string(),
+            stream_name: "users".to_string(),
+            payload: source_cp.clone(),
+        };
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+
+        // Simulate what host_checkpoint() does: parse as Value, then extract
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        // Debug: print the serialized envelope to see structure
+        eprintln!(
+            "Serialized envelope: {}",
+            serde_json::to_string_pretty(&value).unwrap()
+        );
+
+        // This is the exact logic from host_functions.rs:617
+        let checkpoint_value = value.get("payload").cloned().unwrap_or(value.clone());
+        let parsed: Checkpoint = serde_json::from_value(checkpoint_value).unwrap();
+
+        assert_eq!(parsed.stream, "users");
+        assert_eq!(parsed.cursor_field, Some("id".to_string()));
+        assert_eq!(parsed.cursor_value, Some(CursorValue::Int64(42)));
+        assert_eq!(parsed.records_processed, 100);
+
+        // Now do the same for a dest checkpoint
+        let dest_cp = Checkpoint {
+            id: 1,
+            kind: CheckpointKind::Dest,
+            stream: "users".to_string(),
+            cursor_field: None,
+            cursor_value: None,
+            records_processed: 100,
+            bytes_processed: 5000,
+        };
+        let dest_envelope = PayloadEnvelope {
+            protocol_version: "1".to_string(),
+            connector_id: "dest-postgres".to_string(),
+            stream_name: "users".to_string(),
+            payload: dest_cp.clone(),
+        };
+        let dest_bytes = serde_json::to_vec(&dest_envelope).unwrap();
+        let dest_value: serde_json::Value = serde_json::from_slice(&dest_bytes).unwrap();
+        eprintln!(
+            "Dest envelope: {}",
+            serde_json::to_string_pretty(&dest_value).unwrap()
+        );
+        let dest_checkpoint_value = dest_value
+            .get("payload")
+            .cloned()
+            .unwrap_or(dest_value.clone());
+        let dest_parsed: Checkpoint = serde_json::from_value(dest_checkpoint_value).unwrap();
+
+        assert_eq!(dest_parsed.stream, "users");
+        assert_eq!(dest_parsed.kind, CheckpointKind::Dest);
+
+        // Finally, test full correlation -> SQLite persistence
+        let backend = SqliteStateBackend::in_memory().unwrap();
+        let advanced =
+            correlate_and_persist_cursors(&backend, "test_pipe", &[parsed], &[dest_parsed])
+                .unwrap();
+        assert_eq!(advanced, 1);
+
+        let cursor = backend
+            .get_cursor("test_pipe", "users")
+            .unwrap()
+            .unwrap();
+        assert_eq!(cursor.cursor_value, Some("42".to_string()));
+        assert_eq!(cursor.cursor_field, Some("id".to_string()));
+    }
 }
