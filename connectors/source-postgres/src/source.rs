@@ -23,20 +23,17 @@ const FETCH_CHUNK: usize = 10_000;
 const CURSOR_NAME: &str = "rb_cursor";
 
 /// Estimate byte size of a single row for max_record_bytes checking.
-fn estimate_row_bytes(row: &tokio_postgres::Row, columns: &[ColumnSchema]) -> usize {
+fn estimate_row_bytes(columns: &[ColumnSchema]) -> usize {
     let mut total = 0usize;
-    for (col_idx, col) in columns.iter().enumerate() {
+    for col in columns.iter() {
         total += match col.data_type.as_str() {
             "Int16" => 2,
             "Int32" | "Float32" => 4,
             "Int64" | "Float64" => 8,
             "Boolean" => 1,
-            _ => row
-                .try_get::<_, String>(col_idx)
-                .map(|s| s.len() + 4)
-                .unwrap_or(4),
+            _ => 64,
         };
-        total += 1; // null bitmap overhead per column
+        total += 1;
     }
     total
 }
@@ -190,7 +187,7 @@ pub async fn read_stream(
             // Per-row max_record_bytes enforcement (spec § Data Exchange Format)
             let mut valid_rows: Vec<tokio_postgres::Row> = Vec::with_capacity(rows.len());
             for row in rows {
-                let row_bytes = estimate_row_bytes(&row, &columns);
+                let row_bytes = estimate_row_bytes(&columns);
                 if row_bytes > max_record_bytes {
                     match ctx.policies.on_data_error {
                         rapidbyte_sdk::protocol::DataErrorPolicy::Fail => {
@@ -225,7 +222,7 @@ pub async fn read_stream(
             // Flush before adding any row that would push the batch over the limit
             // (spec: max_batch_bytes is a hard ceiling, not a soft trigger).
             for row in valid_rows {
-                let row_bytes = estimate_row_bytes(&row, &columns);
+                let row_bytes = estimate_row_bytes(&columns);
 
                 // Flush if adding this row would exceed max_batch_bytes
                 if !accumulated_rows.is_empty() && estimated_bytes + row_bytes >= max_batch_bytes {
