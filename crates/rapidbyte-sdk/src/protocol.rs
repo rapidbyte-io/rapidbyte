@@ -292,6 +292,8 @@ pub struct WritePerf {
     pub connect_secs: f64,
     pub flush_secs: f64,
     pub commit_secs: f64,
+    #[serde(default)]
+    pub arrow_decode_secs: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -299,6 +301,8 @@ pub struct ReadPerf {
     pub connect_secs: f64,
     pub query_secs: f64,
     pub fetch_secs: f64,
+    #[serde(default)]
+    pub arrow_encode_secs: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -586,6 +590,7 @@ mod tests {
                 connect_secs: 0.1,
                 flush_secs: 1.5,
                 commit_secs: 0.05,
+                arrow_decode_secs: 0.12,
             }),
         };
         let json = serde_json::to_string(&s).unwrap();
@@ -707,6 +712,7 @@ mod tests {
             connect_secs: 0.05,
             query_secs: 0.8,
             fetch_secs: 2.3,
+            arrow_encode_secs: 0.15,
         };
         let json = serde_json::to_string(&perf).unwrap();
         let back: ReadPerf = serde_json::from_str(&json).unwrap();
@@ -725,6 +731,7 @@ mod tests {
                 connect_secs: 0.1,
                 query_secs: 1.0,
                 fetch_secs: 3.0,
+                arrow_encode_secs: 0.2,
             }),
         };
         let json = serde_json::to_string(&s).unwrap();

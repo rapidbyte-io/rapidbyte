@@ -45,11 +45,13 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
     println!("    Connect:       {:.3}s", result.source_connect_secs);
     println!("    Query:         {:.3}s", result.source_query_secs);
     println!("    Fetch:         {:.3}s", result.source_fetch_secs);
+    println!("    Arrow encode:  {:.3}s", result.source_arrow_encode_secs);
     println!("  Dest duration:   {:.2}s", result.dest_duration_secs);
     println!("    VM setup:      {:.3}s", result.dest_vm_setup_secs);
     println!("    Recv loop:     {:.3}s", result.dest_recv_secs);
     println!("    Connect:       {:.3}s", result.dest_connect_secs);
     println!("    Flush:         {:.3}s", result.dest_flush_secs);
+    println!("    Arrow decode:  {:.3}s", result.dest_arrow_decode_secs);
     println!("    Commit:        {:.3}s", result.dest_commit_secs);
     println!("    WASM overhead: {:.3}s", result.wasm_overhead_secs);
     println!(
@@ -107,6 +109,8 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
         "source_connect_secs": result.source_connect_secs,
         "source_query_secs": result.source_query_secs,
         "source_fetch_secs": result.source_fetch_secs,
+        "source_arrow_encode_secs": result.source_arrow_encode_secs,
+        "dest_arrow_decode_secs": result.dest_arrow_decode_secs,
         "source_module_load_ms": result.source_module_load_ms,
         "dest_module_load_ms": result.dest_module_load_ms,
         "source_emit_nanos": result.source_emit_nanos,

@@ -458,6 +458,8 @@ async fn execute_pipeline_once(config: &PipelineConfig, attempt: u32) -> Result<
                 source_connect_secs: src_perf.map(|p| p.connect_secs).unwrap_or(0.0),
                 source_query_secs: src_perf.map(|p| p.query_secs).unwrap_or(0.0),
                 source_fetch_secs: src_perf.map(|p| p.fetch_secs).unwrap_or(0.0),
+                source_arrow_encode_secs: src_perf.map(|p| p.arrow_encode_secs).unwrap_or(0.0),
+                dest_arrow_decode_secs: perf.map(|p| p.arrow_decode_secs).unwrap_or(0.0),
                 dest_connect_secs: perf.map(|p| p.connect_secs).unwrap_or(0.0),
                 dest_flush_secs: perf.map(|p| p.flush_secs).unwrap_or(0.0),
                 dest_commit_secs: perf.map(|p| p.commit_secs).unwrap_or(0.0),

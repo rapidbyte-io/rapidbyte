@@ -69,8 +69,10 @@ def main():
     metrics = [
         ("Duration (s)", "duration_secs", "s"),
         ("Source (s)", "source_duration_secs", "s"),
+        ("  Arrow encode (s)", "source_arrow_encode_secs", "s"),
         ("Dest (s)", "dest_duration_secs", "s"),
         ("  Flush (s)", "dest_flush_secs", "s"),
+        ("  Arrow decode (s)", "dest_arrow_decode_secs", "s"),
         ("  Commit (s)", "dest_commit_secs", "s"),
         ("  WASM overhead (s)", "wasm_overhead_secs", "s"),
         ("  VM setup (s)", "dest_vm_setup_secs", "s"),

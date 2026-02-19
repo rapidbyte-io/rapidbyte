@@ -172,6 +172,7 @@ pub async fn read_stream(
     let mut estimated_bytes: usize = 256; // IPC framing overhead
 
     let mut loop_error: Option<String> = None;
+    let mut arrow_encode_nanos: u64 = 0;
 
     let fetch_start = Instant::now();
     loop {
@@ -228,9 +229,11 @@ pub async fn read_stream(
 
                 // Flush if adding this row would exceed max_batch_bytes
                 if !accumulated_rows.is_empty() && estimated_bytes + row_bytes >= max_batch_bytes {
-                    match rows_to_record_batch(&accumulated_rows, &columns, &arrow_schema)
-                        .and_then(|batch| batch_to_ipc(&batch))
-                    {
+                    let encode_start = Instant::now();
+                    let encode_result = rows_to_record_batch(&accumulated_rows, &columns, &arrow_schema)
+                        .and_then(|batch| batch_to_ipc(&batch));
+                    arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
+                    match encode_result {
                         Ok(ipc_bytes) => {
                             total_records += accumulated_rows.len() as u64;
                             total_bytes += ipc_bytes.len() as u64;
@@ -304,9 +307,11 @@ pub async fn read_stream(
                 || exhausted);
 
         if should_emit {
-            match rows_to_record_batch(&accumulated_rows, &columns, &arrow_schema)
-                .and_then(|batch| batch_to_ipc(&batch))
-            {
+            let encode_start = Instant::now();
+            let encode_result = rows_to_record_batch(&accumulated_rows, &columns, &arrow_schema)
+                .and_then(|batch| batch_to_ipc(&batch));
+            arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
+            match encode_result {
                 Ok(ipc_bytes) => {
                     total_records += accumulated_rows.len() as u64;
                     total_bytes += ipc_bytes.len() as u64;
@@ -405,6 +410,7 @@ pub async fn read_stream(
             connect_secs,
             query_secs,
             fetch_secs,
+            arrow_encode_secs: arrow_encode_nanos as f64 / 1e9,
         }),
     })
 }

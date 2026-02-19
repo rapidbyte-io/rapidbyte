@@ -1,12 +1,14 @@
 use std::collections::HashSet;
 use std::io::Cursor;
+use std::sync::Arc;
 use std::time::Instant;
 
 use arrow::array::{
     Array, AsArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
 };
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, Schema};
 use arrow::ipc::reader::StreamReader;
+use arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::host_ffi;
@@ -52,6 +54,7 @@ pub struct SessionResult {
     pub checkpoint_count: u64,
     pub flush_secs: f64,
     pub commit_secs: f64,
+    pub arrow_decode_secs: f64,
 }
 
 /// Manages the full lifecycle of writing a single stream to PostgreSQL.
@@ -89,6 +92,9 @@ pub struct WriteSession<'a> {
     bytes_since_commit: u64,
     rows_since_commit: u64,
     last_checkpoint_time: Instant,
+
+    // Arrow decode timing
+    arrow_decode_nanos: u64,
 
     // Table creation tracking
     created_tables: HashSet<String>,
@@ -189,6 +195,7 @@ impl<'a> WriteSession<'a> {
             bytes_since_commit: 0,
             rows_since_commit: 0,
             last_checkpoint_time: now,
+            arrow_decode_nanos: 0,
             created_tables: HashSet::new(),
             ignored_columns: HashSet::new(),
             type_null_columns: HashSet::new(),
@@ -238,9 +245,10 @@ impl<'a> WriteSession<'a> {
             type_null_columns: &mut self.type_null_columns,
         };
 
-        let result = write_batch(&mut write_ctx, ipc_bytes).await?;
+        let (result, decode_nanos) = write_batch(&mut write_ctx, ipc_bytes).await?;
 
         // Accumulate stats
+        self.arrow_decode_nanos += decode_nanos;
         self.total_rows += result.rows_written;
         self.total_failed += result.rows_failed;
         self.total_bytes += n as u64;
@@ -390,6 +398,7 @@ impl<'a> WriteSession<'a> {
             checkpoint_count: self.checkpoint_count,
             flush_secs,
             commit_secs,
+            arrow_decode_secs: self.arrow_decode_nanos as f64 / 1e9,
         })
     }
 
@@ -985,24 +994,45 @@ const INSERT_CHUNK_SIZE: usize = 1000;
 /// Buffer size for COPY data before flushing to the sink.
 const COPY_FLUSH_BYTES: usize = 4 * 1024 * 1024; // 4MB
 
+/// Decode Arrow IPC bytes into schema and record batches.
+fn decode_ipc(ipc_bytes: &[u8]) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
+    let cursor = Cursor::new(ipc_bytes);
+    let reader = StreamReader::try_new(cursor, None)
+        .map_err(|e| format!("Failed to read Arrow IPC: {}", e))?;
+    let schema = reader.schema();
+    let batches: Vec<_> = reader
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to read batches: {}", e))?;
+    Ok((schema, batches))
+}
+
 /// Write an Arrow IPC batch to PostgreSQL.
 ///
 /// Dispatches to COPY or INSERT based on `ctx.load_method`. If the load method
 /// is "copy" but the write mode is Upsert, automatically falls back to INSERT
 /// (COPY cannot handle ON CONFLICT). On batch failure with Skip/Dlq error
 /// policy, falls back to single-row INSERTs.
-async fn write_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<WriteResult, String> {
+async fn write_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<(WriteResult, u64), String> {
+    // Decode Arrow IPC with timing
+    let decode_start = Instant::now();
+    let (arrow_schema, batches) = decode_ipc(ipc_bytes)?;
+    let decode_nanos = decode_start.elapsed().as_nanos() as u64;
+
+    if batches.is_empty() {
+        return Ok((WriteResult { rows_written: 0, rows_failed: 0 }, decode_nanos));
+    }
+
     let use_copy = ctx.load_method == "copy"
         && !matches!(ctx.write_mode, Some(WriteMode::Upsert { .. }));
 
     let (result, method_name) = if use_copy {
-        (copy_batch(ctx, ipc_bytes).await, "COPY")
+        (copy_batch(ctx, &arrow_schema, &batches).await, "COPY")
     } else {
-        (insert_batch(ctx, ipc_bytes).await, "INSERT")
+        (insert_batch(ctx, &arrow_schema, &batches).await, "INSERT")
     };
 
     match result {
-        Ok(count) => Ok(WriteResult { rows_written: count, rows_failed: 0 }),
+        Ok(count) => Ok((WriteResult { rows_written: count, rows_failed: 0 }, decode_nanos)),
         Err(e) => {
             if matches!(ctx.on_data_error, DataErrorPolicy::Fail) {
                 return Err(e);
@@ -1014,10 +1044,11 @@ async fn write_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<Wri
                     method_name, e
                 ),
             );
-            write_rows_individually(
-                ctx.client, ctx.target_schema, ctx.stream_name, ipc_bytes, ctx.write_mode,
+            let wr = write_rows_individually(
+                ctx.client, ctx.target_schema, ctx.stream_name, &arrow_schema, &batches, ctx.write_mode,
                 ctx.ignored_columns, ctx.type_null_columns,
-            ).await
+            ).await?;
+            Ok((wr, decode_nanos))
         }
     }
 }
@@ -1028,25 +1059,15 @@ async fn write_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<Wri
 ///   INSERT INTO t (c1, c2) VALUES (v1, v2), (v3, v4), ...
 ///
 /// Chunks at INSERT_CHUNK_SIZE rows to keep SQL size bounded.
-async fn insert_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<u64, String> {
-    // 1. Decode Arrow IPC
-    let cursor = Cursor::new(ipc_bytes);
-    let reader = StreamReader::try_new(cursor, None)
-        .map_err(|e| format!("Failed to read Arrow IPC: {}", e))?;
-
-    let arrow_schema = reader.schema();
-    let batches: Vec<_> = reader
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to read batches: {}", e))?;
-
+async fn insert_batch(ctx: &mut WriteContext<'_>, arrow_schema: &Arc<Schema>, batches: &[RecordBatch]) -> Result<u64, String> {
     if batches.is_empty() {
         return Ok(0);
     }
 
     let qualified_table = format!("\"{}\".\"{}\"", ctx.target_schema, ctx.stream_name);
 
-    // 2. Ensure schema + table exist (only on first encounter)
-    ensure_table_and_schema(ctx, &arrow_schema).await?;
+    // Ensure schema + table exist (only on first encounter)
+    ensure_table_and_schema(ctx, arrow_schema).await?;
 
     // Validate upsert primary_key columns
     if let Some(WriteMode::Upsert { primary_key }) = ctx.write_mode {
@@ -1075,7 +1096,7 @@ async fn insert_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<u6
     // 4. Insert rows using multi-value INSERT
     let mut total_rows: u64 = 0;
 
-    for batch in &batches {
+    for batch in batches {
         let num_rows = batch.num_rows();
 
         // Process in chunks
@@ -1156,26 +1177,17 @@ async fn insert_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<u6
 ///
 /// Streams rows as tab-separated text directly to PostgreSQL's COPY protocol,
 /// bypassing SQL parsing for significantly higher throughput.
-async fn copy_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<u64, String> {
-    // 1. Decode Arrow IPC
-    let cursor = Cursor::new(ipc_bytes);
-    let reader = StreamReader::try_new(cursor, None)
-        .map_err(|e| format!("Failed to read Arrow IPC: {}", e))?;
-    let arrow_schema = reader.schema();
-    let batches: Vec<_> = reader
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to read batches: {}", e))?;
-
+async fn copy_batch(ctx: &mut WriteContext<'_>, arrow_schema: &Arc<Schema>, batches: &[RecordBatch]) -> Result<u64, String> {
     if batches.is_empty() {
         return Ok(0);
     }
 
     let qualified_table = format!("\"{}\".\"{}\"", ctx.target_schema, ctx.stream_name);
 
-    // 2. Ensure schema + table exist (only on first encounter)
-    ensure_table_and_schema(ctx, &arrow_schema).await?;
+    // Ensure schema + table exist (only on first encounter)
+    ensure_table_and_schema(ctx, arrow_schema).await?;
 
-    // 3. Build active column indices (excluding ignored columns)
+    // Build active column indices (excluding ignored columns)
     let active_cols: Vec<usize> = (0..arrow_schema.fields().len())
         .filter(|&i| !ctx.ignored_columns.contains(arrow_schema.field(i).name()))
         .collect();
@@ -1206,7 +1218,7 @@ async fn copy_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<u64,
     let mut total_rows: u64 = 0;
     let mut buf = Vec::with_capacity(COPY_FLUSH_BYTES);
 
-    for batch in &batches {
+    for batch in batches {
         for row_idx in 0..batch.num_rows() {
             for (pos, &col_idx) in active_cols.iter().enumerate() {
                 if pos > 0 {
@@ -1260,19 +1272,12 @@ async fn write_rows_individually(
     client: &Client,
     target_schema: &str,
     stream_name: &str,
-    ipc_bytes: &[u8],
+    arrow_schema: &Arc<Schema>,
+    batches: &[RecordBatch],
     write_mode: Option<&WriteMode>,
     ignored_columns: &HashSet<String>,
     type_null_columns: &HashSet<String>,
 ) -> Result<WriteResult, String> {
-    let cursor = Cursor::new(ipc_bytes);
-    let reader = StreamReader::try_new(cursor, None)
-        .map_err(|e| format!("IPC decode failed: {}", e))?;
-    let arrow_schema = reader.schema();
-    let batches: Vec<_> = reader
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to read batches: {}", e))?;
-
     let qualified_table = format!("\"{}\".\"{}\"", target_schema, stream_name);
 
     // Build active column indices (excluding ignored columns)
@@ -1294,7 +1299,7 @@ async fn write_rows_individually(
     let mut rows_written = 0u64;
     let mut rows_failed = 0u64;
 
-    for batch in &batches {
+    for batch in batches {
         for row_idx in 0..batch.num_rows() {
             let mut sql = format!("INSERT INTO {} ({}) VALUES (", qualified_table, col_list);
             for (pos, &col_idx) in active_cols.iter().enumerate() {

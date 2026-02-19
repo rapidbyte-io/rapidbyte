@@ -246,6 +246,7 @@ for label, key, unit in [
     ('Dest duration', 'dest_duration_secs', 's'),
     ('  Connect', 'dest_connect_secs', 's'),
     ('  Flush', 'dest_flush_secs', 's'),
+    ('  Arrow decode', 'dest_arrow_decode_secs', 's'),
     ('  Commit', 'dest_commit_secs', 's'),
     ('  VM setup', 'dest_vm_setup_secs', 's'),
     ('  Recv loop', 'dest_recv_secs', 's'),
@@ -254,6 +255,7 @@ for label, key, unit in [
     ('  Connect', 'source_connect_secs', 's'),
     ('  Query', 'source_query_secs', 's'),
     ('  Fetch', 'source_fetch_secs', 's'),
+    ('  Arrow encode', 'source_arrow_encode_secs', 's'),
     ('Source module load', 'source_module_load_ms', 'ms'),
     ('Dest module load', 'dest_module_load_ms', 'ms'),
 ]:
@@ -279,44 +281,35 @@ print(hdr.format('Throughput (MB/s)', f'{i_mbps_avg:.2f}', f'{c_mbps_avg:.2f}', 
 
 rm -f "$INSERT_RESULTS" "$COPY_RESULTS"
 
-# ── Optional flamegraph profiling ─────────────────────────────────
+# ── Optional profiling ────────────────────────────────────────────
 if [ "$PROFILE" = "true" ]; then
-    info "Running profiling iteration with flamegraph..."
+    if ! command -v samply &> /dev/null; then
+        fail "samply not found. Install with: cargo install samply"
+    fi
+
+    info "Running profiling iteration with samply..."
     docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
         psql -U postgres -d rapidbyte_test -c "DROP SCHEMA IF EXISTS raw CASCADE" > /dev/null 2>&1
-    rm -f /tmp/rapidbyte_bench_state.db 2>/dev/null || sudo rm -f /tmp/rapidbyte_bench_state.db 2>/dev/null || true
-
-    # Stage connectors to default plugin dir (sudo strips RAPIDBYTE_CONNECTOR_DIR)
-    PLUGIN_DIR="$HOME/.rapidbyte/plugins"
-    mkdir -p "$PLUGIN_DIR"
-    cp "$CONNECTOR_DIR/source_postgres.wasm" "$PLUGIN_DIR/"
-    cp "$CONNECTOR_DIR/dest_postgres.wasm" "$PLUGIN_DIR/"
+    rm -f /tmp/rapidbyte_bench_state.db 2>/dev/null || true
 
     PROFILE_DIR="$PROJECT_ROOT/target/profiles"
     mkdir -p "$PROFILE_DIR"
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-    SVG_FILE="$PROFILE_DIR/flamegraph_${BENCH_ROWS}rows_insert_${TIMESTAMP}.svg"
+    PROFILE_FILE="$PROFILE_DIR/profile_${BENCH_ROWS}rows_insert_${TIMESTAMP}.json"
 
-    info "Generating flamegraph (sudo required for dtrace on macOS)..."
+    info "Rebuilding with debug symbols for profiling..."
+    CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed \
+        cargo build --release 2>&1 | tail -1
 
-    FLAMEGRAPH_RUSTFLAGS="${RUSTFLAGS:-}"
-    if [[ "$OSTYPE" == darwin* ]]; then
-        WASMEDGE_LIB_DIR="$HOME/.wasmedge/lib"
-        if [ -d "$WASMEDGE_LIB_DIR" ]; then
-            FLAMEGRAPH_RUSTFLAGS="$FLAMEGRAPH_RUSTFLAGS -C link-arg=-Wl,-rpath,$WASMEDGE_LIB_DIR"
-        fi
-    fi
-
-    CARGO_PROFILE_RELEASE_DEBUG=2 RUSTFLAGS="$FLAMEGRAPH_RUSTFLAGS" cargo flamegraph \
-        --bin rapidbyte \
-        --release \
-        --root \
-        -o "$SVG_FILE" \
-        -- run "$PROJECT_ROOT/tests/fixtures/pipelines/bench_pg.yaml" \
+    samply record \
+        --save-only \
+        -o "$PROFILE_FILE" \
+        -- "$PROJECT_ROOT/target/release/rapidbyte" run \
+        "$PROJECT_ROOT/tests/fixtures/pipelines/bench_pg.yaml" \
         --log-level warn 2>&1
 
-    info "Flamegraph saved to: $SVG_FILE"
-    info "Open with: open $SVG_FILE"
+    info "Profile saved to: $PROFILE_FILE"
+    info "View with: samply load $PROFILE_FILE"
 fi
 
 echo ""

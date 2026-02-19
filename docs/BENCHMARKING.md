@@ -15,7 +15,7 @@ This runs 3 iterations each of INSERT and COPY modes against 10,000 rows with AO
 - **Docker** — PostgreSQL runs via `docker-compose.yml`
 - **WasmEdge** — runtime + `wasmedge compile` for AOT (source `~/.wasmedge/env`)
 - **Python 3** — used by the reporting scripts
-- **cargo-flamegraph** (optional) — `cargo install flamegraph` for CPU profiling
+- **samply** (optional) — `cargo install samply` for CPU profiling
 
 ## Running Benchmarks
 
@@ -62,11 +62,15 @@ Examples:
 | `just bench-compare ref1 ref2` | Benchmark two git refs and compare |
 | `just bench-results` | View/compare past benchmark results |
 
-## Profiling with Flamegraphs
+## Profiling with samply
+
+Uses [samply](https://github.com/mstange/samply) for CPU profiling with full symbol resolution on macOS (unlike `cargo flamegraph` which produces mostly unresolved hex addresses due to SIP).
+
+Install: `cargo install samply`
 
 ### Standalone Profiler
 
-`bench_profile.sh` generates a CPU flamegraph for a single pipeline run. It rebuilds the host binary with debug symbols (`CARGO_PROFILE_RELEASE_DEBUG=2`) and invokes `cargo flamegraph`.
+`bench_profile.sh` records a CPU profile for a single pipeline run. It builds with debug symbols and invokes `samply record`.
 
 ```bash
 ./tests/bench_profile.sh [ROWS] [MODE]
@@ -83,13 +87,13 @@ Examples:
 just bench-profile 50000 copy
 ```
 
-Output: `target/profiles/flamegraph_<rows>rows_<mode>_<timestamp>.svg`
+Output: `target/profiles/profile_<rows>rows_<mode>_<timestamp>.json`
 
-Open the SVG in a browser for an interactive flamegraph.
+View with: `samply load <profile.json>` — opens Firefox Profiler in your browser with full call stacks, source-level mapping, and flame charts.
 
 ### Integrated Profiling
 
-Pass `--profile` to `bench.sh` to run the normal benchmark iterations first, then generate a flamegraph:
+Pass `--profile` to `bench.sh` to run the normal benchmark iterations first, then record a profile:
 
 ```bash
 ./tests/bench.sh --rows 10000 --profile
@@ -233,11 +237,13 @@ Pipeline 'bench_pg' completed successfully.
     Connect:       0.012s
     Query:         0.001s
     Fetch:         0.430s
+    Arrow encode:  0.050s
   Dest duration:   0.78s
     VM setup:      0.005s
     Recv loop:     0.770s
     Connect:       0.015s
     Flush:         0.700s
+    Arrow decode:  0.030s
     Commit:        0.020s
     WASM overhead: 0.030s
   Host emit_batch: 0.050s (10 calls)
@@ -281,12 +287,14 @@ duration_secs
 ├── source_duration_secs          (source thread wall time)
 │   ├── source_connect_secs       (PG connection)
 │   ├── source_query_secs         (query execution)
-│   └── source_fetch_secs         (row fetching + Arrow encoding)
+│   ├── source_fetch_secs         (row fetching + Arrow encoding)
+│   └── source_arrow_encode_secs  (Arrow IPC serialization, subset of fetch)
 ├── dest_duration_secs            (dest thread wall time)
 │   ├── dest_vm_setup_secs        (WASM VM + import registration)
 │   ├── dest_recv_secs            (channel recv loop)
 │   ├── dest_connect_secs         (PG connection)
-│   ├── dest_flush_secs           (INSERT/COPY writes)
+│   ├── dest_flush_secs           (INSERT/COPY writes + Arrow decoding)
+│   │   └── dest_arrow_decode_secs (Arrow IPC deserialization, subset of flush)
 │   ├── dest_commit_secs          (transaction commit)
 │   └── wasm_overhead_secs        (dest_duration - connect - flush - commit)
 ├── source_module_load_ms         (WASM module load/parse)
@@ -381,8 +389,8 @@ Defined in `crates/rapidbyte-core/src/engine/runner.rs`. Contains all timing and
 - **Counters**: `records_read`, `records_written`, `bytes_read`, `bytes_written`
 - **Wall-clock**: `duration_secs`, `source_duration_secs`, `dest_duration_secs`
 - **Module loading**: `source_module_load_ms`, `dest_module_load_ms`
-- **Source sub-phases**: `source_connect_secs`, `source_query_secs`, `source_fetch_secs`
-- **Dest sub-phases**: `dest_connect_secs`, `dest_flush_secs`, `dest_commit_secs`, `dest_vm_setup_secs`, `dest_recv_secs`, `wasm_overhead_secs`
+- **Source sub-phases**: `source_connect_secs`, `source_query_secs`, `source_fetch_secs`, `source_arrow_encode_secs`
+- **Dest sub-phases**: `dest_connect_secs`, `dest_flush_secs`, `dest_arrow_decode_secs`, `dest_commit_secs`, `dest_vm_setup_secs`, `dest_recv_secs`, `wasm_overhead_secs`
 - **Host functions**: `source_emit_nanos/count`, `source_compress_nanos`, `dest_recv_nanos/count`, `dest_decompress_nanos`
 - **Transforms**: `transform_count`, `transform_duration_secs`, `transform_module_load_ms`
 - **Retries**: `retry_count`
@@ -413,7 +421,7 @@ Row count is controlled by the `bench_rows` psql variable. Average row size is ~
 
 **`records_written` shows 0** — Known issue. The dest connector stats tracking doesn't update this counter. Use `records_read` for throughput calculations (the scripts already do this).
 
-**Flamegraph permission denied (macOS)** — `cargo flamegraph` uses `dtrace` on macOS, which requires root. Run with `sudo` or use `--root` flag.
+**Profiling shows no symbols** — If using `cargo flamegraph` on macOS, SIP prevents dtrace from resolving symbols. Use `samply` instead (`cargo install samply`), which resolves symbols from DWARF debug info independently.
 
 **No results for bench-compare** — Results are stored in `target/bench_results/results.jsonl`. This file is created on the first `bench.sh` run. Clean builds (`cargo clean`) do not delete it since it's under `target/bench_results/`, but manually deleting `target/` will.
 

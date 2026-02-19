@@ -42,6 +42,8 @@ pub struct PipelineResult {
     pub source_connect_secs: f64,
     pub source_query_secs: f64,
     pub source_fetch_secs: f64,
+    pub source_arrow_encode_secs: f64,
+    pub dest_arrow_decode_secs: f64,
     // Host overhead breakdown
     pub dest_vm_setup_secs: f64,
     pub dest_recv_secs: f64,

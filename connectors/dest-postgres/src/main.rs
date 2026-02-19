@@ -350,6 +350,7 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                     connect_secs,
                     flush_secs: result.flush_secs,
                     commit_secs: result.commit_secs,
+                    arrow_decode_secs: result.arrow_decode_secs,
                 }),
             };
             make_ok_response(summary)
