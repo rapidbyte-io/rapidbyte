@@ -56,6 +56,8 @@ WasmEdge env must be sourced: `source ~/.wasmedge/env`
 - **Host functions** registered under `"rapidbyte"` import namespace + WASI module.
 - **State backend**: SQLite (`rusqlite` bundled). Tracks sync runs.
 - **Arrow IPC**: Source emits RecordBatches as IPC bytes through channel to destination.
+- **IPC compression**: Optional lz4/zstd compression between stages, configured via `resources.compression: lz4|zstd` in pipeline YAML. Compression/decompression happens in host functions (`host_emit_batch`/`host_next_batch`), transparent to WASI connectors. Uses `lz4_flex` and `zstd` crates.
+- **Channel backpressure**: `mpsc::sync_channel` capacity is configurable via `resources.max_inflight_batches` (default: 16).
 
 ## Gotchas
 
@@ -64,6 +66,7 @@ WasmEdge env must be sourced: `source ~/.wasmedge/env`
 - **Connector WASM can't be tested natively** — `rb_allocate` etc. use i32 ptrs, SIGSEGV on 64-bit.
 - **PG TIMESTAMP columns**: Use nullable `TIMESTAMP DEFAULT NOW()`, not `TIMESTAMP NOT NULL`. The source connector's Arrow schema mapping produces nulls for non-nullable timestamps.
 - **`records_written` counter**: Currently stays at 0 (known stats tracking issue in dest connector).
+- **SyncMode enum**: Has 3 variants: `FullRefresh`, `Incremental`, `Cdc`. CDC is protocol-ready but no connector implements logical replication yet.
 - **Docker PG readiness**: Use `psql -c "SELECT 1"`, not `pg_isready` (passes before init scripts complete).
 - **Tokio pin**: Connectors must pin `tokio = "=1.36"` (exact) for WASI fork patch to apply.
 
@@ -77,7 +80,7 @@ Connectors use forks from `second-state` GitHub org:
 - Single PostgreSQL instance (port 5433 via docker-compose.yml)
 - Source reads from `public` schema, dest writes to `raw` schema
 - Benchmark emits `@@BENCH_JSON@@{...}` for machine-readable results
-- `PipelineResult` includes per-phase timing: source/dest duration, module load times, VM setup, recv loop
+- `PipelineResult` includes per-phase timing: source/dest duration, module load times, VM setup, recv loop, source connect/query/fetch, dest connect/flush/commit
 - `bench.sh` runs both INSERT and COPY modes automatically with comparison report
 - Dest connector supports `load_method: insert|copy` in pipeline YAML (default: insert)
 - AOT compilation via `wasmedge compile` reduces module load from ~500ms to ~4ms
