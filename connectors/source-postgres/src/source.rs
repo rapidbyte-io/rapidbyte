@@ -274,11 +274,27 @@ pub async fn read_stream(
 
                 // Track max cursor value for incremental checkpoint
                 if let Some(col_idx) = cursor_col_idx {
-                    let val: Option<String> = row
-                        .try_get::<_, String>(col_idx)
-                        .ok()
-                        .or_else(|| row.try_get::<_, i64>(col_idx).ok().map(|n| n.to_string()))
-                        .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(|n| n.to_string()));
+                    let val: Option<String> = match ctx
+                        .cursor_info
+                        .as_ref()
+                        .map(|ci| &ci.cursor_type)
+                    {
+                        Some(rapidbyte_sdk::protocol::CursorType::Int64) => row
+                            .try_get::<_, i64>(col_idx)
+                            .ok()
+                            .map(|n| n.to_string()),
+                        Some(rapidbyte_sdk::protocol::CursorType::Utf8) => {
+                            row.try_get::<_, String>(col_idx).ok()
+                        }
+                        _ => row
+                            .try_get::<_, String>(col_idx)
+                            .ok()
+                            .or_else(|| {
+                                row.try_get::<_, i64>(col_idx)
+                                    .ok()
+                                    .map(|n| n.to_string())
+                            }),
+                    };
 
                     if let Some(val) = val {
                         match &max_cursor_value {
