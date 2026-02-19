@@ -32,6 +32,10 @@ e2e:
 bench-connector-postgres rows="10000":
     ./tests/bench.sh --rows {{rows}} --iters 3
 
+# Scaffold a new connector project
+scaffold name output=("connectors/" + name):
+    cargo run -- scaffold {{name}} --output {{output}}
+
 clean:
     cargo clean
 

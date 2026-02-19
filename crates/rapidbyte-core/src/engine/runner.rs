@@ -496,13 +496,17 @@ pub(crate) fn validate_connector(
 
     let mut handle = ConnectorHandle::new(vm);
 
-    // Wrap config in OpenContext for rb_validate
+    // Lifecycle: open -> validate -> close
     let open_ctx = OpenContext {
         config: ConfigBlob::Json(config.clone()),
         connector_id: connector_id.to_string(),
         connector_version: connector_version.to_string(),
     };
-    handle.validate(&serde_json::to_value(&open_ctx).unwrap())
+
+    handle.open(&open_ctx)?;
+    let result = handle.validate(&serde_json::to_value(&open_ctx).unwrap());
+    let _ = handle.close();
+    result
 }
 
 /// Discover available streams from a source connector.

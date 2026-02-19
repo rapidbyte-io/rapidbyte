@@ -65,7 +65,6 @@ WasmEdge env must be sourced: `source ~/.wasmedge/env`
 - **Debug builds**: `wasi_mio` panics on unsupported socket ops. Connectors need `--cfg skip_wasi_unsupported` in rustflags. Release builds are fine.
 - **Connector WASM can't be tested natively** — `rb_allocate` etc. use i32 ptrs, SIGSEGV on 64-bit.
 - **PG TIMESTAMP columns**: Use nullable `TIMESTAMP DEFAULT NOW()`, not `TIMESTAMP NOT NULL`. The source connector's Arrow schema mapping produces nulls for non-nullable timestamps.
-- **`records_written` counter**: Currently stays at 0 (known stats tracking issue in dest connector).
 - **SyncMode enum**: Has 3 variants: `FullRefresh`, `Incremental`, `Cdc`. CDC is protocol-ready but no connector implements logical replication yet.
 - **Docker PG readiness**: Use `psql -c "SELECT 1"`, not `pg_isready` (passes before init scripts complete).
 - **Tokio pin**: Connectors must pin `tokio = "=1.36"` (exact) for WASI fork patch to apply.
