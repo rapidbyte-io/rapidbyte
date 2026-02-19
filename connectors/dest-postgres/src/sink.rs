@@ -1235,7 +1235,13 @@ async fn insert_batch(ctx: &mut WriteContext<'_>, arrow_schema: &Arc<Schema>, ba
             let chunk_end = (chunk_start + INSERT_CHUNK_SIZE).min(num_rows);
             let chunk_size = chunk_end - chunk_start;
 
-            let mut sql = format!("INSERT INTO {} ({}) VALUES ", qualified_table, col_list);
+            // Pre-allocate: header + estimated row width (15 bytes/col avg) + separators
+            let header = format!("INSERT INTO {} ({}) VALUES ", qualified_table, col_list);
+            let estimated_row_width = active_cols.len() * 15; // avg value width per col
+            let mut sql = String::with_capacity(
+                header.len() + chunk_size * (estimated_row_width + 3), // 3 = "()" + ","
+            );
+            sql.push_str(&header);
 
             for row_idx in chunk_start..chunk_end {
                 if row_idx > chunk_start {
