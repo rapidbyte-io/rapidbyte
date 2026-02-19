@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use arrow::array::{
-    BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, StringArray,
+    BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, StringBuilder,
 };
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
@@ -446,59 +446,57 @@ fn rows_to_record_batch(
             |(col_idx, col)| -> Result<Arc<dyn arrow::array::Array>, String> {
                 match col.data_type.as_str() {
                     "Int16" => {
-                        let values: Vec<Option<i16>> = rows
+                        let arr: Int16Array = rows
                             .iter()
                             .map(|row| row.try_get::<_, i16>(col_idx).ok())
                             .collect();
-                        Ok(Arc::new(Int16Array::from(values)))
+                        Ok(Arc::new(arr))
                     }
                     "Int32" => {
-                        let values: Vec<Option<i32>> = rows
+                        let arr: Int32Array = rows
                             .iter()
                             .map(|row| row.try_get::<_, i32>(col_idx).ok())
                             .collect();
-                        Ok(Arc::new(Int32Array::from(values)))
+                        Ok(Arc::new(arr))
                     }
                     "Int64" => {
-                        let values: Vec<Option<i64>> = rows
+                        let arr: Int64Array = rows
                             .iter()
                             .map(|row| row.try_get::<_, i64>(col_idx).ok())
                             .collect();
-                        Ok(Arc::new(Int64Array::from(values)))
+                        Ok(Arc::new(arr))
                     }
                     "Float32" => {
-                        let values: Vec<Option<f32>> = rows
+                        let arr: Float32Array = rows
                             .iter()
                             .map(|row| row.try_get::<_, f32>(col_idx).ok())
                             .collect();
-                        Ok(Arc::new(Float32Array::from(values)))
+                        Ok(Arc::new(arr))
                     }
                     "Float64" => {
-                        let values: Vec<Option<f64>> = rows
+                        let arr: Float64Array = rows
                             .iter()
                             .map(|row| row.try_get::<_, f64>(col_idx).ok())
                             .collect();
-                        Ok(Arc::new(Float64Array::from(values)))
+                        Ok(Arc::new(arr))
                     }
                     "Boolean" => {
-                        let values: Vec<Option<bool>> = rows
+                        let arr: BooleanArray = rows
                             .iter()
                             .map(|row| row.try_get::<_, bool>(col_idx).ok())
                             .collect();
-                        Ok(Arc::new(BooleanArray::from(values)))
+                        Ok(Arc::new(arr))
                     }
                     _ => {
-                        // Utf8 fallback — try to get as String
-                        let values: Vec<Option<String>> = rows
-                            .iter()
-                            .map(|row| row.try_get::<_, String>(col_idx).ok())
-                            .collect();
-                        Ok(Arc::new(StringArray::from(
-                            values
-                                .iter()
-                                .map(|v| v.as_deref())
-                                .collect::<Vec<Option<&str>>>(),
-                        )))
+                        // Utf8 fallback — use StringBuilder to avoid intermediate Vec<Option<String>>
+                        let mut builder = StringBuilder::with_capacity(rows.len(), rows.len() * 32);
+                        for row in rows {
+                            match row.try_get::<_, String>(col_idx).ok() {
+                                Some(s) => builder.append_value(&s),
+                                None => builder.append_null(),
+                            }
+                        }
+                        Ok(Arc::new(builder.finish()))
                     }
                 }
             },
