@@ -67,40 +67,41 @@ def main():
     shas = seen[-args.last:] if not args.sha else args.sha
 
     metrics = [
-        ("Duration (s)", "duration_secs"),
-        ("Source (s)", "source_duration_secs"),
-        ("Dest (s)", "dest_duration_secs"),
-        ("  Flush (s)", "dest_flush_secs"),
-        ("  Commit (s)", "dest_commit_secs"),
-        ("  WASM overhead (s)", "wasm_overhead_secs"),
-        ("  VM setup (s)", "dest_vm_setup_secs"),
-        ("  Recv loop (s)", "dest_recv_secs"),
-        ("Source load (ms)", "source_module_load_ms"),
-        ("Dest load (ms)", "dest_module_load_ms"),
+        ("Duration (s)", "duration_secs", "s"),
+        ("Source (s)", "source_duration_secs", "s"),
+        ("Dest (s)", "dest_duration_secs", "s"),
+        ("  Flush (s)", "dest_flush_secs", "s"),
+        ("  Commit (s)", "dest_commit_secs", "s"),
+        ("  WASM overhead (s)", "wasm_overhead_secs", "s"),
+        ("  VM setup (s)", "dest_vm_setup_secs", "s"),
+        ("  Recv loop (s)", "dest_recv_secs", "s"),
+        ("Source load (ms)", "source_module_load_ms", "ms"),
+        ("Dest load (ms)", "dest_module_load_ms", "ms"),
     ]
 
     for mode in ["insert", "copy"]:
-        print(f"\n{'=' * 60}")
+        print(f"\n{'=' * 64}")
         print(f"  Mode: {mode.upper()}")
-        print(f"{'=' * 60}")
+        print(f"{'=' * 64}")
 
         header = f"  {'Metric':<22s}"
         for sha in shas:
-            header += f"  {sha:>10s}"
+            header += f"  {sha:>12s}"
         if len(shas) == 2:
             header += f"  {'Change':>10s}"
         print(header)
-        print(f"  {'-' * 22}" + f"  {'-' * 10}" * len(shas) + ("  " + "-" * 10 if len(shas) == 2 else ""))
+        print(f"  {'-' * 22}" + f"  {'-' * 12}" * len(shas) + ("  " + "-" * 10 if len(shas) == 2 else ""))
 
-        for label, key in metrics:
+        for label, key, unit in metrics:
             line = f"  {label:<22s}"
             vals = []
+            fmt = ".1f" if unit == "ms" else ".4f"
             for sha in shas:
                 matching = [r for r in results if r.get("git_sha") == sha and r.get("mode") == mode]
                 v = avg(matching, key)
                 vals.append(v)
-                line += f"  {v:>10.3f}"
-            if len(vals) == 2 and vals[0] > 0:
+                line += f"  {v:>12{fmt}}"
+            if len(vals) == 2 and vals[0] > 0.0001:
                 pct = (vals[1] - vals[0]) / vals[0] * 100
                 sign = "+" if pct > 0 else ""
                 line += f"  {sign}{pct:.1f}%"
