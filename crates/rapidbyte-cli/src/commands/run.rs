@@ -63,6 +63,9 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
     }
     println!("  Source load:     {}ms", result.source_module_load_ms);
     println!("  Dest load:       {}ms", result.dest_module_load_ms);
+    if result.retry_count > 0 {
+        println!("  Retries:         {}", result.retry_count);
+    }
 
     // Machine-readable JSON for benchmarking tools
     let json = serde_json::json!({
@@ -87,6 +90,7 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
         "transform_count": result.transform_count,
         "transform_duration_secs": result.transform_duration_secs,
         "transform_module_load_ms": result.transform_module_load_ms,
+        "retry_count": result.retry_count,
     });
     println!("@@BENCH_JSON@@{}", json);
 

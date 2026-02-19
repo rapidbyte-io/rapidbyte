@@ -9,7 +9,8 @@ use wasmedge_sdk::{Module, Store, Vm};
 use rapidbyte_sdk::errors::ValidationResult;
 use rapidbyte_sdk::manifest::Permissions;
 use rapidbyte_sdk::protocol::{
-    Checkpoint, ConfigBlob, OpenContext, ReadSummary, StreamContext, TransformSummary, WriteSummary,
+    Catalog, Checkpoint, ConfigBlob, OpenContext, ReadSummary, StreamContext, TransformSummary,
+    WriteSummary,
 };
 
 use super::errors::PipelineError;
@@ -49,6 +50,7 @@ pub struct PipelineResult {
     pub transform_count: usize,
     pub transform_duration_secs: f64,
     pub transform_module_load_ms: Vec<u64>,
+    pub retry_count: u32,
 }
 
 /// Result of a pipeline check.
@@ -466,4 +468,72 @@ pub(crate) fn validate_connector(
         connector_version: connector_version.to_string(),
     };
     handle.validate(&serde_json::to_value(&open_ctx).unwrap())
+}
+
+/// Discover available streams from a source connector.
+/// Follows the same VM setup pattern as `validate_connector`, then calls
+/// open -> discover -> close to retrieve the catalog.
+pub(crate) fn run_discover(
+    wasm_path: &std::path::Path,
+    connector_id: &str,
+    connector_version: &str,
+    config: &serde_json::Value,
+    permissions: Option<&Permissions>,
+) -> Result<Catalog> {
+    let runtime = WasmRuntime::new()?;
+    let module = runtime.load_module(wasm_path)?;
+
+    let state = Arc::new(SqliteStateBackend::in_memory()?);
+
+    let host_state = HostState {
+        pipeline_name: "discover".to_string(),
+        current_stream: Arc::new(Mutex::new("discover".to_string())),
+        state_backend: state,
+        stats: Arc::new(Mutex::new(RunStats::default())),
+        batch_sender: None,
+        next_batch_id: 1,
+        batch_receiver: None,
+        pending_batch: None,
+        last_error: None,
+        compression: None,
+        source_checkpoints: Arc::new(Mutex::new(Vec::new())),
+        dest_checkpoints: Arc::new(Mutex::new(Vec::new())),
+    };
+
+    let mut import = wasm_runtime::create_host_imports(host_state)?;
+    let mut wasi = create_secure_wasi_module(permissions)?;
+
+    let mut instances: HashMap<String, &mut dyn SyncInst> = HashMap::new();
+    instances.insert("rapidbyte".to_string(), &mut import);
+    instances.insert(wasi.name().to_string(), wasi.as_mut());
+
+    let mut vm = Vm::new(
+        Store::new(None, instances).map_err(|e| anyhow::anyhow!("Store::new failed: {:?}", e))?,
+    );
+
+    vm.register_module(None, module)
+        .map_err(|e| anyhow::anyhow!("register_module failed: {:?}", e))?;
+
+    let mut handle = ConnectorHandle::new(vm);
+
+    // Lifecycle: open
+    let open_ctx = OpenContext {
+        config: ConfigBlob::Json(config.clone()),
+        connector_id: connector_id.to_string(),
+        connector_version: connector_version.to_string(),
+    };
+
+    tracing::info!("Opening connector for discover");
+    handle.open(&open_ctx)?;
+
+    // Lifecycle: discover
+    let catalog = handle.discover()?;
+
+    // Lifecycle: close
+    tracing::info!("Closing connector after discover");
+    if let Err(e) = handle.close() {
+        tracing::warn!("Connector close failed after discover: {}", e);
+    }
+
+    Ok(catalog)
 }

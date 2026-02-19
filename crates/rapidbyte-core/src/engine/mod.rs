@@ -6,5 +6,5 @@ pub mod vm_factory;
 
 // Re-export public API for convenience
 pub use errors::PipelineError;
-pub use orchestrator::{check_pipeline, run_pipeline};
+pub use orchestrator::{check_pipeline, discover_connector, run_pipeline};
 pub use runner::{CheckResult, PipelineResult};

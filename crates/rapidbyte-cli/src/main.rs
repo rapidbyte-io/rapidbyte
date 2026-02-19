@@ -32,6 +32,11 @@ enum Commands {
         /// Path to pipeline YAML file
         pipeline: PathBuf,
     },
+    /// Discover available streams from a source connector
+    Discover {
+        /// Path to pipeline YAML file
+        pipeline: PathBuf,
+    },
     /// List available connectors
     Connectors,
 }
@@ -45,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Run { pipeline } => commands::run::execute(&pipeline).await,
         Commands::Check { pipeline } => commands::check::execute(&pipeline).await,
+        Commands::Discover { pipeline } => commands::discover::execute(&pipeline).await,
         Commands::Connectors => commands::connectors::execute().await,
     }
 }

@@ -6,13 +6,13 @@ use anyhow::{Context, Result};
 
 use rapidbyte_sdk::errors::ValidationResult;
 use rapidbyte_sdk::protocol::{
-    ConnectorRole, CursorInfo, CursorType, CursorValue, DataErrorPolicy, SchemaHint, StreamContext,
-    StreamLimits, StreamPolicies, SyncMode, WriteMode,
+    Catalog, ConnectorRole, CursorInfo, CursorType, CursorValue, DataErrorPolicy, SchemaHint,
+    StreamContext, StreamLimits, StreamPolicies, SyncMode, WriteMode,
 };
 
 use super::checkpoint::correlate_and_persist_cursors;
 use super::errors::{compute_backoff, PipelineError};
-use super::runner::{run_destination, run_source, run_transform, validate_connector};
+use super::runner::{run_destination, run_discover, run_source, run_transform, validate_connector};
 pub use super::runner::{CheckResult, PipelineResult};
 use crate::pipeline::types::{parse_byte_size, PipelineConfig};
 use crate::runtime::compression::CompressionCodec;
@@ -30,7 +30,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult, Pip
     loop {
         attempt += 1;
 
-        let result = execute_pipeline_once(config).await;
+        let result = execute_pipeline_once(config, attempt).await;
 
         match result {
             Ok(pipeline_result) => return Ok(pipeline_result),
@@ -89,7 +89,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult, Pip
 }
 
 /// Execute a single pipeline attempt: source -> destination with state tracking.
-async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult, PipelineError> {
+async fn execute_pipeline_once(config: &PipelineConfig, attempt: u32) -> Result<PipelineResult, PipelineError> {
     let start = Instant::now();
 
     tracing::info!(pipeline = config.pipeline, "Starting pipeline run");
@@ -467,6 +467,7 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
                 transform_count: transform_durations.len(),
                 transform_duration_secs: transform_durations.iter().sum(),
                 transform_module_load_ms,
+                retry_count: attempt - 1,
             })
         }
         _ => {
@@ -607,6 +608,34 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
         transform_validations,
         state_ok,
     })
+}
+
+/// Discover available streams from a source connector.
+/// Resolves the connector path, loads its manifest for permissions,
+/// then calls `run_discover` on a blocking thread.
+pub async fn discover_connector(
+    connector_ref: &str,
+    config: &serde_json::Value,
+) -> Result<Catalog> {
+    let wasm_path = wasm_runtime::resolve_connector_path(connector_ref)?;
+
+    let manifest =
+        load_and_validate_manifest(&wasm_path, connector_ref, ConnectorRole::Source)?;
+
+    let permissions = manifest.as_ref().map(|m| m.permissions.clone());
+    let (connector_id, connector_version) = parse_connector_ref(connector_ref);
+    let config = config.clone();
+
+    tokio::task::spawn_blocking(move || {
+        run_discover(
+            &wasm_path,
+            &connector_id,
+            &connector_version,
+            &config,
+            permissions.as_ref(),
+        )
+    })
+    .await?
 }
 
 fn create_state_backend(config: &PipelineConfig) -> Result<SqliteStateBackend> {
