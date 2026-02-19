@@ -1222,6 +1222,14 @@ async fn insert_batch(ctx: &mut WriteContext<'_>, arrow_schema: &Arc<Schema>, ba
     for batch in batches {
         let num_rows = batch.num_rows();
 
+        // Pre-downcast columns once per batch (not per cell)
+        let typed_cols = downcast_columns(batch, &active_cols);
+        // Track which active columns are type-nulled
+        let type_null_flags: Vec<bool> = active_cols
+            .iter()
+            .map(|&i| ctx.type_null_columns.contains(arrow_schema.field(i).name()))
+            .collect();
+
         // Process in chunks
         for chunk_start in (0..num_rows).step_by(INSERT_CHUNK_SIZE) {
             let chunk_end = (chunk_start + INSERT_CHUNK_SIZE).min(num_rows);
@@ -1234,14 +1242,14 @@ async fn insert_batch(ctx: &mut WriteContext<'_>, arrow_schema: &Arc<Schema>, ba
                     sql.push_str(", ");
                 }
                 sql.push('(');
-                for (pos, &col_idx) in active_cols.iter().enumerate() {
+                for (pos, typed_col) in typed_cols.iter().enumerate() {
                     if pos > 0 {
                         sql.push_str(", ");
                     }
-                    if ctx.type_null_columns.contains(arrow_schema.field(col_idx).name()) {
+                    if type_null_flags[pos] {
                         sql.push_str("NULL");
                     } else {
-                        sql.push_str(&format_sql_value(batch.column(col_idx).as_ref(), row_idx));
+                        write_sql_value(&mut sql, typed_col, row_idx);
                     }
                 }
                 sql.push(')');
