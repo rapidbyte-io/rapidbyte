@@ -335,7 +335,7 @@ pub extern "C" fn rb_run_write(request_ptr: i32, request_len: i32) -> i64 {
                 Err(e) => {
                     return make_err_response(
                         ConnectorError::transient_db("COMMIT_FAILED", e)
-                            .with_commit_state(CommitState::BeforeCommit),
+                            .with_commit_state(CommitState::AfterCommitUnknown),
                     );
                 }
             };

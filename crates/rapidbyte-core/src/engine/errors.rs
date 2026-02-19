@@ -181,4 +181,34 @@ mod tests {
         let err = ConnectorError::transient_db("X", "y");
         assert_eq!(compute_backoff(&err, 20), Duration::from_millis(60_000));
     }
+
+    // -----------------------------------------------------------------------
+    // commit_state tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pipeline_error_commit_state_extraction() {
+        use rapidbyte_sdk::errors::CommitState;
+
+        let err = PipelineError::Connector(
+            ConnectorError::transient_db("COMMIT_FAILED", "timeout")
+                .with_commit_state(CommitState::AfterCommitUnknown),
+        );
+        let ce = err.as_connector_error().unwrap();
+        assert_eq!(ce.commit_state, Some(CommitState::AfterCommitUnknown));
+    }
+
+    #[test]
+    fn test_pipeline_error_commit_unknown_is_retryable_but_unsafe() {
+        use rapidbyte_sdk::errors::CommitState;
+
+        let err = PipelineError::Connector(
+            ConnectorError::transient_db("COMMIT_FAILED", "timeout")
+                .with_commit_state(CommitState::AfterCommitUnknown),
+        );
+        assert!(err.is_retryable());
+        let ce = err.as_connector_error().unwrap();
+        assert_eq!(ce.commit_state, Some(CommitState::AfterCommitUnknown));
+        assert!(!ce.safe_to_retry);
+    }
 }

@@ -261,8 +261,15 @@ impl ConnectorError {
     }
 
     /// Attach commit state information.
+    ///
+    /// When `AfterCommitUnknown`, also sets `safe_to_retry = false` because
+    /// the server-side commit outcome is unknown (the data may already be
+    /// persisted, so a blind retry could produce duplicates).
     pub fn with_commit_state(mut self, state: CommitState) -> Self {
         self.commit_state = Some(state);
+        if state == CommitState::AfterCommitUnknown {
+            self.safe_to_retry = false;
+        }
         self
     }
 

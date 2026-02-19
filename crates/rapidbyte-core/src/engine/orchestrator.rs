@@ -37,12 +37,18 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult, Pip
             Err(ref err) if err.is_retryable() && attempt <= max_retries => {
                 if let Some(connector_err) = err.as_connector_error() {
                     let delay = compute_backoff(connector_err, attempt);
+                    let commit_state_str = connector_err
+                        .commit_state
+                        .as_ref()
+                        .map(|cs| format!("{:?}", cs));
                     tracing::warn!(
                         attempt,
                         max_retries,
                         delay_ms = delay.as_millis() as u64,
                         category = %connector_err.category,
                         code = %connector_err.code,
+                        commit_state = commit_state_str.as_deref(),
+                        safe_to_retry = connector_err.safe_to_retry,
                         "Retryable error, will retry"
                     );
                     std::thread::sleep(delay);
@@ -50,12 +56,31 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult, Pip
                 continue;
             }
             Err(err) => {
-                if err.is_retryable() {
-                    tracing::error!(
-                        attempt,
-                        max_retries,
-                        "Max retries exhausted, failing pipeline"
-                    );
+                if let Some(connector_err) = err.as_connector_error() {
+                    let commit_state_str = connector_err
+                        .commit_state
+                        .as_ref()
+                        .map(|cs| format!("{:?}", cs));
+                    if err.is_retryable() {
+                        tracing::error!(
+                            attempt,
+                            max_retries,
+                            category = %connector_err.category,
+                            code = %connector_err.code,
+                            commit_state = commit_state_str.as_deref(),
+                            safe_to_retry = connector_err.safe_to_retry,
+                            "Max retries exhausted, failing pipeline"
+                        );
+                    } else {
+                        tracing::error!(
+                            category = %connector_err.category,
+                            code = %connector_err.code,
+                            commit_state = commit_state_str.as_deref(),
+                            "Non-retryable connector error, failing pipeline"
+                        );
+                    }
+                } else {
+                    tracing::error!("Infrastructure error, failing pipeline: {}", err);
                 }
                 return Err(err);
             }
