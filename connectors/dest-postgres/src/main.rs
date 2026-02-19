@@ -4,35 +4,14 @@ mod format;
 mod loader;
 pub mod sink;
 
-use std::time::Instant;
-
 use rapidbyte_sdk::connector::DestinationConnector;
-use rapidbyte_sdk::errors::{CommitState, ConnectorError, ValidationResult, ValidationStatus};
+use rapidbyte_sdk::errors::{ConnectorError, ValidationResult, ValidationStatus};
 use rapidbyte_sdk::host_ffi;
-use rapidbyte_sdk::protocol::{Feature, OpenContext, OpenInfo, StreamContext, WritePerf, WriteSummary};
-use rapidbyte_sdk::validation::validate_pg_identifier;
-use tokio_postgres::NoTls;
+use rapidbyte_sdk::protocol::{Feature, OpenContext, OpenInfo, StreamContext, WriteSummary};
 
 #[derive(Default)]
 pub struct DestPostgres {
     config: Option<config::Config>,
-}
-
-/// Connect to PostgreSQL using the provided config.
-async fn connect(config: &config::Config) -> Result<tokio_postgres::Client, String> {
-    let conn_str = config.connection_string();
-    let (client, connection) = tokio_postgres::connect(&conn_str, NoTls)
-        .await
-        .map_err(|e| format!("Connection failed: {}", e))?;
-
-    // Spawn the connection handler
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            host_ffi::log(0, &format!("PostgreSQL connection error: {}", e));
-        }
-    });
-
-    Ok(client)
 }
 
 impl DestinationConnector for DestPostgres {
@@ -69,7 +48,7 @@ impl DestinationConnector for DestPostgres {
 
         let rt = config::create_runtime();
         rt.block_on(async {
-            let client = connect(config)
+            let client = sink::connect(config)
                 .await
                 .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
 
@@ -113,101 +92,7 @@ impl DestinationConnector for DestPostgres {
         let config = self.config.as_ref().ok_or_else(|| {
             ConnectorError::config("NO_CONFIG", "No config available. Call rb_open first.")
         })?;
-
-        // Validate identifiers before interpolating into SQL
-        validate_pg_identifier(&ctx.stream_name)
-            .map_err(|e| {
-                ConnectorError::config(
-                    "INVALID_IDENTIFIER",
-                    format!("Invalid stream name: {}", e),
-                )
-            })?;
-        validate_pg_identifier(&config.schema)
-            .map_err(|e| {
-                ConnectorError::config(
-                    "INVALID_IDENTIFIER",
-                    format!("Invalid schema name: {}", e),
-                )
-            })?;
-
-        let rt = config::create_runtime();
-        rt.block_on(async {
-            // Phase 1: Connect
-            let connect_start = Instant::now();
-            let client = connect(config)
-                .await
-                .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
-            let connect_secs = connect_start.elapsed().as_secs_f64();
-
-            // Phase 2: Session lifecycle
-            let mut session = sink::WriteSession::begin(
-                &client,
-                &config.schema,
-                sink::SessionConfig {
-                    stream_name: ctx.stream_name.clone(),
-                    write_mode: ctx.write_mode.clone(),
-                    load_method: config.load_method.clone(),
-                    schema_policy: ctx.policies.schema_evolution,
-                    on_data_error: ctx.policies.on_data_error,
-                    checkpoint: sink::CheckpointConfig {
-                        interval_bytes: ctx.limits.checkpoint_interval_bytes,
-                        interval_rows: ctx.limits.checkpoint_interval_rows,
-                        interval_seconds: ctx.limits.checkpoint_interval_seconds,
-                    },
-                },
-            )
-            .await
-            .map_err(|e| ConnectorError::transient_db("SESSION_BEGIN_FAILED", e))?;
-
-            // Phase 3: Pull loop — read batches from host
-            let mut buf: Vec<u8> = Vec::new();
-            let mut loop_error: Option<String> = None;
-
-            loop {
-                match host_ffi::next_batch(&mut buf, ctx.limits.max_batch_bytes) {
-                    Ok(None) => break,
-                    Ok(Some(n)) => {
-                        if let Err(e) = session.process_batch(&buf[..n]).await {
-                            loop_error = Some(e);
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        loop_error = Some(format!("next_batch failed: {}", e));
-                        break;
-                    }
-                }
-            }
-
-            // Handle errors
-            if let Some(err) = loop_error {
-                session.rollback().await;
-                return Err(
-                    ConnectorError::transient_db("WRITE_FAILED", err)
-                        .with_commit_state(CommitState::BeforeCommit),
-                );
-            }
-
-            // Phase 4: Commit
-            let result = session.commit().await.map_err(|e| {
-                ConnectorError::transient_db("COMMIT_FAILED", e)
-                    .with_commit_state(CommitState::AfterCommitUnknown)
-            })?;
-
-            Ok(WriteSummary {
-                records_written: result.total_rows,
-                bytes_written: result.total_bytes,
-                batches_written: result.batches_written,
-                checkpoint_count: result.checkpoint_count,
-                records_failed: result.total_failed,
-                perf: Some(WritePerf {
-                    connect_secs,
-                    flush_secs: result.flush_secs,
-                    commit_secs: result.commit_secs,
-                    arrow_decode_secs: result.arrow_decode_secs,
-                }),
-            })
-        })
+        sink::write_stream(config, &ctx)
     }
 
     fn close(&mut self) -> Result<(), ConnectorError> {
