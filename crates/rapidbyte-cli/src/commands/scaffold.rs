@@ -126,6 +126,21 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
                 &gen_sink_rs(),
                 &mut created_files,
             )?;
+            write_file(
+                &src_dir.join("format.rs"),
+                &gen_format_rs(),
+                &mut created_files,
+            )?;
+            write_file(
+                &src_dir.join("ddl.rs"),
+                &gen_ddl_rs(),
+                &mut created_files,
+            )?;
+            write_file(
+                &src_dir.join("loader.rs"),
+                &gen_loader_rs(),
+                &mut created_files,
+            )?;
         }
     }
 
@@ -146,7 +161,10 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
             println!("  4. Implement stream reading in src/source.rs");
         }
         Role::Destination => {
-            println!("  3. Implement stream writing in src/sink.rs");
+            println!("  3. Implement value formatting in src/format.rs");
+            println!("  4. Implement table DDL in src/ddl.rs");
+            println!("  5. Implement batch loading in src/loader.rs");
+            println!("  6. Wire it together in src/sink.rs");
         }
     }
     println!("  Then: cargo build --release");
@@ -345,7 +363,10 @@ rapidbyte_sdk::source_connector_main!({struct_name});
 fn gen_dest_main(struct_name: &str) -> String {
     format!(
         r#"mod config;
-mod sink;
+mod ddl;
+mod format;
+mod loader;
+pub mod sink;
 
 use rapidbyte_sdk::prelude::*;
 
@@ -485,6 +506,194 @@ pub fn write_stream(config: &Config, ctx: &StreamContext) -> Result<WriteSummary
         records_failed: 0,
         perf: None,
     })
+}
+"#
+    .to_string()
+}
+
+fn gen_format_rs() -> String {
+    r#"use std::fmt::Write as FmtWrite;
+
+use arrow::array::{
+    Array, AsArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+};
+use arrow::datatypes::DataType;
+use arrow::record_batch::RecordBatch;
+
+/// Pre-downcast Arrow column reference for zero-allocation value formatting.
+pub(crate) enum TypedCol<'a> {
+    Int16(&'a Int16Array),
+    Int32(&'a Int32Array),
+    Int64(&'a Int64Array),
+    Float32(&'a Float32Array),
+    Float64(&'a Float64Array),
+    Boolean(&'a BooleanArray),
+    Utf8(&'a arrow::array::StringArray),
+    Null,
+}
+
+/// Pre-downcast active columns from a RecordBatch.
+pub(crate) fn downcast_columns<'a>(batch: &'a RecordBatch, active_cols: &[usize]) -> Vec<TypedCol<'a>> {
+    active_cols.iter().map(|&i| {
+        let col = batch.column(i);
+        match col.data_type() {
+            DataType::Int16 => TypedCol::Int16(col.as_any().downcast_ref().unwrap()),
+            DataType::Int32 => TypedCol::Int32(col.as_any().downcast_ref().unwrap()),
+            DataType::Int64 => TypedCol::Int64(col.as_any().downcast_ref().unwrap()),
+            DataType::Float32 => TypedCol::Float32(col.as_any().downcast_ref().unwrap()),
+            DataType::Float64 => TypedCol::Float64(col.as_any().downcast_ref().unwrap()),
+            DataType::Boolean => TypedCol::Boolean(col.as_any().downcast_ref().unwrap()),
+            DataType::Utf8 => TypedCol::Utf8(col.as_string::<i32>()),
+            _ => TypedCol::Null,
+        }
+    }).collect()
+}
+
+/// Write a SQL literal for the value at `row_idx` into `buf` (no heap allocation).
+pub(crate) fn write_sql_value(buf: &mut String, col: &TypedCol, row_idx: usize) {
+    // TODO: Implement for your connector's data types
+    match col {
+        TypedCol::Null => buf.push_str("NULL"),
+        _ => buf.push_str("NULL"), // placeholder — implement per-type formatting
+    }
+}
+"#
+    .to_string()
+}
+
+fn gen_ddl_rs() -> String {
+    r#"use std::collections::HashSet;
+
+use arrow::datatypes::DataType;
+use tokio_postgres::Client;
+
+use rapidbyte_sdk::host_ffi;
+use rapidbyte_sdk::protocol::{SchemaEvolutionPolicy, WriteMode};
+
+/// Map Arrow data types to database column types.
+pub(crate) fn arrow_to_pg_type(dt: &DataType) -> &'static str {
+    match dt {
+        DataType::Int16 => "SMALLINT",
+        DataType::Int32 => "INTEGER",
+        DataType::Int64 => "BIGINT",
+        DataType::Float32 => "REAL",
+        DataType::Float64 => "DOUBLE PRECISION",
+        DataType::Boolean => "BOOLEAN",
+        DataType::Utf8 => "TEXT",
+        _ => "TEXT",
+    }
+}
+
+/// Create the target table if it doesn't exist, based on the Arrow schema.
+pub(crate) async fn ensure_table(
+    client: &Client,
+    qualified_table: &str,
+    arrow_schema: &arrow::datatypes::Schema,
+) -> Result<(), String> {
+    let columns_ddl: Vec<String> = arrow_schema.fields().iter().map(|field| {
+        let pg_type = arrow_to_pg_type(field.data_type());
+        let nullable = if field.is_nullable() { "" } else { " NOT NULL" };
+        format!("\"{}\" {}{}", field.name(), pg_type, nullable)
+    }).collect();
+
+    let ddl = format!("CREATE TABLE IF NOT EXISTS {} ({})", qualified_table, columns_ddl.join(", "));
+    host_ffi::log(3, &format!("ensuring table: {}", ddl));
+    client.execute(&ddl, &[]).await
+        .map_err(|e| format!("Failed to create table {}: {}", qualified_table, e))?;
+    Ok(())
+}
+
+/// Ensure the target schema and table exist, handling schema drift.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ensure_table_and_schema(
+    client: &Client,
+    target_schema: &str,
+    stream_name: &str,
+    created_tables: &mut HashSet<String>,
+    _write_mode: Option<&WriteMode>,
+    _schema_policy: Option<&SchemaEvolutionPolicy>,
+    arrow_schema: &arrow::datatypes::Schema,
+    _ignored_columns: &mut HashSet<String>,
+    _type_null_columns: &mut HashSet<String>,
+) -> Result<(), String> {
+    let qualified_table = format!("\"{}\".\"{}\"", target_schema, stream_name);
+    if created_tables.contains(&qualified_table) {
+        return Ok(());
+    }
+    let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", target_schema);
+    client.execute(&create_schema, &[]).await
+        .map_err(|e| format!("Failed to create schema: {}", e))?;
+    ensure_table(client, &qualified_table, arrow_schema).await?;
+    created_tables.insert(qualified_table);
+    // TODO: Add schema drift detection and policy enforcement
+    Ok(())
+}
+"#
+    .to_string()
+}
+
+fn gen_loader_rs() -> String {
+    r#"use std::collections::HashSet;
+use std::io::Cursor;
+use std::sync::Arc;
+use std::time::Instant;
+
+use arrow::datatypes::Schema;
+use arrow::ipc::reader::StreamReader;
+use arrow::record_batch::RecordBatch;
+use tokio_postgres::Client;
+
+use rapidbyte_sdk::host_ffi;
+use rapidbyte_sdk::protocol::{DataErrorPolicy, SchemaEvolutionPolicy, WriteMode};
+
+use crate::ddl::ensure_table_and_schema;
+use crate::format::{downcast_columns, write_sql_value};
+
+/// Result of a write operation with per-row error tracking.
+pub(crate) struct WriteResult {
+    pub rows_written: u64,
+    pub rows_failed: u64,
+}
+
+/// Bundled parameters for batch write operations.
+pub(crate) struct WriteContext<'a> {
+    pub client: &'a Client,
+    pub target_schema: &'a str,
+    pub stream_name: &'a str,
+    pub created_tables: &'a mut HashSet<String>,
+    pub write_mode: Option<&'a WriteMode>,
+    pub schema_policy: Option<&'a SchemaEvolutionPolicy>,
+    pub on_data_error: DataErrorPolicy,
+    pub load_method: &'a str,
+    pub ignored_columns: &'a mut HashSet<String>,
+    pub type_null_columns: &'a mut HashSet<String>,
+}
+
+/// Decode Arrow IPC bytes into schema and record batches.
+fn decode_ipc(ipc_bytes: &[u8]) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
+    let cursor = Cursor::new(ipc_bytes);
+    let reader = StreamReader::try_new(cursor, None)
+        .map_err(|e| format!("Failed to read Arrow IPC: {}", e))?;
+    let schema = reader.schema();
+    let batches: Vec<_> = reader.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to read batches: {}", e))?;
+    Ok((schema, batches))
+}
+
+/// Write an Arrow IPC batch to the database.
+pub(crate) async fn write_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<(WriteResult, u64), String> {
+    let decode_start = Instant::now();
+    let (arrow_schema, batches) = decode_ipc(ipc_bytes)?;
+    let decode_nanos = decode_start.elapsed().as_nanos() as u64;
+
+    if batches.is_empty() {
+        return Ok((WriteResult { rows_written: 0, rows_failed: 0 }, decode_nanos));
+    }
+
+    // TODO: Implement INSERT and/or COPY batch writing
+    let total_rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
+    host_ffi::log(2, &format!("wrote {} rows (stub)", total_rows));
+    Ok((WriteResult { rows_written: total_rows, rows_failed: 0 }, decode_nanos))
 }
 "#
     .to_string()
