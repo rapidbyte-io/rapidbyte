@@ -147,6 +147,7 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
         checkpoint_interval_bytes: checkpoint_interval,
         checkpoint_interval_rows: config.resources.checkpoint_interval_rows,
         checkpoint_interval_seconds: config.resources.checkpoint_interval_seconds,
+        max_inflight_batches: config.resources.max_inflight_batches,
         ..StreamLimits::default()
     };
 
@@ -165,6 +166,7 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
         .map(|s| {
             let sync_mode = match s.sync_mode.as_str() {
                 "incremental" => SyncMode::Incremental,
+                "cdc" => SyncMode::Cdc,
                 _ => SyncMode::FullRefresh,
             };
 
@@ -230,7 +232,7 @@ async fn execute_pipeline_once(config: &PipelineConfig) -> Result<PipelineResult
     let mut receivers: Vec<mpsc::Receiver<Frame>> = Vec::with_capacity(num_transforms + 1);
 
     for _ in 0..=num_transforms {
-        let (tx, rx) = mpsc::sync_channel::<Frame>(16);
+        let (tx, rx) = mpsc::sync_channel::<Frame>(limits.max_inflight_batches as usize);
         senders.push(tx);
         receivers.push(rx);
     }

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub enum SyncMode {
     FullRefresh,
     Incremental,
+    Cdc,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -344,6 +345,15 @@ pub struct PayloadEnvelope<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_sync_mode_cdc_roundtrip() {
+        let mode = SyncMode::Cdc;
+        let json = serde_json::to_string(&mode).unwrap();
+        assert_eq!(json, "\"cdc\"");
+        let back: SyncMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(mode, back);
+    }
 
     #[test]
     fn test_sync_mode_roundtrip() {

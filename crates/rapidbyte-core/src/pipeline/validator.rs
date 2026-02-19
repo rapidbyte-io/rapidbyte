@@ -31,10 +31,10 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
             errors.push(format!("Stream {} has an empty name", i));
         }
         match stream.sync_mode.as_str() {
-            "full_refresh" | "incremental" => {}
+            "full_refresh" | "incremental" | "cdc" => {}
             other => {
                 errors.push(format!(
-                    "Stream '{}' has invalid sync_mode '{}', expected 'full_refresh' or 'incremental'",
+                    "Stream '{}' has invalid sync_mode '{}', expected 'full_refresh', 'incremental', or 'cdc'",
                     stream.name, other
                 ));
             }
@@ -253,6 +253,28 @@ destination:
         assert!(err.contains("at least one stream"));
         assert!(err.contains("Destination connector reference"));
         assert!(err.contains("Invalid destination write_mode"));
+    }
+
+    #[test]
+    fn test_cdc_sync_mode_passes() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test_pipeline
+source:
+  use: source-postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: cdc
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+  write_mode: append
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        assert!(validate_pipeline(&config).is_ok());
     }
 
     #[test]
