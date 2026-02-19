@@ -96,6 +96,10 @@ pub struct ResourceConfig {
     /// Valid values: "lz4", "zstd". None = no compression (default).
     #[serde(default)]
     pub compression: Option<String>,
+    /// Channel capacity between pipeline stages. Controls backpressure.
+    /// Must be >= 1. Default: 16.
+    #[serde(default = "default_max_inflight_batches")]
+    pub max_inflight_batches: u32,
 }
 
 fn default_max_memory() -> String {
@@ -113,6 +117,9 @@ fn default_checkpoint_interval() -> String {
 fn default_max_retries() -> u32 {
     3
 }
+fn default_max_inflight_batches() -> u32 {
+    16
+}
 
 impl Default for ResourceConfig {
     fn default() -> Self {
@@ -125,6 +132,7 @@ impl Default for ResourceConfig {
             checkpoint_interval_seconds: 0,
             max_retries: default_max_retries(),
             compression: None,
+            max_inflight_batches: default_max_inflight_batches(),
         }
     }
 }
@@ -443,6 +451,34 @@ resources:
     fn test_compression_defaults_to_none() {
         let config = ResourceConfig::default();
         assert_eq!(config.compression, None);
+    }
+
+    #[test]
+    fn test_deserialize_max_inflight_batches() {
+        let yaml = r#"
+version: "1"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+resources:
+  max_inflight_batches: 32
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.resources.max_inflight_batches, 32);
+    }
+
+    #[test]
+    fn test_max_inflight_batches_defaults_to_16() {
+        let config = ResourceConfig::default();
+        assert_eq!(config.max_inflight_batches, 16);
     }
 
     #[test]

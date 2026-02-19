@@ -67,6 +67,10 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
         );
     }
 
+    if config.resources.max_inflight_batches == 0 {
+        errors.push("max_inflight_batches must be at least 1".to_string());
+    }
+
     if let Some(ref c) = config.resources.compression {
         match c.as_str() {
             "lz4" | "zstd" => {}
@@ -354,5 +358,54 @@ resources:
         let config = parse_pipeline_str(yaml).unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("Invalid compression codec 'snappy'"));
+    }
+
+    #[test]
+    fn test_max_inflight_batches_zero_fails() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test_pipeline
+source:
+  use: source-postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+  write_mode: append
+resources:
+  max_inflight_batches: 0
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        let err = validate_pipeline(&config).unwrap_err().to_string();
+        assert!(err.contains("max_inflight_batches"));
+    }
+
+    #[test]
+    fn test_max_inflight_batches_valid_passes() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test_pipeline
+source:
+  use: source-postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+  write_mode: append
+resources:
+  max_inflight_batches: 8
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        assert!(validate_pipeline(&config).is_ok());
     }
 }
