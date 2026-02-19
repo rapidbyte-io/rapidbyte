@@ -1,4 +1,5 @@
 mod config;
+mod ddl;
 mod format;
 pub mod sink;
 
