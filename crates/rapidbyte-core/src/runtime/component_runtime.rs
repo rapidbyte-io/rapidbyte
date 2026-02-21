@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rapidbyte_sdk::errors::{
@@ -254,6 +257,60 @@ fn build_wasi_ctx(permissions: Option<&Permissions>) -> Result<WasiCtx> {
     }
 
     Ok(builder.build())
+}
+
+/// Default milliseconds to wait for socket readiness before returning WouldBlock.
+/// Override with RAPIDBYTE_SOCKET_POLL_MS env var for performance tuning.
+const SOCKET_READY_POLL_MS: i32 = 1;
+
+/// Interest direction for socket readiness polling.
+#[cfg(unix)]
+enum SocketInterest {
+    Read,
+    Write,
+}
+
+/// Wait up to `timeout_ms` for a socket to become ready for the given interest.
+///
+/// Returns:
+/// - `Ok(true)` if the socket is ready (including error/HUP conditions — the
+///   caller should discover the specifics via the next I/O call).
+/// - `Ok(false)` on a clean timeout (no events).
+/// - `Err(io::Error)` on a non-EINTR poll failure (logged by caller for
+///   observability, then treated as "ready" to let I/O surface the real error).
+///
+/// Handles EINTR by retrying. POLLERR/POLLHUP/POLLNVAL are returned as
+/// `Ok(true)` so that the subsequent read()/write() surfaces the real error
+/// through normal error handling.
+#[cfg(unix)]
+fn wait_socket_ready(
+    stream: &TcpStream,
+    interest: SocketInterest,
+    timeout_ms: i32,
+) -> std::io::Result<bool> {
+    let events = match interest {
+        SocketInterest::Read => libc::POLLIN,
+        SocketInterest::Write => libc::POLLOUT,
+    };
+    let mut pfd = libc::pollfd {
+        fd: stream.as_raw_fd(),
+        events,
+        revents: 0,
+    };
+    loop {
+        let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if ret < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue; // EINTR: retry
+            }
+            return Err(err);
+        }
+        // ret == 0: clean timeout, socket not ready.
+        // ret > 0: socket has events. This includes POLLERR, POLLHUP, POLLNVAL
+        // — all of which mean the next I/O call will return the real error/EOF.
+        return Ok(ret > 0);
+    }
 }
 
 /// Shared state passed to component host imports.
@@ -1461,5 +1518,66 @@ mod tests {
     fn normalize_host_strips_port_for_single_colon_hosts() {
         assert_eq!(normalize_host("example.com:5432"), "example.com");
         assert_eq!(normalize_host("127.0.0.1:5432"), "127.0.0.1");
+    }
+
+    #[cfg(unix)]
+    mod socket_poll_tests {
+        use super::super::{wait_socket_ready, SocketInterest};
+
+        #[test]
+        fn wait_ready_returns_true_when_data_available() {
+            use std::io::Write;
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let client = std::net::TcpStream::connect(addr).unwrap();
+            let (mut server, _) = listener.accept().unwrap();
+            client.set_nonblocking(true).unwrap();
+
+            server.write_all(b"hello").unwrap();
+            // Generous sleep to ensure data arrives in kernel buffer (CI-safe)
+            std::thread::sleep(std::time::Duration::from_millis(50));
+
+            assert!(wait_socket_ready(&client, SocketInterest::Read, 500).unwrap());
+        }
+
+        #[test]
+        fn wait_ready_returns_false_on_timeout() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let client = std::net::TcpStream::connect(addr).unwrap();
+            let _server = listener.accept().unwrap();
+            client.set_nonblocking(true).unwrap();
+
+            // No data written — poll should timeout
+            assert!(!wait_socket_ready(&client, SocketInterest::Read, 1).unwrap());
+        }
+
+        #[test]
+        fn wait_ready_writable_for_connected_socket() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let client = std::net::TcpStream::connect(addr).unwrap();
+            let _server = listener.accept().unwrap();
+            client.set_nonblocking(true).unwrap();
+
+            // Fresh connected socket with empty send buffer should be writable
+            assert!(wait_socket_ready(&client, SocketInterest::Write, 500).unwrap());
+        }
+
+        #[test]
+        fn wait_ready_detects_peer_close_as_ready() {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            let client = std::net::TcpStream::connect(addr).unwrap();
+            let (server, _) = listener.accept().unwrap();
+            client.set_nonblocking(true).unwrap();
+
+            // Close server side — client should see HUP/readability for EOF
+            drop(server);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+
+            assert!(wait_socket_ready(&client, SocketInterest::Read, 500).unwrap());
+        }
     }
 }
