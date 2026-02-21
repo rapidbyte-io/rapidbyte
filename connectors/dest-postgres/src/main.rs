@@ -1,8 +1,7 @@
 mod config;
 mod client;
 mod ddl;
-mod format;
-mod loader;
+mod batch;
 mod writer;
 
 use rapidbyte_sdk::connector::DestinationConnector;

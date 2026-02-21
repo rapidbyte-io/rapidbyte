@@ -14,7 +14,7 @@ use rapidbyte_sdk::protocol::{
 use rapidbyte_sdk::validation::validate_pg_identifier;
 
 use crate::ddl::{prepare_staging, swap_staging_table};
-use crate::loader::{write_batch, WriteContext};
+use crate::batch::{write_batch, WriteContext};
 
 /// Entry point for writing a single stream: validates identifiers, connects,
 /// runs the pull loop through a WriteSession, and returns a WriteSummary.
