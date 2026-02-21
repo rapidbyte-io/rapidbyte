@@ -113,7 +113,7 @@ pub(crate) fn run_source(
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
     connector_id: &str,
-    _connector_version: &str,
+    connector_version: &str,
     source_config: &serde_json::Value,
     stream_ctxs: &[StreamContext],
     stats: Arc<Mutex<RunStats>>,
@@ -126,6 +126,7 @@ pub(crate) fn run_source(
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let source_timings = Arc::new(Mutex::new(HostTimings::default()));
 
+    let stats_ref = stats.clone();
     let host_state = ComponentHostState::new(
         pipeline_name.to_string(),
         connector_id.to_string(),
@@ -155,7 +156,7 @@ pub(crate) fn run_source(
         .context("Failed to serialize source config")
         .map_err(PipelineError::Infrastructure)?;
 
-    tracing::info!(connector = connector_id, "Opening source connector");
+    tracing::info!(connector = connector_id, version = connector_version, "Opening source connector");
     let open_result = iface
         .call_open(&mut store, &source_config_json)
         .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
@@ -210,12 +211,18 @@ pub(crate) fn run_source(
             total_summary.checkpoint_count += summary.checkpoint_count;
             total_summary.records_skipped += summary.records_skipped;
 
+            {
+                let mut s = stats_ref.lock().unwrap();
+                s.records_read = total_summary.records_read;
+                s.bytes_read = total_summary.bytes_read;
+            }
+
             let _ = sender.send(Frame::EndStream);
         }
         Ok(())
     })();
 
-    tracing::info!(connector = connector_id, "Closing source connector");
+    tracing::info!(connector = connector_id, version = connector_version, "Closing source connector");
     match iface.call_close(&mut store) {
         Ok(Ok(())) => {}
         Ok(Err(err)) => {
@@ -250,7 +257,7 @@ pub(crate) fn run_destination(
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
     connector_id: &str,
-    _connector_version: &str,
+    connector_version: &str,
     dest_config: &serde_json::Value,
     stream_ctxs: &[StreamContext],
     stats: Arc<Mutex<RunStats>>,
@@ -264,6 +271,7 @@ pub(crate) fn run_destination(
     let dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let dest_timings = Arc::new(Mutex::new(HostTimings::default()));
 
+    let stats_ref = stats.clone();
     let host_state = ComponentHostState::new(
         pipeline_name.to_string(),
         connector_id.to_string(),
@@ -295,7 +303,7 @@ pub(crate) fn run_destination(
         .context("Failed to serialize destination config")
         .map_err(PipelineError::Infrastructure)?;
 
-    tracing::info!(connector = connector_id, "Opening destination connector");
+    tracing::info!(connector = connector_id, version = connector_version, "Opening destination connector");
     let open_result = iface
         .call_open(&mut store, &dest_config_json)
         .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
@@ -353,13 +361,18 @@ pub(crate) fn run_destination(
             total_summary.batches_written += summary.batches_written;
             total_summary.checkpoint_count += summary.checkpoint_count;
             total_summary.records_failed += summary.records_failed;
+
+            {
+                let mut s = stats_ref.lock().unwrap();
+                s.records_written = total_summary.records_written;
+            }
         }
         Ok(())
     })();
 
     let recv_secs = recv_start.elapsed().as_secs_f64();
 
-    tracing::info!(connector = connector_id, "Closing destination connector");
+    tracing::info!(connector = connector_id, version = connector_version, "Closing destination connector");
     match iface.call_close(&mut store) {
         Ok(Ok(())) => {}
         Ok(Err(err)) => {
@@ -397,7 +410,7 @@ pub(crate) fn run_transform(
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
     connector_id: &str,
-    _connector_version: &str,
+    connector_version: &str,
     transform_config: &serde_json::Value,
     stream_ctxs: &[StreamContext],
     stats: Arc<Mutex<RunStats>>,
@@ -440,7 +453,7 @@ pub(crate) fn run_transform(
         .context("Failed to serialize transform config")
         .map_err(PipelineError::Infrastructure)?;
 
-    tracing::info!(connector = connector_id, "Opening transform connector");
+    tracing::info!(connector = connector_id, version = connector_version, "Opening transform connector");
     let open_result = iface
         .call_open(&mut store, &transform_config_json)
         .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
@@ -491,7 +504,7 @@ pub(crate) fn run_transform(
         Ok(())
     })();
 
-    tracing::info!(connector = connector_id, "Closing transform connector");
+    tracing::info!(connector = connector_id, version = connector_version, "Closing transform connector");
     match iface.call_close(&mut store) {
         Ok(Ok(())) => {}
         Ok(Err(err)) => {
@@ -511,10 +524,12 @@ pub(crate) fn validate_connector(
     wasm_path: &std::path::Path,
     role: ConnectorRole,
     connector_id: &str,
-    _connector_version: &str,
+    connector_version: &str,
     config: &serde_json::Value,
     permissions: Option<&Permissions>,
 ) -> Result<ValidationResult> {
+    tracing::info!(connector = connector_id, version = connector_version, role = ?role, "Validating connector");
+
     let runtime = WasmRuntime::new()?;
     let module = runtime.load_module(wasm_path)?;
 
@@ -618,7 +633,7 @@ pub(crate) fn validate_connector(
 pub(crate) fn run_discover(
     wasm_path: &std::path::Path,
     connector_id: &str,
-    _connector_version: &str,
+    connector_version: &str,
     config: &serde_json::Value,
     permissions: Option<&Permissions>,
 ) -> Result<Catalog> {
@@ -654,6 +669,7 @@ pub(crate) fn run_discover(
 
     tracing::info!(
         connector = connector_id,
+        version = connector_version,
         "Opening source connector for discover"
     );
     if let Err(err) = iface.call_open(&mut store, &config_json)? {
@@ -673,6 +689,7 @@ pub(crate) fn run_discover(
 
     tracing::info!(
         connector = connector_id,
+        version = connector_version,
         "Closing source connector after discover"
     );
     if let Err(err) = iface.call_close(&mut store)? {
