@@ -9,7 +9,7 @@ pub use crate::errors::{ConnectorError, ValidationResult, ValidationStatus};
 pub use crate::host_ffi;
 pub use crate::host_tcp::HostTcpStream;
 pub use crate::protocol::{
-    Catalog, Checkpoint, CheckpointKind, ConfigBlob, CursorInfo, CursorValue, Feature, Metric,
-    MetricValue, OpenContext, OpenInfo, ReadPerf, ReadSummary, SchemaHint, StreamContext,
-    StreamLimits, SyncMode, TransformSummary, WriteMode, WritePerf, WriteSummary,
+    Catalog, Checkpoint, CheckpointKind, CursorInfo, CursorValue, Feature, Metric, MetricValue,
+    OpenInfo, ReadPerf, ReadSummary, SchemaHint, StreamContext, StreamLimits, SyncMode,
+    TransformSummary, WriteMode, WritePerf, WriteSummary,
 };

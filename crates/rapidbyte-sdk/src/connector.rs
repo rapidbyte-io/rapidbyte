@@ -1,41 +1,76 @@
-//! Standard connector traits.
+//! Async-first connector traits.
 //!
-//! Rapidbyte connectors implement one or more traits below.
-//! The `*_connector_main!` macros export component-model bindings
-//! for the corresponding WIT world.
+//! Connectors implement one of the traits below. The `*_connector_main!`
+//! macros handle Tokio runtime, config deserialization, and WIT bindings.
 
-use crate::errors::{ConnectorError, ValidationResult};
+use serde::de::DeserializeOwned;
+
+use crate::errors::{ConnectorError, ValidationResult, ValidationStatus};
 use crate::protocol::{
-    Catalog, OpenContext, OpenInfo, ReadSummary, StreamContext, TransformSummary, WriteSummary,
+    Catalog, OpenInfo, ReadSummary, StreamContext, TransformSummary, WriteSummary,
 };
 
 /// Source connector lifecycle.
-pub trait SourceConnector: Default {
-    fn open(&mut self, ctx: OpenContext) -> Result<OpenInfo, ConnectorError>;
-    fn discover(&mut self) -> Result<Catalog, ConnectorError>;
-    fn validate(&mut self) -> Result<ValidationResult, ConnectorError>;
-    fn read(&mut self, ctx: StreamContext) -> Result<ReadSummary, ConnectorError>;
-    fn close(&mut self) -> Result<(), ConnectorError> {
+#[allow(async_fn_in_trait)]
+pub trait SourceConnector: Sized {
+    type Config: DeserializeOwned;
+
+    async fn connect(config: Self::Config) -> Result<(Self, OpenInfo), ConnectorError>;
+
+    async fn validate(_config: &Self::Config) -> Result<ValidationResult, ConnectorError> {
+        Ok(ValidationResult {
+            status: ValidationStatus::Success,
+            message: "Validation not implemented".to_string(),
+        })
+    }
+
+    async fn discover(&mut self) -> Result<Catalog, ConnectorError>;
+
+    async fn read(&mut self, ctx: StreamContext) -> Result<ReadSummary, ConnectorError>;
+
+    async fn close(&mut self) -> Result<(), ConnectorError> {
         Ok(())
     }
 }
 
 /// Destination connector lifecycle.
-pub trait DestinationConnector: Default {
-    fn open(&mut self, ctx: OpenContext) -> Result<OpenInfo, ConnectorError>;
-    fn validate(&mut self) -> Result<ValidationResult, ConnectorError>;
-    fn write(&mut self, ctx: StreamContext) -> Result<WriteSummary, ConnectorError>;
-    fn close(&mut self) -> Result<(), ConnectorError> {
+#[allow(async_fn_in_trait)]
+pub trait DestinationConnector: Sized {
+    type Config: DeserializeOwned;
+
+    async fn connect(config: Self::Config) -> Result<(Self, OpenInfo), ConnectorError>;
+
+    async fn validate(_config: &Self::Config) -> Result<ValidationResult, ConnectorError> {
+        Ok(ValidationResult {
+            status: ValidationStatus::Success,
+            message: "Validation not implemented".to_string(),
+        })
+    }
+
+    async fn write(&mut self, ctx: StreamContext) -> Result<WriteSummary, ConnectorError>;
+
+    async fn close(&mut self) -> Result<(), ConnectorError> {
         Ok(())
     }
 }
 
 /// Transform connector lifecycle.
-pub trait TransformConnector: Default {
-    fn open(&mut self, ctx: OpenContext) -> Result<OpenInfo, ConnectorError>;
-    fn validate(&mut self) -> Result<ValidationResult, ConnectorError>;
-    fn transform(&mut self, ctx: StreamContext) -> Result<TransformSummary, ConnectorError>;
-    fn close(&mut self) -> Result<(), ConnectorError> {
+#[allow(async_fn_in_trait)]
+pub trait TransformConnector: Sized {
+    type Config: DeserializeOwned;
+
+    async fn connect(config: Self::Config) -> Result<(Self, OpenInfo), ConnectorError>;
+
+    async fn validate(_config: &Self::Config) -> Result<ValidationResult, ConnectorError> {
+        Ok(ValidationResult {
+            status: ValidationStatus::Success,
+            message: "Validation not implemented".to_string(),
+        })
+    }
+
+    async fn transform(&mut self, ctx: StreamContext) -> Result<TransformSummary, ConnectorError>;
+
+    async fn close(&mut self) -> Result<(), ConnectorError> {
         Ok(())
     }
 }
@@ -642,4 +677,121 @@ macro_rules! transform_connector_main {
 
         fn main() {}
     };
+}
+
+#[cfg(test)]
+#[allow(dead_code, unused_imports)]
+mod tests {
+    use super::*;
+    use crate::errors::{ConnectorError, ValidationResult, ValidationStatus};
+    use crate::protocol::{Catalog, OpenInfo, ReadSummary, StreamContext, WriteSummary, TransformSummary};
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    struct TestConfig {
+        host: String,
+    }
+
+    struct TestSource {
+        config: TestConfig,
+    }
+
+    impl SourceConnector for TestSource {
+        type Config = TestConfig;
+
+        async fn connect(config: Self::Config) -> Result<(Self, OpenInfo), ConnectorError> {
+            Ok((
+                Self { config },
+                OpenInfo {
+                    protocol_version: "2".to_string(),
+                    features: vec![],
+                    default_max_batch_bytes: 64 * 1024 * 1024,
+                },
+            ))
+        }
+
+        async fn discover(&mut self) -> Result<Catalog, ConnectorError> {
+            Ok(Catalog { streams: vec![] })
+        }
+
+        async fn read(&mut self, _ctx: StreamContext) -> Result<ReadSummary, ConnectorError> {
+            Ok(ReadSummary {
+                records_read: 0,
+                bytes_read: 0,
+                batches_emitted: 0,
+                checkpoint_count: 0,
+                records_skipped: 0,
+                perf: None,
+            })
+        }
+    }
+
+    struct TestDest {
+        config: TestConfig,
+    }
+
+    impl DestinationConnector for TestDest {
+        type Config = TestConfig;
+
+        async fn connect(config: Self::Config) -> Result<(Self, OpenInfo), ConnectorError> {
+            Ok((
+                Self { config },
+                OpenInfo {
+                    protocol_version: "2".to_string(),
+                    features: vec![],
+                    default_max_batch_bytes: 64 * 1024 * 1024,
+                },
+            ))
+        }
+
+        async fn write(&mut self, _ctx: StreamContext) -> Result<WriteSummary, ConnectorError> {
+            Ok(WriteSummary {
+                records_written: 0,
+                bytes_written: 0,
+                batches_written: 0,
+                checkpoint_count: 0,
+                records_failed: 0,
+                perf: None,
+            })
+        }
+    }
+
+    struct TestTransform {
+        config: TestConfig,
+    }
+
+    impl TransformConnector for TestTransform {
+        type Config = TestConfig;
+
+        async fn connect(config: Self::Config) -> Result<(Self, OpenInfo), ConnectorError> {
+            Ok((
+                Self { config },
+                OpenInfo {
+                    protocol_version: "2".to_string(),
+                    features: vec![],
+                    default_max_batch_bytes: 64 * 1024 * 1024,
+                },
+            ))
+        }
+
+        async fn transform(&mut self, _ctx: StreamContext) -> Result<TransformSummary, ConnectorError> {
+            Ok(TransformSummary {
+                records_in: 0,
+                records_out: 0,
+                bytes_in: 0,
+                bytes_out: 0,
+                batches_processed: 0,
+            })
+        }
+    }
+
+    #[test]
+    fn test_trait_shapes_compile() {
+        fn assert_source<T: SourceConnector>() {}
+        fn assert_dest<T: DestinationConnector>() {}
+        fn assert_transform<T: TransformConnector>() {}
+        assert_source::<TestSource>();
+        assert_dest::<TestDest>();
+        assert_transform::<TestTransform>();
+    }
 }
