@@ -1,7 +1,7 @@
 pub mod config;
 mod client;
 pub mod schema;
-pub mod source;
+mod reader;
 
 use std::time::Instant;
 
@@ -55,7 +55,7 @@ impl SourceConnector for SourcePostgres {
             .await
             .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
         let connect_secs = connect_start.elapsed().as_secs_f64();
-        source::read_stream(&client, &ctx, connect_secs)
+        reader::read_stream(&client, &ctx, connect_secs)
             .await
             .map_err(|e| ConnectorError::internal("READ_FAILED", e))
     }
