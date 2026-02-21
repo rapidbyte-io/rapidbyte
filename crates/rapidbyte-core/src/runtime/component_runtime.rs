@@ -263,6 +263,11 @@ fn build_wasi_ctx(permissions: Option<&Permissions>) -> Result<WasiCtx> {
 /// Override with RAPIDBYTE_SOCKET_POLL_MS env var for performance tuning.
 const SOCKET_READY_POLL_MS: i32 = 1;
 
+/// Number of consecutive WouldBlock events before activating poll(1ms).
+/// At ~2M iterations/sec CPU speed, 1024 iterations ≈ 0.5ms of spinning.
+/// This avoids adding 1ms poll overhead to transient WouldBlocks during active streaming.
+const SOCKET_POLL_ACTIVATION_THRESHOLD: u32 = 1024;
+
 /// Interest direction for socket readiness polling.
 #[cfg(unix)]
 enum SocketInterest {
@@ -324,6 +329,13 @@ fn socket_poll_timeout_ms() -> i32 {
     })
 }
 
+/// Per-socket state tracking the TCP stream and consecutive WouldBlock streaks.
+struct SocketEntry {
+    stream: TcpStream,
+    read_would_block_streak: u32,
+    write_would_block_streak: u32,
+}
+
 /// Shared state passed to component host imports.
 pub struct ComponentHostState {
     pub pipeline_name: String,
@@ -344,7 +356,7 @@ pub struct ComponentHostState {
     pub timings: Arc<Mutex<HostTimings>>,
 
     network_acl: NetworkAcl,
-    sockets: HashMap<u64, TcpStream>,
+    sockets: HashMap<u64, SocketEntry>,
     next_socket_handle: u64,
 
     ctx: WasiCtx,
@@ -680,7 +692,11 @@ impl ComponentHostState {
 
         let handle = self.next_socket_handle;
         self.next_socket_handle = self.next_socket_handle.saturating_add(1);
-        self.sockets.insert(handle, stream);
+        self.sockets.insert(handle, SocketEntry {
+            stream,
+            read_would_block_streak: 0,
+            write_would_block_streak: 0,
+        });
 
         Ok(handle)
     }
@@ -690,24 +706,36 @@ impl ComponentHostState {
         handle: u64,
         len: u64,
     ) -> Result<SocketReadResultInternal, ConnectorError> {
-        let stream = self
+        let entry = self
             .sockets
             .get_mut(&handle)
             .ok_or_else(|| ConnectorError::internal("INVALID_SOCKET", "Invalid socket handle"))?;
 
         let read_len = len.min(64 * 1024).max(1) as usize;
         let mut buf = vec![0u8; read_len];
-        match stream.read(&mut buf) {
-            Ok(0) => Ok(SocketReadResultInternal::Eof),
+        match entry.stream.read(&mut buf) {
+            Ok(0) => {
+                entry.read_would_block_streak = 0;
+                Ok(SocketReadResultInternal::Eof)
+            }
             Ok(n) => {
+                entry.read_would_block_streak = 0;
                 buf.truncate(n);
                 Ok(SocketReadResultInternal::Data(buf))
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Poll for readiness before returning WouldBlock.
-                // This prevents the guest from busy-looping at CPU speed.
+                entry.read_would_block_streak += 1;
+
+                // Below threshold: return WouldBlock immediately (near-zero overhead).
+                // This avoids adding 1ms poll latency to transient WouldBlocks during
+                // active streaming where the next packet arrives in microseconds.
+                if entry.read_would_block_streak < SOCKET_POLL_ACTIVATION_THRESHOLD {
+                    return Ok(SocketReadResultInternal::WouldBlock);
+                }
+
+                // Above threshold: socket appears idle. Poll to avoid busy-looping.
                 #[cfg(unix)]
-                let ready = match wait_socket_ready(stream, SocketInterest::Read, socket_poll_timeout_ms()) {
+                let ready = match wait_socket_ready(&entry.stream, SocketInterest::Read, socket_poll_timeout_ms()) {
                     Ok(ready) => ready,
                     Err(poll_err) => {
                         tracing::warn!(handle, error = %poll_err, "poll() failed in socket_read");
@@ -718,9 +746,13 @@ impl ComponentHostState {
                 let ready = false;
 
                 if ready {
-                    match stream.read(&mut buf) {
-                        Ok(0) => Ok(SocketReadResultInternal::Eof),
+                    match entry.stream.read(&mut buf) {
+                        Ok(0) => {
+                            entry.read_would_block_streak = 0;
+                            Ok(SocketReadResultInternal::Eof)
+                        }
                         Ok(n) => {
+                            entry.read_would_block_streak = 0;
                             buf.truncate(n);
                             Ok(SocketReadResultInternal::Data(buf))
                         }
@@ -749,18 +781,27 @@ impl ComponentHostState {
         handle: u64,
         data: Vec<u8>,
     ) -> Result<SocketWriteResultInternal, ConnectorError> {
-        let stream = self
+        let entry = self
             .sockets
             .get_mut(&handle)
             .ok_or_else(|| ConnectorError::internal("INVALID_SOCKET", "Invalid socket handle"))?;
 
-        match stream.write(&data) {
-            Ok(n) => Ok(SocketWriteResultInternal::Written(n as u64)),
+        match entry.stream.write(&data) {
+            Ok(n) => {
+                entry.write_would_block_streak = 0;
+                Ok(SocketWriteResultInternal::Written(n as u64))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Poll for writability before returning WouldBlock.
-                // This prevents the guest from busy-looping at CPU speed.
+                entry.write_would_block_streak += 1;
+
+                // Below threshold: return WouldBlock immediately (near-zero overhead).
+                if entry.write_would_block_streak < SOCKET_POLL_ACTIVATION_THRESHOLD {
+                    return Ok(SocketWriteResultInternal::WouldBlock);
+                }
+
+                // Above threshold: socket appears idle. Poll to avoid busy-looping.
                 #[cfg(unix)]
-                let ready = match wait_socket_ready(stream, SocketInterest::Write, socket_poll_timeout_ms()) {
+                let ready = match wait_socket_ready(&entry.stream, SocketInterest::Write, socket_poll_timeout_ms()) {
                     Ok(ready) => ready,
                     Err(poll_err) => {
                         tracing::warn!(handle, error = %poll_err, "poll() failed in socket_write");
@@ -771,8 +812,11 @@ impl ComponentHostState {
                 let ready = false;
 
                 if ready {
-                    match stream.write(&data) {
-                        Ok(n) => Ok(SocketWriteResultInternal::Written(n as u64)),
+                    match entry.stream.write(&data) {
+                        Ok(n) => {
+                            entry.write_would_block_streak = 0;
+                            Ok(SocketWriteResultInternal::Written(n as u64))
+                        }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             Ok(SocketWriteResultInternal::WouldBlock)
                         }
