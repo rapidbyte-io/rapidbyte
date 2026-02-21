@@ -1,0 +1,76 @@
+use anyhow::{anyhow, Context};
+use tokio_postgres::{Client, Config as PgConfig, NoTls};
+
+use rapidbyte_sdk::errors::{ConnectorError, ValidationResult, ValidationStatus};
+use rapidbyte_sdk::host_ffi;
+
+/// Connect to PostgreSQL using the provided config.
+pub(crate) async fn connect(config: &crate::config::Config) -> Result<Client, String> {
+    connect_inner(config).await.map_err(|e| e.to_string())
+}
+
+async fn connect_inner(config: &crate::config::Config) -> anyhow::Result<Client> {
+    let mut pg = PgConfig::new();
+    pg.host(&config.host);
+    pg.port(config.port);
+    pg.user(&config.user);
+    if !config.password.is_empty() {
+        pg.password(&config.password);
+    }
+    pg.dbname(&config.database);
+
+    let stream = rapidbyte_sdk::host_tcp::HostTcpStream::connect(&config.host, config.port)
+        .map_err(|e| anyhow!("Connection failed: {e}"))?;
+    let (client, connection) = pg
+        .connect_raw(stream, NoTls)
+        .await
+        .context("Connection failed")?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            host_ffi::log(0, &format!("PostgreSQL connection error: {}", e));
+        }
+    });
+
+    Ok(client)
+}
+
+/// Validate PostgreSQL connectivity and target schema.
+pub(crate) async fn validate(config: &crate::config::Config) -> Result<ValidationResult, ConnectorError> {
+    let client = connect(config)
+        .await
+        .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
+
+    client
+        .query_one("SELECT 1", &[])
+        .await
+        .map_err(|e| {
+            ConnectorError::transient_network(
+                "CONNECTION_TEST_FAILED",
+                format!("Connection test failed: {}", e),
+            )
+        })?;
+
+    let schema_check = client
+        .query_one(
+            "SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1",
+            &[&config.schema],
+        )
+        .await;
+
+    let message = match schema_check {
+        Ok(_) => format!(
+            "Connected to {}:{}/{} (schema: {})",
+            config.host, config.port, config.database, config.schema
+        ),
+        Err(_) => format!(
+            "Connected to {}:{}/{} (schema '{}' does not exist, will be created)",
+            config.host, config.port, config.database, config.schema
+        ),
+    };
+
+    Ok(ValidationResult {
+        status: ValidationStatus::Success,
+        message,
+    })
+}

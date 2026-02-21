@@ -3,7 +3,7 @@ use std::io::Cursor;
 use std::time::Instant;
 
 use arrow::ipc::reader::StreamReader;
-use tokio_postgres::{Client, Config as PgConfig, NoTls};
+use tokio_postgres::Client;
 
 use rapidbyte_sdk::errors::{CommitState, ConnectorError};
 use rapidbyte_sdk::host_ffi;
@@ -15,36 +15,6 @@ use rapidbyte_sdk::validation::validate_pg_identifier;
 
 use crate::ddl::{prepare_staging, swap_staging_table};
 use crate::loader::{write_batch, WriteContext};
-
-/// Connect to PostgreSQL using the provided config.
-pub(crate) async fn connect(
-    config: &crate::config::Config,
-) -> Result<tokio_postgres::Client, String> {
-    let mut pg = PgConfig::new();
-    pg.host(&config.host);
-    pg.port(config.port);
-    pg.user(&config.user);
-    if !config.password.is_empty() {
-        pg.password(&config.password);
-    }
-    pg.dbname(&config.database);
-
-    let stream = rapidbyte_sdk::host_tcp::HostTcpStream::connect(&config.host, config.port)
-        .map_err(|e| format!("Connection failed: {}", e))?;
-    let (client, connection) = pg
-        .connect_raw(stream, NoTls)
-        .await
-        .map_err(|e| format!("Connection failed: {}", e))?;
-
-    // Spawn the connection handler
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            host_ffi::log(0, &format!("PostgreSQL connection error: {}", e));
-        }
-    });
-
-    Ok(client)
-}
 
 /// Entry point for writing a single stream: validates identifiers, connects,
 /// runs the pull loop through a WriteSession, and returns a WriteSummary.
@@ -68,7 +38,7 @@ pub async fn write_stream(
 
     // Phase 1: Connect
     let connect_start = Instant::now();
-    let client = connect(config)
+    let client = crate::client::connect(config)
         .await
         .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
     let connect_secs = connect_start.elapsed().as_secs_f64();
