@@ -34,7 +34,7 @@ impl DestinationConnector for DestPostgres {
         self.config = Some(config);
 
         Ok(OpenInfo {
-            protocol_version: "1".to_string(),
+            protocol_version: "2".to_string(),
             features,
             default_max_batch_bytes: 64 * 1024 * 1024,
         })
@@ -90,7 +90,7 @@ impl DestinationConnector for DestPostgres {
 
     fn write(&mut self, ctx: StreamContext) -> Result<WriteSummary, ConnectorError> {
         let config = self.config.as_ref().ok_or_else(|| {
-            ConnectorError::config("NO_CONFIG", "No config available. Call rb_open first.")
+            ConnectorError::config("NO_CONFIG", "No config available. Call open first.")
         })?;
         sink::write_stream(config, &ctx)
     }

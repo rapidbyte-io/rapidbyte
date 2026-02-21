@@ -5,11 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONNECTOR_DIR="$PROJECT_ROOT/target/connectors"
 
-# Source WasmEdge environment
-if [ -f "$HOME/.wasmedge/env" ]; then
-    set +u; source "$HOME/.wasmedge/env"; set -u
-fi
-
 # Defaults
 BENCH_ROWS="10000"
 BENCH_ITERS="3"
@@ -29,6 +24,16 @@ warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 fail()  { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
 cyan()  { echo -e "${CYAN}$*${NC}"; }
 
+# Keep benchmark compare deterministic across developer environments.
+if [ "${RAPIDBYTE_BENCH_DISABLE_RUSTC_WRAPPER:-1}" = "1" ]; then
+    export RUSTC_WRAPPER=""
+    export CARGO_BUILD_RUSTC_WRAPPER=""
+fi
+if [ "${RAPIDBYTE_BENCH_RESET_RUSTFLAGS:-1}" = "1" ]; then
+    export RUSTFLAGS=""
+    export CARGO_TARGET_WASM32_WASIP2_RUSTFLAGS=""
+fi
+
 ORIGINAL_REF=""
 PG_STARTED="false"
 
@@ -45,7 +50,7 @@ cleanup() {
 }
 
 usage() {
-    echo "Usage: $0 <ref1> <ref2> [--rows N] [--iters N] [--no-aot]"
+    echo "Usage: $0 <ref1> <ref2> [--rows N] [--iters N] [--aot|--no-aot]"
     echo ""
     echo "Benchmark two git refs and compare results."
     echo ""
@@ -56,7 +61,8 @@ usage() {
     echo "Options:"
     echo "  --rows N    Number of rows to benchmark (default: 10000)"
     echo "  --iters N   Number of iterations per mode (default: 3)"
-    echo "  --no-aot    Skip AOT compilation of WASM modules"
+    echo "  --aot       Enable Wasmtime AOT cache (default)"
+    echo "  --no-aot    Disable Wasmtime AOT cache"
     echo ""
     echo "Examples:"
     echo "  $0 main my-feature"
@@ -77,6 +83,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --rows)   BENCH_ROWS="$2"; shift 2 ;;
         --iters)  BENCH_ITERS="$2"; shift 2 ;;
+        --aot)    BENCH_AOT="true"; shift ;;
         --no-aot) BENCH_AOT="false"; shift ;;
         --help)   usage ;;
         *)        fail "Unknown option: $1" ;;
@@ -143,32 +150,23 @@ bench_ref() {
 
     # Checkout
     info "Checking out $ref..."
-    git -C "$PROJECT_ROOT" checkout "$ref" 2>&1 | tail -1
+    git -C "$PROJECT_ROOT" checkout "$ref" --quiet
 
     # Build
     info "Building host binary (release)..."
-    (cd "$PROJECT_ROOT" && cargo build --release 2>&1 | tail -1)
+    (cd "$PROJECT_ROOT" && cargo build --release --quiet)
 
     info "Building source-postgres connector (release)..."
-    (cd "$PROJECT_ROOT/connectors/source-postgres" && cargo build --release 2>&1 | tail -1)
+    (cd "$PROJECT_ROOT/connectors/source-postgres" && cargo build --release --quiet)
 
     info "Building dest-postgres connector (release)..."
-    (cd "$PROJECT_ROOT/connectors/dest-postgres" && cargo build --release 2>&1 | tail -1)
+    (cd "$PROJECT_ROOT/connectors/dest-postgres" && cargo build --release --quiet)
 
     # Stage .wasm files
     mkdir -p "$CONNECTOR_DIR"
-    cp "$PROJECT_ROOT/connectors/source-postgres/target/wasm32-wasip1/release/source_postgres.wasm" "$CONNECTOR_DIR/"
-    cp "$PROJECT_ROOT/connectors/dest-postgres/target/wasm32-wasip1/release/dest_postgres.wasm" "$CONNECTOR_DIR/"
+    cp "$PROJECT_ROOT/connectors/source-postgres/target/wasm32-wasip2/release/source_postgres.wasm" "$CONNECTOR_DIR/"
+    cp "$PROJECT_ROOT/connectors/dest-postgres/target/wasm32-wasip2/release/dest_postgres.wasm" "$CONNECTOR_DIR/"
     info "Connectors staged"
-
-    # AOT compile
-    if [ "$BENCH_AOT" = "true" ] && command -v wasmedge &> /dev/null; then
-        info "AOT-compiling connectors..."
-        wasmedge compile "$CONNECTOR_DIR/source_postgres.wasm" "$CONNECTOR_DIR/source_postgres.wasm" 2>&1 | tail -1
-        wasmedge compile "$CONNECTOR_DIR/dest_postgres.wasm" "$CONNECTOR_DIR/dest_postgres.wasm" 2>&1 | tail -1
-    elif [ "$BENCH_AOT" = "true" ]; then
-        warn "wasmedge CLI not found, skipping AOT compilation"
-    fi
 
     # Seed benchmark data
     info "Seeding $BENCH_ROWS rows into bench_events..."
@@ -182,6 +180,11 @@ bench_ref() {
 
     # Run iterations
     export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
+    if [ "$BENCH_AOT" = "true" ]; then
+        export RAPIDBYTE_WASMTIME_AOT="1"
+    else
+        export RAPIDBYTE_WASMTIME_AOT="0"
+    fi
 
     for mode in insert copy; do
         local pipeline="bench_pg.yaml"
@@ -236,7 +239,7 @@ bench_ref "$REF2" "$SHA2"
 
 # ── Restore original branch ──────────────────────────────────────
 info "Restoring original branch: $ORIGINAL_REF"
-git -C "$PROJECT_ROOT" checkout "$ORIGINAL_REF" 2>&1 | tail -1
+git -C "$PROJECT_ROOT" checkout "$ORIGINAL_REF" --quiet
 ORIGINAL_REF=""  # prevent double-restore in cleanup trap
 
 echo ""

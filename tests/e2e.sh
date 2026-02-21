@@ -5,14 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONNECTOR_DIR="$PROJECT_ROOT/target/connectors"
 
-# Source WasmEdge environment (DYLD_LIBRARY_PATH, PATH)
-# Temporarily relax nounset — the env script checks variables that may be unset
-if [ -f "$HOME/.wasmedge/env" ]; then
-    set +u
-    source "$HOME/.wasmedge/env"
-    set -u
-fi
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -21,6 +13,20 @@ NC='\033[0m'
 info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 fail()  { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
+
+# E2E should be deterministic and not depend on local rustc wrappers (e.g. sccache).
+# Set RAPIDBYTE_E2E_DISABLE_RUSTC_WRAPPER=0 to keep existing wrapper configuration.
+if [ "${RAPIDBYTE_E2E_DISABLE_RUSTC_WRAPPER:-1}" = "1" ]; then
+    export RUSTC_WRAPPER=""
+    export CARGO_BUILD_RUSTC_WRAPPER=""
+fi
+
+# Global host rustflags (for example target-cpu=apple-m2) can break wasm target builds.
+# Keep e2e stable by clearing them unless explicitly opted out.
+if [ "${RAPIDBYTE_E2E_RESET_RUSTFLAGS:-1}" = "1" ]; then
+    export RUSTFLAGS=""
+    export CARGO_TARGET_WASM32_WASIP2_RUSTFLAGS=""
+fi
 
 cleanup() {
     info "Stopping Docker Compose..."
@@ -34,23 +40,22 @@ cleanup() {
 # ── Step 1: Build everything ────────────────────────────────────────
 
 info "Building host binary..."
-(cd "$PROJECT_ROOT" && cargo build 2>&1 | tail -1)
+(cd "$PROJECT_ROOT" && cargo build --quiet)
 
 info "Building source-postgres connector..."
-(cd "$PROJECT_ROOT/connectors/source-postgres" && cargo build 2>&1 | tail -1)
+(cd "$PROJECT_ROOT/connectors/source-postgres" && cargo build --quiet)
 
 info "Building dest-postgres connector..."
-(cd "$PROJECT_ROOT/connectors/dest-postgres" && cargo build 2>&1 | tail -1)
+(cd "$PROJECT_ROOT/connectors/dest-postgres" && cargo build --quiet)
 
 # ── Step 2: Stage .wasm files ───────────────────────────────────────
 
 mkdir -p "$CONNECTOR_DIR"
-cp "$PROJECT_ROOT/connectors/source-postgres/target/wasm32-wasip1/debug/source_postgres.wasm" "$CONNECTOR_DIR/"
-cp "$PROJECT_ROOT/connectors/dest-postgres/target/wasm32-wasip1/debug/dest_postgres.wasm" "$CONNECTOR_DIR/"
+cp "$PROJECT_ROOT/connectors/source-postgres/target/wasm32-wasip2/debug/source_postgres.wasm" "$CONNECTOR_DIR/"
+cp "$PROJECT_ROOT/connectors/dest-postgres/target/wasm32-wasip2/debug/dest_postgres.wasm" "$CONNECTOR_DIR/"
 cp "$PROJECT_ROOT/connectors/source-postgres/manifest.json" "$CONNECTOR_DIR/source_postgres.manifest.json"
 cp "$PROJECT_ROOT/connectors/dest-postgres/manifest.json" "$CONNECTOR_DIR/dest_postgres.manifest.json"
 info "Connectors staged in $CONNECTOR_DIR"
-ls -lh "$CONNECTOR_DIR"/*.wasm
 
 # ── Step 3: Start PostgreSQL ────────────────────────────────────────
 
@@ -94,7 +99,7 @@ export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
 
 "$PROJECT_ROOT/target/debug/rapidbyte" run \
     "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_single_pg.yaml" \
-    --log-level debug 2>&1
+    --log-level info 2>&1
 
 # ── Step 6: Verify destination data ─────────────────────────────────
 
@@ -182,7 +187,7 @@ docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
 info "Running incremental pipeline (run 1 — initial load)..."
 "$PROJECT_ROOT/target/debug/rapidbyte" run \
     "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_incremental.yaml" \
-    --log-level debug 2>&1
+    --log-level info 2>&1
 
 # Verify: raw_incr.users should have 3 rows
 INCR_COUNT_1=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
@@ -213,7 +218,7 @@ docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
 info "Running incremental pipeline (run 2 — should read only new rows)..."
 "$PROJECT_ROOT/target/debug/rapidbyte" run \
     "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_incremental.yaml" \
-    --log-level debug 2>&1
+    --log-level info 2>&1
 
 # Verify: raw_incr.users should have 5 rows (3 from run 1 + 2 new)
 INCR_COUNT_2=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
@@ -248,7 +253,7 @@ rm -f /tmp/rapidbyte_e2e_replace_state.db
 info "Running replace pipeline (run 1 — initial load)..."
 "$PROJECT_ROOT/target/debug/rapidbyte" run \
     "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_replace.yaml" \
-    --log-level debug 2>&1
+    --log-level info 2>&1
 
 REPLACE_COUNT_1=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
     psql -U postgres -d rapidbyte_test -t -A -c "SELECT COUNT(*) FROM raw_replace.users")
@@ -261,7 +266,7 @@ fi
 info "Running replace pipeline (run 2 — should truncate and re-insert)..."
 "$PROJECT_ROOT/target/debug/rapidbyte" run \
     "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_replace.yaml" \
-    --log-level debug 2>&1
+    --log-level info 2>&1
 
 REPLACE_COUNT_2=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
     psql -U postgres -d rapidbyte_test -t -A -c "SELECT COUNT(*) FROM raw_replace.users")
@@ -289,7 +294,7 @@ rm -f /tmp/rapidbyte_e2e_upsert_state.db
 info "Running upsert pipeline (run 1 — initial load)..."
 "$PROJECT_ROOT/target/debug/rapidbyte" run \
     "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_upsert.yaml" \
-    --log-level debug 2>&1
+    --log-level info 2>&1
 
 UPSERT_COUNT_1=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
     psql -U postgres -d rapidbyte_test -t -A -c "SELECT COUNT(*) FROM raw_upsert.users")
@@ -307,7 +312,7 @@ docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
 info "Running upsert pipeline (run 2 — should update existing rows)..."
 "$PROJECT_ROOT/target/debug/rapidbyte" run \
     "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_upsert.yaml" \
-    --log-level debug 2>&1
+    --log-level info 2>&1
 
 UPSERT_COUNT_2=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
     psql -U postgres -d rapidbyte_test -t -A -c "SELECT COUNT(*) FROM raw_upsert.users")

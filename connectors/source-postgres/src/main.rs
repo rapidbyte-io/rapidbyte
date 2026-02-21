@@ -26,7 +26,7 @@ impl SourceConnector for SourcePostgres {
         );
         self.config = Some(config);
         Ok(OpenInfo {
-            protocol_version: "1".to_string(),
+            protocol_version: "2".to_string(),
             features: vec![],
             default_max_batch_bytes: 64 * 1024 * 1024,
         })
@@ -34,7 +34,7 @@ impl SourceConnector for SourcePostgres {
 
     fn discover(&mut self) -> Result<Catalog, ConnectorError> {
         let config = self.config.as_ref().ok_or_else(|| {
-            ConnectorError::config("NOT_OPENED", "rb_open must be called before rb_discover")
+            ConnectorError::config("NOT_OPENED", "open must be called before discover")
         })?;
         let rt = config::create_runtime();
         rt.block_on(async {
@@ -78,7 +78,7 @@ impl SourceConnector for SourcePostgres {
 
     fn read(&mut self, ctx: StreamContext) -> Result<ReadSummary, ConnectorError> {
         let config = self.config.as_ref().ok_or_else(|| {
-            ConnectorError::config("NO_CONFIG", "No config available. Call rb_open first.")
+            ConnectorError::config("NO_CONFIG", "No config available. Call open first.")
         })?;
         let rt = config::create_runtime();
         rt.block_on(async {

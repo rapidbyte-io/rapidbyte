@@ -206,7 +206,7 @@ mod tests {
             bytes_processed: 5000,
         };
         let envelope = PayloadEnvelope {
-            protocol_version: "1".to_string(),
+            protocol_version: "2".to_string(),
             connector_id: "source-postgres".to_string(),
             stream_name: "users".to_string(),
             payload: source_cp.clone(),
@@ -222,7 +222,7 @@ mod tests {
             serde_json::to_string_pretty(&value).unwrap()
         );
 
-        // This is the exact logic from host_functions.rs:617
+        // This is the same parsing logic used by the component host runtime.
         let checkpoint_value = value.get("payload").cloned().unwrap_or(value.clone());
         let parsed: Checkpoint = serde_json::from_value(checkpoint_value).unwrap();
 
@@ -242,7 +242,7 @@ mod tests {
             bytes_processed: 5000,
         };
         let dest_envelope = PayloadEnvelope {
-            protocol_version: "1".to_string(),
+            protocol_version: "2".to_string(),
             connector_id: "dest-postgres".to_string(),
             stream_name: "users".to_string(),
             payload: dest_cp.clone(),
@@ -269,10 +269,7 @@ mod tests {
                 .unwrap();
         assert_eq!(advanced, 1);
 
-        let cursor = backend
-            .get_cursor("test_pipe", "users")
-            .unwrap()
-            .unwrap();
+        let cursor = backend.get_cursor("test_pipe", "users").unwrap().unwrap();
         assert_eq!(cursor.cursor_value, Some("42".to_string()));
         assert_eq!(cursor.cursor_field, Some("id".to_string()));
     }

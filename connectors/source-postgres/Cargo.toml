@@ -9,16 +9,15 @@ path = "src/main.rs"
 
 [dependencies]
 rapidbyte-sdk = { path = "../../crates/rapidbyte-sdk" }
-tokio = { version = "=1.36", features = ["rt", "net", "macros", "io-util"] }
-tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
+tokio = { version = "1.36", default-features = false, features = ["rt", "macros", "io-util"] }
+tokio-postgres = { version = "0.7.16", default-features = false, features = ["with-serde_json-1"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 arrow = { version = "53", features = ["ipc"] }
 chrono = "0.4"
-
-[workspace]
+wit-bindgen = "0.46"
 
 [patch.crates-io]
-tokio = { git = "https://github.com/second-state/wasi_tokio.git", branch = "v1.36.x" }
-socket2 = { git = "https://github.com/second-state/socket2.git", branch = "v0.5.x" }
-tokio-postgres = { git = "https://github.com/second-state/rust-postgres.git" }
+whoami = { path = "../../crates/whoami-shim" }
+
+[workspace]

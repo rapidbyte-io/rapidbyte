@@ -176,7 +176,7 @@ pub struct ConnectorManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
 
-    /// Protocol version this connector implements (e.g., "1").
+    /// Protocol version this connector implements (e.g., "2").
     pub protocol_version: String,
 
     // -- Artifact --
@@ -225,7 +225,7 @@ mod tests {
             description: "Writes data to PostgreSQL using INSERT or COPY".to_string(),
             author: Some("Rapidbyte Inc.".to_string()),
             license: Some("Apache-2.0".to_string()),
-            protocol_version: "1".to_string(),
+            protocol_version: "2".to_string(),
             artifact: ArtifactInfo {
                 entry_point: "dest_postgres.wasm".to_string(),
                 checksum: None,
@@ -256,7 +256,7 @@ mod tests {
             description: "Reads from PostgreSQL".to_string(),
             author: None,
             license: None,
-            protocol_version: "1".to_string(),
+            protocol_version: "2".to_string(),
             artifact: ArtifactInfo {
                 entry_point: "source_postgres.wasm".to_string(),
                 checksum: None,
@@ -299,7 +299,7 @@ mod tests {
             description: "Masks PII columns".to_string(),
             author: None,
             license: None,
-            protocol_version: "1".to_string(),
+            protocol_version: "2".to_string(),
             artifact: ArtifactInfo {
                 entry_point: "transform_mask.wasm".to_string(),
                 checksum: None,
@@ -343,7 +343,7 @@ mod tests {
             "description": "Writes data to PostgreSQL using INSERT or COPY",
             "author": "Rapidbyte Inc.",
             "license": "Apache-2.0",
-            "protocol_version": "1",
+            "protocol_version": "2",
             "artifact": {
                 "entry_point": "dest_postgres.wasm",
                 "checksum": "sha256:abcd1234",
@@ -402,7 +402,7 @@ mod tests {
             "id": "test",
             "name": "Test",
             "version": "0.1.0",
-            "protocol_version": "1",
+            "protocol_version": "2",
             "artifact": { "entry_point": "test.wasm" },
             "roles": {}
         }"#;
@@ -421,7 +421,7 @@ mod tests {
             description: "".to_string(),
             author: None,
             license: None,
-            protocol_version: "1".to_string(),
+            protocol_version: "2".to_string(),
             artifact: ArtifactInfo {
                 entry_point: "pg_bidir.wasm".to_string(),
                 checksum: None,

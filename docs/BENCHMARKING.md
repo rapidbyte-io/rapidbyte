@@ -8,12 +8,12 @@ Guide to running benchmarks, profiling, and tracking performance regressions in 
 just bench-connector-postgres
 ```
 
-This runs 3 iterations each of INSERT and COPY modes against 10,000 rows with AOT-compiled WASM modules, then prints a comparison report.
+This runs 3 iterations each of INSERT and COPY modes against 10,000 rows, then prints a comparison report.
 
 ## Prerequisites
 
 - **Docker** — PostgreSQL runs via `docker-compose.yml`
-- **WasmEdge** — runtime + `wasmedge compile` for AOT (source `~/.wasmedge/env`)
+- **Wasmtime** — component runtime used by the host
 - **Python 3** — used by the reporting scripts
 - **samply** (optional) — `cargo install samply` for CPU profiling
 
@@ -31,7 +31,8 @@ The main benchmark script. Builds everything, starts PostgreSQL, seeds data, run
 |------|---------|-------------|
 | `--rows N` | 10000 | Number of rows to seed and benchmark |
 | `--iters N` | 3 | Iterations per mode (INSERT and COPY) |
-| `--no-aot` | (AOT on) | Skip AOT compilation of WASM modules |
+| `--aot` | on | Enable Wasmtime AOT cache |
+| `--no-aot` | off override | Disable Wasmtime AOT cache |
 | `--debug` | (release) | Use debug builds instead of release |
 | `--profile` | (off) | Generate a flamegraph after benchmark runs |
 
@@ -41,7 +42,7 @@ Examples:
 # 100K rows, 5 iterations
 ./tests/bench.sh --rows 100000 --iters 5
 
-# Debug build, no AOT
+# Debug build
 ./tests/bench.sh --debug --no-aot
 
 # Benchmark + flamegraph at the end
@@ -137,7 +138,7 @@ Every benchmark run appends enriched JSON results to `target/bench_results/resul
 - `timestamp` — ISO 8601
 - `mode` — `insert` or `copy`
 - `bench_rows` — row count
-- `aot` — whether AOT was enabled
+- `aot` — whether Wasmtime AOT cache was enabled for this run
 - `git_sha` — short commit hash
 - `git_branch` — current branch
 
@@ -167,7 +168,8 @@ The script:
 |------|---------|-------------|
 | `--rows N` | 10000 | Number of rows to benchmark |
 | `--iters N` | 3 | Iterations per mode |
-| `--no-aot` | (AOT on) | Skip AOT compilation |
+| `--aot` | on | Enable Wasmtime AOT cache |
+| `--no-aot` | off override | Disable Wasmtime AOT cache |
 
 ### Viewing Past Results
 
@@ -367,12 +369,12 @@ resources:
 
 ### HostTimings
 
-Defined in `crates/rapidbyte-core/src/runtime/host_functions.rs`:
+Defined in `crates/rapidbyte-core/src/runtime/component_runtime.rs`:
 
 ```rust
 pub struct HostTimings {
-    pub emit_batch_nanos: u64,    // total time in host_emit_batch
-    pub next_batch_nanos: u64,    // total time in host_next_batch
+    pub emit_batch_nanos: u64,    // total time in emit-batch host import
+    pub next_batch_nanos: u64,    // total time in next-batch host import
     pub compress_nanos: u64,      // time spent compressing (LZ4/Zstd)
     pub decompress_nanos: u64,    // time spent decompressing
     pub emit_batch_count: u64,    // number of emit_batch calls
@@ -415,7 +417,7 @@ Row count is controlled by the `bench_rows` psql variable. Average row size is ~
 
 **PostgreSQL not ready** — The scripts use `psql -c "SELECT 1"` to check readiness, not `pg_isready`. If seeding fails, increase the wait time or check Docker logs with `docker compose logs postgres`.
 
-**AOT compilation not found** — Ensure WasmEdge is installed and `source ~/.wasmedge/env` is in your shell profile. Without AOT, module load takes ~500ms instead of ~4ms.
+**AOT compilation flags** — Bench scripts enable Wasmtime AOT cache by default. Use `--no-aot` to disable it for A/B comparisons.
 
 **Debug build panics** — WASI connectors panic in debug builds on unsupported socket ops (e.g., `set_nodelay`). Always use release builds for benchmarking (the default). Debug mode is available via `--debug` but is only useful for testing the benchmark harness itself.
 

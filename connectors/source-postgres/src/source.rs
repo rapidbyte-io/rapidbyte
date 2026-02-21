@@ -7,7 +7,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::{Client, Config as PgConfig, NoTls};
 
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::protocol::{ColumnSchema, Metric, MetricValue, ReadSummary, StreamContext};
@@ -15,8 +15,19 @@ use rapidbyte_sdk::validation::validate_pg_identifier;
 
 /// Connect to PostgreSQL using the provided config.
 pub async fn connect(config: &crate::config::Config) -> Result<Client, String> {
-    let conn_str = config.connection_string();
-    let (client, connection) = tokio_postgres::connect(&conn_str, NoTls)
+    let mut pg = PgConfig::new();
+    pg.host(&config.host);
+    pg.port(config.port);
+    pg.user(&config.user);
+    if !config.password.is_empty() {
+        pg.password(&config.password);
+    }
+    pg.dbname(&config.database);
+
+    let stream = rapidbyte_sdk::host_tcp::HostTcpStream::connect(&config.host, config.port)
+        .map_err(|e| format!("Connection failed: {}", e))?;
+    let (client, connection) = pg
+        .connect_raw(stream, NoTls)
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
 

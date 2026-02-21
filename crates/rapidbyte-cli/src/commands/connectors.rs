@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rapidbyte_core::runtime::wasm_runtime;
+use rapidbyte_core::runtime::component_runtime;
 
 /// Execute the `connectors` command: list available connectors with manifest info.
 pub async fn execute() -> Result<()> {
@@ -25,7 +25,7 @@ pub async fn execute() -> Result<()> {
 
             if path.extension().map(|e| e == "wasm").unwrap_or(false) {
                 found = true;
-                match wasm_runtime::load_connector_manifest(&path)? {
+                match component_runtime::load_connector_manifest(&path)? {
                     Some(manifest) => {
                         let mut roles = Vec::new();
                         if manifest.roles.source.is_some() {

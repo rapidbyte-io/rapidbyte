@@ -4,7 +4,7 @@
     "name": "PostgreSQL Source",
     "version": "0.1.0",
     "description": "Reads data from PostgreSQL tables using streaming queries",
-    "protocol_version": "1",
+    "protocol_version": "2",
     "artifact": {
         "entry_point": "source_postgres.wasm"
     },

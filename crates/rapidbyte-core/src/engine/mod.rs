@@ -2,7 +2,6 @@ pub mod checkpoint;
 pub mod errors;
 pub mod orchestrator;
 pub mod runner;
-pub mod vm_factory;
 
 // Re-export public API for convenience
 pub use errors::PipelineError;

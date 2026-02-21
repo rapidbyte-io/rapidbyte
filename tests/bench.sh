@@ -5,11 +5,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONNECTOR_DIR="$PROJECT_ROOT/target/connectors"
 
-# Source WasmEdge environment
-if [ -f "$HOME/.wasmedge/env" ]; then
-    set +u; source "$HOME/.wasmedge/env"; set -u
-fi
-
 # Defaults
 BENCH_ROWS="${BENCH_ROWS:-10000}"
 BENCH_ITERS="${BENCH_ITERS:-3}"
@@ -31,6 +26,20 @@ warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 fail()  { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
 cyan()  { echo -e "${CYAN}$*${NC}"; }
 
+# Bench should be deterministic and not depend on local rustc wrappers (e.g. sccache).
+# Set RAPIDBYTE_BENCH_DISABLE_RUSTC_WRAPPER=0 to keep existing wrapper configuration.
+if [ "${RAPIDBYTE_BENCH_DISABLE_RUSTC_WRAPPER:-1}" = "1" ]; then
+    export RUSTC_WRAPPER=""
+    export CARGO_BUILD_RUSTC_WRAPPER=""
+fi
+
+# Global host rustflags (for example target-cpu=apple-m2) can break wasm target builds.
+# Keep benchmark runs stable by clearing them unless explicitly opted out.
+if [ "${RAPIDBYTE_BENCH_RESET_RUSTFLAGS:-1}" = "1" ]; then
+    export RUSTFLAGS=""
+    export CARGO_TARGET_WASM32_WASIP2_RUSTFLAGS=""
+fi
+
 cleanup() {
     info "Stopping Docker Compose..."
     docker compose -f "$PROJECT_ROOT/docker-compose.yml" down -v 2>/dev/null || true
@@ -39,12 +48,13 @@ cleanup() {
 }
 
 usage() {
-    echo "Usage: $0 [--rows N] [--iters N] [--no-aot] [--debug] [--profile]"
+    echo "Usage: $0 [--rows N] [--iters N] [--aot|--no-aot] [--debug] [--profile]"
     echo ""
     echo "Options:"
     echo "  --rows N    Number of rows to benchmark (default: 10000)"
     echo "  --iters N   Number of iterations per mode (default: 3)"
-    echo "  --no-aot    Skip AOT compilation of WASM modules"
+    echo "  --aot       Enable Wasmtime AOT cache (default)"
+    echo "  --no-aot    Disable Wasmtime AOT cache"
     echo "  --debug     Use debug builds instead of release"
     echo "  --profile   Generate flamegraph after benchmark runs"
     echo ""
@@ -57,6 +67,7 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         --rows)   BENCH_ROWS="$2"; shift 2 ;;
         --iters)  BENCH_ITERS="$2"; shift 2 ;;
+        --aot)    BENCH_AOT="true"; shift ;;
         --no-aot) BENCH_AOT="false"; shift ;;
         --debug)  BUILD_MODE="debug"; shift ;;
         --profile) PROFILE="true"; shift ;;
@@ -81,30 +92,19 @@ if [ "$BUILD_MODE" = "release" ]; then
 fi
 
 info "Building host binary ($BUILD_MODE)..."
-(cd "$PROJECT_ROOT" && cargo build $BUILD_FLAG 2>&1 | tail -1)
+(cd "$PROJECT_ROOT" && cargo build $BUILD_FLAG --quiet)
 
 info "Building source-postgres connector ($BUILD_MODE)..."
-(cd "$PROJECT_ROOT/connectors/source-postgres" && cargo build $BUILD_FLAG 2>&1 | tail -1)
+(cd "$PROJECT_ROOT/connectors/source-postgres" && cargo build $BUILD_FLAG --quiet)
 
 info "Building dest-postgres connector ($BUILD_MODE)..."
-(cd "$PROJECT_ROOT/connectors/dest-postgres" && cargo build $BUILD_FLAG 2>&1 | tail -1)
+(cd "$PROJECT_ROOT/connectors/dest-postgres" && cargo build $BUILD_FLAG --quiet)
 
 # Stage .wasm files
 mkdir -p "$CONNECTOR_DIR"
-cp "$PROJECT_ROOT/connectors/source-postgres/target/wasm32-wasip1/$TARGET_DIR/source_postgres.wasm" "$CONNECTOR_DIR/"
-cp "$PROJECT_ROOT/connectors/dest-postgres/target/wasm32-wasip1/$TARGET_DIR/dest_postgres.wasm" "$CONNECTOR_DIR/"
+cp "$PROJECT_ROOT/connectors/source-postgres/target/wasm32-wasip2/$TARGET_DIR/source_postgres.wasm" "$CONNECTOR_DIR/"
+cp "$PROJECT_ROOT/connectors/dest-postgres/target/wasm32-wasip2/$TARGET_DIR/dest_postgres.wasm" "$CONNECTOR_DIR/"
 info "Connectors staged in $CONNECTOR_DIR"
-
-# ── AOT-compile WASM modules ────────────────────────────────────
-if [ "$BENCH_AOT" = "true" ] && command -v wasmedge &> /dev/null; then
-    info "AOT-compiling source connector..."
-    wasmedge compile "$CONNECTOR_DIR/source_postgres.wasm" "$CONNECTOR_DIR/source_postgres.wasm" 2>&1 | tail -1
-    info "AOT-compiling dest connector..."
-    wasmedge compile "$CONNECTOR_DIR/dest_postgres.wasm" "$CONNECTOR_DIR/dest_postgres.wasm" 2>&1 | tail -1
-    info "AOT compilation complete"
-elif [ "$BENCH_AOT" = "true" ]; then
-    warn "wasmedge CLI not found, skipping AOT compilation"
-fi
 
 # ── Start PostgreSQL ──────────────────────────────────────────────
 info "Starting PostgreSQL via Docker Compose..."
@@ -137,6 +137,12 @@ info "Seeded $ROW_COUNT rows"
 
 # ── Run benchmark iterations ─────────────────────────────────────
 export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
+if [ "$BENCH_AOT" = "true" ]; then
+    export RAPIDBYTE_WASMTIME_AOT="1"
+else
+    export RAPIDBYTE_WASMTIME_AOT="0"
+fi
+info "Wasmtime AOT cache: ${BENCH_AOT}"
 
 run_mode() {
     local mode="$1"
@@ -299,7 +305,7 @@ if [ "$PROFILE" = "true" ]; then
 
     info "Rebuilding with debug symbols for profiling..."
     CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed \
-        cargo build --release 2>&1 | tail -1
+        cargo build --release --quiet
 
     samply record \
         --save-only \

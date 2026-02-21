@@ -15,9 +15,8 @@ use super::errors::{compute_backoff, PipelineError};
 use super::runner::{run_destination, run_discover, run_source, run_transform, validate_connector};
 pub use super::runner::{CheckResult, PipelineResult};
 use crate::pipeline::types::{parse_byte_size, PipelineConfig};
+use crate::runtime::component_runtime::{self, parse_connector_ref, Frame, WasmRuntime};
 use crate::runtime::compression::CompressionCodec;
-use crate::runtime::host_functions::Frame;
-use crate::runtime::wasm_runtime::{self, parse_connector_ref, WasmRuntime};
 use crate::state::backend::{RunStats, RunStatus, StateBackend};
 use crate::state::sqlite::SqliteStateBackend;
 
@@ -89,14 +88,17 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult, Pip
 }
 
 /// Execute a single pipeline attempt: source -> destination with state tracking.
-async fn execute_pipeline_once(config: &PipelineConfig, attempt: u32) -> Result<PipelineResult, PipelineError> {
+async fn execute_pipeline_once(
+    config: &PipelineConfig,
+    attempt: u32,
+) -> Result<PipelineResult, PipelineError> {
     let start = Instant::now();
 
     tracing::info!(pipeline = config.pipeline, "Starting pipeline run");
 
     // 1. Resolve connector paths
-    let source_wasm = wasm_runtime::resolve_connector_path(&config.source.use_ref)?;
-    let dest_wasm = wasm_runtime::resolve_connector_path(&config.destination.use_ref)?;
+    let source_wasm = component_runtime::resolve_connector_path(&config.source.use_ref)?;
+    let dest_wasm = component_runtime::resolve_connector_path(&config.destination.use_ref)?;
 
     // 1b. Load and validate manifests (pre-flight)
     let source_manifest =
@@ -144,7 +146,7 @@ async fn execute_pipeline_once(config: &PipelineConfig, attempt: u32) -> Result<
         .transforms
         .iter()
         .map(|tc| {
-            let wasm_path = wasm_runtime::resolve_connector_path(&tc.use_ref)?;
+            let wasm_path = component_runtime::resolve_connector_path(&tc.use_ref)?;
             let manifest =
                 load_and_validate_manifest(&wasm_path, &tc.use_ref, ConnectorRole::Transform)?;
             if let Some(ref m) = manifest {
@@ -398,7 +400,14 @@ async fn execute_pipeline_once(config: &PipelineConfig, attempt: u32) -> Result<
     match (&source_result, &dest_result) {
         (
             Ok((src_dur, read_summary, source_checkpoints, src_host_timings)),
-            Ok((dst_dur, write_summary, vm_setup_secs, recv_secs, dest_checkpoints, dst_host_timings)),
+            Ok((
+                dst_dur,
+                write_summary,
+                vm_setup_secs,
+                recv_secs,
+                dest_checkpoints,
+                dst_host_timings,
+            )),
         ) => {
             let perf = write_summary.perf.as_ref();
             let src_perf = read_summary.perf.as_ref();
@@ -518,8 +527,8 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     );
 
     // 1. Resolve connector paths
-    let source_wasm = wasm_runtime::resolve_connector_path(&config.source.use_ref)?;
-    let dest_wasm = wasm_runtime::resolve_connector_path(&config.destination.use_ref)?;
+    let source_wasm = component_runtime::resolve_connector_path(&config.source.use_ref)?;
+    let dest_wasm = component_runtime::resolve_connector_path(&config.destination.use_ref)?;
 
     // 1b. Validate manifests
     let source_manifest =
@@ -565,6 +574,7 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     let source_validation = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
         validate_connector(
             &source_wasm,
+            ConnectorRole::Source,
             &src_id,
             &src_ver,
             &source_config,
@@ -580,6 +590,7 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     let dest_validation = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
         validate_connector(
             &dest_wasm,
+            ConnectorRole::Destination,
             &dst_id,
             &dst_ver,
             &dest_config,
@@ -591,7 +602,7 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     // 5. Validate transform connectors
     let mut transform_validations = Vec::new();
     for tc in &config.transforms {
-        let wasm_path = wasm_runtime::resolve_connector_path(&tc.use_ref)?;
+        let wasm_path = component_runtime::resolve_connector_path(&tc.use_ref)?;
         let manifest =
             load_and_validate_manifest(&wasm_path, &tc.use_ref, ConnectorRole::Transform)?;
         if let Some(ref m) = manifest {
@@ -606,6 +617,7 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
         let result = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
             validate_connector(
                 &wasm_path,
+                ConnectorRole::Transform,
                 &tc_id,
                 &tc_ver,
                 &config_val,
@@ -631,10 +643,9 @@ pub async fn discover_connector(
     connector_ref: &str,
     config: &serde_json::Value,
 ) -> Result<Catalog> {
-    let wasm_path = wasm_runtime::resolve_connector_path(connector_ref)?;
+    let wasm_path = component_runtime::resolve_connector_path(connector_ref)?;
 
-    let manifest =
-        load_and_validate_manifest(&wasm_path, connector_ref, ConnectorRole::Source)?;
+    let manifest = load_and_validate_manifest(&wasm_path, connector_ref, ConnectorRole::Source)?;
 
     let permissions = manifest.as_ref().map(|m| m.permissions.clone());
     let (connector_id, connector_version) = parse_connector_ref(connector_ref);
@@ -687,7 +698,7 @@ fn load_and_validate_manifest(
     connector_ref: &str,
     expected_role: ConnectorRole,
 ) -> Result<Option<rapidbyte_sdk::manifest::ConnectorManifest>> {
-    let manifest = wasm_runtime::load_connector_manifest(wasm_path)?;
+    let manifest = component_runtime::load_connector_manifest(wasm_path)?;
 
     if let Some(ref m) = manifest {
         if !m.supports_role(expected_role) {
@@ -698,11 +709,11 @@ fn load_and_validate_manifest(
             );
         }
 
-        if m.protocol_version != "1" {
+        if m.protocol_version != "2" {
             tracing::warn!(
                 connector = connector_ref,
                 manifest_protocol = m.protocol_version,
-                host_protocol = "1",
+                host_protocol = "2",
                 "Protocol version mismatch"
             );
         }

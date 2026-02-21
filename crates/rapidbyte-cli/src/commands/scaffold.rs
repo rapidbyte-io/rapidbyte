@@ -68,7 +68,11 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
 
     // Write Cargo.toml
     let cargo_toml = gen_cargo_toml(name, &name_underscored);
-    write_file(&base_dir.join("Cargo.toml"), &cargo_toml, &mut created_files)?;
+    write_file(
+        &base_dir.join("Cargo.toml"),
+        &cargo_toml,
+        &mut created_files,
+    )?;
 
     // Write .cargo/config.toml
     let cargo_config = gen_cargo_config();
@@ -121,11 +125,7 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
                 &gen_config(),
                 &mut created_files,
             )?;
-            write_file(
-                &src_dir.join("sink.rs"),
-                &gen_sink_rs(),
-                &mut created_files,
-            )?;
+            write_file(&src_dir.join("sink.rs"), &gen_sink_rs(), &mut created_files)?;
         }
     }
 
@@ -215,22 +215,15 @@ path = "src/main.rs"
 rapidbyte-sdk = {{ path = "../../crates/rapidbyte-sdk" }}
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
-tokio = {{ version = "=1.36", features = ["rt", "net", "macros", "io-util"] }}
+tokio = {{ version = "1.36", features = ["rt", "macros", "io-util"] }}
 arrow = {{ version = "53", features = ["ipc"] }}
-
-[patch.crates-io]
-tokio = {{ git = "https://github.com/second-state/wasi_tokio.git", branch = "v1.36.x" }}
-socket2 = {{ git = "https://github.com/second-state/socket2.git", branch = "v0.5.x" }}
 "#
     )
 }
 
 fn gen_cargo_config() -> String {
     r#"[build]
-target = "wasm32-wasip1"
-
-[target.wasm32-wasip1]
-rustflags = ["--cfg", "wasmedge", "--cfg", "tokio_unstable", "--cfg", "skip_wasi_unsupported"]
+target = "wasm32-wasip2"
 "#
     .to_string()
 }
@@ -250,7 +243,7 @@ fn gen_manifest(
     "name": "{display_name}",
     "version": "0.1.0",
     "description": "{role_str} connector for {service_name}",
-    "protocol_version": "1",
+    "protocol_version": "2",
     "artifact": {{
         "entry_point": "{name_underscored}.wasm"
     }},
@@ -303,7 +296,7 @@ impl SourceConnector for {struct_name} {{
             env!("CARGO_PKG_NAME"), config.host, config.database));
         self.config = Some(config);
         Ok(OpenInfo {{
-            protocol_version: "1".to_string(),
+            protocol_version: "2".to_string(),
             features: vec![],
             default_max_batch_bytes: 64 * 1024 * 1024,
         }})
@@ -361,7 +354,7 @@ impl DestinationConnector for {struct_name} {{
             env!("CARGO_PKG_NAME"), config.host, config.database));
         self.config = Some(config);
         Ok(OpenInfo {{
-            protocol_version: "1".to_string(),
+            protocol_version: "2".to_string(),
             features: vec![],
             default_max_batch_bytes: 64 * 1024 * 1024,
         }})

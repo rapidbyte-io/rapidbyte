@@ -5,14 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONNECTOR_DIR="$PROJECT_ROOT/target/connectors"
 
-# Source WasmEdge environment
-if [ -f "$HOME/.wasmedge/env" ]; then
-    set +u; source "$HOME/.wasmedge/env"; set -u
-fi
-
 # Defaults
 BENCH_ROWS="${1:-10000}"
 LOAD_METHOD="${2:-insert}"
+BENCH_AOT="${BENCH_AOT:-true}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -25,6 +21,16 @@ warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 fail()  { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
 cyan()  { echo -e "${CYAN}$*${NC}"; }
 
+# Keep profiling runs deterministic across developer environments.
+if [ "${RAPIDBYTE_BENCH_DISABLE_RUSTC_WRAPPER:-1}" = "1" ]; then
+    export RUSTC_WRAPPER=""
+    export CARGO_BUILD_RUSTC_WRAPPER=""
+fi
+if [ "${RAPIDBYTE_BENCH_RESET_RUSTFLAGS:-1}" = "1" ]; then
+    export RUSTFLAGS=""
+    export CARGO_TARGET_WASM32_WASIP2_RUSTFLAGS=""
+fi
+
 cleanup() {
     info "Stopping Docker Compose..."
     docker compose -f "$PROJECT_ROOT/docker-compose.yml" down -v 2>/dev/null || true
@@ -34,7 +40,7 @@ cleanup() {
 echo ""
 cyan "═══════════════════════════════════════════════"
 cyan "  Rapidbyte Profiler (samply)"
-cyan "  Rows: $BENCH_ROWS | Mode: $LOAD_METHOD"
+cyan "  Rows: $BENCH_ROWS | Mode: $LOAD_METHOD | AOT: $BENCH_AOT"
 cyan "═══════════════════════════════════════════════"
 echo ""
 
@@ -52,18 +58,18 @@ fi
 # split-debuginfo=packed creates a .dSYM bundle on macOS for samply symbol resolution
 info "Building host binary (release + debug symbols)..."
 (cd "$PROJECT_ROOT" && CARGO_PROFILE_RELEASE_DEBUG=2 CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=packed \
-    cargo build --release 2>&1 | tail -1)
+    cargo build --release --quiet)
 
 info "Building source-postgres connector (release)..."
-(cd "$PROJECT_ROOT/connectors/source-postgres" && cargo build --release 2>&1 | tail -1)
+(cd "$PROJECT_ROOT/connectors/source-postgres" && cargo build --release --quiet)
 
 info "Building dest-postgres connector (release)..."
-(cd "$PROJECT_ROOT/connectors/dest-postgres" && cargo build --release 2>&1 | tail -1)
+(cd "$PROJECT_ROOT/connectors/dest-postgres" && cargo build --release --quiet)
 
 # Stage .wasm files
 mkdir -p "$CONNECTOR_DIR"
-cp "$PROJECT_ROOT/connectors/source-postgres/target/wasm32-wasip1/release/source_postgres.wasm" "$CONNECTOR_DIR/"
-cp "$PROJECT_ROOT/connectors/dest-postgres/target/wasm32-wasip1/release/dest_postgres.wasm" "$CONNECTOR_DIR/"
+cp "$PROJECT_ROOT/connectors/source-postgres/target/wasm32-wasip2/release/source_postgres.wasm" "$CONNECTOR_DIR/"
+cp "$PROJECT_ROOT/connectors/dest-postgres/target/wasm32-wasip2/release/dest_postgres.wasm" "$CONNECTOR_DIR/"
 info "Connectors staged in $CONNECTOR_DIR"
 
 # ── Start PostgreSQL ──────────────────────────────────────────────
@@ -109,6 +115,11 @@ PIPELINE_PATH="$PROJECT_ROOT/tests/fixtures/pipelines/$PIPELINE"
 
 # ── Set connector dir ─────────────────────────────────────────────
 export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
+if [ "$BENCH_AOT" = "true" ]; then
+    export RAPIDBYTE_WASMTIME_AOT="1"
+else
+    export RAPIDBYTE_WASMTIME_AOT="0"
+fi
 
 # ── Output setup ──────────────────────────────────────────────────
 PROFILE_DIR="$PROJECT_ROOT/target/profiles"

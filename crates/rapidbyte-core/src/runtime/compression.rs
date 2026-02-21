@@ -70,8 +70,14 @@ mod tests {
 
     #[test]
     fn test_codec_from_str() {
-        assert_eq!(CompressionCodec::from_str_opt(Some("lz4")), Some(CompressionCodec::Lz4));
-        assert_eq!(CompressionCodec::from_str_opt(Some("zstd")), Some(CompressionCodec::Zstd));
+        assert_eq!(
+            CompressionCodec::from_str_opt(Some("lz4")),
+            Some(CompressionCodec::Lz4)
+        );
+        assert_eq!(
+            CompressionCodec::from_str_opt(Some("zstd")),
+            Some(CompressionCodec::Zstd)
+        );
         assert_eq!(CompressionCodec::from_str_opt(Some("none")), None);
         assert_eq!(CompressionCodec::from_str_opt(None), None);
     }

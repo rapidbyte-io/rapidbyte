@@ -5,7 +5,7 @@ members = [
     "crates/rapidbyte-core",
     "crates/rapidbyte-sdk",
 ]
-# Connectors target wasm32-wasip1 — build separately
+# Connectors target wasm32-wasip2 — build separately
 exclude = [
     "connectors/source-postgres",
     "connectors/dest-postgres",

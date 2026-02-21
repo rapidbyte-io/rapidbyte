@@ -429,7 +429,7 @@ mod tests {
     #[test]
     fn test_open_info_roundtrip() {
         let info = OpenInfo {
-            protocol_version: "1".to_string(),
+            protocol_version: "2".to_string(),
             features: vec![Feature::ExactlyOnce, Feature::BulkLoadCopy],
             default_max_batch_bytes: 64 * 1024 * 1024,
         };
@@ -601,7 +601,7 @@ mod tests {
     #[test]
     fn test_payload_envelope_roundtrip() {
         let envelope = PayloadEnvelope {
-            protocol_version: "1".to_string(),
+            protocol_version: "2".to_string(),
             connector_id: "source-postgres".to_string(),
             stream_name: "users".to_string(),
             payload: ReadSummary {

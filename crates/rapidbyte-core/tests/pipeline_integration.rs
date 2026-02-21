@@ -135,7 +135,7 @@ fn test_state_backend_full_lifecycle() {
 /// Test that connector path resolution works with RAPIDBYTE_CONNECTOR_DIR.
 #[test]
 fn test_connector_path_resolution_with_env() {
-    use rapidbyte_core::runtime::wasm_runtime::resolve_connector_path;
+    use rapidbyte_core::runtime::component_runtime::resolve_connector_path;
 
     // Create a temp directory with a fake .wasm file
     let tmp = std::env::temp_dir().join("rapidbyte_test_connectors");
@@ -160,7 +160,7 @@ fn test_connector_path_resolution_with_env() {
 /// Test that connector path resolution fails gracefully for missing connectors.
 #[test]
 fn test_connector_path_resolution_missing() {
-    use rapidbyte_core::runtime::wasm_runtime::resolve_connector_path;
+    use rapidbyte_core::runtime::component_runtime::resolve_connector_path;
 
     // Ensure RAPIDBYTE_CONNECTOR_DIR points nowhere useful
     std::env::set_var("RAPIDBYTE_CONNECTOR_DIR", "/tmp/nonexistent_dir_rapidbyte");

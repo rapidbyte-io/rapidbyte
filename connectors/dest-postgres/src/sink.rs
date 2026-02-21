@@ -3,7 +3,7 @@ use std::io::Cursor;
 use std::time::Instant;
 
 use arrow::ipc::reader::StreamReader;
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::{Client, Config as PgConfig, NoTls};
 
 use rapidbyte_sdk::errors::{CommitState, ConnectorError};
 use rapidbyte_sdk::host_ffi;
@@ -20,8 +20,19 @@ use crate::loader::{write_batch, WriteContext};
 pub(crate) async fn connect(
     config: &crate::config::Config,
 ) -> Result<tokio_postgres::Client, String> {
-    let conn_str = config.connection_string();
-    let (client, connection) = tokio_postgres::connect(&conn_str, NoTls)
+    let mut pg = PgConfig::new();
+    pg.host(&config.host);
+    pg.port(config.port);
+    pg.user(&config.user);
+    if !config.password.is_empty() {
+        pg.password(&config.password);
+    }
+    pg.dbname(&config.database);
+
+    let stream = rapidbyte_sdk::host_tcp::HostTcpStream::connect(&config.host, config.port)
+        .map_err(|e| format!("Connection failed: {}", e))?;
+    let (client, connection) = pg
+        .connect_raw(stream, NoTls)
         .await
         .map_err(|e| format!("Connection failed: {}", e))?;
 

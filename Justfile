@@ -8,8 +8,8 @@ build-connectors:
     cd connectors/source-postgres && cargo build
     cd connectors/dest-postgres && cargo build
     mkdir -p target/connectors
-    cp connectors/source-postgres/target/wasm32-wasip1/debug/source_postgres.wasm target/connectors/
-    cp connectors/dest-postgres/target/wasm32-wasip1/debug/dest_postgres.wasm target/connectors/
+    cp connectors/source-postgres/target/wasm32-wasip2/debug/source_postgres.wasm target/connectors/
+    cp connectors/dest-postgres/target/wasm32-wasip2/debug/dest_postgres.wasm target/connectors/
     cp connectors/source-postgres/manifest.json target/connectors/source_postgres.manifest.json
     cp connectors/dest-postgres/manifest.json target/connectors/dest_postgres.manifest.json
 

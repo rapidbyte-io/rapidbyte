@@ -62,7 +62,6 @@ impl Config {
 /// Create a tokio runtime suitable for the Wasm environment.
 pub fn create_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
-        .enable_all()
         .build()
         .expect("Failed to create tokio runtime")
 }

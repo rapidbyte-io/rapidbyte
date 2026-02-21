@@ -4,7 +4,7 @@
     "name": "PostgreSQL Destination",
     "version": "0.1.0",
     "description": "Writes data to PostgreSQL using INSERT or COPY",
-    "protocol_version": "1",
+    "protocol_version": "2",
     "artifact": {
         "entry_point": "dest_postgres.wasm"
     },
