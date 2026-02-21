@@ -111,22 +111,22 @@ fn build_wasi_ctx(permissions: Option<&Permissions>) -> Result<WasiCtx> {
 
 /// Shared state passed to component host imports.
 pub struct ComponentHostState {
-    pub pipeline_name: String,
-    pub connector_id: String,
-    pub current_stream: Arc<Mutex<String>>,
-    pub state_backend: Arc<dyn StateBackend>,
-    pub stats: Arc<Mutex<RunStats>>,
+    pub(crate) pipeline_name: String,
+    pub(crate) connector_id: String,
+    pub(crate) current_stream: Arc<Mutex<String>>,
+    pub(crate) state_backend: Arc<dyn StateBackend>,
+    pub(crate) stats: Arc<Mutex<RunStats>>,
 
-    pub batch_sender: Option<mpsc::SyncSender<Frame>>,
-    pub next_batch_id: u64,
+    pub(crate) batch_sender: Option<mpsc::SyncSender<Frame>>,
+    pub(crate) next_batch_id: u64,
 
-    pub batch_receiver: Option<mpsc::Receiver<Frame>>,
+    pub(crate) batch_receiver: Option<mpsc::Receiver<Frame>>,
 
-    pub compression: Option<CompressionCodec>,
+    pub(crate) compression: Option<CompressionCodec>,
 
-    pub source_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
-    pub dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
-    pub timings: Arc<Mutex<HostTimings>>,
+    pub(crate) source_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
+    pub(crate) dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
+    pub(crate) timings: Arc<Mutex<HostTimings>>,
 
     network_acl: NetworkAcl,
     sockets: HashMap<u64, SocketEntry>,
