@@ -313,6 +313,17 @@ fn wait_socket_ready(
     }
 }
 
+/// Read the socket poll timeout, allowing env override for perf tuning.
+fn socket_poll_timeout_ms() -> i32 {
+    static CACHED: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("RAPIDBYTE_SOCKET_POLL_MS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(SOCKET_READY_POLL_MS)
+    })
+}
+
 /// Shared state passed to component host imports.
 pub struct ComponentHostState {
     pub pipeline_name: String,
@@ -693,7 +704,38 @@ impl ComponentHostState {
                 Ok(SocketReadResultInternal::Data(buf))
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                Ok(SocketReadResultInternal::WouldBlock)
+                // Poll for readiness before returning WouldBlock.
+                // This prevents the guest from busy-looping at CPU speed.
+                #[cfg(unix)]
+                let ready = match wait_socket_ready(stream, SocketInterest::Read, socket_poll_timeout_ms()) {
+                    Ok(ready) => ready,
+                    Err(poll_err) => {
+                        tracing::warn!(handle, error = %poll_err, "poll() failed in socket_read");
+                        true // Let the next read() surface the real error
+                    }
+                };
+                #[cfg(not(unix))]
+                let ready = false;
+
+                if ready {
+                    match stream.read(&mut buf) {
+                        Ok(0) => Ok(SocketReadResultInternal::Eof),
+                        Ok(n) => {
+                            buf.truncate(n);
+                            Ok(SocketReadResultInternal::Data(buf))
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            Ok(SocketReadResultInternal::WouldBlock)
+                        }
+                        Err(e) => Err(ConnectorError::transient_network(
+                            "SOCKET_READ_FAILED",
+                            e.to_string(),
+                        )),
+                    }
+                } else {
+                    tracing::trace!(handle, "socket_read: WouldBlock after poll timeout");
+                    Ok(SocketReadResultInternal::WouldBlock)
+                }
             }
             Err(e) => Err(ConnectorError::transient_network(
                 "SOCKET_READ_FAILED",
