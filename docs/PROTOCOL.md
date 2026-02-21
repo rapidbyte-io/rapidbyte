@@ -159,15 +159,38 @@ Host validates connector manifest role compatibility before run/check/discover:
 
 Host expects `manifest.protocol_version == "2"`; mismatches emit warnings.
 
-## 10. SDK Expectations
+## 10. Building Connectors
 
-Connectors should use `rapidbyte-sdk` component macros:
+### 10.1 Language-Agnostic Contract
 
-- `source_connector_main!(Type)`
-- `dest_connector_main!(Type)`
-- `transform_connector_main!(Type)`
+Any language that compiles to `wasm32-wasip2` and implements the WIT interface can be a Rapidbyte connector. The WIT file (`wit/rapidbyte-connector.wit`) is the source of truth — not any particular SDK.
 
-For TCP clients (for example `tokio-postgres`), use `rapidbyte_sdk::host_tcp::HostTcpStream` with `connect_raw`.
+A valid connector is a WASI component that:
+1. Exports one of `source-connector`, `dest-connector`, or `transform-connector`
+2. Accepts JSON config via `open(config-json: string)`
+3. Exchanges Arrow IPC batches via host imports (`emit-batch`/`next-batch`)
+4. Returns structured `connector-error` records on failure
+
+### 10.2 Rust SDK (recommended for Rust connectors)
+
+The `rapidbyte-sdk` crate provides ergonomic Rust traits and macros:
+
+- `source_connector_main!(Type)` — exports a source component
+- `dest_connector_main!(Type)` — exports a destination component
+- `transform_connector_main!(Type)` — exports a transform component
+
+The SDK handles WIT binding generation, config JSON deserialization, Tokio runtime management, and error type conversion.
+
+For TCP clients (e.g. `tokio-postgres`), use `rapidbyte_sdk::host_tcp::HostTcpStream` with `connect_raw` to route through host-proxied networking.
+
+### 10.3 Other Languages
+
+Connectors can be written in any language with WASI component support:
+- **Go:** Use `wit-bindgen-go` to generate bindings from the WIT file
+- **Python:** Use `componentize-py` to compile Python to a WASI component
+- **C/C++:** Use `wit-bindgen-c` for C bindings
+
+The connector must implement the same WIT exports and call the same WIT imports regardless of language.
 
 ## 11. Migration Notes from v1
 
