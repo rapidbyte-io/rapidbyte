@@ -5,7 +5,7 @@ use rapidbyte_sdk::errors::{ConnectorError, ValidationResult, ValidationStatus};
 use rapidbyte_sdk::host_ffi;
 
 /// Connect to PostgreSQL using the provided config.
-pub async fn connect(config: &crate::config::Config) -> Result<Client, String> {
+pub(crate) async fn connect(config: &crate::config::Config) -> Result<Client, String> {
     connect_inner(config).await.map_err(|e| e.to_string())
 }
 
@@ -36,7 +36,7 @@ async fn connect_inner(config: &crate::config::Config) -> anyhow::Result<Client>
 }
 
 /// Validate PostgreSQL connectivity.
-pub async fn validate(config: &crate::config::Config) -> Result<ValidationResult, ConnectorError> {
+pub(crate) async fn validate(config: &crate::config::Config) -> Result<ValidationResult, ConnectorError> {
     let client = connect(config)
         .await
         .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;

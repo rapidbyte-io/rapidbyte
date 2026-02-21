@@ -5,7 +5,7 @@ This document defines the connector protocol used by Rapidbyte v2 (Wasmtime comp
 - Runtime: **Wasmtime component model**
 - Connector target: **`wasm32-wasip2`**
 - WIT package: **`rapidbyte:connector@2.0.0`** (`wit/rapidbyte-connector.wit`)
-- Protocol version string in manifests/OpenInfo: **`2`**
+- Protocol version string in manifests/ConnectorInfo: **`2`**
 
 ## 1. Architecture
 

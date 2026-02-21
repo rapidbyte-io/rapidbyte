@@ -229,7 +229,7 @@ macro_rules! __rb_guest_lifecycle_methods {
             let config: <$connector_type as $connector_trait>::Config = parse_config(&config_json)?;
 
             let rt = get_runtime();
-            let (instance, _open_info) = rt
+            let (instance, _connector_info) = rt
                 .block_on(<$connector_type as $connector_trait>::init(config))
                 .map_err(to_component_error)?;
 
