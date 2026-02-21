@@ -8,8 +8,9 @@ use tokio::sync::mpsc;
 
 use rapidbyte_sdk::errors::ValidationResult;
 use rapidbyte_sdk::protocol::{
-    Catalog, ConnectorRole, CursorInfo, CursorType, CursorValue, DataErrorPolicy, SchemaHint,
-    StreamContext, StreamLimits, StreamPolicies, SyncMode, WriteMode,
+    Catalog, ColumnPolicy, ConnectorRole, CursorInfo, CursorType, CursorValue, DataErrorPolicy,
+    NullabilityPolicy, SchemaEvolutionPolicy, SchemaHint, StreamContext, StreamLimits,
+    StreamPolicies, SyncMode, TypeChangePolicy, WriteMode,
 };
 
 use super::checkpoint::correlate_and_persist_cursors;
@@ -230,6 +231,31 @@ async fn execute_pipeline_once(
         _ => DataErrorPolicy::Fail,
     };
 
+    let schema_evolution = match &config.destination.schema_evolution {
+        Some(se) => SchemaEvolutionPolicy {
+            new_column: match se.new_column.as_str() {
+                "ignore" => ColumnPolicy::Ignore,
+                "fail" => ColumnPolicy::Fail,
+                _ => ColumnPolicy::Add,
+            },
+            removed_column: match se.removed_column.as_str() {
+                "fail" => ColumnPolicy::Fail,
+                "add" => ColumnPolicy::Add,
+                _ => ColumnPolicy::Ignore,
+            },
+            type_change: match se.type_change.as_str() {
+                "coerce" => TypeChangePolicy::Coerce,
+                "null" => TypeChangePolicy::Null,
+                _ => TypeChangePolicy::Fail,
+            },
+            nullability_change: match se.nullability_change.as_str() {
+                "fail" => NullabilityPolicy::Fail,
+                _ => NullabilityPolicy::Allow,
+            },
+        },
+        None => SchemaEvolutionPolicy::default(),
+    };
+
     let stream_ctxs: Vec<StreamContext> = config
         .source
         .streams
@@ -279,7 +305,7 @@ async fn execute_pipeline_once(
                 limits: limits.clone(),
                 policies: StreamPolicies {
                     on_data_error,
-                    ..StreamPolicies::default()
+                    schema_evolution,
                 },
                 write_mode: Some(write_mode),
                 selected_columns: s.columns.clone(),

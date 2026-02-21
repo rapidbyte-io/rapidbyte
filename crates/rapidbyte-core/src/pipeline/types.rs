@@ -27,7 +27,6 @@ pub struct StreamConfig {
     pub name: String,
     pub sync_mode: String,
     pub cursor_field: Option<String>,
-    #[serde(default)]
     pub columns: Option<Vec<String>>,
 }
 
@@ -48,10 +47,37 @@ pub struct DestinationConfig {
     pub primary_key: Vec<String>,
     #[serde(default = "default_on_data_error")]
     pub on_data_error: String,
+    #[serde(default)]
+    pub schema_evolution: Option<SchemaEvolutionConfig>,
 }
 
 fn default_on_data_error() -> String {
     "fail".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaEvolutionConfig {
+    #[serde(default = "default_new_column")]
+    pub new_column: String,
+    #[serde(default = "default_removed_column")]
+    pub removed_column: String,
+    #[serde(default = "default_type_change")]
+    pub type_change: String,
+    #[serde(default = "default_nullability_change")]
+    pub nullability_change: String,
+}
+
+fn default_new_column() -> String {
+    "add".to_string()
+}
+fn default_removed_column() -> String {
+    "ignore".to_string()
+}
+fn default_type_change() -> String {
+    "fail".to_string()
+}
+fn default_nullability_change() -> String {
+    "allow".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -528,6 +554,53 @@ destination:
 "#;
         let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.source.streams[0].columns.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_schema_evolution() {
+        let yaml = r#"
+version: "1"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+  schema_evolution:
+    new_column: ignore
+    type_change: coerce
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        let se = config.destination.schema_evolution.unwrap();
+        assert_eq!(se.new_column, "ignore");
+        assert_eq!(se.type_change, "coerce");
+        assert_eq!(se.removed_column, "ignore"); // default
+        assert_eq!(se.nullability_change, "allow"); // default
+    }
+
+    #[test]
+    fn test_schema_evolution_defaults_to_none() {
+        let yaml = r#"
+version: "1"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.destination.schema_evolution.is_none());
     }
 
     #[test]
