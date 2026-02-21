@@ -48,7 +48,7 @@ pub(crate) async fn connect(
 
 /// Entry point for writing a single stream: validates identifiers, connects,
 /// runs the pull loop through a WriteSession, and returns a WriteSummary.
-pub fn write_stream(
+pub async fn write_stream(
     config: &crate::config::Config,
     ctx: &StreamContext,
 ) -> Result<WriteSummary, ConnectorError> {
@@ -66,83 +66,80 @@ pub fn write_stream(
         )
     })?;
 
-    let rt = crate::config::create_runtime();
-    rt.block_on(async {
-        // Phase 1: Connect
-        let connect_start = Instant::now();
-        let client = connect(config)
-            .await
-            .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
-        let connect_secs = connect_start.elapsed().as_secs_f64();
-
-        // Phase 2: Session lifecycle
-        let mut session = WriteSession::begin(
-            &client,
-            &config.schema,
-            SessionConfig {
-                stream_name: ctx.stream_name.clone(),
-                write_mode: ctx.write_mode.clone(),
-                load_method: config.load_method.clone(),
-                schema_policy: ctx.policies.schema_evolution,
-                on_data_error: ctx.policies.on_data_error,
-                checkpoint: CheckpointConfig {
-                    interval_bytes: ctx.limits.checkpoint_interval_bytes,
-                    interval_rows: ctx.limits.checkpoint_interval_rows,
-                    interval_seconds: ctx.limits.checkpoint_interval_seconds,
-                },
-            },
-        )
+    // Phase 1: Connect
+    let connect_start = Instant::now();
+    let client = connect(config)
         .await
-        .map_err(|e| ConnectorError::transient_db("SESSION_BEGIN_FAILED", e))?;
+        .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
+    let connect_secs = connect_start.elapsed().as_secs_f64();
 
-        // Phase 3: Pull loop — read batches from host
-        let mut buf: Vec<u8> = Vec::new();
-        let mut loop_error: Option<String> = None;
+    // Phase 2: Session lifecycle
+    let mut session = WriteSession::begin(
+        &client,
+        &config.schema,
+        SessionConfig {
+            stream_name: ctx.stream_name.clone(),
+            write_mode: ctx.write_mode.clone(),
+            load_method: config.load_method.clone(),
+            schema_policy: ctx.policies.schema_evolution,
+            on_data_error: ctx.policies.on_data_error,
+            checkpoint: CheckpointConfig {
+                interval_bytes: ctx.limits.checkpoint_interval_bytes,
+                interval_rows: ctx.limits.checkpoint_interval_rows,
+                interval_seconds: ctx.limits.checkpoint_interval_seconds,
+            },
+        },
+    )
+    .await
+    .map_err(|e| ConnectorError::transient_db("SESSION_BEGIN_FAILED", e))?;
 
-        loop {
-            match host_ffi::next_batch(&mut buf, ctx.limits.max_batch_bytes) {
-                Ok(None) => break,
-                Ok(Some(n)) => {
-                    if let Err(e) = session.process_batch(&buf[..n]).await {
-                        loop_error = Some(e);
-                        break;
-                    }
-                }
-                Err(e) => {
-                    loop_error = Some(format!("next_batch failed: {}", e));
+    // Phase 3: Pull loop — read batches from host
+    let mut buf: Vec<u8> = Vec::new();
+    let mut loop_error: Option<String> = None;
+
+    loop {
+        match host_ffi::next_batch(&mut buf, ctx.limits.max_batch_bytes) {
+            Ok(None) => break,
+            Ok(Some(n)) => {
+                if let Err(e) = session.process_batch(&buf[..n]).await {
+                    loop_error = Some(e);
                     break;
                 }
             }
+            Err(e) => {
+                loop_error = Some(format!("next_batch failed: {}", e));
+                break;
+            }
         }
+    }
 
-        // Handle errors
-        if let Some(err) = loop_error {
-            session.rollback().await;
-            return Err(
-                ConnectorError::transient_db("WRITE_FAILED", err)
-                    .with_commit_state(CommitState::BeforeCommit),
-            );
-        }
+    // Handle errors
+    if let Some(err) = loop_error {
+        session.rollback().await;
+        return Err(
+            ConnectorError::transient_db("WRITE_FAILED", err)
+                .with_commit_state(CommitState::BeforeCommit),
+        );
+    }
 
-        // Phase 4: Commit
-        let result = session.commit().await.map_err(|e| {
-            ConnectorError::transient_db("COMMIT_FAILED", e)
-                .with_commit_state(CommitState::AfterCommitUnknown)
-        })?;
+    // Phase 4: Commit
+    let result = session.commit().await.map_err(|e| {
+        ConnectorError::transient_db("COMMIT_FAILED", e)
+            .with_commit_state(CommitState::AfterCommitUnknown)
+    })?;
 
-        Ok(WriteSummary {
-            records_written: result.total_rows,
-            bytes_written: result.total_bytes,
-            batches_written: result.batches_written,
-            checkpoint_count: result.checkpoint_count,
-            records_failed: result.total_failed,
-            perf: Some(WritePerf {
-                connect_secs,
-                flush_secs: result.flush_secs,
-                commit_secs: result.commit_secs,
-                arrow_decode_secs: result.arrow_decode_secs,
-            }),
-        })
+    Ok(WriteSummary {
+        records_written: result.total_rows,
+        bytes_written: result.total_bytes,
+        batches_written: result.batches_written,
+        checkpoint_count: result.checkpoint_count,
+        records_failed: result.total_failed,
+        perf: Some(WritePerf {
+            connect_secs,
+            flush_secs: result.flush_secs,
+            commit_secs: result.commit_secs,
+            arrow_decode_secs: result.arrow_decode_secs,
+        }),
     })
 }
 

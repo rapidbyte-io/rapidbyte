@@ -1,5 +1,4 @@
 use rapidbyte_sdk::errors::ConnectorError;
-use rapidbyte_sdk::protocol::{ConfigBlob, OpenContext};
 use serde::Deserialize;
 
 /// PostgreSQL connection config from pipeline YAML.
@@ -31,24 +30,17 @@ fn default_load_method() -> String {
 }
 
 impl Config {
-    pub fn from_open_context(ctx: &OpenContext) -> Result<Self, ConnectorError> {
-        let value = match &ctx.config {
-            ConfigBlob::Json(v) => v.clone(),
-        };
-        let config: Self = serde_json::from_value(value).map_err(|e| {
-            ConnectorError::config("INVALID_CONFIG", format!("Config parse error: {}", e))
-        })?;
-        // Validate load_method
-        if config.load_method != "insert" && config.load_method != "copy" {
+    pub fn validate(&self) -> Result<(), ConnectorError> {
+        if self.load_method != "insert" && self.load_method != "copy" {
             return Err(ConnectorError::config(
                 "INVALID_CONFIG",
                 format!(
                     "Invalid load_method: '{}'. Must be 'insert' or 'copy'",
-                    config.load_method
+                    self.load_method
                 ),
             ));
         }
-        Ok(config)
+        Ok(())
     }
 
     pub fn connection_string(&self) -> String {
@@ -57,11 +49,4 @@ impl Config {
             self.host, self.port, self.user, self.password, self.database
         )
     }
-}
-
-/// Create a tokio runtime suitable for the Wasm environment.
-pub fn create_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("Failed to create tokio runtime")
 }
