@@ -484,7 +484,7 @@ impl ComponentHostState {
             .get_mut(&handle)
             .ok_or_else(|| ConnectorError::internal("INVALID_SOCKET", "Invalid socket handle"))?;
 
-        let read_len = len.min(64 * 1024).max(1) as usize;
+        let read_len = len.clamp(1, 64 * 1024) as usize;
         let mut buf = vec![0u8; read_len];
         match entry.stream.read(&mut buf) {
             Ok(0) => {
