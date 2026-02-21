@@ -211,6 +211,32 @@ pub fn metric(_connector_id: &str, _stream_name: &str, _m: &Metric) -> Result<()
     Ok(())
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn emit_dlq_record(
+    stream_name: &str,
+    record_json: &str,
+    error_message: &str,
+    error_category: &str,
+) -> Result<(), ConnectorError> {
+    bindings::rapidbyte::connector::host::emit_dlq_record(
+        stream_name,
+        record_json,
+        error_message,
+        error_category,
+    )
+    .map_err(from_component_error)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn emit_dlq_record(
+    _stream_name: &str,
+    _record_json: &str,
+    _error_message: &str,
+    _error_category: &str,
+) -> Result<(), ConnectorError> {
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SocketReadResult {
     Data(Vec<u8>),

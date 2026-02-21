@@ -113,6 +113,7 @@ interface host {
     log: func(level: u32, msg: string);
     checkpoint: func(kind: u32, payload-json: string) -> result<_, connector-error>;
     metric: func(payload-json: string) -> result<_, connector-error>;
+    emit-dlq-record: func(stream-name: string, record-json: string, error-message: string, error-category: string) -> result<_, connector-error>;
     state-get: func(scope: u32, key: string) -> result<option<string>, connector-error>;
     state-put: func(scope: u32, key: string, val: string) -> result<_, connector-error>;
     state-cas: func(scope: u32, key: string, expected: option<string>, new-val: string) -> result<bool, connector-error>;

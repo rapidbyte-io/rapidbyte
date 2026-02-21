@@ -321,6 +321,7 @@ impl<'a> WriteSession<'a> {
             client: self.client,
             target_schema: self.target_schema,
             stream_name: &self.effective_stream,
+            logical_stream_name: &self.stream_name,
             created_tables: &mut self.created_tables,
             write_mode: self.effective_write_mode.as_ref(),
             schema_policy: Some(&self.schema_policy),

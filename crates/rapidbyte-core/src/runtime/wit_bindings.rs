@@ -193,6 +193,17 @@ macro_rules! impl_host_trait_for_world {
                 self.metric_impl(payload_json).map_err($to_world_error)
             }
 
+            fn emit_dlq_record(
+                &mut self,
+                stream_name: String,
+                record_json: String,
+                error_message: String,
+                error_category: String,
+            ) -> std::result::Result<(), $module::rapidbyte::connector::types::ConnectorError> {
+                self.emit_dlq_record_impl(stream_name, record_json, error_message, error_category)
+                    .map_err($to_world_error)
+            }
+
             fn state_get(
                 &mut self,
                 scope: u32,

@@ -100,7 +100,6 @@ struct StreamResult {
     write_summary: WriteSummary,
     source_checkpoints: Vec<Checkpoint>,
     dest_checkpoints: Vec<Checkpoint>,
-    dlq_records: Vec<DlqRecord>,
     src_host_timings: HostTimings,
     dst_host_timings: HostTimings,
     src_duration: f64,
@@ -110,18 +109,14 @@ struct StreamResult {
     transform_durations: Vec<f64>,
 }
 
-/// Error from a per-stream task, carrying any DLQ records collected before the error.
+/// Error from a per-stream task.
 struct StreamError {
     error: PipelineError,
-    dlq_records: Vec<DlqRecord>,
 }
 
 impl From<PipelineError> for StreamError {
     fn from(error: PipelineError) -> Self {
-        StreamError {
-            error,
-            dlq_records: Vec::new(),
-        }
+        StreamError { error }
     }
 }
 
@@ -395,6 +390,7 @@ async fn execute_pipeline_once(
 
     let mut stream_join_handles: Vec<tokio::task::JoinHandle<Result<StreamResult, StreamError>>> =
         Vec::with_capacity(stream_ctxs.len());
+    let run_dlq_records: Arc<Mutex<Vec<DlqRecord>>> = Arc::new(Mutex::new(Vec::new()));
 
     for stream_ctx in stream_ctxs.iter() {
         let permit = semaphore.clone().acquire_owned().await.map_err(|e| {
@@ -418,6 +414,7 @@ async fn execute_pipeline_once(
         let dest_connector_version = dest_connector_version.clone();
         let source_permissions = source_permissions.clone();
         let dest_permissions = dest_permissions.clone();
+        let run_dlq_records = run_dlq_records.clone();
         let transform_modules_for_stream: Vec<_> = transform_modules
             .iter()
             .map(|(m, id, ver, cfg, _ms, perms)| {
@@ -502,6 +499,7 @@ async fn execute_pipeline_once(
                 run_destination_stream(
                     &dest_module,
                     dest_rx,
+                    run_dlq_records,
                     state_dst,
                     &pipeline_name_dst,
                     &dest_connector_id,
@@ -575,31 +573,22 @@ async fn execute_pipeline_once(
 
             // If a transform failed, propagate the error (but still collect DLQ records)
             if let Some(transform_err) = first_transform_error {
-                let dlq_records = match dst_result {
-                    Ok((_, _, _, _, _, _, dlq)) => dlq,
-                    Err(derr) => derr.dlq_records,
-                };
-                return Err(StreamError { error: transform_err, dlq_records });
+                return Err(StreamError { error: transform_err });
             }
 
             // Process source and dest results
             let (src_dur, read_summary, source_checkpoints, src_host_timings) = match src_result {
                 Ok(ok) => ok,
                 Err(src_err) => {
-                    // Collect DLQ records from destination before returning
-                    let dlq_records = match dst_result {
-                        Ok((_, _, _, _, _, _, dlq)) => dlq,
-                        Err(derr) => derr.dlq_records,
-                    };
-                    return Err(StreamError { error: src_err, dlq_records });
+                    return Err(StreamError { error: src_err });
                 }
             };
 
-            let (dst_dur, write_summary, vm_setup_secs, recv_secs, dest_checkpoints, dst_host_timings, dlq_records) =
+            let (dst_dur, write_summary, vm_setup_secs, recv_secs, dest_checkpoints, dst_host_timings) =
                 match dst_result {
                     Ok(ok) => ok,
                     Err(derr) => {
-                        return Err(StreamError { error: derr.error, dlq_records: derr.dlq_records });
+                        return Err(StreamError { error: derr });
                     }
                 };
 
@@ -608,7 +597,6 @@ async fn execute_pipeline_once(
                 write_summary,
                 source_checkpoints,
                 dest_checkpoints,
-                dlq_records,
                 src_host_timings,
                 dst_host_timings,
                 src_duration: src_dur,
@@ -625,7 +613,6 @@ async fn execute_pipeline_once(
     // 6. Wait for all streams and aggregate results
     let mut all_source_checkpoints: Vec<Checkpoint> = Vec::new();
     let mut all_dest_checkpoints: Vec<Checkpoint> = Vec::new();
-    let mut all_dlq_records: Vec<DlqRecord> = Vec::new();
     let mut total_read_summary = ReadSummary {
         records_read: 0,
         bytes_read: 0,
@@ -676,9 +663,6 @@ async fn execute_pipeline_once(
                 all_source_checkpoints.extend(sr.source_checkpoints);
                 all_dest_checkpoints.extend(sr.dest_checkpoints);
 
-                // Collect DLQ records
-                all_dlq_records.extend(sr.dlq_records);
-
                 // Aggregate host timings
                 total_src_host_timings.emit_batch_nanos += sr.src_host_timings.emit_batch_nanos;
                 total_src_host_timings.compress_nanos += sr.src_host_timings.compress_nanos;
@@ -699,15 +683,16 @@ async fn execute_pipeline_once(
                 }
                 all_transform_durations.extend(sr.transform_durations);
             }
-            Err(StreamError { error, dlq_records }) => {
+            Err(StreamError { error }) => {
                 tracing::error!("Stream failed: {}", error);
-                all_dlq_records.extend(dlq_records);
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
             }
         }
     }
+
+    let all_dlq_records: Vec<DlqRecord> = run_dlq_records.lock().unwrap().drain(..).collect();
 
     let final_stats = stats.lock().unwrap().clone();
 

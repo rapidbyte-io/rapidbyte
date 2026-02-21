@@ -9,12 +9,12 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use rapidbyte_sdk::errors::ConnectorError;
 use rapidbyte_sdk::manifest::Permissions;
-use rapidbyte_sdk::protocol::{Checkpoint, StateScope};
+use rapidbyte_sdk::protocol::{Checkpoint, DlqRecord, StateScope};
 use tokio::sync::mpsc;
 use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-use crate::state::backend::{CursorState, RunStats, StateBackend};
+use crate::state::backend::{CursorState, StateBackend};
 
 use crate::engine::compression::CompressionCodec;
 use super::host_socket::{
@@ -114,7 +114,7 @@ fn build_wasi_ctx(permissions: Option<&Permissions>) -> Result<WasiCtx> {
 pub struct ComponentHostState {
     pub(crate) pipeline_name: String,
     pub(crate) connector_id: String,
-    pub(crate) current_stream: Arc<Mutex<String>>,
+    pub(crate) current_stream: String,
     pub(crate) state_backend: Arc<dyn StateBackend>,
 
     pub(crate) batch_sender: Option<mpsc::Sender<Frame>>,
@@ -126,6 +126,7 @@ pub struct ComponentHostState {
 
     pub(crate) source_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
     pub(crate) dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
+    pub(crate) dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     pub(crate) timings: Arc<Mutex<HostTimings>>,
 
     network_acl: NetworkAcl,
@@ -141,14 +142,14 @@ impl ComponentHostState {
     pub fn new(
         pipeline_name: String,
         connector_id: String,
-        current_stream: Arc<Mutex<String>>,
+        current_stream: String,
         state_backend: Arc<dyn StateBackend>,
-        _stats: Arc<Mutex<RunStats>>,
         batch_sender: Option<mpsc::Sender<Frame>>,
         batch_receiver: Option<mpsc::Receiver<Frame>>,
         compression: Option<CompressionCodec>,
         source_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
         dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
+        dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
         timings: Arc<Mutex<HostTimings>>,
         permissions: Option<&Permissions>,
         config: &serde_json::Value,
@@ -164,6 +165,7 @@ impl ComponentHostState {
             compression,
             source_checkpoints,
             dest_checkpoints,
+            dlq_records,
             timings,
             network_acl: derive_network_acl(permissions, config),
             sockets: HashMap::new(),
@@ -173,8 +175,8 @@ impl ComponentHostState {
         })
     }
 
-    fn current_stream(&self) -> String {
-        self.current_stream.lock().unwrap().clone()
+    fn current_stream(&self) -> &str {
+        &self.current_stream
     }
 
     pub(crate) fn emit_batch_impl(&mut self, batch: Vec<u8>) -> Result<(), ConnectorError> {
@@ -611,6 +613,31 @@ impl ComponentHostState {
 
     pub(crate) fn socket_close_impl(&mut self, handle: u64) {
         self.sockets.remove(&handle);
+    }
+
+    pub(crate) fn emit_dlq_record_impl(
+        &mut self,
+        stream_name: String,
+        record_json: String,
+        error_message: String,
+        error_category: String,
+    ) -> Result<(), ConnectorError> {
+        let mut dlq = self.dlq_records.lock().unwrap();
+        if dlq.len() >= crate::engine::dlq::MAX_DLQ_RECORDS {
+            tracing::warn!(
+                max = crate::engine::dlq::MAX_DLQ_RECORDS,
+                "DLQ record cap reached; dropping further records"
+            );
+            return Ok(());
+        }
+        dlq.push(DlqRecord {
+            stream_name,
+            record_json,
+            error_message,
+            error_category,
+            failed_at: chrono::Utc::now().to_rfc3339(),
+        });
+        Ok(())
     }
 }
 

@@ -9,7 +9,8 @@ use wasmtime::Store;
 use rapidbyte_sdk::errors::ValidationResult;
 use rapidbyte_sdk::manifest::Permissions;
 use rapidbyte_sdk::protocol::{
-    Catalog, Checkpoint, ConnectorRole, ReadSummary, StreamContext, TransformSummary, WriteSummary,
+    Catalog, Checkpoint, ConnectorRole, DlqRecord, ReadSummary, StreamContext, TransformSummary,
+    WriteSummary,
 };
 
 use super::errors::PipelineError;
@@ -107,37 +108,38 @@ fn create_transform_linker(engine: &wasmtime::Engine) -> Result<Linker<Component
     Ok(linker)
 }
 
+/// Run a source connector for a single stream.
+/// Creates its own WASM instance (Store), opens the connector, reads one stream,
+/// sends EndStream, then closes the connector. Returns read summary, checkpoints, and timings.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_source(
-    module: LoadedComponent,
+pub(crate) fn run_source_stream(
+    module: &LoadedComponent,
     sender: mpsc::Sender<Frame>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
     connector_id: &str,
     connector_version: &str,
     source_config: &serde_json::Value,
-    stream_ctxs: &[StreamContext],
+    stream_ctx: &StreamContext,
     stats: Arc<Mutex<RunStats>>,
     permissions: Option<&Permissions>,
     compression: Option<CompressionCodec>,
 ) -> Result<(f64, ReadSummary, Vec<Checkpoint>, HostTimings), PipelineError> {
     let phase_start = Instant::now();
 
-    let current_stream = Arc::new(Mutex::new(String::new()));
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let source_timings = Arc::new(Mutex::new(HostTimings::default()));
 
-    let stats_ref = stats.clone();
     let host_state = ComponentHostState::new(
         pipeline_name.to_string(),
         connector_id.to_string(),
-        current_stream.clone(),
+        stream_ctx.stream_name.clone(),
         state_backend,
-        stats,
         Some(sender.clone()),
         None,
         compression,
         source_checkpoints.clone(),
+        Arc::new(Mutex::new(Vec::new())),
         Arc::new(Mutex::new(Vec::new())),
         source_timings.clone(),
         permissions,
@@ -157,7 +159,12 @@ pub(crate) fn run_source(
         .context("Failed to serialize source config")
         .map_err(PipelineError::Infrastructure)?;
 
-    tracing::info!(connector = connector_id, version = connector_version, "Opening source connector");
+    tracing::info!(
+        connector = connector_id,
+        version = connector_version,
+        stream = stream_ctx.stream_name,
+        "Opening source connector for stream"
+    );
     let open_result = iface
         .call_open(&mut store, &source_config_json)
         .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
@@ -165,247 +172,237 @@ pub(crate) fn run_source(
         return Err(PipelineError::Connector(source_error_to_sdk(err)));
     }
 
-    let mut total_summary = ReadSummary {
-        records_read: 0,
-        bytes_read: 0,
-        batches_emitted: 0,
-        checkpoint_count: 0,
-        records_skipped: 0,
-        perf: None,
+    let ctx_json = serde_json::to_string(stream_ctx)
+        .context("Failed to serialize StreamContext")
+        .map_err(PipelineError::Infrastructure)?;
+
+    tracing::info!(stream = stream_ctx.stream_name, "Starting source read");
+    let run_result = iface
+        .call_run_read(&mut store, &ctx_json)
+        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
+
+    let summary = match run_result {
+        Ok(summary) => ReadSummary {
+            records_read: summary.records_read,
+            bytes_read: summary.bytes_read,
+            batches_emitted: summary.batches_emitted,
+            checkpoint_count: summary.checkpoint_count,
+            records_skipped: summary.records_skipped,
+            perf: None,
+        },
+        Err(err) => {
+            let _ = iface.call_close(&mut store);
+            return Err(PipelineError::Connector(source_error_to_sdk(err)));
+        }
     };
 
-    let stream_result: Result<(), PipelineError> = (|| {
-        for stream_ctx in stream_ctxs {
-            *current_stream.lock().unwrap() = stream_ctx.stream_name.clone();
+    tracing::info!(
+        stream = stream_ctx.stream_name,
+        records = summary.records_read,
+        bytes = summary.bytes_read,
+        "Source read complete for stream"
+    );
 
-            let ctx_json = serde_json::to_string(stream_ctx)
-                .context("Failed to serialize StreamContext")
-                .map_err(PipelineError::Infrastructure)?;
+    {
+        let mut s = stats.lock().unwrap();
+        s.records_read += summary.records_read;
+        s.bytes_read += summary.bytes_read;
+    }
 
-            tracing::info!(stream = stream_ctx.stream_name, "Starting source read");
-            let run_result = iface
-                .call_run_read(&mut store, &ctx_json)
-                .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
+    // Signal end of stream data
+    let _ = sender.blocking_send(Frame::EndStream);
 
-            let summary = match run_result {
-                Ok(summary) => ReadSummary {
-                    records_read: summary.records_read,
-                    bytes_read: summary.bytes_read,
-                    batches_emitted: summary.batches_emitted,
-                    checkpoint_count: summary.checkpoint_count,
-                    records_skipped: summary.records_skipped,
-                    perf: None,
-                },
-                Err(err) => return Err(PipelineError::Connector(source_error_to_sdk(err))),
-            };
-
-            tracing::info!(
-                stream = stream_ctx.stream_name,
-                records = summary.records_read,
-                bytes = summary.bytes_read,
-                "Source read complete for stream"
-            );
-
-            total_summary.records_read += summary.records_read;
-            total_summary.bytes_read += summary.bytes_read;
-            total_summary.batches_emitted += summary.batches_emitted;
-            total_summary.checkpoint_count += summary.checkpoint_count;
-            total_summary.records_skipped += summary.records_skipped;
-
-            {
-                let mut s = stats_ref.lock().unwrap();
-                s.records_read = total_summary.records_read;
-                s.bytes_read = total_summary.bytes_read;
-            }
-
-            let _ = sender.blocking_send(Frame::EndStream);
-        }
-        Ok(())
-    })();
-
-    tracing::info!(connector = connector_id, version = connector_version, "Closing source connector");
+    // Close connector
+    tracing::info!(
+        connector = connector_id,
+        version = connector_version,
+        stream = stream_ctx.stream_name,
+        "Closing source connector for stream"
+    );
     match iface.call_close(&mut store) {
         Ok(Ok(())) => {}
         Ok(Err(err)) => {
-            tracing::warn!("Source close failed: {}", source_error_to_sdk(err));
+            tracing::warn!(stream = stream_ctx.stream_name, "Source close failed: {}", source_error_to_sdk(err));
         }
         Err(err) => {
-            tracing::warn!("Source close trap: {}", err);
+            tracing::warn!(stream = stream_ctx.stream_name, "Source close trap: {}", err);
         }
     }
 
-    stream_result?;
-
-    let checkpoints = source_checkpoints
-        .lock()
-        .unwrap()
-        .drain(..)
-        .collect::<Vec<_>>();
+    let checkpoints = source_checkpoints.lock().unwrap().drain(..).collect::<Vec<_>>();
     let source_host_timings = source_timings.lock().unwrap().clone();
 
     Ok((
         phase_start.elapsed().as_secs_f64(),
-        total_summary,
+        summary,
         checkpoints,
         source_host_timings,
     ))
 }
 
+/// Run a destination connector for a single stream.
+/// Creates its own WASM instance (Store), opens the connector, writes one stream,
+/// then closes the connector. Returns write summary, checkpoints, and timings.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub(crate) fn run_destination(
-    module: LoadedComponent,
+pub(crate) fn run_destination_stream(
+    module: &LoadedComponent,
     receiver: mpsc::Receiver<Frame>,
+    dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
     connector_id: &str,
     connector_version: &str,
     dest_config: &serde_json::Value,
-    stream_ctxs: &[StreamContext],
+    stream_ctx: &StreamContext,
     stats: Arc<Mutex<RunStats>>,
     permissions: Option<&Permissions>,
     compression: Option<CompressionCodec>,
-) -> Result<(f64, WriteSummary, f64, f64, Vec<Checkpoint>, HostTimings), PipelineError> {
+) -> Result<
+    (
+        f64,
+        WriteSummary,
+        f64,
+        f64,
+        Vec<Checkpoint>,
+        HostTimings,
+    ),
+    PipelineError,
+>
+{
     let phase_start = Instant::now();
     let vm_setup_start = Instant::now();
 
-    let current_stream = Arc::new(Mutex::new(String::new()));
     let dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let dest_timings = Arc::new(Mutex::new(HostTimings::default()));
 
-    let stats_ref = stats.clone();
     let host_state = ComponentHostState::new(
         pipeline_name.to_string(),
         connector_id.to_string(),
-        current_stream.clone(),
+        stream_ctx.stream_name.clone(),
         state_backend,
-        stats,
         None,
         Some(receiver),
         compression,
         Arc::new(Mutex::new(Vec::new())),
         dest_checkpoints.clone(),
+        dlq_records.clone(),
         dest_timings.clone(),
         permissions,
         dest_config,
     )
     .map_err(PipelineError::Infrastructure)?;
 
-    let mut store = Store::new(&module.engine, host_state);
-    let linker = create_dest_linker(&module.engine).map_err(PipelineError::Infrastructure)?;
-    let bindings =
-        dest_bindings::RapidbyteDestination::instantiate(&mut store, &module.component, &linker)
-            .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
-
-    let iface = bindings.rapidbyte_connector_dest_connector();
-
-    let vm_setup_secs = vm_setup_start.elapsed().as_secs_f64();
-
-    let dest_config_json = serde_json::to_string(dest_config)
-        .context("Failed to serialize destination config")
-        .map_err(PipelineError::Infrastructure)?;
-
-    tracing::info!(connector = connector_id, version = connector_version, "Opening destination connector");
-    let open_result = iface
-        .call_open(&mut store, &dest_config_json)
-        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
-    if let Err(err) = open_result {
-        return Err(PipelineError::Connector(dest_error_to_sdk(err)));
-    }
-
-    let recv_start = Instant::now();
-    let mut total_summary = WriteSummary {
-        records_written: 0,
-        bytes_written: 0,
-        batches_written: 0,
-        checkpoint_count: 0,
-        records_failed: 0,
-        perf: None,
-    };
-
-    let stream_result: Result<(), PipelineError> = (|| {
-        for stream_ctx in stream_ctxs {
-            *current_stream.lock().unwrap() = stream_ctx.stream_name.clone();
-
-            let ctx_json = serde_json::to_string(stream_ctx)
-                .context("Failed to serialize StreamContext")
-                .map_err(PipelineError::Infrastructure)?;
-
-            tracing::info!(
-                stream = stream_ctx.stream_name,
-                "Starting destination write"
-            );
-            let run_result = iface
-                .call_run_write(&mut store, &ctx_json)
+    (|| {
+        let mut store = Store::new(&module.engine, host_state);
+        let linker = create_dest_linker(&module.engine).map_err(PipelineError::Infrastructure)?;
+        let bindings =
+            dest_bindings::RapidbyteDestination::instantiate(&mut store, &module.component, &linker)
                 .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
 
-            let summary = match run_result {
-                Ok(summary) => WriteSummary {
-                    records_written: summary.records_written,
-                    bytes_written: summary.bytes_written,
-                    batches_written: summary.batches_written,
-                    checkpoint_count: summary.checkpoint_count,
-                    records_failed: summary.records_failed,
-                    perf: None,
-                },
-                Err(err) => return Err(PipelineError::Connector(dest_error_to_sdk(err))),
-            };
+        let iface = bindings.rapidbyte_connector_dest_connector();
 
-            tracing::info!(
-                stream = stream_ctx.stream_name,
-                records = summary.records_written,
-                bytes = summary.bytes_written,
-                "Destination write complete for stream"
-            );
+        let vm_setup_secs = vm_setup_start.elapsed().as_secs_f64();
 
-            total_summary.records_written += summary.records_written;
-            total_summary.bytes_written += summary.bytes_written;
-            total_summary.batches_written += summary.batches_written;
-            total_summary.checkpoint_count += summary.checkpoint_count;
-            total_summary.records_failed += summary.records_failed;
+        let dest_config_json = serde_json::to_string(dest_config)
+            .context("Failed to serialize destination config")
+            .map_err(PipelineError::Infrastructure)?;
 
-            {
-                let mut s = stats_ref.lock().unwrap();
-                s.records_written = total_summary.records_written;
+        tracing::info!(
+            connector = connector_id,
+            version = connector_version,
+            stream = stream_ctx.stream_name,
+            "Opening destination connector for stream"
+        );
+        let open_result = iface
+            .call_open(&mut store, &dest_config_json)
+            .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
+        if let Err(err) = open_result {
+            return Err(PipelineError::Connector(dest_error_to_sdk(err)));
+        }
+
+        let recv_start = Instant::now();
+
+        let ctx_json = serde_json::to_string(stream_ctx)
+            .context("Failed to serialize StreamContext")
+            .map_err(PipelineError::Infrastructure)?;
+
+        tracing::info!(
+            stream = stream_ctx.stream_name,
+            "Starting destination write"
+        );
+        let run_result = iface
+            .call_run_write(&mut store, &ctx_json)
+            .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
+
+        let summary = match run_result {
+            Ok(summary) => WriteSummary {
+                records_written: summary.records_written,
+                bytes_written: summary.bytes_written,
+                batches_written: summary.batches_written,
+                checkpoint_count: summary.checkpoint_count,
+                records_failed: summary.records_failed,
+                perf: None,
+            },
+            Err(err) => {
+                let _ = iface.call_close(&mut store);
+                return Err(PipelineError::Connector(dest_error_to_sdk(err)));
+            }
+        };
+
+        tracing::info!(
+            stream = stream_ctx.stream_name,
+            records = summary.records_written,
+            bytes = summary.bytes_written,
+            "Destination write complete for stream"
+        );
+
+        {
+            let mut s = stats.lock().unwrap();
+            s.records_written += summary.records_written;
+        }
+
+        let recv_secs = recv_start.elapsed().as_secs_f64();
+
+        tracing::info!(
+            connector = connector_id,
+            version = connector_version,
+            stream = stream_ctx.stream_name,
+            "Closing destination connector for stream"
+        );
+        match iface.call_close(&mut store) {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                tracing::warn!(stream = stream_ctx.stream_name, "Destination close failed: {}", dest_error_to_sdk(err));
+            }
+            Err(err) => {
+                tracing::warn!(stream = stream_ctx.stream_name, "Destination close trap: {}", err);
             }
         }
-        Ok(())
-    })();
 
-    let recv_secs = recv_start.elapsed().as_secs_f64();
+        let checkpoints = dest_checkpoints
+            .lock()
+            .unwrap()
+            .drain(..)
+            .collect::<Vec<_>>();
+        let dest_host_timings = dest_timings.lock().unwrap().clone();
 
-    tracing::info!(connector = connector_id, version = connector_version, "Closing destination connector");
-    match iface.call_close(&mut store) {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => {
-            tracing::warn!("Destination close failed: {}", dest_error_to_sdk(err));
-        }
-        Err(err) => {
-            tracing::warn!("Destination close trap: {}", err);
-        }
-    }
-
-    stream_result?;
-
-    let checkpoints = dest_checkpoints
-        .lock()
-        .unwrap()
-        .drain(..)
-        .collect::<Vec<_>>();
-    let dest_host_timings = dest_timings.lock().unwrap().clone();
-
-    Ok((
-        phase_start.elapsed().as_secs_f64(),
-        total_summary,
-        vm_setup_secs,
-        recv_secs,
-        checkpoints,
-        dest_host_timings,
-    ))
+        Ok((
+            phase_start.elapsed().as_secs_f64(),
+            summary,
+            vm_setup_secs,
+            recv_secs,
+            checkpoints,
+            dest_host_timings,
+        ))
+    })()
 }
 
+/// Run a transform connector for a single stream.
+/// Creates its own WASM instance (Store), opens the connector, transforms one stream,
+/// sends EndStream on the output channel, then closes the connector.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_transform(
-    module: LoadedComponent,
+pub(crate) fn run_transform_stream(
+    module: &LoadedComponent,
     receiver: mpsc::Receiver<Frame>,
     sender: mpsc::Sender<Frame>,
     state_backend: Arc<dyn StateBackend>,
@@ -413,14 +410,12 @@ pub(crate) fn run_transform(
     connector_id: &str,
     connector_version: &str,
     transform_config: &serde_json::Value,
-    stream_ctxs: &[StreamContext],
-    stats: Arc<Mutex<RunStats>>,
+    stream_ctx: &StreamContext,
     permissions: Option<&Permissions>,
     compression: Option<CompressionCodec>,
 ) -> Result<(f64, TransformSummary), PipelineError> {
     let phase_start = Instant::now();
 
-    let current_stream = Arc::new(Mutex::new(String::new()));
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let timings = Arc::new(Mutex::new(HostTimings::default()));
@@ -428,14 +423,14 @@ pub(crate) fn run_transform(
     let host_state = ComponentHostState::new(
         pipeline_name.to_string(),
         connector_id.to_string(),
-        current_stream.clone(),
+        stream_ctx.stream_name.clone(),
         state_backend,
-        stats,
         Some(sender.clone()),
         Some(receiver),
         compression,
         source_checkpoints,
         dest_checkpoints,
+        Arc::new(Mutex::new(Vec::new())),
         timings,
         permissions,
         transform_config,
@@ -454,7 +449,12 @@ pub(crate) fn run_transform(
         .context("Failed to serialize transform config")
         .map_err(PipelineError::Infrastructure)?;
 
-    tracing::info!(connector = connector_id, version = connector_version, "Opening transform connector");
+    tracing::info!(
+        connector = connector_id,
+        version = connector_version,
+        stream = stream_ctx.stream_name,
+        "Opening transform connector for stream"
+    );
     let open_result = iface
         .call_open(&mut store, &transform_config_json)
         .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
@@ -462,63 +462,49 @@ pub(crate) fn run_transform(
         return Err(PipelineError::Connector(transform_error_to_sdk(err)));
     }
 
-    let mut total_summary = TransformSummary {
-        records_in: 0,
-        records_out: 0,
-        bytes_in: 0,
-        bytes_out: 0,
-        batches_processed: 0,
+    let ctx_json = serde_json::to_string(stream_ctx)
+        .context("Failed to serialize StreamContext")
+        .map_err(PipelineError::Infrastructure)?;
+
+    tracing::info!(stream = stream_ctx.stream_name, "Starting transform");
+    let run_result = iface
+        .call_run_transform(&mut store, &ctx_json)
+        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
+
+    let summary = match run_result {
+        Ok(summary) => TransformSummary {
+            records_in: summary.records_in,
+            records_out: summary.records_out,
+            bytes_in: summary.bytes_in,
+            bytes_out: summary.bytes_out,
+            batches_processed: summary.batches_processed,
+        },
+        Err(err) => {
+            let _ = iface.call_close(&mut store);
+            return Err(PipelineError::Connector(transform_error_to_sdk(err)));
+        }
     };
 
-    let stream_result: Result<(), PipelineError> = (|| {
-        for stream_ctx in stream_ctxs {
-            *current_stream.lock().unwrap() = stream_ctx.stream_name.clone();
+    // Signal end of stream data on the output channel
+    let _ = sender.blocking_send(Frame::EndStream);
 
-            let ctx_json = serde_json::to_string(stream_ctx)
-                .context("Failed to serialize StreamContext")
-                .map_err(PipelineError::Infrastructure)?;
-
-            tracing::info!(stream = stream_ctx.stream_name, "Starting transform");
-            let run_result = iface
-                .call_run_transform(&mut store, &ctx_json)
-                .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
-
-            let summary = match run_result {
-                Ok(summary) => TransformSummary {
-                    records_in: summary.records_in,
-                    records_out: summary.records_out,
-                    bytes_in: summary.bytes_in,
-                    bytes_out: summary.bytes_out,
-                    batches_processed: summary.batches_processed,
-                },
-                Err(err) => return Err(PipelineError::Connector(transform_error_to_sdk(err))),
-            };
-
-            total_summary.records_in += summary.records_in;
-            total_summary.records_out += summary.records_out;
-            total_summary.bytes_in += summary.bytes_in;
-            total_summary.bytes_out += summary.bytes_out;
-            total_summary.batches_processed += summary.batches_processed;
-
-            let _ = sender.blocking_send(Frame::EndStream);
-        }
-        Ok(())
-    })();
-
-    tracing::info!(connector = connector_id, version = connector_version, "Closing transform connector");
+    tracing::info!(
+        connector = connector_id,
+        version = connector_version,
+        stream = stream_ctx.stream_name,
+        "Closing transform connector for stream"
+    );
     match iface.call_close(&mut store) {
         Ok(Ok(())) => {}
         Ok(Err(err)) => {
-            tracing::warn!("Transform close failed: {}", transform_error_to_sdk(err));
+            tracing::warn!(stream = stream_ctx.stream_name, "Transform close failed: {}", transform_error_to_sdk(err));
         }
         Err(err) => {
-            tracing::warn!("Transform close trap: {}", err);
+            tracing::warn!(stream = stream_ctx.stream_name, "Transform close trap: {}", err);
         }
     }
 
-    stream_result?;
-
-    Ok((phase_start.elapsed().as_secs_f64(), total_summary))
+    Ok((phase_start.elapsed().as_secs_f64(), summary))
 }
 
 pub(crate) fn validate_connector(
@@ -535,17 +521,16 @@ pub(crate) fn validate_connector(
     let module = runtime.load_module(wasm_path)?;
 
     let state = Arc::new(SqliteStateBackend::in_memory()?);
-    let current_stream = Arc::new(Mutex::new("check".to_string()));
 
     let host_state = ComponentHostState::new(
         "check".to_string(),
         connector_id.to_string(),
-        current_stream,
+        "check".to_string(),
         state,
-        Arc::new(Mutex::new(RunStats::default())),
         None,
         None,
         None,
+        Arc::new(Mutex::new(Vec::new())),
         Arc::new(Mutex::new(Vec::new())),
         Arc::new(Mutex::new(Vec::new())),
         Arc::new(Mutex::new(HostTimings::default())),
@@ -642,17 +627,16 @@ pub(crate) fn run_discover(
     let module = runtime.load_module(wasm_path)?;
 
     let state = Arc::new(SqliteStateBackend::in_memory()?);
-    let current_stream = Arc::new(Mutex::new("discover".to_string()));
 
     let host_state = ComponentHostState::new(
         "discover".to_string(),
         connector_id.to_string(),
-        current_stream,
+        "discover".to_string(),
         state,
-        Arc::new(Mutex::new(RunStats::default())),
         None,
         None,
         None,
+        Arc::new(Mutex::new(Vec::new())),
         Arc::new(Mutex::new(Vec::new())),
         Arc::new(Mutex::new(Vec::new())),
         Arc::new(Mutex::new(HostTimings::default())),

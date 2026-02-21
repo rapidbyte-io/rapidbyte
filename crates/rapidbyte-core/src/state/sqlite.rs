@@ -5,6 +5,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::Connection;
 
+use rapidbyte_sdk::protocol::DlqRecord;
+
 use super::backend::{CursorState, RunStats, RunStatus, StateBackend};
 use super::schema;
 
@@ -146,6 +148,42 @@ impl StateBackend for SqliteStateBackend {
             ],
         )?;
         Ok(())
+    }
+
+    fn insert_dlq_records(
+        &self,
+        pipeline: &str,
+        run_id: i64,
+        records: &[DlqRecord],
+    ) -> Result<u64> {
+        if records.is_empty() {
+            return Ok(0);
+        }
+
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        let mut stmt = tx.prepare(
+            "INSERT INTO dlq_records (pipeline, run_id, stream_name, record_json, error_message, error_category, failed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )?;
+
+        let mut count = 0u64;
+        for record in records {
+            stmt.execute(rusqlite::params![
+                pipeline,
+                run_id,
+                record.stream_name,
+                record.record_json,
+                record.error_message,
+                record.error_category,
+                record.failed_at,
+            ])?;
+            count += 1;
+        }
+        drop(stmt);
+        tx.commit()?;
+
+        Ok(count)
     }
 }
 
@@ -384,6 +422,62 @@ mod tests {
 
         let got = backend.get_cursor("pipe", "stream1").unwrap().unwrap();
         assert_eq!(got.cursor_value, Some("50".to_string()));
+    }
+
+    #[test]
+    fn test_dlq_records_insert_and_count() {
+        let backend = SqliteStateBackend::in_memory().unwrap();
+
+        let records = vec![
+            DlqRecord {
+                stream_name: "users".to_string(),
+                record_json: r#"{"id":1}"#.to_string(),
+                error_message: "not-null violation".to_string(),
+                error_category: "data".to_string(),
+                failed_at: "2026-02-21T12:00:00+00:00".to_string(),
+            },
+            DlqRecord {
+                stream_name: "users".to_string(),
+                record_json: r#"{"id":2}"#.to_string(),
+                error_message: "type mismatch".to_string(),
+                error_category: "data".to_string(),
+                failed_at: "2026-02-21T12:00:01+00:00".to_string(),
+            },
+        ];
+
+        let count = backend
+            .insert_dlq_records("pipe1", 1, &records)
+            .unwrap();
+        assert_eq!(count, 2);
+
+        // Verify records are actually in the table
+        let conn = backend.conn.lock().unwrap();
+        let stored_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM dlq_records WHERE pipeline = ?1 AND run_id = ?2",
+                rusqlite::params!["pipe1", 1i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_count, 2);
+
+        // Verify content of first record
+        let (stream, error_msg): (String, String) = conn
+            .query_row(
+                "SELECT stream_name, error_message FROM dlq_records WHERE pipeline = ?1 ORDER BY id LIMIT 1",
+                rusqlite::params!["pipe1"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stream, "users");
+        assert_eq!(error_msg, "not-null violation");
+    }
+
+    #[test]
+    fn test_dlq_records_empty_insert() {
+        let backend = SqliteStateBackend::in_memory().unwrap();
+        let count = backend.insert_dlq_records("pipe1", 1, &[]).unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]

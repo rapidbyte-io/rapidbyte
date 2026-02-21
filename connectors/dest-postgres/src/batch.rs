@@ -172,7 +172,10 @@ pub(crate) struct WriteResult {
 pub(crate) struct WriteContext<'a> {
     pub(crate) client: &'a Client,
     pub(crate) target_schema: &'a str,
+    /// Physical write target (staging table in Replace mode).
     pub(crate) stream_name: &'a str,
+    /// Logical stream identity for metrics/checkpoints/DLQ metadata.
+    pub(crate) logical_stream_name: &'a str,
     pub(crate) created_tables: &'a mut HashSet<String>,
     pub(crate) write_mode: Option<&'a WriteMode>,
     pub(crate) schema_policy: Option<&'a SchemaEvolutionPolicy>,
@@ -278,22 +281,27 @@ async fn write_batch_inner(
             if matches!(ctx.on_data_error, DataErrorPolicy::Fail) {
                 return Err(e.context(format!("{} failed for stream {}", method_name, ctx.stream_name)));
             }
+            let emit_dlq = matches!(ctx.on_data_error, DataErrorPolicy::Dlq);
             host_ffi::log(
                 1,
                 &format!(
-                    "dest-postgres: {} failed ({}), falling back to per-row INSERT with skip",
-                    method_name, e
+                    "dest-postgres: {} failed ({}), falling back to per-row INSERT with {}",
+                    method_name,
+                    e,
+                    if emit_dlq { "dlq" } else { "skip" }
                 ),
             );
             let wr = write_rows_individually(
                 ctx.client,
                 ctx.target_schema,
                 ctx.stream_name,
+                ctx.logical_stream_name,
                 &arrow_schema,
                 &batches,
                 ctx.write_mode,
                 ctx.ignored_columns,
                 ctx.type_null_columns,
+                emit_dlq,
             )
             .await
             .context("per-row fallback INSERT failed")?;
@@ -530,15 +538,19 @@ async fn copy_batch(
 }
 
 /// Insert rows one at a time, skipping any that fail.
+/// When `emit_dlq` is true, failed rows are serialized to JSON and emitted via
+/// `host_ffi::emit_dlq_record` so the host can persist them to the DLQ table.
 async fn write_rows_individually(
     client: &Client,
     target_schema: &str,
     stream_name: &str,
+    logical_stream_name: &str,
     arrow_schema: &Arc<Schema>,
     batches: &[RecordBatch],
     write_mode: Option<&WriteMode>,
     ignored_columns: &HashSet<String>,
     type_null_columns: &HashSet<String>,
+    emit_dlq: bool,
 ) -> anyhow::Result<WriteResult> {
     let qualified_table = format!("\"{}\".\"{}\"", target_schema, stream_name);
 
@@ -604,6 +616,15 @@ async fn write_rows_individually(
                             row_idx, e
                         ),
                     );
+                    if emit_dlq {
+                        let record_json = serialize_row_to_json(arrow_schema, batch, row_idx, &active_cols);
+                        let _ = host_ffi::emit_dlq_record(
+                            logical_stream_name,
+                            &record_json,
+                            &e.to_string(),
+                            "data",
+                        );
+                    }
                 }
             }
         }
@@ -667,6 +688,66 @@ fn build_upsert_clause(
     } else {
         Ok(None)
     }
+}
+
+/// Serialize a single row from a RecordBatch into a JSON string for DLQ emission.
+fn serialize_row_to_json(
+    arrow_schema: &Arc<Schema>,
+    batch: &RecordBatch,
+    row_idx: usize,
+    active_cols: &[usize],
+) -> String {
+    use serde_json::{Map, Value};
+
+    let mut map = Map::new();
+    for &col_idx in active_cols {
+        let field = arrow_schema.field(col_idx);
+        let col = batch.column(col_idx);
+
+        let value = if col.is_null(row_idx) {
+            Value::Null
+        } else {
+            match col.data_type() {
+                DataType::Int16 => {
+                    let arr = col.as_any().downcast_ref::<Int16Array>().unwrap();
+                    Value::Number(arr.value(row_idx).into())
+                }
+                DataType::Int32 => {
+                    let arr = col.as_any().downcast_ref::<Int32Array>().unwrap();
+                    Value::Number(arr.value(row_idx).into())
+                }
+                DataType::Int64 => {
+                    let arr = col.as_any().downcast_ref::<Int64Array>().unwrap();
+                    Value::Number(arr.value(row_idx).into())
+                }
+                DataType::Float32 => {
+                    let arr = col.as_any().downcast_ref::<Float32Array>().unwrap();
+                    serde_json::Number::from_f64(arr.value(row_idx) as f64)
+                        .map(Value::Number)
+                        .unwrap_or(Value::Null)
+                }
+                DataType::Float64 => {
+                    let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
+                    serde_json::Number::from_f64(arr.value(row_idx))
+                        .map(Value::Number)
+                        .unwrap_or(Value::Null)
+                }
+                DataType::Boolean => {
+                    let arr = col.as_any().downcast_ref::<BooleanArray>().unwrap();
+                    Value::Bool(arr.value(row_idx))
+                }
+                DataType::Utf8 => {
+                    let arr = col.as_string::<i32>();
+                    Value::String(arr.value(row_idx).to_string())
+                }
+                _ => Value::String(format!("<unsupported:{:?}>", col.data_type())),
+            }
+        };
+
+        map.insert(field.name().clone(), value);
+    }
+
+    serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string())
 }
 
 fn sql_param_value<'a>(col: &'a TypedCol<'a>, row_idx: usize) -> SqlParamValue<'a> {
