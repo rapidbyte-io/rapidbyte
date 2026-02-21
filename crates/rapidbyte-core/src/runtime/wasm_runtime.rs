@@ -2,6 +2,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -27,6 +28,12 @@ pub struct WasmRuntime {
     engine: Arc<Engine>,
     aot_cache_dir: Option<PathBuf>,
     aot_compat_hash: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AotLoadKind {
+    CacheHit,
+    Compiled,
 }
 
 impl WasmRuntime {
@@ -70,9 +77,15 @@ impl WasmRuntime {
 
     /// Load a component from a file on disk.
     pub fn load_module(&self, wasm_path: &Path) -> Result<LoadedComponent> {
+        let load_start = Instant::now();
+        let mut aot_load_kind: Option<AotLoadKind> = None;
+
         let component = if self.aot_cache_dir.is_some() {
             match self.load_module_aot(wasm_path) {
-                Ok(component) => component,
+                Ok((component, kind)) => {
+                    aot_load_kind = Some(kind);
+                    component
+                }
                 Err(err) => {
                     tracing::warn!(
                         path = %wasm_path.display(),
@@ -89,6 +102,31 @@ impl WasmRuntime {
                 format!("Failed to load Wasm component: {}", wasm_path.display())
             })?
         };
+
+        let load_ms = load_start.elapsed().as_millis() as u64;
+        match aot_load_kind {
+            Some(AotLoadKind::CacheHit) => {
+                tracing::info!(
+                    path = %wasm_path.display(),
+                    load_ms,
+                    "Loaded connector module from AOT cache"
+                );
+            }
+            Some(AotLoadKind::Compiled) => {
+                tracing::info!(
+                    path = %wasm_path.display(),
+                    load_ms,
+                    "Precompiled connector module for AOT cache"
+                );
+            }
+            None => {
+                tracing::info!(
+                    path = %wasm_path.display(),
+                    load_ms,
+                    "Loaded connector module without AOT cache"
+                );
+            }
+        }
 
         Ok(LoadedComponent {
             engine: self.engine.clone(),
@@ -136,7 +174,7 @@ impl WasmRuntime {
         Store::new(&self.engine, host_state)
     }
 
-    fn load_module_aot(&self, wasm_path: &Path) -> Result<Component> {
+    fn load_module_aot(&self, wasm_path: &Path) -> Result<(Component, AotLoadKind)> {
         let cache_dir = self
             .aot_cache_dir
             .as_ref()
@@ -158,7 +196,7 @@ impl WasmRuntime {
                         artifact = %artifact_path.display(),
                         "Loaded connector from Wasmtime AOT artifact"
                     );
-                    return Ok(component);
+                    return Ok((component, AotLoadKind::CacheHit));
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -199,7 +237,7 @@ impl WasmRuntime {
             artifact = %artifact_path.display(),
             "Compiled connector into Wasmtime AOT artifact"
         );
-        Ok(component)
+        Ok((component, AotLoadKind::Compiled))
     }
 
     fn aot_artifact_path(&self, cache_dir: &Path, wasm_path: &Path, wasm_hash: &str) -> PathBuf {

@@ -133,15 +133,57 @@ async fn execute_pipeline_once(
     let run_id = state.start_run(&config.pipeline, "all")?;
 
     // 3. Load modules
-    let runtime = WasmRuntime::new()?;
+    let runtime = Arc::new(WasmRuntime::new()?);
+    tracing::info!(
+        source = %source_wasm.display(),
+        destination = %dest_wasm.display(),
+        "Loading connector modules"
+    );
 
-    let source_load_start = Instant::now();
-    let source_module = runtime.load_module(&source_wasm)?;
-    let source_module_load_ms = source_load_start.elapsed().as_millis() as u64;
+    let source_wasm_for_load = source_wasm.clone();
+    let runtime_for_source = runtime.clone();
+    let source_load_task = tokio::task::spawn_blocking(move || {
+        let load_start = Instant::now();
+        let module = runtime_for_source
+            .load_module(&source_wasm_for_load)
+            .map_err(PipelineError::Infrastructure)?;
+        let load_ms = load_start.elapsed().as_millis() as u64;
+        Ok::<_, PipelineError>((module, load_ms))
+    });
 
-    let dest_load_start = Instant::now();
-    let dest_module = runtime.load_module(&dest_wasm)?;
-    let dest_module_load_ms = dest_load_start.elapsed().as_millis() as u64;
+    let dest_wasm_for_load = dest_wasm.clone();
+    let runtime_for_dest = runtime.clone();
+    let dest_load_task = tokio::task::spawn_blocking(move || {
+        let load_start = Instant::now();
+        let module = runtime_for_dest
+            .load_module(&dest_wasm_for_load)
+            .map_err(PipelineError::Infrastructure)?;
+        let load_ms = load_start.elapsed().as_millis() as u64;
+        Ok::<_, PipelineError>((module, load_ms))
+    });
+
+    let (source_module, source_module_load_ms) = source_load_task
+        .await
+        .map_err(|e| {
+            PipelineError::Infrastructure(anyhow::anyhow!(
+                "Source module load task panicked: {}",
+                e
+            ))
+        })??;
+    let (dest_module, dest_module_load_ms) = dest_load_task
+        .await
+        .map_err(|e| {
+            PipelineError::Infrastructure(anyhow::anyhow!(
+                "Destination module load task panicked: {}",
+                e
+            ))
+        })??;
+
+    tracing::info!(
+        source_ms = source_module_load_ms,
+        dest_ms = dest_module_load_ms,
+        "Connector modules loaded"
+    );
 
     // 3b. Load transform modules (in order)
     let transform_modules = config

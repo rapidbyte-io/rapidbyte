@@ -4,6 +4,9 @@ default:
 build:
     cargo build
 
+build-no-sccache:
+    NO_SCCACHE=1 cargo build
+
 build-connectors:
     cd connectors/source-postgres && cargo build
     cd connectors/dest-postgres && cargo build
@@ -18,6 +21,9 @@ test:
 
 check:
     cargo check --all-targets
+
+check-no-sccache:
+    NO_SCCACHE=1 cargo check --all-targets
 
 fmt:
     cargo fmt --all
@@ -58,3 +64,6 @@ bench-compare ref1 ref2 *args="":
 # View/compare past benchmark results
 bench-results *args="":
     python3 tests/bench_compare.py {{args}}
+
+sccache-stats:
+    sccache --show-stats

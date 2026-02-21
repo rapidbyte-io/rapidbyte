@@ -1,1 +1,18 @@
-# Host-side build configuration
+# Repo-local build configuration:
+# - Uses a resilient rustc wrapper (sccache with automatic fallback).
+# - Keeps native CPU tuning for non-wasm targets.
+# - Ensures wasm32-wasip2 builds do not receive invalid target-cpu flags.
+
+[build]
+rustc-wrapper = "scripts/rustc-wrapper.sh"
+rustflags = []
+
+[env]
+SCCACHE_DIR = { value = "target/sccache", relative = true }
+SCCACHE_CACHE_SIZE = "10G"
+
+[target.'cfg(not(target_arch = "wasm32"))']
+rustflags = ["-C", "target-cpu=native"]
+
+[target.wasm32-wasip2]
+rustflags = []

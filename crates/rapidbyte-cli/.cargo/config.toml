@@ -1,4 +1,3 @@
 [build]
-target = "wasm32-wasip2"
 rustc-wrapper = "../../scripts/rustc-wrapper.sh"
 rustflags = []
