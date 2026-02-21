@@ -1,3 +1,5 @@
+//! Host TCP socket helpers backing WIT host socket operations.
+
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 
 #[cfg(unix)]

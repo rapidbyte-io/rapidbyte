@@ -1,8 +1,10 @@
+//! Host-side runtime state and host import implementations for connector components.
+
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -14,7 +16,7 @@ use tokio::sync::mpsc;
 use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-use crate::state::backend::{CursorState, StateBackend};
+use crate::state::backend::{CursorState, PipelineId, StateBackend, StreamName};
 
 use super::host_socket::{
     resolve_socket_addrs, SocketEntry, SocketReadResultInternal, SocketWriteResultInternal,
@@ -34,6 +36,11 @@ pub use super::wit_bindings::{
     dest_error_to_sdk, dest_validation_to_sdk, source_error_to_sdk, source_validation_to_sdk,
     transform_error_to_sdk, transform_validation_to_sdk,
 };
+
+const MAX_SOCKET_READ_BYTES: u64 = 64 * 1024;
+const CHECKPOINT_KIND_SOURCE: u32 = 0;
+const CHECKPOINT_KIND_DEST: u32 = 1;
+const CHECKPOINT_KIND_TRANSFORM: u32 = 2;
 
 pub mod source_bindings {
     wasmtime::component::bindgen!({
@@ -89,6 +96,12 @@ pub struct HostTimings {
     pub next_batch_count: u64,
 }
 
+fn lock_mutex<'a, T>(mutex: &'a Mutex<T>, name: &str) -> Result<MutexGuard<'a, T>, ConnectorError> {
+    mutex
+        .lock()
+        .map_err(|_| ConnectorError::internal("MUTEX_POISONED", format!("{} mutex poisoned", name)))
+}
+
 fn build_wasi_ctx(permissions: Option<&Permissions>) -> Result<WasiCtx> {
     let mut builder = WasiCtxBuilder::new();
     builder.allow_blocking_current_thread(true);
@@ -124,73 +137,213 @@ fn build_wasi_ctx(permissions: Option<&Permissions>) -> Result<WasiCtx> {
     Ok(builder.build())
 }
 
+pub(crate) struct ConnectorIdentity {
+    pub pipeline: PipelineId,
+    pub connector_id: String,
+    pub stream: StreamName,
+    pub state_backend: Arc<dyn StateBackend>,
+}
+
+pub(crate) struct BatchRouter {
+    pub sender: Option<mpsc::Sender<Frame>>,
+    pub receiver: Option<mpsc::Receiver<Frame>>,
+    pub next_batch_id: u64,
+    pub compression: Option<CompressionCodec>,
+}
+
+pub(crate) struct CheckpointCollector {
+    pub source: Arc<Mutex<Vec<Checkpoint>>>,
+    pub dest: Arc<Mutex<Vec<Checkpoint>>>,
+    pub dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
+    pub timings: Arc<Mutex<HostTimings>>,
+}
+
+pub(crate) struct SocketManager {
+    pub acl: NetworkAcl,
+    pub sockets: HashMap<u64, SocketEntry>,
+    pub next_handle: u64,
+}
+
 /// Shared state passed to component host imports.
 pub struct ComponentHostState {
-    pub(crate) pipeline_name: String,
-    pub(crate) connector_id: String,
-    pub(crate) current_stream: String,
-    pub(crate) state_backend: Arc<dyn StateBackend>,
-
-    pub(crate) batch_sender: Option<mpsc::Sender<Frame>>,
-    pub(crate) next_batch_id: u64,
-
-    pub(crate) batch_receiver: Option<mpsc::Receiver<Frame>>,
-
-    pub(crate) compression: Option<CompressionCodec>,
-
-    pub(crate) source_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
-    pub(crate) dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
-    pub(crate) dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
-    pub(crate) timings: Arc<Mutex<HostTimings>>,
-
-    network_acl: NetworkAcl,
-    sockets: HashMap<u64, SocketEntry>,
-    next_socket_handle: u64,
-
+    pub(crate) identity: ConnectorIdentity,
+    pub(crate) batch: BatchRouter,
+    pub(crate) checkpoints: CheckpointCollector,
+    pub(crate) sockets: SocketManager,
     ctx: WasiCtx,
     table: ResourceTable,
 }
 
 impl ComponentHostState {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        pipeline_name: String,
-        connector_id: String,
-        current_stream: String,
-        state_backend: Arc<dyn StateBackend>,
-        batch_sender: Option<mpsc::Sender<Frame>>,
-        batch_receiver: Option<mpsc::Receiver<Frame>>,
-        compression: Option<CompressionCodec>,
-        source_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
-        dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
-        dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
-        timings: Arc<Mutex<HostTimings>>,
+    fn from_parts(
+        identity: ConnectorIdentity,
+        batch: BatchRouter,
+        checkpoints: CheckpointCollector,
         permissions: Option<&Permissions>,
         config: &serde_json::Value,
     ) -> Result<Self> {
         Ok(Self {
-            pipeline_name,
-            connector_id,
-            current_stream,
-            state_backend,
-            batch_sender,
-            next_batch_id: 1,
-            batch_receiver,
-            compression,
-            source_checkpoints,
-            dest_checkpoints,
-            dlq_records,
-            timings,
-            network_acl: derive_network_acl(permissions, config),
-            sockets: HashMap::new(),
-            next_socket_handle: 1,
+            identity,
+            batch,
+            checkpoints,
+            sockets: SocketManager {
+                acl: derive_network_acl(permissions, config),
+                sockets: HashMap::new(),
+                next_handle: 1,
+            },
             ctx: build_wasi_ctx(permissions)?,
             table: ResourceTable::new(),
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_source(
+        pipeline_name: String,
+        connector_id: String,
+        stream_name: String,
+        state_backend: Arc<dyn StateBackend>,
+        sender: mpsc::Sender<Frame>,
+        source_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
+        timings: Arc<Mutex<HostTimings>>,
+        permissions: Option<&Permissions>,
+        config: &serde_json::Value,
+        compression: Option<CompressionCodec>,
+    ) -> Result<Self> {
+        Self::from_parts(
+            ConnectorIdentity {
+                pipeline: PipelineId(pipeline_name),
+                connector_id,
+                stream: StreamName(stream_name),
+                state_backend,
+            },
+            BatchRouter {
+                sender: Some(sender),
+                receiver: None,
+                next_batch_id: 1,
+                compression,
+            },
+            CheckpointCollector {
+                source: source_checkpoints,
+                dest: Arc::new(Mutex::new(Vec::new())),
+                dlq_records: Arc::new(Mutex::new(Vec::new())),
+                timings,
+            },
+            permissions,
+            config,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_destination(
+        pipeline_name: String,
+        connector_id: String,
+        stream_name: String,
+        state_backend: Arc<dyn StateBackend>,
+        receiver: mpsc::Receiver<Frame>,
+        dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
+        dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
+        timings: Arc<Mutex<HostTimings>>,
+        permissions: Option<&Permissions>,
+        config: &serde_json::Value,
+        compression: Option<CompressionCodec>,
+    ) -> Result<Self> {
+        Self::from_parts(
+            ConnectorIdentity {
+                pipeline: PipelineId(pipeline_name),
+                connector_id,
+                stream: StreamName(stream_name),
+                state_backend,
+            },
+            BatchRouter {
+                sender: None,
+                receiver: Some(receiver),
+                next_batch_id: 1,
+                compression,
+            },
+            CheckpointCollector {
+                source: Arc::new(Mutex::new(Vec::new())),
+                dest: dest_checkpoints,
+                dlq_records,
+                timings,
+            },
+            permissions,
+            config,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_transform(
+        pipeline_name: String,
+        connector_id: String,
+        stream_name: String,
+        state_backend: Arc<dyn StateBackend>,
+        sender: mpsc::Sender<Frame>,
+        receiver: mpsc::Receiver<Frame>,
+        source_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
+        dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
+        timings: Arc<Mutex<HostTimings>>,
+        permissions: Option<&Permissions>,
+        config: &serde_json::Value,
+        compression: Option<CompressionCodec>,
+    ) -> Result<Self> {
+        Self::from_parts(
+            ConnectorIdentity {
+                pipeline: PipelineId(pipeline_name),
+                connector_id,
+                stream: StreamName(stream_name),
+                state_backend,
+            },
+            BatchRouter {
+                sender: Some(sender),
+                receiver: Some(receiver),
+                next_batch_id: 1,
+                compression,
+            },
+            CheckpointCollector {
+                source: source_checkpoints,
+                dest: dest_checkpoints,
+                dlq_records: Arc::new(Mutex::new(Vec::new())),
+                timings,
+            },
+            permissions,
+            config,
+        )
+    }
+
+    pub fn for_validation(
+        pipeline_name: String,
+        connector_id: String,
+        stream_name: String,
+        state_backend: Arc<dyn StateBackend>,
+        permissions: Option<&Permissions>,
+        config: &serde_json::Value,
+    ) -> Result<Self> {
+        Self::from_parts(
+            ConnectorIdentity {
+                pipeline: PipelineId(pipeline_name),
+                connector_id,
+                stream: StreamName(stream_name),
+                state_backend,
+            },
+            BatchRouter {
+                sender: None,
+                receiver: None,
+                next_batch_id: 1,
+                compression: None,
+            },
+            CheckpointCollector {
+                source: Arc::new(Mutex::new(Vec::new())),
+                dest: Arc::new(Mutex::new(Vec::new())),
+                dlq_records: Arc::new(Mutex::new(Vec::new())),
+                timings: Arc::new(Mutex::new(HostTimings::default())),
+            },
+            permissions,
+            config,
+        )
+    }
+
     fn current_stream(&self) -> &str {
-        &self.current_stream
+        self.identity.stream.as_str()
     }
 
     pub(crate) fn emit_batch_impl(&mut self, batch: Vec<u8>) -> Result<(), ConnectorError> {
@@ -204,29 +357,30 @@ impl ComponentHostState {
         let fn_start = Instant::now();
 
         let compress_start = Instant::now();
-        let batch = if let Some(codec) = self.compression {
+        let batch = if let Some(codec) = self.batch.compression {
             crate::engine::compression::compress(codec, &batch)
+                .map_err(|e| ConnectorError::internal("COMPRESS_FAILED", e.to_string()))?
         } else {
             batch
         };
-        let compress_elapsed_nanos = if self.compression.is_some() {
+        let compress_elapsed_nanos = if self.batch.compression.is_some() {
             compress_start.elapsed().as_nanos() as u64
         } else {
             0
         };
 
-        let sender = self
-            .batch_sender
-            .as_ref()
-            .ok_or_else(|| ConnectorError::internal("NO_SENDER", "No batch sender configured"))?;
+        let sender =
+            self.batch.sender.as_ref().ok_or_else(|| {
+                ConnectorError::internal("NO_SENDER", "No batch sender configured")
+            })?;
 
         sender
             .blocking_send(Frame::Data(batch))
             .map_err(|e| ConnectorError::internal("CHANNEL_SEND", e.to_string()))?;
 
-        self.next_batch_id += 1;
+        self.batch.next_batch_id += 1;
 
-        let mut t = self.timings.lock().unwrap();
+        let mut t = lock_mutex(&self.checkpoints.timings, "timings")?;
         t.emit_batch_nanos += fn_start.elapsed().as_nanos() as u64;
         t.emit_batch_count += 1;
         t.compress_nanos += compress_elapsed_nanos;
@@ -237,7 +391,7 @@ impl ComponentHostState {
     pub(crate) fn next_batch_impl(&mut self) -> Result<Option<Vec<u8>>, ConnectorError> {
         let fn_start = Instant::now();
 
-        let receiver = self.batch_receiver.as_mut().ok_or_else(|| {
+        let receiver = self.batch.receiver.as_mut().ok_or_else(|| {
             ConnectorError::internal("NO_RECEIVER", "No batch receiver configured")
         })?;
 
@@ -252,18 +406,19 @@ impl ComponentHostState {
         };
 
         let decompress_start = Instant::now();
-        let batch = if let Some(codec) = self.compression {
+        let batch = if let Some(codec) = self.batch.compression {
             crate::engine::compression::decompress(codec, &batch)
+                .map_err(|e| ConnectorError::internal("DECOMPRESS_FAILED", e.to_string()))?
         } else {
             batch
         };
-        let decompress_elapsed_nanos = if self.compression.is_some() {
+        let decompress_elapsed_nanos = if self.batch.compression.is_some() {
             decompress_start.elapsed().as_nanos() as u64
         } else {
             0
         };
 
-        let mut t = self.timings.lock().unwrap();
+        let mut t = lock_mutex(&self.checkpoints.timings, "timings")?;
         t.next_batch_nanos += fn_start.elapsed().as_nanos() as u64;
         t.next_batch_count += 1;
         t.decompress_nanos += decompress_elapsed_nanos;
@@ -275,7 +430,7 @@ impl ComponentHostState {
         match scope {
             StateScope::Pipeline => key.to_string(),
             StateScope::Stream => format!("{}:{}", self.current_stream(), key),
-            StateScope::ConnectorInstance => format!("{}:{}", self.connector_id, key),
+            StateScope::ConnectorInstance => format!("{}:{}", self.identity.connector_id, key),
         }
     }
 
@@ -296,9 +451,9 @@ impl ComponentHostState {
         })?;
 
         let scoped_key = self.scoped_state_key(scope, &key);
-
-        self.state_backend
-            .get_cursor(&self.pipeline_name, &scoped_key)
+        self.identity
+            .state_backend
+            .get_cursor(&self.identity.pipeline, &StreamName(scoped_key))
             .map_err(|e| ConnectorError::internal("STATE_BACKEND", e.to_string()))
             .map(|opt| opt.and_then(|cursor| cursor.cursor_value))
     }
@@ -327,8 +482,9 @@ impl ComponentHostState {
             updated_at: Utc::now(),
         };
 
-        self.state_backend
-            .set_cursor(&self.pipeline_name, &scoped_key, &cursor)
+        self.identity
+            .state_backend
+            .set_cursor(&self.identity.pipeline, &StreamName(scoped_key), &cursor)
             .map_err(|e| ConnectorError::internal("STATE_BACKEND", e.to_string()))
     }
 
@@ -351,11 +507,11 @@ impl ComponentHostState {
         })?;
 
         let scoped_key = self.scoped_state_key(scope, &key);
-
-        self.state_backend
+        self.identity
+            .state_backend
             .compare_and_set(
-                &self.pipeline_name,
-                &scoped_key,
+                &self.identity.pipeline,
+                &StreamName(scoped_key),
                 expected.as_deref(),
                 &new_value,
             )
@@ -370,34 +526,29 @@ impl ComponentHostState {
         let envelope: serde_json::Value = serde_json::from_str(&payload_json)
             .map_err(|e| ConnectorError::internal("PARSE_CHECKPOINT", e.to_string()))?;
 
-        let current_stream = self.current_stream();
-
         tracing::debug!(
-            pipeline = self.pipeline_name,
-            stream = %current_stream,
+            pipeline = self.identity.pipeline.as_str(),
+            stream = %self.current_stream(),
             "Received checkpoint: {}",
             serde_json::to_string(&envelope).unwrap_or_default()
         );
 
+        let payload = envelope.get("payload").cloned().unwrap_or(envelope.clone());
         match kind {
-            0 => {
-                if let Ok(cp) = serde_json::from_value::<Checkpoint>(
-                    envelope.get("payload").cloned().unwrap_or(envelope.clone()),
-                ) {
-                    self.source_checkpoints.lock().unwrap().push(cp);
+            CHECKPOINT_KIND_SOURCE => {
+                if let Ok(cp) = serde_json::from_value::<Checkpoint>(payload) {
+                    lock_mutex(&self.checkpoints.source, "source_checkpoints")?.push(cp);
                 }
             }
-            1 => {
-                if let Ok(cp) = serde_json::from_value::<Checkpoint>(
-                    envelope.get("payload").cloned().unwrap_or(envelope.clone()),
-                ) {
-                    self.dest_checkpoints.lock().unwrap().push(cp);
+            CHECKPOINT_KIND_DEST => {
+                if let Ok(cp) = serde_json::from_value::<Checkpoint>(payload) {
+                    lock_mutex(&self.checkpoints.dest, "dest_checkpoints")?.push(cp);
                 }
             }
-            2 => {
+            CHECKPOINT_KIND_TRANSFORM => {
                 tracing::debug!(
-                    pipeline = self.pipeline_name,
-                    stream = %current_stream,
+                    pipeline = self.identity.pipeline.as_str(),
+                    stream = %self.current_stream(),
                     "Received transform checkpoint"
                 );
             }
@@ -417,7 +568,7 @@ impl ComponentHostState {
             .map_err(|e| ConnectorError::internal("PARSE_METRIC", e.to_string()))?;
 
         tracing::debug!(
-            pipeline = self.pipeline_name,
+            pipeline = self.identity.pipeline.as_str(),
             stream = %self.current_stream(),
             "Received metric: {}",
             serde_json::to_string(&metric).unwrap_or_default()
@@ -427,7 +578,7 @@ impl ComponentHostState {
     }
 
     pub(crate) fn log_impl(&mut self, level: u32, msg: String) {
-        let pipeline = &self.pipeline_name;
+        let pipeline = self.identity.pipeline.as_str();
         let stream = self.current_stream();
 
         match level {
@@ -444,7 +595,7 @@ impl ComponentHostState {
         host: String,
         port: u16,
     ) -> Result<u64, ConnectorError> {
-        if !self.network_acl.allows(&host) {
+        if !self.sockets.acl.allows(&host) {
             return Err(ConnectorError::permission(
                 "NETWORK_DENIED",
                 format!("Host '{}' is not allowed by connector permissions", host),
@@ -486,9 +637,9 @@ impl ComponentHostState {
             .set_nodelay(true)
             .map_err(|e| ConnectorError::internal("SOCKET_CONFIG", e.to_string()))?;
 
-        let handle = self.next_socket_handle;
-        self.next_socket_handle = self.next_socket_handle.saturating_add(1);
-        self.sockets.insert(
+        let handle = self.sockets.next_handle;
+        self.sockets.next_handle = self.sockets.next_handle.saturating_add(1);
+        self.sockets.sockets.insert(
             handle,
             SocketEntry {
                 stream,
@@ -505,12 +656,12 @@ impl ComponentHostState {
         handle: u64,
         len: u64,
     ) -> Result<SocketReadResultInternal, ConnectorError> {
-        let entry = self
-            .sockets
-            .get_mut(&handle)
-            .ok_or_else(|| ConnectorError::internal("INVALID_SOCKET", "Invalid socket handle"))?;
+        let entry =
+            self.sockets.sockets.get_mut(&handle).ok_or_else(|| {
+                ConnectorError::internal("INVALID_SOCKET", "Invalid socket handle")
+            })?;
 
-        let read_len = len.clamp(1, 64 * 1024) as usize;
+        let read_len = len.clamp(1, MAX_SOCKET_READ_BYTES) as usize;
         let mut buf = vec![0u8; read_len];
         match entry.stream.read(&mut buf) {
             Ok(0) => {
@@ -525,14 +676,10 @@ impl ComponentHostState {
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 entry.read_would_block_streak += 1;
 
-                // Below threshold: return WouldBlock immediately (near-zero overhead).
-                // This avoids adding 1ms poll latency to transient WouldBlocks during
-                // active streaming where the next packet arrives in microseconds.
                 if entry.read_would_block_streak < SOCKET_POLL_ACTIVATION_THRESHOLD {
                     return Ok(SocketReadResultInternal::WouldBlock);
                 }
 
-                // Above threshold: socket appears idle. Poll to avoid busy-looping.
                 #[cfg(unix)]
                 let ready = match wait_socket_ready(
                     &entry.stream,
@@ -542,7 +689,7 @@ impl ComponentHostState {
                     Ok(ready) => ready,
                     Err(poll_err) => {
                         tracing::warn!(handle, error = %poll_err, "poll() failed in socket_read");
-                        true // Let the next read() surface the real error
+                        true
                     }
                 };
                 #[cfg(not(unix))]
@@ -584,10 +731,10 @@ impl ComponentHostState {
         handle: u64,
         data: Vec<u8>,
     ) -> Result<SocketWriteResultInternal, ConnectorError> {
-        let entry = self
-            .sockets
-            .get_mut(&handle)
-            .ok_or_else(|| ConnectorError::internal("INVALID_SOCKET", "Invalid socket handle"))?;
+        let entry =
+            self.sockets.sockets.get_mut(&handle).ok_or_else(|| {
+                ConnectorError::internal("INVALID_SOCKET", "Invalid socket handle")
+            })?;
 
         match entry.stream.write(&data) {
             Ok(n) => {
@@ -597,12 +744,10 @@ impl ComponentHostState {
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 entry.write_would_block_streak += 1;
 
-                // Below threshold: return WouldBlock immediately (near-zero overhead).
                 if entry.write_would_block_streak < SOCKET_POLL_ACTIVATION_THRESHOLD {
                     return Ok(SocketWriteResultInternal::WouldBlock);
                 }
 
-                // Above threshold: socket appears idle. Poll to avoid busy-looping.
                 #[cfg(unix)]
                 let ready = match wait_socket_ready(
                     &entry.stream,
@@ -612,7 +757,7 @@ impl ComponentHostState {
                     Ok(ready) => ready,
                     Err(poll_err) => {
                         tracing::warn!(handle, error = %poll_err, "poll() failed in socket_write");
-                        true // Let the next write() surface the real error
+                        true
                     }
                 };
                 #[cfg(not(unix))]
@@ -645,7 +790,7 @@ impl ComponentHostState {
     }
 
     pub(crate) fn socket_close_impl(&mut self, handle: u64) {
-        self.sockets.remove(&handle);
+        self.sockets.sockets.remove(&handle);
     }
 
     pub(crate) fn emit_dlq_record_impl(
@@ -655,7 +800,7 @@ impl ComponentHostState {
         error_message: String,
         error_category: String,
     ) -> Result<(), ConnectorError> {
-        let mut dlq = self.dlq_records.lock().unwrap();
+        let mut dlq = lock_mutex(&self.checkpoints.dlq_records, "dlq_records")?;
         if dlq.len() >= crate::engine::dlq::MAX_DLQ_RECORDS {
             tracing::warn!(
                 max = crate::engine::dlq::MAX_DLQ_RECORDS,
@@ -680,5 +825,36 @@ impl WasiView for ComponentHostState {
             ctx: &mut self.ctx,
             table: &mut self.table,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::sqlite::SqliteStateBackend;
+
+    #[test]
+    fn test_parse_error_category() {
+        assert_eq!(parse_error_category("config"), ErrorCategory::Config);
+        assert_eq!(parse_error_category("schema"), ErrorCategory::Schema);
+        assert_eq!(parse_error_category("unknown"), ErrorCategory::Internal);
+    }
+
+    #[test]
+    fn test_scoped_state_key_pipeline_scope() {
+        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let host = ComponentHostState::for_validation(
+            "pipe".to_string(),
+            "source-postgres".to_string(),
+            "users".to_string(),
+            state,
+            None,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        assert_eq!(
+            host.scoped_state_key(StateScope::Pipeline, "offset"),
+            "offset".to_string()
+        );
     }
 }

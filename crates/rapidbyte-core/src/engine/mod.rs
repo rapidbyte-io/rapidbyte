@@ -1,3 +1,5 @@
+//! Engine layer: orchestration, connector runners, checkpoints, and error policy.
+
 pub mod checkpoint;
 pub(crate) mod compression;
 pub(crate) mod dlq;

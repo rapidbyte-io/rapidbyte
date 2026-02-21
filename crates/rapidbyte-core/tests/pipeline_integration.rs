@@ -4,8 +4,9 @@
 //! through validation, using real fixture files.
 
 use rapidbyte_core::pipeline::parser;
+use rapidbyte_core::pipeline::types::{PipelineWriteMode, StateBackendKind};
 use rapidbyte_core::pipeline::validator;
-use rapidbyte_core::state::backend::{RunStats, RunStatus, StateBackend};
+use rapidbyte_core::state::backend::{PipelineId, RunStats, RunStatus, StateBackend, StreamName};
 use rapidbyte_core::state::sqlite::SqliteStateBackend;
 
 /// Test parsing and validating a well-formed pipeline YAML fixture.
@@ -32,9 +33,9 @@ fn test_parse_and_validate_fixture_pipeline() {
     assert_eq!(config.source.streams[0].name, "users");
     assert_eq!(config.source.streams[1].name, "orders");
     assert_eq!(config.destination.use_ref, "dest-postgres");
-    assert_eq!(config.destination.write_mode, "append");
+    assert_eq!(config.destination.write_mode, PipelineWriteMode::Append);
     assert_eq!(config.destination.config["schema"], "raw");
-    assert_eq!(config.state.backend, "sqlite");
+    assert_eq!(config.state.backend, StateBackendKind::Sqlite);
 
     // Validate should pass
     validator::validate_pipeline(&config).expect("Validation should pass");
@@ -56,15 +57,13 @@ fn test_parse_and_validate_invalid_fixture() {
         .unwrap()
         .join("tests/fixtures/pipelines/invalid_pipeline.yaml");
 
-    let config =
-        parser::parse_pipeline(&fixture_path).expect("Should parse even invalid pipelines");
-
-    let result = validator::validate_pipeline(&config);
-    assert!(result.is_err(), "Invalid pipeline should fail validation");
-
+    let result = parser::parse_pipeline(&fixture_path);
+    assert!(result.is_err(), "Invalid pipeline should fail at parse-time");
     let err = result.unwrap_err().to_string();
-    assert!(err.contains("version"), "Should report version error");
-    assert!(err.contains("Pipeline name"), "Should report empty name");
+    assert!(
+        err.contains("unknown variant") || err.contains("Failed to parse pipeline YAML"),
+        "Expected serde enum parse error, got: {err}"
+    );
 }
 
 /// Test full state backend lifecycle: create run, set cursors, complete run.
@@ -74,7 +73,10 @@ fn test_state_backend_full_lifecycle() {
 
     // Start a run
     let run_id = state
-        .start_run("my_pipeline", "all")
+        .start_run(
+            &PipelineId("my_pipeline".to_string()),
+            &StreamName("all".to_string()),
+        )
         .expect("Failed to start run");
     assert!(run_id > 0);
 
@@ -85,12 +87,19 @@ fn test_state_backend_full_lifecycle() {
         updated_at: chrono::Utc::now(),
     };
     state
-        .set_cursor("my_pipeline", "users", &cursor)
+        .set_cursor(
+            &PipelineId("my_pipeline".to_string()),
+            &StreamName("users".to_string()),
+            &cursor,
+        )
         .expect("Failed to set cursor");
 
     // Read cursor back
     let loaded = state
-        .get_cursor("my_pipeline", "users")
+        .get_cursor(
+            &PipelineId("my_pipeline".to_string()),
+            &StreamName("users".to_string()),
+        )
         .expect("Failed to get cursor")
         .expect("Cursor should exist");
     assert_eq!(loaded.cursor_field, Some("updated_at".to_string()));
@@ -115,7 +124,10 @@ fn test_state_backend_full_lifecycle() {
 
     // Start another run and fail it
     let run_id2 = state
-        .start_run("my_pipeline", "all")
+        .start_run(
+            &PipelineId("my_pipeline".to_string()),
+            &StreamName("all".to_string()),
+        )
         .expect("Failed to start second run");
 
     state
@@ -268,21 +280,21 @@ async fn test_pg_to_pg_full_pipeline() {
 
     // Source has 3 users + 3 orders = 6 records
     assert!(
-        result.records_read >= 6,
+        result.counts.records_read >= 6,
         "Expected at least 6 records read, got {}",
-        result.records_read
+        result.counts.records_read
     );
     assert!(
-        result.records_written >= 6,
+        result.counts.records_written >= 6,
         "Expected at least 6 records written, got {}",
-        result.records_written
+        result.counts.records_written
     );
-    assert!(result.bytes_read > 0, "Should have read some bytes");
+    assert!(result.counts.bytes_read > 0, "Should have read some bytes");
     assert!(result.duration_secs > 0.0, "Should have non-zero duration");
 
     println!("E2E test passed:");
-    println!("  Records read:    {}", result.records_read);
-    println!("  Records written: {}", result.records_written);
-    println!("  Bytes read:      {}", result.bytes_read);
+    println!("  Records read:    {}", result.counts.records_read);
+    println!("  Records written: {}", result.counts.records_written);
+    println!("  Bytes read:      {}", result.counts.bytes_read);
     println!("  Duration:        {:.2}s", result.duration_secs);
 }

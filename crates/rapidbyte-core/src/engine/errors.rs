@@ -1,6 +1,13 @@
+//! Pipeline error model and retry backoff policy helpers.
+
 use std::time::Duration;
 
 use rapidbyte_types::errors::{BackoffClass, ConnectorError};
+
+const BACKOFF_FAST_BASE_MS: u64 = 100;
+const BACKOFF_NORMAL_BASE_MS: u64 = 1_000;
+const BACKOFF_SLOW_BASE_MS: u64 = 5_000;
+const BACKOFF_MAX_MS: u64 = 60_000;
 
 // ---------------------------------------------------------------------------
 // PipelineError — categorised errors for retry decisions
@@ -67,14 +74,13 @@ pub(crate) fn compute_backoff(err: &ConnectorError, attempt: u32) -> Duration {
 
     // Exponential backoff based on backoff_class
     let base_ms: u64 = match err.backoff_class {
-        BackoffClass::Fast => 100,
-        BackoffClass::Normal => 1000,
-        BackoffClass::Slow => 5000,
+        BackoffClass::Fast => BACKOFF_FAST_BASE_MS,
+        BackoffClass::Normal => BACKOFF_NORMAL_BASE_MS,
+        BackoffClass::Slow => BACKOFF_SLOW_BASE_MS,
     };
 
     let delay_ms = base_ms.saturating_mul(2u64.pow(attempt.saturating_sub(1)));
-    let max_ms: u64 = 60_000; // cap at 60s
-    Duration::from_millis(delay_ms.min(max_ms))
+    Duration::from_millis(delay_ms.min(BACKOFF_MAX_MS))
 }
 
 #[cfg(test)]

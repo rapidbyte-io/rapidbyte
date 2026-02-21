@@ -1,6 +1,38 @@
+//! State backend traits and shared state model types.
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rapidbyte_types::protocol::DlqRecord;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PipelineId(pub String);
+
+impl PipelineId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for PipelineId {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StreamName(pub String);
+
+impl StreamName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for StreamName {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct CursorState {
@@ -35,24 +67,34 @@ pub struct RunStats {
 }
 
 pub trait StateBackend: Send + Sync {
-    fn get_cursor(&self, pipeline: &str, stream: &str) -> Result<Option<CursorState>>;
-    fn set_cursor(&self, pipeline: &str, stream: &str, cursor: &CursorState) -> Result<()>;
+    fn get_cursor(&self, pipeline: &PipelineId, stream: &StreamName)
+        -> Result<Option<CursorState>>;
+    fn set_cursor(
+        &self,
+        pipeline: &PipelineId,
+        stream: &StreamName,
+        cursor: &CursorState,
+    ) -> Result<()>;
 
     /// Compare-and-set: atomically update cursor_value only if it matches `expected`.
     /// Returns `true` if the update was applied, `false` if the current value didn't match.
     /// When `expected` is `None`, succeeds only if the key does not exist (insert-if-absent).
     fn compare_and_set(
         &self,
-        pipeline: &str,
-        stream: &str,
+        pipeline: &PipelineId,
+        stream: &StreamName,
         expected: Option<&str>,
         new_value: &str,
     ) -> Result<bool>;
 
-    fn start_run(&self, pipeline: &str, stream: &str) -> Result<i64>;
+    fn start_run(&self, pipeline: &PipelineId, stream: &StreamName) -> Result<i64>;
     fn complete_run(&self, run_id: i64, status: RunStatus, stats: &RunStats) -> Result<()>;
 
     /// Insert DLQ records into the state backend. Returns the number of records inserted.
-    fn insert_dlq_records(&self, pipeline: &str, run_id: i64, records: &[DlqRecord])
-        -> Result<u64>;
+    fn insert_dlq_records(
+        &self,
+        pipeline: &PipelineId,
+        run_id: i64,
+        records: &[DlqRecord],
+    ) -> Result<u64>;
 }

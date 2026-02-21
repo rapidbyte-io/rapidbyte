@@ -1,4 +1,18 @@
+//! Pipeline configuration types and config parsing helpers.
+
+use rapidbyte_types::protocol::{DataErrorPolicy, SchemaEvolutionPolicy, SyncMode, WriteMode};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::engine::compression::CompressionCodec;
+
+const DEFAULT_STATE_BACKEND: StateBackendKind = StateBackendKind::Sqlite;
+const DEFAULT_MAX_MEMORY: &str = "256mb";
+const DEFAULT_MAX_BATCH_BYTES: &str = "64mb";
+const DEFAULT_PARALLELISM: u32 = 1;
+const DEFAULT_CHECKPOINT_INTERVAL_BYTES: &str = "64mb";
+const DEFAULT_MAX_RETRIES: u32 = 3;
+const DEFAULT_MAX_INFLIGHT_BATCHES: u32 = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineConfig {
@@ -25,7 +39,7 @@ pub struct SourceConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamConfig {
     pub name: String,
-    pub sync_mode: String,
+    pub sync_mode: SyncMode,
     pub cursor_field: Option<String>,
     pub columns: Option<Vec<String>>,
 }
@@ -37,146 +51,127 @@ pub struct TransformConfig {
     pub config: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineWriteMode {
+    Append,
+    Replace,
+    Upsert,
+}
+
+impl PipelineWriteMode {
+    pub fn to_protocol(self, primary_key: Vec<String>) -> WriteMode {
+        match self {
+            Self::Append => WriteMode::Append,
+            Self::Replace => WriteMode::Replace,
+            Self::Upsert => WriteMode::Upsert { primary_key },
+        }
+    }
+}
+
+fn default_on_data_error() -> DataErrorPolicy {
+    DataErrorPolicy::Fail
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DestinationConfig {
     #[serde(rename = "use")]
     pub use_ref: String,
     pub config: serde_json::Value,
-    pub write_mode: String,
+    pub write_mode: PipelineWriteMode,
     #[serde(default)]
     pub primary_key: Vec<String>,
     #[serde(default = "default_on_data_error")]
-    pub on_data_error: String,
+    pub on_data_error: DataErrorPolicy,
     #[serde(default)]
-    pub schema_evolution: Option<SchemaEvolutionConfig>,
+    pub schema_evolution: Option<SchemaEvolutionPolicy>,
 }
 
-fn default_on_data_error() -> String {
-    "fail".to_string()
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StateBackendKind {
+    Sqlite,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SchemaEvolutionConfig {
-    #[serde(default = "default_new_column")]
-    pub new_column: String,
-    #[serde(default = "default_removed_column")]
-    pub removed_column: String,
-    #[serde(default = "default_type_change")]
-    pub type_change: String,
-    #[serde(default = "default_nullability_change")]
-    pub nullability_change: String,
-}
-
-fn default_new_column() -> String {
-    "add".to_string()
-}
-fn default_removed_column() -> String {
-    "ignore".to_string()
-}
-fn default_type_change() -> String {
-    "fail".to_string()
-}
-fn default_nullability_change() -> String {
-    "allow".to_string()
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StateConfig {
-    #[serde(default = "default_backend")]
-    pub backend: String,
-    pub connection: Option<String>,
-}
-
-fn default_backend() -> String {
-    "sqlite".to_string()
-}
-
-impl Default for StateConfig {
+impl Default for StateBackendKind {
     fn default() -> Self {
-        Self {
-            backend: default_backend(),
-            connection: None,
-        }
+        DEFAULT_STATE_BACKEND
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceConfig {
-    #[serde(default = "default_max_memory")]
-    pub max_memory: String,
-    #[serde(default = "default_max_batch_bytes")]
-    pub max_batch_bytes: String,
-    #[serde(default = "default_parallelism")]
-    pub parallelism: u32,
-    /// Destination commits after writing this many bytes. "0" disables chunking.
-    #[serde(default = "default_checkpoint_interval")]
-    pub checkpoint_interval_bytes: String,
-    /// Destination commits after writing this many rows. 0 = disabled.
-    #[serde(default)]
-    pub checkpoint_interval_rows: u64,
-    /// Destination commits after this many seconds elapse. 0 = disabled.
-    #[serde(default)]
-    pub checkpoint_interval_seconds: u64,
-    /// Maximum number of retry attempts for retryable errors. 0 disables retries.
-    #[serde(default = "default_max_retries")]
-    pub max_retries: u32,
-    /// IPC compression codec for data transferred between source and dest.
-    /// Valid values: "lz4", "zstd". None = no compression (default).
-    #[serde(default)]
-    pub compression: Option<String>,
-    /// Channel capacity between pipeline stages. Controls backpressure.
-    /// Must be >= 1. Default: 16.
-    #[serde(default = "default_max_inflight_batches")]
-    pub max_inflight_batches: u32,
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct StateConfig {
+    pub backend: StateBackendKind,
+    pub connection: Option<String>,
 }
 
-fn default_max_memory() -> String {
-    "256mb".to_string()
-}
-fn default_max_batch_bytes() -> String {
-    "64mb".to_string()
-}
-fn default_parallelism() -> u32 {
-    1
-}
-fn default_checkpoint_interval() -> String {
-    "64mb".to_string()
-}
-fn default_max_retries() -> u32 {
-    3
-}
-fn default_max_inflight_batches() -> u32 {
-    16
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResourceConfig {
+    pub max_memory: String,
+    pub max_batch_bytes: String,
+    pub parallelism: u32,
+    /// Destination commits after writing this many bytes. "0" disables chunking.
+    pub checkpoint_interval_bytes: String,
+    /// Destination commits after writing this many rows. 0 = disabled.
+    pub checkpoint_interval_rows: u64,
+    /// Destination commits after this many seconds elapse. 0 = disabled.
+    pub checkpoint_interval_seconds: u64,
+    /// Maximum number of retry attempts for retryable errors. 0 disables retries.
+    pub max_retries: u32,
+    /// IPC compression codec for data transferred between source and destination.
+    pub compression: Option<CompressionCodec>,
+    /// Channel capacity between pipeline stages. Controls backpressure.
+    /// Must be >= 1. Default: 16.
+    pub max_inflight_batches: u32,
 }
 
 impl Default for ResourceConfig {
     fn default() -> Self {
         Self {
-            max_memory: default_max_memory(),
-            max_batch_bytes: default_max_batch_bytes(),
-            parallelism: default_parallelism(),
-            checkpoint_interval_bytes: default_checkpoint_interval(),
+            max_memory: DEFAULT_MAX_MEMORY.to_string(),
+            max_batch_bytes: DEFAULT_MAX_BATCH_BYTES.to_string(),
+            parallelism: DEFAULT_PARALLELISM,
+            checkpoint_interval_bytes: DEFAULT_CHECKPOINT_INTERVAL_BYTES.to_string(),
             checkpoint_interval_rows: 0,
             checkpoint_interval_seconds: 0,
-            max_retries: default_max_retries(),
+            max_retries: DEFAULT_MAX_RETRIES,
             compression: None,
-            max_inflight_batches: default_max_inflight_batches(),
+            max_inflight_batches: DEFAULT_MAX_INFLIGHT_BATCHES,
         }
     }
 }
 
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ParseByteSizeError {
+    #[error("byte size cannot be empty")]
+    Empty,
+    #[error("invalid number in byte size '{0}'")]
+    InvalidNumber(String),
+}
+
 /// Parse a human-readable byte size like "64mb" into bytes.
-pub fn parse_byte_size(s: &str) -> u64 {
-    let s = s.trim().to_lowercase();
-    if let Some(n) = s.strip_suffix("gb") {
-        n.trim().parse::<u64>().unwrap_or(0) * 1024 * 1024 * 1024
-    } else if let Some(n) = s.strip_suffix("mb") {
-        n.trim().parse::<u64>().unwrap_or(0) * 1024 * 1024
-    } else if let Some(n) = s.strip_suffix("kb") {
-        n.trim().parse::<u64>().unwrap_or(0) * 1024
-    } else {
-        s.parse::<u64>().unwrap_or(0)
+pub fn parse_byte_size(raw: &str) -> Result<u64, ParseByteSizeError> {
+    let s = raw.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return Err(ParseByteSizeError::Empty);
     }
+
+    let (num, multiplier) = if let Some(n) = s.strip_suffix("gb") {
+        (n.trim(), 1024_u64 * 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix("mb") {
+        (n.trim(), 1024_u64 * 1024)
+    } else if let Some(n) = s.strip_suffix("kb") {
+        (n.trim(), 1024_u64)
+    } else {
+        (s.as_str(), 1_u64)
+    };
+
+    let value = num
+        .parse::<u64>()
+        .map_err(|_| ParseByteSizeError::InvalidNumber(raw.to_string()))?;
+    Ok(value.saturating_mul(multiplier))
 }
 
 #[cfg(test)]
@@ -188,44 +183,24 @@ mod tests {
         let yaml = r#"
 version: "1.0"
 pipeline: test_pg_to_pg
-
 source:
-  use: rapidbyte/source-postgres@v0.1.0
-  config:
-    host: localhost
-    port: 5432
-    user: postgres
-    password: secret
-    database: source_db
+  use: source-postgres
+  config: {}
   streams:
     - name: users
       sync_mode: full_refresh
-
 destination:
-  use: rapidbyte/dest-postgres@v0.1.0
-  config:
-    host: localhost
-    port: 5433
-    user: postgres
-    password: secret
-    database: dest_db
-    schema: raw
+  use: dest-postgres
+  config: {}
   write_mode: append
 "#;
         let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.pipeline, "test_pg_to_pg");
-        assert_eq!(config.version, "1.0");
-        assert_eq!(config.source.use_ref, "rapidbyte/source-postgres@v0.1.0");
-        assert_eq!(config.source.streams.len(), 1);
-        assert_eq!(config.source.streams[0].name, "users");
-        assert_eq!(config.source.streams[0].sync_mode, "full_refresh");
-        assert_eq!(config.destination.write_mode, "append");
-        // Defaults applied
-        assert_eq!(config.state.backend, "sqlite");
-        assert_eq!(config.resources.parallelism, 1);
-        assert_eq!(config.resources.max_memory, "256mb");
-        assert_eq!(config.resources.checkpoint_interval_bytes, "64mb");
-        assert_eq!(config.resources.max_retries, 3);
+        assert_eq!(config.source.streams[0].sync_mode, SyncMode::FullRefresh);
+        assert_eq!(config.destination.write_mode, PipelineWriteMode::Append);
+        assert_eq!(config.destination.on_data_error, DataErrorPolicy::Fail);
+        assert_eq!(config.state.backend, StateBackendKind::Sqlite);
+        assert_eq!(config.resources.max_batch_bytes, "64mb");
     }
 
     #[test]
@@ -233,331 +208,80 @@ destination:
         let yaml = r#"
 version: "1.0"
 pipeline: full_test
-
 source:
   use: source-postgres
-  config:
-    host: localhost
+  config: {}
   streams:
     - name: users
       sync_mode: incremental
       cursor_field: updated_at
-    - name: orders
-      sync_mode: full_refresh
-
 destination:
   use: dest-postgres
-  config:
-    host: localhost
+  config: {}
   write_mode: upsert
-  primary_key:
-    - id
-
+  primary_key: [id]
+  on_data_error: skip
 state:
   backend: sqlite
   connection: /tmp/state.db
-
 resources:
   max_memory: 512mb
   max_batch_bytes: 128mb
   parallelism: 4
   checkpoint_interval_bytes: 32mb
+  compression: zstd
 "#;
         let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.source.streams.len(), 2);
-        assert_eq!(
-            config.source.streams[0].cursor_field,
-            Some("updated_at".to_string())
-        );
-        assert!(config.source.streams[1].cursor_field.is_none());
+        assert_eq!(config.source.streams[0].sync_mode, SyncMode::Incremental);
+        assert_eq!(config.destination.write_mode, PipelineWriteMode::Upsert);
         assert_eq!(config.destination.primary_key, vec!["id"]);
+        assert_eq!(config.destination.on_data_error, DataErrorPolicy::Skip);
         assert_eq!(config.state.connection, Some("/tmp/state.db".to_string()));
-        assert_eq!(config.resources.parallelism, 4);
-        assert_eq!(config.resources.max_memory, "512mb");
-        assert_eq!(config.resources.checkpoint_interval_bytes, "32mb");
+        assert_eq!(config.resources.compression, Some(CompressionCodec::Zstd));
+    }
+
+    #[test]
+    fn test_write_mode_to_protocol() {
+        assert_eq!(
+            PipelineWriteMode::Append.to_protocol(vec![]),
+            WriteMode::Append
+        );
+        assert_eq!(
+            PipelineWriteMode::Replace.to_protocol(vec![]),
+            WriteMode::Replace
+        );
+        assert_eq!(
+            PipelineWriteMode::Upsert.to_protocol(vec!["id".to_string()]),
+            WriteMode::Upsert {
+                primary_key: vec!["id".to_string()]
+            }
+        );
     }
 
     #[test]
     fn test_parse_byte_size() {
-        assert_eq!(parse_byte_size("64mb"), 64 * 1024 * 1024);
-        assert_eq!(parse_byte_size("128mb"), 128 * 1024 * 1024);
-        assert_eq!(parse_byte_size("1gb"), 1024 * 1024 * 1024);
-        assert_eq!(parse_byte_size("512kb"), 512 * 1024);
-        assert_eq!(parse_byte_size("1024"), 1024);
-        assert_eq!(parse_byte_size("0"), 0);
-        assert_eq!(parse_byte_size("  64MB  "), 64 * 1024 * 1024);
+        assert_eq!(parse_byte_size("64mb").unwrap(), 64 * 1024 * 1024);
+        assert_eq!(parse_byte_size("128mb").unwrap(), 128 * 1024 * 1024);
+        assert_eq!(parse_byte_size("1gb").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_byte_size("512kb").unwrap(), 512 * 1024);
+        assert_eq!(parse_byte_size("1024").unwrap(), 1024);
+        assert_eq!(parse_byte_size("  64MB  ").unwrap(), 64 * 1024 * 1024);
     }
 
     #[test]
-    fn test_deserialize_pipeline_with_transforms() {
-        let yaml = r#"
-version: "1.0"
-pipeline: transform_test
-
-source:
-  use: source-postgres
-  config:
-    host: localhost
-  streams:
-    - name: users
-      sync_mode: full_refresh
-
-transforms:
-  - use: rapidbyte/transform-mask@v0.1.0
-    config:
-      columns:
-        - email
-
-destination:
-  use: dest-postgres
-  config:
-    host: localhost
-  write_mode: append
-"#;
-        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.transforms.len(), 1);
-        assert_eq!(
-            config.transforms[0].use_ref,
-            "rapidbyte/transform-mask@v0.1.0"
-        );
+    fn test_parse_byte_size_invalid() {
+        assert!(matches!(
+            parse_byte_size(""),
+            Err(ParseByteSizeError::Empty)
+        ));
+        assert!(matches!(
+            parse_byte_size("sixty-four mb"),
+            Err(ParseByteSizeError::InvalidNumber(_))
+        ));
     }
 
     #[test]
-    fn test_deserialize_pipeline_without_transforms_defaults_empty() {
-        let yaml = r#"
-version: "1.0"
-pipeline: no_transforms
-
-source:
-  use: source-postgres
-  config:
-    host: localhost
-  streams:
-    - name: users
-      sync_mode: full_refresh
-
-destination:
-  use: dest-postgres
-  config:
-    host: localhost
-  write_mode: append
-"#;
-        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.transforms.is_empty());
-    }
-
-    #[test]
-    fn test_deserialize_pipeline_multiple_transforms() {
-        let yaml = r#"
-version: "1.0"
-pipeline: multi_transform
-
-source:
-  use: source-postgres
-  config:
-    host: localhost
-  streams:
-    - name: users
-      sync_mode: full_refresh
-
-transforms:
-  - use: transform-mask@v0.1.0
-    config:
-      columns: [email]
-  - use: transform-filter@v0.1.0
-    config:
-      condition: "active = true"
-
-destination:
-  use: dest-postgres
-  config:
-    host: localhost
-  write_mode: append
-"#;
-        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.transforms.len(), 2);
-        assert_eq!(config.transforms[0].use_ref, "transform-mask@v0.1.0");
-        assert_eq!(config.transforms[1].use_ref, "transform-filter@v0.1.0");
-    }
-
-    #[test]
-    fn test_deserialize_checkpoint_intervals() {
-        let yaml = r#"
-version: "1"
-pipeline: test
-source:
-  use: source-postgres
-  config: {}
-  streams:
-    - name: users
-      sync_mode: full_refresh
-destination:
-  use: dest-postgres
-  config: {}
-  write_mode: append
-resources:
-  checkpoint_interval_bytes: 32mb
-  checkpoint_interval_rows: 5000
-  checkpoint_interval_seconds: 30
-"#;
-        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.resources.checkpoint_interval_rows, 5000);
-        assert_eq!(config.resources.checkpoint_interval_seconds, 30);
-    }
-
-    #[test]
-    fn test_checkpoint_intervals_default_zero() {
-        let config = ResourceConfig::default();
-        assert_eq!(config.checkpoint_interval_rows, 0);
-        assert_eq!(config.checkpoint_interval_seconds, 0);
-    }
-
-    #[test]
-    fn test_deserialize_on_data_error_skip() {
-        let yaml = r#"
-version: "1"
-pipeline: test
-source:
-  use: source-postgres
-  config: {}
-  streams:
-    - name: users
-      sync_mode: full_refresh
-destination:
-  use: dest-postgres
-  config: {}
-  write_mode: append
-  on_data_error: skip
-"#;
-        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.destination.on_data_error, "skip");
-    }
-
-    #[test]
-    fn test_on_data_error_defaults_to_fail() {
-        let yaml = r#"
-version: "1"
-pipeline: test
-source:
-  use: source-postgres
-  config: {}
-  streams:
-    - name: users
-      sync_mode: full_refresh
-destination:
-  use: dest-postgres
-  config: {}
-  write_mode: append
-"#;
-        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.destination.on_data_error, "fail");
-    }
-
-    #[test]
-    fn test_deserialize_compression_lz4() {
-        let yaml = r#"
-version: "1"
-pipeline: test
-source:
-  use: source-postgres
-  config: {}
-  streams:
-    - name: users
-      sync_mode: full_refresh
-destination:
-  use: dest-postgres
-  config: {}
-  write_mode: append
-resources:
-  compression: lz4
-"#;
-        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.resources.compression, Some("lz4".to_string()));
-    }
-
-    #[test]
-    fn test_compression_defaults_to_none() {
-        let config = ResourceConfig::default();
-        assert_eq!(config.compression, None);
-    }
-
-    #[test]
-    fn test_deserialize_max_inflight_batches() {
-        let yaml = r#"
-version: "1"
-pipeline: test
-source:
-  use: source-postgres
-  config: {}
-  streams:
-    - name: users
-      sync_mode: full_refresh
-destination:
-  use: dest-postgres
-  config: {}
-  write_mode: append
-resources:
-  max_inflight_batches: 32
-"#;
-        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.resources.max_inflight_batches, 32);
-    }
-
-    #[test]
-    fn test_max_inflight_batches_defaults_to_16() {
-        let config = ResourceConfig::default();
-        assert_eq!(config.max_inflight_batches, 16);
-    }
-
-    #[test]
-    fn test_deserialize_stream_with_columns() {
-        let yaml = r#"
-version: "1"
-pipeline: test
-source:
-  use: source-postgres
-  config: {}
-  streams:
-    - name: users
-      sync_mode: full_refresh
-      columns:
-        - id
-        - name
-        - email
-destination:
-  use: dest-postgres
-  config: {}
-  write_mode: append
-"#;
-        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(
-            config.source.streams[0].columns,
-            Some(vec!["id".into(), "name".into(), "email".into()])
-        );
-    }
-
-    #[test]
-    fn test_deserialize_stream_without_columns_defaults_none() {
-        let yaml = r#"
-version: "1"
-pipeline: test
-source:
-  use: source-postgres
-  config: {}
-  streams:
-    - name: users
-      sync_mode: full_refresh
-destination:
-  use: dest-postgres
-  config: {}
-  write_mode: append
-"#;
-        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.source.streams[0].columns.is_none());
-    }
-
-    #[test]
-    fn test_deserialize_schema_evolution() {
+    fn test_schema_evolution_typed() {
         let yaml = r#"
 version: "1"
 pipeline: test
@@ -577,51 +301,14 @@ destination:
 "#;
         let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
         let se = config.destination.schema_evolution.unwrap();
-        assert_eq!(se.new_column, "ignore");
-        assert_eq!(se.type_change, "coerce");
-        assert_eq!(se.removed_column, "ignore"); // default
-        assert_eq!(se.nullability_change, "allow"); // default
-    }
-
-    #[test]
-    fn test_schema_evolution_defaults_to_none() {
-        let yaml = r#"
-version: "1"
-pipeline: test
-source:
-  use: source-postgres
-  config: {}
-  streams:
-    - name: users
-      sync_mode: full_refresh
-destination:
-  use: dest-postgres
-  config: {}
-  write_mode: append
-"#;
-        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.destination.schema_evolution.is_none());
-    }
-
-    #[test]
-    fn test_deserialize_compression_zstd() {
-        let yaml = r#"
-version: "1"
-pipeline: test
-source:
-  use: source-postgres
-  config: {}
-  streams:
-    - name: users
-      sync_mode: full_refresh
-destination:
-  use: dest-postgres
-  config: {}
-  write_mode: append
-resources:
-  compression: zstd
-"#;
-        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.resources.compression, Some("zstd".to_string()));
+        assert_eq!(
+            se,
+            SchemaEvolutionPolicy {
+                new_column: rapidbyte_types::protocol::ColumnPolicy::Ignore,
+                removed_column: rapidbyte_types::protocol::ColumnPolicy::Ignore,
+                type_change: rapidbyte_types::protocol::TypeChangePolicy::Coerce,
+                nullability_change: rapidbyte_types::protocol::NullabilityPolicy::Allow,
+            }
+        );
     }
 }

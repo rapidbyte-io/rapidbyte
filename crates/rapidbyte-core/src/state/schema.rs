@@ -1,3 +1,5 @@
+//! SQLite DDL for pipeline cursors, run history, and DLQ persistence.
+
 pub const CREATE_TABLES: &str = r#"
 CREATE TABLE IF NOT EXISTS sync_cursors (
     pipeline TEXT NOT NULL,
@@ -24,7 +26,7 @@ CREATE TABLE IF NOT EXISTS sync_runs (
 CREATE TABLE IF NOT EXISTS dlq_records (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pipeline TEXT NOT NULL,
-    run_id INTEGER NOT NULL,
+    run_id INTEGER NOT NULL REFERENCES sync_runs(id),
     stream_name TEXT NOT NULL,
     record_json TEXT NOT NULL,
     error_message TEXT NOT NULL,

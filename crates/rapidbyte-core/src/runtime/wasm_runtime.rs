@@ -1,3 +1,5 @@
+//! Wasmtime component runtime and optional AOT caching helpers.
+
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -9,9 +11,7 @@ use chrono::Utc;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store};
 
-use super::component_runtime::{
-    dest_bindings, source_bindings, transform_bindings, ComponentHostState,
-};
+use super::component_runtime::ComponentHostState;
 use super::connector_resolve::sha256_hex;
 
 const RAPIDBYTE_WASMTIME_AOT_ENV: &str = "RAPIDBYTE_WASMTIME_AOT";
@@ -34,6 +34,21 @@ pub struct WasmRuntime {
 enum AotLoadKind {
     CacheHit,
     Compiled,
+}
+
+pub fn create_component_linker<F>(
+    engine: &Engine,
+    role: &str,
+    add_bindings: F,
+) -> Result<Linker<ComponentHostState>>
+where
+    F: FnOnce(&mut Linker<ComponentHostState>) -> Result<()>,
+{
+    let mut linker = Linker::new(engine);
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
+        .with_context(|| format!("Failed to add WASI imports for {}", role))?;
+    add_bindings(&mut linker)?;
+    Ok(linker)
 }
 
 impl WasmRuntime {
@@ -132,42 +147,6 @@ impl WasmRuntime {
             engine: self.engine.clone(),
             component: Arc::new(component),
         })
-    }
-
-    pub fn source_linker(&self) -> Result<Linker<ComponentHostState>> {
-        let mut linker = Linker::new(&self.engine);
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
-            .context("Failed to add WASI imports to linker")?;
-        source_bindings::RapidbyteSource::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
-            &mut linker,
-            |state| state,
-        )
-        .context("Failed to add rapidbyte source imports to linker")?;
-        Ok(linker)
-    }
-
-    pub fn dest_linker(&self) -> Result<Linker<ComponentHostState>> {
-        let mut linker = Linker::new(&self.engine);
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
-            .context("Failed to add WASI imports to linker")?;
-        dest_bindings::RapidbyteDestination::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
-            &mut linker,
-            |state| state,
-        )
-        .context("Failed to add rapidbyte destination imports to linker")?;
-        Ok(linker)
-    }
-
-    pub fn transform_linker(&self) -> Result<Linker<ComponentHostState>> {
-        let mut linker = Linker::new(&self.engine);
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
-            .context("Failed to add WASI imports to linker")?;
-        transform_bindings::RapidbyteTransform::add_to_linker::<
-            _,
-            wasmtime::component::HasSelf<_>,
-        >(&mut linker, |state| state)
-        .context("Failed to add rapidbyte transform imports to linker")?;
-        Ok(linker)
     }
 
     pub fn new_store(&self, host_state: ComponentHostState) -> Store<ComponentHostState> {
@@ -342,5 +321,23 @@ fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_cache_component_name() {
+        assert_eq!(sanitize_cache_component_name("abc-123"), "abc-123");
+        assert_eq!(sanitize_cache_component_name("abc/123"), "abc_123");
+        assert_eq!(sanitize_cache_component_name(""), "component");
+    }
+
+    #[test]
+    fn test_env_flag_enabled_defaults() {
+        assert!(env_flag_enabled("RAPIDBYTE_TEST_FLAG_NOT_SET", true));
+        assert!(!env_flag_enabled("RAPIDBYTE_TEST_FLAG_NOT_SET", false));
     }
 }

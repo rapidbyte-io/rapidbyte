@@ -1,3 +1,5 @@
+//! Network ACL derivation and host allow/deny matching for connector sockets.
+
 use std::collections::HashSet;
 use std::net::IpAddr;
 

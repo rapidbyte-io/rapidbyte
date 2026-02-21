@@ -1,3 +1,5 @@
+//! Runtime layer for connector resolution, component host state, and Wasmtime integration.
+
 pub mod component_runtime;
 pub(crate) mod connector_resolve;
 pub(crate) mod host_socket;

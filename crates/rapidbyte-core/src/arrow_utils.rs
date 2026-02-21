@@ -1,3 +1,5 @@
+//! Arrow IPC serialization and streaming batch utility helpers.
+
 use std::io::Cursor;
 
 use anyhow::{Context, Result};

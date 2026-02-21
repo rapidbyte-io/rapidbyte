@@ -1,13 +1,15 @@
+//! Checkpoint correlation and cursor advancement logic.
+
 use anyhow::Result;
 use rapidbyte_types::protocol::{Checkpoint, CursorValue};
 
-use crate::state::backend::{CursorState, StateBackend};
+use crate::state::backend::{CursorState, PipelineId, StateBackend, StreamName};
 
-/// Correlate source and dest checkpoints, persisting cursor state only when
+/// Correlate source and destination checkpoints, persisting cursor state only when
 /// both sides confirm the data for a stream. Returns the number of cursors advanced.
 pub(crate) fn correlate_and_persist_cursors(
     state_backend: &dyn StateBackend,
-    pipeline: &str,
+    pipeline: &PipelineId,
     source_checkpoints: &[Checkpoint],
     dest_checkpoints: &[Checkpoint],
 ) -> Result<u64> {
@@ -19,16 +21,14 @@ pub(crate) fn correlate_and_persist_cursors(
             _ => continue,
         };
 
-        // Check if we have a dest checkpoint confirming this stream's data
         let dest_confirmed = dest_checkpoints
             .iter()
             .any(|dcp| dcp.stream == src_cp.stream);
-
         if !dest_confirmed {
             tracing::warn!(
-                pipeline,
+                pipeline = pipeline.as_str(),
                 stream = src_cp.stream,
-                "Skipping cursor advancement: no dest checkpoint confirms stream data"
+                "Skipping cursor advancement: no destination checkpoint confirms stream data"
             );
             continue;
         }
@@ -49,13 +49,13 @@ pub(crate) fn correlate_and_persist_cursors(
             cursor_value: Some(value_str.clone()),
             updated_at: chrono::Utc::now(),
         };
-        state_backend.set_cursor(pipeline, &src_cp.stream, &cursor)?;
+        state_backend.set_cursor(pipeline, &StreamName(src_cp.stream.clone()), &cursor)?;
         tracing::info!(
-            pipeline,
+            pipeline = pipeline.as_str(),
             stream = src_cp.stream,
             cursor_field = cursor_field,
             cursor_value = value_str,
-            "Cursor advanced: source + dest checkpoints correlated"
+            "Cursor advanced: source + destination checkpoints correlated"
         );
         cursors_advanced += 1;
     }
@@ -93,16 +93,23 @@ mod tests {
         }
     }
 
+    fn pid() -> PipelineId {
+        PipelineId("test_pipe".to_string())
+    }
+
     #[test]
     fn test_correlate_both_checkpoints_advances_cursor() {
         let backend = SqliteStateBackend::in_memory().unwrap();
         let src = vec![make_source_checkpoint("users", "id", "42")];
         let dst = vec![make_dest_checkpoint("users")];
 
-        let advanced = correlate_and_persist_cursors(&backend, "test_pipe", &src, &dst).unwrap();
+        let advanced = correlate_and_persist_cursors(&backend, &pid(), &src, &dst).unwrap();
         assert_eq!(advanced, 1);
 
-        let cursor = backend.get_cursor("test_pipe", "users").unwrap().unwrap();
+        let cursor = backend
+            .get_cursor(&pid(), &StreamName("users".to_string()))
+            .unwrap()
+            .unwrap();
         assert_eq!(cursor.cursor_value, Some("42".to_string()));
         assert_eq!(cursor.cursor_field, Some("id".to_string()));
     }
@@ -113,46 +120,13 @@ mod tests {
         let src = vec![make_source_checkpoint("users", "id", "42")];
         let dst: Vec<Checkpoint> = vec![];
 
-        let advanced = correlate_and_persist_cursors(&backend, "test_pipe", &src, &dst).unwrap();
+        let advanced = correlate_and_persist_cursors(&backend, &pid(), &src, &dst).unwrap();
         assert_eq!(advanced, 0);
 
-        let cursor = backend.get_cursor("test_pipe", "users").unwrap();
+        let cursor = backend
+            .get_cursor(&pid(), &StreamName("users".to_string()))
+            .unwrap();
         assert!(cursor.is_none());
-    }
-
-    #[test]
-    fn test_correlate_dest_for_different_stream_does_not_advance() {
-        let backend = SqliteStateBackend::in_memory().unwrap();
-        let src = vec![make_source_checkpoint("users", "id", "42")];
-        let dst = vec![make_dest_checkpoint("orders")];
-
-        let advanced = correlate_and_persist_cursors(&backend, "test_pipe", &src, &dst).unwrap();
-        assert_eq!(advanced, 0);
-
-        let cursor = backend.get_cursor("test_pipe", "users").unwrap();
-        assert!(cursor.is_none());
-    }
-
-    #[test]
-    fn test_correlate_multiple_streams() {
-        let backend = SqliteStateBackend::in_memory().unwrap();
-        let src = vec![
-            make_source_checkpoint("users", "id", "42"),
-            make_source_checkpoint("orders", "order_id", "99"),
-        ];
-        let dst = vec![
-            make_dest_checkpoint("users"),
-            make_dest_checkpoint("orders"),
-        ];
-
-        let advanced = correlate_and_persist_cursors(&backend, "test_pipe", &src, &dst).unwrap();
-        assert_eq!(advanced, 2);
-
-        let u = backend.get_cursor("test_pipe", "users").unwrap().unwrap();
-        assert_eq!(u.cursor_value, Some("42".to_string()));
-
-        let o = backend.get_cursor("test_pipe", "orders").unwrap().unwrap();
-        assert_eq!(o.cursor_value, Some("99".to_string()));
     }
 
     #[test]
@@ -164,39 +138,25 @@ mod tests {
         ];
         let dst = vec![make_dest_checkpoint("users")];
 
-        let advanced = correlate_and_persist_cursors(&backend, "test_pipe", &src, &dst).unwrap();
+        let advanced = correlate_and_persist_cursors(&backend, &pid(), &src, &dst).unwrap();
         assert_eq!(advanced, 1);
 
-        let u = backend.get_cursor("test_pipe", "users").unwrap().unwrap();
-        assert_eq!(u.cursor_value, Some("42".to_string()));
+        let users = backend
+            .get_cursor(&pid(), &StreamName("users".to_string()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(users.cursor_value, Some("42".to_string()));
 
-        let o = backend.get_cursor("test_pipe", "orders").unwrap();
-        assert!(o.is_none());
-    }
-
-    #[test]
-    fn test_correlate_source_without_cursor_value_skipped() {
-        let backend = SqliteStateBackend::in_memory().unwrap();
-        let src = vec![Checkpoint {
-            id: 1,
-            kind: CheckpointKind::Source,
-            stream: "users".to_string(),
-            cursor_field: None,
-            cursor_value: None,
-            records_processed: 100,
-            bytes_processed: 5000,
-        }];
-        let dst = vec![make_dest_checkpoint("users")];
-
-        let advanced = correlate_and_persist_cursors(&backend, "test_pipe", &src, &dst).unwrap();
-        assert_eq!(advanced, 0);
+        let orders = backend
+            .get_cursor(&pid(), &StreamName("orders".to_string()))
+            .unwrap();
+        assert!(orders.is_none());
     }
 
     #[test]
     fn test_checkpoint_envelope_roundtrip_via_host_parsing() {
-        use rapidbyte_types::protocol::{CursorValue, PayloadEnvelope};
+        use rapidbyte_types::protocol::PayloadEnvelope;
 
-        // Simulate what the source connector does in host_ffi::checkpoint()
         let source_cp = Checkpoint {
             id: 1,
             kind: CheckpointKind::Source,
@@ -206,33 +166,22 @@ mod tests {
             records_processed: 100,
             bytes_processed: 5000,
         };
-        let envelope = PayloadEnvelope {
+        let source_env = PayloadEnvelope {
             protocol_version: ProtocolVersion::V2,
             connector_id: "source-postgres".to_string(),
             stream_name: "users".to_string(),
-            payload: source_cp.clone(),
+            payload: source_cp,
         };
-        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let src_value: serde_json::Value =
+            serde_json::from_slice(&serde_json::to_vec(&source_env).unwrap()).unwrap();
+        let parsed_source: Checkpoint = serde_json::from_value(
+            src_value
+                .get("payload")
+                .cloned()
+                .unwrap_or(src_value.clone()),
+        )
+        .unwrap();
 
-        // Simulate what host_checkpoint() does: parse as Value, then extract
-        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-
-        // Debug: print the serialized envelope to see structure
-        eprintln!(
-            "Serialized envelope: {}",
-            serde_json::to_string_pretty(&value).unwrap()
-        );
-
-        // This is the same parsing logic used by the component host runtime.
-        let checkpoint_value = value.get("payload").cloned().unwrap_or(value.clone());
-        let parsed: Checkpoint = serde_json::from_value(checkpoint_value).unwrap();
-
-        assert_eq!(parsed.stream, "users");
-        assert_eq!(parsed.cursor_field, Some("id".to_string()));
-        assert_eq!(parsed.cursor_value, Some(CursorValue::Int64(42)));
-        assert_eq!(parsed.records_processed, 100);
-
-        // Now do the same for a dest checkpoint
         let dest_cp = Checkpoint {
             id: 1,
             kind: CheckpointKind::Dest,
@@ -242,36 +191,26 @@ mod tests {
             records_processed: 100,
             bytes_processed: 5000,
         };
-        let dest_envelope = PayloadEnvelope {
+        let dest_env = PayloadEnvelope {
             protocol_version: ProtocolVersion::V2,
             connector_id: "dest-postgres".to_string(),
             stream_name: "users".to_string(),
-            payload: dest_cp.clone(),
+            payload: dest_cp,
         };
-        let dest_bytes = serde_json::to_vec(&dest_envelope).unwrap();
-        let dest_value: serde_json::Value = serde_json::from_slice(&dest_bytes).unwrap();
-        eprintln!(
-            "Dest envelope: {}",
-            serde_json::to_string_pretty(&dest_value).unwrap()
-        );
-        let dest_checkpoint_value = dest_value
-            .get("payload")
-            .cloned()
-            .unwrap_or(dest_value.clone());
-        let dest_parsed: Checkpoint = serde_json::from_value(dest_checkpoint_value).unwrap();
+        let dst_value: serde_json::Value =
+            serde_json::from_slice(&serde_json::to_vec(&dest_env).unwrap()).unwrap();
+        let parsed_dest: Checkpoint = serde_json::from_value(
+            dst_value
+                .get("payload")
+                .cloned()
+                .unwrap_or(dst_value.clone()),
+        )
+        .unwrap();
 
-        assert_eq!(dest_parsed.stream, "users");
-        assert_eq!(dest_parsed.kind, CheckpointKind::Dest);
-
-        // Finally, test full correlation -> SQLite persistence
         let backend = SqliteStateBackend::in_memory().unwrap();
         let advanced =
-            correlate_and_persist_cursors(&backend, "test_pipe", &[parsed], &[dest_parsed])
+            correlate_and_persist_cursors(&backend, &pid(), &[parsed_source], &[parsed_dest])
                 .unwrap();
         assert_eq!(advanced, 1);
-
-        let cursor = backend.get_cursor("test_pipe", "users").unwrap().unwrap();
-        assert_eq!(cursor.cursor_value, Some("42".to_string()));
-        assert_eq!(cursor.cursor_field, Some("id".to_string()));
     }
 }

@@ -1,17 +1,22 @@
+//! Pipeline YAML parsing with environment variable substitution.
+
 use std::path::Path;
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
 use regex::Regex;
 
 use crate::pipeline::types::PipelineConfig;
 
+static ENV_VAR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").expect("valid env var regex"));
+
 /// Substitute `${VAR_NAME}` patterns with environment variable values.
 pub fn substitute_env_vars(input: &str) -> Result<String> {
-    let re = Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").unwrap();
     let mut result = input.to_string();
     let mut errors = Vec::new();
 
-    for cap in re.captures_iter(input) {
+    for cap in ENV_VAR_RE.captures_iter(input) {
         let var_name = &cap[1];
         match std::env::var(var_name) {
             Ok(val) => {

@@ -1,3 +1,5 @@
+//! Connector reference parsing, path resolution, and manifest loading helpers.
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -120,4 +122,32 @@ pub fn load_connector_manifest(wasm_path: &Path) -> Result<Option<ConnectorManif
     }
 
     Ok(Some(manifest))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_connector_ref_with_namespace_version() {
+        let (id, ver) = parse_connector_ref("rapidbyte/source-postgres@v0.1.0");
+        assert_eq!(id, "source-postgres");
+        assert_eq!(ver, "0.1.0");
+    }
+
+    #[test]
+    fn test_parse_connector_ref_without_version() {
+        let (id, ver) = parse_connector_ref("source-postgres");
+        assert_eq!(id, "source-postgres");
+        assert_eq!(ver, "unknown");
+    }
+
+    #[test]
+    fn test_manifest_path_from_wasm() {
+        let path = Path::new("/tmp/source_postgres.wasm");
+        assert_eq!(
+            manifest_path_from_wasm(path),
+            PathBuf::from("/tmp/source_postgres.manifest.json")
+        );
+    }
 }
