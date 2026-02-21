@@ -116,10 +116,12 @@ async fn read_cdc_inner(
     let arrow_schema = build_cdc_arrow_schema(&table_columns);
 
     // 4. Read changes from the slot (this CONSUMES them)
+    // Limit WAL changes per invocation to prevent OOM on large backlogs.
+    let max_changes = 100_000i64;
     let changes_query =
-        "SELECT lsn::text, xid, data FROM pg_logical_slot_get_changes($1, NULL, NULL)";
+        "SELECT lsn::text, data FROM pg_logical_slot_get_changes($1, NULL, $2)";
     let change_rows = client
-        .query(changes_query, &[&slot_name])
+        .query(changes_query, &[&slot_name, &max_changes])
         .await
         .with_context(|| format!("pg_logical_slot_get_changes failed for slot {}", slot_name))?;
 
@@ -139,8 +141,7 @@ async fn read_cdc_inner(
 
     for row in &change_rows {
         let lsn: String = row.get(0);
-        let _xid: i32 = row.get(1);
-        let data: String = row.get(2);
+        let data: String = row.get(1);
 
         // Track max LSN
         if max_lsn.as_ref().map_or(true, |current| lsn_gt(&lsn, current)) {
@@ -205,7 +206,9 @@ async fn read_cdc_inner(
             records_processed: total_records,
             bytes_processed: total_bytes,
         };
-        let _ = host_ffi::checkpoint("source-postgres", &ctx.stream_name, &cp);
+        // CDC uses get_changes (destructive) so checkpoint MUST succeed to avoid data loss.
+        host_ffi::checkpoint("source-postgres", &ctx.stream_name, &cp)
+            .map_err(|e| anyhow!("CDC checkpoint failed (WAL already consumed): {}", e.message))?;
         host_ffi::log(
             2,
             &format!(
@@ -249,39 +252,49 @@ async fn read_cdc_inner(
 }
 
 /// Ensure the logical replication slot exists, creating it if necessary.
+/// Uses try-create to avoid TOCTOU race between check and create.
 async fn ensure_replication_slot(client: &Client, slot_name: &str) -> anyhow::Result<()> {
-    let check = client
+    host_ffi::log(
+        3,
+        &format!("Ensuring replication slot '{}' exists", slot_name),
+    );
+
+    // Try to create; if it already exists, PG raises duplicate_object (42710).
+    let result = client
         .query_one(
-            "SELECT count(*) FROM pg_replication_slots WHERE slot_name = $1",
+            "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
             &[&slot_name],
         )
-        .await
-        .context("Failed to check replication slot")?;
+        .await;
 
-    let count: i64 = check.get(0);
-    if count == 0 {
-        host_ffi::log(
-            2,
-            &format!("Creating replication slot '{}' with test_decoding", slot_name),
-        );
-        client
-            .query_one(
-                "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
-                &[&slot_name],
-            )
-            .await
-            .with_context(|| {
-                format!(
+    match result {
+        Ok(_) => {
+            host_ffi::log(
+                2,
+                &format!("Created replication slot '{}' with test_decoding", slot_name),
+            );
+        }
+        Err(e) => {
+            // Check for duplicate_object error (SQLSTATE 42710)
+            let is_duplicate = e
+                .as_db_error()
+                .map(|db| db.code().code() == "42710")
+                .unwrap_or(false);
+
+            if is_duplicate {
+                host_ffi::log(
+                    3,
+                    &format!("Replication slot '{}' already exists", slot_name),
+                );
+            } else {
+                return Err(anyhow::anyhow!(
                     "Failed to create logical replication slot '{}'. \
-                     Ensure wal_level=logical in postgresql.conf",
-                    slot_name
-                )
-            })?;
-    } else {
-        host_ffi::log(
-            3,
-            &format!("Replication slot '{}' already exists", slot_name),
-        );
+                     Ensure wal_level=logical in postgresql.conf: {}",
+                    slot_name,
+                    e
+                ));
+            }
+        }
     }
 
     Ok(())
@@ -376,26 +389,27 @@ fn parse_columns(s: &str) -> Vec<(String, String, String)> {
 /// Handles quoted strings (with '' escape for internal quotes) and unquoted values.
 fn parse_value(s: &str) -> (String, &str) {
     if s.starts_with('\'') {
-        // Quoted string value
-        let mut end = 1;
-        let bytes = s.as_bytes();
+        // Quoted string value — iterate by char to handle multi-byte UTF-8 correctly
+        let inner = &s[1..]; // skip opening quote
         let mut value = String::new();
-        while end < bytes.len() {
-            if bytes[end] == b'\'' {
-                // Check for escaped quote ('')
-                if end + 1 < bytes.len() && bytes[end + 1] == b'\'' {
-                    value.push('\'');
-                    end += 2;
-                    continue;
+        let mut chars = inner.char_indices();
+        loop {
+            match chars.next() {
+                Some((i, '\'')) => {
+                    // Check for escaped quote ('')
+                    let rest = &inner[i + 1..];
+                    if rest.starts_with('\'') {
+                        value.push('\'');
+                        chars.next(); // skip the second quote
+                    } else {
+                        // End of quoted string; +1 for opening quote, +i+1 for closing quote
+                        return (value, rest);
+                    }
                 }
-                // End of quoted string
-                return (value, &s[end + 1..]);
+                Some((_, ch)) => value.push(ch),
+                None => return (value, ""), // unterminated quote
             }
-            value.push(bytes[end] as char);
-            end += 1;
         }
-        // Unterminated quote - take rest
-        (value, "")
     } else {
         // Unquoted value - ends at space or end of string
         match s.find(' ') {
@@ -489,7 +503,7 @@ fn lsn_gt(a: &str, b: &str) -> bool {
 
     match (parse_lsn(a), parse_lsn(b)) {
         (Some(a), Some(b)) => a > b,
-        _ => a > b, // fallback to lexicographic
+        _ => false, // unparseable LSN — don't advance
     }
 }
 
@@ -772,5 +786,33 @@ mod tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].num_rows(), 2);
         assert_eq!(batches[0].num_columns(), 3); // id, name, _rb_op
+    }
+
+    #[test]
+    fn test_parse_multibyte_utf8_value() {
+        let line = "table public.users: INSERT: id[integer]:1 name[text]:'\u{00e9}l\u{00e8}ve'";
+        let change = parse_change_line(line).unwrap();
+        assert_eq!(
+            change.columns[1],
+            ("name".into(), "text".into(), "\u{00e9}l\u{00e8}ve".into())
+        );
+    }
+
+    #[test]
+    fn test_parse_cjk_utf8_value() {
+        let line = "table public.users: INSERT: id[integer]:1 name[text]:'\u{4f60}\u{597d}\u{4e16}\u{754c}'";
+        let change = parse_change_line(line).unwrap();
+        assert_eq!(
+            change.columns[1],
+            ("name".into(), "text".into(), "\u{4f60}\u{597d}\u{4e16}\u{754c}".into())
+        );
+    }
+
+    #[test]
+    fn test_lsn_gt_unparseable_returns_false() {
+        // Malformed LSN should not advance
+        assert!(!lsn_gt("invalid", "0/1"));
+        assert!(!lsn_gt("0/1", "invalid"));
+        assert!(!lsn_gt("bad", "also_bad"));
     }
 }

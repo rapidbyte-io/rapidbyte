@@ -9,7 +9,7 @@ use std::time::Instant;
 use rapidbyte_sdk::connector::SourceConnector;
 use rapidbyte_sdk::errors::{ConnectorError, ValidationResult};
 use rapidbyte_sdk::host_ffi;
-use rapidbyte_sdk::protocol::{Catalog, ConnectorInfo, ReadSummary, StreamContext, SyncMode};
+use rapidbyte_sdk::protocol::{Catalog, ConnectorInfo, Feature, ReadSummary, StreamContext, SyncMode};
 
 pub struct SourcePostgres {
     config: config::Config,
@@ -30,7 +30,7 @@ impl SourceConnector for SourcePostgres {
             Self { config },
             ConnectorInfo {
                 protocol_version: "2".to_string(),
-                features: vec![],
+                features: vec![Feature::Cdc],
                 default_max_batch_bytes: 64 * 1024 * 1024,
             },
         ))

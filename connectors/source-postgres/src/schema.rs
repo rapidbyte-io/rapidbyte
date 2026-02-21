@@ -64,7 +64,7 @@ pub async fn discover_catalog(client: &Client) -> Result<Vec<Stream>, String> {
                 streams.push(Stream {
                     name: prev_table,
                     schema: std::mem::take(&mut current_columns),
-                    supported_sync_modes: vec![SyncMode::FullRefresh],
+                    supported_sync_modes: vec![SyncMode::FullRefresh, SyncMode::Cdc],
                     source_defined_cursor: None,
                     source_defined_primary_key: None,
                 });
