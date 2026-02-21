@@ -1,11 +1,21 @@
+use std::io::Cursor;
+
 use anyhow::{Context, Result};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 
+const IPC_STREAM_OVERHEAD_BYTES: usize = 1024;
+
+fn estimate_ipc_capacity(batch: &RecordBatch) -> usize {
+    batch
+        .get_array_memory_size()
+        .saturating_add(IPC_STREAM_OVERHEAD_BYTES)
+}
+
 /// Serialize a RecordBatch to Arrow IPC stream format bytes.
 pub fn record_batch_to_ipc(batch: &RecordBatch) -> Result<Vec<u8>> {
-    let mut buf = Vec::new();
+    let mut buf = Vec::with_capacity(estimate_ipc_capacity(batch));
     let mut writer = StreamWriter::try_new(&mut buf, batch.schema().as_ref())
         .context("Failed to create Arrow IPC StreamWriter")?;
     writer
@@ -15,14 +25,40 @@ pub fn record_batch_to_ipc(batch: &RecordBatch) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Deserialize Arrow IPC stream format bytes into a Vec of RecordBatches.
-pub fn ipc_to_record_batches(ipc_bytes: &[u8]) -> Result<Vec<RecordBatch>> {
-    let cursor = std::io::Cursor::new(ipc_bytes);
+/// Decode Arrow IPC and call `f` once per batch without building an intermediate `Vec`.
+pub fn for_each_ipc_batch<F>(ipc_bytes: &[u8], mut f: F) -> Result<()>
+where
+    F: FnMut(RecordBatch) -> Result<()>,
+{
+    let cursor = Cursor::new(ipc_bytes);
     let reader =
         StreamReader::try_new(cursor, None).context("Failed to create Arrow IPC StreamReader")?;
-    let batches: Result<Vec<_>, _> = reader.collect();
-    let batches = batches.context("Failed to read RecordBatches from IPC stream")?;
+
+    for maybe_batch in reader {
+        let batch = maybe_batch.context("Failed to read RecordBatch from IPC stream")?;
+        f(batch)?;
+    }
+    Ok(())
+}
+
+/// Deserialize Arrow IPC stream format bytes into a Vec of RecordBatches.
+pub fn ipc_to_record_batches(ipc_bytes: &[u8]) -> Result<Vec<RecordBatch>> {
+    let mut batches: Vec<RecordBatch> = Vec::new();
+    for_each_ipc_batch(ipc_bytes, |batch| {
+        batches.push(batch);
+        Ok(())
+    })?;
     Ok(batches)
+}
+
+/// Count rows in an Arrow IPC stream without materializing all batches at once.
+pub fn count_ipc_rows(ipc_bytes: &[u8]) -> Result<u64> {
+    let mut total_rows = 0u64;
+    for_each_ipc_batch(ipc_bytes, |batch| {
+        total_rows += batch.num_rows() as u64;
+        Ok(())
+    })?;
+    Ok(total_rows)
 }
 
 #[cfg(test)]
@@ -125,5 +161,25 @@ mod tests {
     fn test_invalid_ipc_bytes_errors() {
         let result = ipc_to_record_batches(b"not valid ipc data");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_count_ipc_rows() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(vec![1, 2, 3, 4])),
+                Arc::new(StringArray::from(vec!["a", "b", "c", "d"])),
+            ],
+        )
+        .unwrap();
+
+        let ipc_bytes = record_batch_to_ipc(&batch).unwrap();
+        let row_count = count_ipc_rows(&ipc_bytes).unwrap();
+        assert_eq!(row_count, 4);
     }
 }

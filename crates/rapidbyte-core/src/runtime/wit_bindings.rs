@@ -11,6 +11,29 @@ use super::component_runtime::{
 };
 use super::host_socket::{SocketReadResultInternal, SocketWriteResultInternal};
 
+macro_rules! for_each_world {
+    ($macro_name:ident) => {
+        $macro_name!(
+            source_bindings,
+            to_source_error,
+            source_error_to_sdk,
+            source_validation_to_sdk
+        );
+        $macro_name!(
+            dest_bindings,
+            to_dest_error,
+            dest_error_to_sdk,
+            dest_validation_to_sdk
+        );
+        $macro_name!(
+            transform_bindings,
+            to_transform_error,
+            transform_error_to_sdk,
+            transform_validation_to_sdk
+        );
+    };
+}
+
 macro_rules! define_error_converters {
     ($to_world_fn:ident, $from_world_fn:ident, $module:ident) => {
         fn $to_world_fn(
@@ -130,14 +153,6 @@ macro_rules! define_error_converters {
         }
     };
 }
-
-define_error_converters!(to_source_error, source_error_to_sdk, source_bindings);
-define_error_converters!(to_dest_error, dest_error_to_sdk, dest_bindings);
-define_error_converters!(
-    to_transform_error,
-    transform_error_to_sdk,
-    transform_bindings
-);
 
 macro_rules! impl_host_trait_for_world {
     ($module:ident, $to_world_error:ident) => {
@@ -270,67 +285,34 @@ macro_rules! impl_host_trait_for_world {
     };
 }
 
-impl_host_trait_for_world!(source_bindings, to_source_error);
-impl_host_trait_for_world!(dest_bindings, to_dest_error);
-impl_host_trait_for_world!(transform_bindings, to_transform_error);
-
-impl source_bindings::rapidbyte::connector::types::Host for ComponentHostState {}
-impl dest_bindings::rapidbyte::connector::types::Host for ComponentHostState {}
-impl transform_bindings::rapidbyte::connector::types::Host for ComponentHostState {}
-
-pub fn source_validation_to_sdk(
-    value: source_bindings::rapidbyte::connector::types::ValidationResult,
-) -> ValidationResult {
-    ValidationResult {
-        status: match value.status {
-            source_bindings::rapidbyte::connector::types::ValidationStatus::Success => {
-                ValidationStatus::Success
+macro_rules! define_validation_to_sdk {
+    ($fn_name:ident, $module:ident) => {
+        pub fn $fn_name(value: $module::rapidbyte::connector::types::ValidationResult) -> ValidationResult {
+            ValidationResult {
+                status: match value.status {
+                    $module::rapidbyte::connector::types::ValidationStatus::Success => {
+                        ValidationStatus::Success
+                    }
+                    $module::rapidbyte::connector::types::ValidationStatus::Failed => {
+                        ValidationStatus::Failed
+                    }
+                    $module::rapidbyte::connector::types::ValidationStatus::Warning => {
+                        ValidationStatus::Warning
+                    }
+                },
+                message: value.message,
             }
-            source_bindings::rapidbyte::connector::types::ValidationStatus::Failed => {
-                ValidationStatus::Failed
-            }
-            source_bindings::rapidbyte::connector::types::ValidationStatus::Warning => {
-                ValidationStatus::Warning
-            }
-        },
-        message: value.message,
-    }
+        }
+    };
 }
 
-pub fn dest_validation_to_sdk(
-    value: dest_bindings::rapidbyte::connector::types::ValidationResult,
-) -> ValidationResult {
-    ValidationResult {
-        status: match value.status {
-            dest_bindings::rapidbyte::connector::types::ValidationStatus::Success => {
-                ValidationStatus::Success
-            }
-            dest_bindings::rapidbyte::connector::types::ValidationStatus::Failed => {
-                ValidationStatus::Failed
-            }
-            dest_bindings::rapidbyte::connector::types::ValidationStatus::Warning => {
-                ValidationStatus::Warning
-            }
-        },
-        message: value.message,
-    }
+macro_rules! define_world_glue {
+    ($module:ident, $to_world_error:ident, $from_world_error:ident, $validation_fn:ident) => {
+        define_error_converters!($to_world_error, $from_world_error, $module);
+        impl_host_trait_for_world!($module, $to_world_error);
+        impl $module::rapidbyte::connector::types::Host for ComponentHostState {}
+        define_validation_to_sdk!($validation_fn, $module);
+    };
 }
 
-pub fn transform_validation_to_sdk(
-    value: transform_bindings::rapidbyte::connector::types::ValidationResult,
-) -> ValidationResult {
-    ValidationResult {
-        status: match value.status {
-            transform_bindings::rapidbyte::connector::types::ValidationStatus::Success => {
-                ValidationStatus::Success
-            }
-            transform_bindings::rapidbyte::connector::types::ValidationStatus::Failed => {
-                ValidationStatus::Failed
-            }
-            transform_bindings::rapidbyte::connector::types::ValidationStatus::Warning => {
-                ValidationStatus::Warning
-            }
-        },
-        message: value.message,
-    }
-}
+for_each_world!(define_world_glue);

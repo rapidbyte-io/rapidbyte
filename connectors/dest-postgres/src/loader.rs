@@ -1,13 +1,17 @@
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::io::Cursor;
 use std::sync::Arc;
 use std::time::Instant;
 
+use anyhow::{anyhow, Context};
+use arrow::array::Array;
 use arrow::datatypes::Schema;
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use futures_util::SinkExt;
+use tokio_postgres::types::ToSql;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::host_ffi;
@@ -15,7 +19,7 @@ use rapidbyte_sdk::protocol::{DataErrorPolicy, SchemaEvolutionPolicy, WriteMode}
 use rapidbyte_sdk::validation::validate_pg_identifier;
 
 use crate::ddl::ensure_table_and_schema;
-use crate::format::{downcast_columns, format_copy_value, write_sql_value};
+use crate::format::{downcast_columns, format_copy_typed_value, TypedCol};
 
 /// Result of a write operation with per-row error tracking.
 pub(crate) struct WriteResult {
@@ -47,15 +51,38 @@ const INSERT_CHUNK_SIZE: usize = 1000;
 /// Buffer size for COPY data before flushing to the sink.
 const COPY_FLUSH_BYTES: usize = 4 * 1024 * 1024; // 4MB
 
+enum SqlParamValue<'a> {
+    Int16(Option<i16>),
+    Int32(Option<i32>),
+    Int64(Option<i64>),
+    Float32(Option<f32>),
+    Float64(Option<f64>),
+    Boolean(Option<bool>),
+    Text(Option<&'a str>),
+}
+
+impl<'a> SqlParamValue<'a> {
+    fn as_tosql(&self) -> &(dyn ToSql + Sync) {
+        match self {
+            Self::Int16(v) => v,
+            Self::Int32(v) => v,
+            Self::Int64(v) => v,
+            Self::Float32(v) => v,
+            Self::Float64(v) => v,
+            Self::Boolean(v) => v,
+            Self::Text(v) => v,
+        }
+    }
+}
+
 /// Decode Arrow IPC bytes into schema and record batches.
-fn decode_ipc(ipc_bytes: &[u8]) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
+fn decode_ipc(ipc_bytes: &[u8]) -> anyhow::Result<(Arc<Schema>, Vec<RecordBatch>)> {
     let cursor = Cursor::new(ipc_bytes);
-    let reader = StreamReader::try_new(cursor, None)
-        .map_err(|e| format!("Failed to read Arrow IPC: {}", e))?;
+    let reader = StreamReader::try_new(cursor, None).context("Failed to read Arrow IPC")?;
     let schema = reader.schema();
     let batches: Vec<_> = reader
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("Failed to read batches: {}", e))?;
+        .context("Failed to read IPC batches")?;
     Ok((schema, batches))
 }
 
@@ -65,18 +92,35 @@ fn decode_ipc(ipc_bytes: &[u8]) -> Result<(Arc<Schema>, Vec<RecordBatch>), Strin
 /// is "copy" but the write mode is Upsert, automatically falls back to INSERT
 /// (COPY cannot handle ON CONFLICT). On batch failure with Skip/Dlq error
 /// policy, falls back to single-row INSERTs.
-pub(crate) async fn write_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) -> Result<(WriteResult, u64), String> {
-    // Decode Arrow IPC with timing
+pub(crate) async fn write_batch(
+    ctx: &mut WriteContext<'_>,
+    ipc_bytes: &[u8],
+) -> Result<(WriteResult, u64), String> {
+    write_batch_inner(ctx, ipc_bytes)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn write_batch_inner(
+    ctx: &mut WriteContext<'_>,
+    ipc_bytes: &[u8],
+) -> anyhow::Result<(WriteResult, u64)> {
     let decode_start = Instant::now();
     let (arrow_schema, batches) = decode_ipc(ipc_bytes)?;
     let decode_nanos = decode_start.elapsed().as_nanos() as u64;
 
     if batches.is_empty() {
-        return Ok((WriteResult { rows_written: 0, rows_failed: 0 }, decode_nanos));
+        return Ok((
+            WriteResult {
+                rows_written: 0,
+                rows_failed: 0,
+            },
+            decode_nanos,
+        ));
     }
 
-    let use_copy = ctx.load_method == "copy"
-        && !matches!(ctx.write_mode, Some(WriteMode::Upsert { .. }));
+    let use_copy =
+        ctx.load_method == "copy" && !matches!(ctx.write_mode, Some(WriteMode::Upsert { .. }));
 
     let (result, method_name) = if use_copy {
         (copy_batch(ctx, &arrow_schema, &batches).await, "COPY")
@@ -85,10 +129,16 @@ pub(crate) async fn write_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) ->
     };
 
     match result {
-        Ok(count) => Ok((WriteResult { rows_written: count, rows_failed: 0 }, decode_nanos)),
+        Ok(count) => Ok((
+            WriteResult {
+                rows_written: count,
+                rows_failed: 0,
+            },
+            decode_nanos,
+        )),
         Err(e) => {
             if matches!(ctx.on_data_error, DataErrorPolicy::Fail) {
-                return Err(e);
+                return Err(e.context(format!("{} failed for stream {}", method_name, ctx.stream_name)));
             }
             host_ffi::log(
                 1,
@@ -98,9 +148,17 @@ pub(crate) async fn write_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) ->
                 ),
             );
             let wr = write_rows_individually(
-                ctx.client, ctx.target_schema, ctx.stream_name, &arrow_schema, &batches, ctx.write_mode,
-                ctx.ignored_columns, ctx.type_null_columns,
-            ).await?;
+                ctx.client,
+                ctx.target_schema,
+                ctx.stream_name,
+                &arrow_schema,
+                &batches,
+                ctx.write_mode,
+                ctx.ignored_columns,
+                ctx.type_null_columns,
+            )
+            .await
+            .context("per-row fallback INSERT failed")?;
             Ok((wr, decode_nanos))
         }
     }
@@ -109,40 +167,40 @@ pub(crate) async fn write_batch(ctx: &mut WriteContext<'_>, ipc_bytes: &[u8]) ->
 /// Internal: write via multi-value INSERT, returning row count.
 ///
 /// Builds batched statements:
-///   INSERT INTO t (c1, c2) VALUES (v1, v2), (v3, v4), ...
+///   INSERT INTO t (c1, c2) VALUES ($1, $2), ($3, $4), ...
 ///
 /// Chunks at INSERT_CHUNK_SIZE rows to keep SQL size bounded.
-async fn insert_batch(ctx: &mut WriteContext<'_>, arrow_schema: &Arc<Schema>, batches: &[RecordBatch]) -> Result<u64, String> {
+async fn insert_batch(
+    ctx: &mut WriteContext<'_>,
+    arrow_schema: &Arc<Schema>,
+    batches: &[RecordBatch],
+) -> anyhow::Result<u64> {
     if batches.is_empty() {
         return Ok(0);
     }
 
     let qualified_table = format!("\"{}\".\"{}\"", ctx.target_schema, ctx.stream_name);
 
-    // Ensure schema + table exist (only on first encounter)
     ensure_table_and_schema(
-        ctx.client, ctx.target_schema, ctx.stream_name,
-        ctx.created_tables, ctx.write_mode, ctx.schema_policy,
-        arrow_schema, ctx.ignored_columns, ctx.type_null_columns,
-    ).await?;
+        ctx.client,
+        ctx.target_schema,
+        ctx.stream_name,
+        ctx.created_tables,
+        ctx.write_mode,
+        ctx.schema_policy,
+        arrow_schema,
+        ctx.ignored_columns,
+        ctx.type_null_columns,
+    )
+    .await
+    .map_err(|e| anyhow!("Failed to ensure table and schema for {}: {}", ctx.stream_name, e))?;
 
-    // Validate upsert primary_key columns
-    if let Some(WriteMode::Upsert { primary_key }) = ctx.write_mode {
-        for pk_col in primary_key {
-            validate_pg_identifier(pk_col)
-                .map_err(|e| format!("Invalid primary key column name '{}': {}", pk_col, e))?;
-        }
-    }
-
-    // 3. Build active column indices (excluding ignored columns)
-    let active_cols: Vec<usize> = (0..arrow_schema.fields().len())
-        .filter(|&i| !ctx.ignored_columns.contains(arrow_schema.field(i).name()))
-        .collect();
-
+    let active_cols = active_column_indices(arrow_schema, ctx.ignored_columns);
     if active_cols.is_empty() {
         host_ffi::log(1, "dest-postgres: all columns ignored, skipping batch");
         return Ok(0);
     }
+    let upsert_clause = build_upsert_clause(ctx.write_mode, arrow_schema, &active_cols)?;
 
     let col_list = active_cols
         .iter()
@@ -150,59 +208,27 @@ async fn insert_batch(ctx: &mut WriteContext<'_>, arrow_schema: &Arc<Schema>, ba
         .collect::<Vec<_>>()
         .join(", ");
 
-    // 4. Insert rows using multi-value INSERT
     let mut total_rows: u64 = 0;
 
     for batch in batches {
         let num_rows = batch.num_rows();
 
-        // Pre-downcast columns once per batch (not per cell)
         let typed_cols = downcast_columns(batch, &active_cols);
-        // Track which active columns are type-nulled
         let type_null_flags: Vec<bool> = active_cols
             .iter()
             .map(|&i| ctx.type_null_columns.contains(arrow_schema.field(i).name()))
             .collect();
 
-        // Pre-compute upsert clause (same for every chunk)
-        let upsert_clause: Option<String> =
-            if let Some(WriteMode::Upsert { primary_key }) = ctx.write_mode {
-                let pk_cols = primary_key
-                    .iter()
-                    .map(|k| format!("\"{}\"", k))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let update_cols: Vec<String> = active_cols
-                    .iter()
-                    .map(|&i| arrow_schema.field(i).name())
-                    .filter(|name| !primary_key.contains(name))
-                    .map(|name| format!("\"{}\" = EXCLUDED.\"{}\"", name, name))
-                    .collect();
-                if update_cols.is_empty() {
-                    Some(format!(" ON CONFLICT ({}) DO NOTHING", pk_cols))
-                } else {
-                    Some(format!(
-                        " ON CONFLICT ({}) DO UPDATE SET {}",
-                        pk_cols,
-                        update_cols.join(", ")
-                    ))
-                }
-            } else {
-                None
-            };
-
-        // Process in chunks
         for chunk_start in (0..num_rows).step_by(INSERT_CHUNK_SIZE) {
             let chunk_end = (chunk_start + INSERT_CHUNK_SIZE).min(num_rows);
             let chunk_size = chunk_end - chunk_start;
 
-            // Pre-allocate: header + estimated row width (15 bytes/col avg) + separators
             let header = format!("INSERT INTO {} ({}) VALUES ", qualified_table, col_list);
-            let estimated_row_width = active_cols.len() * 15; // avg value width per col
-            let mut sql = String::with_capacity(
-                header.len() + chunk_size * (estimated_row_width + 3), // 3 = "()" + ","
-            );
+            let mut sql = String::with_capacity(header.len() + chunk_size * typed_cols.len() * 6);
             sql.push_str(&header);
+
+            let mut params: Vec<SqlParamValue<'_>> =
+                Vec::with_capacity(chunk_size.saturating_mul(typed_cols.len()));
 
             for row_idx in chunk_start..chunk_end {
                 if row_idx > chunk_start {
@@ -213,27 +239,32 @@ async fn insert_batch(ctx: &mut WriteContext<'_>, arrow_schema: &Arc<Schema>, ba
                     if pos > 0 {
                         sql.push_str(", ");
                     }
-                    if type_null_flags[pos] {
-                        sql.push_str("NULL");
+
+                    let value = if type_null_flags[pos] {
+                        SqlParamValue::Text(None)
                     } else {
-                        write_sql_value(&mut sql, typed_col, row_idx);
-                    }
+                        sql_param_value(typed_col, row_idx)
+                    };
+                    params.push(value);
+                    let _ = write!(sql, "${}", params.len());
                 }
                 sql.push(')');
             }
 
-            // Append pre-computed ON CONFLICT clause for upsert mode
-            if let Some(ref clause) = upsert_clause {
+            if let Some(clause) = upsert_clause.as_ref() {
                 sql.push_str(clause);
             }
 
+            let param_refs: Vec<&(dyn ToSql + Sync)> =
+                params.iter().map(SqlParamValue::as_tosql).collect();
+
             ctx.client
-                .execute(&sql, &[])
+                .execute(&sql, &param_refs)
                 .await
-                .map_err(|e| {
+                .with_context(|| {
                     format!(
-                        "Multi-value INSERT failed for {}, rows {}-{}: {}",
-                        ctx.stream_name, chunk_start, chunk_end, e
+                        "Multi-value INSERT failed for {}, rows {}-{}",
+                        ctx.stream_name, chunk_start, chunk_end
                     )
                 })?;
 
@@ -256,25 +287,32 @@ async fn insert_batch(ctx: &mut WriteContext<'_>, arrow_schema: &Arc<Schema>, ba
 ///
 /// Streams rows as tab-separated text directly to PostgreSQL's COPY protocol,
 /// bypassing SQL parsing for significantly higher throughput.
-async fn copy_batch(ctx: &mut WriteContext<'_>, arrow_schema: &Arc<Schema>, batches: &[RecordBatch]) -> Result<u64, String> {
+async fn copy_batch(
+    ctx: &mut WriteContext<'_>,
+    arrow_schema: &Arc<Schema>,
+    batches: &[RecordBatch],
+) -> anyhow::Result<u64> {
     if batches.is_empty() {
         return Ok(0);
     }
 
     let qualified_table = format!("\"{}\".\"{}\"", ctx.target_schema, ctx.stream_name);
 
-    // Ensure schema + table exist (only on first encounter)
     ensure_table_and_schema(
-        ctx.client, ctx.target_schema, ctx.stream_name,
-        ctx.created_tables, ctx.write_mode, ctx.schema_policy,
-        arrow_schema, ctx.ignored_columns, ctx.type_null_columns,
-    ).await?;
+        ctx.client,
+        ctx.target_schema,
+        ctx.stream_name,
+        ctx.created_tables,
+        ctx.write_mode,
+        ctx.schema_policy,
+        arrow_schema,
+        ctx.ignored_columns,
+        ctx.type_null_columns,
+    )
+    .await
+    .map_err(|e| anyhow!("Failed to ensure table and schema for {}: {}", ctx.stream_name, e))?;
 
-    // Build active column indices (excluding ignored columns)
-    let active_cols: Vec<usize> = (0..arrow_schema.fields().len())
-        .filter(|&i| !ctx.ignored_columns.contains(arrow_schema.field(i).name()))
-        .collect();
-
+    let active_cols = active_column_indices(arrow_schema, ctx.ignored_columns);
     if active_cols.is_empty() {
         host_ffi::log(1, "dest-postgres: all columns ignored, skipping COPY batch");
         return Ok(0);
@@ -290,54 +328,57 @@ async fn copy_batch(ctx: &mut WriteContext<'_>, arrow_schema: &Arc<Schema>, batc
         qualified_table, col_list
     );
 
-    // 4. Start COPY and stream data
     let sink = ctx
         .client
         .copy_in(&copy_stmt)
         .await
-        .map_err(|e| format!("COPY start failed: {}", e))?;
+        .context("COPY start failed")?;
     let mut sink = Box::pin(sink);
 
     let mut total_rows: u64 = 0;
     let mut buf = Vec::with_capacity(COPY_FLUSH_BYTES);
 
     for batch in batches {
+        let typed_cols = downcast_columns(batch, &active_cols);
+        let type_null_flags: Vec<bool> = active_cols
+            .iter()
+            .map(|&i| ctx.type_null_columns.contains(arrow_schema.field(i).name()))
+            .collect();
+
         for row_idx in 0..batch.num_rows() {
-            for (pos, &col_idx) in active_cols.iter().enumerate() {
+            for (pos, typed_col) in typed_cols.iter().enumerate() {
                 if pos > 0 {
                     buf.push(b'\t');
                 }
-                if ctx.type_null_columns.contains(arrow_schema.field(col_idx).name()) {
+                if type_null_flags[pos] {
                     buf.extend_from_slice(b"\\N");
                 } else {
-                    format_copy_value(&mut buf, batch.column(col_idx).as_ref(), row_idx);
+                    format_copy_typed_value(&mut buf, typed_col, row_idx);
                 }
             }
             buf.push(b'\n');
             total_rows += 1;
 
-            // Flush periodically to avoid unbounded memory growth
             if buf.len() >= COPY_FLUSH_BYTES {
                 sink.send(Bytes::from(std::mem::take(&mut buf)))
                     .await
-                    .map_err(|e| format!("COPY send failed: {}", e))?;
+                    .context("COPY send failed")?;
                 buf = Vec::with_capacity(COPY_FLUSH_BYTES);
             }
         }
     }
 
-    // Flush remaining data
     if !buf.is_empty() {
         sink.send(Bytes::from(buf))
             .await
-            .map_err(|e| format!("COPY send failed: {}", e))?;
+            .context("COPY send failed")?;
     }
 
     let _rows = sink
         .as_mut()
         .finish()
         .await
-        .map_err(|e| format!("COPY finish failed: {}", e))?;
+        .context("COPY finish failed")?;
 
     host_ffi::log(
         2,
@@ -360,18 +401,18 @@ async fn write_rows_individually(
     write_mode: Option<&WriteMode>,
     ignored_columns: &HashSet<String>,
     type_null_columns: &HashSet<String>,
-) -> Result<WriteResult, String> {
+) -> anyhow::Result<WriteResult> {
     let qualified_table = format!("\"{}\".\"{}\"", target_schema, stream_name);
 
-    // Build active column indices (excluding ignored columns)
-    let active_cols: Vec<usize> = (0..arrow_schema.fields().len())
-        .filter(|&i| !ignored_columns.contains(arrow_schema.field(i).name()))
-        .collect();
-
+    let active_cols = active_column_indices(arrow_schema, ignored_columns);
     if active_cols.is_empty() {
         host_ffi::log(1, "dest-postgres: all columns ignored, skipping per-row writes");
-        return Ok(WriteResult { rows_written: 0, rows_failed: 0 });
+        return Ok(WriteResult {
+            rows_written: 0,
+            rows_failed: 0,
+        });
     }
+    let upsert_clause = build_upsert_clause(write_mode, arrow_schema, &active_cols)?;
 
     let col_list = active_cols
         .iter()
@@ -391,43 +432,30 @@ async fn write_rows_individually(
 
         for row_idx in 0..batch.num_rows() {
             let mut sql = format!("INSERT INTO {} ({}) VALUES (", qualified_table, col_list);
+            let mut params: Vec<SqlParamValue<'_>> = Vec::with_capacity(typed_cols.len());
+
             for (pos, typed_col) in typed_cols.iter().enumerate() {
                 if pos > 0 {
                     sql.push_str(", ");
                 }
-                if type_null_flags[pos] {
-                    sql.push_str("NULL");
+                let value = if type_null_flags[pos] {
+                    SqlParamValue::Text(None)
                 } else {
-                    write_sql_value(&mut sql, typed_col, row_idx);
-                }
+                    sql_param_value(typed_col, row_idx)
+                };
+                params.push(value);
+                let _ = write!(sql, "${}", params.len());
             }
             sql.push(')');
 
-            // Append ON CONFLICT clause for upsert mode
-            if let Some(WriteMode::Upsert { primary_key }) = write_mode {
-                let pk_cols = primary_key
-                    .iter()
-                    .map(|k| format!("\"{}\"", k))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let update_cols: Vec<String> = active_cols
-                    .iter()
-                    .map(|&i| arrow_schema.field(i).name())
-                    .filter(|name| !primary_key.contains(name))
-                    .map(|name| format!("\"{}\" = EXCLUDED.\"{}\"", name, name))
-                    .collect();
-                if update_cols.is_empty() {
-                    sql.push_str(&format!(" ON CONFLICT ({}) DO NOTHING", pk_cols));
-                } else {
-                    sql.push_str(&format!(
-                        " ON CONFLICT ({}) DO UPDATE SET {}",
-                        pk_cols,
-                        update_cols.join(", ")
-                    ));
-                }
+            if let Some(clause) = upsert_clause.as_ref() {
+                sql.push_str(clause);
             }
 
-            match client.execute(&sql, &[]).await {
+            let param_refs: Vec<&(dyn ToSql + Sync)> =
+                params.iter().map(SqlParamValue::as_tosql).collect();
+
+            match client.execute(&sql, &param_refs).await {
                 Ok(_) => rows_written += 1,
                 Err(e) => {
                     rows_failed += 1;
@@ -457,4 +485,103 @@ async fn write_rows_individually(
         rows_written,
         rows_failed,
     })
+}
+
+fn active_column_indices(arrow_schema: &Arc<Schema>, ignored_columns: &HashSet<String>) -> Vec<usize> {
+    (0..arrow_schema.fields().len())
+        .filter(|&i| !ignored_columns.contains(arrow_schema.field(i).name()))
+        .collect()
+}
+
+fn build_upsert_clause(
+    write_mode: Option<&WriteMode>,
+    arrow_schema: &Arc<Schema>,
+    active_cols: &[usize],
+) -> anyhow::Result<Option<String>> {
+    if let Some(WriteMode::Upsert { primary_key }) = write_mode {
+        for pk_col in primary_key {
+            validate_pg_identifier(pk_col)
+                .map_err(|e| anyhow!("Invalid primary key column name '{}': {}", pk_col, e))?;
+        }
+
+        let pk_cols = primary_key
+            .iter()
+            .map(|k| format!("\"{}\"", k))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let update_cols: Vec<String> = active_cols
+            .iter()
+            .map(|&i| arrow_schema.field(i).name())
+            .filter(|name| !primary_key.contains(name))
+            .map(|name| format!("\"{}\" = EXCLUDED.\"{}\"", name, name))
+            .collect();
+
+        if update_cols.is_empty() {
+            Ok(Some(format!(" ON CONFLICT ({}) DO NOTHING", pk_cols)))
+        } else {
+            Ok(Some(format!(
+                " ON CONFLICT ({}) DO UPDATE SET {}",
+                pk_cols,
+                update_cols.join(", ")
+            )))
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+fn sql_param_value<'a>(col: &'a TypedCol<'a>, row_idx: usize) -> SqlParamValue<'a> {
+    match col {
+        TypedCol::Null => SqlParamValue::Text(None),
+        TypedCol::Int16(arr) => {
+            if arr.is_null(row_idx) {
+                SqlParamValue::Int16(None)
+            } else {
+                SqlParamValue::Int16(Some(arr.value(row_idx)))
+            }
+        }
+        TypedCol::Int32(arr) => {
+            if arr.is_null(row_idx) {
+                SqlParamValue::Int32(None)
+            } else {
+                SqlParamValue::Int32(Some(arr.value(row_idx)))
+            }
+        }
+        TypedCol::Int64(arr) => {
+            if arr.is_null(row_idx) {
+                SqlParamValue::Int64(None)
+            } else {
+                SqlParamValue::Int64(Some(arr.value(row_idx)))
+            }
+        }
+        TypedCol::Float32(arr) => {
+            if arr.is_null(row_idx) {
+                SqlParamValue::Float32(None)
+            } else {
+                SqlParamValue::Float32(Some(arr.value(row_idx)))
+            }
+        }
+        TypedCol::Float64(arr) => {
+            if arr.is_null(row_idx) {
+                SqlParamValue::Float64(None)
+            } else {
+                SqlParamValue::Float64(Some(arr.value(row_idx)))
+            }
+        }
+        TypedCol::Boolean(arr) => {
+            if arr.is_null(row_idx) {
+                SqlParamValue::Boolean(None)
+            } else {
+                SqlParamValue::Boolean(Some(arr.value(row_idx)))
+            }
+        }
+        TypedCol::Utf8(arr) => {
+            if arr.is_null(row_idx) {
+                SqlParamValue::Text(None)
+            } else {
+                SqlParamValue::Text(Some(arr.value(row_idx)))
+            }
+        }
+    }
 }

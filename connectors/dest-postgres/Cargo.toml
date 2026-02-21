@@ -16,6 +16,7 @@ serde_json = "1"
 arrow = { version = "53", features = ["ipc"] }
 bytes = "1"
 futures-util = "0.3"
+anyhow = "1"
 wit-bindgen = "0.46"
 
 [patch.crates-io]

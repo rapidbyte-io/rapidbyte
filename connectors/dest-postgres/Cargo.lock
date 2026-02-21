@@ -435,6 +435,7 @@ dependencies = [
 name = "dest-postgres"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "arrow",
  "bytes",
  "futures-util",

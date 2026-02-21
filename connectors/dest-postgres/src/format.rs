@@ -1,9 +1,6 @@
-use std::fmt::Write as FmtWrite;
 use std::io::Write;
 
-use arrow::array::{
-    Array, AsArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
-};
+use arrow::array::{Array, AsArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array};
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 
@@ -40,123 +37,44 @@ pub(crate) fn downcast_columns<'a>(batch: &'a RecordBatch, active_cols: &[usize]
         .collect()
 }
 
-/// Write a SQL literal for the value at `row_idx` directly into `buf`.
-/// No heap allocation — writes in-place via `std::fmt::Write`.
-pub(crate) fn write_sql_value(buf: &mut String, col: &TypedCol, row_idx: usize) {
-    match col {
-        TypedCol::Null => buf.push_str("NULL"),
-        TypedCol::Int16(arr) => {
-            if arr.is_null(row_idx) {
-                buf.push_str("NULL");
-            } else {
-                let _ = write!(buf, "{}", arr.value(row_idx));
-            }
-        }
-        TypedCol::Int32(arr) => {
-            if arr.is_null(row_idx) {
-                buf.push_str("NULL");
-            } else {
-                let _ = write!(buf, "{}", arr.value(row_idx));
-            }
-        }
-        TypedCol::Int64(arr) => {
-            if arr.is_null(row_idx) {
-                buf.push_str("NULL");
-            } else {
-                let _ = write!(buf, "{}", arr.value(row_idx));
-            }
-        }
-        TypedCol::Float32(arr) => {
-            if arr.is_null(row_idx) {
-                buf.push_str("NULL");
-            } else {
-                let v = arr.value(row_idx);
-                if v.is_nan() {
-                    buf.push_str("'NaN'::real");
-                } else if v.is_infinite() {
-                    if v > 0.0 {
-                        buf.push_str("'Infinity'::real");
-                    } else {
-                        buf.push_str("'-Infinity'::real");
-                    }
-                } else {
-                    let _ = write!(buf, "{}", v);
-                }
-            }
-        }
-        TypedCol::Float64(arr) => {
-            if arr.is_null(row_idx) {
-                buf.push_str("NULL");
-            } else {
-                let v = arr.value(row_idx);
-                if v.is_nan() {
-                    buf.push_str("'NaN'::double precision");
-                } else if v.is_infinite() {
-                    if v > 0.0 {
-                        buf.push_str("'Infinity'::double precision");
-                    } else {
-                        buf.push_str("'-Infinity'::double precision");
-                    }
-                } else {
-                    let _ = write!(buf, "{}", v);
-                }
-            }
-        }
-        TypedCol::Boolean(arr) => {
-            if arr.is_null(row_idx) {
-                buf.push_str("NULL");
-            } else if arr.value(row_idx) {
-                buf.push_str("TRUE");
-            } else {
-                buf.push_str("FALSE");
-            }
-        }
-        TypedCol::Utf8(arr) => {
-            if arr.is_null(row_idx) {
-                buf.push_str("NULL");
-            } else {
-                buf.push('\'');
-                for ch in arr.value(row_idx).chars() {
-                    match ch {
-                        '\'' => buf.push_str("''"),
-                        '\0' => {} // strip null bytes
-                        _ => buf.push(ch),
-                    }
-                }
-                buf.push('\'');
-            }
-        }
-    }
-}
-
-/// Format an Arrow array value at a given row index for COPY text format.
+/// Format a pre-downcast value at a given row index for COPY text format.
 ///
 /// COPY text format rules:
 /// - NULL: `\N`
 /// - Strings: backslash-escape `\`, tab, newline, carriage return; strip null bytes
 /// - Booleans: `t` / `f`
 /// - Numbers: decimal representation (NaN, Infinity as literals)
-pub(crate) fn format_copy_value(buf: &mut Vec<u8>, col: &dyn Array, row_idx: usize) {
-    if col.is_null(row_idx) {
-        buf.extend_from_slice(b"\\N");
-        return;
-    }
-
-    match col.data_type() {
-        DataType::Int16 => {
-            let arr = col.as_any().downcast_ref::<Int16Array>().unwrap();
+pub(crate) fn format_copy_typed_value(buf: &mut Vec<u8>, col: &TypedCol<'_>, row_idx: usize) {
+    match col {
+        TypedCol::Null => {
+            buf.extend_from_slice(b"\\N");
+        }
+        TypedCol::Int16(arr) => {
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
             let _ = write!(buf, "{}", arr.value(row_idx));
         }
-        DataType::Int32 => {
-            let arr = col.as_any().downcast_ref::<Int32Array>().unwrap();
+        TypedCol::Int32(arr) => {
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
             let _ = write!(buf, "{}", arr.value(row_idx));
         }
-        DataType::Int64 => {
-            let arr = col.as_any().downcast_ref::<Int64Array>().unwrap();
+        TypedCol::Int64(arr) => {
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
             let _ = write!(buf, "{}", arr.value(row_idx));
         }
-        DataType::Float32 => {
-            let arr = col.as_any().downcast_ref::<Float32Array>().unwrap();
+        TypedCol::Float32(arr) => {
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
             let v = arr.value(row_idx);
             if v.is_nan() {
                 buf.extend_from_slice(b"NaN");
@@ -170,8 +88,11 @@ pub(crate) fn format_copy_value(buf: &mut Vec<u8>, col: &dyn Array, row_idx: usi
                 let _ = write!(buf, "{}", v);
             }
         }
-        DataType::Float64 => {
-            let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
+        TypedCol::Float64(arr) => {
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
             let v = arr.value(row_idx);
             if v.is_nan() {
                 buf.extend_from_slice(b"NaN");
@@ -185,12 +106,18 @@ pub(crate) fn format_copy_value(buf: &mut Vec<u8>, col: &dyn Array, row_idx: usi
                 let _ = write!(buf, "{}", v);
             }
         }
-        DataType::Boolean => {
-            let arr = col.as_any().downcast_ref::<BooleanArray>().unwrap();
+        TypedCol::Boolean(arr) => {
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
             buf.push(if arr.value(row_idx) { b't' } else { b'f' });
         }
-        DataType::Utf8 => {
-            let arr = col.as_string::<i32>();
+        TypedCol::Utf8(arr) => {
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
             let val = arr.value(row_idx);
             // COPY text format: escape backslash, tab, newline, CR; strip null bytes
             for byte in val.bytes() {
@@ -203,9 +130,6 @@ pub(crate) fn format_copy_value(buf: &mut Vec<u8>, col: &dyn Array, row_idx: usi
                     _ => buf.push(byte),
                 }
             }
-        }
-        _ => {
-            buf.extend_from_slice(b"\\N");
         }
     }
 }

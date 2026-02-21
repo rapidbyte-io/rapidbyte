@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -10,6 +10,7 @@ use chrono::Utc;
 use rapidbyte_sdk::errors::ConnectorError;
 use rapidbyte_sdk::manifest::Permissions;
 use rapidbyte_sdk::protocol::{Checkpoint, StateScope};
+use tokio::sync::mpsc;
 use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
@@ -116,7 +117,7 @@ pub struct ComponentHostState {
     pub(crate) current_stream: Arc<Mutex<String>>,
     pub(crate) state_backend: Arc<dyn StateBackend>,
 
-    pub(crate) batch_sender: Option<mpsc::SyncSender<Frame>>,
+    pub(crate) batch_sender: Option<mpsc::Sender<Frame>>,
     pub(crate) next_batch_id: u64,
 
     pub(crate) batch_receiver: Option<mpsc::Receiver<Frame>>,
@@ -143,7 +144,7 @@ impl ComponentHostState {
         current_stream: Arc<Mutex<String>>,
         state_backend: Arc<dyn StateBackend>,
         _stats: Arc<Mutex<RunStats>>,
-        batch_sender: Option<mpsc::SyncSender<Frame>>,
+        batch_sender: Option<mpsc::Sender<Frame>>,
         batch_receiver: Option<mpsc::Receiver<Frame>>,
         compression: Option<CompressionCodec>,
         source_checkpoints: Arc<Mutex<Vec<Checkpoint>>>,
@@ -204,7 +205,7 @@ impl ComponentHostState {
             .ok_or_else(|| ConnectorError::internal("NO_SENDER", "No batch sender configured"))?;
 
         sender
-            .send(Frame::Data(batch))
+            .blocking_send(Frame::Data(batch))
             .map_err(|e| ConnectorError::internal("CHANNEL_SEND", e.to_string()))?;
 
         self.next_batch_id += 1;
@@ -220,13 +221,13 @@ impl ComponentHostState {
     pub(crate) fn next_batch_impl(&mut self) -> Result<Option<Vec<u8>>, ConnectorError> {
         let fn_start = Instant::now();
 
-        let receiver = self.batch_receiver.as_ref().ok_or_else(|| {
+        let receiver = self.batch_receiver.as_mut().ok_or_else(|| {
             ConnectorError::internal("NO_RECEIVER", "No batch receiver configured")
         })?;
 
-        let frame = match receiver.recv() {
-            Ok(frame) => frame,
-            Err(_) => return Ok(None),
+        let frame = match receiver.blocking_recv() {
+            Some(frame) => frame,
+            None => return Ok(None),
         };
 
         let batch = match frame {

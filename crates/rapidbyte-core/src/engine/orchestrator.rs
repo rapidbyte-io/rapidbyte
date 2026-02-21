@@ -1,8 +1,10 @@
+use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use tokio::sync::mpsc;
 
 use rapidbyte_sdk::errors::ValidationResult;
 use rapidbyte_sdk::protocol::{
@@ -50,7 +52,7 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult, Pip
                         safe_to_retry = connector_err.safe_to_retry,
                         "Retryable error, will retry"
                     );
-                    std::thread::sleep(delay);
+                    tokio::time::sleep(delay).await;
                 }
                 continue;
             }
@@ -255,13 +257,14 @@ async fn execute_pipeline_once(
     // For N transforms we need N+1 channels.
     // Channel i connects stage i to stage i+1.
     let num_transforms = config.transforms.len();
-    let mut senders: Vec<mpsc::SyncSender<Frame>> = Vec::with_capacity(num_transforms + 1);
-    let mut receivers: Vec<mpsc::Receiver<Frame>> = Vec::with_capacity(num_transforms + 1);
+    let channel_capacity = usize::max(1, limits.max_inflight_batches as usize);
+    let mut senders: VecDeque<mpsc::Sender<Frame>> = VecDeque::with_capacity(num_transforms + 1);
+    let mut receivers: VecDeque<mpsc::Receiver<Frame>> = VecDeque::with_capacity(num_transforms + 1);
 
     for _ in 0..=num_transforms {
-        let (tx, rx) = mpsc::sync_channel::<Frame>(limits.max_inflight_batches as usize);
-        senders.push(tx);
-        receivers.push(rx);
+        let (tx, rx) = mpsc::channel::<Frame>(channel_capacity);
+        senders.push_back(tx);
+        receivers.push_back(rx);
     }
 
     // Source writes to senders[0], dest reads from receivers[num_transforms].
@@ -269,8 +272,12 @@ async fn execute_pipeline_once(
     //   senders  = [s1, s2, ..., s_n]   (n elements for n transforms)
     //   receivers = [r0, r1, ..., r_{n-1}] (n elements for n transforms)
     // Transform[i] gets (receivers[i], senders[i]) = (r_i, s_{i+1}).
-    let batch_tx = senders.remove(0);
-    let batch_rx = receivers.pop().unwrap(); // last receiver
+    let batch_tx = senders
+        .pop_front()
+        .expect("pipeline stage graph always has at least one channel sender");
+    let batch_rx = receivers
+        .pop_back()
+        .expect("pipeline stage graph always has at least one channel receiver");
 
     // 5a. Spawn source
     let state_src = state.clone();
@@ -301,8 +308,12 @@ async fn execute_pipeline_once(
         .collect();
     let mut transform_handles = Vec::new();
     for (module, id, ver, tconfig, _load_ms, transform_perms) in transform_modules.into_iter() {
-        let rx = receivers.remove(0);
-        let tx = senders.remove(0);
+        let rx = receivers
+            .pop_front()
+            .expect("transform stage must have an input receiver");
+        let tx = senders
+            .pop_front()
+            .expect("transform stage must have an output sender");
         let state_t = state.clone();
         let stats_t = stats.clone();
         let stream_ctxs_t = stream_ctxs_clone.clone();
@@ -355,6 +366,7 @@ async fn execute_pipeline_once(
 
     // 6a. Wait for transforms (in order)
     let mut transform_durations: Vec<f64> = Vec::new();
+    let mut first_transform_error: Option<(usize, PipelineError)> = None;
     for (i, handle) in transform_handles.into_iter().enumerate() {
         let result = handle.await.map_err(|e| {
             PipelineError::Infrastructure(anyhow::anyhow!("Transform {} task panicked: {}", i, e))
@@ -372,20 +384,9 @@ async fn execute_pipeline_once(
             }
             Err(e) => {
                 tracing::error!(transform_index = i, "Transform failed: {}", e);
-                // Record failure and propagate
-                let final_stats = stats.lock().unwrap().clone();
-                let state_backend = create_state_backend(config)?;
-                state_backend.complete_run(
-                    run_id,
-                    RunStatus::Failed,
-                    &RunStats {
-                        records_read: final_stats.records_read,
-                        records_written: final_stats.records_written,
-                        bytes_read: final_stats.bytes_read,
-                        error_message: Some(format!("Transform {} error: {}", i, e)),
-                    },
-                )?;
-                return Err(e);
+                if first_transform_error.is_none() {
+                    first_transform_error = Some((i, e));
+                }
             }
         }
     }
@@ -396,6 +397,21 @@ async fn execute_pipeline_once(
         .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!("Dest task panicked: {}", e)))?;
 
     let final_stats = stats.lock().unwrap().clone();
+
+    if let Some((transform_index, err)) = first_transform_error {
+        let state_backend = create_state_backend(config)?;
+        state_backend.complete_run(
+            run_id,
+            RunStatus::Failed,
+            &RunStats {
+                records_read: final_stats.records_read,
+                records_written: final_stats.records_written,
+                bytes_read: final_stats.bytes_read,
+                error_message: Some(format!("Transform {} error: {}", transform_index, err)),
+            },
+        )?;
+        return Err(err);
+    }
 
     match (&source_result, &dest_result) {
         (
@@ -571,7 +587,7 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     let source_config = config.source.config.clone();
     let source_permissions = source_manifest.as_ref().map(|m| m.permissions.clone());
     let (src_id, src_ver) = parse_connector_ref(&config.source.use_ref);
-    let source_validation = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
+    let source_validation_handle = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
         validate_connector(
             &source_wasm,
             ConnectorRole::Source,
@@ -580,14 +596,13 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
             &source_config,
             source_permissions.as_ref(),
         )
-    })
-    .await??;
+    });
 
     // 4. Validate destination connector
     let dest_config = config.destination.config.clone();
     let dest_permissions = dest_manifest.as_ref().map(|m| m.permissions.clone());
     let (dst_id, dst_ver) = parse_connector_ref(&config.destination.use_ref);
-    let dest_validation = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
+    let dest_validation_handle = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
         validate_connector(
             &dest_wasm,
             ConnectorRole::Destination,
@@ -596,12 +611,18 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
             &dest_config,
             dest_permissions.as_ref(),
         )
-    })
-    .await??;
+    });
+
+    let source_validation = source_validation_handle
+        .await
+        .map_err(|e| anyhow::anyhow!("Source validation task panicked: {}", e))??;
+    let dest_validation = dest_validation_handle
+        .await
+        .map_err(|e| anyhow::anyhow!("Destination validation task panicked: {}", e))??;
 
     // 5. Validate transform connectors
-    let mut transform_validations = Vec::new();
-    for tc in &config.transforms {
+    let mut transform_tasks = Vec::with_capacity(config.transforms.len());
+    for (index, tc) in config.transforms.iter().enumerate() {
         let wasm_path = component_runtime::resolve_connector_path(&tc.use_ref)?;
         let manifest =
             load_and_validate_manifest(&wasm_path, &tc.use_ref, ConnectorRole::Transform)?;
@@ -613,8 +634,9 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
         }
         let transform_perms = manifest.as_ref().map(|m| m.permissions.clone());
         let config_val = tc.config.clone();
+        let connector_ref = tc.use_ref.clone();
         let (tc_id, tc_ver) = parse_connector_ref(&tc.use_ref);
-        let result = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
+        let handle = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
             validate_connector(
                 &wasm_path,
                 ConnectorRole::Transform,
@@ -623,8 +645,20 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
                 &config_val,
                 transform_perms.as_ref(),
             )
-        })
-        .await??;
+        });
+        transform_tasks.push((index, connector_ref, handle));
+    }
+
+    let mut transform_validations = Vec::with_capacity(transform_tasks.len());
+    for (index, connector_ref, handle) in transform_tasks {
+        let result = handle.await.map_err(|e| {
+            anyhow::anyhow!(
+                "Transform validation task panicked (index {}, {}): {}",
+                index,
+                connector_ref,
+                e
+            )
+        })??;
         transform_validations.push(result);
     }
 
@@ -660,7 +694,8 @@ pub async fn discover_connector(
             permissions.as_ref(),
         )
     })
-    .await?
+    .await
+    .map_err(|e| anyhow::anyhow!("Discover task panicked: {}", e))?
 }
 
 fn create_state_backend(config: &PipelineConfig) -> Result<SqliteStateBackend> {

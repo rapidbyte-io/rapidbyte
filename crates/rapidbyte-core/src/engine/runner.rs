@@ -1,7 +1,8 @@
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use tokio::sync::mpsc;
 use wasmtime::component::Linker;
 use wasmtime::Store;
 
@@ -109,7 +110,7 @@ fn create_transform_linker(engine: &wasmtime::Engine) -> Result<Linker<Component
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_source(
     module: LoadedComponent,
-    sender: mpsc::SyncSender<Frame>,
+    sender: mpsc::Sender<Frame>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
     connector_id: &str,
@@ -217,7 +218,7 @@ pub(crate) fn run_source(
                 s.bytes_read = total_summary.bytes_read;
             }
 
-            let _ = sender.send(Frame::EndStream);
+            let _ = sender.blocking_send(Frame::EndStream);
         }
         Ok(())
     })();
@@ -406,7 +407,7 @@ pub(crate) fn run_destination(
 pub(crate) fn run_transform(
     module: LoadedComponent,
     receiver: mpsc::Receiver<Frame>,
-    sender: mpsc::SyncSender<Frame>,
+    sender: mpsc::Sender<Frame>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
     connector_id: &str,
@@ -499,7 +500,7 @@ pub(crate) fn run_transform(
             total_summary.bytes_out += summary.bytes_out;
             total_summary.batches_processed += summary.batches_processed;
 
-            let _ = sender.send(Frame::EndStream);
+            let _ = sender.blocking_send(Frame::EndStream);
         }
         Ok(())
     })();
