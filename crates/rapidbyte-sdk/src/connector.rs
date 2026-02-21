@@ -91,15 +91,28 @@ macro_rules! source_connector_main {
 
         use rapidbyte_sdk::errors::{BackoffClass, CommitState, ErrorCategory, ErrorScope};
 
-        struct SyncRefCell(RefCell<$connector_type>);
+        // Note: These statics live inside the macro expansion, so each connector
+        // type that invokes the macro gets its own distinct static variables.
+        // This is correct and thread-safe within the WASI single-threaded environment.
+        static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        static CONFIG_JSON: OnceLock<String> = OnceLock::new();
+
+        fn get_runtime() -> &'static tokio::runtime::Runtime {
+            RUNTIME.get_or_init(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create guest tokio runtime")
+            })
+        }
+
+        struct SyncRefCell(RefCell<Option<$connector_type>>);
         unsafe impl Sync for SyncRefCell {}
 
         static CONNECTOR: OnceLock<SyncRefCell> = OnceLock::new();
 
-        fn get_connector() -> &'static RefCell<$connector_type> {
-            &CONNECTOR
-                .get_or_init(|| SyncRefCell(RefCell::new(<$connector_type>::default())))
-                .0
+        fn get_state() -> &'static RefCell<Option<$connector_type>> {
+            &CONNECTOR.get_or_init(|| SyncRefCell(RefCell::new(None))).0
         }
 
         fn to_component_error(
@@ -146,26 +159,6 @@ macro_rules! source_connector_main {
             }
         }
 
-        fn parse_open_context(
-            config_json: String,
-        ) -> Result<
-            rapidbyte_sdk::protocol::OpenContext,
-            __rb_source_bindings::rapidbyte::connector::types::ConnectorError,
-        > {
-            let config_value: serde_json::Value = serde_json::from_str(&config_json).map_err(|e| {
-                to_component_error(rapidbyte_sdk::errors::ConnectorError::config(
-                    "INVALID_CONFIG_JSON",
-                    format!("Invalid config JSON: {}", e),
-                ))
-            })?;
-
-            Ok(rapidbyte_sdk::protocol::OpenContext {
-                config: rapidbyte_sdk::protocol::ConfigBlob::Json(config_value),
-                connector_id: env!("CARGO_PKG_NAME").to_string(),
-                connector_version: env!("CARGO_PKG_VERSION").to_string(),
-            })
-        }
-
         fn parse_stream_context(
             ctx_json: String,
         ) -> Result<
@@ -207,24 +200,48 @@ macro_rules! source_connector_main {
                 config_json: String,
             ) -> Result<(), __rb_source_bindings::rapidbyte::connector::types::ConnectorError>
             {
-                let open_ctx = parse_open_context(config_json)?;
-                let mut conn = get_connector().borrow_mut();
-                <$connector_type as rapidbyte_sdk::connector::SourceConnector>::open(
-                    &mut *conn,
-                    open_ctx,
-                )
-                .map(|_| ())
-                .map_err(to_component_error)
+                // Store raw JSON for validate() to re-parse later
+                let _ = CONFIG_JSON.set(config_json.clone());
+
+                let config: <$connector_type as rapidbyte_sdk::connector::SourceConnector>::Config =
+                    serde_json::from_str(&config_json).map_err(|e| {
+                        to_component_error(rapidbyte_sdk::errors::ConnectorError::config(
+                            "INVALID_CONFIG",
+                            format!("Config parse error: {}", e),
+                        ))
+                    })?;
+
+                let rt = get_runtime();
+                let (instance, _open_info) = rt
+                    .block_on(
+                        <$connector_type as rapidbyte_sdk::connector::SourceConnector>::connect(
+                            config,
+                        ),
+                    )
+                    .map_err(to_component_error)?;
+
+                // Store just the initialized connector instance
+                let state_cell = get_state();
+                *state_cell.borrow_mut() = Some(instance);
+
+                Ok(())
             }
 
             fn discover(
             ) -> Result<String, __rb_source_bindings::rapidbyte::connector::types::ConnectorError>
             {
-                let mut conn = get_connector().borrow_mut();
-                let catalog = <$connector_type as rapidbyte_sdk::connector::SourceConnector>::discover(
-                    &mut *conn,
-                )
-                .map_err(to_component_error)?;
+                let rt = get_runtime();
+                let state_cell = get_state();
+                let mut state_ref = state_cell.borrow_mut();
+                let conn = state_ref.as_mut().expect("Connector not opened");
+
+                let catalog = rt
+                    .block_on(
+                        <$connector_type as rapidbyte_sdk::connector::SourceConnector>::discover(
+                            conn,
+                        ),
+                    )
+                    .map_err(to_component_error)?;
 
                 serde_json::to_string(&catalog).map_err(|e| {
                     to_component_error(rapidbyte_sdk::errors::ConnectorError::internal(
@@ -239,10 +256,23 @@ macro_rules! source_connector_main {
                 __rb_source_bindings::rapidbyte::connector::types::ValidationResult,
                 __rb_source_bindings::rapidbyte::connector::types::ConnectorError,
             > {
-                let mut conn = get_connector().borrow_mut();
-                <$connector_type as rapidbyte_sdk::connector::SourceConnector>::validate(&mut *conn)
-                    .map(to_component_validation)
-                    .map_err(to_component_error)
+                let json = CONFIG_JSON.get().expect("open must be called before validate");
+                let config: <$connector_type as rapidbyte_sdk::connector::SourceConnector>::Config =
+                    serde_json::from_str(json).map_err(|e| {
+                        to_component_error(rapidbyte_sdk::errors::ConnectorError::config(
+                            "INVALID_CONFIG",
+                            format!("Config parse error: {}", e),
+                        ))
+                    })?;
+
+                let rt = get_runtime();
+                rt.block_on(
+                    <$connector_type as rapidbyte_sdk::connector::SourceConnector>::validate(
+                        &config,
+                    ),
+                )
+                .map(to_component_validation)
+                .map_err(to_component_error)
             }
 
             fn run_read(
@@ -252,12 +282,19 @@ macro_rules! source_connector_main {
                 __rb_source_bindings::rapidbyte::connector::types::ConnectorError,
             > {
                 let ctx = parse_stream_context(ctx_json)?;
-                let mut conn = get_connector().borrow_mut();
-                let summary = <$connector_type as rapidbyte_sdk::connector::SourceConnector>::read(
-                    &mut *conn,
-                    ctx,
-                )
-                .map_err(to_component_error)?;
+                let rt = get_runtime();
+                let state_cell = get_state();
+                let mut state_ref = state_cell.borrow_mut();
+                let conn = state_ref.as_mut().expect("Connector not opened");
+
+                let summary = rt
+                    .block_on(
+                        <$connector_type as rapidbyte_sdk::connector::SourceConnector>::read(
+                            conn,
+                            ctx,
+                        ),
+                    )
+                    .map_err(to_component_error)?;
 
                 Ok(__rb_source_bindings::rapidbyte::connector::types::ReadSummary {
                     records_read: summary.records_read,
@@ -270,9 +307,19 @@ macro_rules! source_connector_main {
 
             fn close(
             ) -> Result<(), __rb_source_bindings::rapidbyte::connector::types::ConnectorError> {
-                let mut conn = get_connector().borrow_mut();
-                <$connector_type as rapidbyte_sdk::connector::SourceConnector>::close(&mut *conn)
-                    .map_err(to_component_error)
+                let rt = get_runtime();
+                let state_cell = get_state();
+                let mut state_ref = state_cell.borrow_mut();
+                if let Some(conn) = state_ref.as_mut() {
+                    rt.block_on(
+                        <$connector_type as rapidbyte_sdk::connector::SourceConnector>::close(
+                            conn,
+                        ),
+                    )
+                    .map_err(to_component_error)?;
+                }
+                *state_ref = None;
+                Ok(())
             }
         }
 
@@ -300,15 +347,28 @@ macro_rules! dest_connector_main {
 
         use rapidbyte_sdk::errors::{BackoffClass, CommitState, ErrorCategory, ErrorScope};
 
-        struct SyncRefCell(RefCell<$connector_type>);
+        // Note: These statics live inside the macro expansion, so each connector
+        // type that invokes the macro gets its own distinct static variables.
+        // This is correct and thread-safe within the WASI single-threaded environment.
+        static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        static CONFIG_JSON: OnceLock<String> = OnceLock::new();
+
+        fn get_runtime() -> &'static tokio::runtime::Runtime {
+            RUNTIME.get_or_init(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create guest tokio runtime")
+            })
+        }
+
+        struct SyncRefCell(RefCell<Option<$connector_type>>);
         unsafe impl Sync for SyncRefCell {}
 
         static CONNECTOR: OnceLock<SyncRefCell> = OnceLock::new();
 
-        fn get_connector() -> &'static RefCell<$connector_type> {
-            &CONNECTOR
-                .get_or_init(|| SyncRefCell(RefCell::new(<$connector_type>::default())))
-                .0
+        fn get_state() -> &'static RefCell<Option<$connector_type>> {
+            &CONNECTOR.get_or_init(|| SyncRefCell(RefCell::new(None))).0
         }
 
         fn to_component_error(
@@ -355,26 +415,6 @@ macro_rules! dest_connector_main {
             }
         }
 
-        fn parse_open_context(
-            config_json: String,
-        ) -> Result<
-            rapidbyte_sdk::protocol::OpenContext,
-            __rb_dest_bindings::rapidbyte::connector::types::ConnectorError,
-        > {
-            let config_value: serde_json::Value = serde_json::from_str(&config_json).map_err(|e| {
-                to_component_error(rapidbyte_sdk::errors::ConnectorError::config(
-                    "INVALID_CONFIG_JSON",
-                    format!("Invalid config JSON: {}", e),
-                ))
-            })?;
-
-            Ok(rapidbyte_sdk::protocol::OpenContext {
-                config: rapidbyte_sdk::protocol::ConfigBlob::Json(config_value),
-                connector_id: env!("CARGO_PKG_NAME").to_string(),
-                connector_version: env!("CARGO_PKG_VERSION").to_string(),
-            })
-        }
-
         fn parse_stream_context(
             ctx_json: String,
         ) -> Result<
@@ -407,23 +447,40 @@ macro_rules! dest_connector_main {
             }
         }
 
-        struct RapidbyteDestinationComponent;
+        struct RapidbyteDestComponent;
 
         impl __rb_dest_bindings::exports::rapidbyte::connector::dest_connector::Guest
-            for RapidbyteDestinationComponent
+            for RapidbyteDestComponent
         {
             fn open(
                 config_json: String,
             ) -> Result<(), __rb_dest_bindings::rapidbyte::connector::types::ConnectorError>
             {
-                let open_ctx = parse_open_context(config_json)?;
-                let mut conn = get_connector().borrow_mut();
-                <$connector_type as rapidbyte_sdk::connector::DestinationConnector>::open(
-                    &mut *conn,
-                    open_ctx,
-                )
-                .map(|_| ())
-                .map_err(to_component_error)
+                // Store raw JSON for validate() to re-parse later
+                let _ = CONFIG_JSON.set(config_json.clone());
+
+                let config: <$connector_type as rapidbyte_sdk::connector::DestinationConnector>::Config =
+                    serde_json::from_str(&config_json).map_err(|e| {
+                        to_component_error(rapidbyte_sdk::errors::ConnectorError::config(
+                            "INVALID_CONFIG",
+                            format!("Config parse error: {}", e),
+                        ))
+                    })?;
+
+                let rt = get_runtime();
+                let (instance, _open_info) = rt
+                    .block_on(
+                        <$connector_type as rapidbyte_sdk::connector::DestinationConnector>::connect(
+                            config,
+                        ),
+                    )
+                    .map_err(to_component_error)?;
+
+                // Store just the initialized connector instance
+                let state_cell = get_state();
+                *state_cell.borrow_mut() = Some(instance);
+
+                Ok(())
             }
 
             fn validate(
@@ -431,9 +488,20 @@ macro_rules! dest_connector_main {
                 __rb_dest_bindings::rapidbyte::connector::types::ValidationResult,
                 __rb_dest_bindings::rapidbyte::connector::types::ConnectorError,
             > {
-                let mut conn = get_connector().borrow_mut();
-                <$connector_type as rapidbyte_sdk::connector::DestinationConnector>::validate(
-                    &mut *conn,
+                let json = CONFIG_JSON.get().expect("open must be called before validate");
+                let config: <$connector_type as rapidbyte_sdk::connector::DestinationConnector>::Config =
+                    serde_json::from_str(json).map_err(|e| {
+                        to_component_error(rapidbyte_sdk::errors::ConnectorError::config(
+                            "INVALID_CONFIG",
+                            format!("Config parse error: {}", e),
+                        ))
+                    })?;
+
+                let rt = get_runtime();
+                rt.block_on(
+                    <$connector_type as rapidbyte_sdk::connector::DestinationConnector>::validate(
+                        &config,
+                    ),
                 )
                 .map(to_component_validation)
                 .map_err(to_component_error)
@@ -446,12 +514,19 @@ macro_rules! dest_connector_main {
                 __rb_dest_bindings::rapidbyte::connector::types::ConnectorError,
             > {
                 let ctx = parse_stream_context(ctx_json)?;
-                let mut conn = get_connector().borrow_mut();
-                let summary = <$connector_type as rapidbyte_sdk::connector::DestinationConnector>::write(
-                    &mut *conn,
-                    ctx,
-                )
-                .map_err(to_component_error)?;
+                let rt = get_runtime();
+                let state_cell = get_state();
+                let mut state_ref = state_cell.borrow_mut();
+                let conn = state_ref.as_mut().expect("Connector not opened");
+
+                let summary = rt
+                    .block_on(
+                        <$connector_type as rapidbyte_sdk::connector::DestinationConnector>::write(
+                            conn,
+                            ctx,
+                        ),
+                    )
+                    .map_err(to_component_error)?;
 
                 Ok(__rb_dest_bindings::rapidbyte::connector::types::WriteSummary {
                     records_written: summary.records_written,
@@ -464,16 +539,24 @@ macro_rules! dest_connector_main {
 
             fn close(
             ) -> Result<(), __rb_dest_bindings::rapidbyte::connector::types::ConnectorError> {
-                let mut conn = get_connector().borrow_mut();
-                <$connector_type as rapidbyte_sdk::connector::DestinationConnector>::close(
-                    &mut *conn,
-                )
-                .map_err(to_component_error)
+                let rt = get_runtime();
+                let state_cell = get_state();
+                let mut state_ref = state_cell.borrow_mut();
+                if let Some(conn) = state_ref.as_mut() {
+                    rt.block_on(
+                        <$connector_type as rapidbyte_sdk::connector::DestinationConnector>::close(
+                            conn,
+                        ),
+                    )
+                    .map_err(to_component_error)?;
+                }
+                *state_ref = None;
+                Ok(())
             }
         }
 
         __rb_dest_bindings::export!(
-            RapidbyteDestinationComponent with_types_in __rb_dest_bindings
+            RapidbyteDestComponent with_types_in __rb_dest_bindings
         );
 
         fn main() {}
@@ -496,15 +579,28 @@ macro_rules! transform_connector_main {
 
         use rapidbyte_sdk::errors::{BackoffClass, CommitState, ErrorCategory, ErrorScope};
 
-        struct SyncRefCell(RefCell<$connector_type>);
+        // Note: These statics live inside the macro expansion, so each connector
+        // type that invokes the macro gets its own distinct static variables.
+        // This is correct and thread-safe within the WASI single-threaded environment.
+        static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        static CONFIG_JSON: OnceLock<String> = OnceLock::new();
+
+        fn get_runtime() -> &'static tokio::runtime::Runtime {
+            RUNTIME.get_or_init(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create guest tokio runtime")
+            })
+        }
+
+        struct SyncRefCell(RefCell<Option<$connector_type>>);
         unsafe impl Sync for SyncRefCell {}
 
         static CONNECTOR: OnceLock<SyncRefCell> = OnceLock::new();
 
-        fn get_connector() -> &'static RefCell<$connector_type> {
-            &CONNECTOR
-                .get_or_init(|| SyncRefCell(RefCell::new(<$connector_type>::default())))
-                .0
+        fn get_state() -> &'static RefCell<Option<$connector_type>> {
+            &CONNECTOR.get_or_init(|| SyncRefCell(RefCell::new(None))).0
         }
 
         fn to_component_error(
@@ -551,26 +647,6 @@ macro_rules! transform_connector_main {
             }
         }
 
-        fn parse_open_context(
-            config_json: String,
-        ) -> Result<
-            rapidbyte_sdk::protocol::OpenContext,
-            __rb_transform_bindings::rapidbyte::connector::types::ConnectorError,
-        > {
-            let config_value: serde_json::Value = serde_json::from_str(&config_json).map_err(|e| {
-                to_component_error(rapidbyte_sdk::errors::ConnectorError::config(
-                    "INVALID_CONFIG_JSON",
-                    format!("Invalid config JSON: {}", e),
-                ))
-            })?;
-
-            Ok(rapidbyte_sdk::protocol::OpenContext {
-                config: rapidbyte_sdk::protocol::ConfigBlob::Json(config_value),
-                connector_id: env!("CARGO_PKG_NAME").to_string(),
-                connector_version: env!("CARGO_PKG_VERSION").to_string(),
-            })
-        }
-
         fn parse_stream_context(
             ctx_json: String,
         ) -> Result<
@@ -612,14 +688,31 @@ macro_rules! transform_connector_main {
                 config_json: String,
             ) -> Result<(), __rb_transform_bindings::rapidbyte::connector::types::ConnectorError>
             {
-                let open_ctx = parse_open_context(config_json)?;
-                let mut conn = get_connector().borrow_mut();
-                <$connector_type as rapidbyte_sdk::connector::TransformConnector>::open(
-                    &mut *conn,
-                    open_ctx,
-                )
-                .map(|_| ())
-                .map_err(to_component_error)
+                // Store raw JSON for validate() to re-parse later
+                let _ = CONFIG_JSON.set(config_json.clone());
+
+                let config: <$connector_type as rapidbyte_sdk::connector::TransformConnector>::Config =
+                    serde_json::from_str(&config_json).map_err(|e| {
+                        to_component_error(rapidbyte_sdk::errors::ConnectorError::config(
+                            "INVALID_CONFIG",
+                            format!("Config parse error: {}", e),
+                        ))
+                    })?;
+
+                let rt = get_runtime();
+                let (instance, _open_info) = rt
+                    .block_on(
+                        <$connector_type as rapidbyte_sdk::connector::TransformConnector>::connect(
+                            config,
+                        ),
+                    )
+                    .map_err(to_component_error)?;
+
+                // Store just the initialized connector instance
+                let state_cell = get_state();
+                *state_cell.borrow_mut() = Some(instance);
+
+                Ok(())
             }
 
             fn validate(
@@ -627,9 +720,20 @@ macro_rules! transform_connector_main {
                 __rb_transform_bindings::rapidbyte::connector::types::ValidationResult,
                 __rb_transform_bindings::rapidbyte::connector::types::ConnectorError,
             > {
-                let mut conn = get_connector().borrow_mut();
-                <$connector_type as rapidbyte_sdk::connector::TransformConnector>::validate(
-                    &mut *conn,
+                let json = CONFIG_JSON.get().expect("open must be called before validate");
+                let config: <$connector_type as rapidbyte_sdk::connector::TransformConnector>::Config =
+                    serde_json::from_str(json).map_err(|e| {
+                        to_component_error(rapidbyte_sdk::errors::ConnectorError::config(
+                            "INVALID_CONFIG",
+                            format!("Config parse error: {}", e),
+                        ))
+                    })?;
+
+                let rt = get_runtime();
+                rt.block_on(
+                    <$connector_type as rapidbyte_sdk::connector::TransformConnector>::validate(
+                        &config,
+                    ),
                 )
                 .map(to_component_validation)
                 .map_err(to_component_error)
@@ -642,12 +746,19 @@ macro_rules! transform_connector_main {
                 __rb_transform_bindings::rapidbyte::connector::types::ConnectorError,
             > {
                 let ctx = parse_stream_context(ctx_json)?;
-                let mut conn = get_connector().borrow_mut();
-                let summary = <$connector_type as rapidbyte_sdk::connector::TransformConnector>::transform(
-                    &mut *conn,
-                    ctx,
-                )
-                .map_err(to_component_error)?;
+                let rt = get_runtime();
+                let state_cell = get_state();
+                let mut state_ref = state_cell.borrow_mut();
+                let conn = state_ref.as_mut().expect("Connector not opened");
+
+                let summary = rt
+                    .block_on(
+                        <$connector_type as rapidbyte_sdk::connector::TransformConnector>::transform(
+                            conn,
+                            ctx,
+                        ),
+                    )
+                    .map_err(to_component_error)?;
 
                 Ok(
                     __rb_transform_bindings::rapidbyte::connector::types::TransformSummary {
@@ -663,11 +774,19 @@ macro_rules! transform_connector_main {
             fn close(
             ) -> Result<(), __rb_transform_bindings::rapidbyte::connector::types::ConnectorError>
             {
-                let mut conn = get_connector().borrow_mut();
-                <$connector_type as rapidbyte_sdk::connector::TransformConnector>::close(
-                    &mut *conn,
-                )
-                .map_err(to_component_error)
+                let rt = get_runtime();
+                let state_cell = get_state();
+                let mut state_ref = state_cell.borrow_mut();
+                if let Some(conn) = state_ref.as_mut() {
+                    rt.block_on(
+                        <$connector_type as rapidbyte_sdk::connector::TransformConnector>::close(
+                            conn,
+                        ),
+                    )
+                    .map_err(to_component_error)?;
+                }
+                *state_ref = None;
+                Ok(())
             }
         }
 
