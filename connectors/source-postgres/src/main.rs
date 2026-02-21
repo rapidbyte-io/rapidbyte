@@ -1,4 +1,5 @@
 pub mod config;
+mod cdc;
 mod client;
 pub mod schema;
 mod reader;
@@ -8,7 +9,7 @@ use std::time::Instant;
 use rapidbyte_sdk::connector::SourceConnector;
 use rapidbyte_sdk::errors::{ConnectorError, ValidationResult};
 use rapidbyte_sdk::host_ffi;
-use rapidbyte_sdk::protocol::{Catalog, ConnectorInfo, ReadSummary, StreamContext};
+use rapidbyte_sdk::protocol::{Catalog, ConnectorInfo, ReadSummary, StreamContext, SyncMode};
 
 pub struct SourcePostgres {
     config: config::Config,
@@ -55,9 +56,19 @@ impl SourceConnector for SourcePostgres {
             .await
             .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
         let connect_secs = connect_start.elapsed().as_secs_f64();
-        reader::read_stream(&client, &ctx, connect_secs)
-            .await
-            .map_err(|e| ConnectorError::internal("READ_FAILED", e))
+
+        match ctx.sync_mode {
+            SyncMode::Cdc => {
+                cdc::read_cdc_changes(&client, &ctx, &self.config, connect_secs)
+                    .await
+                    .map_err(|e| ConnectorError::internal("CDC_READ_FAILED", e))
+            }
+            _ => {
+                reader::read_stream(&client, &ctx, connect_secs)
+                    .await
+                    .map_err(|e| ConnectorError::internal("READ_FAILED", e))
+            }
+        }
     }
 
     async fn close(&mut self) -> Result<(), ConnectorError> {

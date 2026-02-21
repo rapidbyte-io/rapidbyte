@@ -116,9 +116,28 @@ async fn read_stream_inner(
         bail!("Table '{}' not found or has no columns", ctx.stream_name);
     }
 
-    // Apply projection pushdown: filter to selected columns if specified
+    // Apply projection pushdown: filter to selected columns if specified.
+    // Column order follows table ordinal position, not user-specified order.
     let columns: Vec<ColumnSchema> = match &ctx.selected_columns {
         Some(selected) if !selected.is_empty() => {
+            for col in selected {
+                validate_pg_identifier(col)
+                    .map_err(|e| anyhow!("Invalid column name '{}': {}", col, e))?;
+            }
+
+            let unknown: Vec<&str> = selected
+                .iter()
+                .filter(|name| !all_columns.iter().any(|c| c.name == **name))
+                .map(|s| s.as_str())
+                .collect();
+            if !unknown.is_empty() {
+                bail!(
+                    "Selected columns {:?} not found in table '{}'",
+                    unknown,
+                    ctx.stream_name
+                );
+            }
+
             let filtered: Vec<ColumnSchema> = all_columns
                 .into_iter()
                 .filter(|c| selected.iter().any(|s| s == &c.name))
@@ -129,6 +148,15 @@ async fn read_stream_inner(
                     selected,
                     ctx.stream_name
                 );
+            }
+            if let (SyncMode::Incremental, Some(ci)) = (&ctx.sync_mode, &ctx.cursor_info) {
+                if !filtered.iter().any(|c| c.name == ci.cursor_field) {
+                    bail!(
+                        "Cursor field '{}' must be included in selected columns for incremental stream '{}'",
+                        ci.cursor_field,
+                        ctx.stream_name
+                    );
+                }
             }
             filtered
         }
@@ -469,14 +497,11 @@ fn effective_cursor_type(cursor_type: CursorType, cursor_column_arrow_type: &str
 }
 
 fn build_base_query(ctx: &StreamContext, columns: &[ColumnSchema]) -> anyhow::Result<CursorQuery> {
-    let col_list = match &ctx.selected_columns {
-        Some(cols) if !cols.is_empty() => cols
-            .iter()
-            .map(|c| format!("\"{}\"", c))
-            .collect::<Vec<_>>()
-            .join(", "),
-        _ => "*".to_string(),
-    };
+    let col_list = columns
+        .iter()
+        .map(|c| format!("\"{}\"", c.name))
+        .collect::<Vec<_>>()
+        .join(", ");
 
     if let (SyncMode::Incremental, Some(ci)) = (&ctx.sync_mode, &ctx.cursor_info) {
         validate_pg_identifier(&ci.cursor_field)
@@ -592,6 +617,7 @@ fn cursor_bind_param(
                 CursorValue::TimestampMicros(v) => timestamp_micros_to_rfc3339(*v)?,
                 CursorValue::Decimal { value, .. } => value.clone(),
                 CursorValue::Json(v) => v.to_string(),
+                CursorValue::Lsn(v) => v.clone(),
                 CursorValue::Null => bail!("null cursor cannot be used as a predicate"),
             };
             Ok((CursorBindParam::Text(text), "text"))
@@ -634,6 +660,16 @@ fn cursor_bind_param(
                 _ => bail!("cursor value is incompatible with json cursor type"),
             };
             Ok((CursorBindParam::Json(json), "jsonb"))
+        }
+        CursorType::Lsn => {
+            // LSN cursors are used in CDC mode and are not applicable to
+            // incremental queries. Treat as text if encountered here.
+            let text = match value {
+                CursorValue::Lsn(v) => v.clone(),
+                CursorValue::Utf8(v) => v.clone(),
+                _ => bail!("cursor value is incompatible with lsn cursor type"),
+            };
+            Ok((CursorBindParam::Text(text), "pg_lsn"))
         }
     }
 }

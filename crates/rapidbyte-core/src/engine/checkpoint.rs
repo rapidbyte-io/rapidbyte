@@ -40,6 +40,7 @@ pub(crate) fn correlate_and_persist_cursors(
             CursorValue::TimestampMicros(us) => us.to_string(),
             CursorValue::Decimal { value, .. } => value.clone(),
             CursorValue::Json(v) => v.to_string(),
+            CursorValue::Lsn(s) => s.clone(),
             CursorValue::Null => continue,
         };
 

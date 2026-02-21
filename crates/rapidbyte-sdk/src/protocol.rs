@@ -70,6 +70,7 @@ pub enum CursorType {
     TimestampMicros,
     Decimal,
     Json,
+    Lsn,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -82,6 +83,7 @@ pub enum CursorValue {
     TimestampMicros(i64),
     Decimal { value: String, scale: i32 },
     Json(serde_json::Value),
+    Lsn(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -320,6 +322,15 @@ pub struct TransformSummary {
     pub bytes_in: u64,
     pub bytes_out: u64,
     pub batches_processed: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DlqRecord {
+    pub stream_name: String,
+    pub record_json: String,
+    pub error_message: String,
+    pub error_category: String,
+    pub failed_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -759,5 +770,36 @@ mod tests {
         let json = r#"{"records_written":100,"bytes_written":500,"batches_written":1,"checkpoint_count":0,"perf":null}"#;
         let s: WriteSummary = serde_json::from_str(json).unwrap();
         assert_eq!(s.records_failed, 0);
+    }
+
+    #[test]
+    fn test_cursor_type_lsn_roundtrip() {
+        let ct = CursorType::Lsn;
+        let json = serde_json::to_string(&ct).unwrap();
+        assert_eq!(json, "\"lsn\"");
+        let back: CursorType = serde_json::from_str(&json).unwrap();
+        assert_eq!(ct, back);
+    }
+
+    #[test]
+    fn test_cursor_value_lsn_roundtrip() {
+        let cv = CursorValue::Lsn("0/16B3748".to_string());
+        let json = serde_json::to_string(&cv).unwrap();
+        let back: CursorValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(cv, back);
+    }
+
+    #[test]
+    fn test_dlq_record_roundtrip() {
+        let record = DlqRecord {
+            stream_name: "users".to_string(),
+            record_json: r#"{"id":1,"name":"Alice"}"#.to_string(),
+            error_message: "column \"email\" violates not-null constraint".to_string(),
+            error_category: "data".to_string(),
+            failed_at: "2026-02-21T12:00:00+00:00".to_string(),
+        };
+        let json = serde_json::to_string(&record).unwrap();
+        let back: DlqRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(record, back);
     }
 }

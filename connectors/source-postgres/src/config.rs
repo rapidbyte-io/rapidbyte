@@ -10,6 +10,12 @@ pub struct Config {
     #[serde(default)]
     pub password: String,
     pub database: String,
+    /// Logical replication slot name for CDC mode. Defaults to `rapidbyte_{stream_name}`.
+    #[serde(default)]
+    pub replication_slot: Option<String>,
+    /// Publication name for CDC mode. Defaults to `rapidbyte_{stream_name}`.
+    #[serde(default)]
+    pub publication_name: Option<String>,
 }
 
 fn default_port() -> u16 {

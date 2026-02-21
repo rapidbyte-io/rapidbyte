@@ -1,24 +1,28 @@
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use rapidbyte_sdk::manifest::Permissions;
 use tokio::sync::mpsc;
 
 use rapidbyte_sdk::errors::ValidationResult;
 use rapidbyte_sdk::protocol::{
-    Catalog, ColumnPolicy, ConnectorRole, CursorInfo, CursorType, CursorValue, DataErrorPolicy,
-    NullabilityPolicy, SchemaEvolutionPolicy, SchemaHint, StreamContext, StreamLimits,
-    StreamPolicies, SyncMode, TypeChangePolicy, WriteMode,
+    Catalog, Checkpoint, ColumnPolicy, ConnectorRole, CursorInfo, CursorType, CursorValue,
+    DataErrorPolicy, DlqRecord, NullabilityPolicy, ReadSummary, SchemaEvolutionPolicy, SchemaHint,
+    StreamContext, StreamLimits, StreamPolicies, SyncMode, TypeChangePolicy,
+    WriteMode, WriteSummary,
 };
 
 use super::checkpoint::correlate_and_persist_cursors;
 use super::errors::{compute_backoff, PipelineError};
-use super::runner::{run_destination, run_discover, run_source, run_transform, validate_connector};
+use super::runner::{
+    run_destination_stream, run_discover, run_source_stream, run_transform_stream,
+    validate_connector,
+};
 pub use super::runner::{CheckResult, PipelineResult};
 use crate::pipeline::types::{parse_byte_size, PipelineConfig};
-use crate::runtime::component_runtime::{self, parse_connector_ref, Frame, WasmRuntime};
+use crate::runtime::component_runtime::{self, parse_connector_ref, Frame, HostTimings, LoadedComponent, WasmRuntime};
 use super::compression::CompressionCodec;
 use crate::state::backend::{RunStats, RunStatus, StateBackend};
 use crate::state::sqlite::SqliteStateBackend;
@@ -90,7 +94,40 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult, Pip
     }
 }
 
+/// Aggregated results from a single stream's source+dest pipeline.
+struct StreamResult {
+    read_summary: ReadSummary,
+    write_summary: WriteSummary,
+    source_checkpoints: Vec<Checkpoint>,
+    dest_checkpoints: Vec<Checkpoint>,
+    dlq_records: Vec<DlqRecord>,
+    src_host_timings: HostTimings,
+    dst_host_timings: HostTimings,
+    src_duration: f64,
+    dst_duration: f64,
+    vm_setup_secs: f64,
+    recv_secs: f64,
+    transform_durations: Vec<f64>,
+}
+
+/// Error from a per-stream task, carrying any DLQ records collected before the error.
+struct StreamError {
+    error: PipelineError,
+    dlq_records: Vec<DlqRecord>,
+}
+
+impl From<PipelineError> for StreamError {
+    fn from(error: PipelineError) -> Self {
+        StreamError {
+            error,
+            dlq_records: Vec::new(),
+        }
+    }
+}
+
 /// Execute a single pipeline attempt: source -> destination with state tracking.
+/// Each stream gets its own WASM instance pair (source+dest), connected by its own
+/// channel, bounded by a semaphore for concurrency control.
 async fn execute_pipeline_once(
     config: &PipelineConfig,
     attempt: u32,
@@ -187,7 +224,7 @@ async fn execute_pipeline_once(
     );
 
     // 3b. Load transform modules (in order)
-    let transform_modules = config
+    let transform_modules: Vec<(LoadedComponent, String, String, serde_json::Value, u64, Option<Permissions>)> = config
         .transforms
         .iter()
         .map(|tc| {
@@ -267,26 +304,41 @@ async fn execute_pipeline_once(
                 _ => SyncMode::FullRefresh,
             };
 
-            // For incremental streams, load cursor from state backend
-            let cursor_info = if sync_mode == SyncMode::Incremental {
-                if let Some(cursor_field) = &s.cursor_field {
+            // For incremental/CDC streams, load cursor from state backend
+            let cursor_info = match sync_mode {
+                SyncMode::Incremental => {
+                    if let Some(cursor_field) = &s.cursor_field {
+                        let last_value = state
+                            .get_cursor(&config.pipeline, &s.name)
+                            .ok()
+                            .flatten()
+                            .and_then(|cs| cs.cursor_value)
+                            .map(CursorValue::Utf8);
+
+                        Some(CursorInfo {
+                            cursor_field: cursor_field.clone(),
+                            cursor_type: CursorType::Utf8,
+                            last_value,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                SyncMode::Cdc => {
                     let last_value = state
                         .get_cursor(&config.pipeline, &s.name)
                         .ok()
                         .flatten()
                         .and_then(|cs| cs.cursor_value)
-                        .map(CursorValue::Utf8);
+                        .map(CursorValue::Lsn);
 
                     Some(CursorInfo {
-                        cursor_field: cursor_field.clone(),
-                        cursor_type: CursorType::Utf8,
+                        cursor_field: "lsn".to_string(),
+                        cursor_type: CursorType::Lsn,
                         last_value,
                     })
-                } else {
-                    None
                 }
-            } else {
-                None
+                _ => None,
             };
 
             let write_mode = match config.destination.write_mode.as_str() {
@@ -322,286 +374,460 @@ async fn execute_pipeline_once(
         parse_connector_ref(&config.destination.use_ref);
     let stats = Arc::new(Mutex::new(RunStats::default()));
 
-    // 5. Build channel chain: source -> [transforms] -> dest
-    // For N transforms we need N+1 channels.
-    // Channel i connects stage i to stage i+1.
-    let num_transforms = config.transforms.len();
     let channel_capacity = usize::max(1, limits.max_inflight_batches as usize);
-    let mut senders: VecDeque<mpsc::Sender<Frame>> = VecDeque::with_capacity(num_transforms + 1);
-    let mut receivers: VecDeque<mpsc::Receiver<Frame>> = VecDeque::with_capacity(num_transforms + 1);
-
-    for _ in 0..=num_transforms {
-        let (tx, rx) = mpsc::channel::<Frame>(channel_capacity);
-        senders.push_back(tx);
-        receivers.push_back(rx);
-    }
-
-    // Source writes to senders[0], dest reads from receivers[num_transforms].
-    // After removal:
-    //   senders  = [s1, s2, ..., s_n]   (n elements for n transforms)
-    //   receivers = [r0, r1, ..., r_{n-1}] (n elements for n transforms)
-    // Transform[i] gets (receivers[i], senders[i]) = (r_i, s_{i+1}).
-    let batch_tx = senders
-        .pop_front()
-        .expect("pipeline stage graph always has at least one channel sender");
-    let batch_rx = receivers
-        .pop_back()
-        .expect("pipeline stage graph always has at least one channel receiver");
-
-    // 5a. Spawn source
-    let state_src = state.clone();
-    let stats_src = stats.clone();
-    let stream_ctxs_clone = stream_ctxs.clone();
-    let pipeline_name_src = pipeline_name.clone();
-
-    let source_handle = tokio::task::spawn_blocking(move || {
-        run_source(
-            source_module,
-            batch_tx,
-            state_src,
-            &pipeline_name_src,
-            &source_connector_id,
-            &source_connector_version,
-            &source_config,
-            &stream_ctxs,
-            stats_src,
-            source_permissions.as_ref(),
-            compression,
-        )
-    });
-
-    // 5b. Spawn transform threads (in pipeline order)
+    let num_transforms = config.transforms.len();
     let transform_module_load_ms: Vec<u64> = transform_modules
         .iter()
         .map(|(_, _, _, _, ms, _)| *ms)
         .collect();
-    let mut transform_handles = Vec::new();
-    for (module, id, ver, tconfig, _load_ms, transform_perms) in transform_modules.into_iter() {
-        let rx = receivers
-            .pop_front()
-            .expect("transform stage must have an input receiver");
-        let tx = senders
-            .pop_front()
-            .expect("transform stage must have an output sender");
-        let state_t = state.clone();
-        let stats_t = stats.clone();
-        let stream_ctxs_t = stream_ctxs_clone.clone();
-        let pipeline_name_t = pipeline_name.clone();
 
-        let handle = tokio::task::spawn_blocking(move || {
-            run_transform(
-                module,
-                rx,
-                tx,
-                state_t,
-                &pipeline_name_t,
-                &id,
-                &ver,
-                &tconfig,
-                &stream_ctxs_t,
-                stats_t,
-                transform_perms.as_ref(),
-                compression,
-            )
+    // 5. Spawn per-stream tasks bounded by semaphore
+    let parallelism = config.resources.parallelism.max(1) as usize;
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(parallelism));
+
+    tracing::info!(
+        pipeline = config.pipeline,
+        parallelism,
+        num_streams = stream_ctxs.len(),
+        num_transforms,
+        "Starting per-stream pipeline execution"
+    );
+
+    let mut stream_join_handles: Vec<tokio::task::JoinHandle<Result<StreamResult, StreamError>>> =
+        Vec::with_capacity(stream_ctxs.len());
+
+    for stream_ctx in stream_ctxs.iter() {
+        let permit = semaphore.clone().acquire_owned().await.map_err(|e| {
+            PipelineError::Infrastructure(anyhow::anyhow!("Semaphore closed: {}", e))
+        })?;
+
+        // Clone all data needed for this stream's tasks
+        let source_module = source_module.clone();
+        let dest_module = dest_module.clone();
+        let state_src = state.clone();
+        let state_dst = state.clone();
+        let stats_src = stats.clone();
+        let stats_dst = stats.clone();
+        let stream_ctx = stream_ctx.clone();
+        let pipeline_name = pipeline_name.clone();
+        let source_config = source_config.clone();
+        let dest_config = dest_config.clone();
+        let source_connector_id = source_connector_id.clone();
+        let source_connector_version = source_connector_version.clone();
+        let dest_connector_id = dest_connector_id.clone();
+        let dest_connector_version = dest_connector_version.clone();
+        let source_permissions = source_permissions.clone();
+        let dest_permissions = dest_permissions.clone();
+        let transform_modules_for_stream: Vec<_> = transform_modules
+            .iter()
+            .map(|(m, id, ver, cfg, _ms, perms)| {
+                (m.clone(), id.clone(), ver.clone(), cfg.clone(), perms.clone())
+            })
+            .collect();
+
+        let handle = tokio::spawn(async move {
+            // Build per-stream channel chain: source -> [transforms] -> dest
+            let num_t = transform_modules_for_stream.len();
+            let mut channels = Vec::with_capacity(num_t + 1);
+            for _ in 0..=num_t {
+                channels.push(mpsc::channel::<Frame>(channel_capacity));
+            }
+
+            // channels[0] = (source_tx, transform_0_rx or dest_rx)
+            // channels[N] = (transform_N-1_tx or source_tx, dest_rx)
+            // Source writes to channels[0].0, Dest reads from channels[num_t].1
+
+            // Extract sender/receiver pairs
+            let (mut senders, mut receivers): (Vec<mpsc::Sender<Frame>>, Vec<mpsc::Receiver<Frame>>) = channels.into_iter().unzip();
+
+            let source_tx = senders.remove(0);
+            let dest_rx = receivers.pop().unwrap();
+
+            // senders now has num_t elements (one per transform output)
+            // receivers now has num_t elements (one per transform input)
+
+            let stream_ctx_for_src = stream_ctx.clone();
+            let stream_ctx_for_dst = stream_ctx.clone();
+            let pipeline_name_src = pipeline_name.clone();
+            let pipeline_name_dst = pipeline_name.clone();
+
+            // Spawn source for this stream
+            let src_handle = tokio::task::spawn_blocking(move || {
+                run_source_stream(
+                    &source_module,
+                    source_tx,
+                    state_src,
+                    &pipeline_name_src,
+                    &source_connector_id,
+                    &source_connector_version,
+                    &source_config,
+                    &stream_ctx_for_src,
+                    stats_src,
+                    source_permissions.as_ref(),
+                    compression,
+                )
+            });
+
+            // Spawn transforms for this stream (in pipeline order)
+            let mut transform_handles = Vec::with_capacity(num_t);
+            for (i, (module, id, ver, tconfig, transform_perms)) in
+                transform_modules_for_stream.into_iter().enumerate()
+            {
+                let rx = receivers.remove(0);
+                let tx = senders.remove(0);
+                let state_t = state_dst.clone();
+                let stream_ctx_t = stream_ctx.clone();
+                let pipeline_name_t = pipeline_name.clone();
+
+                let t_handle = tokio::task::spawn_blocking(move || {
+                    run_transform_stream(
+                        &module,
+                        rx,
+                        tx,
+                        state_t,
+                        &pipeline_name_t,
+                        &id,
+                        &ver,
+                        &tconfig,
+                        &stream_ctx_t,
+                        transform_perms.as_ref(),
+                        compression,
+                    )
+                });
+                transform_handles.push((i, t_handle));
+            }
+
+            // Spawn destination for this stream
+            let dst_handle = tokio::task::spawn_blocking(move || {
+                run_destination_stream(
+                    &dest_module,
+                    dest_rx,
+                    state_dst,
+                    &pipeline_name_dst,
+                    &dest_connector_id,
+                    &dest_connector_version,
+                    &dest_config,
+                    &stream_ctx_for_dst,
+                    stats_dst,
+                    dest_permissions.as_ref(),
+                    compression,
+                )
+            });
+
+            // Wait for source
+            let src_result = src_handle.await.map_err(|e| {
+                PipelineError::Infrastructure(anyhow::anyhow!(
+                    "Source task panicked for stream '{}': {}",
+                    stream_ctx.stream_name,
+                    e
+                ))
+            })?;
+
+            // Wait for transforms (in order)
+            let mut transform_durations: Vec<f64> = Vec::new();
+            let mut first_transform_error: Option<PipelineError> = None;
+            for (i, t_handle) in transform_handles {
+                let result = t_handle.await.map_err(|e| {
+                    PipelineError::Infrastructure(anyhow::anyhow!(
+                        "Transform {} task panicked for stream '{}': {}",
+                        i,
+                        stream_ctx.stream_name,
+                        e
+                    ))
+                })?;
+                match result {
+                    Ok((duration, summary)) => {
+                        tracing::info!(
+                            transform_index = i,
+                            stream = stream_ctx.stream_name,
+                            duration_secs = duration,
+                            records_in = summary.records_in,
+                            records_out = summary.records_out,
+                            "Transform stage completed for stream"
+                        );
+                        transform_durations.push(duration);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            transform_index = i,
+                            stream = stream_ctx.stream_name,
+                            "Transform failed: {}",
+                            e
+                        );
+                        if first_transform_error.is_none() {
+                            first_transform_error = Some(e);
+                        }
+                    }
+                }
+            }
+
+            // Wait for destination
+            let dst_result = dst_handle.await.map_err(|e| {
+                PipelineError::Infrastructure(anyhow::anyhow!(
+                    "Dest task panicked for stream '{}': {}",
+                    stream_ctx.stream_name,
+                    e
+                ))
+            })?;
+
+            // Release semaphore permit
+            drop(permit);
+
+            // If a transform failed, propagate the error (but still collect DLQ records)
+            if let Some(transform_err) = first_transform_error {
+                let dlq_records = match dst_result {
+                    Ok((_, _, _, _, _, _, dlq)) => dlq,
+                    Err(derr) => derr.dlq_records,
+                };
+                return Err(StreamError { error: transform_err, dlq_records });
+            }
+
+            // Process source and dest results
+            let (src_dur, read_summary, source_checkpoints, src_host_timings) = match src_result {
+                Ok(ok) => ok,
+                Err(src_err) => {
+                    // Collect DLQ records from destination before returning
+                    let dlq_records = match dst_result {
+                        Ok((_, _, _, _, _, _, dlq)) => dlq,
+                        Err(derr) => derr.dlq_records,
+                    };
+                    return Err(StreamError { error: src_err, dlq_records });
+                }
+            };
+
+            let (dst_dur, write_summary, vm_setup_secs, recv_secs, dest_checkpoints, dst_host_timings, dlq_records) =
+                match dst_result {
+                    Ok(ok) => ok,
+                    Err(derr) => {
+                        return Err(StreamError { error: derr.error, dlq_records: derr.dlq_records });
+                    }
+                };
+
+            Ok(StreamResult {
+                read_summary,
+                write_summary,
+                source_checkpoints,
+                dest_checkpoints,
+                dlq_records,
+                src_host_timings,
+                dst_host_timings,
+                src_duration: src_dur,
+                dst_duration: dst_dur,
+                vm_setup_secs,
+                recv_secs,
+                transform_durations,
+            })
         });
-        transform_handles.push(handle);
+
+        stream_join_handles.push(handle);
     }
 
-    // 5c. Spawn destination
-    let state_dst = state.clone();
-    let stats_dst = stats.clone();
-    let pipeline_name_dst = pipeline_name.clone();
+    // 6. Wait for all streams and aggregate results
+    let mut all_source_checkpoints: Vec<Checkpoint> = Vec::new();
+    let mut all_dest_checkpoints: Vec<Checkpoint> = Vec::new();
+    let mut all_dlq_records: Vec<DlqRecord> = Vec::new();
+    let mut total_read_summary = ReadSummary {
+        records_read: 0,
+        bytes_read: 0,
+        batches_emitted: 0,
+        checkpoint_count: 0,
+        records_skipped: 0,
+        perf: None,
+    };
+    let mut total_write_summary = WriteSummary {
+        records_written: 0,
+        bytes_written: 0,
+        batches_written: 0,
+        checkpoint_count: 0,
+        records_failed: 0,
+        perf: None,
+    };
+    let mut total_src_host_timings = HostTimings::default();
+    let mut total_dst_host_timings = HostTimings::default();
+    let mut max_src_duration: f64 = 0.0;
+    let mut max_dst_duration: f64 = 0.0;
+    let mut max_dst_vm_setup_secs: f64 = 0.0;
+    let mut max_dst_recv_secs: f64 = 0.0;
+    let mut all_transform_durations: Vec<f64> = Vec::new();
+    let mut first_error: Option<PipelineError> = None;
 
-    let dest_handle = tokio::task::spawn_blocking(move || {
-        run_destination(
-            dest_module,
-            batch_rx,
-            state_dst,
-            &pipeline_name_dst,
-            &dest_connector_id,
-            &dest_connector_version,
-            &dest_config,
-            &stream_ctxs_clone,
-            stats_dst,
-            dest_permissions.as_ref(),
-            compression,
-        )
-    });
-
-    // 6. Wait for all stages
-    let source_result = source_handle.await.map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!("Source task panicked: {}", e))
-    })?;
-
-    // 6a. Wait for transforms (in order)
-    let mut transform_durations: Vec<f64> = Vec::new();
-    let mut first_transform_error: Option<(usize, PipelineError)> = None;
-    for (i, handle) in transform_handles.into_iter().enumerate() {
+    for handle in stream_join_handles {
         let result = handle.await.map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!("Transform {} task panicked: {}", i, e))
+            PipelineError::Infrastructure(anyhow::anyhow!("Stream task panicked: {}", e))
         })?;
+
         match result {
-            Ok((duration, summary)) => {
-                tracing::info!(
-                    transform_index = i,
-                    duration_secs = duration,
-                    records_in = summary.records_in,
-                    records_out = summary.records_out,
-                    "Transform stage completed"
-                );
-                transform_durations.push(duration);
+            Ok(sr) => {
+                // Aggregate read summary
+                total_read_summary.records_read += sr.read_summary.records_read;
+                total_read_summary.bytes_read += sr.read_summary.bytes_read;
+                total_read_summary.batches_emitted += sr.read_summary.batches_emitted;
+                total_read_summary.checkpoint_count += sr.read_summary.checkpoint_count;
+                total_read_summary.records_skipped += sr.read_summary.records_skipped;
+
+                // Aggregate write summary
+                total_write_summary.records_written += sr.write_summary.records_written;
+                total_write_summary.bytes_written += sr.write_summary.bytes_written;
+                total_write_summary.batches_written += sr.write_summary.batches_written;
+                total_write_summary.checkpoint_count += sr.write_summary.checkpoint_count;
+                total_write_summary.records_failed += sr.write_summary.records_failed;
+
+                // Collect checkpoints
+                all_source_checkpoints.extend(sr.source_checkpoints);
+                all_dest_checkpoints.extend(sr.dest_checkpoints);
+
+                // Collect DLQ records
+                all_dlq_records.extend(sr.dlq_records);
+
+                // Aggregate host timings
+                total_src_host_timings.emit_batch_nanos += sr.src_host_timings.emit_batch_nanos;
+                total_src_host_timings.compress_nanos += sr.src_host_timings.compress_nanos;
+                total_src_host_timings.emit_batch_count += sr.src_host_timings.emit_batch_count;
+                total_dst_host_timings.next_batch_nanos += sr.dst_host_timings.next_batch_nanos;
+                total_dst_host_timings.decompress_nanos += sr.dst_host_timings.decompress_nanos;
+                total_dst_host_timings.next_batch_count += sr.dst_host_timings.next_batch_count;
+
+                // Track max durations (parallel streams overlap, so max is more meaningful)
+                if sr.src_duration > max_src_duration {
+                    max_src_duration = sr.src_duration;
+                }
+                if sr.dst_duration > max_dst_duration {
+                    max_dst_duration = sr.dst_duration;
+                    // Keep sub-phase timings from the slowest stream for accurate overhead calculation
+                    max_dst_vm_setup_secs = sr.vm_setup_secs;
+                    max_dst_recv_secs = sr.recv_secs;
+                }
+                all_transform_durations.extend(sr.transform_durations);
             }
-            Err(e) => {
-                tracing::error!(transform_index = i, "Transform failed: {}", e);
-                if first_transform_error.is_none() {
-                    first_transform_error = Some((i, e));
+            Err(StreamError { error, dlq_records }) => {
+                tracing::error!("Stream failed: {}", error);
+                all_dlq_records.extend(dlq_records);
+                if first_error.is_none() {
+                    first_error = Some(error);
                 }
             }
         }
     }
 
-    // 6b. Wait for destination
-    let dest_result = dest_handle
-        .await
-        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!("Dest task panicked: {}", e)))?;
-
     let final_stats = stats.lock().unwrap().clone();
 
-    if let Some((transform_index, err)) = first_transform_error {
-        let state_backend = create_state_backend(config)?;
-        state_backend.complete_run(
+    // If any stream failed, record failure and return error
+    if let Some(err) = first_error {
+        state.complete_run(
             run_id,
             RunStatus::Failed,
             &RunStats {
                 records_read: final_stats.records_read,
                 records_written: final_stats.records_written,
                 bytes_read: final_stats.bytes_read,
-                error_message: Some(format!("Transform {} error: {}", transform_index, err)),
+                error_message: Some(format!("Stream error: {}", err)),
             },
         )?;
+        super::dlq::persist_dlq_records(
+            state.as_ref(),
+            &config.pipeline,
+            run_id,
+            &all_dlq_records,
+        );
         return Err(err);
     }
 
-    match (&source_result, &dest_result) {
-        (
-            Ok((src_dur, read_summary, source_checkpoints, src_host_timings)),
-            Ok((
-                dst_dur,
-                write_summary,
-                vm_setup_secs,
-                recv_secs,
-                dest_checkpoints,
-                dst_host_timings,
-            )),
-        ) => {
-            let perf = write_summary.perf.as_ref();
-            let src_perf = read_summary.perf.as_ref();
-            let connector_internal_secs = perf
-                .map(|p| p.connect_secs + p.flush_secs + p.commit_secs)
-                .unwrap_or(0.0);
-            let wasm_overhead_secs =
-                (dst_dur - vm_setup_secs - recv_secs - connector_internal_secs).max(0.0);
+    // All streams succeeded — finalize
 
-            let state_backend = create_state_backend(config)?;
-            state_backend.complete_run(
-                run_id,
-                RunStatus::Completed,
-                &RunStats {
-                    records_read: read_summary.records_read,
-                    records_written: write_summary.records_written,
-                    bytes_read: read_summary.bytes_read,
-                    error_message: None,
-                },
-            )?;
+    // For PipelineResult timing, we use max (wall-clock) duration since streams run in parallel
+    let connector_internal_secs = total_write_summary
+        .perf
+        .as_ref()
+        .map(|p| p.connect_secs + p.flush_secs + p.commit_secs)
+        .unwrap_or(0.0);
+    let wasm_overhead_secs =
+        (max_dst_duration - max_dst_vm_setup_secs - max_dst_recv_secs - connector_internal_secs)
+            .max(0.0);
 
-            // Checkpoint coordination: persist cursor only when both source and
-            // dest confirm the stream data (per spec § State + Checkpointing)
-            tracing::debug!(
-                pipeline = config.pipeline,
-                source_checkpoint_count = source_checkpoints.len(),
-                dest_checkpoint_count = dest_checkpoints.len(),
-                "About to correlate checkpoints"
-            );
-            let cursors_advanced = correlate_and_persist_cursors(
-                &state_backend,
-                &config.pipeline,
-                source_checkpoints,
-                dest_checkpoints,
-            )?;
-            if cursors_advanced > 0 {
-                tracing::info!(
-                    pipeline = config.pipeline,
-                    cursors_advanced,
-                    "Checkpoint coordination complete"
-                );
-            }
+    state.complete_run(
+        run_id,
+        RunStatus::Completed,
+        &RunStats {
+            records_read: total_read_summary.records_read,
+            records_written: total_write_summary.records_written,
+            bytes_read: total_read_summary.bytes_read,
+            error_message: None,
+        },
+    )?;
 
-            let duration = start.elapsed();
-            tracing::info!(
-                pipeline = config.pipeline,
-                records_read = read_summary.records_read,
-                records_written = write_summary.records_written,
-                duration_secs = duration.as_secs_f64(),
-                "Pipeline run completed"
-            );
-
-            Ok(PipelineResult {
-                records_read: read_summary.records_read,
-                records_written: write_summary.records_written,
-                bytes_read: read_summary.bytes_read,
-                bytes_written: write_summary.bytes_written,
-                duration_secs: duration.as_secs_f64(),
-                source_duration_secs: *src_dur,
-                dest_duration_secs: *dst_dur,
-                source_module_load_ms,
-                dest_module_load_ms,
-                source_connect_secs: src_perf.map(|p| p.connect_secs).unwrap_or(0.0),
-                source_query_secs: src_perf.map(|p| p.query_secs).unwrap_or(0.0),
-                source_fetch_secs: src_perf.map(|p| p.fetch_secs).unwrap_or(0.0),
-                source_arrow_encode_secs: src_perf.map(|p| p.arrow_encode_secs).unwrap_or(0.0),
-                dest_arrow_decode_secs: perf.map(|p| p.arrow_decode_secs).unwrap_or(0.0),
-                dest_connect_secs: perf.map(|p| p.connect_secs).unwrap_or(0.0),
-                dest_flush_secs: perf.map(|p| p.flush_secs).unwrap_or(0.0),
-                dest_commit_secs: perf.map(|p| p.commit_secs).unwrap_or(0.0),
-                dest_vm_setup_secs: *vm_setup_secs,
-                dest_recv_secs: *recv_secs,
-                wasm_overhead_secs,
-                source_emit_nanos: src_host_timings.emit_batch_nanos,
-                source_compress_nanos: src_host_timings.compress_nanos,
-                source_emit_count: src_host_timings.emit_batch_count,
-                dest_recv_nanos: dst_host_timings.next_batch_nanos,
-                dest_decompress_nanos: dst_host_timings.decompress_nanos,
-                dest_recv_count: dst_host_timings.next_batch_count,
-                transform_count: transform_durations.len(),
-                transform_duration_secs: transform_durations.iter().sum(),
-                transform_module_load_ms,
-                retry_count: attempt - 1,
-            })
-        }
-        _ => {
-            let error_msg = match (&source_result, &dest_result) {
-                (Err(e), _) => format!("Source error: {}", e),
-                (_, Err(e)) => format!("Destination error: {}", e),
-                _ => unreachable!(),
-            };
-
-            let state_backend = create_state_backend(config)?;
-            state_backend.complete_run(
-                run_id,
-                RunStatus::Failed,
-                &RunStats {
-                    records_read: final_stats.records_read,
-                    records_written: final_stats.records_written,
-                    bytes_read: final_stats.bytes_read,
-                    error_message: Some(error_msg.clone()),
-                },
-            )?;
-
-            source_result.map(|_| ())?;
-            dest_result.map(|_| ())?;
-            unreachable!()
-        }
+    // Checkpoint coordination: persist cursor only when both source and
+    // dest confirm the stream data (per spec: State + Checkpointing)
+    tracing::debug!(
+        pipeline = config.pipeline,
+        source_checkpoint_count = all_source_checkpoints.len(),
+        dest_checkpoint_count = all_dest_checkpoints.len(),
+        "About to correlate checkpoints"
+    );
+    let cursors_advanced = correlate_and_persist_cursors(
+        state.as_ref(),
+        &config.pipeline,
+        &all_source_checkpoints,
+        &all_dest_checkpoints,
+    )?;
+    if cursors_advanced > 0 {
+        tracing::info!(
+            pipeline = config.pipeline,
+            cursors_advanced,
+            "Checkpoint coordination complete"
+        );
     }
+
+    super::dlq::persist_dlq_records(
+        state.as_ref(),
+        &config.pipeline,
+        run_id,
+        &all_dlq_records,
+    );
+
+    let duration = start.elapsed();
+    let src_perf = total_read_summary.perf.as_ref();
+    let perf = total_write_summary.perf.as_ref();
+
+    tracing::info!(
+        pipeline = config.pipeline,
+        records_read = total_read_summary.records_read,
+        records_written = total_write_summary.records_written,
+        duration_secs = duration.as_secs_f64(),
+        "Pipeline run completed"
+    );
+
+    Ok(PipelineResult {
+        records_read: total_read_summary.records_read,
+        records_written: total_write_summary.records_written,
+        bytes_read: total_read_summary.bytes_read,
+        bytes_written: total_write_summary.bytes_written,
+        duration_secs: duration.as_secs_f64(),
+        source_duration_secs: max_src_duration,
+        dest_duration_secs: max_dst_duration,
+        source_module_load_ms,
+        dest_module_load_ms,
+        source_connect_secs: src_perf.map(|p| p.connect_secs).unwrap_or(0.0),
+        source_query_secs: src_perf.map(|p| p.query_secs).unwrap_or(0.0),
+        source_fetch_secs: src_perf.map(|p| p.fetch_secs).unwrap_or(0.0),
+        source_arrow_encode_secs: src_perf.map(|p| p.arrow_encode_secs).unwrap_or(0.0),
+        dest_arrow_decode_secs: perf.map(|p| p.arrow_decode_secs).unwrap_or(0.0),
+        dest_connect_secs: perf.map(|p| p.connect_secs).unwrap_or(0.0),
+        dest_flush_secs: perf.map(|p| p.flush_secs).unwrap_or(0.0),
+        dest_commit_secs: perf.map(|p| p.commit_secs).unwrap_or(0.0),
+        dest_vm_setup_secs: max_dst_vm_setup_secs,
+        dest_recv_secs: max_dst_recv_secs,
+        wasm_overhead_secs,
+        source_emit_nanos: total_src_host_timings.emit_batch_nanos,
+        source_compress_nanos: total_src_host_timings.compress_nanos,
+        source_emit_count: total_src_host_timings.emit_batch_count,
+        dest_recv_nanos: total_dst_host_timings.next_batch_nanos,
+        dest_decompress_nanos: total_dst_host_timings.decompress_nanos,
+        dest_recv_count: total_dst_host_timings.next_batch_count,
+        transform_count: all_transform_durations.len(),
+        transform_duration_secs: all_transform_durations.iter().sum(),
+        transform_module_load_ms,
+        retry_count: attempt - 1,
+    })
 }
 
 /// Check a pipeline: validate configuration and connectivity without running.
