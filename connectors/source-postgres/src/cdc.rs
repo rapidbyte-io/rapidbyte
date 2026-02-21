@@ -16,6 +16,7 @@ use rapidbyte_sdk::protocol::{
 use rapidbyte_sdk::validation::validate_pg_identifier;
 
 use crate::config::Config;
+use crate::schema::pg_type_to_arrow;
 
 /// Maximum number of change rows per Arrow RecordBatch.
 const BATCH_SIZE: usize = 10_000;
@@ -504,18 +505,6 @@ fn lsn_gt(a: &str, b: &str) -> bool {
     match (parse_lsn(a), parse_lsn(b)) {
         (Some(a), Some(b)) => a > b,
         _ => false, // unparseable LSN — don't advance
-    }
-}
-
-fn pg_type_to_arrow(pg_type: &str) -> &'static str {
-    match pg_type {
-        "integer" | "int4" | "serial" => "Int32",
-        "bigint" | "int8" | "bigserial" => "Int64",
-        "smallint" | "int2" => "Int16",
-        "real" | "float4" => "Float32",
-        "double precision" | "float8" => "Float64",
-        "boolean" | "bool" => "Boolean",
-        _ => "Utf8",
     }
 }
 

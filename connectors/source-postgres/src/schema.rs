@@ -2,7 +2,7 @@ use rapidbyte_sdk::protocol::{ColumnSchema, Stream, SyncMode};
 use tokio_postgres::Client;
 
 /// Map PostgreSQL data types to Arrow-compatible type names.
-fn pg_type_to_arrow(pg_type: &str) -> &'static str {
+pub(crate) fn pg_type_to_arrow(pg_type: &str) -> &'static str {
     match pg_type {
         "integer" | "int4" | "serial" => "Int32",
         "bigint" | "int8" | "bigserial" => "Int64",
@@ -64,7 +64,7 @@ pub async fn discover_catalog(client: &Client) -> Result<Vec<Stream>, String> {
                 streams.push(Stream {
                     name: prev_table,
                     schema: std::mem::take(&mut current_columns),
-                    supported_sync_modes: vec![SyncMode::FullRefresh, SyncMode::Cdc],
+                    supported_sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental, SyncMode::Cdc],
                     source_defined_cursor: None,
                     source_defined_primary_key: None,
                 });
@@ -84,7 +84,7 @@ pub async fn discover_catalog(client: &Client) -> Result<Vec<Stream>, String> {
         streams.push(Stream {
             name: table_name,
             schema: current_columns,
-            supported_sync_modes: vec![SyncMode::FullRefresh],
+            supported_sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental, SyncMode::Cdc],
             source_defined_cursor: None,
             source_defined_primary_key: None,
         });

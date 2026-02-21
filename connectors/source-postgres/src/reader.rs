@@ -19,6 +19,8 @@ use rapidbyte_sdk::protocol::{
 };
 use rapidbyte_sdk::validation::validate_pg_identifier;
 
+use crate::schema::pg_type_to_arrow;
+
 /// Maximum number of rows per Arrow RecordBatch.
 const BATCH_SIZE: usize = 10_000;
 
@@ -786,16 +788,4 @@ fn batch_to_ipc(batch: &RecordBatch) -> anyhow::Result<Vec<u8>> {
     writer.write(batch).context("IPC write error")?;
     writer.finish().context("IPC finish error")?;
     Ok(buf)
-}
-
-fn pg_type_to_arrow(pg_type: &str) -> &'static str {
-    match pg_type {
-        "integer" | "int4" | "serial" => "Int32",
-        "bigint" | "int8" | "bigserial" => "Int64",
-        "smallint" | "int2" => "Int16",
-        "real" | "float4" => "Float32",
-        "double precision" | "float8" => "Float64",
-        "boolean" | "bool" => "Boolean",
-        _ => "Utf8",
-    }
 }
