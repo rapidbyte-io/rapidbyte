@@ -278,53 +278,50 @@ fn gen_manifest(
 
 fn gen_source_main(struct_name: &str) -> String {
     format!(
-        r#"mod config;
-mod schema;
-mod source;
+        r#"pub mod config;
+pub mod schema;
+pub mod source;
 
 use rapidbyte_sdk::prelude::*;
 
-#[derive(Default)]
 pub struct {struct_name} {{
-    config: Option<config::Config>,
+    config: config::Config,
 }}
 
 impl SourceConnector for {struct_name} {{
-    fn open(&mut self, ctx: OpenContext) -> Result<OpenInfo, ConnectorError> {{
-        let config = config::Config::from_open_context(&ctx)?;
+    type Config = config::Config;
+
+    async fn connect(config: Self::Config) -> Result<(Self, OpenInfo), ConnectorError> {{
         host_ffi::log(2, &format!("{{}}: open with host={{}} db={{}}",
             env!("CARGO_PKG_NAME"), config.host, config.database));
-        self.config = Some(config);
-        Ok(OpenInfo {{
-            protocol_version: "2".to_string(),
-            features: vec![],
-            default_max_batch_bytes: 64 * 1024 * 1024,
-        }})
+        Ok((
+            Self {{ config }},
+            OpenInfo {{
+                protocol_version: "2".to_string(),
+                features: vec![],
+                default_max_batch_bytes: 64 * 1024 * 1024,
+            }},
+        ))
     }}
 
-    fn discover(&mut self) -> Result<Catalog, ConnectorError> {{
-        let config = self.config.as_ref()
-            .ok_or_else(|| ConnectorError::config("NO_CONFIG", "Call open first"))?;
-        schema::discover_catalog(config)
+    async fn discover(&mut self) -> Result<Catalog, ConnectorError> {{
+        schema::discover_catalog(&self.config)
     }}
 
-    fn validate(&mut self) -> Result<ValidationResult, ConnectorError> {{
-        let _config = self.config.as_ref()
-            .ok_or_else(|| ConnectorError::config("NO_CONFIG", "Call open first"))?;
+    async fn validate(config: &Self::Config) -> Result<ValidationResult, ConnectorError> {{
         // TODO: Connect and run a test query
+        let _ = config;
         Ok(ValidationResult {{
             status: ValidationStatus::Success,
             message: "Validation not yet implemented".to_string(),
         }})
     }}
 
-    fn read(&mut self, ctx: StreamContext) -> Result<ReadSummary, ConnectorError> {{
-        let config = self.config.as_ref()
-            .ok_or_else(|| ConnectorError::config("NO_CONFIG", "Call open first"))?;
-        source::read_stream(config, &ctx)
+    async fn read(&mut self, ctx: StreamContext) -> Result<ReadSummary, ConnectorError> {{
+        source::read_stream(&self.config, &ctx).await
     }}
 
-    fn close(&mut self) -> Result<(), ConnectorError> {{
+    async fn close(&mut self) -> Result<(), ConnectorError> {{
         host_ffi::log(2, &format!("{{}}: close", env!("CARGO_PKG_NAME")));
         Ok(())
     }}
@@ -342,40 +339,40 @@ mod sink;
 
 use rapidbyte_sdk::prelude::*;
 
-#[derive(Default)]
 pub struct {struct_name} {{
-    config: Option<config::Config>,
+    config: config::Config,
 }}
 
 impl DestinationConnector for {struct_name} {{
-    fn open(&mut self, ctx: OpenContext) -> Result<OpenInfo, ConnectorError> {{
-        let config = config::Config::from_open_context(&ctx)?;
+    type Config = config::Config;
+
+    async fn connect(config: Self::Config) -> Result<(Self, OpenInfo), ConnectorError> {{
         host_ffi::log(2, &format!("{{}}: open with host={{}} db={{}}",
             env!("CARGO_PKG_NAME"), config.host, config.database));
-        self.config = Some(config);
-        Ok(OpenInfo {{
-            protocol_version: "2".to_string(),
-            features: vec![],
-            default_max_batch_bytes: 64 * 1024 * 1024,
-        }})
+        Ok((
+            Self {{ config }},
+            OpenInfo {{
+                protocol_version: "2".to_string(),
+                features: vec![],
+                default_max_batch_bytes: 64 * 1024 * 1024,
+            }},
+        ))
     }}
 
-    fn validate(&mut self) -> Result<ValidationResult, ConnectorError> {{
-        let _config = self.config.as_ref()
-            .ok_or_else(|| ConnectorError::config("NO_CONFIG", "Call open first"))?;
+    async fn validate(config: &Self::Config) -> Result<ValidationResult, ConnectorError> {{
+        // TODO: Connect and run a test query
+        let _ = config;
         Ok(ValidationResult {{
             status: ValidationStatus::Success,
             message: "Validation not yet implemented".to_string(),
         }})
     }}
 
-    fn write(&mut self, ctx: StreamContext) -> Result<WriteSummary, ConnectorError> {{
-        let config = self.config.as_ref()
-            .ok_or_else(|| ConnectorError::config("NO_CONFIG", "Call open first"))?;
-        sink::write_stream(config, &ctx)
+    async fn write(&mut self, ctx: StreamContext) -> Result<WriteSummary, ConnectorError> {{
+        sink::write_stream(&self.config, &ctx).await
     }}
 
-    fn close(&mut self) -> Result<(), ConnectorError> {{
+    async fn close(&mut self) -> Result<(), ConnectorError> {{
         host_ffi::log(2, &format!("{{}}: close", env!("CARGO_PKG_NAME")));
         Ok(())
     }}
@@ -387,9 +384,9 @@ rapidbyte_sdk::dest_connector_main!({struct_name});
 }
 
 fn gen_config() -> String {
-    r#"use rapidbyte_sdk::prelude::*;
-use serde::Deserialize;
+    r#"use serde::Deserialize;
 
+/// Connection config deserialized from pipeline YAML.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub host: String,
@@ -406,28 +403,12 @@ fn default_port() -> u16 {
 }
 
 impl Config {
-    pub fn from_open_context(ctx: &OpenContext) -> Result<Self, ConnectorError> {
-        let value = match &ctx.config {
-            ConfigBlob::Json(v) => v.clone(),
-        };
-        serde_json::from_value(value).map_err(|e| {
-            ConnectorError::config("INVALID_CONFIG", format!("Config parse error: {}", e))
-        })
-    }
-
     pub fn connection_string(&self) -> String {
         format!(
             "host={} port={} user={} password={} dbname={}",
             self.host, self.port, self.user, self.password, self.database
         )
     }
-}
-
-pub fn create_runtime() -> tokio::runtime::Runtime {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("Failed to create tokio runtime")
 }
 "#
     .to_string()
@@ -437,8 +418,9 @@ fn gen_source_rs() -> String {
     r#"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
-pub fn read_stream(config: &Config, ctx: &StreamContext) -> Result<ReadSummary, ConnectorError> {
+pub async fn read_stream(config: &Config, ctx: &StreamContext) -> Result<ReadSummary, ConnectorError> {
     // TODO: Implement stream reading
+    let _ = (config, ctx);
     Ok(ReadSummary {
         records_read: 0,
         bytes_read: 0,
@@ -458,6 +440,7 @@ use crate::config::Config;
 
 pub fn discover_catalog(config: &Config) -> Result<Catalog, ConnectorError> {
     // TODO: Implement schema discovery
+    let _ = config;
     Ok(Catalog { streams: vec![] })
 }
 "#
@@ -468,8 +451,9 @@ fn gen_sink_rs() -> String {
     r#"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
-pub fn write_stream(config: &Config, ctx: &StreamContext) -> Result<WriteSummary, ConnectorError> {
+pub async fn write_stream(config: &Config, ctx: &StreamContext) -> Result<WriteSummary, ConnectorError> {
     // TODO: Implement stream writing
+    let _ = (config, ctx);
     Ok(WriteSummary {
         records_written: 0,
         bytes_written: 0,
