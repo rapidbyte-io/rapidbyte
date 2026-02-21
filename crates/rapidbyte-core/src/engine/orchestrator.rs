@@ -16,7 +16,7 @@ use super::runner::{run_destination, run_discover, run_source, run_transform, va
 pub use super::runner::{CheckResult, PipelineResult};
 use crate::pipeline::types::{parse_byte_size, PipelineConfig};
 use crate::runtime::component_runtime::{self, parse_connector_ref, Frame, WasmRuntime};
-use crate::runtime::compression::CompressionCodec;
+use super::compression::CompressionCodec;
 use crate::state::backend::{RunStats, RunStatus, StateBackend};
 use crate::state::sqlite::SqliteStateBackend;
 

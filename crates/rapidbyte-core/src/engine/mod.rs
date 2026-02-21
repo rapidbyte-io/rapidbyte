@@ -1,4 +1,5 @@
 pub mod checkpoint;
+pub(crate) mod compression;
 pub mod errors;
 pub mod orchestrator;
 pub mod runner;

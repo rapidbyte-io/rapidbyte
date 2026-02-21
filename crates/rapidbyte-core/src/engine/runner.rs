@@ -17,7 +17,7 @@ use crate::runtime::component_runtime::{
     transform_bindings, transform_error_to_sdk, ComponentHostState, Frame, HostTimings,
     LoadedComponent, WasmRuntime,
 };
-use crate::runtime::compression::CompressionCodec;
+use super::compression::CompressionCodec;
 use crate::state::backend::{RunStats, StateBackend};
 use crate::state::sqlite::SqliteStateBackend;
 

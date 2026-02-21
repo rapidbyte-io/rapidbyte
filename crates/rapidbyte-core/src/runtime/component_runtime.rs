@@ -15,7 +15,7 @@ use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, W
 
 use crate::state::backend::{CursorState, RunStats, StateBackend};
 
-use super::compression::CompressionCodec;
+use crate::engine::compression::CompressionCodec;
 use super::host_socket::{
     resolve_socket_addrs, SocketEntry, SocketReadResultInternal, SocketWriteResultInternal,
     SOCKET_POLL_ACTIVATION_THRESHOLD,
@@ -188,7 +188,7 @@ impl ComponentHostState {
 
         let compress_start = Instant::now();
         let batch = if let Some(codec) = self.compression {
-            super::compression::compress(codec, &batch)
+            crate::engine::compression::compress(codec, &batch)
         } else {
             batch
         };
@@ -236,7 +236,7 @@ impl ComponentHostState {
 
         let decompress_start = Instant::now();
         let batch = if let Some(codec) = self.compression {
-            super::compression::decompress(codec, &batch)
+            crate::engine::compression::decompress(codec, &batch)
         } else {
             batch
         };
