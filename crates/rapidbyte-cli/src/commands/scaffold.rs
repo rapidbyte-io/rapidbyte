@@ -93,39 +93,17 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
     // Write source files
     match role {
         Role::Source => {
-            write_file(
-                &src_dir.join("main.rs"),
-                &gen_source_main(&struct_name),
-                &mut created_files,
-            )?;
-            write_file(
-                &src_dir.join("config.rs"),
-                &gen_config(),
-                &mut created_files,
-            )?;
-            write_file(
-                &src_dir.join("source.rs"),
-                &gen_source_rs(),
-                &mut created_files,
-            )?;
-            write_file(
-                &src_dir.join("schema.rs"),
-                &gen_schema_rs(),
-                &mut created_files,
-            )?;
+            write_file(&src_dir.join("main.rs"), &gen_source_main(&struct_name), &mut created_files)?;
+            write_file(&src_dir.join("config.rs"), &gen_config(), &mut created_files)?;
+            write_file(&src_dir.join("client.rs"), &gen_client_rs(), &mut created_files)?;
+            write_file(&src_dir.join("reader.rs"), &gen_reader_rs(), &mut created_files)?;
+            write_file(&src_dir.join("schema.rs"), &gen_schema_rs(), &mut created_files)?;
         }
         Role::Destination => {
-            write_file(
-                &src_dir.join("main.rs"),
-                &gen_dest_main(&struct_name),
-                &mut created_files,
-            )?;
-            write_file(
-                &src_dir.join("config.rs"),
-                &gen_config(),
-                &mut created_files,
-            )?;
-            write_file(&src_dir.join("sink.rs"), &gen_sink_rs(), &mut created_files)?;
+            write_file(&src_dir.join("main.rs"), &gen_dest_main(&struct_name), &mut created_files)?;
+            write_file(&src_dir.join("config.rs"), &gen_config(), &mut created_files)?;
+            write_file(&src_dir.join("client.rs"), &gen_client_rs(), &mut created_files)?;
+            write_file(&src_dir.join("writer.rs"), &gen_writer_rs(), &mut created_files)?;
         }
     }
 
@@ -142,11 +120,13 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
     println!("  2. Edit src/config.rs with your connection parameters");
     match role {
         Role::Source => {
-            println!("  3. Implement schema discovery in src/schema.rs");
-            println!("  4. Implement stream reading in src/source.rs");
+            println!("  3. Implement connection validation in src/client.rs");
+            println!("  4. Implement schema discovery in src/schema.rs");
+            println!("  5. Implement stream reading in src/reader.rs");
         }
         Role::Destination => {
-            println!("  3. Implement stream writing in src/sink.rs");
+            println!("  3. Implement connection validation in src/client.rs");
+            println!("  4. Implement stream writing in src/writer.rs");
         }
     }
     println!("  Then: cargo build --release");
@@ -279,8 +259,9 @@ fn gen_manifest(
 fn gen_source_main(struct_name: &str) -> String {
     format!(
         r#"pub mod config;
+mod client;
+mod reader;
 pub mod schema;
-pub mod source;
 
 use rapidbyte_sdk::prelude::*;
 
@@ -291,12 +272,12 @@ pub struct {struct_name} {{
 impl SourceConnector for {struct_name} {{
     type Config = config::Config;
 
-    async fn connect(config: Self::Config) -> Result<(Self, OpenInfo), ConnectorError> {{
-        host_ffi::log(2, &format!("{{}}: open with host={{}} db={{}}",
+    async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {{
+        host_ffi::log(2, &format!("{{}}: init with host={{}} db={{}}",
             env!("CARGO_PKG_NAME"), config.host, config.database));
         Ok((
             Self {{ config }},
-            OpenInfo {{
+            ConnectorInfo {{
                 protocol_version: "2".to_string(),
                 features: vec![],
                 default_max_batch_bytes: 64 * 1024 * 1024,
@@ -309,16 +290,11 @@ impl SourceConnector for {struct_name} {{
     }}
 
     async fn validate(config: &Self::Config) -> Result<ValidationResult, ConnectorError> {{
-        // TODO: Connect and run a test query
-        let _ = config;
-        Ok(ValidationResult {{
-            status: ValidationStatus::Success,
-            message: "Validation not yet implemented".to_string(),
-        }})
+        client::validate(config).await
     }}
 
     async fn read(&mut self, ctx: StreamContext) -> Result<ReadSummary, ConnectorError> {{
-        source::read_stream(&self.config, &ctx).await
+        reader::read_stream(&self.config, &ctx).await
     }}
 
     async fn close(&mut self) -> Result<(), ConnectorError> {{
@@ -335,7 +311,8 @@ rapidbyte_sdk::source_connector_main!({struct_name});
 fn gen_dest_main(struct_name: &str) -> String {
     format!(
         r#"mod config;
-mod sink;
+mod client;
+mod writer;
 
 use rapidbyte_sdk::prelude::*;
 
@@ -346,12 +323,12 @@ pub struct {struct_name} {{
 impl DestinationConnector for {struct_name} {{
     type Config = config::Config;
 
-    async fn connect(config: Self::Config) -> Result<(Self, OpenInfo), ConnectorError> {{
-        host_ffi::log(2, &format!("{{}}: open with host={{}} db={{}}",
+    async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {{
+        host_ffi::log(2, &format!("{{}}: init with host={{}} db={{}}",
             env!("CARGO_PKG_NAME"), config.host, config.database));
         Ok((
             Self {{ config }},
-            OpenInfo {{
+            ConnectorInfo {{
                 protocol_version: "2".to_string(),
                 features: vec![],
                 default_max_batch_bytes: 64 * 1024 * 1024,
@@ -360,16 +337,11 @@ impl DestinationConnector for {struct_name} {{
     }}
 
     async fn validate(config: &Self::Config) -> Result<ValidationResult, ConnectorError> {{
-        // TODO: Connect and run a test query
-        let _ = config;
-        Ok(ValidationResult {{
-            status: ValidationStatus::Success,
-            message: "Validation not yet implemented".to_string(),
-        }})
+        client::validate(config).await
     }}
 
     async fn write(&mut self, ctx: StreamContext) -> Result<WriteSummary, ConnectorError> {{
-        sink::write_stream(&self.config, &ctx).await
+        writer::write_stream(&self.config, &ctx).await
     }}
 
     async fn close(&mut self) -> Result<(), ConnectorError> {{
@@ -414,7 +386,23 @@ impl Config {
     .to_string()
 }
 
-fn gen_source_rs() -> String {
+fn gen_client_rs() -> String {
+    r#"use rapidbyte_sdk::prelude::*;
+use crate::config::Config;
+
+pub async fn validate(config: &Config) -> Result<ValidationResult, ConnectorError> {
+    // TODO: Connect and run a test query
+    let _ = config;
+    Ok(ValidationResult {
+        status: ValidationStatus::Success,
+        message: "Validation not yet implemented".to_string(),
+    })
+}
+"#
+    .to_string()
+}
+
+fn gen_reader_rs() -> String {
     r#"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
@@ -447,7 +435,7 @@ pub fn discover_catalog(config: &Config) -> Result<Catalog, ConnectorError> {
     .to_string()
 }
 
-fn gen_sink_rs() -> String {
+fn gen_writer_rs() -> String {
     r#"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
