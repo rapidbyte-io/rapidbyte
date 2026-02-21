@@ -282,6 +282,7 @@ async fn execute_pipeline_once(
                     ..StreamPolicies::default()
                 },
                 write_mode: Some(write_mode),
+                selected_columns: s.columns.clone(),
             }
         })
         .collect();

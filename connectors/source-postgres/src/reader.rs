@@ -98,7 +98,7 @@ async fn read_stream_inner(
         .await
         .with_context(|| format!("Schema query failed for {}", ctx.stream_name))?;
 
-    let columns: Vec<ColumnSchema> = schema_rows
+    let all_columns: Vec<ColumnSchema> = schema_rows
         .iter()
         .map(|row| {
             let name: String = row.get(0);
@@ -112,9 +112,28 @@ async fn read_stream_inner(
         })
         .collect();
 
-    if columns.is_empty() {
+    if all_columns.is_empty() {
         bail!("Table '{}' not found or has no columns", ctx.stream_name);
     }
+
+    // Apply projection pushdown: filter to selected columns if specified
+    let columns: Vec<ColumnSchema> = match &ctx.selected_columns {
+        Some(selected) if !selected.is_empty() => {
+            let filtered: Vec<ColumnSchema> = all_columns
+                .into_iter()
+                .filter(|c| selected.iter().any(|s| s == &c.name))
+                .collect();
+            if filtered.is_empty() {
+                bail!(
+                    "None of the selected columns {:?} found in table '{}'",
+                    selected,
+                    ctx.stream_name
+                );
+            }
+            filtered
+        }
+        _ => all_columns,
+    };
 
     let arrow_schema = build_arrow_schema(&columns);
 
@@ -450,6 +469,15 @@ fn effective_cursor_type(cursor_type: CursorType, cursor_column_arrow_type: &str
 }
 
 fn build_base_query(ctx: &StreamContext, columns: &[ColumnSchema]) -> anyhow::Result<CursorQuery> {
+    let col_list = match &ctx.selected_columns {
+        Some(cols) if !cols.is_empty() => cols
+            .iter()
+            .map(|c| format!("\"{}\"", c))
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => "*".to_string(),
+    };
+
     if let (SyncMode::Incremental, Some(ci)) = (&ctx.sync_mode, &ctx.cursor_info) {
         validate_pg_identifier(&ci.cursor_field)
             .map_err(|e| anyhow!("Invalid cursor field '{}': {}", ci.cursor_field, e))?;
@@ -473,8 +501,8 @@ fn build_base_query(ctx: &StreamContext, columns: &[ColumnSchema]) -> anyhow::Re
                 );
                 return Ok(CursorQuery {
                     sql: format!(
-                        "SELECT * FROM {} ORDER BY {}",
-                        table_name, cursor_field
+                        "SELECT {} FROM {} ORDER BY {}",
+                        col_list, table_name, cursor_field
                     ),
                     bind: None,
                 });
@@ -512,8 +540,8 @@ fn build_base_query(ctx: &StreamContext, columns: &[ColumnSchema]) -> anyhow::Re
 
             return Ok(CursorQuery {
                 sql: format!(
-                    "SELECT * FROM {} WHERE {} > $1::{} ORDER BY {}",
-                    table_name, cursor_field, cast, cursor_field
+                    "SELECT {} FROM {} WHERE {} > $1::{} ORDER BY {}",
+                    col_list, table_name, cursor_field, cast, cursor_field
                 ),
                 bind: Some(bind),
             });
@@ -527,13 +555,13 @@ fn build_base_query(ctx: &StreamContext, columns: &[ColumnSchema]) -> anyhow::Re
             ),
         );
         return Ok(CursorQuery {
-            sql: format!("SELECT * FROM {} ORDER BY {}", table_name, cursor_field),
+            sql: format!("SELECT {} FROM {} ORDER BY {}", col_list, table_name, cursor_field),
             bind: None,
         });
     }
 
     Ok(CursorQuery {
-        sql: format!("SELECT * FROM \"{}\"", ctx.stream_name),
+        sql: format!("SELECT {} FROM \"{}\"", col_list, ctx.stream_name),
         bind: None,
     })
 }

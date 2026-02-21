@@ -27,6 +27,8 @@ pub struct StreamConfig {
     pub name: String,
     pub sync_mode: String,
     pub cursor_field: Option<String>,
+    #[serde(default)]
+    pub columns: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -479,6 +481,53 @@ resources:
     fn test_max_inflight_batches_defaults_to_16() {
         let config = ResourceConfig::default();
         assert_eq!(config.max_inflight_batches, 16);
+    }
+
+    #[test]
+    fn test_deserialize_stream_with_columns() {
+        let yaml = r#"
+version: "1"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+      columns:
+        - id
+        - name
+        - email
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.source.streams[0].columns,
+            Some(vec!["id".into(), "name".into(), "email".into()])
+        );
+    }
+
+    #[test]
+    fn test_deserialize_stream_without_columns_defaults_none() {
+        let yaml = r#"
+version: "1"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.source.streams[0].columns.is_none());
     }
 
     #[test]

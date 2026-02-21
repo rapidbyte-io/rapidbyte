@@ -201,6 +201,8 @@ pub struct StreamContext {
     pub limits: StreamLimits,
     pub policies: StreamPolicies,
     pub write_mode: Option<WriteMode>,
+    #[serde(default)]
+    pub selected_columns: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -481,10 +483,35 @@ mod tests {
             limits: StreamLimits::default(),
             policies: StreamPolicies::default(),
             write_mode: Some(WriteMode::Append),
+            selected_columns: None,
         };
         let json = serde_json::to_string(&ctx).unwrap();
         let back: StreamContext = serde_json::from_str(&json).unwrap();
         assert_eq!(ctx, back);
+    }
+
+    #[test]
+    fn test_stream_context_with_selected_columns_roundtrip() {
+        let ctx = StreamContext {
+            stream_name: "users".to_string(),
+            schema: SchemaHint::Columns(vec![]),
+            sync_mode: SyncMode::FullRefresh,
+            cursor_info: None,
+            limits: StreamLimits::default(),
+            policies: StreamPolicies::default(),
+            write_mode: Some(WriteMode::Append),
+            selected_columns: Some(vec!["id".into(), "name".into()]),
+        };
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: StreamContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(ctx, back);
+    }
+
+    #[test]
+    fn test_stream_context_backwards_compat_no_selected_columns() {
+        let json = r#"{"stream_name":"users","schema":{"columns":[]},"sync_mode":"full_refresh","cursor_info":null,"limits":{"max_batch_bytes":67108864,"max_record_bytes":16777216,"max_inflight_batches":16,"max_parallel_requests":1,"checkpoint_interval_bytes":67108864,"checkpoint_interval_rows":0,"checkpoint_interval_seconds":0},"policies":{"on_data_error":"fail","schema_evolution":{"new_column":"add","removed_column":"ignore","type_change":"fail","nullability_change":"allow"}},"write_mode":"append"}"#;
+        let ctx: StreamContext = serde_json::from_str(json).unwrap();
+        assert!(ctx.selected_columns.is_none());
     }
 
     #[test]
