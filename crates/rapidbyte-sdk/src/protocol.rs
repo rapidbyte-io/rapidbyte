@@ -48,7 +48,7 @@ pub enum Feature {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct OpenInfo {
+pub struct ConnectorInfo {
     pub protocol_version: String,
     pub features: Vec<Feature>,
     pub default_max_batch_bytes: u64,
@@ -390,14 +390,14 @@ mod tests {
     }
 
     #[test]
-    fn test_open_info_roundtrip() {
-        let info = OpenInfo {
+    fn test_connector_info_roundtrip() {
+        let info = ConnectorInfo {
             protocol_version: "2".to_string(),
             features: vec![Feature::ExactlyOnce, Feature::BulkLoadCopy],
             default_max_batch_bytes: 64 * 1024 * 1024,
         };
         let json = serde_json::to_string(&info).unwrap();
-        let back: OpenInfo = serde_json::from_str(&json).unwrap();
+        let back: ConnectorInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(info, back);
     }
 

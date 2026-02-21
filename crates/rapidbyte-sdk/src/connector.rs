@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 
 use crate::errors::{ConnectorError, ValidationResult, ValidationStatus};
 use crate::protocol::{
-    Catalog, OpenInfo, ReadSummary, StreamContext, TransformSummary, WriteSummary,
+    Catalog, ConnectorInfo, ReadSummary, StreamContext, TransformSummary, WriteSummary,
 };
 
 /// Source connector lifecycle.
@@ -15,7 +15,7 @@ use crate::protocol::{
 pub trait SourceConnector: Sized {
     type Config: DeserializeOwned;
 
-    async fn connect(config: Self::Config) -> Result<(Self, OpenInfo), ConnectorError>;
+    async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError>;
 
     async fn validate(_config: &Self::Config) -> Result<ValidationResult, ConnectorError> {
         Ok(ValidationResult {
@@ -38,7 +38,7 @@ pub trait SourceConnector: Sized {
 pub trait DestinationConnector: Sized {
     type Config: DeserializeOwned;
 
-    async fn connect(config: Self::Config) -> Result<(Self, OpenInfo), ConnectorError>;
+    async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError>;
 
     async fn validate(_config: &Self::Config) -> Result<ValidationResult, ConnectorError> {
         Ok(ValidationResult {
@@ -59,7 +59,7 @@ pub trait DestinationConnector: Sized {
 pub trait TransformConnector: Sized {
     type Config: DeserializeOwned;
 
-    async fn connect(config: Self::Config) -> Result<(Self, OpenInfo), ConnectorError>;
+    async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError>;
 
     async fn validate(_config: &Self::Config) -> Result<ValidationResult, ConnectorError> {
         Ok(ValidationResult {
@@ -230,7 +230,7 @@ macro_rules! __rb_guest_lifecycle_methods {
 
             let rt = get_runtime();
             let (instance, _open_info) = rt
-                .block_on(<$connector_type as $connector_trait>::connect(config))
+                .block_on(<$connector_type as $connector_trait>::init(config))
                 .map_err(to_component_error)?;
 
             *get_state().borrow_mut() = Some(instance);
@@ -450,7 +450,7 @@ macro_rules! transform_connector_main {
 mod tests {
     use super::*;
     use crate::errors::{ConnectorError, ValidationResult, ValidationStatus};
-    use crate::protocol::{Catalog, OpenInfo, ReadSummary, StreamContext, WriteSummary, TransformSummary};
+    use crate::protocol::{Catalog, ConnectorInfo, ReadSummary, StreamContext, WriteSummary, TransformSummary};
     use serde::Deserialize;
 
     #[derive(Debug, Deserialize)]
@@ -465,10 +465,10 @@ mod tests {
     impl SourceConnector for TestSource {
         type Config = TestConfig;
 
-        async fn connect(config: Self::Config) -> Result<(Self, OpenInfo), ConnectorError> {
+        async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
             Ok((
                 Self { config },
-                OpenInfo {
+                ConnectorInfo {
                     protocol_version: "2".to_string(),
                     features: vec![],
                     default_max_batch_bytes: 64 * 1024 * 1024,
@@ -499,10 +499,10 @@ mod tests {
     impl DestinationConnector for TestDest {
         type Config = TestConfig;
 
-        async fn connect(config: Self::Config) -> Result<(Self, OpenInfo), ConnectorError> {
+        async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
             Ok((
                 Self { config },
-                OpenInfo {
+                ConnectorInfo {
                     protocol_version: "2".to_string(),
                     features: vec![],
                     default_max_batch_bytes: 64 * 1024 * 1024,
@@ -529,10 +529,10 @@ mod tests {
     impl TransformConnector for TestTransform {
         type Config = TestConfig;
 
-        async fn connect(config: Self::Config) -> Result<(Self, OpenInfo), ConnectorError> {
+        async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
             Ok((
                 Self { config },
-                OpenInfo {
+                ConnectorInfo {
                     protocol_version: "2".to_string(),
                     features: vec![],
                     default_max_batch_bytes: 64 * 1024 * 1024,
