@@ -1,11 +1,13 @@
 //! Guest-side host import wrappers for the component model.
 
-use crate::errors::ConnectorError;
+use std::sync::OnceLock;
+
 #[cfg(target_arch = "wasm32")]
-use crate::errors::{BackoffClass, CommitState, ErrorCategory, ErrorScope};
-#[cfg(target_arch = "wasm32")]
-use crate::protocol::CheckpointKind;
+use crate::errors::{BackoffClass, CommitState, ErrorScope};
+use crate::errors::{ConnectorError, ErrorCategory};
 use crate::protocol::{Checkpoint, Metric, StateScope};
+#[cfg(target_arch = "wasm32")]
+use crate::protocol::{CheckpointKind, PayloadEnvelope, ProtocolVersion};
 
 #[cfg(target_arch = "wasm32")]
 mod bindings {
@@ -13,228 +15,6 @@ mod bindings {
         path: "../../wit",
         world: "rapidbyte-host",
     });
-}
-
-#[cfg(target_arch = "wasm32")]
-fn from_component_error(
-    err: bindings::rapidbyte::connector::types::ConnectorError,
-) -> ConnectorError {
-    ConnectorError {
-        category: match err.category {
-            bindings::rapidbyte::connector::types::ErrorCategory::Config => ErrorCategory::Config,
-            bindings::rapidbyte::connector::types::ErrorCategory::Auth => ErrorCategory::Auth,
-            bindings::rapidbyte::connector::types::ErrorCategory::Permission => {
-                ErrorCategory::Permission
-            }
-            bindings::rapidbyte::connector::types::ErrorCategory::RateLimit => {
-                ErrorCategory::RateLimit
-            }
-            bindings::rapidbyte::connector::types::ErrorCategory::TransientNetwork => {
-                ErrorCategory::TransientNetwork
-            }
-            bindings::rapidbyte::connector::types::ErrorCategory::TransientDb => {
-                ErrorCategory::TransientDb
-            }
-            bindings::rapidbyte::connector::types::ErrorCategory::Data => ErrorCategory::Data,
-            bindings::rapidbyte::connector::types::ErrorCategory::Schema => ErrorCategory::Schema,
-            bindings::rapidbyte::connector::types::ErrorCategory::Internal => {
-                ErrorCategory::Internal
-            }
-        },
-        scope: match err.scope {
-            bindings::rapidbyte::connector::types::ErrorScope::PerStream => ErrorScope::Stream,
-            bindings::rapidbyte::connector::types::ErrorScope::PerBatch => ErrorScope::Batch,
-            bindings::rapidbyte::connector::types::ErrorScope::PerRecord => ErrorScope::Record,
-        },
-        code: err.code,
-        message: err.message,
-        retryable: err.retryable,
-        retry_after_ms: err.retry_after_ms,
-        backoff_class: match err.backoff_class {
-            bindings::rapidbyte::connector::types::BackoffClass::Fast => BackoffClass::Fast,
-            bindings::rapidbyte::connector::types::BackoffClass::Normal => BackoffClass::Normal,
-            bindings::rapidbyte::connector::types::BackoffClass::Slow => BackoffClass::Slow,
-        },
-        safe_to_retry: err.safe_to_retry,
-        commit_state: err.commit_state.map(|s| match s {
-            bindings::rapidbyte::connector::types::CommitState::BeforeCommit => {
-                CommitState::BeforeCommit
-            }
-            bindings::rapidbyte::connector::types::CommitState::AfterCommitUnknown => {
-                CommitState::AfterCommitUnknown
-            }
-            bindings::rapidbyte::connector::types::CommitState::AfterCommitConfirmed => {
-                CommitState::AfterCommitConfirmed
-            }
-        }),
-        details: err
-            .details_json
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok()),
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn log(level: i32, message: &str) {
-    bindings::rapidbyte::connector::host::log(level as u32, message);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn log(_level: i32, _message: &str) {}
-
-#[cfg(target_arch = "wasm32")]
-pub fn emit_batch(ipc_bytes: &[u8]) -> Result<(), ConnectorError> {
-    bindings::rapidbyte::connector::host::emit_batch(ipc_bytes).map_err(from_component_error)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn emit_batch(_ipc_bytes: &[u8]) -> Result<(), ConnectorError> {
-    Ok(())
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn next_batch(buf: &mut Vec<u8>, max_bytes: u64) -> Result<Option<usize>, ConnectorError> {
-    let next = bindings::rapidbyte::connector::host::next_batch().map_err(from_component_error)?;
-    match next {
-        Some(batch) => {
-            if batch.len() as u64 > max_bytes {
-                return Err(ConnectorError::internal(
-                    "BATCH_TOO_LARGE",
-                    format!("Batch {} exceeds max {}", batch.len(), max_bytes),
-                ));
-            }
-            buf.clear();
-            buf.extend_from_slice(&batch);
-            Ok(Some(batch.len()))
-        }
-        None => Ok(None),
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn next_batch(_buf: &mut Vec<u8>, _max_bytes: u64) -> Result<Option<usize>, ConnectorError> {
-    Ok(None)
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn state_get(scope: StateScope, key: &str) -> Result<Option<String>, ConnectorError> {
-    bindings::rapidbyte::connector::host::state_get(scope.to_i32() as u32, key)
-        .map_err(from_component_error)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn state_get(_scope: StateScope, _key: &str) -> Result<Option<String>, ConnectorError> {
-    Ok(None)
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn state_put(scope: StateScope, key: &str, value: &str) -> Result<(), ConnectorError> {
-    bindings::rapidbyte::connector::host::state_put(scope.to_i32() as u32, key, value)
-        .map_err(from_component_error)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn state_put(_scope: StateScope, _key: &str, _value: &str) -> Result<(), ConnectorError> {
-    Ok(())
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn state_compare_and_set(
-    scope: StateScope,
-    key: &str,
-    expected: Option<&str>,
-    new_value: &str,
-) -> Result<bool, ConnectorError> {
-    bindings::rapidbyte::connector::host::state_cas(scope.to_i32() as u32, key, expected, new_value)
-        .map_err(from_component_error)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn state_compare_and_set(
-    _scope: StateScope,
-    _key: &str,
-    _expected: Option<&str>,
-    _new_value: &str,
-) -> Result<bool, ConnectorError> {
-    Ok(false)
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn checkpoint(
-    connector_id: &str,
-    stream_name: &str,
-    cp: &Checkpoint,
-) -> Result<(), ConnectorError> {
-    let kind = match cp.kind {
-        CheckpointKind::Source => 0,
-        CheckpointKind::Dest => 1,
-        CheckpointKind::Transform => 2,
-    };
-
-    let envelope = serde_json::json!({
-        "protocol_version": "2",
-        "connector_id": connector_id,
-        "stream_name": stream_name,
-        "payload": cp,
-    });
-    let payload_json = serde_json::to_string(&envelope)
-        .map_err(|e| ConnectorError::internal("SERIALIZE_CHECKPOINT", e.to_string()))?;
-
-    bindings::rapidbyte::connector::host::checkpoint(kind, &payload_json)
-        .map_err(from_component_error)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn checkpoint(
-    _connector_id: &str,
-    _stream_name: &str,
-    _cp: &Checkpoint,
-) -> Result<(), ConnectorError> {
-    Ok(())
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn metric(connector_id: &str, stream_name: &str, m: &Metric) -> Result<(), ConnectorError> {
-    let envelope = serde_json::json!({
-        "protocol_version": "2",
-        "connector_id": connector_id,
-        "stream_name": stream_name,
-        "payload": m,
-    });
-    let payload_json = serde_json::to_string(&envelope)
-        .map_err(|e| ConnectorError::internal("SERIALIZE_METRIC", e.to_string()))?;
-
-    bindings::rapidbyte::connector::host::metric(&payload_json).map_err(from_component_error)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn metric(_connector_id: &str, _stream_name: &str, _m: &Metric) -> Result<(), ConnectorError> {
-    Ok(())
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn emit_dlq_record(
-    stream_name: &str,
-    record_json: &str,
-    error_message: &str,
-    error_category: &str,
-) -> Result<(), ConnectorError> {
-    bindings::rapidbyte::connector::host::emit_dlq_record(
-        stream_name,
-        record_json,
-        error_message,
-        error_category,
-    )
-    .map_err(from_component_error)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn emit_dlq_record(
-    _stream_name: &str,
-    _record_json: &str,
-    _error_message: &str,
-    _error_category: &str,
-) -> Result<(), ConnectorError> {
-    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,59 +30,442 @@ pub enum SocketWriteResult {
     WouldBlock,
 }
 
+/// Host imports abstraction to make host FFI behavior testable on native targets.
+pub trait HostImports: Send + Sync {
+    fn log(&self, level: i32, message: &str);
+    fn emit_batch(&self, ipc_bytes: &[u8]) -> Result<(), ConnectorError>;
+    fn next_batch(&self, max_bytes: u64) -> Result<Option<Vec<u8>>, ConnectorError>;
+
+    fn state_get(&self, scope: StateScope, key: &str) -> Result<Option<String>, ConnectorError>;
+    fn state_put(&self, scope: StateScope, key: &str, value: &str) -> Result<(), ConnectorError>;
+    fn state_compare_and_set(
+        &self,
+        scope: StateScope,
+        key: &str,
+        expected: Option<&str>,
+        new_value: &str,
+    ) -> Result<bool, ConnectorError>;
+
+    fn checkpoint(
+        &self,
+        connector_id: &str,
+        stream_name: &str,
+        cp: &Checkpoint,
+    ) -> Result<(), ConnectorError>;
+    fn metric(
+        &self,
+        connector_id: &str,
+        stream_name: &str,
+        m: &Metric,
+    ) -> Result<(), ConnectorError>;
+    fn emit_dlq_record(
+        &self,
+        stream_name: &str,
+        record_json: &str,
+        error_message: &str,
+        error_category: ErrorCategory,
+    ) -> Result<(), ConnectorError>;
+
+    fn connect_tcp(&self, host: &str, port: u16) -> Result<u64, ConnectorError>;
+    fn socket_read(&self, handle: u64, len: u64) -> Result<SocketReadResult, ConnectorError>;
+    fn socket_write(&self, handle: u64, data: &[u8]) -> Result<SocketWriteResult, ConnectorError>;
+    fn socket_close(&self, handle: u64);
+}
+
+static HOST_IMPORTS: OnceLock<Box<dyn HostImports>> = OnceLock::new();
+
+fn default_host_imports() -> Box<dyn HostImports> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        Box::new(WasmHostImports)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Box::new(StubHostImports)
+    }
+}
+
+fn host_imports() -> &'static dyn HostImports {
+    HOST_IMPORTS.get_or_init(default_host_imports).as_ref()
+}
+
+/// Installs a custom host imports implementation.
+///
+/// This is primarily intended for tests and native simulation.
+pub fn set_host_imports(imports: Box<dyn HostImports>) -> Result<(), Box<dyn HostImports>> {
+    HOST_IMPORTS.set(imports)
+}
+
 #[cfg(target_arch = "wasm32")]
+fn from_component_error(
+    err: bindings::rapidbyte::connector::types::ConnectorError,
+) -> ConnectorError {
+    ConnectorError {
+        category: crate::__rb_map_enum_variants!(
+            err.category,
+            bindings::rapidbyte::connector::types::ErrorCategory => ErrorCategory,
+            {
+                Config => Config,
+                Auth => Auth,
+                Permission => Permission,
+                RateLimit => RateLimit,
+                TransientNetwork => TransientNetwork,
+                TransientDb => TransientDb,
+                Data => Data,
+                Schema => Schema,
+                Internal => Internal
+            }
+        ),
+        scope: crate::__rb_map_enum_variants!(
+            err.scope,
+            bindings::rapidbyte::connector::types::ErrorScope => ErrorScope,
+            {
+                PerStream => Stream,
+                PerBatch => Batch,
+                PerRecord => Record
+            }
+        ),
+        code: err.code.into(),
+        message: err.message,
+        retryable: err.retryable,
+        retry_after_ms: err.retry_after_ms,
+        backoff_class: crate::__rb_map_enum_variants!(
+            err.backoff_class,
+            bindings::rapidbyte::connector::types::BackoffClass => BackoffClass,
+            {
+                Fast => Fast,
+                Normal => Normal,
+                Slow => Slow
+            }
+        ),
+        safe_to_retry: err.safe_to_retry,
+        commit_state: err.commit_state.map(|s| {
+            crate::__rb_map_enum_variants!(
+                s,
+                bindings::rapidbyte::connector::types::CommitState => CommitState,
+                {
+                    BeforeCommit => BeforeCommit,
+                    AfterCommitUnknown => AfterCommitUnknown,
+                    AfterCommitConfirmed => AfterCommitConfirmed
+                }
+            )
+        }),
+        details: err
+            .details_json
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok()),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub struct WasmHostImports;
+
+#[cfg(target_arch = "wasm32")]
+impl HostImports for WasmHostImports {
+    fn log(&self, level: i32, message: &str) {
+        bindings::rapidbyte::connector::host::log(level as u32, message);
+    }
+
+    fn emit_batch(&self, ipc_bytes: &[u8]) -> Result<(), ConnectorError> {
+        bindings::rapidbyte::connector::host::emit_batch(ipc_bytes).map_err(from_component_error)
+    }
+
+    fn next_batch(&self, max_bytes: u64) -> Result<Option<Vec<u8>>, ConnectorError> {
+        let next =
+            bindings::rapidbyte::connector::host::next_batch().map_err(from_component_error)?;
+        match next {
+            Some(batch) if batch.len() as u64 > max_bytes => Err(ConnectorError::internal(
+                "BATCH_TOO_LARGE",
+                format!("Batch {} exceeds max {}", batch.len(), max_bytes),
+            )),
+            Some(batch) => Ok(Some(batch)),
+            None => Ok(None),
+        }
+    }
+
+    fn state_get(&self, scope: StateScope, key: &str) -> Result<Option<String>, ConnectorError> {
+        bindings::rapidbyte::connector::host::state_get(scope.to_i32() as u32, key)
+            .map_err(from_component_error)
+    }
+
+    fn state_put(&self, scope: StateScope, key: &str, value: &str) -> Result<(), ConnectorError> {
+        bindings::rapidbyte::connector::host::state_put(scope.to_i32() as u32, key, value)
+            .map_err(from_component_error)
+    }
+
+    fn state_compare_and_set(
+        &self,
+        scope: StateScope,
+        key: &str,
+        expected: Option<&str>,
+        new_value: &str,
+    ) -> Result<bool, ConnectorError> {
+        bindings::rapidbyte::connector::host::state_cas(
+            scope.to_i32() as u32,
+            key,
+            expected,
+            new_value,
+        )
+        .map_err(from_component_error)
+    }
+
+    fn checkpoint(
+        &self,
+        connector_id: &str,
+        stream_name: &str,
+        cp: &Checkpoint,
+    ) -> Result<(), ConnectorError> {
+        let kind = match cp.kind {
+            CheckpointKind::Source => 0,
+            CheckpointKind::Dest => 1,
+            CheckpointKind::Transform => 2,
+        };
+
+        let envelope = PayloadEnvelope {
+            protocol_version: ProtocolVersion::V2,
+            connector_id: connector_id.to_string(),
+            stream_name: stream_name.to_string(),
+            payload: cp,
+        };
+        let payload_json = serde_json::to_string(&envelope)
+            .map_err(|e| ConnectorError::internal("SERIALIZE_CHECKPOINT", e.to_string()))?;
+
+        bindings::rapidbyte::connector::host::checkpoint(kind, &payload_json)
+            .map_err(from_component_error)
+    }
+
+    fn metric(
+        &self,
+        connector_id: &str,
+        stream_name: &str,
+        m: &Metric,
+    ) -> Result<(), ConnectorError> {
+        let envelope = PayloadEnvelope {
+            protocol_version: ProtocolVersion::V2,
+            connector_id: connector_id.to_string(),
+            stream_name: stream_name.to_string(),
+            payload: m,
+        };
+        let payload_json = serde_json::to_string(&envelope)
+            .map_err(|e| ConnectorError::internal("SERIALIZE_METRIC", e.to_string()))?;
+
+        bindings::rapidbyte::connector::host::metric(&payload_json).map_err(from_component_error)
+    }
+
+    fn emit_dlq_record(
+        &self,
+        stream_name: &str,
+        record_json: &str,
+        error_message: &str,
+        error_category: ErrorCategory,
+    ) -> Result<(), ConnectorError> {
+        bindings::rapidbyte::connector::host::emit_dlq_record(
+            stream_name,
+            record_json,
+            error_message,
+            &error_category.to_string(),
+        )
+        .map_err(from_component_error)
+    }
+
+    fn connect_tcp(&self, host: &str, port: u16) -> Result<u64, ConnectorError> {
+        bindings::rapidbyte::connector::host::connect_tcp(host, port).map_err(from_component_error)
+    }
+
+    fn socket_read(&self, handle: u64, len: u64) -> Result<SocketReadResult, ConnectorError> {
+        let result = bindings::rapidbyte::connector::host::socket_read(handle, len)
+            .map_err(from_component_error)?;
+        Ok(match result {
+            bindings::rapidbyte::connector::types::SocketReadResult::Data(data) => {
+                SocketReadResult::Data(data)
+            }
+            bindings::rapidbyte::connector::types::SocketReadResult::Eof => SocketReadResult::Eof,
+            bindings::rapidbyte::connector::types::SocketReadResult::WouldBlock => {
+                SocketReadResult::WouldBlock
+            }
+        })
+    }
+
+    fn socket_write(&self, handle: u64, data: &[u8]) -> Result<SocketWriteResult, ConnectorError> {
+        let result = bindings::rapidbyte::connector::host::socket_write(handle, data)
+            .map_err(from_component_error)?;
+        Ok(match result {
+            bindings::rapidbyte::connector::types::SocketWriteResult::Written(n) => {
+                SocketWriteResult::Written(n)
+            }
+            bindings::rapidbyte::connector::types::SocketWriteResult::WouldBlock => {
+                SocketWriteResult::WouldBlock
+            }
+        })
+    }
+
+    fn socket_close(&self, handle: u64) {
+        bindings::rapidbyte::connector::host::socket_close(handle)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub struct StubHostImports;
+
+#[cfg(not(target_arch = "wasm32"))]
+impl HostImports for StubHostImports {
+    fn log(&self, _level: i32, _message: &str) {}
+
+    fn emit_batch(&self, _ipc_bytes: &[u8]) -> Result<(), ConnectorError> {
+        Ok(())
+    }
+
+    fn next_batch(&self, _max_bytes: u64) -> Result<Option<Vec<u8>>, ConnectorError> {
+        Ok(None)
+    }
+
+    fn state_get(&self, _scope: StateScope, _key: &str) -> Result<Option<String>, ConnectorError> {
+        Ok(None)
+    }
+
+    fn state_put(
+        &self,
+        _scope: StateScope,
+        _key: &str,
+        _value: &str,
+    ) -> Result<(), ConnectorError> {
+        Ok(())
+    }
+
+    fn state_compare_and_set(
+        &self,
+        _scope: StateScope,
+        _key: &str,
+        _expected: Option<&str>,
+        _new_value: &str,
+    ) -> Result<bool, ConnectorError> {
+        Ok(false)
+    }
+
+    fn checkpoint(
+        &self,
+        _connector_id: &str,
+        _stream_name: &str,
+        _cp: &Checkpoint,
+    ) -> Result<(), ConnectorError> {
+        Ok(())
+    }
+
+    fn metric(
+        &self,
+        _connector_id: &str,
+        _stream_name: &str,
+        _m: &Metric,
+    ) -> Result<(), ConnectorError> {
+        Ok(())
+    }
+
+    fn emit_dlq_record(
+        &self,
+        _stream_name: &str,
+        _record_json: &str,
+        _error_message: &str,
+        _error_category: ErrorCategory,
+    ) -> Result<(), ConnectorError> {
+        Ok(())
+    }
+
+    fn connect_tcp(&self, _host: &str, _port: u16) -> Result<u64, ConnectorError> {
+        Err(ConnectorError::internal("STUB", "No-op stub"))
+    }
+
+    fn socket_read(&self, _handle: u64, _len: u64) -> Result<SocketReadResult, ConnectorError> {
+        Ok(SocketReadResult::Eof)
+    }
+
+    fn socket_write(&self, _handle: u64, data: &[u8]) -> Result<SocketWriteResult, ConnectorError> {
+        Ok(SocketWriteResult::Written(data.len() as u64))
+    }
+
+    fn socket_close(&self, _handle: u64) {}
+}
+
+pub fn log(level: i32, message: &str) {
+    host_imports().log(level, message)
+}
+
+pub fn emit_batch(ipc_bytes: &[u8]) -> Result<(), ConnectorError> {
+    host_imports().emit_batch(ipc_bytes)
+}
+
+pub fn next_batch(max_bytes: u64) -> Result<Option<Vec<u8>>, ConnectorError> {
+    host_imports().next_batch(max_bytes)
+}
+
+pub fn state_get(scope: StateScope, key: &str) -> Result<Option<String>, ConnectorError> {
+    host_imports().state_get(scope, key)
+}
+
+pub fn state_put(scope: StateScope, key: &str, value: &str) -> Result<(), ConnectorError> {
+    host_imports().state_put(scope, key, value)
+}
+
+pub fn state_compare_and_set(
+    scope: StateScope,
+    key: &str,
+    expected: Option<&str>,
+    new_value: &str,
+) -> Result<bool, ConnectorError> {
+    host_imports().state_compare_and_set(scope, key, expected, new_value)
+}
+
+pub fn checkpoint(
+    connector_id: &str,
+    stream_name: &str,
+    cp: &Checkpoint,
+) -> Result<(), ConnectorError> {
+    host_imports().checkpoint(connector_id, stream_name, cp)
+}
+
+pub fn metric(connector_id: &str, stream_name: &str, m: &Metric) -> Result<(), ConnectorError> {
+    host_imports().metric(connector_id, stream_name, m)
+}
+
+pub fn emit_dlq_record(
+    stream_name: &str,
+    record_json: &str,
+    error_message: &str,
+    error_category: ErrorCategory,
+) -> Result<(), ConnectorError> {
+    host_imports().emit_dlq_record(stream_name, record_json, error_message, error_category)
+}
+
 pub fn connect_tcp(host: &str, port: u16) -> Result<u64, ConnectorError> {
-    bindings::rapidbyte::connector::host::connect_tcp(host, port).map_err(from_component_error)
+    host_imports().connect_tcp(host, port)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub fn connect_tcp(_host: &str, _port: u16) -> Result<u64, ConnectorError> {
-    Err(ConnectorError::internal("STUB", "No-op stub"))
-}
-
-#[cfg(target_arch = "wasm32")]
 pub fn socket_read(handle: u64, len: u64) -> Result<SocketReadResult, ConnectorError> {
-    let result = bindings::rapidbyte::connector::host::socket_read(handle, len)
-        .map_err(from_component_error)?;
-    Ok(match result {
-        bindings::rapidbyte::connector::types::SocketReadResult::Data(data) => {
-            SocketReadResult::Data(data)
-        }
-        bindings::rapidbyte::connector::types::SocketReadResult::Eof => SocketReadResult::Eof,
-        bindings::rapidbyte::connector::types::SocketReadResult::WouldBlock => {
-            SocketReadResult::WouldBlock
-        }
-    })
+    host_imports().socket_read(handle, len)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub fn socket_read(_handle: u64, _len: u64) -> Result<SocketReadResult, ConnectorError> {
-    Ok(SocketReadResult::Eof)
-}
-
-#[cfg(target_arch = "wasm32")]
 pub fn socket_write(handle: u64, data: &[u8]) -> Result<SocketWriteResult, ConnectorError> {
-    let result = bindings::rapidbyte::connector::host::socket_write(handle, data)
-        .map_err(from_component_error)?;
-    Ok(match result {
-        bindings::rapidbyte::connector::types::SocketWriteResult::Written(n) => {
-            SocketWriteResult::Written(n)
-        }
-        bindings::rapidbyte::connector::types::SocketWriteResult::WouldBlock => {
-            SocketWriteResult::WouldBlock
-        }
-    })
+    host_imports().socket_write(handle, data)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub fn socket_write(_handle: u64, data: &[u8]) -> Result<SocketWriteResult, ConnectorError> {
-    Ok(SocketWriteResult::Written(data.len() as u64))
-}
-
-#[cfg(target_arch = "wasm32")]
 pub fn socket_close(handle: u64) {
-    bindings::rapidbyte::connector::host::socket_close(handle)
+    host_imports().socket_close(handle)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-pub fn socket_close(_handle: u64) {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stub_socket_variants_construct() {
+        let _ = SocketReadResult::Eof;
+        let _ = SocketReadResult::WouldBlock;
+        let _ = SocketWriteResult::WouldBlock;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_native_stub_next_batch_none() {
+        let batch = next_batch(1024).expect("next batch");
+        assert!(batch.is_none());
+    }
+}

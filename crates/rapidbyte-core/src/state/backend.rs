@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rapidbyte_sdk::protocol::DlqRecord;
+use rapidbyte_types::protocol::DlqRecord;
 
 #[derive(Debug, Clone)]
 pub struct CursorState {
@@ -53,10 +53,6 @@ pub trait StateBackend: Send + Sync {
     fn complete_run(&self, run_id: i64, status: RunStatus, stats: &RunStats) -> Result<()>;
 
     /// Insert DLQ records into the state backend. Returns the number of records inserted.
-    fn insert_dlq_records(
-        &self,
-        pipeline: &str,
-        run_id: i64,
-        records: &[DlqRecord],
-    ) -> Result<u64>;
+    fn insert_dlq_records(&self, pipeline: &str, run_id: i64, records: &[DlqRecord])
+        -> Result<u64>;
 }

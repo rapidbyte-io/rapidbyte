@@ -12,12 +12,12 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use tokio_postgres::types::ToSql;
 use tokio_postgres::Client;
 
+use crate::identifier::validate_pg_identifier;
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::protocol::{
     ColumnSchema, CursorType, CursorValue, Metric, MetricValue, ReadSummary, StreamContext,
     SyncMode,
 };
-use rapidbyte_sdk::validation::validate_pg_identifier;
 
 use crate::schema::pg_type_to_arrow;
 
@@ -108,7 +108,7 @@ async fn read_stream_inner(
             let nullable: bool = row.get::<_, String>(2) == "YES";
             ColumnSchema {
                 name,
-                data_type: pg_type_to_arrow(&data_type).to_string(),
+                data_type: pg_type_to_arrow(&data_type),
                 nullable,
             }
         })
@@ -288,8 +288,9 @@ async fn read_stream_inner(
 
                 if !accumulated_rows.is_empty() && estimated_bytes + row_bytes >= max_batch_bytes {
                     let encode_start = Instant::now();
-                    let encode_result = rows_to_record_batch(&accumulated_rows, &columns, &arrow_schema)
-                        .and_then(|batch| batch_to_ipc(&batch));
+                    let encode_result =
+                        rows_to_record_batch(&accumulated_rows, &columns, &arrow_schema)
+                            .and_then(|batch| batch_to_ipc(&batch));
                     arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
                     match encode_result {
                         Ok(ipc_bytes) => {
@@ -338,7 +339,10 @@ async fn read_stream_inner(
                 estimated_bytes += row_bytes;
 
                 if let Some(col_idx) = cursor_col_idx {
-                    let val: Option<String> = match ctx.cursor_info.as_ref().map(|ci| &ci.cursor_type)
+                    let val: Option<String> = match ctx
+                        .cursor_info
+                        .as_ref()
+                        .map(|ci| &ci.cursor_type)
                     {
                         Some(CursorType::Int64) => row
                             .try_get::<_, i64>(col_idx)
@@ -356,7 +360,8 @@ async fn read_stream_inner(
                         match &max_cursor_value {
                             None => max_cursor_value = Some(val),
                             Some(current) => {
-                                let is_greater = match (val.parse::<i64>(), current.parse::<i64>()) {
+                                let is_greater = match (val.parse::<i64>(), current.parse::<i64>())
+                                {
                                     (Ok(a), Ok(b)) => a > b,
                                     _ => val > *current,
                                 };
@@ -434,7 +439,10 @@ async fn read_stream_inner(
     if loop_error.is_some() {
         let _ = client.execute("ROLLBACK", &[]).await;
     } else {
-        client.execute("COMMIT", &[]).await.context("COMMIT failed")?;
+        client
+            .execute("COMMIT", &[])
+            .await
+            .context("COMMIT failed")?;
     }
 
     if let Some(e) = loop_error {
@@ -535,7 +543,8 @@ fn build_base_query(ctx: &StreamContext, columns: &[ColumnSchema]) -> anyhow::Re
                 });
             }
 
-            let resolved_cursor_type = effective_cursor_type(ci.cursor_type, cursor_column_arrow_type);
+            let resolved_cursor_type =
+                effective_cursor_type(ci.cursor_type, cursor_column_arrow_type);
             if resolved_cursor_type != ci.cursor_type {
                 host_ffi::log(
                     3,
@@ -550,12 +559,13 @@ fn build_base_query(ctx: &StreamContext, columns: &[ColumnSchema]) -> anyhow::Re
                 );
             }
 
-            let (bind, cast) = cursor_bind_param(&resolved_cursor_type, last_value).with_context(|| {
-                format!(
-                    "Invalid incremental cursor value for stream '{}' field '{}'",
-                    ctx.stream_name, ci.cursor_field
-                )
-            })?;
+            let (bind, cast) =
+                cursor_bind_param(&resolved_cursor_type, last_value).with_context(|| {
+                    format!(
+                        "Invalid incremental cursor value for stream '{}' field '{}'",
+                        ctx.stream_name, ci.cursor_field
+                    )
+                })?;
 
             host_ffi::log(
                 2,
@@ -582,7 +592,10 @@ fn build_base_query(ctx: &StreamContext, columns: &[ColumnSchema]) -> anyhow::Re
             ),
         );
         return Ok(CursorQuery {
-            sql: format!("SELECT {} FROM {} ORDER BY {}", col_list, table_name, cursor_field),
+            sql: format!(
+                "SELECT {} FROM {} ORDER BY {}",
+                col_list, table_name, cursor_field
+            ),
             bind: None,
         });
     }
@@ -783,8 +796,8 @@ fn rows_to_record_batch(
 
 fn batch_to_ipc(batch: &RecordBatch) -> anyhow::Result<Vec<u8>> {
     let mut buf = Vec::new();
-    let mut writer = StreamWriter::try_new(&mut buf, batch.schema().as_ref())
-        .context("IPC writer error")?;
+    let mut writer =
+        StreamWriter::try_new(&mut buf, batch.schema().as_ref()).context("IPC writer error")?;
     writer.write(batch).context("IPC write error")?;
     writer.finish().context("IPC finish error")?;
     Ok(buf)

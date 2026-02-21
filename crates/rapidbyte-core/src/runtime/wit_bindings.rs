@@ -1,7 +1,7 @@
 //! WIT binding glue: error type converters between SDK types and world-specific WIT types,
 //! `Host` trait impls for all three worlds, and validation result converters.
 
-use rapidbyte_sdk::errors::{
+use rapidbyte_types::errors::{
     BackoffClass, CommitState, ConnectorError, ErrorCategory, ErrorScope, ValidationResult,
     ValidationStatus,
 };
@@ -62,7 +62,7 @@ macro_rules! define_error_converters {
                     ErrorScope::Batch => CErrorScope::PerBatch,
                     ErrorScope::Record => CErrorScope::PerRecord,
                 },
-                code: error.code,
+                code: error.code.to_string(),
                 message: error.message,
                 retryable: error.retryable,
                 retry_after_ms: error.retry_after_ms,
@@ -123,7 +123,7 @@ macro_rules! define_error_converters {
                         ErrorScope::Record
                     }
                 },
-                code: error.code,
+                code: error.code.into(),
                 message: error.message,
                 retryable: error.retryable,
                 retry_after_ms: error.retry_after_ms,
@@ -298,7 +298,9 @@ macro_rules! impl_host_trait_for_world {
 
 macro_rules! define_validation_to_sdk {
     ($fn_name:ident, $module:ident) => {
-        pub fn $fn_name(value: $module::rapidbyte::connector::types::ValidationResult) -> ValidationResult {
+        pub fn $fn_name(
+            value: $module::rapidbyte::connector::types::ValidationResult,
+        ) -> ValidationResult {
             ValidationResult {
                 status: match value.status {
                     $module::rapidbyte::connector::types::ValidationStatus::Success => {

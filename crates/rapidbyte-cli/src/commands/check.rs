@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use rapidbyte_sdk::errors::ValidationStatus;
+use rapidbyte_types::errors::ValidationStatus;
 
 use rapidbyte_core::engine::orchestrator;
 use rapidbyte_core::pipeline::parser;
@@ -51,7 +51,7 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
     }
 }
 
-fn print_validation(label: &str, result: &rapidbyte_sdk::errors::ValidationResult) {
+fn print_validation(label: &str, result: &rapidbyte_types::errors::ValidationResult) {
     let status = match result.status {
         ValidationStatus::Success => "OK",
         ValidationStatus::Failed => "FAILED",

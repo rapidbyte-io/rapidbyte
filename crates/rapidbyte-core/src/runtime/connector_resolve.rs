@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rapidbyte_sdk::manifest::ConnectorManifest;
+use rapidbyte_types::manifest::ConnectorManifest;
 use sha2::{Digest, Sha256};
 
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {

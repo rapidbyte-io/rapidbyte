@@ -3,11 +3,11 @@ use std::collections::HashSet;
 use arrow::datatypes::DataType;
 use tokio_postgres::Client;
 
+use crate::identifier::validate_pg_identifier;
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::protocol::{
     ColumnPolicy, NullabilityPolicy, SchemaEvolutionPolicy, TypeChangePolicy, WriteMode,
 };
-use rapidbyte_sdk::validation::validate_pg_identifier;
 
 /// Map Arrow data types back to PostgreSQL column types.
 pub(crate) fn arrow_to_pg_type(dt: &DataType) -> &'static str {
@@ -72,8 +72,7 @@ pub(crate) async fn ensure_table(
 ) -> Result<(), String> {
     // Validate all column names before interpolating into DDL
     for field in arrow_schema.fields() {
-        validate_pg_identifier(field.name())
-            .map_err(|e| format!("Invalid column name: {}", e))?;
+        validate_pg_identifier(field.name()).map_err(|e| format!("Invalid column name: {}", e))?;
     }
 
     let columns_ddl: Vec<String> = arrow_schema
@@ -158,8 +157,7 @@ pub(crate) async fn ensure_table_and_schema(
     // Detect schema drift and apply policy
     if let Some(policy) = schema_policy {
         if let Some(drift) =
-            detect_schema_drift(client, target_schema, stream_name, arrow_schema)
-                .await?
+            detect_schema_drift(client, target_schema, stream_name, arrow_schema).await?
         {
             host_ffi::log(
                 2,
@@ -403,16 +401,13 @@ async fn apply_schema_policy(
                     "ALTER TABLE {} ALTER COLUMN \"{}\" TYPE {} USING \"{}\"::{}",
                     qualified_table, col_name, new_type, col_name, new_type
                 );
-                client
-                    .execute(&sql, &[])
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "Schema evolution: ALTER COLUMN '{}' TYPE {} failed: {}. \
+                client.execute(&sql, &[]).await.map_err(|e| {
+                    format!(
+                        "Schema evolution: ALTER COLUMN '{}' TYPE {} failed: {}. \
                              Existing data may not be castable to the new type.",
-                            col_name, new_type, e
-                        )
-                    })?;
+                        col_name, new_type, e
+                    )
+                })?;
                 host_ffi::log(
                     2,
                     &format!(
@@ -456,10 +451,7 @@ async fn apply_schema_policy(
                     );
                     match client.execute(&sql, &[]).await {
                         Ok(_) => {
-                            host_ffi::log(
-                                2,
-                                &format!("dest-postgres: SET NOT NULL on '{}'", col),
-                            );
+                            host_ffi::log(2, &format!("dest-postgres: SET NOT NULL on '{}'", col));
                         }
                         Err(e) => {
                             // Existing NULLs prevent SET NOT NULL — log and continue
@@ -478,16 +470,10 @@ async fn apply_schema_policy(
                         "ALTER TABLE {} ALTER COLUMN \"{}\" DROP NOT NULL",
                         qualified_table, col
                     );
-                    client
-                        .execute(&sql, &[])
-                        .await
-                        .map_err(|e| {
-                            format!("ALTER TABLE DROP NOT NULL on '{}' failed: {}", col, e)
-                        })?;
-                    host_ffi::log(
-                        2,
-                        &format!("dest-postgres: DROP NOT NULL on '{}'", col),
-                    );
+                    client.execute(&sql, &[]).await.map_err(|e| {
+                        format!("ALTER TABLE DROP NOT NULL on '{}' failed: {}", col, e)
+                    })?;
+                    host_ffi::log(2, &format!("dest-postgres: DROP NOT NULL on '{}'", col));
                 }
             }
         }

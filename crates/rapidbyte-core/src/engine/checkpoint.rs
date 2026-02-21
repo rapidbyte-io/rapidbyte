@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rapidbyte_sdk::protocol::{Checkpoint, CursorValue};
+use rapidbyte_types::protocol::{Checkpoint, CursorValue};
 
 use crate::state::backend::{CursorState, StateBackend};
 
@@ -67,7 +67,7 @@ pub(crate) fn correlate_and_persist_cursors(
 mod tests {
     use super::*;
     use crate::state::sqlite::SqliteStateBackend;
-    use rapidbyte_sdk::protocol::CheckpointKind;
+    use rapidbyte_types::protocol::{CheckpointKind, ProtocolVersion};
 
     fn make_source_checkpoint(stream: &str, cursor_field: &str, cursor_value: &str) -> Checkpoint {
         Checkpoint {
@@ -194,7 +194,7 @@ mod tests {
 
     #[test]
     fn test_checkpoint_envelope_roundtrip_via_host_parsing() {
-        use rapidbyte_sdk::protocol::{CursorValue, PayloadEnvelope};
+        use rapidbyte_types::protocol::{CursorValue, PayloadEnvelope};
 
         // Simulate what the source connector does in host_ffi::checkpoint()
         let source_cp = Checkpoint {
@@ -207,7 +207,7 @@ mod tests {
             bytes_processed: 5000,
         };
         let envelope = PayloadEnvelope {
-            protocol_version: "2".to_string(),
+            protocol_version: ProtocolVersion::V2,
             connector_id: "source-postgres".to_string(),
             stream_name: "users".to_string(),
             payload: source_cp.clone(),
@@ -243,7 +243,7 @@ mod tests {
             bytes_processed: 5000,
         };
         let dest_envelope = PayloadEnvelope {
-            protocol_version: "2".to_string(),
+            protocol_version: ProtocolVersion::V2,
             connector_id: "dest-postgres".to_string(),
             stream_name: "users".to_string(),
             payload: dest_cp.clone(),

@@ -1,4 +1,4 @@
-use rapidbyte_sdk::protocol::DlqRecord;
+use rapidbyte_types::protocol::DlqRecord;
 
 use crate::state::backend::StateBackend;
 

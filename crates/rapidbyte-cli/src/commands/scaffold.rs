@@ -93,17 +93,53 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
     // Write source files
     match role {
         Role::Source => {
-            write_file(&src_dir.join("main.rs"), &gen_source_main(&struct_name), &mut created_files)?;
-            write_file(&src_dir.join("config.rs"), &gen_config(), &mut created_files)?;
-            write_file(&src_dir.join("client.rs"), &gen_client_rs(), &mut created_files)?;
-            write_file(&src_dir.join("reader.rs"), &gen_reader_rs(), &mut created_files)?;
-            write_file(&src_dir.join("schema.rs"), &gen_schema_rs(), &mut created_files)?;
+            write_file(
+                &src_dir.join("main.rs"),
+                &gen_source_main(&struct_name),
+                &mut created_files,
+            )?;
+            write_file(
+                &src_dir.join("config.rs"),
+                &gen_config(),
+                &mut created_files,
+            )?;
+            write_file(
+                &src_dir.join("client.rs"),
+                &gen_client_rs(),
+                &mut created_files,
+            )?;
+            write_file(
+                &src_dir.join("reader.rs"),
+                &gen_reader_rs(),
+                &mut created_files,
+            )?;
+            write_file(
+                &src_dir.join("schema.rs"),
+                &gen_schema_rs(),
+                &mut created_files,
+            )?;
         }
         Role::Destination => {
-            write_file(&src_dir.join("main.rs"), &gen_dest_main(&struct_name), &mut created_files)?;
-            write_file(&src_dir.join("config.rs"), &gen_config(), &mut created_files)?;
-            write_file(&src_dir.join("client.rs"), &gen_client_rs(), &mut created_files)?;
-            write_file(&src_dir.join("writer.rs"), &gen_writer_rs(), &mut created_files)?;
+            write_file(
+                &src_dir.join("main.rs"),
+                &gen_dest_main(&struct_name),
+                &mut created_files,
+            )?;
+            write_file(
+                &src_dir.join("config.rs"),
+                &gen_config(),
+                &mut created_files,
+            )?;
+            write_file(
+                &src_dir.join("client.rs"),
+                &gen_client_rs(),
+                &mut created_files,
+            )?;
+            write_file(
+                &src_dir.join("writer.rs"),
+                &gen_writer_rs(),
+                &mut created_files,
+            )?;
         }
     }
 
@@ -269,7 +305,7 @@ pub struct {struct_name} {{
     config: config::Config,
 }}
 
-impl SourceConnector for {struct_name} {{
+impl Source for {struct_name} {{
     type Config = config::Config;
 
     async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {{
@@ -278,7 +314,7 @@ impl SourceConnector for {struct_name} {{
         Ok((
             Self {{ config }},
             ConnectorInfo {{
-                protocol_version: "2".to_string(),
+                protocol_version: ProtocolVersion::V2,
                 features: vec![],
                 default_max_batch_bytes: 64 * 1024 * 1024,
             }},
@@ -303,7 +339,7 @@ impl SourceConnector for {struct_name} {{
     }}
 }}
 
-rapidbyte_sdk::source_connector_main!({struct_name});
+rapidbyte_sdk::connector_main!(source, {struct_name});
 "#
     )
 }
@@ -320,7 +356,7 @@ pub struct {struct_name} {{
     config: config::Config,
 }}
 
-impl DestinationConnector for {struct_name} {{
+impl Destination for {struct_name} {{
     type Config = config::Config;
 
     async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {{
@@ -329,7 +365,7 @@ impl DestinationConnector for {struct_name} {{
         Ok((
             Self {{ config }},
             ConnectorInfo {{
-                protocol_version: "2".to_string(),
+                protocol_version: ProtocolVersion::V2,
                 features: vec![],
                 default_max_batch_bytes: 64 * 1024 * 1024,
             }},
@@ -350,7 +386,7 @@ impl DestinationConnector for {struct_name} {{
     }}
 }}
 
-rapidbyte_sdk::dest_connector_main!({struct_name});
+rapidbyte_sdk::connector_main!(destination, {struct_name});
 "#
     )
 }

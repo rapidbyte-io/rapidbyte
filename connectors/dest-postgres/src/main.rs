@@ -1,19 +1,22 @@
-mod config;
-mod client;
-mod ddl;
 mod batch;
+mod client;
+mod config;
+mod ddl;
+mod identifier;
 mod writer;
 
-use rapidbyte_sdk::connector::DestinationConnector;
+use rapidbyte_sdk::connector::Destination;
 use rapidbyte_sdk::errors::{ConnectorError, ValidationResult};
 use rapidbyte_sdk::host_ffi;
-use rapidbyte_sdk::protocol::{ConnectorInfo, Feature, StreamContext, WriteSummary};
+use rapidbyte_sdk::protocol::{
+    ConnectorInfo, Feature, ProtocolVersion, StreamContext, WriteSummary,
+};
 
 pub struct DestPostgres {
     config: config::Config,
 }
 
-impl DestinationConnector for DestPostgres {
+impl Destination for DestPostgres {
     type Config = config::Config;
 
     async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
@@ -32,7 +35,7 @@ impl DestinationConnector for DestPostgres {
         Ok((
             Self { config },
             ConnectorInfo {
-                protocol_version: "2".to_string(),
+                protocol_version: ProtocolVersion::V2,
                 features,
                 default_max_batch_bytes: 64 * 1024 * 1024,
             },
@@ -53,4 +56,4 @@ impl DestinationConnector for DestPostgres {
     }
 }
 
-rapidbyte_sdk::dest_connector_main!(DestPostgres);
+rapidbyte_sdk::connector_main!(destination, DestPostgres);

@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::net::IpAddr;
 
-use rapidbyte_sdk::manifest::Permissions;
+use rapidbyte_types::manifest::Permissions;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NetworkAcl {

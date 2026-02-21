@@ -4,12 +4,16 @@
 //! use rapidbyte_sdk::prelude::*;
 //! ```
 
-pub use crate::connector::{DestinationConnector, SourceConnector, TransformConnector};
-pub use crate::errors::{ConnectorError, ValidationResult, ValidationStatus};
+pub use crate::connector::{Destination, Source, Transform};
+pub use crate::errors::{
+    BackoffClass, CommitState, ConnectorError, ConnectorResult, ErrorCategory, ErrorScope,
+    ValidationResult, ValidationStatus,
+};
 pub use crate::host_ffi;
 pub use crate::host_tcp::HostTcpStream;
 pub use crate::protocol::{
-    Catalog, Checkpoint, CheckpointKind, CursorInfo, CursorValue, Feature, Metric, MetricValue,
-    ConnectorInfo, ReadPerf, ReadSummary, SchemaHint, StreamContext, StreamLimits, SyncMode,
-    TransformSummary, WriteMode, WritePerf, WriteSummary,
+    ArrowDataType, Catalog, Checkpoint, CheckpointKind, ColumnSchema, ConnectorInfo, ConnectorRole,
+    CursorInfo, CursorValue, Feature, Metric, MetricValue, ProtocolVersion, ReadPerf, ReadSummary,
+    SchemaHint, StateScope, Stream, StreamContext, StreamLimits, SyncMode, TransformSummary,
+    WriteMode, WritePerf, WriteSummary,
 };

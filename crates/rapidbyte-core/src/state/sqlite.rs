@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::Connection;
 
-use rapidbyte_sdk::protocol::DlqRecord;
+use rapidbyte_types::protocol::DlqRecord;
 
 use super::backend::{CursorState, RunStats, RunStatus, StateBackend};
 use super::schema;
@@ -175,8 +175,8 @@ impl StateBackend for SqliteStateBackend {
                 record.stream_name,
                 record.record_json,
                 record.error_message,
-                record.error_category,
-                record.failed_at,
+                record.error_category.to_string(),
+                record.failed_at.0.as_str(),
             ])?;
             count += 1;
         }
@@ -190,6 +190,8 @@ impl StateBackend for SqliteStateBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rapidbyte_types::errors::ErrorCategory;
+    use rapidbyte_types::protocol::Iso8601Timestamp;
 
     #[test]
     fn test_cursor_roundtrip() {
@@ -433,21 +435,19 @@ mod tests {
                 stream_name: "users".to_string(),
                 record_json: r#"{"id":1}"#.to_string(),
                 error_message: "not-null violation".to_string(),
-                error_category: "data".to_string(),
-                failed_at: "2026-02-21T12:00:00+00:00".to_string(),
+                error_category: ErrorCategory::Data,
+                failed_at: Iso8601Timestamp("2026-02-21T12:00:00+00:00".to_string()),
             },
             DlqRecord {
                 stream_name: "users".to_string(),
                 record_json: r#"{"id":2}"#.to_string(),
                 error_message: "type mismatch".to_string(),
-                error_category: "data".to_string(),
-                failed_at: "2026-02-21T12:00:01+00:00".to_string(),
+                error_category: ErrorCategory::Data,
+                failed_at: Iso8601Timestamp("2026-02-21T12:00:01+00:00".to_string()),
             },
         ];
 
-        let count = backend
-            .insert_dlq_records("pipe1", 1, &records)
-            .unwrap();
+        let count = backend.insert_dlq_records("pipe1", 1, &records).unwrap();
         assert_eq!(count, 2);
 
         // Verify records are actually in the table

@@ -3,18 +3,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use rapidbyte_sdk::manifest::Permissions;
+use rapidbyte_types::manifest::Permissions;
 use tokio::sync::mpsc;
 
-use rapidbyte_sdk::errors::ValidationResult;
-use rapidbyte_sdk::protocol::{
+use rapidbyte_types::errors::ValidationResult;
+use rapidbyte_types::protocol::{
     Catalog, Checkpoint, ColumnPolicy, ConnectorRole, CursorInfo, CursorType, CursorValue,
-    DataErrorPolicy, DlqRecord, NullabilityPolicy, ReadSummary, SchemaEvolutionPolicy, SchemaHint,
-    StreamContext, StreamLimits, StreamPolicies, SyncMode, TypeChangePolicy,
-    WriteMode, WriteSummary,
+    DataErrorPolicy, DlqRecord, NullabilityPolicy, ProtocolVersion, ReadSummary,
+    SchemaEvolutionPolicy, SchemaHint, StreamContext, StreamLimits, StreamPolicies, SyncMode,
+    TypeChangePolicy, WriteMode, WriteSummary,
 };
 
 use super::checkpoint::correlate_and_persist_cursors;
+use super::compression::CompressionCodec;
 use super::errors::{compute_backoff, PipelineError};
 use super::runner::{
     run_destination_stream, run_discover, run_source_stream, run_transform_stream,
@@ -22,8 +23,9 @@ use super::runner::{
 };
 pub use super::runner::{CheckResult, PipelineResult};
 use crate::pipeline::types::{parse_byte_size, PipelineConfig};
-use crate::runtime::component_runtime::{self, parse_connector_ref, Frame, HostTimings, LoadedComponent, WasmRuntime};
-use super::compression::CompressionCodec;
+use crate::runtime::component_runtime::{
+    self, parse_connector_ref, Frame, HostTimings, LoadedComponent, WasmRuntime,
+};
 use crate::state::backend::{RunStats, RunStatus, StateBackend};
 use crate::state::sqlite::SqliteStateBackend;
 
@@ -195,22 +197,15 @@ async fn execute_pipeline_once(
         Ok::<_, PipelineError>((module, load_ms))
     });
 
-    let (source_module, source_module_load_ms) = source_load_task
-        .await
-        .map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!(
-                "Source module load task panicked: {}",
-                e
-            ))
-        })??;
-    let (dest_module, dest_module_load_ms) = dest_load_task
-        .await
-        .map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!(
-                "Destination module load task panicked: {}",
-                e
-            ))
-        })??;
+    let (source_module, source_module_load_ms) = source_load_task.await.map_err(|e| {
+        PipelineError::Infrastructure(anyhow::anyhow!("Source module load task panicked: {}", e))
+    })??;
+    let (dest_module, dest_module_load_ms) = dest_load_task.await.map_err(|e| {
+        PipelineError::Infrastructure(anyhow::anyhow!(
+            "Destination module load task panicked: {}",
+            e
+        ))
+    })??;
 
     tracing::info!(
         source_ms = source_module_load_ms,
@@ -219,7 +214,14 @@ async fn execute_pipeline_once(
     );
 
     // 3b. Load transform modules (in order)
-    let transform_modules: Vec<(LoadedComponent, String, String, serde_json::Value, u64, Option<Permissions>)> = config
+    let transform_modules: Vec<(
+        LoadedComponent,
+        String,
+        String,
+        serde_json::Value,
+        u64,
+        Option<Permissions>,
+    )> = config
         .transforms
         .iter()
         .map(|tc| {
@@ -418,7 +420,13 @@ async fn execute_pipeline_once(
         let transform_modules_for_stream: Vec<_> = transform_modules
             .iter()
             .map(|(m, id, ver, cfg, _ms, perms)| {
-                (m.clone(), id.clone(), ver.clone(), cfg.clone(), perms.clone())
+                (
+                    m.clone(),
+                    id.clone(),
+                    ver.clone(),
+                    cfg.clone(),
+                    perms.clone(),
+                )
             })
             .collect();
 
@@ -435,7 +443,10 @@ async fn execute_pipeline_once(
             // Source writes to channels[0].0, Dest reads from channels[num_t].1
 
             // Extract sender/receiver pairs
-            let (mut senders, mut receivers): (Vec<mpsc::Sender<Frame>>, Vec<mpsc::Receiver<Frame>>) = channels.into_iter().unzip();
+            let (mut senders, mut receivers): (
+                Vec<mpsc::Sender<Frame>>,
+                Vec<mpsc::Receiver<Frame>>,
+            ) = channels.into_iter().unzip();
 
             let source_tx = senders.remove(0);
             let dest_rx = receivers.pop().unwrap();
@@ -573,7 +584,9 @@ async fn execute_pipeline_once(
 
             // If a transform failed, propagate the error (but still collect DLQ records)
             if let Some(transform_err) = first_transform_error {
-                return Err(StreamError { error: transform_err });
+                return Err(StreamError {
+                    error: transform_err,
+                });
             }
 
             // Process source and dest results
@@ -584,13 +597,19 @@ async fn execute_pipeline_once(
                 }
             };
 
-            let (dst_dur, write_summary, vm_setup_secs, recv_secs, dest_checkpoints, dst_host_timings) =
-                match dst_result {
-                    Ok(ok) => ok,
-                    Err(derr) => {
-                        return Err(StreamError { error: derr });
-                    }
-                };
+            let (
+                dst_dur,
+                write_summary,
+                vm_setup_secs,
+                recv_secs,
+                dest_checkpoints,
+                dst_host_timings,
+            ) = match dst_result {
+                Ok(ok) => ok,
+                Err(derr) => {
+                    return Err(StreamError { error: derr });
+                }
+            };
 
             Ok(StreamResult {
                 read_summary,
@@ -708,12 +727,7 @@ async fn execute_pipeline_once(
                 error_message: Some(format!("Stream error: {}", err)),
             },
         )?;
-        super::dlq::persist_dlq_records(
-            state.as_ref(),
-            &config.pipeline,
-            run_id,
-            &all_dlq_records,
-        );
+        super::dlq::persist_dlq_records(state.as_ref(), &config.pipeline, run_id, &all_dlq_records);
         return Err(err);
     }
 
@@ -762,12 +776,7 @@ async fn execute_pipeline_once(
         );
     }
 
-    super::dlq::persist_dlq_records(
-        state.as_ref(),
-        &config.pipeline,
-        run_id,
-        &all_dlq_records,
-    );
+    super::dlq::persist_dlq_records(state.as_ref(), &config.pipeline, run_id, &all_dlq_records);
 
     let duration = start.elapsed();
     let src_perf = total_read_summary.perf.as_ref();
@@ -867,31 +876,33 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     let source_config = config.source.config.clone();
     let source_permissions = source_manifest.as_ref().map(|m| m.permissions.clone());
     let (src_id, src_ver) = parse_connector_ref(&config.source.use_ref);
-    let source_validation_handle = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
-        validate_connector(
-            &source_wasm,
-            ConnectorRole::Source,
-            &src_id,
-            &src_ver,
-            &source_config,
-            source_permissions.as_ref(),
-        )
-    });
+    let source_validation_handle =
+        tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
+            validate_connector(
+                &source_wasm,
+                ConnectorRole::Source,
+                &src_id,
+                &src_ver,
+                &source_config,
+                source_permissions.as_ref(),
+            )
+        });
 
     // 4. Validate destination connector
     let dest_config = config.destination.config.clone();
     let dest_permissions = dest_manifest.as_ref().map(|m| m.permissions.clone());
     let (dst_id, dst_ver) = parse_connector_ref(&config.destination.use_ref);
-    let dest_validation_handle = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
-        validate_connector(
-            &dest_wasm,
-            ConnectorRole::Destination,
-            &dst_id,
-            &dst_ver,
-            &dest_config,
-            dest_permissions.as_ref(),
-        )
-    });
+    let dest_validation_handle =
+        tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
+            validate_connector(
+                &dest_wasm,
+                ConnectorRole::Destination,
+                &dst_id,
+                &dst_ver,
+                &dest_config,
+                dest_permissions.as_ref(),
+            )
+        });
 
     let source_validation = source_validation_handle
         .await
@@ -1012,7 +1023,7 @@ fn load_and_validate_manifest(
     wasm_path: &std::path::Path,
     connector_ref: &str,
     expected_role: ConnectorRole,
-) -> Result<Option<rapidbyte_sdk::manifest::ConnectorManifest>> {
+) -> Result<Option<rapidbyte_types::manifest::ConnectorManifest>> {
     let manifest = component_runtime::load_connector_manifest(wasm_path)?;
 
     if let Some(ref m) = manifest {
@@ -1024,11 +1035,11 @@ fn load_and_validate_manifest(
             );
         }
 
-        if m.protocol_version != "2" {
+        if m.protocol_version != ProtocolVersion::V2 {
             tracing::warn!(
                 connector = connector_ref,
-                manifest_protocol = m.protocol_version,
-                host_protocol = "2",
+                manifest_protocol = ?m.protocol_version,
+                host_protocol = ?ProtocolVersion::V2,
                 "Protocol version mismatch"
             );
         }
@@ -1053,7 +1064,7 @@ fn load_and_validate_manifest(
 fn validate_config_against_schema(
     connector_ref: &str,
     config: &serde_json::Value,
-    manifest: &rapidbyte_sdk::manifest::ConnectorManifest,
+    manifest: &rapidbyte_types::manifest::ConnectorManifest,
 ) -> Result<()> {
     let schema_value = match &manifest.config_schema {
         Some(s) => s,

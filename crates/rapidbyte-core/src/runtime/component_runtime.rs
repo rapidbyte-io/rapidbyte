@@ -7,16 +7,15 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rapidbyte_sdk::errors::ConnectorError;
-use rapidbyte_sdk::manifest::Permissions;
-use rapidbyte_sdk::protocol::{Checkpoint, DlqRecord, StateScope};
+use rapidbyte_types::errors::{ConnectorError, ErrorCategory};
+use rapidbyte_types::manifest::Permissions;
+use rapidbyte_types::protocol::{Checkpoint, DlqRecord, Iso8601Timestamp, StateScope};
 use tokio::sync::mpsc;
 use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::state::backend::{CursorState, StateBackend};
 
-use crate::engine::compression::CompressionCodec;
 use super::host_socket::{
     resolve_socket_addrs, SocketEntry, SocketReadResultInternal, SocketWriteResultInternal,
     SOCKET_POLL_ACTIVATION_THRESHOLD,
@@ -24,10 +23,11 @@ use super::host_socket::{
 #[cfg(unix)]
 use super::host_socket::{socket_poll_timeout_ms, wait_socket_ready, SocketInterest};
 use super::network_acl::{derive_network_acl, NetworkAcl};
+use crate::engine::compression::CompressionCodec;
 
 pub use super::connector_resolve::{
-    load_connector_manifest, manifest_path_from_wasm, parse_connector_ref,
-    resolve_connector_path, verify_wasm_checksum,
+    load_connector_manifest, manifest_path_from_wasm, parse_connector_ref, resolve_connector_path,
+    verify_wasm_checksum,
 };
 pub use super::wasm_runtime::{LoadedComponent, WasmRuntime};
 pub use super::wit_bindings::{
@@ -62,6 +62,20 @@ pub enum Frame {
     Data(Vec<u8>),
     /// End-of-stream marker for per-stream boundaries.
     EndStream,
+}
+
+fn parse_error_category(raw: &str) -> ErrorCategory {
+    match raw {
+        "config" => ErrorCategory::Config,
+        "auth" => ErrorCategory::Auth,
+        "permission" => ErrorCategory::Permission,
+        "rate_limit" => ErrorCategory::RateLimit,
+        "transient_network" => ErrorCategory::TransientNetwork,
+        "transient_db" => ErrorCategory::TransientDb,
+        "data" => ErrorCategory::Data,
+        "schema" => ErrorCategory::Schema,
+        _ => ErrorCategory::Internal,
+    }
 }
 
 /// Cumulative timing counters for host function calls.
@@ -277,7 +291,7 @@ impl ComponentHostState {
             ));
         }
 
-        let scope = StateScope::from_i32(scope as i32).ok_or_else(|| {
+        let scope = StateScope::try_from(scope as i32).map_err(|_| {
             ConnectorError::config("INVALID_SCOPE", format!("Invalid scope: {}", scope))
         })?;
 
@@ -302,7 +316,7 @@ impl ComponentHostState {
             ));
         }
 
-        let scope = StateScope::from_i32(scope as i32).ok_or_else(|| {
+        let scope = StateScope::try_from(scope as i32).map_err(|_| {
             ConnectorError::config("INVALID_SCOPE", format!("Invalid scope: {}", scope))
         })?;
 
@@ -332,7 +346,7 @@ impl ComponentHostState {
             ));
         }
 
-        let scope = StateScope::from_i32(scope as i32).ok_or_else(|| {
+        let scope = StateScope::try_from(scope as i32).map_err(|_| {
             ConnectorError::config("INVALID_SCOPE", format!("Invalid scope: {}", scope))
         })?;
 
@@ -348,7 +362,11 @@ impl ComponentHostState {
             .map_err(|e| ConnectorError::internal("STATE_BACKEND", e.to_string()))
     }
 
-    pub(crate) fn checkpoint_impl(&mut self, kind: u32, payload_json: String) -> Result<(), ConnectorError> {
+    pub(crate) fn checkpoint_impl(
+        &mut self,
+        kind: u32,
+        payload_json: String,
+    ) -> Result<(), ConnectorError> {
         let envelope: serde_json::Value = serde_json::from_str(&payload_json)
             .map_err(|e| ConnectorError::internal("PARSE_CHECKPOINT", e.to_string()))?;
 
@@ -421,7 +439,11 @@ impl ComponentHostState {
         }
     }
 
-    pub(crate) fn connect_tcp_impl(&mut self, host: String, port: u16) -> Result<u64, ConnectorError> {
+    pub(crate) fn connect_tcp_impl(
+        &mut self,
+        host: String,
+        port: u16,
+    ) -> Result<u64, ConnectorError> {
         if !self.network_acl.allows(&host) {
             return Err(ConnectorError::permission(
                 "NETWORK_DENIED",
@@ -466,11 +488,14 @@ impl ComponentHostState {
 
         let handle = self.next_socket_handle;
         self.next_socket_handle = self.next_socket_handle.saturating_add(1);
-        self.sockets.insert(handle, SocketEntry {
-            stream,
-            read_would_block_streak: 0,
-            write_would_block_streak: 0,
-        });
+        self.sockets.insert(
+            handle,
+            SocketEntry {
+                stream,
+                read_would_block_streak: 0,
+                write_would_block_streak: 0,
+            },
+        );
 
         Ok(handle)
     }
@@ -509,7 +534,11 @@ impl ComponentHostState {
 
                 // Above threshold: socket appears idle. Poll to avoid busy-looping.
                 #[cfg(unix)]
-                let ready = match wait_socket_ready(&entry.stream, SocketInterest::Read, socket_poll_timeout_ms()) {
+                let ready = match wait_socket_ready(
+                    &entry.stream,
+                    SocketInterest::Read,
+                    socket_poll_timeout_ms(),
+                ) {
                     Ok(ready) => ready,
                     Err(poll_err) => {
                         tracing::warn!(handle, error = %poll_err, "poll() failed in socket_read");
@@ -575,7 +604,11 @@ impl ComponentHostState {
 
                 // Above threshold: socket appears idle. Poll to avoid busy-looping.
                 #[cfg(unix)]
-                let ready = match wait_socket_ready(&entry.stream, SocketInterest::Write, socket_poll_timeout_ms()) {
+                let ready = match wait_socket_ready(
+                    &entry.stream,
+                    SocketInterest::Write,
+                    socket_poll_timeout_ms(),
+                ) {
                     Ok(ready) => ready,
                     Err(poll_err) => {
                         tracing::warn!(handle, error = %poll_err, "poll() failed in socket_write");
@@ -634,8 +667,8 @@ impl ComponentHostState {
             stream_name,
             record_json,
             error_message,
-            error_category,
-            failed_at: chrono::Utc::now().to_rfc3339(),
+            error_category: parse_error_category(&error_category),
+            failed_at: Iso8601Timestamp(chrono::Utc::now().to_rfc3339()),
         });
         Ok(())
     }

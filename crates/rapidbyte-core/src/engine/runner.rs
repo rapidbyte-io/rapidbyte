@@ -6,20 +6,20 @@ use tokio::sync::mpsc;
 use wasmtime::component::Linker;
 use wasmtime::Store;
 
-use rapidbyte_sdk::errors::ValidationResult;
-use rapidbyte_sdk::manifest::Permissions;
-use rapidbyte_sdk::protocol::{
+use rapidbyte_types::errors::ValidationResult;
+use rapidbyte_types::manifest::Permissions;
+use rapidbyte_types::protocol::{
     Catalog, Checkpoint, ConnectorRole, DlqRecord, ReadSummary, StreamContext, TransformSummary,
     WriteSummary,
 };
 
+use super::compression::CompressionCodec;
 use super::errors::PipelineError;
 use crate::runtime::component_runtime::{
     self, dest_bindings, dest_error_to_sdk, source_bindings, source_error_to_sdk,
     transform_bindings, transform_error_to_sdk, ComponentHostState, Frame, HostTimings,
     LoadedComponent, WasmRuntime,
 };
-use super::compression::CompressionCodec;
 use crate::state::backend::{RunStats, StateBackend};
 use crate::state::sqlite::SqliteStateBackend;
 
@@ -222,14 +222,26 @@ pub(crate) fn run_source_stream(
     match iface.call_close(&mut store) {
         Ok(Ok(())) => {}
         Ok(Err(err)) => {
-            tracing::warn!(stream = stream_ctx.stream_name, "Source close failed: {}", source_error_to_sdk(err));
+            tracing::warn!(
+                stream = stream_ctx.stream_name,
+                "Source close failed: {}",
+                source_error_to_sdk(err)
+            );
         }
         Err(err) => {
-            tracing::warn!(stream = stream_ctx.stream_name, "Source close trap: {}", err);
+            tracing::warn!(
+                stream = stream_ctx.stream_name,
+                "Source close trap: {}",
+                err
+            );
         }
     }
 
-    let checkpoints = source_checkpoints.lock().unwrap().drain(..).collect::<Vec<_>>();
+    let checkpoints = source_checkpoints
+        .lock()
+        .unwrap()
+        .drain(..)
+        .collect::<Vec<_>>();
     let source_host_timings = source_timings.lock().unwrap().clone();
 
     Ok((
@@ -257,18 +269,7 @@ pub(crate) fn run_destination_stream(
     stats: Arc<Mutex<RunStats>>,
     permissions: Option<&Permissions>,
     compression: Option<CompressionCodec>,
-) -> Result<
-    (
-        f64,
-        WriteSummary,
-        f64,
-        f64,
-        Vec<Checkpoint>,
-        HostTimings,
-    ),
-    PipelineError,
->
-{
+) -> Result<(f64, WriteSummary, f64, f64, Vec<Checkpoint>, HostTimings), PipelineError> {
     let phase_start = Instant::now();
     let vm_setup_start = Instant::now();
 
@@ -295,9 +296,12 @@ pub(crate) fn run_destination_stream(
     (|| {
         let mut store = Store::new(&module.engine, host_state);
         let linker = create_dest_linker(&module.engine).map_err(PipelineError::Infrastructure)?;
-        let bindings =
-            dest_bindings::RapidbyteDestination::instantiate(&mut store, &module.component, &linker)
-                .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
+        let bindings = dest_bindings::RapidbyteDestination::instantiate(
+            &mut store,
+            &module.component,
+            &linker,
+        )
+        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
 
         let iface = bindings.rapidbyte_connector_dest_connector();
 
@@ -372,10 +376,18 @@ pub(crate) fn run_destination_stream(
         match iface.call_close(&mut store) {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
-                tracing::warn!(stream = stream_ctx.stream_name, "Destination close failed: {}", dest_error_to_sdk(err));
+                tracing::warn!(
+                    stream = stream_ctx.stream_name,
+                    "Destination close failed: {}",
+                    dest_error_to_sdk(err)
+                );
             }
             Err(err) => {
-                tracing::warn!(stream = stream_ctx.stream_name, "Destination close trap: {}", err);
+                tracing::warn!(
+                    stream = stream_ctx.stream_name,
+                    "Destination close trap: {}",
+                    err
+                );
             }
         }
 
@@ -497,10 +509,18 @@ pub(crate) fn run_transform_stream(
     match iface.call_close(&mut store) {
         Ok(Ok(())) => {}
         Ok(Err(err)) => {
-            tracing::warn!(stream = stream_ctx.stream_name, "Transform close failed: {}", transform_error_to_sdk(err));
+            tracing::warn!(
+                stream = stream_ctx.stream_name,
+                "Transform close failed: {}",
+                transform_error_to_sdk(err)
+            );
         }
         Err(err) => {
-            tracing::warn!(stream = stream_ctx.stream_name, "Transform close trap: {}", err);
+            tracing::warn!(
+                stream = stream_ctx.stream_name,
+                "Transform close trap: {}",
+                err
+            );
         }
     }
 

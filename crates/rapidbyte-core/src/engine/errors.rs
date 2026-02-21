@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use rapidbyte_sdk::errors::{BackoffClass, ConnectorError};
+use rapidbyte_types::errors::{BackoffClass, ConnectorError};
 
 // ---------------------------------------------------------------------------
 // PipelineError — categorised errors for retry decisions
@@ -80,7 +80,7 @@ pub(crate) fn compute_backoff(err: &ConnectorError, attempt: u32) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapidbyte_sdk::errors::ErrorCategory;
+    use rapidbyte_types::errors::ErrorCategory;
 
     // -----------------------------------------------------------------------
     // PipelineError tests
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_error_commit_state_extraction() {
-        use rapidbyte_sdk::errors::CommitState;
+        use rapidbyte_types::errors::CommitState;
 
         let err = PipelineError::Connector(
             ConnectorError::transient_db("COMMIT_FAILED", "timeout")
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_error_commit_unknown_is_retryable_but_unsafe() {
-        use rapidbyte_sdk::errors::CommitState;
+        use rapidbyte_types::errors::CommitState;
 
         let err = PipelineError::Connector(
             ConnectorError::transient_db("COMMIT_FAILED", "timeout")

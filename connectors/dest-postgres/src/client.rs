@@ -36,20 +36,19 @@ async fn connect_inner(config: &crate::config::Config) -> anyhow::Result<Client>
 }
 
 /// Validate PostgreSQL connectivity and target schema.
-pub(crate) async fn validate(config: &crate::config::Config) -> Result<ValidationResult, ConnectorError> {
+pub(crate) async fn validate(
+    config: &crate::config::Config,
+) -> Result<ValidationResult, ConnectorError> {
     let client = connect(config)
         .await
         .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
 
-    client
-        .query_one("SELECT 1", &[])
-        .await
-        .map_err(|e| {
-            ConnectorError::transient_network(
-                "CONNECTION_TEST_FAILED",
-                format!("Connection test failed: {}", e),
-            )
-        })?;
+    client.query_one("SELECT 1", &[]).await.map_err(|e| {
+        ConnectorError::transient_network(
+            "CONNECTION_TEST_FAILED",
+            format!("Connection test failed: {}", e),
+        )
+    })?;
 
     let schema_check = client
         .query_one(

@@ -5,16 +5,16 @@ use std::time::Instant;
 use arrow::ipc::reader::StreamReader;
 use tokio_postgres::Client;
 
+use crate::identifier::validate_pg_identifier;
 use rapidbyte_sdk::errors::{CommitState, ConnectorError};
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::protocol::{
     DataErrorPolicy, Metric, MetricValue, SchemaEvolutionPolicy, StreamContext, WriteMode,
     WritePerf, WriteSummary,
 };
-use rapidbyte_sdk::validation::validate_pg_identifier;
 
-use crate::ddl::{prepare_staging, swap_staging_table};
 use crate::batch::{write_batch, WriteContext};
+use crate::ddl::{prepare_staging, swap_staging_table};
 
 /// Entry point for writing a single stream: validates identifiers, connects,
 /// runs the pull loop through a WriteSession, and returns a WriteSummary.
@@ -24,16 +24,10 @@ pub async fn write_stream(
 ) -> Result<WriteSummary, ConnectorError> {
     // Validate identifiers before interpolating into SQL
     validate_pg_identifier(&ctx.stream_name).map_err(|e| {
-        ConnectorError::config(
-            "INVALID_IDENTIFIER",
-            format!("Invalid stream name: {}", e),
-        )
+        ConnectorError::config("INVALID_IDENTIFIER", format!("Invalid stream name: {}", e))
     })?;
     validate_pg_identifier(&config.schema).map_err(|e| {
-        ConnectorError::config(
-            "INVALID_IDENTIFIER",
-            format!("Invalid schema name: {}", e),
-        )
+        ConnectorError::config("INVALID_IDENTIFIER", format!("Invalid schema name: {}", e))
     })?;
 
     // Phase 1: Connect
@@ -64,14 +58,13 @@ pub async fn write_stream(
     .map_err(|e| ConnectorError::transient_db("SESSION_BEGIN_FAILED", e))?;
 
     // Phase 3: Pull loop — read batches from host
-    let mut buf: Vec<u8> = Vec::new();
     let mut loop_error: Option<String> = None;
 
     loop {
-        match host_ffi::next_batch(&mut buf, ctx.limits.max_batch_bytes) {
+        match host_ffi::next_batch(ctx.limits.max_batch_bytes) {
             Ok(None) => break,
-            Ok(Some(n)) => {
-                if let Err(e) = session.process_batch(&buf[..n]).await {
+            Ok(Some(buf)) => {
+                if let Err(e) = session.process_batch(&buf).await {
                     loop_error = Some(e);
                     break;
                 }
@@ -86,10 +79,8 @@ pub async fn write_stream(
     // Handle errors
     if let Some(err) = loop_error {
         session.rollback().await;
-        return Err(
-            ConnectorError::transient_db("WRITE_FAILED", err)
-                .with_commit_state(CommitState::BeforeCommit),
-        );
+        return Err(ConnectorError::transient_db("WRITE_FAILED", err)
+            .with_commit_state(CommitState::BeforeCommit));
     }
 
     // Phase 4: Commit
@@ -204,7 +195,10 @@ impl<'a> WriteSession<'a> {
         if let Err(e) = ensure_watermarks_table(client, target_schema).await {
             host_ffi::log(
                 1,
-                &format!("dest-postgres: watermarks table creation failed (non-fatal): {}", e),
+                &format!(
+                    "dest-postgres: watermarks table creation failed (non-fatal): {}",
+                    e
+                ),
             );
         }
 
@@ -242,7 +236,10 @@ impl<'a> WriteSession<'a> {
                 Err(e) => {
                     host_ffi::log(
                         1,
-                        &format!("dest-postgres: watermark query failed (starting fresh): {}", e),
+                        &format!(
+                            "dest-postgres: watermark query failed (starting fresh): {}",
+                            e
+                        ),
                     );
                     0
                 }
@@ -343,16 +340,24 @@ impl<'a> WriteSession<'a> {
         self.batches_written += 1;
 
         // Emit real-time metrics per spec § Standard Metrics
-        let _ = host_ffi::metric("dest-postgres", &self.stream_name, &Metric {
-            name: "records_written".to_string(),
-            value: MetricValue::Counter(self.total_rows),
-            labels: vec![],
-        });
-        let _ = host_ffi::metric("dest-postgres", &self.stream_name, &Metric {
-            name: "bytes_written".to_string(),
-            value: MetricValue::Counter(self.total_bytes),
-            labels: vec![],
-        });
+        let _ = host_ffi::metric(
+            "dest-postgres",
+            &self.stream_name,
+            &Metric {
+                name: "records_written".to_string(),
+                value: MetricValue::Counter(self.total_rows),
+                labels: vec![],
+            },
+        );
+        let _ = host_ffi::metric(
+            "dest-postgres",
+            &self.stream_name,
+            &Metric {
+                name: "bytes_written".to_string(),
+                value: MetricValue::Counter(self.total_bytes),
+                labels: vec![],
+            },
+        );
 
         // Checkpoint if any threshold is reached
         self.maybe_checkpoint().await?;
@@ -504,10 +509,7 @@ impl<'a> WriteSession<'a> {
 ///
 /// Also creates the target schema if it doesn't exist yet, since the watermark
 /// table must live in the same schema as the data tables.
-async fn ensure_watermarks_table(
-    client: &Client,
-    target_schema: &str,
-) -> Result<(), String> {
+async fn ensure_watermarks_table(client: &Client, target_schema: &str) -> Result<(), String> {
     let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", target_schema);
     client
         .execute(&create_schema, &[])
@@ -585,8 +587,8 @@ async fn set_watermark(
 /// Count the number of rows in an Arrow IPC byte buffer without writing them.
 fn count_ipc_rows(ipc_bytes: &[u8]) -> Result<u64, String> {
     let cursor = Cursor::new(ipc_bytes);
-    let reader = StreamReader::try_new(cursor, None)
-        .map_err(|e| format!("IPC decode failed: {}", e))?;
+    let reader =
+        StreamReader::try_new(cursor, None).map_err(|e| format!("IPC decode failed: {}", e))?;
     let mut total = 0u64;
     for batch in reader {
         let batch = batch.map_err(|e| format!("IPC batch read failed: {}", e))?;
@@ -602,10 +604,7 @@ async fn clear_watermark(
     stream_name: &str,
 ) -> Result<(), String> {
     let qualified = format!("\"{}\".__rb_watermarks", target_schema);
-    let sql = format!(
-        "DELETE FROM {} WHERE stream_name = $1",
-        qualified
-    );
+    let sql = format!("DELETE FROM {} WHERE stream_name = $1", qualified);
     client
         .execute(&sql, &[&stream_name])
         .await

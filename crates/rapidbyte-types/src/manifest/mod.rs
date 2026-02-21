@@ -1,154 +1,24 @@
+//! Connector manifest types, permissions, and role capability declarations.
+
+mod artifact;
+mod permissions;
+mod roles;
+
+pub use artifact::*;
+pub use permissions::*;
+pub use roles::*;
+
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{ConnectorRole, SyncMode, WriteMode};
+use crate::protocol::{ConnectorRole, ProtocolVersion};
 
-// ---------------------------------------------------------------------------
-// Permissions & WASI Sandbox Boundaries
-// ---------------------------------------------------------------------------
-
-/// TLS requirement for connector network access.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum TlsRequirement {
-    Required,
-    #[default]
-    Optional,
-    Forbidden,
-}
-
-/// Network permissions declared by a connector.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct NetworkPermissions {
-    /// Static list of allowed domains or IPs. Use ["*"] to allow all.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub allowed_domains: Option<Vec<String>>,
-
-    /// If true, the host can inspect validated config for fields like
-    /// "host" or "url" and dynamically allow network access at runtime.
-    #[serde(default)]
-    pub allow_runtime_config_domains: bool,
-
-    /// TLS requirement for outbound connections.
-    #[serde(default = "default_tls")]
-    pub tls: TlsRequirement,
-}
-
-fn default_tls() -> TlsRequirement {
-    TlsRequirement::Optional
-}
-
-/// Filesystem permissions for the WASI sandbox.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct FsPermissions {
-    /// Directories the connector needs mounted (read-only or read-write).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub preopens: Vec<String>,
-}
-
-/// Environment variable permissions for the WASI sandbox.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct EnvPermissions {
-    /// Environment variables this connector is explicitly allowed to read.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allowed_vars: Vec<String>,
-}
-
-/// Combined permissions controlling the WASI sandbox boundary.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct Permissions {
-    #[serde(default)]
-    pub network: NetworkPermissions,
-    #[serde(default)]
-    pub fs: FsPermissions,
-    #[serde(default)]
-    pub env: EnvPermissions,
-}
-
-// ---------------------------------------------------------------------------
-// Roles & Capabilities
-// ---------------------------------------------------------------------------
-
-/// Source-specific features.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceFeature {
-    Cdc,
-    Stateful,
-}
-
-/// Capabilities declared when a connector supports the Source role.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SourceCapabilities {
-    pub supported_sync_modes: Vec<SyncMode>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub features: Vec<SourceFeature>,
-}
-
-/// Destination-specific features.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum DestinationFeature {
-    ExactlyOnce,
-    SchemaAutoMigrate,
-    BulkLoadCopy,
-    BulkLoadCopyBinary,
-}
-
-/// Capabilities declared when a connector supports the Destination role.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct DestinationCapabilities {
-    pub supported_write_modes: Vec<WriteMode>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub features: Vec<DestinationFeature>,
-}
-
-/// Capabilities declared when a connector supports the Transform role.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct TransformCapabilities {}
-
-/// Capabilities declared when a connector supports the Utility role.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct UtilityCapabilities {}
-
-/// Role declarations — each `Some` variant means the connector supports that role.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
-pub struct Roles {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<SourceCapabilities>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub destination: Option<DestinationCapabilities>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transform: Option<TransformCapabilities>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub utility: Option<UtilityCapabilities>,
-}
-
-// ---------------------------------------------------------------------------
-// Artifact Metadata
-// ---------------------------------------------------------------------------
-
-/// Information about the WASM binary artifact.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ArtifactInfo {
-    /// WASM binary filename (e.g., "source_postgres.wasm").
-    pub entry_point: String,
-    /// Checksum of the WASM binary (e.g., "sha256:abcd1234...").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checksum: Option<String>,
-    /// Minimum recommended memory in MB.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub min_memory_mb: Option<u32>,
-}
-
-// ---------------------------------------------------------------------------
-// Root Manifest
-// ---------------------------------------------------------------------------
+pub const DEFAULT_MANIFEST_VERSION: &str = "1.0";
 
 fn default_manifest_version() -> String {
-    "1.0".to_string()
+    DEFAULT_MANIFEST_VERSION.to_string()
 }
 
-/// Connector manifest — declares identity, roles, capabilities, config schema,
+/// Connector manifest - declares identity, roles, capabilities, config schema,
 /// and security requirements.
 ///
 /// Stored as `<connector_name>.manifest.json` alongside the `.wasm` binary
@@ -159,7 +29,7 @@ pub struct ConnectorManifest {
     #[serde(default = "default_manifest_version")]
     pub manifest_version: String,
 
-    // -- Metadata --
+    // Metadata.
     /// Connector identifier (e.g., "rapidbyte/dest-postgres").
     pub id: String,
     /// Human-readable display name.
@@ -176,19 +46,19 @@ pub struct ConnectorManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
 
-    /// Protocol version this connector implements (e.g., "2").
-    pub protocol_version: String,
+    /// Protocol version this connector implements.
+    pub protocol_version: ProtocolVersion,
 
-    // -- Artifact --
+    // Artifact.
     /// WASM binary artifact info.
     pub artifact: ArtifactInfo,
 
-    // -- Security --
+    // Security.
     /// Permissions controlling the WASI sandbox boundary.
     #[serde(default)]
     pub permissions: Permissions,
 
-    // -- Roles --
+    // Roles.
     /// Role-specific capability declarations.
     pub roles: Roles,
 
@@ -213,7 +83,7 @@ impl ConnectorManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{SyncMode, WriteMode};
+    use crate::protocol::{ProtocolVersion, SyncMode, WriteMode};
 
     #[test]
     fn test_dest_manifest_roundtrip() {
@@ -225,7 +95,7 @@ mod tests {
             description: "Writes data to PostgreSQL using INSERT or COPY".to_string(),
             author: Some("Rapidbyte Inc.".to_string()),
             license: Some("Apache-2.0".to_string()),
-            protocol_version: "2".to_string(),
+            protocol_version: ProtocolVersion::V2,
             artifact: ArtifactInfo {
                 entry_point: "dest_postgres.wasm".to_string(),
                 checksum: None,
@@ -241,8 +111,8 @@ mod tests {
             },
             config_schema: None,
         };
-        let json = serde_json::to_string_pretty(&manifest).unwrap();
-        let back: ConnectorManifest = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string_pretty(&manifest).expect("serialize");
+        let back: ConnectorManifest = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(manifest, back);
     }
 
@@ -256,7 +126,7 @@ mod tests {
             description: "Reads from PostgreSQL".to_string(),
             author: None,
             license: None,
-            protocol_version: "2".to_string(),
+            protocol_version: ProtocolVersion::V2,
             artifact: ArtifactInfo {
                 entry_point: "source_postgres.wasm".to_string(),
                 checksum: None,
@@ -282,8 +152,8 @@ mod tests {
             },
             config_schema: None,
         };
-        let json = serde_json::to_string_pretty(&manifest).unwrap();
-        let back: ConnectorManifest = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string_pretty(&manifest).expect("serialize");
+        let back: ConnectorManifest = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(manifest, back);
         assert!(manifest.supports_role(ConnectorRole::Source));
         assert!(!manifest.supports_role(ConnectorRole::Destination));
@@ -299,7 +169,7 @@ mod tests {
             description: "Masks PII columns".to_string(),
             author: None,
             license: None,
-            protocol_version: "2".to_string(),
+            protocol_version: ProtocolVersion::V2,
             artifact: ArtifactInfo {
                 entry_point: "transform_mask.wasm".to_string(),
                 checksum: None,
@@ -380,7 +250,7 @@ mod tests {
                 }
             }
         }"#;
-        let manifest: ConnectorManifest = serde_json::from_str(json).unwrap();
+        let manifest: ConnectorManifest = serde_json::from_str(json).expect("deserialize");
         assert_eq!(manifest.id, "rapidbyte/dest-postgres");
         assert!(manifest.supports_role(ConnectorRole::Destination));
         assert!(!manifest.supports_role(ConnectorRole::Source));
@@ -391,8 +261,12 @@ mod tests {
         );
         assert_eq!(manifest.permissions.env.allowed_vars, vec!["PGSSLROOTCERT"]);
         assert!(manifest.config_schema.is_some());
-        let schema = manifest.config_schema.unwrap();
-        let required = schema.get("required").unwrap().as_array().unwrap();
+        let schema = manifest.config_schema.expect("schema");
+        let required = schema
+            .get("required")
+            .expect("required")
+            .as_array()
+            .expect("array");
         assert_eq!(required.len(), 4);
     }
 
@@ -406,7 +280,7 @@ mod tests {
             "artifact": { "entry_point": "test.wasm" },
             "roles": {}
         }"#;
-        let manifest: ConnectorManifest = serde_json::from_str(json).unwrap();
+        let manifest: ConnectorManifest = serde_json::from_str(json).expect("deserialize");
         assert_eq!(manifest.manifest_version, "1.0");
         assert!(manifest.permissions.env.allowed_vars.is_empty());
     }
@@ -421,7 +295,7 @@ mod tests {
             description: "".to_string(),
             author: None,
             license: None,
-            protocol_version: "2".to_string(),
+            protocol_version: ProtocolVersion::V2,
             artifact: ArtifactInfo {
                 entry_point: "pg_bidir.wasm".to_string(),
                 checksum: None,

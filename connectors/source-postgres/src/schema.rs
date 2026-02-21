@@ -1,30 +1,32 @@
-use rapidbyte_sdk::protocol::{ColumnSchema, Stream, SyncMode};
+use rapidbyte_sdk::protocol::{ArrowDataType, ColumnSchema, Stream, SyncMode};
 use tokio_postgres::Client;
 
-/// Map PostgreSQL data types to Arrow-compatible type names.
-pub(crate) fn pg_type_to_arrow(pg_type: &str) -> &'static str {
+/// Map PostgreSQL data types to Arrow-compatible data types.
+pub(crate) fn pg_type_to_arrow(pg_type: &str) -> ArrowDataType {
     match pg_type {
-        "integer" | "int4" | "serial" => "Int32",
-        "bigint" | "int8" | "bigserial" => "Int64",
-        "smallint" | "int2" => "Int16",
-        "real" | "float4" => "Float32",
-        "double precision" | "float8" => "Float64",
-        "boolean" | "bool" => "Boolean",
-        "text" | "varchar" | "character varying" | "char" | "character" | "name" => "Utf8",
+        "integer" | "int4" | "serial" => ArrowDataType::Int32,
+        "bigint" | "int8" | "bigserial" => ArrowDataType::Int64,
+        "smallint" | "int2" => ArrowDataType::Int16,
+        "real" | "float4" => ArrowDataType::Float32,
+        "double precision" | "float8" => ArrowDataType::Float64,
+        "boolean" | "bool" => ArrowDataType::Boolean,
+        "text" | "varchar" | "character varying" | "char" | "character" | "name" => {
+            ArrowDataType::Utf8
+        }
         // For v0.1, represent complex types as strings
         "timestamp without time zone"
         | "timestamp with time zone"
         | "timestamp"
-        | "timestamptz" => "Utf8",
-        "date" => "Utf8",
-        "time" | "time without time zone" | "time with time zone" => "Utf8",
-        "numeric" | "decimal" => "Utf8",
-        "json" | "jsonb" => "Utf8",
-        "uuid" => "Utf8",
-        "bytea" => "Utf8",
-        "inet" | "cidr" | "macaddr" => "Utf8",
-        "interval" => "Utf8",
-        _ => "Utf8", // Safe fallback
+        | "timestamptz" => ArrowDataType::Utf8,
+        "date" => ArrowDataType::Utf8,
+        "time" | "time without time zone" | "time with time zone" => ArrowDataType::Utf8,
+        "numeric" | "decimal" => ArrowDataType::Utf8,
+        "json" | "jsonb" => ArrowDataType::Utf8,
+        "uuid" => ArrowDataType::Utf8,
+        "bytea" => ArrowDataType::Utf8,
+        "inet" | "cidr" | "macaddr" => ArrowDataType::Utf8,
+        "interval" => ArrowDataType::Utf8,
+        _ => ArrowDataType::Utf8, // Safe fallback
     }
 }
 
@@ -64,7 +66,11 @@ pub async fn discover_catalog(client: &Client) -> Result<Vec<Stream>, String> {
                 streams.push(Stream {
                     name: prev_table,
                     schema: std::mem::take(&mut current_columns),
-                    supported_sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental, SyncMode::Cdc],
+                    supported_sync_modes: vec![
+                        SyncMode::FullRefresh,
+                        SyncMode::Incremental,
+                        SyncMode::Cdc,
+                    ],
                     source_defined_cursor: None,
                     source_defined_primary_key: None,
                 });
@@ -74,7 +80,7 @@ pub async fn discover_catalog(client: &Client) -> Result<Vec<Stream>, String> {
 
         current_columns.push(ColumnSchema {
             name: column_name,
-            data_type: pg_type_to_arrow(&data_type).to_string(),
+            data_type: pg_type_to_arrow(&data_type),
             nullable,
         });
     }

@@ -8,12 +8,12 @@ use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
 
+use crate::identifier::validate_pg_identifier;
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::protocol::{
     Checkpoint, CheckpointKind, ColumnSchema, CursorValue, Metric, MetricValue, ReadSummary,
     StreamContext,
 };
-use rapidbyte_sdk::validation::validate_pg_identifier;
 
 use crate::config::Config;
 use crate::schema::pg_type_to_arrow;
@@ -103,7 +103,7 @@ async fn read_cdc_inner(
             let nullable: bool = row.get::<_, String>(2) == "YES";
             ColumnSchema {
                 name,
-                data_type: pg_type_to_arrow(&data_type).to_string(),
+                data_type: pg_type_to_arrow(&data_type),
                 nullable,
             }
         })
@@ -119,8 +119,7 @@ async fn read_cdc_inner(
     // 4. Read changes from the slot (this CONSUMES them)
     // Limit WAL changes per invocation to prevent OOM on large backlogs.
     let max_changes = 100_000i64;
-    let changes_query =
-        "SELECT lsn::text, data FROM pg_logical_slot_get_changes($1, NULL, $2)";
+    let changes_query = "SELECT lsn::text, data FROM pg_logical_slot_get_changes($1, NULL, $2)";
     let change_rows = client
         .query(changes_query, &[&slot_name, &max_changes])
         .await
@@ -145,15 +144,16 @@ async fn read_cdc_inner(
         let data: String = row.get(1);
 
         // Track max LSN
-        if max_lsn.as_ref().map_or(true, |current| lsn_gt(&lsn, current)) {
+        if max_lsn
+            .as_ref()
+            .map_or(true, |current| lsn_gt(&lsn, current))
+        {
             max_lsn = Some(lsn.clone());
         }
 
         // Parse change line; skip BEGIN/COMMIT/non-matching tables
         if let Some(change) = parse_change_line(&data) {
-            if change.table == target_table
-                || change.table == ctx.stream_name
-            {
+            if change.table == target_table || change.table == ctx.stream_name {
                 accumulated_changes.push(change);
             }
         }
@@ -161,8 +161,7 @@ async fn read_cdc_inner(
         // Flush batch if accumulated enough
         if accumulated_changes.len() >= BATCH_SIZE {
             let encode_start = Instant::now();
-            let ipc_bytes =
-                changes_to_ipc(&accumulated_changes, &table_columns, &arrow_schema)?;
+            let ipc_bytes = changes_to_ipc(&accumulated_changes, &table_columns, &arrow_schema)?;
             arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
 
             total_records += accumulated_changes.len() as u64;
@@ -180,8 +179,7 @@ async fn read_cdc_inner(
     // Flush remaining changes
     if !accumulated_changes.is_empty() {
         let encode_start = Instant::now();
-        let ipc_bytes =
-            changes_to_ipc(&accumulated_changes, &table_columns, &arrow_schema)?;
+        let ipc_bytes = changes_to_ipc(&accumulated_changes, &table_columns, &arrow_schema)?;
         arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
 
         total_records += accumulated_changes.len() as u64;
@@ -208,23 +206,21 @@ async fn read_cdc_inner(
             bytes_processed: total_bytes,
         };
         // CDC uses get_changes (destructive) so checkpoint MUST succeed to avoid data loss.
-        host_ffi::checkpoint("source-postgres", &ctx.stream_name, &cp)
-            .map_err(|e| anyhow!("CDC checkpoint failed (WAL already consumed): {}", e.message))?;
+        host_ffi::checkpoint("source-postgres", &ctx.stream_name, &cp).map_err(|e| {
+            anyhow!(
+                "CDC checkpoint failed (WAL already consumed): {}",
+                e.message
+            )
+        })?;
         host_ffi::log(
             2,
-            &format!(
-                "CDC checkpoint: stream={} lsn={}",
-                ctx.stream_name, lsn
-            ),
+            &format!("CDC checkpoint: stream={} lsn={}", ctx.stream_name, lsn),
         );
         1u64
     } else {
         host_ffi::log(
             2,
-            &format!(
-                "CDC: no new changes for stream '{}'",
-                ctx.stream_name
-            ),
+            &format!("CDC: no new changes for stream '{}'", ctx.stream_name),
         );
         0u64
     };
@@ -272,7 +268,10 @@ async fn ensure_replication_slot(client: &Client, slot_name: &str) -> anyhow::Re
         Ok(_) => {
             host_ffi::log(
                 2,
-                &format!("Created replication slot '{}' with test_decoding", slot_name),
+                &format!(
+                    "Created replication slot '{}' with test_decoding",
+                    slot_name
+                ),
             );
         }
         Err(e) => {
@@ -534,16 +533,19 @@ fn emit_metrics(ctx: &StreamContext, total_records: u64, total_bytes: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rapidbyte_sdk::protocol::ArrowDataType;
 
     #[test]
     fn test_parse_insert_line() {
-        let line =
-            "table public.users: INSERT: id[integer]:1 name[text]:'John' active[boolean]:t";
+        let line = "table public.users: INSERT: id[integer]:1 name[text]:'John' active[boolean]:t";
         let change = parse_change_line(line).expect("should parse INSERT");
         assert_eq!(change.op, CdcOp::Insert);
         assert_eq!(change.table, "public.users");
         assert_eq!(change.columns.len(), 3);
-        assert_eq!(change.columns[0], ("id".into(), "integer".into(), "1".into()));
+        assert_eq!(
+            change.columns[0],
+            ("id".into(), "integer".into(), "1".into())
+        );
         assert_eq!(
             change.columns[1],
             ("name".into(), "text".into(), "John".into())
@@ -561,7 +563,10 @@ mod tests {
         assert_eq!(change.op, CdcOp::Update);
         assert_eq!(change.table, "public.users");
         assert_eq!(change.columns.len(), 2);
-        assert_eq!(change.columns[0], ("id".into(), "integer".into(), "1".into()));
+        assert_eq!(
+            change.columns[0],
+            ("id".into(), "integer".into(), "1".into())
+        );
         assert_eq!(
             change.columns[1],
             ("name".into(), "text".into(), "Jane".into())
@@ -575,7 +580,10 @@ mod tests {
         assert_eq!(change.op, CdcOp::Delete);
         assert_eq!(change.table, "public.users");
         assert_eq!(change.columns.len(), 1);
-        assert_eq!(change.columns[0], ("id".into(), "integer".into(), "1".into()));
+        assert_eq!(
+            change.columns[0],
+            ("id".into(), "integer".into(), "1".into())
+        );
     }
 
     #[test]
@@ -594,10 +602,7 @@ mod tests {
             "COMMIT 12345",
         ];
 
-        let changes: Vec<CdcChange> = lines
-            .into_iter()
-            .filter_map(parse_change_line)
-            .collect();
+        let changes: Vec<CdcChange> = lines.into_iter().filter_map(parse_change_line).collect();
 
         assert_eq!(changes.len(), 3);
         assert_eq!(changes[0].op, CdcOp::Insert);
@@ -608,10 +613,7 @@ mod tests {
     #[test]
     fn test_parse_empty_changes() {
         let lines: Vec<&str> = vec![];
-        let changes: Vec<CdcChange> = lines
-            .into_iter()
-            .filter_map(parse_change_line)
-            .collect();
+        let changes: Vec<CdcChange> = lines.into_iter().filter_map(parse_change_line).collect();
         assert!(changes.is_empty());
     }
 
@@ -672,7 +674,10 @@ mod tests {
         let line = "table public.orders: INSERT: id[integer]:42 amount[numeric]:123.45 qty[bigint]:1000000";
         let change = parse_change_line(line).unwrap();
         assert_eq!(change.columns.len(), 3);
-        assert_eq!(change.columns[0], ("id".into(), "integer".into(), "42".into()));
+        assert_eq!(
+            change.columns[0],
+            ("id".into(), "integer".into(), "42".into())
+        );
         assert_eq!(
             change.columns[1],
             ("amount".into(), "numeric".into(), "123.45".into())
@@ -685,7 +690,8 @@ mod tests {
 
     #[test]
     fn test_parse_boolean_values() {
-        let line = "table public.flags: INSERT: id[integer]:1 active[boolean]:t archived[boolean]:f";
+        let line =
+            "table public.flags: INSERT: id[integer]:1 active[boolean]:t archived[boolean]:f";
         let change = parse_change_line(line).unwrap();
         assert_eq!(
             change.columns[1],
@@ -709,12 +715,12 @@ mod tests {
         let columns = vec![
             ColumnSchema {
                 name: "id".to_string(),
-                data_type: "Int32".to_string(),
+                data_type: ArrowDataType::Int32,
                 nullable: false,
             },
             ColumnSchema {
                 name: "name".to_string(),
-                data_type: "Utf8".to_string(),
+                data_type: ArrowDataType::Utf8,
                 nullable: true,
             },
         ];
@@ -736,12 +742,12 @@ mod tests {
         let columns = vec![
             ColumnSchema {
                 name: "id".to_string(),
-                data_type: "Int32".to_string(),
+                data_type: ArrowDataType::Int32,
                 nullable: false,
             },
             ColumnSchema {
                 name: "name".to_string(),
-                data_type: "Utf8".to_string(),
+                data_type: ArrowDataType::Utf8,
                 nullable: true,
             },
         ];
@@ -759,9 +765,7 @@ mod tests {
             CdcChange {
                 op: CdcOp::Delete,
                 table: "public.users".to_string(),
-                columns: vec![
-                    ("id".to_string(), "integer".to_string(), "2".to_string()),
-                ],
+                columns: vec![("id".to_string(), "integer".to_string(), "2".to_string())],
             },
         ];
 
@@ -793,7 +797,11 @@ mod tests {
         let change = parse_change_line(line).unwrap();
         assert_eq!(
             change.columns[1],
-            ("name".into(), "text".into(), "\u{4f60}\u{597d}\u{4e16}\u{754c}".into())
+            (
+                "name".into(),
+                "text".into(),
+                "\u{4f60}\u{597d}\u{4e16}\u{754c}".into()
+            )
         );
     }
 

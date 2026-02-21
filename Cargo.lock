@@ -2145,7 +2145,7 @@ dependencies = [
  "anyhow",
  "clap",
  "rapidbyte-core",
- "rapidbyte-sdk",
+ "rapidbyte-types",
  "serde_json",
  "tokio",
  "tracing",
@@ -2162,7 +2162,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "lz4_flex",
- "rapidbyte-sdk",
+ "rapidbyte-types",
  "regex",
  "rusqlite",
  "serde",
@@ -2182,10 +2182,20 @@ dependencies = [
 name = "rapidbyte-sdk"
 version = "0.1.0"
 dependencies = [
+ "rapidbyte-types",
  "serde",
  "serde_json",
  "tokio",
  "wit-bindgen 0.46.0",
+]
+
+[[package]]
+name = "rapidbyte-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

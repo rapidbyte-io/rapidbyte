@@ -1,21 +1,24 @@
-pub mod config;
 mod cdc;
 mod client;
-pub mod schema;
+pub mod config;
+mod identifier;
 mod reader;
+pub mod schema;
 
 use std::time::Instant;
 
-use rapidbyte_sdk::connector::SourceConnector;
+use rapidbyte_sdk::connector::Source;
 use rapidbyte_sdk::errors::{ConnectorError, ValidationResult};
 use rapidbyte_sdk::host_ffi;
-use rapidbyte_sdk::protocol::{Catalog, ConnectorInfo, Feature, ReadSummary, StreamContext, SyncMode};
+use rapidbyte_sdk::protocol::{
+    Catalog, ConnectorInfo, Feature, ProtocolVersion, ReadSummary, StreamContext, SyncMode,
+};
 
 pub struct SourcePostgres {
     config: config::Config,
 }
 
-impl SourceConnector for SourcePostgres {
+impl Source for SourcePostgres {
     type Config = config::Config;
 
     async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
@@ -29,7 +32,7 @@ impl SourceConnector for SourcePostgres {
         Ok((
             Self { config },
             ConnectorInfo {
-                protocol_version: "2".to_string(),
+                protocol_version: ProtocolVersion::V2,
                 features: vec![Feature::Cdc],
                 default_max_batch_bytes: 64 * 1024 * 1024,
             },
@@ -58,16 +61,12 @@ impl SourceConnector for SourcePostgres {
         let connect_secs = connect_start.elapsed().as_secs_f64();
 
         match ctx.sync_mode {
-            SyncMode::Cdc => {
-                cdc::read_cdc_changes(&client, &ctx, &self.config, connect_secs)
-                    .await
-                    .map_err(|e| ConnectorError::internal("CDC_READ_FAILED", e))
-            }
-            _ => {
-                reader::read_stream(&client, &ctx, connect_secs)
-                    .await
-                    .map_err(|e| ConnectorError::internal("READ_FAILED", e))
-            }
+            SyncMode::Cdc => cdc::read_cdc_changes(&client, &ctx, &self.config, connect_secs)
+                .await
+                .map_err(|e| ConnectorError::internal("CDC_READ_FAILED", e)),
+            _ => reader::read_stream(&client, &ctx, connect_secs)
+                .await
+                .map_err(|e| ConnectorError::internal("READ_FAILED", e)),
         }
     }
 
@@ -77,4 +76,4 @@ impl SourceConnector for SourcePostgres {
     }
 }
 
-rapidbyte_sdk::source_connector_main!(SourcePostgres);
+rapidbyte_sdk::connector_main!(source, SourcePostgres);

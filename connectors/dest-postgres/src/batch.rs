@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Context};
-use arrow::array::{Array, AsArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array};
+use arrow::array::{
+    Array, AsArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+};
 use arrow::datatypes::{DataType, Schema};
 use arrow::ipc::reader::StreamReader;
 use arrow::record_batch::RecordBatch;
@@ -15,9 +17,10 @@ use futures_util::SinkExt;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::Client;
 
+use crate::identifier::validate_pg_identifier;
+use rapidbyte_sdk::errors::ErrorCategory;
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::protocol::{DataErrorPolicy, SchemaEvolutionPolicy, WriteMode};
-use rapidbyte_sdk::validation::validate_pg_identifier;
 
 use crate::ddl::ensure_table_and_schema;
 
@@ -39,7 +42,10 @@ pub(crate) enum TypedCol<'a> {
 }
 
 /// Pre-downcast active columns from a RecordBatch into TypedCol references.
-pub(crate) fn downcast_columns<'a>(batch: &'a RecordBatch, active_cols: &[usize]) -> Vec<TypedCol<'a>> {
+pub(crate) fn downcast_columns<'a>(
+    batch: &'a RecordBatch,
+    active_cols: &[usize],
+) -> Vec<TypedCol<'a>> {
     active_cols
         .iter()
         .map(|&i| {
@@ -279,7 +285,10 @@ async fn write_batch_inner(
         )),
         Err(e) => {
             if matches!(ctx.on_data_error, DataErrorPolicy::Fail) {
-                return Err(e.context(format!("{} failed for stream {}", method_name, ctx.stream_name)));
+                return Err(e.context(format!(
+                    "{} failed for stream {}",
+                    method_name, ctx.stream_name
+                )));
             }
             let emit_dlq = matches!(ctx.on_data_error, DataErrorPolicy::Dlq);
             host_ffi::log(
@@ -339,7 +348,13 @@ async fn insert_batch(
         ctx.type_null_columns,
     )
     .await
-    .map_err(|e| anyhow!("Failed to ensure table and schema for {}: {}", ctx.stream_name, e))?;
+    .map_err(|e| {
+        anyhow!(
+            "Failed to ensure table and schema for {}: {}",
+            ctx.stream_name,
+            e
+        )
+    })?;
 
     let active_cols = active_column_indices(arrow_schema, ctx.ignored_columns);
     if active_cols.is_empty() {
@@ -456,7 +471,13 @@ async fn copy_batch(
         ctx.type_null_columns,
     )
     .await
-    .map_err(|e| anyhow!("Failed to ensure table and schema for {}: {}", ctx.stream_name, e))?;
+    .map_err(|e| {
+        anyhow!(
+            "Failed to ensure table and schema for {}: {}",
+            ctx.stream_name,
+            e
+        )
+    })?;
 
     let active_cols = active_column_indices(arrow_schema, ctx.ignored_columns);
     if active_cols.is_empty() {
@@ -520,11 +541,7 @@ async fn copy_batch(
             .context("COPY send failed")?;
     }
 
-    let _rows = sink
-        .as_mut()
-        .finish()
-        .await
-        .context("COPY finish failed")?;
+    let _rows = sink.as_mut().finish().await.context("COPY finish failed")?;
 
     host_ffi::log(
         2,
@@ -556,7 +573,10 @@ async fn write_rows_individually(
 
     let active_cols = active_column_indices(arrow_schema, ignored_columns);
     if active_cols.is_empty() {
-        host_ffi::log(1, "dest-postgres: all columns ignored, skipping per-row writes");
+        host_ffi::log(
+            1,
+            "dest-postgres: all columns ignored, skipping per-row writes",
+        );
         return Ok(WriteResult {
             rows_written: 0,
             rows_failed: 0,
@@ -617,12 +637,13 @@ async fn write_rows_individually(
                         ),
                     );
                     if emit_dlq {
-                        let record_json = serialize_row_to_json(arrow_schema, batch, row_idx, &active_cols);
+                        let record_json =
+                            serialize_row_to_json(arrow_schema, batch, row_idx, &active_cols);
                         let _ = host_ffi::emit_dlq_record(
                             logical_stream_name,
                             &record_json,
                             &e.to_string(),
-                            "data",
+                            ErrorCategory::Data,
                         );
                     }
                 }
@@ -646,7 +667,10 @@ async fn write_rows_individually(
     })
 }
 
-fn active_column_indices(arrow_schema: &Arc<Schema>, ignored_columns: &HashSet<String>) -> Vec<usize> {
+fn active_column_indices(
+    arrow_schema: &Arc<Schema>,
+    ignored_columns: &HashSet<String>,
+) -> Vec<usize> {
     (0..arrow_schema.fields().len())
         .filter(|&i| !ignored_columns.contains(arrow_schema.field(i).name()))
         .collect()

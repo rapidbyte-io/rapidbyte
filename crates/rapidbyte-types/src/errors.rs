@@ -1,9 +1,7 @@
-use serde::{Deserialize, Serialize};
-use std::fmt;
+//! Typed connector error model shared across SDK and host runtime.
 
-// ---------------------------------------------------------------------------
-// Validation types (unchanged)
-// ---------------------------------------------------------------------------
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -19,29 +17,37 @@ pub struct ValidationResult {
     pub message: String,
 }
 
-// ---------------------------------------------------------------------------
-// Typed error model
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Error, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCategory {
+    #[error("config")]
     Config,
+    #[error("auth")]
     Auth,
+    #[error("permission")]
     Permission,
+    #[error("rate_limit")]
     RateLimit,
+    #[error("transient_network")]
     TransientNetwork,
+    #[error("transient_db")]
     TransientDb,
+    #[error("data")]
     Data,
+    #[error("schema")]
     Schema,
+    #[error("internal")]
     Internal,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Error, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorScope {
+    #[error("stream")]
     Stream,
+    #[error("batch")]
     Batch,
+    #[error("record")]
     Record,
 }
 
@@ -61,37 +67,44 @@ pub enum CommitState {
     AfterCommitConfirmed,
 }
 
-impl std::fmt::Display for ErrorCategory {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Config => write!(f, "config"),
-            Self::Auth => write!(f, "auth"),
-            Self::Permission => write!(f, "permission"),
-            Self::RateLimit => write!(f, "rate_limit"),
-            Self::TransientNetwork => write!(f, "transient_network"),
-            Self::TransientDb => write!(f, "transient_db"),
-            Self::Data => write!(f, "data"),
-            Self::Schema => write!(f, "schema"),
-            Self::Internal => write!(f, "internal"),
-        }
+/// Opaque error code following SCREAMING_SNAKE_CASE convention.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(transparent)]
+pub struct ErrorCode(pub String);
+
+impl ErrorCode {
+    pub fn new(code: impl Into<String>) -> Self {
+        Self(code.into())
     }
 }
 
-impl std::fmt::Display for ErrorScope {
+impl std::fmt::Display for ErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Stream => write!(f, "stream"),
-            Self::Batch => write!(f, "batch"),
-            Self::Record => write!(f, "record"),
-        }
+        f.write_str(&self.0)
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+impl From<&str> for ErrorCode {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for ErrorCode {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
+#[derive(Debug, Clone, Error, Serialize, Deserialize, PartialEq)]
+#[error(
+    "[{category}/{scope}] {code} ({retryability}): {message}",
+    retryability = if *.retryable { "retryable" } else { "fatal" }
+)]
 pub struct ConnectorError {
     pub category: ErrorCategory,
     pub scope: ErrorScope,
-    pub code: String,
+    pub code: ErrorCode,
     pub message: String,
     pub retryable: bool,
     pub retry_after_ms: Option<u64>,
@@ -102,10 +115,8 @@ pub struct ConnectorError {
 }
 
 impl ConnectorError {
-    // -- Category constructors that enforce invariants --
-
     /// Configuration error (not retryable).
-    pub fn config(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn config(code: impl Into<ErrorCode>, message: impl Into<String>) -> Self {
         Self {
             category: ErrorCategory::Config,
             scope: ErrorScope::Stream,
@@ -121,7 +132,7 @@ impl ConnectorError {
     }
 
     /// Authentication error (not retryable).
-    pub fn auth(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn auth(code: impl Into<ErrorCode>, message: impl Into<String>) -> Self {
         Self {
             category: ErrorCategory::Auth,
             scope: ErrorScope::Stream,
@@ -137,7 +148,7 @@ impl ConnectorError {
     }
 
     /// Permission error (not retryable).
-    pub fn permission(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn permission(code: impl Into<ErrorCode>, message: impl Into<String>) -> Self {
         Self {
             category: ErrorCategory::Permission,
             scope: ErrorScope::Stream,
@@ -154,7 +165,7 @@ impl ConnectorError {
 
     /// Rate limit error (retryable, slow backoff).
     pub fn rate_limit(
-        code: impl Into<String>,
+        code: impl Into<ErrorCode>,
         message: impl Into<String>,
         retry_after_ms: Option<u64>,
     ) -> Self {
@@ -173,7 +184,7 @@ impl ConnectorError {
     }
 
     /// Transient network error (retryable, normal backoff).
-    pub fn transient_network(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn transient_network(code: impl Into<ErrorCode>, message: impl Into<String>) -> Self {
         Self {
             category: ErrorCategory::TransientNetwork,
             scope: ErrorScope::Stream,
@@ -189,7 +200,7 @@ impl ConnectorError {
     }
 
     /// Transient database error (retryable, normal backoff).
-    pub fn transient_db(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn transient_db(code: impl Into<ErrorCode>, message: impl Into<String>) -> Self {
         Self {
             category: ErrorCategory::TransientDb,
             scope: ErrorScope::Stream,
@@ -205,7 +216,7 @@ impl ConnectorError {
     }
 
     /// Data error (not retryable, record scope).
-    pub fn data(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn data(code: impl Into<ErrorCode>, message: impl Into<String>) -> Self {
         Self {
             category: ErrorCategory::Data,
             scope: ErrorScope::Record,
@@ -221,7 +232,7 @@ impl ConnectorError {
     }
 
     /// Schema error (not retryable).
-    pub fn schema(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn schema(code: impl Into<ErrorCode>, message: impl Into<String>) -> Self {
         Self {
             category: ErrorCategory::Schema,
             scope: ErrorScope::Stream,
@@ -237,7 +248,7 @@ impl ConnectorError {
     }
 
     /// Internal error (not retryable).
-    pub fn internal(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn internal(code: impl Into<ErrorCode>, message: impl Into<String>) -> Self {
         Self {
             category: ErrorCategory::Internal,
             scope: ErrorScope::Stream,
@@ -251,8 +262,6 @@ impl ConnectorError {
             details: None,
         }
     }
-
-    // -- Builder methods --
 
     /// Attach structured details.
     pub fn with_details(mut self, details: serde_json::Value) -> Self {
@@ -280,22 +289,6 @@ impl ConnectorError {
     }
 }
 
-impl fmt::Display for ConnectorError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "[{}/{}] {} ({}): {}",
-            self.category,
-            self.scope,
-            self.code,
-            if self.retryable { "retryable" } else { "fatal" },
-            self.message
-        )
-    }
-}
-
-impl std::error::Error for ConnectorError {}
-
 /// Result type with typed errors including retry metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
@@ -314,8 +307,8 @@ mod tests {
             status: ValidationStatus::Success,
             message: "Connection successful".to_string(),
         };
-        let json = serde_json::to_string(&result).unwrap();
-        let back: ValidationResult = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&result).expect("serialize");
+        let back: ValidationResult = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(result, back);
     }
 
@@ -394,7 +387,7 @@ mod tests {
         let err = ConnectorError::data("INVALID_TYPE", "bad value")
             .with_details(serde_json::json!({"column": "age", "value": "abc"}));
         assert!(err.details.is_some());
-        assert_eq!(err.details.unwrap()["column"], "age");
+        assert_eq!(err.details.expect("details")["column"], "age");
     }
 
     #[test]
@@ -432,8 +425,8 @@ mod tests {
         let result: ConnectorResult<String> = ConnectorResult::Ok {
             data: "hello".to_string(),
         };
-        let json = serde_json::to_string(&result).unwrap();
-        let back: ConnectorResult<String> = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&result).expect("serialize");
+        let back: ConnectorResult<String> = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(result, back);
         assert!(json.contains("\"status\":\"ok\""));
     }
@@ -443,8 +436,8 @@ mod tests {
         let result: ConnectorResult<()> = ConnectorResult::Err {
             error: ConnectorError::config("BAD_HOST", "invalid host"),
         };
-        let json = serde_json::to_string(&result).unwrap();
-        let back: ConnectorResult<()> = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&result).expect("serialize");
+        let back: ConnectorResult<()> = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(result, back);
         assert!(json.contains("\"status\":\"err\""));
         assert!(json.contains("\"category\":\"config\""));
@@ -455,8 +448,8 @@ mod tests {
         let err = ConnectorError::rate_limit("TOO_MANY", "slow down", Some(1000))
             .with_details(serde_json::json!({"endpoint": "/api/data"}))
             .with_commit_state(CommitState::BeforeCommit);
-        let json = serde_json::to_string(&err).unwrap();
-        let back: ConnectorError = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&err).expect("serialize");
+        let back: ConnectorError = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(err, back);
     }
 }
