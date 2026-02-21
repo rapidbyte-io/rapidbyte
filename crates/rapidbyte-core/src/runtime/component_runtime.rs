@@ -757,7 +757,34 @@ impl ComponentHostState {
         match stream.write(&data) {
             Ok(n) => Ok(SocketWriteResultInternal::Written(n as u64)),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                Ok(SocketWriteResultInternal::WouldBlock)
+                // Poll for writability before returning WouldBlock.
+                // This prevents the guest from busy-looping at CPU speed.
+                #[cfg(unix)]
+                let ready = match wait_socket_ready(stream, SocketInterest::Write, socket_poll_timeout_ms()) {
+                    Ok(ready) => ready,
+                    Err(poll_err) => {
+                        tracing::warn!(handle, error = %poll_err, "poll() failed in socket_write");
+                        true // Let the next write() surface the real error
+                    }
+                };
+                #[cfg(not(unix))]
+                let ready = false;
+
+                if ready {
+                    match stream.write(&data) {
+                        Ok(n) => Ok(SocketWriteResultInternal::Written(n as u64)),
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            Ok(SocketWriteResultInternal::WouldBlock)
+                        }
+                        Err(e) => Err(ConnectorError::transient_network(
+                            "SOCKET_WRITE_FAILED",
+                            e.to_string(),
+                        )),
+                    }
+                } else {
+                    tracing::trace!(handle, "socket_write: WouldBlock after poll timeout");
+                    Ok(SocketWriteResultInternal::WouldBlock)
+                }
             }
             Err(e) => Err(ConnectorError::transient_network(
                 "SOCKET_WRITE_FAILED",
