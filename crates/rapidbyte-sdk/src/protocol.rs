@@ -37,23 +37,6 @@ pub enum WriteMode {
     Upsert { primary_key: Vec<String> },
 }
 
-// ---------------------------------------------------------------------------
-// Protocol types
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum ConfigBlob {
-    Json(serde_json::Value),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct OpenContext {
-    pub config: ConfigBlob,
-    pub connector_id: String,
-    pub connector_version: String,
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Feature {
@@ -395,26 +378,6 @@ mod tests {
         let json = serde_json::to_string(&mode).unwrap();
         let back: WriteMode = serde_json::from_str(&json).unwrap();
         assert_eq!(mode, back);
-    }
-
-    #[test]
-    fn test_config_blob_roundtrip() {
-        let blob = ConfigBlob::Json(serde_json::json!({"host": "localhost", "port": 5432}));
-        let json = serde_json::to_string(&blob).unwrap();
-        let back: ConfigBlob = serde_json::from_str(&json).unwrap();
-        assert_eq!(blob, back);
-    }
-
-    #[test]
-    fn test_open_context_roundtrip() {
-        let ctx = OpenContext {
-            config: ConfigBlob::Json(serde_json::json!({"dsn": "postgres://localhost"})),
-            connector_id: "source-postgres".to_string(),
-            connector_version: "0.1.0".to_string(),
-        };
-        let json = serde_json::to_string(&ctx).unwrap();
-        let back: OpenContext = serde_json::from_str(&json).unwrap();
-        assert_eq!(ctx, back);
     }
 
     #[test]
