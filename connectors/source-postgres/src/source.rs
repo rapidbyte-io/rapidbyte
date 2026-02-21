@@ -10,7 +10,7 @@ use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, SecondsFormat, Utc};
 use tokio_postgres::types::ToSql;
-use tokio_postgres::{Client, Config as PgConfig, NoTls};
+use tokio_postgres::Client;
 
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::protocol::{
@@ -18,37 +18,6 @@ use rapidbyte_sdk::protocol::{
     SyncMode,
 };
 use rapidbyte_sdk::validation::validate_pg_identifier;
-
-/// Connect to PostgreSQL using the provided config.
-pub async fn connect(config: &crate::config::Config) -> Result<Client, String> {
-    connect_inner(config).await.map_err(|e| e.to_string())
-}
-
-async fn connect_inner(config: &crate::config::Config) -> anyhow::Result<Client> {
-    let mut pg = PgConfig::new();
-    pg.host(&config.host);
-    pg.port(config.port);
-    pg.user(&config.user);
-    if !config.password.is_empty() {
-        pg.password(&config.password);
-    }
-    pg.dbname(&config.database);
-
-    let stream = rapidbyte_sdk::host_tcp::HostTcpStream::connect(&config.host, config.port)
-        .map_err(|e| anyhow!("Connection failed: {e}"))?;
-    let (client, connection) = pg
-        .connect_raw(stream, NoTls)
-        .await
-        .context("Connection failed")?;
-
-    tokio::spawn(async move {
-        if let Err(e) = connection.await {
-            host_ffi::log(0, &format!("PostgreSQL connection error: {}", e));
-        }
-    });
-
-    Ok(client)
-}
 
 /// Maximum number of rows per Arrow RecordBatch.
 const BATCH_SIZE: usize = 10_000;
