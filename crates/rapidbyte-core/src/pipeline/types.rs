@@ -311,4 +311,172 @@ destination:
             }
         );
     }
+
+    #[test]
+    fn test_on_data_error_dlq_accepted() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+  on_data_error: dlq
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.destination.on_data_error, DataErrorPolicy::Dlq);
+    }
+
+    #[test]
+    fn test_compression_lz4_accepted() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+resources:
+  compression: lz4
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.resources.compression, Some(CompressionCodec::Lz4));
+    }
+
+    #[test]
+    fn test_compression_zstd_accepted() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+resources:
+  compression: zstd
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.resources.compression, Some(CompressionCodec::Zstd));
+    }
+
+    #[test]
+    fn test_compression_absent_is_none() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.resources.compression, None);
+    }
+
+    #[test]
+    fn test_columns_projection_parsed() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+      columns: [id, name]
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.source.streams[0].columns,
+            Some(vec!["id".to_string(), "name".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_invalid_compression_rejected() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+resources:
+  compression: gzip
+"#;
+        assert!(serde_yaml::from_str::<PipelineConfig>(yaml).is_err());
+    }
+
+    #[test]
+    fn test_invalid_write_mode_rejected() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: truncate
+"#;
+        assert!(serde_yaml::from_str::<PipelineConfig>(yaml).is_err());
+    }
+
+    #[test]
+    fn test_invalid_sync_mode_rejected() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: snapshot
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+"#;
+        assert!(serde_yaml::from_str::<PipelineConfig>(yaml).is_err());
+    }
 }

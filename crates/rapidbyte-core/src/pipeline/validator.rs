@@ -150,4 +150,72 @@ resources:
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("max_inflight_batches"));
     }
+
+    #[test]
+    fn test_upsert_with_primary_key_passes() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test_upsert
+source:
+  use: source-postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+  write_mode: upsert
+  primary_key: [id]
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        assert!(validate_pipeline(&config).is_ok());
+    }
+
+    #[test]
+    fn test_incremental_with_cursor_passes() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test_incr
+source:
+  use: source-postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: incremental
+      cursor_field: id
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+  write_mode: append
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        assert!(validate_pipeline(&config).is_ok());
+    }
+
+    #[test]
+    fn test_replace_write_mode_passes() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test_replace
+source:
+  use: source-postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+  write_mode: replace
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        assert!(validate_pipeline(&config).is_ok());
+    }
 }
