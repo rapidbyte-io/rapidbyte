@@ -31,12 +31,12 @@ fmt:
 lint:
     cargo clippy --all-targets -- -D warnings
 
-e2e:
-    ./tests/e2e.sh
+e2e *args="":
+    ./tests/e2e.sh {{args}}
 
-# Run a single E2E scenario by name (e.g. just e2e-scenario 01_full_refresh)
-e2e-scenario name:
-    RAPIDBYTE_CONNECTOR_DIR=target/connectors bash tests/e2e/{{name}}.sh
+# Run a single E2E scenario (e.g. just e2e-scenario postgres/scenarios/01_full_refresh)
+e2e-scenario path:
+    RAPIDBYTE_CONNECTOR_DIR=target/connectors bash tests/connectors/{{path}}.sh
 
 # Run benchmarks: bench [CONNECTOR] [ROWS] [--iters N] [--profile]
 bench *args="":
