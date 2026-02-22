@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib/helpers.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/helpers.sh"
 
 section "Setup: Build and Stage"
 

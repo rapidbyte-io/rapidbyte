@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Shared E2E test helpers. Source this file, do not execute directly.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+_HELPERS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$_HELPERS_DIR/../.." && pwd)"
 CONNECTOR_DIR="$PROJECT_ROOT/target/connectors"
 COMPOSE_FILE="$PROJECT_ROOT/docker-compose.yml"
 
