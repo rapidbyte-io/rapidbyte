@@ -5,10 +5,10 @@ Guide to running benchmarks, profiling, and tracking performance regressions in 
 ## Quick Start
 
 ```bash
-just bench-connector-postgres
+just bench
 ```
 
-This runs 3 iterations each of INSERT and COPY modes against 10,000 rows, then prints a comparison report.
+This runs 3 iterations each of INSERT and COPY modes against 10,000 rows, then prints a criterion-style comparison report.
 
 ## Prerequisites
 
@@ -16,20 +16,22 @@ This runs 3 iterations each of INSERT and COPY modes against 10,000 rows, then p
 - **Wasmtime** — component runtime used by the host
 - **Python 3** — used by the reporting scripts
 - **samply** (optional) — `cargo install samply` for CPU profiling
+- **Criterion** — Rust micro-benchmarks use criterion 0.5 (dev-dependency)
 
 ## Running Benchmarks
 
-### bench.sh
+### E2E Pipeline Benchmarks
 
-The main benchmark script. Builds everything, starts PostgreSQL, seeds data, runs both INSERT and COPY modes, and prints a comparison table.
+The main benchmark orchestrator. Builds everything, starts PostgreSQL, seeds data, runs all configured modes, and prints a comparison table.
 
 ```bash
-./tests/bench.sh [OPTIONS]
+./bench/bench.sh [CONNECTOR] [ROWS] [OPTIONS]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--rows N` | 10000 | Number of rows to seed and benchmark |
+| `CONNECTOR` | (all) | Connector name (e.g. postgres). Omit to bench all. |
+| `ROWS` | 10000 | Number of rows to seed and benchmark |
 | `--iters N` | 3 | Iterations per mode (INSERT and COPY) |
 | `--aot` | on | Enable Wasmtime AOT cache |
 | `--no-aot` | off override | Disable Wasmtime AOT cache |
@@ -39,29 +41,43 @@ The main benchmark script. Builds everything, starts PostgreSQL, seeds data, run
 Examples:
 
 ```bash
-# 100K rows, 5 iterations
-./tests/bench.sh --rows 100000 --iters 5
+# All connectors, default settings
+just bench
+
+# Postgres only, 100K rows, 5 iterations
+just bench postgres 100000 --iters 5
 
 # Debug build
-./tests/bench.sh --debug --no-aot
+just bench postgres --debug --no-aot
 
 # Benchmark + flamegraph at the end
-./tests/bench.sh --rows 50000 --profile
+just bench postgres 50000 --profile
 ```
+
+### Criterion Micro-Benchmarks
+
+Rust-native benchmarks using Criterion 0.5 for hot-path operations:
+
+```bash
+# Run all criterion benchmarks
+cargo bench
+
+# Arrow IPC codec benchmarks only
+cargo bench --bench arrow_codec
+
+# State backend benchmarks only
+cargo bench --bench state_backend
+```
+
+HTML reports are generated in `target/criterion/`.
 
 ### Justfile Targets
 
 | Target | Description |
 |--------|-------------|
-| `just bench-connector-postgres` | INSERT vs COPY comparison (10K rows, 3 iters) |
-| `just bench-connector-postgres 100000` | Same with custom row count |
-| `just bench-connector-postgres-profile` | Benchmark + flamegraph |
-| `just bench-connector-postgres-profile 50000` | Profiled run with custom rows |
-| `just bench-profile` | Standalone flamegraph (10K rows, INSERT) |
-| `just bench-profile 50000 copy` | Flamegraph with custom rows and mode |
-| `just bench-matrix` | Row-count sweep (1K, 10K, 100K) |
-| `just bench-compare ref1 ref2` | Benchmark two git refs and compare |
-| `just bench-results` | View/compare past benchmark results |
+| `just bench` | Run E2E pipeline benchmarks (all connectors, defaults) |
+| `just bench postgres 50000` | Benchmark postgres with 50K rows |
+| `just bench-compare ref1 ref2` | Compare benchmarks between two git refs |
 
 ## Profiling with samply
 
@@ -69,92 +85,30 @@ Uses [samply](https://github.com/mstange/samply) for CPU profiling with full sym
 
 Install: `cargo install samply`
 
-### Standalone Profiler
-
-`bench_profile.sh` records a CPU profile for a single pipeline run. It builds with debug symbols and invokes `samply record`.
-
-```bash
-./tests/bench_profile.sh [ROWS] [MODE]
-```
-
-- `ROWS` — row count (default: 10000)
-- `MODE` — `insert` or `copy` (default: insert)
-
-```bash
-# Profile COPY mode with 50K rows
-./tests/bench_profile.sh 50000 copy
-
-# Or via just
-just bench-profile 50000 copy
-```
-
-Output: `target/profiles/profile_<rows>rows_<mode>_<timestamp>.json`
-
-View with: `samply load <profile.json>` — opens Firefox Profiler in your browser with full call stacks, source-level mapping, and flame charts.
-
 ### Integrated Profiling
 
 Pass `--profile` to `bench.sh` to run the normal benchmark iterations first, then record a profile:
 
 ```bash
-./tests/bench.sh --rows 10000 --profile
-# or
-just bench-connector-postgres-profile
+just bench postgres --profile
 ```
 
-This uses the INSERT pipeline for the profiling run.
+Output: `target/profiles/profile_<rows>rows_insert_<timestamp>.json`
 
-## Benchmark Matrix
-
-`bench_matrix.sh` sweeps across multiple row counts, running `bench.sh` for each:
-
-```bash
-./tests/bench_matrix.sh [OPTIONS]
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--rows "N1 N2 ..."` | `"1000 10000 100000"` | Space-separated row counts |
-| `--iters N` | 3 | Iterations per mode per row count |
-
-Environment variables also work:
-
-```bash
-BENCH_MATRIX_ROWS="5000 50000 500000" BENCH_MATRIX_ITERS=5 ./tests/bench_matrix.sh
-```
-
-Or via just:
-
-```bash
-just bench-matrix
-just bench-matrix --rows "1000 50000" --iters 2
-```
+View with: `samply load <profile.json>` — opens Firefox Profiler in your browser with full call stacks, source-level mapping, and flame charts.
 
 ## Regression Tracking
 
-Every benchmark run appends enriched JSON results to `target/bench_results/results.jsonl`. Each line includes:
-
-- All `PipelineResult` timing fields
-- `timestamp` — ISO 8601
-- `mode` — `insert` or `copy`
-- `bench_rows` — row count
-- `aot` — whether Wasmtime AOT cache was enabled for this run
-- `git_sha` — short commit hash
-- `git_branch` — current branch
-
 ### Comparing Two Git Refs
 
-The easiest way to compare performance across commits is `bench_compare.sh`, which checks out each ref, builds, benchmarks, and shows a comparison — all in one command:
+`compare.sh` checks out each ref, builds, benchmarks, and shows a comparison — all in one command:
 
 ```bash
 # Compare main vs your feature branch
 just bench-compare main my-feature
 
-# Compare last two commits with 100K rows
-just bench-compare HEAD~1 HEAD --rows 100000
-
-# Compare tags
-just bench-compare v0.1.0 v0.2.0 --iters 5
+# Compare with options
+just bench-compare HEAD~1 HEAD --connector postgres --rows 100000
 ```
 
 The script:
@@ -166,120 +120,60 @@ The script:
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--connector NAME` | (all) | Benchmark only this connector |
 | `--rows N` | 10000 | Number of rows to benchmark |
 | `--iters N` | 3 | Iterations per mode |
 | `--aot` | on | Enable Wasmtime AOT cache |
 | `--no-aot` | off override | Disable Wasmtime AOT cache |
 
+**Note:** Both refs must have the new `bench/` directory structure. Comparing against refs from before the benchmark refactor is not supported.
+
 ### Viewing Past Results
 
-Use `bench_compare.py` to view and compare results already stored in `results.jsonl`:
+Use `bench/analyze.py` to view and compare results already stored in `results.jsonl`:
 
 ```bash
 # Compare last 2 runs
-just bench-results
+python3 bench/analyze.py
 
 # Show last 5 runs
-just bench-results --last 5
+python3 bench/analyze.py --last 5
 
 # Compare specific commits
-just bench-results --sha abc1234 def5678
+python3 bench/analyze.py --sha abc1234 def5678
 
 # Filter by row count
-just bench-results --rows 100000
+python3 bench/analyze.py --rows 100000
 ```
 
-The output shows per-metric averages for each SHA and, when comparing exactly 2, the percentage change:
-
-```
-============================================================
-  Mode: INSERT
-============================================================
-  Metric                    abc1234     def5678      Change
-  ----------------------  ----------  ----------  ----------
-  Duration (s)                 1.234       1.100     -10.9%
-  Source (s)                   0.450       0.440      -2.2%
-  Dest (s)                     0.780       0.655     -16.0%
-  ...
-```
-
-### Manual Workflow
-
-If you prefer to benchmark refs separately (e.g., to avoid checkout):
-
-```bash
-# 1. Benchmark on main
-git checkout main
-just bench-connector-postgres
-
-# 2. Benchmark on your branch
-git checkout my-feature
-just bench-connector-postgres
-
-# 3. Compare
-just bench-results
-```
+Every benchmark run appends enriched JSON results to `target/bench_results/results.jsonl`. Each line includes all `PipelineResult` timing fields plus metadata: `timestamp`, `mode`, `bench_rows`, `aot`, `git_sha`, `git_branch`.
 
 ## Understanding the Output
 
-### Human-Readable Output
+### Criterion-Style Report
 
-Each `rapidbyte run` prints a breakdown after completion:
-
-```
-Pipeline 'bench_pg' completed successfully.
-  Records read:    10000
-  Records written: 0
-  Bytes read:      1.14 MB
-  Bytes written:   0 B
-  Avg row size:    120 B
-  Duration:        1.23s
-  Throughput:      8130 rows/sec, 0.93 MB/s
-  Source duration:  0.45s
-    Connect:       0.012s
-    Query:         0.001s
-    Fetch:         0.430s
-    Arrow encode:  0.050s
-  Dest duration:   0.78s
-    VM setup:      0.005s
-    Recv loop:     0.770s
-    Connect:       0.015s
-    Flush:         0.700s
-    Arrow decode:  0.030s
-    Commit:        0.020s
-    WASM overhead: 0.030s
-  Host emit_batch: 0.050s (10 calls)
-  Host next_batch: 0.040s (10 calls)
-  Source load:     4ms
-  Dest load:       4ms
-```
-
-### Machine-Readable JSON
-
-Every run also emits a JSON line prefixed with `@@BENCH_JSON@@`:
+`bench.sh` prints a statistical report after all iterations:
 
 ```
-@@BENCH_JSON@@{"records_read":10000,"duration_secs":1.23,...}
-```
+  Dataset:     10,000 rows, 1.14 MB (120 B/row)
+  Samples:     3 INSERT, 3 COPY
 
-`bench.sh` parses this line to collect per-iteration results. The JSON contains all fields from `PipelineResult`.
+  connector-postgres/insert/10000
+                        time:   [1.1902 1.2340 1.2778] s
+                        thrpt:  [7,826 8,104 8,401] rows/s
+                                [0.89 0.93 0.96] MB/s
 
-### Comparison Report
+  connector-postgres/copy/10000
+                        time:   [0.8512 0.8900 0.9288] s
+                        thrpt:  [10,766 11,236 11,748] rows/s
+                                [1.23 1.28 1.34] MB/s
 
-`bench.sh` prints a side-by-side table after all iterations:
+  COPY vs INSERT:  1.39x faster
 
-```
-  Dataset:     10000 rows, 1.14 MB (120 B/row)
-  Iterations:  3 per mode
-
-  Metric (avg)              INSERT        COPY     Speedup
+  Metric (mean)           INSERT          COPY     Speedup
   ----------------------  ----------  ----------  ----------
-  Total duration               1.234       0.890       1.4x
-  Dest duration                0.780       0.430       1.8x
-    Flush                      0.700       0.350       2.0x
-    ...
-  Throughput (rows/s)         8,130      11,236       1.4x
-  Throughput (MB/s)            0.93        1.28       1.4x
+  Total duration            1.2340s       0.8900s      1.4x
+  ...
 ```
 
 ### Timing Hierarchy
@@ -311,7 +205,7 @@ Note: source and destination run on separate threads. `duration_secs` is wall-cl
 
 ## Pipeline Variants
 
-Four benchmark pipeline YAMLs are provided in `tests/fixtures/pipelines/`:
+Four benchmark pipeline YAMLs are provided in `bench/fixtures/pipelines/`:
 
 | File | Load Method | Compression | Notes |
 |------|-------------|-------------|-------|
@@ -347,71 +241,22 @@ resources:
   compression: lz4   # or "zstd", omit for no compression
 ```
 
-Compression/decompression happens in host functions (`host_emit_batch` / `host_next_batch`), transparent to WASI connectors. Compression time is tracked in `source_compress_nanos` and `dest_decompress_nanos`.
-
 To benchmark with compression, run the pipeline directly:
 
 ```bash
-rapidbyte run tests/fixtures/pipelines/bench_pg_lz4.yaml
-rapidbyte run tests/fixtures/pipelines/bench_pg_zstd.yaml
+rapidbyte run bench/fixtures/pipelines/bench_pg_lz4.yaml
+rapidbyte run bench/fixtures/pipelines/bench_pg_zstd.yaml
 ```
 
-### Backpressure
+## Adding a New Connector Benchmark
 
-Channel capacity between source and destination is configurable:
-
-```yaml
-resources:
-  max_inflight_batches: 16  # default
-```
-
-## Internals
-
-### HostTimings
-
-Defined in `crates/rapidbyte-core/src/runtime/component_runtime.rs`:
-
-```rust
-pub struct HostTimings {
-    pub emit_batch_nanos: u64,    // total time in emit-batch host import
-    pub next_batch_nanos: u64,    // total time in next-batch host import
-    pub compress_nanos: u64,      // time spent compressing (LZ4/Zstd)
-    pub decompress_nanos: u64,    // time spent decompressing
-    pub emit_batch_count: u64,    // number of emit_batch calls
-    pub next_batch_count: u64,    // number of next_batch calls
-}
-```
-
-These are accumulated by the host functions during a pipeline run and reported in `PipelineResult`.
-
-### PipelineResult
-
-Defined in `crates/rapidbyte-core/src/engine/runner.rs`. Contains all timing and stats fields emitted in the `@@BENCH_JSON@@` output. Key categories:
-
-- **Counters**: `records_read`, `records_written`, `bytes_read`, `bytes_written`
-- **Wall-clock**: `duration_secs`, `source_duration_secs`, `dest_duration_secs`
-- **Module loading**: `source_module_load_ms`, `dest_module_load_ms`
-- **Source sub-phases**: `source_connect_secs`, `source_query_secs`, `source_fetch_secs`, `source_arrow_encode_secs`
-- **Dest sub-phases**: `dest_connect_secs`, `dest_flush_secs`, `dest_arrow_decode_secs`, `dest_commit_secs`, `dest_vm_setup_secs`, `dest_recv_secs`, `wasm_overhead_secs`
-- **Host functions**: `source_emit_nanos/count`, `source_compress_nanos`, `dest_recv_nanos/count`, `dest_decompress_nanos`
-- **Transforms**: `transform_count`, `transform_duration_secs`, `transform_module_load_ms`
-- **Retries**: `retry_count`
-
-### Benchmark Dataset
-
-`tests/fixtures/sql/bench_seed.sql` creates a `bench_events` table:
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | SERIAL | Auto-increment PK |
-| `event_type` | TEXT | Cycles: click, purchase, view, signup, logout |
-| `user_id` | INTEGER | Modulo 1000 |
-| `amount` | INTEGER | Deterministic from row index |
-| `is_active` | BOOLEAN | 2/3 true, 1/3 false |
-| `payload` | TEXT | ~60 bytes per row (`payload-N-xxx...`) |
-| `created_at` | TIMESTAMP | Spread across 24 hours |
-
-Row count is controlled by the `bench_rows` psql variable. Average row size is ~120 bytes in Arrow IPC format.
+1. Create `bench/connectors/<name>/` with 4 files:
+   - `config.sh` — `BENCH_DEFAULT_ROWS`, `BENCH_MODES`, `BENCH_PIPELINES`
+   - `setup.sh` — Start infrastructure, seed data
+   - `run.sh` — Iterate modes, collect results, call `criterion_report`
+   - `teardown.sh` — Clean per-run state
+2. Add pipeline YAMLs to `bench/fixtures/pipelines/`
+3. Run: `just bench <name>`
 
 ## Troubleshooting
 
@@ -427,4 +272,4 @@ Row count is controlled by the `bench_rows` psql variable. Average row size is ~
 
 **No results for bench-compare** — Results are stored in `target/bench_results/results.jsonl`. This file is created on the first `bench.sh` run. Clean builds (`cargo clean`) do not delete it since it's under `target/bench_results/`, but manually deleting `target/` will.
 
-**Compression fields are 0** — Compression timing only appears when a pipeline has `resources.compression` set. The default `bench_pg.yaml` and `bench_pg_copy.yaml` do not use compression.
+**Bash 4+ required** — The connector config scripts use associative arrays (`declare -A`) which require bash 4+. macOS ships with bash 3.2; install a modern bash via Homebrew (`brew install bash`).

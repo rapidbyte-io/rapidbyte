@@ -13,7 +13,8 @@ cleanup() {
                 /tmp/rapidbyte_e2e_incr_state.db \
                 /tmp/rapidbyte_e2e_replace_state.db \
                 /tmp/rapidbyte_e2e_upsert_state.db \
-                /tmp/rapidbyte_e2e_all_types_state.db
+                /tmp/rapidbyte_e2e_all_types_state.db \
+                /tmp/rapidbyte_e2e_cdc_state.db
 }
 trap cleanup EXIT
 

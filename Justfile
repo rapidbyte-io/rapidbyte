@@ -38,9 +38,13 @@ e2e:
 e2e-scenario name:
     RAPIDBYTE_CONNECTOR_DIR=target/connectors bash tests/e2e/{{name}}.sh
 
-# Benchmark postgres connectors: INSERT vs COPY comparison (10K rows default)
-bench-connector-postgres rows="10000":
-    ./tests/bench.sh --rows {{rows}} --iters 3
+# Run benchmarks: bench [CONNECTOR] [ROWS] [--iters N] [--profile]
+bench *args="":
+    ./bench/bench.sh {{args}}
+
+# Compare benchmarks between two git refs
+bench-compare ref1 ref2 *args="":
+    ./bench/compare.sh {{ref1}} {{ref2}} {{args}}
 
 # Scaffold a new connector project
 scaffold name output=("connectors/" + name):
@@ -48,26 +52,6 @@ scaffold name output=("connectors/" + name):
 
 clean:
     cargo clean
-
-# Profile a benchmark run and generate flamegraph
-bench-profile rows="10000" mode="insert":
-    ./tests/bench_profile.sh {{rows}} {{mode}}
-
-# Benchmark with flamegraph profiling at the end
-bench-connector-postgres-profile rows="10000":
-    ./tests/bench.sh --rows {{rows}} --iters 3 --profile
-
-# Run benchmark matrix across row counts
-bench-matrix *args="":
-    ./tests/bench_matrix.sh {{args}}
-
-# Compare benchmarks between two git refs
-bench-compare ref1 ref2 *args="":
-    ./tests/bench_compare.sh {{ref1}} {{ref2}} {{args}}
-
-# View/compare past benchmark results
-bench-results *args="":
-    python3 tests/bench_compare.py {{args}}
 
 sccache-stats:
     sccache --show-stats

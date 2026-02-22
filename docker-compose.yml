@@ -7,6 +7,12 @@ services:
       POSTGRES_DB: rapidbyte_test
     ports:
       - "5433:5432"
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=4
     volumes:
       - ./tests/fixtures/sql/source_seed.sql:/docker-entrypoint-initdb.d/01_seed.sql:ro
       - ./tests/fixtures/sql/all_types.sql:/docker-entrypoint-initdb.d/02_all_types.sql:ro

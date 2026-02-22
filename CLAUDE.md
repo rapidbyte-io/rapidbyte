@@ -13,9 +13,17 @@ connectors/
   source-postgres/   # Source connector (wasm32-wasip2 target)
   dest-postgres/     # Destination connector (wasm32-wasip2 target)
 tests/
-  e2e.sh             # End-to-end test (Docker PG)
-  bench.sh           # Benchmark script (variable row counts)
+  e2e.sh             # End-to-end test orchestrator (Docker PG)
+  e2e/               # Individual E2E test scenarios
+  lib/               # Shared test helpers
   fixtures/          # SQL seeds, pipeline YAMLs
+bench/
+  bench.sh           # Benchmark orchestrator (auto-discovers connectors)
+  compare.sh         # Compare benchmarks between git refs
+  lib/               # Shared helpers, criterion-style report generator
+  connectors/        # Per-connector benchmarks (postgres/)
+  fixtures/          # Bench SQL seeds, pipeline YAMLs
+  analyze.py         # Historical results viewer
 ```
 
 - Workspace has 3 crates. Connectors are excluded from workspace and build separately.
@@ -28,7 +36,12 @@ just build              # Build host binary
 just build-connectors   # Build both connectors (wasm32-wasip2)
 just test               # cargo test --workspace (host tests)
 just e2e                # Full E2E: build, Docker PG, pipeline, verify
-just bench-connector-postgres       # Benchmark: INSERT vs COPY comparison
+just bench              # All connectors, default rows
+just bench postgres     # Postgres connector, default rows
+just bench postgres 50000           # Postgres, 50K rows
+just bench postgres 50000 --iters 5 # Postgres, 50K rows, 5 iterations
+just bench-compare main feature     # Compare benchmarks between refs
+cargo bench             # Criterion micro-benchmarks (Arrow codec, state backend)
 just fmt                # cargo fmt
 just lint               # cargo clippy
 ```

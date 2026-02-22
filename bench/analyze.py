@@ -2,9 +2,9 @@
 """Compare benchmark results across runs.
 
 Usage:
-    python3 tests/bench_compare.py                    # Compare last 2 runs
-    python3 tests/bench_compare.py --last 5           # Show last 5 runs
-    python3 tests/bench_compare.py --sha abc123 def456  # Compare specific commits
+    python3 bench/analyze.py                    # Compare last 2 runs
+    python3 bench/analyze.py --last 5           # Show last 5 runs
+    python3 bench/analyze.py --sha abc123 def456  # Compare specific commits
 """
 import argparse
 import json
@@ -17,7 +17,7 @@ RESULTS_FILE = Path(__file__).parent.parent / "target" / "bench_results" / "resu
 def load_results():
     if not RESULTS_FILE.exists():
         print("No benchmark results found.")
-        print("Run a benchmark first:  just bench-connector-postgres")
+        print("Run a benchmark first:  just bench")
         print("Then compare runs:      just bench-compare")
         sys.exit(1)
     results = []

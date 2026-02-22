@@ -12,6 +12,7 @@ info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
 warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 fail()  { echo -e "${RED}[FAIL]${NC}  $*"; exit 1; }
 pass()  { echo -e "${GREEN}[PASS]${NC}  $*"; }
+cyan()  { echo -e "${CYAN}$*${NC}"; }
 section() { echo -e "\n${CYAN}=== $* ===${NC}"; }
 
 # Execute SQL against the test database, return trimmed result.

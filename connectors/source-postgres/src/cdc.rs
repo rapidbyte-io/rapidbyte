@@ -27,7 +27,8 @@ use crate::schema::pg_type_to_arrow;
 const BATCH_SIZE: usize = 10_000;
 
 /// Maximum WAL changes consumed per CDC invocation to avoid unbounded memory use.
-const CDC_MAX_CHANGES: i64 = 100_000;
+/// Type is i32 because pg_logical_slot_get_changes() expects int4.
+const CDC_MAX_CHANGES: i32 = 100_000;
 
 /// Default replication slot prefix. Full slot names are `rapidbyte_{stream_name}`.
 const SLOT_PREFIX: &str = "rapidbyte_";
