@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context};
 use arrow::datatypes::Schema;
+use chrono::NaiveDateTime;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::host_ffi;
@@ -227,7 +228,7 @@ async fn read_stream_inner(
         .await
         .context("BEGIN failed")?;
 
-    let cursor_query = build_base_query(ctx, &columns)?;
+    let cursor_query = build_base_query(ctx, &columns, &pg_types)?;
 
     let declare = format!(
         "DECLARE {} NO SCROLL CURSOR FOR {}",
@@ -386,7 +387,22 @@ async fn read_stream_inner(
                             .try_get::<_, String>(col_idx)
                             .ok()
                             .or_else(|| row.try_get::<_, i64>(col_idx).ok().map(|n| n.to_string()))
-                            .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(|n| n.to_string()));
+                            .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(|n| n.to_string()))
+                            .or_else(|| {
+                                row.try_get::<_, NaiveDateTime>(col_idx)
+                                    .ok()
+                                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
+                            })
+                            .or_else(|| {
+                                row.try_get::<_, chrono::NaiveDate>(col_idx)
+                                    .ok()
+                                    .map(|d| d.to_string())
+                            })
+                            .or_else(|| {
+                                row.try_get::<_, serde_json::Value>(col_idx)
+                                    .ok()
+                                    .map(|v| v.to_string())
+                            });
                         if let Some(val) = val {
                             MaxCursorValue::update_text(&mut max_cursor_value, val);
                         }

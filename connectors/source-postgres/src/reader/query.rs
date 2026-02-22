@@ -7,6 +7,8 @@ use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::protocol::{ColumnSchema, CursorType, CursorValue, StreamContext, SyncMode};
 use tokio_postgres::types::ToSql;
 
+use crate::schema::needs_text_cast;
+
 #[derive(Debug)]
 pub(crate) enum CursorBindParam {
     Int64(i64),
@@ -45,10 +47,19 @@ pub(crate) fn effective_cursor_type(
 pub(crate) fn build_base_query(
     ctx: &StreamContext,
     columns: &[ColumnSchema],
+    pg_types: &[String],
 ) -> anyhow::Result<CursorQuery> {
     let col_list = columns
         .iter()
-        .map(|c| quote_identifier(&c.name))
+        .zip(pg_types.iter())
+        .map(|(c, pg_type)| {
+            let ident = quote_identifier(&c.name);
+            if needs_text_cast(pg_type) {
+                format!("{}::text AS {}", ident, ident)
+            } else {
+                ident.to_string()
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -321,7 +332,8 @@ mod tests {
             data_type: ArrowDataType::Utf8,
             nullable: true,
         }];
-        let query = build_base_query(&ctx, &columns).expect("query should build");
+        let pg_types = vec!["text".to_string()];
+        let query = build_base_query(&ctx, &columns, &pg_types).expect("query should build");
         assert_eq!(query.sql, "SELECT \"select\" FROM \"User\"");
         assert!(query.bind.is_none());
     }
@@ -336,11 +348,35 @@ mod tests {
             last_value: Some(CursorValue::Int64(7)),
         });
 
-        let query = build_base_query(&ctx, &columns_for_cursor()).expect("query should build");
+        let pg_types = vec!["bigint".to_string(), "text".to_string()];
+        let query =
+            build_base_query(&ctx, &columns_for_cursor(), &pg_types).expect("query should build");
         assert_eq!(
             query.sql,
             "SELECT id, name FROM users WHERE id > $1::bigint ORDER BY id"
         );
         assert!(query.bind.is_some());
+    }
+
+    #[test]
+    fn build_base_query_applies_text_cast_for_uuid() {
+        let ctx = base_context();
+        let columns = vec![
+            ColumnSchema {
+                name: "id".to_string(),
+                data_type: ArrowDataType::Int64,
+                nullable: false,
+            },
+            ColumnSchema {
+                name: "external_id".to_string(),
+                data_type: ArrowDataType::Utf8,
+                nullable: true,
+            },
+        ];
+        let pg_types = vec!["bigint".to_string(), "uuid".to_string()];
+        let query = build_base_query(&ctx, &columns, &pg_types).expect("query should build");
+        // uuid needs ::text cast, bigint does not
+        assert!(query.sql.contains("\"external_id\"::text AS \"external_id\""));
+        assert!(!query.sql.contains("\"id\"::text"));
     }
 }
