@@ -1151,6 +1151,8 @@ mod tests {
                 use_ref: "source".to_string(),
                 config: serde_json::json!({}),
                 streams: vec![],
+                permissions: None,
+                limits: None,
             },
             transforms: vec![],
             destination: crate::pipeline::types::DestinationConfig {
@@ -1160,6 +1162,8 @@ mod tests {
                 primary_key: vec![],
                 on_data_error: rapidbyte_types::protocol::DataErrorPolicy::Fail,
                 schema_evolution: None,
+                permissions: None,
+                limits: None,
             },
             state: crate::pipeline::types::StateConfig {
                 backend: StateBackendKind::Sqlite,

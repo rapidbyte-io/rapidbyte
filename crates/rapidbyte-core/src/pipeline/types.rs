@@ -28,12 +28,59 @@ pub struct PipelineConfig {
     pub resources: ResourceConfig,
 }
 
+/// Pipeline-level network permission overrides.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PipelineNetworkPermissions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_hosts: Option<Vec<String>>,
+}
+
+/// Pipeline-level environment variable permission overrides.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PipelineEnvPermissions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_vars: Option<Vec<String>>,
+}
+
+/// Pipeline-level filesystem permission overrides.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PipelineFsPermissions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_preopens: Option<Vec<String>>,
+}
+
+/// Combined pipeline-level permission overrides for a connector.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PipelinePermissions {
+    pub network: PipelineNetworkPermissions,
+    pub env: PipelineEnvPermissions,
+    pub fs: PipelineFsPermissions,
+}
+
+/// Pipeline-level resource limit overrides for a connector.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PipelineLimits {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_memory: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceConfig {
     #[serde(rename = "use")]
     pub use_ref: String,
     pub config: serde_json::Value,
     pub streams: Vec<StreamConfig>,
+    #[serde(default)]
+    pub permissions: Option<PipelinePermissions>,
+    #[serde(default)]
+    pub limits: Option<PipelineLimits>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +96,10 @@ pub struct TransformConfig {
     #[serde(rename = "use")]
     pub use_ref: String,
     pub config: serde_json::Value,
+    #[serde(default)]
+    pub permissions: Option<PipelinePermissions>,
+    #[serde(default)]
+    pub limits: Option<PipelineLimits>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -85,6 +136,10 @@ pub struct DestinationConfig {
     pub on_data_error: DataErrorPolicy,
     #[serde(default)]
     pub schema_evolution: Option<SchemaEvolutionPolicy>,
+    #[serde(default)]
+    pub permissions: Option<PipelinePermissions>,
+    #[serde(default)]
+    pub limits: Option<PipelineLimits>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -478,5 +533,113 @@ destination:
   write_mode: append
 "#;
         assert!(serde_yaml::from_str::<PipelineConfig>(yaml).is_err());
+    }
+
+    #[test]
+    fn test_pipeline_permissions_and_limits_full() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test_perms
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+  permissions:
+    network:
+      allowed_hosts:
+        - db.example.com
+        - "*.internal.corp"
+    env:
+      allowed_vars: [DATABASE_URL, PG_PASSWORD]
+    fs:
+      allowed_preopens: [/data/exports]
+  limits:
+    max_memory: 128mb
+    timeout_seconds: 60
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+  permissions:
+    network:
+      allowed_hosts:
+        - warehouse.example.com
+  limits:
+    max_memory: 256mb
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        let src_perms = config.source.permissions.as_ref().unwrap();
+        assert_eq!(
+            src_perms.network.allowed_hosts,
+            Some(vec!["db.example.com".to_string(), "*.internal.corp".to_string()])
+        );
+        assert_eq!(
+            src_perms.env.allowed_vars,
+            Some(vec!["DATABASE_URL".to_string(), "PG_PASSWORD".to_string()])
+        );
+        assert_eq!(
+            src_perms.fs.allowed_preopens,
+            Some(vec!["/data/exports".to_string()])
+        );
+        let src_limits = config.source.limits.as_ref().unwrap();
+        assert_eq!(src_limits.max_memory, Some("128mb".to_string()));
+        assert_eq!(src_limits.timeout_seconds, Some(60));
+        let dst_perms = config.destination.permissions.as_ref().unwrap();
+        assert_eq!(
+            dst_perms.network.allowed_hosts,
+            Some(vec!["warehouse.example.com".to_string()])
+        );
+        assert!(dst_perms.env.allowed_vars.is_none());
+        let dst_limits = config.destination.limits.as_ref().unwrap();
+        assert_eq!(dst_limits.max_memory, Some("256mb".to_string()));
+        assert!(dst_limits.timeout_seconds.is_none());
+    }
+
+    #[test]
+    fn test_pipeline_permissions_and_limits_absent() {
+        let config: PipelineConfig = serde_yaml::from_str(r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+"#).unwrap();
+        assert!(config.source.permissions.is_none());
+        assert!(config.source.limits.is_none());
+        assert!(config.destination.permissions.is_none());
+        assert!(config.destination.limits.is_none());
+    }
+
+    #[test]
+    fn test_pipeline_limits_only_no_permissions() {
+        let config: PipelineConfig = serde_yaml::from_str(r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+  limits:
+    timeout_seconds: 30
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+"#).unwrap();
+        assert!(config.source.permissions.is_none());
+        let limits = config.source.limits.as_ref().unwrap();
+        assert_eq!(limits.timeout_seconds, Some(30));
+        assert!(limits.max_memory.is_none());
     }
 }
