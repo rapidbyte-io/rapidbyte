@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib/helpers.sh"
+source "$(dirname "$0")/../lib.sh"
 
 section "CDC (Change Data Capture) Test"
-
-export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
 
 # Clean up any previous CDC state
 clean_state /tmp/rapidbyte_e2e_cdc_state.db
@@ -22,7 +20,7 @@ pg_cmd "SELECT pg_drop_replication_slot('rapidbyte_users') FROM pg_replication_s
 # then make changes and capture them in run 2.
 
 info "Running CDC pipeline (run 1 -- create slot, capture any pending WAL)..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_cdc.yaml"
+run_pipeline "$PG_PIPELINES/e2e_cdc.yaml"
 
 # Run 1 might capture 0 rows (slot just created, no new WAL since)
 # or some rows if there were WAL entries. Either way is fine.
@@ -58,7 +56,7 @@ pg_cmd "DELETE FROM users WHERE name = 'Carol';"
 
 # ── Run 2: Capture the changes ──────────────────────────────────
 info "Running CDC pipeline (run 2 -- capture INSERT, UPDATE, DELETE)..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_cdc.yaml"
+run_pipeline "$PG_PIPELINES/e2e_cdc.yaml"
 
 # Verify: raw_cdc.users should have the 3 change rows from run 2
 CDC_COUNT_2=$(pg_exec "SELECT COUNT(*) FROM raw_cdc.users")
@@ -112,7 +110,7 @@ fi
 
 # ── Run 3: No new changes → no new rows ─────────────────────────
 info "Running CDC pipeline (run 3 -- no new changes)..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_cdc.yaml"
+run_pipeline "$PG_PIPELINES/e2e_cdc.yaml"
 
 CDC_COUNT_3=$(pg_exec "SELECT COUNT(*) FROM raw_cdc.users")
 info "After run 3: raw_cdc.users=$CDC_COUNT_3 (expected $EXPECTED_TOTAL -- unchanged)"

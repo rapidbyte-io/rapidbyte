@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib/helpers.sh"
+source "$(dirname "$0")/../lib.sh"
 
 section "Edge Cases Test"
-
-export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
 
 clean_state /tmp/rapidbyte_e2e_edges_state.db
 
 # Run pipeline to sync all_types (with edge case rows) into raw_edges schema
 info "Running edge cases pipeline..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_edge_cases.yaml"
+run_pipeline "$PG_PIPELINES/e2e_edge_cases.yaml"
 
 # ── Verify total row count ───────────────────────────────────────────
 

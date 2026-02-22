@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib/helpers.sh"
+source "$(dirname "$0")/../lib.sh"
 
 section "Upsert Write Mode With All PG Types Test"
-
-export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
 
 clean_state /tmp/rapidbyte_e2e_upsert_types_state.db
 
 # Run 1: Initial load (upsert into empty table = plain insert)
 info "Running upsert_types pipeline (run 1 -- initial load)..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_upsert_types.yaml"
+run_pipeline "$PG_PIPELINES/e2e_upsert_types.yaml"
 
 COUNT_1=$(pg_exec "SELECT COUNT(*) FROM raw_upsert_types.all_types")
 info "After run 1: raw_upsert_types.all_types=$COUNT_1"
@@ -18,7 +16,7 @@ assert_eq_num "$COUNT_1" 4 "Upsert run 1 row count (1 data + 1 NULL + 2 edge)"
 
 # Run 2: Re-run without changes -- upsert should update existing rows, not duplicate
 info "Running upsert_types pipeline (run 2 -- should update, not duplicate)..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_upsert_types.yaml"
+run_pipeline "$PG_PIPELINES/e2e_upsert_types.yaml"
 
 COUNT_2=$(pg_exec "SELECT COUNT(*) FROM raw_upsert_types.all_types")
 info "After run 2: raw_upsert_types.all_types=$COUNT_2"

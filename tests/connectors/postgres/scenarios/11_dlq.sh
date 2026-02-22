@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib/helpers.sh"
+source "$(dirname "$0")/../lib.sh"
 
 section "DLQ Test (on_data_error: dlq configuration)"
-
-export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
 
 clean_state /tmp/rapidbyte_e2e_dlq_state.db
 
 # ── Run pipeline with on_data_error: dlq ────────────────────────────
 
 info "Running rapidbyte pipeline with on_data_error: dlq..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_dlq.yaml"
+run_pipeline "$PG_PIPELINES/e2e_dlq.yaml"
 
 # ── Verify destination schema exists ────────────────────────────────
 

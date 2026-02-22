@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib/helpers.sh"
+source "$(dirname "$0")/../lib.sh"
 
 section "Incremental Sync Test"
-
-export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
 
 # Clean up any previous incremental state
 clean_state /tmp/rapidbyte_e2e_incr_state.db
@@ -14,7 +12,7 @@ pg_cmd "CREATE SCHEMA IF NOT EXISTS raw_incr;"
 
 # Run 1: Full initial load (incremental with no prior cursor = read all)
 info "Running incremental pipeline (run 1 -- initial load)..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_incremental.yaml"
+run_pipeline "$PG_PIPELINES/e2e_incremental.yaml"
 
 # Verify: raw_incr.users should have 3 rows
 INCR_COUNT_1=$(pg_exec "SELECT COUNT(*) FROM raw_incr.users")
@@ -38,7 +36,7 @@ pg_cmd "INSERT INTO users (name, email) VALUES ('Dave', 'dave@example.com'), ('E
 
 # Run 2: Incremental (should only read new rows with id > 3)
 info "Running incremental pipeline (run 2 -- should read only new rows)..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_incremental.yaml"
+run_pipeline "$PG_PIPELINES/e2e_incremental.yaml"
 
 # Verify: raw_incr.users should have 5 rows (3 from run 1 + 2 new)
 INCR_COUNT_2=$(pg_exec "SELECT COUNT(*) FROM raw_incr.users")

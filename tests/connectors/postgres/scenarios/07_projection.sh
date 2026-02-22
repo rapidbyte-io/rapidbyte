@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib/helpers.sh"
+source "$(dirname "$0")/../lib.sh"
 
 section "Projection Pushdown Test"
-
-export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
 
 clean_state /tmp/rapidbyte_e2e_projection_state.db
 
 # Run pipeline with column projection: only id and name selected
 info "Running projection pipeline..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_projection.yaml"
+run_pipeline "$PG_PIPELINES/e2e_projection.yaml"
 
 # ── Verify destination row count ─────────────────────────────────────
 

@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib/helpers.sh"
+source "$(dirname "$0")/../lib.sh"
 
 section "Upsert Write Mode Test"
-
-export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
 
 clean_state /tmp/rapidbyte_e2e_upsert_state.db
 
 # Run 1: Initial load (upsert into empty table = plain insert)
 info "Running upsert pipeline (run 1 -- initial load)..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_upsert.yaml"
+run_pipeline "$PG_PIPELINES/e2e_upsert.yaml"
 
 UPSERT_COUNT_1=$(pg_exec "SELECT COUNT(*) FROM raw_upsert.users")
 info "After run 1: raw_upsert.users=$UPSERT_COUNT_1"
@@ -21,7 +19,7 @@ pg_cmd "UPDATE users SET email = 'alice-updated@example.com' WHERE name = 'Alice
 
 # Run 2: Should upsert (update existing rows, no duplicates)
 info "Running upsert pipeline (run 2 -- should update existing rows)..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_upsert.yaml"
+run_pipeline "$PG_PIPELINES/e2e_upsert.yaml"
 
 UPSERT_COUNT_2=$(pg_exec "SELECT COUNT(*) FROM raw_upsert.users")
 info "After run 2: raw_upsert.users=$UPSERT_COUNT_2"

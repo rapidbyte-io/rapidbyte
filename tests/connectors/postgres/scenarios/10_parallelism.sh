@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib/helpers.sh"
+source "$(dirname "$0")/../lib.sh"
 
 section "Parallelism Test (3 concurrent streams)"
-
-export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
 
 clean_state /tmp/rapidbyte_e2e_parallel_state.db
 
 # ── Run pipeline with parallelism=3 ─────────────────────────────────
 
 info "Running rapidbyte pipeline with parallelism=3..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_parallel.yaml"
+run_pipeline "$PG_PIPELINES/e2e_parallel.yaml"
 
 # ── Verify destination schema exists ────────────────────────────────
 

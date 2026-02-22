@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib/helpers.sh"
+source "$(dirname "$0")/../lib.sh"
 
 section "Compression E2E Test (LZ4 and Zstd data integrity)"
-
-export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
 
 # ── Clean state DBs ──────────────────────────────────────────────────
 
@@ -15,7 +13,7 @@ clean_state /tmp/rapidbyte_e2e_lz4_state.db /tmp/rapidbyte_e2e_zstd_state.db
 section "LZ4 Compression"
 
 info "Running rapidbyte pipeline with LZ4 compression..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_lz4.yaml"
+run_pipeline "$PG_PIPELINES/e2e_lz4.yaml"
 
 info "Verifying destination schema raw_lz4..."
 SCHEMA_EXISTS=$(pg_exec \
@@ -43,7 +41,7 @@ assert_eq "$BOB_EMAIL_LZ4" "bob@example.com" "Bob email spot-check (LZ4)"
 section "Zstd Compression"
 
 info "Running rapidbyte pipeline with Zstd compression..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_zstd.yaml"
+run_pipeline "$PG_PIPELINES/e2e_zstd.yaml"
 
 info "Verifying destination schema raw_zstd..."
 SCHEMA_EXISTS=$(pg_exec \

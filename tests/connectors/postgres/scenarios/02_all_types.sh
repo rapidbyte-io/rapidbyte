@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib/helpers.sh"
+source "$(dirname "$0")/../lib.sh"
 
 section "All PG Types Test"
-
-export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
 
 clean_state /tmp/rapidbyte_e2e_all_types_state.db
 
 # Run pipeline to sync all_types through source -> dest
 info "Running all_types pipeline..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_all_types.yaml"
+run_pipeline "$PG_PIPELINES/e2e_all_types.yaml"
 
 # Verify row count
 DEST_ALL_TYPES=$(pg_exec "SELECT COUNT(*) FROM raw_types.all_types")

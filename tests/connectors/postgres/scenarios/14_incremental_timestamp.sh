@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib/helpers.sh"
+source "$(dirname "$0")/../lib.sh"
 
 section "Incremental Sync with Timestamp Cursor Test"
-
-export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
 
 # Clean up any previous state
 clean_state /tmp/rapidbyte_e2e_incr_ts_state.db
@@ -18,7 +16,7 @@ info "Baseline source user count: $BASELINE_COUNT"
 
 # Run 1: Full initial load (incremental with no prior cursor = read all)
 info "Running incremental timestamp pipeline (run 1 -- initial load)..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_incr_timestamp.yaml"
+run_pipeline "$PG_PIPELINES/e2e_incr_timestamp.yaml"
 
 # Verify: destination should have all baseline rows
 DEST_COUNT_1=$(pg_exec "SELECT COUNT(*) FROM raw_incr_ts.users")
@@ -42,7 +40,7 @@ pg_cmd "INSERT INTO users (name, email) VALUES ('Timestamp_Test_User', 'ts_test@
 
 # Run 2: Incremental (should only read new row with created_at > stored cursor)
 info "Running incremental timestamp pipeline (run 2 -- should read only new row)..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_incr_timestamp.yaml"
+run_pipeline "$PG_PIPELINES/e2e_incr_timestamp.yaml"
 
 # Verify: destination should have baseline + 1 rows
 EXPECTED_TOTAL=$((BASELINE_COUNT + 1))

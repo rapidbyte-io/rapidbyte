@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib/helpers.sh"
+source "$(dirname "$0")/../lib.sh"
 
 section "Schema Evolution Test (new_column: add)"
-
-export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
 
 clean_state /tmp/rapidbyte_e2e_evo_state.db
 
@@ -23,7 +21,7 @@ pg_cmd "INSERT INTO public.evo_test (name, score) VALUES ('Alice', 90), ('Bob', 
 # ── Run 1: initial load (3 columns: id, name, score) ──────────────
 
 info "Running schema evolution pipeline (run 1 -- initial 3-column schema)..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_schema_evo.yaml"
+run_pipeline "$PG_PIPELINES/e2e_schema_evo.yaml"
 
 ROW_COUNT_1=$(pg_exec "SELECT COUNT(*) FROM raw_evo.evo_test")
 info "After run 1: raw_evo.evo_test rows=$ROW_COUNT_1"
@@ -51,7 +49,7 @@ assert_eq_num "$SRC_ROWS" 3 "Source row count after INSERT"
 # ── Run 2: schema drift detected, new_column=add policy fires ─────
 
 info "Running schema evolution pipeline (run 2 -- 4-column schema, drift detection)..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_schema_evo.yaml"
+run_pipeline "$PG_PIPELINES/e2e_schema_evo.yaml"
 
 # After run 2 with append mode: 2 rows from run 1 + 3 rows from run 2 = 5
 ROW_COUNT_2=$(pg_exec "SELECT COUNT(*) FROM raw_evo.evo_test")

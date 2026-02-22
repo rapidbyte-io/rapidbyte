@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-source "$(dirname "$0")/../lib/helpers.sh"
+source "$(dirname "$0")/../lib.sh"
 
 section "Full Refresh Test"
 
-export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
-
 info "Running rapidbyte pipeline..."
-run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_single_pg.yaml"
+run_pipeline "$PG_PIPELINES/e2e_single_pg.yaml"
 
 # ── Verify destination data ─────────────────────────────────────────
 
