@@ -16,6 +16,7 @@ serde_json = "1"
 arrow = { version = "53", features = ["ipc"] }
 chrono = "0.4"
 anyhow = "1"
+pg_escape = "0.1"
 wit-bindgen = "0.46"
 
 [patch.crates-io]

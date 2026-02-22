@@ -1,15 +1,20 @@
+//! Destination connector for PostgreSQL.
+//!
+//! Receives Arrow IPC batches from the host and writes them to PostgreSQL
+//! with transactional checkpoints and schema evolution handling.
+
 mod batch;
 mod client;
 mod config;
 mod ddl;
-mod identifier;
 mod writer;
 
+use config::LoadMethod;
 use rapidbyte_sdk::connector::Destination;
 use rapidbyte_sdk::errors::{ConnectorError, ValidationResult};
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::protocol::{
-    ConnectorInfo, Feature, ProtocolVersion, StreamContext, WriteSummary,
+    ConnectorInfo, Feature, ProtocolVersion, StreamContext, WriteSummary, DEFAULT_MAX_BATCH_BYTES,
 };
 
 pub struct DestPostgres {
@@ -20,7 +25,6 @@ impl Destination for DestPostgres {
     type Config = config::Config;
 
     async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
-        config.validate()?;
         host_ffi::log(
             2,
             &format!(
@@ -29,7 +33,7 @@ impl Destination for DestPostgres {
             ),
         );
         let mut features = vec![Feature::ExactlyOnce];
-        if config.load_method == "copy" {
+        if config.load_method == LoadMethod::Copy {
             features.push(Feature::BulkLoadCopy);
         }
         Ok((
@@ -37,7 +41,7 @@ impl Destination for DestPostgres {
             ConnectorInfo {
                 protocol_version: ProtocolVersion::V2,
                 features,
-                default_max_batch_bytes: 64 * 1024 * 1024,
+                default_max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
             },
         ))
     }

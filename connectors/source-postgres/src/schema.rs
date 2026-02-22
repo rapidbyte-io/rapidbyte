@@ -1,3 +1,5 @@
+//! PostgreSQL catalog discovery and type mapping for source connector.
+
 use rapidbyte_sdk::protocol::{ArrowDataType, ColumnSchema, Stream, SyncMode};
 use tokio_postgres::Client;
 

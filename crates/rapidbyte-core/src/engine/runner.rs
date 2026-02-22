@@ -290,16 +290,15 @@ pub(crate) fn run_destination_stream(
 
     (|| {
         let mut store = Store::new(&module.engine, host_state);
-        let linker =
-            create_component_linker(&module.engine, "destination", |linker| {
-                dest_bindings::RapidbyteDestination::add_to_linker::<
+        let linker = create_component_linker(&module.engine, "destination", |linker| {
+            dest_bindings::RapidbyteDestination::add_to_linker::<
                     _,
                     wasmtime::component::HasSelf<_>,
                 >(linker, |state| state)
                 .context("Failed to add rapidbyte destination host imports")?;
-                Ok(())
-            })
-            .map_err(PipelineError::Infrastructure)?;
+            Ok(())
+        })
+        .map_err(PipelineError::Infrastructure)?;
         let bindings = dest_bindings::RapidbyteDestination::instantiate(
             &mut store,
             &module.component,

@@ -1,7 +1,13 @@
+//! Source connector for PostgreSQL.
+//!
+//! Implements discovery and read paths (full-refresh, incremental cursor reads,
+//! and CDC logical replication) and streams Arrow IPC batches to the host.
+
+mod arrow_util;
 mod cdc;
 mod client;
 pub mod config;
-mod identifier;
+mod metrics;
 mod reader;
 pub mod schema;
 
@@ -12,6 +18,7 @@ use rapidbyte_sdk::errors::{ConnectorError, ValidationResult};
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::protocol::{
     Catalog, ConnectorInfo, Feature, ProtocolVersion, ReadSummary, StreamContext, SyncMode,
+    DEFAULT_MAX_BATCH_BYTES,
 };
 
 pub struct SourcePostgres {
@@ -22,6 +29,7 @@ impl Source for SourcePostgres {
     type Config = config::Config;
 
     async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
+        config.validate()?;
         host_ffi::log(
             2,
             &format!(
@@ -34,7 +42,7 @@ impl Source for SourcePostgres {
             ConnectorInfo {
                 protocol_version: ProtocolVersion::V2,
                 features: vec![Feature::Cdc],
-                default_max_batch_bytes: 64 * 1024 * 1024,
+                default_max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
             },
         ))
     }

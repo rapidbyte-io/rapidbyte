@@ -1,3 +1,5 @@
+//! PostgreSQL client connection and validation helpers for dest-postgres.
+
 use anyhow::{anyhow, Context};
 use tokio_postgres::{Client, Config as PgConfig, NoTls};
 
@@ -6,7 +8,7 @@ use rapidbyte_sdk::host_ffi;
 
 /// Connect to PostgreSQL using the provided config.
 pub(crate) async fn connect(config: &crate::config::Config) -> Result<Client, String> {
-    connect_inner(config).await.map_err(|e| e.to_string())
+    connect_inner(config).await.map_err(|e| format!("{:#}", e))
 }
 
 async fn connect_inner(config: &crate::config::Config) -> anyhow::Result<Client> {

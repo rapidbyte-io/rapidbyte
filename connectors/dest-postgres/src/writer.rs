@@ -1,63 +1,56 @@
+//! Stream write session lifecycle for destination PostgreSQL connector.
+//!
+//! Owns connection/session orchestration around batch writes, checkpoints,
+//! watermark-based resume, and Replace-mode staging swap.
+
 use std::collections::HashSet;
 use std::io::Cursor;
 use std::time::Instant;
 
 use arrow::ipc::reader::StreamReader;
+use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 
-use crate::identifier::validate_pg_identifier;
 use rapidbyte_sdk::errors::{CommitState, ConnectorError};
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::protocol::{
-    DataErrorPolicy, Metric, MetricValue, SchemaEvolutionPolicy, StreamContext, WriteMode,
-    WritePerf, WriteSummary,
+    Metric, MetricValue, SchemaEvolutionPolicy, StreamContext, WriteMode, WritePerf, WriteSummary,
 };
 
 use crate::batch::{write_batch, WriteContext};
+use crate::config::LoadMethod;
 use crate::ddl::{prepare_staging, swap_staging_table};
 
-/// Entry point for writing a single stream: validates identifiers, connects,
-/// runs the pull loop through a WriteSession, and returns a WriteSummary.
+/// Entry point for writing a single stream.
 pub async fn write_stream(
     config: &crate::config::Config,
     ctx: &StreamContext,
 ) -> Result<WriteSummary, ConnectorError> {
-    // Validate identifiers before interpolating into SQL
-    validate_pg_identifier(&ctx.stream_name).map_err(|e| {
-        ConnectorError::config("INVALID_IDENTIFIER", format!("Invalid stream name: {}", e))
-    })?;
-    validate_pg_identifier(&config.schema).map_err(|e| {
-        ConnectorError::config("INVALID_IDENTIFIER", format!("Invalid schema name: {}", e))
-    })?;
-
-    // Phase 1: Connect
     let connect_start = Instant::now();
     let client = crate::client::connect(config)
         .await
         .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
     let connect_secs = connect_start.elapsed().as_secs_f64();
 
-    // Phase 2: Session lifecycle
     let mut session = WriteSession::begin(
         &client,
         &config.schema,
         SessionConfig {
             stream_name: ctx.stream_name.clone(),
             write_mode: ctx.write_mode.clone(),
-            load_method: config.load_method.clone(),
+            load_method: config.load_method,
             schema_policy: ctx.policies.schema_evolution,
-            on_data_error: ctx.policies.on_data_error,
             checkpoint: CheckpointConfig {
                 interval_bytes: ctx.limits.checkpoint_interval_bytes,
                 interval_rows: ctx.limits.checkpoint_interval_rows,
                 interval_seconds: ctx.limits.checkpoint_interval_seconds,
             },
+            copy_flush_bytes: config.copy_flush_bytes,
         },
     )
     .await
     .map_err(|e| ConnectorError::transient_db("SESSION_BEGIN_FAILED", e))?;
 
-    // Phase 3: Pull loop — read batches from host
     let mut loop_error: Option<String> = None;
 
     loop {
@@ -76,14 +69,13 @@ pub async fn write_stream(
         }
     }
 
-    // Handle errors
     if let Some(err) = loop_error {
         session.rollback().await;
-        return Err(ConnectorError::transient_db("WRITE_FAILED", err)
-            .with_commit_state(CommitState::BeforeCommit));
+        return Err(
+            ConnectorError::transient_db("WRITE_FAILED", err).with_commit_state(CommitState::BeforeCommit),
+        );
     }
 
-    // Phase 4: Commit
     let result = session.commit().await.map_err(|e| {
         ConnectorError::transient_db("COMMIT_FAILED", e)
             .with_commit_state(CommitState::AfterCommitUnknown)
@@ -108,10 +100,10 @@ pub async fn write_stream(
 pub struct SessionConfig {
     pub stream_name: String,
     pub write_mode: Option<WriteMode>,
-    pub load_method: String,
+    pub load_method: LoadMethod,
     pub schema_policy: SchemaEvolutionPolicy,
-    pub on_data_error: DataErrorPolicy,
     pub checkpoint: CheckpointConfig,
+    pub copy_flush_bytes: Option<usize>,
 }
 
 /// Checkpoint threshold configuration extracted from StreamLimits.
@@ -133,33 +125,7 @@ pub struct SessionResult {
     pub arrow_decode_secs: f64,
 }
 
-/// Manages the full lifecycle of writing a single stream to PostgreSQL.
-///
-/// Encapsulates Replace-mode staging, watermark-based resume, transaction
-/// management, checkpoint emission, and load-method dispatch. The caller
-/// only needs: `begin()` -> loop `process_batch()` -> `commit()`.
-pub struct WriteSession<'a> {
-    client: &'a Client,
-    target_schema: &'a str,
-    /// Original stream name (used for watermarks and checkpoints).
-    stream_name: String,
-    /// Effective stream name (differs from stream_name in Replace mode).
-    effective_stream: String,
-    effective_write_mode: Option<WriteMode>,
-    load_method: String,
-    schema_policy: SchemaEvolutionPolicy,
-    on_data_error: DataErrorPolicy,
-    checkpoint_config: CheckpointConfig,
-
-    // Replace mode state
-    is_replace: bool,
-
-    // Watermark resume state
-    watermark_records: u64,
-    cumulative_records: u64,
-
-    // Transaction / checkpoint tracking
-    flush_start: Instant,
+struct WriteStats {
     total_rows: u64,
     total_bytes: u64,
     total_failed: u64,
@@ -167,23 +133,45 @@ pub struct WriteSession<'a> {
     checkpoint_count: u64,
     bytes_since_commit: u64,
     rows_since_commit: u64,
-    last_checkpoint_time: Instant,
-
-    // Arrow decode timing
     arrow_decode_nanos: u64,
+}
 
-    // Table creation tracking
+/// Manages lifecycle of writing a single stream to PostgreSQL.
+pub struct WriteSession<'a> {
+    client: &'a Client,
+    target_schema: &'a str,
+
+    // Stream identity
+    stream_name: String,
+    effective_stream: String,
+    effective_write_mode: Option<WriteMode>,
+
+    // Config
+    load_method: LoadMethod,
+    schema_policy: SchemaEvolutionPolicy,
+    checkpoint_config: CheckpointConfig,
+    copy_flush_bytes: Option<usize>,
+
+    // Replace mode
+    is_replace: bool,
+
+    // Watermark resume
+    watermark_records: u64,
+    cumulative_records: u64,
+
+    // Timing + stats
+    flush_start: Instant,
+    last_checkpoint_time: Instant,
+    stats: WriteStats,
+
+    // Schema tracking
     created_tables: HashSet<String>,
-
-    /// Columns present in Arrow but excluded from writes (new_column: Ignore policy).
     ignored_columns: HashSet<String>,
-    /// Columns with type mismatches written as NULL (type_change: Null policy).
     type_null_columns: HashSet<String>,
 }
 
 impl<'a> WriteSession<'a> {
-    /// Open a write session: ensure watermarks table, set up Replace-mode
-    /// staging, query watermark for resume, and BEGIN the first transaction.
+    /// Open a write session and BEGIN the first transaction.
     pub async fn begin(
         client: &'a Client,
         target_schema: &'a str,
@@ -191,7 +179,7 @@ impl<'a> WriteSession<'a> {
     ) -> Result<WriteSession<'a>, String> {
         let stream_name = &config.stream_name;
         let write_mode = config.write_mode;
-        // Ensure watermarks table exists (non-fatal if it fails)
+
         if let Err(e) = ensure_watermarks_table(client, target_schema).await {
             host_ffi::log(
                 1,
@@ -202,10 +190,11 @@ impl<'a> WriteSession<'a> {
             );
         }
 
-        // Replace mode: route writes to a staging table
         let is_replace = matches!(write_mode, Some(WriteMode::Replace));
         let (effective_stream, effective_write_mode) = if is_replace {
-            let staging_name = prepare_staging(client, target_schema, stream_name).await?;
+            let staging_name = prepare_staging(client, target_schema, stream_name)
+                .await
+                .map_err(|e| format!("{:#}", e))?;
             host_ffi::log(
                 2,
                 &format!(
@@ -218,7 +207,6 @@ impl<'a> WriteSession<'a> {
             (stream_name.to_string(), write_mode.clone())
         };
 
-        // Exactly-once: query watermark for resume position
         let watermark_records = if !is_replace {
             match get_watermark(client, target_schema, stream_name).await {
                 Ok(w) => {
@@ -248,7 +236,6 @@ impl<'a> WriteSession<'a> {
             0
         };
 
-        // BEGIN first transaction
         client
             .execute("BEGIN", &[])
             .await
@@ -263,34 +250,34 @@ impl<'a> WriteSession<'a> {
             effective_write_mode,
             load_method: config.load_method,
             schema_policy: config.schema_policy,
-            on_data_error: config.on_data_error,
             checkpoint_config: config.checkpoint,
+            copy_flush_bytes: config.copy_flush_bytes,
             is_replace,
             watermark_records,
             cumulative_records: 0,
             flush_start: now,
-            total_rows: 0,
-            total_bytes: 0,
-            total_failed: 0,
-            batches_written: 0,
-            checkpoint_count: 0,
-            bytes_since_commit: 0,
-            rows_since_commit: 0,
             last_checkpoint_time: now,
-            arrow_decode_nanos: 0,
+            stats: WriteStats {
+                total_rows: 0,
+                total_bytes: 0,
+                total_failed: 0,
+                batches_written: 0,
+                checkpoint_count: 0,
+                bytes_since_commit: 0,
+                rows_since_commit: 0,
+                arrow_decode_nanos: 0,
+            },
             created_tables: HashSet::new(),
             ignored_columns: HashSet::new(),
             type_null_columns: HashSet::new(),
         })
     }
 
-    /// Process a single IPC batch: skip if already committed (watermark),
-    /// write via INSERT or COPY, accumulate stats, and checkpoint if thresholds
-    /// are reached.
+    /// Process a single IPC batch.
     pub async fn process_batch(&mut self, ipc_bytes: &[u8]) -> Result<(), String> {
         let n = ipc_bytes.len();
 
-        // Exactly-once: skip already-committed batches
+        // Exactly-once: skip already-committed batches.
         if self.watermark_records > 0 && self.cumulative_records < self.watermark_records {
             let batch_rows = count_ipc_rows(ipc_bytes)?;
             self.cumulative_records += batch_rows;
@@ -313,39 +300,35 @@ impl<'a> WriteSession<'a> {
             );
         }
 
-        // Write the batch
         let mut write_ctx = WriteContext {
             client: self.client,
             target_schema: self.target_schema,
             stream_name: &self.effective_stream,
-            logical_stream_name: &self.stream_name,
             created_tables: &mut self.created_tables,
             write_mode: self.effective_write_mode.as_ref(),
             schema_policy: Some(&self.schema_policy),
-            on_data_error: self.on_data_error,
-            load_method: &self.load_method,
+            load_method: self.load_method,
             ignored_columns: &mut self.ignored_columns,
             type_null_columns: &mut self.type_null_columns,
+            copy_flush_bytes: self.copy_flush_bytes,
         };
 
         let (result, decode_nanos) = write_batch(&mut write_ctx, ipc_bytes).await?;
 
-        // Accumulate stats
-        self.arrow_decode_nanos += decode_nanos;
-        self.total_rows += result.rows_written;
-        self.total_failed += result.rows_failed;
-        self.total_bytes += n as u64;
-        self.bytes_since_commit += n as u64;
-        self.rows_since_commit += result.rows_written;
-        self.batches_written += 1;
+        self.stats.arrow_decode_nanos += decode_nanos;
+        self.stats.total_rows += result.rows_written;
+        self.stats.total_failed += result.rows_failed;
+        self.stats.total_bytes += n as u64;
+        self.stats.bytes_since_commit += n as u64;
+        self.stats.rows_since_commit += result.rows_written;
+        self.stats.batches_written += 1;
 
-        // Emit real-time metrics per spec § Standard Metrics
         let _ = host_ffi::metric(
             "dest-postgres",
             &self.stream_name,
             &Metric {
                 name: "records_written".to_string(),
-                value: MetricValue::Counter(self.total_rows),
+                value: MetricValue::Counter(self.stats.total_rows),
                 labels: vec![],
             },
         );
@@ -354,23 +337,22 @@ impl<'a> WriteSession<'a> {
             &self.stream_name,
             &Metric {
                 name: "bytes_written".to_string(),
-                value: MetricValue::Counter(self.total_bytes),
+                value: MetricValue::Counter(self.stats.total_bytes),
                 labels: vec![],
             },
         );
 
-        // Checkpoint if any threshold is reached
         self.maybe_checkpoint().await?;
 
         Ok(())
     }
 
-    /// Check checkpoint thresholds and commit + re-open transaction if needed.
+    /// Commit and reopen transaction when checkpoint thresholds are reached.
     async fn maybe_checkpoint(&mut self) -> Result<(), String> {
         let cfg = &self.checkpoint_config;
         let should_checkpoint = (cfg.interval_bytes > 0
-            && self.bytes_since_commit >= cfg.interval_bytes)
-            || (cfg.interval_rows > 0 && self.rows_since_commit >= cfg.interval_rows)
+            && self.stats.bytes_since_commit >= cfg.interval_bytes)
+            || (cfg.interval_rows > 0 && self.stats.rows_since_commit >= cfg.interval_rows)
             || (cfg.interval_seconds > 0
                 && self.last_checkpoint_time.elapsed().as_secs() >= cfg.interval_seconds);
 
@@ -378,13 +360,12 @@ impl<'a> WriteSession<'a> {
             return Ok(());
         }
 
-        // Update watermark before commit (atomic with data in same transaction)
         set_watermark(
             self.client,
             self.target_schema,
             &self.stream_name,
-            self.total_rows,
-            self.total_bytes,
+            self.stats.total_rows,
+            self.stats.total_bytes,
         )
         .await
         .map_err(|e| format!("Watermark update failed: {}", e))?;
@@ -394,31 +375,29 @@ impl<'a> WriteSession<'a> {
             .await
             .map_err(|e| format!("Checkpoint COMMIT failed: {}", e))?;
 
-        // Emit checkpoint so host can track progress
         let cp = rapidbyte_sdk::protocol::Checkpoint {
-            id: self.checkpoint_count + 1,
+            id: self.stats.checkpoint_count + 1,
             kind: rapidbyte_sdk::protocol::CheckpointKind::Dest,
             stream: self.stream_name.clone(),
             cursor_field: None,
             cursor_value: None,
-            records_processed: self.total_rows,
-            bytes_processed: self.total_bytes,
+            records_processed: self.stats.total_rows,
+            bytes_processed: self.stats.total_bytes,
         };
         let _ = host_ffi::checkpoint("dest-postgres", &self.stream_name, &cp);
-        self.checkpoint_count += 1;
-        self.bytes_since_commit = 0;
-        self.rows_since_commit = 0;
+        self.stats.checkpoint_count += 1;
+        self.stats.bytes_since_commit = 0;
+        self.stats.rows_since_commit = 0;
         self.last_checkpoint_time = Instant::now();
 
         host_ffi::log(
             3,
             &format!(
                 "dest-postgres: checkpoint {} — committed {} rows, {} bytes so far",
-                self.checkpoint_count, self.total_rows, self.total_bytes
+                self.stats.checkpoint_count, self.stats.total_rows, self.stats.total_bytes
             ),
         );
 
-        // Begin new transaction for next chunk
         self.client
             .execute("BEGIN", &[])
             .await
@@ -427,20 +406,16 @@ impl<'a> WriteSession<'a> {
         Ok(())
     }
 
-    /// Finalize the session: set final watermark, COMMIT, emit final
-    /// checkpoint, and perform Replace-mode swap if needed.
-    ///
-    /// Returns `SessionResult` with all accumulated stats.
+    /// Finalize the session.
     pub async fn commit(mut self) -> Result<SessionResult, String> {
         let flush_secs = self.flush_start.elapsed().as_secs_f64();
 
-        // Update watermark before final commit (atomic with data)
         set_watermark(
             self.client,
             self.target_schema,
             &self.stream_name,
-            self.total_rows,
-            self.total_bytes,
+            self.stats.total_rows,
+            self.stats.total_bytes,
         )
         .await
         .map_err(|e| format!("Watermark update failed: {}", e))?;
@@ -452,71 +427,65 @@ impl<'a> WriteSession<'a> {
             .map_err(|e| format!("COMMIT failed: {}", e))?;
         let commit_secs = commit_start.elapsed().as_secs_f64();
 
-        // Final checkpoint — always emit so the host can correlate
-        // source and dest checkpoints for cursor advancement.
-        {
-            let cp = rapidbyte_sdk::protocol::Checkpoint {
-                id: self.checkpoint_count + 1,
-                kind: rapidbyte_sdk::protocol::CheckpointKind::Dest,
-                stream: self.stream_name.clone(),
-                cursor_field: None,
-                cursor_value: None,
-                records_processed: self.total_rows,
-                bytes_processed: self.total_bytes,
-            };
-            let _ = host_ffi::checkpoint("dest-postgres", &self.stream_name, &cp);
-            self.checkpoint_count += 1;
-        }
+        let cp = rapidbyte_sdk::protocol::Checkpoint {
+            id: self.stats.checkpoint_count + 1,
+            kind: rapidbyte_sdk::protocol::CheckpointKind::Dest,
+            stream: self.stream_name.clone(),
+            cursor_field: None,
+            cursor_value: None,
+            records_processed: self.stats.total_rows,
+            bytes_processed: self.stats.total_bytes,
+        };
+        let _ = host_ffi::checkpoint("dest-postgres", &self.stream_name, &cp);
+        self.stats.checkpoint_count += 1;
 
-        // Replace mode: atomically swap staging table into target position
         if self.is_replace {
-            swap_staging_table(self.client, self.target_schema, &self.stream_name).await?;
+            swap_staging_table(self.client, self.target_schema, &self.stream_name)
+                .await
+                .map_err(|e| format!("{:#}", e))?;
         }
 
-        // Clear watermark after successful commit — the watermark is only
-        // useful for crash recovery within a single run. Between runs
-        // (especially incremental), a stale watermark would cause the next
-        // run's batches to be skipped.
         let _ = clear_watermark(self.client, self.target_schema, &self.stream_name).await;
 
         host_ffi::log(
             2,
             &format!(
                 "dest-postgres: flushed {} rows in {} batches via {} (flush={:.3}s commit={:.3}s)",
-                self.total_rows, self.batches_written, self.load_method, flush_secs, commit_secs
+                self.stats.total_rows,
+                self.stats.batches_written,
+                self.load_method,
+                flush_secs,
+                commit_secs
             ),
         );
 
         Ok(SessionResult {
-            total_rows: self.total_rows,
-            total_bytes: self.total_bytes,
-            total_failed: self.total_failed,
-            batches_written: self.batches_written,
-            checkpoint_count: self.checkpoint_count,
+            total_rows: self.stats.total_rows,
+            total_bytes: self.stats.total_bytes,
+            total_failed: self.stats.total_failed,
+            batches_written: self.stats.batches_written,
+            checkpoint_count: self.stats.checkpoint_count,
             flush_secs,
             commit_secs,
-            arrow_decode_secs: self.arrow_decode_nanos as f64 / 1e9,
+            arrow_decode_secs: self.stats.arrow_decode_nanos as f64 / 1e9,
         })
     }
 
-    /// Abort the session: ROLLBACK the current transaction.
+    /// Abort the session with ROLLBACK.
     pub async fn rollback(self) {
         let _ = self.client.execute("ROLLBACK", &[]).await;
     }
 }
 
 /// Ensure the __rb_watermarks metadata table exists.
-///
-/// Also creates the target schema if it doesn't exist yet, since the watermark
-/// table must live in the same schema as the data tables.
 async fn ensure_watermarks_table(client: &Client, target_schema: &str) -> Result<(), String> {
-    let create_schema = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", target_schema);
+    let create_schema = format!("CREATE SCHEMA IF NOT EXISTS {}", quote_identifier(target_schema));
     client
         .execute(&create_schema, &[])
         .await
         .map_err(|e| format!("Failed to create schema '{}': {}", target_schema, e))?;
 
-    let qualified = format!("\"{}\".__rb_watermarks", target_schema);
+    let qualified = format!("{}.__rb_watermarks", quote_identifier(target_schema));
     let ddl = format!(
         "CREATE TABLE IF NOT EXISTS {} (
             stream_name TEXT PRIMARY KEY,
@@ -533,13 +502,13 @@ async fn ensure_watermarks_table(client: &Client, target_schema: &str) -> Result
     Ok(())
 }
 
-/// Get the watermark (records committed) for a stream. Returns 0 if none.
+/// Get watermark (records committed) for a stream. Returns 0 if none.
 async fn get_watermark(
     client: &Client,
     target_schema: &str,
     stream_name: &str,
 ) -> Result<u64, String> {
-    let qualified = format!("\"{}\".__rb_watermarks", target_schema);
+    let qualified = format!("{}.__rb_watermarks", quote_identifier(target_schema));
     let sql = format!(
         "SELECT records_committed FROM {} WHERE stream_name = $1",
         qualified
@@ -554,7 +523,7 @@ async fn get_watermark(
     }
 }
 
-/// Update the watermark for a stream. Called inside the same transaction as the data COMMIT.
+/// Upsert watermark row inside the same transaction as data writes.
 async fn set_watermark(
     client: &Client,
     target_schema: &str,
@@ -562,7 +531,7 @@ async fn set_watermark(
     records_committed: u64,
     bytes_committed: u64,
 ) -> Result<(), String> {
-    let qualified = format!("\"{}\".__rb_watermarks", target_schema);
+    let qualified = format!("{}.__rb_watermarks", quote_identifier(target_schema));
     let sql = format!(
         "INSERT INTO {} (stream_name, records_committed, bytes_committed, committed_at)
          VALUES ($1, $2, $3, NOW())
@@ -584,7 +553,7 @@ async fn set_watermark(
     Ok(())
 }
 
-/// Count the number of rows in an Arrow IPC byte buffer without writing them.
+/// Count number of rows in an Arrow IPC payload.
 fn count_ipc_rows(ipc_bytes: &[u8]) -> Result<u64, String> {
     let cursor = Cursor::new(ipc_bytes);
     let reader =
@@ -597,13 +566,13 @@ fn count_ipc_rows(ipc_bytes: &[u8]) -> Result<u64, String> {
     Ok(total)
 }
 
-/// Clear the watermark for a stream (used when Replace mode completes its swap).
+/// Clear watermark for a stream after successful completion.
 async fn clear_watermark(
     client: &Client,
     target_schema: &str,
     stream_name: &str,
 ) -> Result<(), String> {
-    let qualified = format!("\"{}\".__rb_watermarks", target_schema);
+    let qualified = format!("{}.__rb_watermarks", quote_identifier(target_schema));
     let sql = format!("DELETE FROM {} WHERE stream_name = $1", qualified);
     client
         .execute(&sql, &[&stream_name])

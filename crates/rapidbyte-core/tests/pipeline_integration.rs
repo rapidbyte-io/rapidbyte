@@ -58,7 +58,10 @@ fn test_parse_and_validate_invalid_fixture() {
         .join("tests/fixtures/pipelines/invalid_pipeline.yaml");
 
     let result = parser::parse_pipeline(&fixture_path);
-    assert!(result.is_err(), "Invalid pipeline should fail at parse-time");
+    assert!(
+        result.is_err(),
+        "Invalid pipeline should fail at parse-time"
+    );
     let err = result.unwrap_err().to_string();
     assert!(
         err.contains("unknown variant") || err.contains("Failed to parse pipeline YAML"),

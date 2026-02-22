@@ -1,25 +1,36 @@
+//! Change Data Capture via PostgreSQL logical replication slots.
+//!
+//! Reads WAL changes through `pg_logical_slot_get_changes` with the
+//! `test_decoding` plugin, parses decoded rows, emits Arrow IPC batches,
+//! and checkpoints by LSN.
+
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context};
 use arrow::array::StringBuilder;
 use arrow::datatypes::{DataType, Field, Schema};
-use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
 
-use crate::identifier::validate_pg_identifier;
 use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::protocol::{
-    Checkpoint, CheckpointKind, ColumnSchema, CursorValue, Metric, MetricValue, ReadSummary,
-    StreamContext,
+    Checkpoint, CheckpointKind, ColumnSchema, CursorValue, ReadSummary, StreamContext,
 };
 
+use crate::arrow_util::batch_to_ipc;
 use crate::config::Config;
+use crate::metrics::emit_read_metrics;
 use crate::schema::pg_type_to_arrow;
 
 /// Maximum number of change rows per Arrow RecordBatch.
 const BATCH_SIZE: usize = 10_000;
+
+/// Maximum WAL changes consumed per CDC invocation to avoid unbounded memory use.
+const CDC_MAX_CHANGES: i64 = 100_000;
+
+/// Default replication slot prefix. Full slot names are `rapidbyte_{stream_name}`.
+const SLOT_PREFIX: &str = "rapidbyte_";
 
 /// CDC operation type extracted from test_decoding output.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +67,7 @@ pub async fn read_cdc_changes(
 ) -> Result<ReadSummary, String> {
     read_cdc_inner(client, ctx, config, connect_secs)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("{:#}", e))
 }
 
 async fn read_cdc_inner(
@@ -67,19 +78,13 @@ async fn read_cdc_inner(
 ) -> anyhow::Result<ReadSummary> {
     host_ffi::log(2, &format!("CDC reading stream: {}", ctx.stream_name));
 
-    validate_pg_identifier(&ctx.stream_name)
-        .map_err(|e| anyhow!("Invalid stream name '{}': {}", ctx.stream_name, e))?;
-
     let query_start = Instant::now();
 
     // 1. Derive slot name
     let slot_name = config
         .replication_slot
         .clone()
-        .unwrap_or_else(|| format!("rapidbyte_{}", ctx.stream_name));
-
-    validate_pg_identifier(&slot_name)
-        .map_err(|e| anyhow!("Invalid replication slot name '{}': {}", slot_name, e))?;
+        .unwrap_or_else(|| format!("{}{}", SLOT_PREFIX, ctx.stream_name));
 
     // 2. Ensure replication slot exists (idempotent)
     ensure_replication_slot(client, &slot_name).await?;
@@ -118,10 +123,9 @@ async fn read_cdc_inner(
 
     // 4. Read changes from the slot (this CONSUMES them)
     // Limit WAL changes per invocation to prevent OOM on large backlogs.
-    let max_changes = 100_000i64;
     let changes_query = "SELECT lsn::text, data FROM pg_logical_slot_get_changes($1, NULL, $2)";
     let change_rows = client
-        .query(changes_query, &[&slot_name, &max_changes])
+        .query(changes_query, &[&slot_name, &CDC_MAX_CHANGES])
         .await
         .with_context(|| format!("pg_logical_slot_get_changes failed for slot {}", slot_name))?;
 
@@ -171,7 +175,7 @@ async fn read_cdc_inner(
             host_ffi::emit_batch(&ipc_bytes)
                 .map_err(|e| anyhow!("emit_batch failed: {}", e.message))?;
 
-            emit_metrics(ctx, total_records, total_bytes);
+            emit_read_metrics(&ctx.stream_name, total_records, total_bytes);
             accumulated_changes.clear();
         }
     }
@@ -189,7 +193,7 @@ async fn read_cdc_inner(
         host_ffi::emit_batch(&ipc_bytes)
             .map_err(|e| anyhow!("emit_batch failed: {}", e.message))?;
 
-        emit_metrics(ctx, total_records, total_bytes);
+        emit_read_metrics(&ctx.stream_name, total_records, total_bytes);
     }
 
     let fetch_secs = fetch_start.elapsed().as_secs_f64();
@@ -386,7 +390,17 @@ fn parse_columns(s: &str) -> Vec<(String, String, String)> {
 }
 
 /// Parse a single value from test_decoding output.
-/// Handles quoted strings (with '' escape for internal quotes) and unquoted values.
+///
+/// Informal grammar:
+/// - `value = quoted | unquoted`
+/// - `quoted = \"'\" ( char | \"''\" )* \"'\"` (`''` escapes a literal `'`)
+/// - `unquoted = [^ ]+` (terminated by space or EOF)
+///
+/// Edge cases:
+/// - `'O''Brien'` -> `O'Brien`
+/// - `'élève'` / CJK text -> preserved via char-wise iteration
+/// - `null` -> literal string `\"null\"` (null semantics handled by caller)
+/// - unterminated quoted value returns the accumulated payload
 fn parse_value(s: &str) -> (String, &str) {
     if s.starts_with('\'') {
         // Quoted string value — iterate by char to handle multi-byte UTF-8 correctly
@@ -480,12 +494,7 @@ fn changes_to_ipc(
     let batch =
         RecordBatch::try_new(schema.clone(), arrays).context("Failed to create CDC RecordBatch")?;
 
-    let mut buf = Vec::new();
-    let mut writer =
-        StreamWriter::try_new(&mut buf, batch.schema().as_ref()).context("IPC writer error")?;
-    writer.write(&batch).context("IPC write error")?;
-    writer.finish().context("IPC finish error")?;
-    Ok(buf)
+    batch_to_ipc(&batch)
 }
 
 /// Compare two LSN strings (format: "X/YYYYYYYY").
@@ -505,27 +514,6 @@ fn lsn_gt(a: &str, b: &str) -> bool {
         (Some(a), Some(b)) => a > b,
         _ => false, // unparseable LSN — don't advance
     }
-}
-
-fn emit_metrics(ctx: &StreamContext, total_records: u64, total_bytes: u64) {
-    let _ = host_ffi::metric(
-        "source-postgres",
-        &ctx.stream_name,
-        &Metric {
-            name: "records_read".to_string(),
-            value: MetricValue::Counter(total_records),
-            labels: vec![],
-        },
-    );
-    let _ = host_ffi::metric(
-        "source-postgres",
-        &ctx.stream_name,
-        &Metric {
-            name: "bytes_read".to_string(),
-            value: MetricValue::Counter(total_bytes),
-            labels: vec![],
-        },
-    );
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────
