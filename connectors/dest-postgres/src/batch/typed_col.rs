@@ -29,25 +29,25 @@ pub(crate) enum TypedCol<'a> {
 pub(crate) fn downcast_columns<'a>(
     batch: &'a RecordBatch,
     active_cols: &[usize],
-) -> Vec<TypedCol<'a>> {
+) -> Result<Vec<TypedCol<'a>>, String> {
     active_cols
         .iter()
         .map(|&i| {
             let col = batch.column(i);
             match col.data_type() {
-                DataType::Int16 => TypedCol::Int16(col.as_any().downcast_ref().unwrap()),
-                DataType::Int32 => TypedCol::Int32(col.as_any().downcast_ref().unwrap()),
-                DataType::Int64 => TypedCol::Int64(col.as_any().downcast_ref().unwrap()),
-                DataType::Float32 => TypedCol::Float32(col.as_any().downcast_ref().unwrap()),
-                DataType::Float64 => TypedCol::Float64(col.as_any().downcast_ref().unwrap()),
-                DataType::Boolean => TypedCol::Boolean(col.as_any().downcast_ref().unwrap()),
-                DataType::Utf8 => TypedCol::Utf8(col.as_string::<i32>()),
+                DataType::Int16 => Ok(TypedCol::Int16(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected Int16Array)"))?)),
+                DataType::Int32 => Ok(TypedCol::Int32(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected Int32Array)"))?)),
+                DataType::Int64 => Ok(TypedCol::Int64(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected Int64Array)"))?)),
+                DataType::Float32 => Ok(TypedCol::Float32(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected Float32Array)"))?)),
+                DataType::Float64 => Ok(TypedCol::Float64(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected Float64Array)"))?)),
+                DataType::Boolean => Ok(TypedCol::Boolean(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected BooleanArray)"))?)),
+                DataType::Utf8 => Ok(TypedCol::Utf8(col.as_string::<i32>())),
                 DataType::Timestamp(rapidbyte_sdk::arrow::datatypes::TimeUnit::Microsecond, _) => {
-                    TypedCol::TimestampMicros(col.as_any().downcast_ref().unwrap())
+                    Ok(TypedCol::TimestampMicros(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected TimestampMicrosecondArray)"))?))
                 }
-                DataType::Date32 => TypedCol::Date32(col.as_any().downcast_ref().unwrap()),
-                DataType::Binary => TypedCol::Binary(col.as_any().downcast_ref().unwrap()),
-                _ => TypedCol::Null,
+                DataType::Date32 => Ok(TypedCol::Date32(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected Date32Array)"))?)),
+                DataType::Binary => Ok(TypedCol::Binary(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected BinaryArray)"))?)),
+                _ => Ok(TypedCol::Null),
             }
         })
         .collect()
@@ -226,7 +226,7 @@ mod tests {
         )
         .unwrap();
 
-        let cols = downcast_columns(&batch, &[0, 1, 2]);
+        let cols = downcast_columns(&batch, &[0, 1, 2]).unwrap();
         assert!(matches!(cols[0], TypedCol::TimestampMicros(_)));
         assert!(matches!(cols[1], TypedCol::Date32(_)));
         assert!(matches!(cols[2], TypedCol::Binary(_)));

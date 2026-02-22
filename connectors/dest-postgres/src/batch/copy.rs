@@ -79,7 +79,7 @@ pub(crate) async fn copy_batch(
     let mut buf = Vec::with_capacity(flush_threshold);
 
     for batch in batches {
-        let typed_cols = downcast_columns(batch, &active_cols);
+        let typed_cols = downcast_columns(batch, &active_cols).map_err(|e| anyhow::anyhow!(e))?;
         let type_null_flags: Vec<bool> = active_cols
             .iter()
             .map(|&i| ctx.type_null_columns.contains(arrow_schema.field(i).name()))
