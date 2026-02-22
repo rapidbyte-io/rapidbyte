@@ -24,8 +24,8 @@ fi
 
 if [[ "$INPUT" == "$OUTPUT" ]]; then
     TMP="${INPUT}.strip.tmp"
-    wasm-tools strip --all "$INPUT" -o "$TMP"
+    wasm-tools strip "$INPUT" -o "$TMP"
     mv "$TMP" "$OUTPUT"
 else
-    wasm-tools strip --all "$INPUT" -o "$OUTPUT"
+    wasm-tools strip "$INPUT" -o "$OUTPUT"
 fi
