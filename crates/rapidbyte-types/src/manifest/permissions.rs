@@ -39,3 +39,17 @@ pub struct Permissions {
     pub fs: FsPermissions,
     pub env: EnvPermissions,
 }
+
+/// Resource limits for the WASI sandbox.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(default)]
+pub struct ResourceLimits {
+    /// Maximum WASI linear memory in human-readable format (e.g. "256mb").
+    /// Enforced via Wasmtime StoreLimits.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_memory: Option<String>,
+
+    /// Maximum execution time in seconds. Enforced via Wasmtime epoch interruption.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+}

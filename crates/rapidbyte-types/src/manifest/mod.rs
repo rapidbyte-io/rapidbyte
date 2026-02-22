@@ -58,6 +58,10 @@ pub struct ConnectorManifest {
     #[serde(default)]
     pub permissions: Permissions,
 
+    /// Resource limits for the WASI sandbox (memory, timeout).
+    #[serde(default)]
+    pub limits: ResourceLimits,
+
     // Roles.
     /// Role-specific capability declarations.
     pub roles: Roles,
@@ -102,6 +106,7 @@ mod tests {
                 min_memory_mb: Some(128),
             },
             permissions: Permissions::default(),
+            limits: ResourceLimits::default(),
             roles: Roles {
                 destination: Some(DestinationCapabilities {
                     supported_write_modes: vec![WriteMode::Append, WriteMode::Replace],
@@ -142,6 +147,7 @@ mod tests {
                 },
                 fs: FsPermissions::default(),
             },
+            limits: ResourceLimits::default(),
             roles: Roles {
                 source: Some(SourceCapabilities {
                     supported_sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental],
@@ -175,6 +181,7 @@ mod tests {
                 min_memory_mb: None,
             },
             permissions: Permissions::default(),
+            limits: ResourceLimits::default(),
             roles: Roles {
                 transform: Some(TransformCapabilities {}),
                 ..Default::default()
@@ -276,6 +283,41 @@ mod tests {
     }
 
     #[test]
+    fn manifest_resource_limits_parsed() {
+        let yaml = r#"
+id: test-connector
+name: Test Connector
+version: "1.0.0"
+protocol_version: "2"
+artifact:
+  entry_point: test.wasm
+roles: {}
+limits:
+  max_memory: 128mb
+  timeout_seconds: 60
+"#;
+        let manifest: ConnectorManifest = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(manifest.limits.max_memory, Some("128mb".to_string()));
+        assert_eq!(manifest.limits.timeout_seconds, Some(60));
+    }
+
+    #[test]
+    fn manifest_resource_limits_absent_is_default() {
+        let yaml = r#"
+id: test-connector
+name: Test Connector
+version: "1.0.0"
+protocol_version: "2"
+artifact:
+  entry_point: test.wasm
+roles: {}
+"#;
+        let manifest: ConnectorManifest = serde_yaml::from_str(yaml).unwrap();
+        assert!(manifest.limits.max_memory.is_none());
+        assert!(manifest.limits.timeout_seconds.is_none());
+    }
+
+    #[test]
     fn test_dual_role_connector() {
         let manifest = ConnectorManifest {
             manifest_version: "1.0".to_string(),
@@ -292,6 +334,7 @@ mod tests {
                 min_memory_mb: None,
             },
             permissions: Permissions::default(),
+            limits: ResourceLimits::default(),
             roles: Roles {
                 source: Some(SourceCapabilities {
                     supported_sync_modes: vec![SyncMode::FullRefresh],
