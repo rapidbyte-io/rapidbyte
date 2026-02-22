@@ -40,6 +40,8 @@ pub(crate) fn effective_cursor_type(
         // If the actual cursor column is numeric, bind as Int64 for a valid
         // typed predicate instead of comparing against text.
         (CursorType::Utf8, "Int16" | "Int32" | "Int64") => CursorType::Int64,
+        // Timestamp columns need ::timestamptz cast, not ::text.
+        (CursorType::Utf8, "TimestampMicros") => CursorType::TimestampMicros,
         _ => cursor_type,
     }
 }
@@ -299,6 +301,14 @@ mod tests {
         assert_eq!(
             effective_cursor_type(CursorType::Utf8, "Utf8"),
             CursorType::Utf8
+        );
+    }
+
+    #[test]
+    fn effective_cursor_type_promotes_timestamp_utf8() {
+        assert_eq!(
+            effective_cursor_type(CursorType::Utf8, "TimestampMicros"),
+            CursorType::TimestampMicros
         );
     }
 

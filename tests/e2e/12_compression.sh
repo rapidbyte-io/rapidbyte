@@ -35,8 +35,8 @@ pass "raw_lz4.users row count >= 3"
 assert_eq_num "$DEST_ORDERS_LZ4" 3 "raw_lz4.orders row count"
 
 info "Spot-checking data integrity (LZ4)..."
-ALICE_EMAIL_LZ4=$(pg_exec "SELECT email FROM raw_lz4.users WHERE name = 'Alice'")
-assert_eq "$ALICE_EMAIL_LZ4" "alice@example.com" "Alice email spot-check (LZ4)"
+BOB_EMAIL_LZ4=$(pg_exec "SELECT email FROM raw_lz4.users WHERE name = 'Bob'")
+assert_eq "$BOB_EMAIL_LZ4" "bob@example.com" "Bob email spot-check (LZ4)"
 
 # ── Zstd Pipeline ────────────────────────────────────────────────────
 
@@ -63,8 +63,8 @@ pass "raw_zstd.users row count >= 3"
 assert_eq_num "$DEST_ORDERS_ZSTD" 3 "raw_zstd.orders row count"
 
 info "Spot-checking data integrity (Zstd)..."
-ALICE_EMAIL_ZSTD=$(pg_exec "SELECT email FROM raw_zstd.users WHERE name = 'Alice'")
-assert_eq "$ALICE_EMAIL_ZSTD" "alice@example.com" "Alice email spot-check (Zstd)"
+BOB_EMAIL_ZSTD=$(pg_exec "SELECT email FROM raw_zstd.users WHERE name = 'Bob'")
+assert_eq "$BOB_EMAIL_ZSTD" "bob@example.com" "Bob email spot-check (Zstd)"
 
 # ── Compression E2E Done ─────────────────────────────────────────────
 

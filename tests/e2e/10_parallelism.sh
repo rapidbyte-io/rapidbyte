@@ -58,8 +58,8 @@ assert_eq_num "$DEST_ALL_TYPES" 4 "raw_parallel.all_types row count"
 # ── Spot-check data integrity (no corruption from concurrent writes) ─
 
 info "Spot-checking data integrity..."
-ALICE_EMAIL=$(pg_exec "SELECT email FROM raw_parallel.users WHERE name = 'Alice'")
-assert_eq "$ALICE_EMAIL" "alice@example.com" "Alice email spot-check (no corruption)"
+BOB_EMAIL=$(pg_exec "SELECT email FROM raw_parallel.users WHERE name = 'Bob'")
+assert_eq "$BOB_EMAIL" "bob@example.com" "Bob email spot-check (no corruption)"
 
 MAX_ORDER=$(pg_exec "SELECT MAX(amount_cents) FROM raw_parallel.orders")
 assert_eq_num "$MAX_ORDER" 12000 "Max order amount spot-check (no corruption)"
