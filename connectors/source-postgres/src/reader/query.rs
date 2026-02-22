@@ -198,7 +198,9 @@ pub(crate) fn cursor_bind_param(
                 CursorValue::TimestampMicros(v) => timestamp_micros_to_rfc3339(*v)?,
                 _ => bail!("cursor value is incompatible with timestamp_millis cursor type"),
             };
-            Ok((CursorBindParam::Text(ts), "timestamptz"))
+            // Double-cast: bind as text (tokio-postgres supports String→text),
+            // then PG casts text→timestamp for the comparison.
+            Ok((CursorBindParam::Text(ts), "text::timestamp"))
         }
         CursorType::TimestampMicros => {
             let ts = match value {
@@ -208,7 +210,9 @@ pub(crate) fn cursor_bind_param(
                 CursorValue::TimestampMillis(v) => timestamp_millis_to_rfc3339(*v)?,
                 _ => bail!("cursor value is incompatible with timestamp_micros cursor type"),
             };
-            Ok((CursorBindParam::Text(ts), "timestamptz"))
+            // Double-cast: bind as text (tokio-postgres supports String→text),
+            // then PG casts text→timestamp for the comparison.
+            Ok((CursorBindParam::Text(ts), "text::timestamp"))
         }
         CursorType::Decimal => {
             let decimal = match value {
