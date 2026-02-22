@@ -76,4 +76,32 @@ INSERT INTO all_types (
     NULL, NULL,
     NULL, NULL, NULL,
     NULL, NULL, NULL
+),
+-- Edge-case row 3: integer min boundaries, float specials (NaN/Inf), epoch dates, empty strings
+(
+    -32768, -2147483648, -9223372036854775808,
+    'NaN'::real, 'Infinity'::double precision,
+    false,
+    '', '', '          ',
+    '1970-01-01 00:00:00', '1970-01-01 00:00:00+00',
+    '1970-01-01',
+    E'\\x',
+    '{}', '[]',
+    0.000000, '00000000-0000-0000-0000-000000000000',
+    '00:00:00', '00:00:00+00', '0 seconds',
+    '0.0.0.0', '0.0.0.0/0', '00:00:00:00:00:00'
+),
+-- Edge-case row 4: integer max boundaries, float specials (-Inf/NaN), max dates, Unicode
+(
+    32767, 2147483647, 9223372036854775807,
+    '-Infinity'::real, 'NaN'::double precision,
+    true,
+    E'\U0001F680 rocket \u4E2D\u6587', repeat('x', 255), 'abcdefghij',
+    '9999-12-31 23:59:59', '9999-12-31 23:59:59+00',
+    '9999-12-31',
+    E'\\x00',
+    '[1,2,3]', '{"a":{"b":{"c":[1,null,"x"]}}}',
+    999999999999.999999, 'ffffffff-ffff-ffff-ffff-ffffffffffff',
+    '23:59:59', '23:59:59+00', '100 years',
+    '255.255.255.255', '255.255.255.255/32', 'ff:ff:ff:ff:ff:ff'
 );

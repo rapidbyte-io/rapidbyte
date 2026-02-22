@@ -57,4 +57,4 @@ echo "  Source: users=$USER_COUNT, orders=$ORDER_COUNT, all_types=$ALL_TYPES_COU
 
 assert_eq_num "$USER_COUNT" 3 "users seed count"
 assert_eq_num "$ORDER_COUNT" 3 "orders seed count"
-assert_eq_num "$ALL_TYPES_COUNT" 2 "all_types seed count"
+assert_eq_num "$ALL_TYPES_COUNT" 4 "all_types seed count"
