@@ -188,27 +188,6 @@ impl WasmRuntime {
         })
     }
 
-    /// Create a new `Store` with epoch deadline and memory limiter applied.
-    ///
-    /// `timeout_seconds` controls how many epoch ticks (1 tick = 1 second) before
-    /// the store traps. Defaults to 300 (5 minutes) as a safety net.
-    pub fn new_store(
-        &self,
-        host_state: ComponentHostState,
-        timeout_seconds: Option<u64>,
-    ) -> Store<ComponentHostState> {
-        let mut store = Store::new(&self.engine, host_state);
-
-        // Epoch deadline: each tick = 1 second
-        let deadline = timeout_seconds.unwrap_or(300);
-        store.set_epoch_deadline(deadline);
-
-        // Apply memory limiter from the store_limits field on ComponentHostState
-        store.limiter(|state| &mut state.store_limits);
-
-        store
-    }
-
     pub fn engine(&self) -> &Engine {
         &self.engine
     }

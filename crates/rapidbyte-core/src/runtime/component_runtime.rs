@@ -278,7 +278,7 @@ impl ComponentHostState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn for_source(
+    pub(crate) fn for_source(
         pipeline_name: String,
         connector_id: String,
         stream_name: String,
@@ -317,7 +317,7 @@ impl ComponentHostState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn for_destination(
+    pub(crate) fn for_destination(
         pipeline_name: String,
         connector_id: String,
         stream_name: String,
@@ -357,7 +357,7 @@ impl ComponentHostState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn for_transform(
+    pub(crate) fn for_transform(
         pipeline_name: String,
         connector_id: String,
         stream_name: String,
@@ -397,7 +397,7 @@ impl ComponentHostState {
         )
     }
 
-    pub fn for_validation(
+    pub(crate) fn for_validation(
         pipeline_name: String,
         connector_id: String,
         stream_name: String,
