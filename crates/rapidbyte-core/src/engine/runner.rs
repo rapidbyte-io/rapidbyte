@@ -18,7 +18,7 @@ use super::errors::PipelineError;
 use crate::runtime::component_runtime::{
     self, dest_bindings, dest_error_to_sdk, source_bindings, source_error_to_sdk,
     transform_bindings, transform_error_to_sdk, ComponentHostState, Frame, HostTimings,
-    LoadedComponent, WasmRuntime,
+    LoadedComponent, SandboxOverrides, WasmRuntime,
 };
 use crate::runtime::wasm_runtime::create_component_linker;
 use crate::state::backend::{RunStats, StateBackend};
@@ -121,6 +121,7 @@ pub(crate) fn run_source_stream(
     stats: Arc<Mutex<RunStats>>,
     permissions: Option<&Permissions>,
     compression: Option<CompressionCodec>,
+    overrides: Option<&SandboxOverrides>,
 ) -> Result<(f64, ReadSummary, Vec<Checkpoint>, HostTimings), PipelineError> {
     let phase_start = Instant::now();
 
@@ -138,11 +139,12 @@ pub(crate) fn run_source_stream(
         permissions,
         source_config,
         compression,
-        None,
+        overrides,
     )
     .map_err(PipelineError::Infrastructure)?;
 
-    let mut store = module.new_store(host_state, None);
+    let timeout = overrides.and_then(|o| o.timeout_seconds);
+    let mut store = module.new_store(host_state, timeout);
     let linker = create_component_linker(&module.engine, "source", |linker| {
         source_bindings::RapidbyteSource::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
             linker,
@@ -266,6 +268,7 @@ pub(crate) fn run_destination_stream(
     stats: Arc<Mutex<RunStats>>,
     permissions: Option<&Permissions>,
     compression: Option<CompressionCodec>,
+    overrides: Option<&SandboxOverrides>,
 ) -> Result<(f64, WriteSummary, f64, f64, Vec<Checkpoint>, HostTimings), PipelineError> {
     let phase_start = Instant::now();
     let vm_setup_start = Instant::now();
@@ -285,12 +288,13 @@ pub(crate) fn run_destination_stream(
         permissions,
         dest_config,
         compression,
-        None,
+        overrides,
     )
     .map_err(PipelineError::Infrastructure)?;
 
+    let timeout = overrides.and_then(|o| o.timeout_seconds);
     (|| {
-        let mut store = module.new_store(host_state, None);
+        let mut store = module.new_store(host_state, timeout);
         let linker = create_component_linker(&module.engine, "destination", |linker| {
             dest_bindings::RapidbyteDestination::add_to_linker::<
                     _,
@@ -425,6 +429,7 @@ pub(crate) fn run_transform_stream(
     stream_ctx: &StreamContext,
     permissions: Option<&Permissions>,
     compression: Option<CompressionCodec>,
+    overrides: Option<&SandboxOverrides>,
 ) -> Result<(f64, TransformSummary), PipelineError> {
     let phase_start = Instant::now();
 
@@ -445,11 +450,12 @@ pub(crate) fn run_transform_stream(
         permissions,
         transform_config,
         compression,
-        None,
+        overrides,
     )
     .map_err(PipelineError::Infrastructure)?;
 
-    let mut store = module.new_store(host_state, None);
+    let timeout = overrides.and_then(|o| o.timeout_seconds);
+    let mut store = module.new_store(host_state, timeout);
     let linker = create_component_linker(&module.engine, "transform", |linker| {
         transform_bindings::RapidbyteTransform::add_to_linker::<
             _,

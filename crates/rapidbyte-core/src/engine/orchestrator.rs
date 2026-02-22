@@ -511,6 +511,7 @@ async fn execute_streams(
                     stats_src,
                     source_permissions.as_ref(),
                     compression,
+                    None,
                 )
             });
 
@@ -534,6 +535,7 @@ async fn execute_streams(
                         &stream_ctx_t,
                         t.permissions.as_ref(),
                         compression,
+                        None,
                     )
                 });
                 transform_handles.push((i, t_handle));
@@ -553,6 +555,7 @@ async fn execute_streams(
                     stats_dst,
                     dest_permissions.as_ref(),
                     compression,
+                    None,
                 )
             });
 
