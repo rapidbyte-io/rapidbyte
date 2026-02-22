@@ -4,8 +4,10 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use arrow::array::{
-    BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, StringBuilder,
+    BinaryBuilder, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array, Int32Array,
+    Int64Array, StringBuilder, TimestampMicrosecondArray,
 };
+use chrono::{NaiveDate, NaiveDateTime};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use rapidbyte_sdk::protocol::ColumnSchema;
@@ -21,6 +23,11 @@ pub(crate) fn build_arrow_schema(columns: &[ColumnSchema]) -> Arc<Schema> {
                 "Float32" => DataType::Float32,
                 "Float64" => DataType::Float64,
                 "Boolean" => DataType::Boolean,
+                "TimestampMicros" => {
+                    DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None)
+                }
+                "Date32" => DataType::Date32,
+                "Binary" => DataType::Binary,
                 _ => DataType::Utf8,
             };
             Field::new(&col.name, dt, col.nullable)
@@ -32,6 +39,7 @@ pub(crate) fn build_arrow_schema(columns: &[ColumnSchema]) -> Arc<Schema> {
 pub(crate) fn rows_to_record_batch(
     rows: &[tokio_postgres::Row],
     columns: &[ColumnSchema],
+    pg_types: &[String],
     schema: &Arc<Schema>,
 ) -> anyhow::Result<RecordBatch> {
     let arrays: Vec<Arc<dyn arrow::array::Array>> = columns
@@ -82,10 +90,54 @@ pub(crate) fn rows_to_record_batch(
                             .collect();
                         Ok(Arc::new(arr))
                     }
-                    _ => {
-                        let mut builder = StringBuilder::with_capacity(rows.len(), rows.len() * 32);
+                    "TimestampMicros" => {
+                        let arr: TimestampMicrosecondArray = rows
+                            .iter()
+                            .map(|row| {
+                                row.try_get::<_, NaiveDateTime>(col_idx)
+                                    .ok()
+                                    .map(|dt| dt.and_utc().timestamp_micros())
+                            })
+                            .collect();
+                        Ok(Arc::new(arr))
+                    }
+                    "Date32" => {
+                        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                        let arr: Date32Array = rows
+                            .iter()
+                            .map(|row| {
+                                row.try_get::<_, NaiveDate>(col_idx)
+                                    .ok()
+                                    .map(|d| (d - epoch).num_days() as i32)
+                            })
+                            .collect();
+                        Ok(Arc::new(arr))
+                    }
+                    "Binary" => {
+                        let mut builder =
+                            BinaryBuilder::with_capacity(rows.len(), rows.len() * 64);
                         for row in rows {
-                            match row.try_get::<_, String>(col_idx).ok() {
+                            match row.try_get::<_, Vec<u8>>(col_idx).ok() {
+                                Some(bytes) => builder.append_value(&bytes),
+                                None => builder.append_null(),
+                            }
+                        }
+                        Ok(Arc::new(builder.finish()))
+                    }
+                    _ => {
+                        // Utf8 path: handles text, varchar, json/jsonb, and all ::text-cast types.
+                        let mut builder =
+                            StringBuilder::with_capacity(rows.len(), rows.len() * 32);
+                        let pg_type = pg_types.get(col_idx).map(|s| s.as_str()).unwrap_or("");
+                        for row in rows {
+                            let val = if pg_type == "json" || pg_type == "jsonb" {
+                                row.try_get::<_, serde_json::Value>(col_idx)
+                                    .ok()
+                                    .map(|v| v.to_string())
+                            } else {
+                                row.try_get::<_, String>(col_idx).ok()
+                            };
+                            match val {
                                 Some(s) => builder.append_value(&s),
                                 None => builder.append_null(),
                             }
@@ -104,6 +156,34 @@ pub(crate) fn rows_to_record_batch(
 mod tests {
     use super::*;
     use rapidbyte_sdk::protocol::ArrowDataType;
+
+    #[test]
+    fn build_arrow_schema_maps_timestamp_date_binary() {
+        let columns = vec![
+            ColumnSchema {
+                name: "created_at".to_string(),
+                data_type: ArrowDataType::TimestampMicros,
+                nullable: true,
+            },
+            ColumnSchema {
+                name: "birth_date".to_string(),
+                data_type: ArrowDataType::Date32,
+                nullable: true,
+            },
+            ColumnSchema {
+                name: "avatar".to_string(),
+                data_type: ArrowDataType::Binary,
+                nullable: true,
+            },
+        ];
+        let schema = build_arrow_schema(&columns);
+        assert_eq!(
+            *schema.field(0).data_type(),
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None)
+        );
+        assert_eq!(*schema.field(1).data_type(), DataType::Date32);
+        assert_eq!(*schema.field(2).data_type(), DataType::Binary);
+    }
 
     #[test]
     fn build_arrow_schema_maps_types() {

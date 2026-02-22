@@ -101,13 +101,14 @@ impl MaxCursorValue {
 fn emit_accumulated_rows(
     rows: &mut Vec<tokio_postgres::Row>,
     columns: &[ColumnSchema],
+    pg_types: &[String],
     schema: &Arc<Schema>,
     stream_name: &str,
     state: &mut EmitState,
     estimated_bytes: &mut usize,
 ) -> anyhow::Result<()> {
     let encode_start = Instant::now();
-    let ipc_bytes = rows_to_record_batch(rows, columns, schema).and_then(|batch| batch_to_ipc(&batch))?;
+    let ipc_bytes = rows_to_record_batch(rows, columns, pg_types, schema).and_then(|batch| batch_to_ipc(&batch))?;
     state.arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
 
     state.total_records += rows.len() as u64;
@@ -170,9 +171,15 @@ async fn read_stream_inner(
         bail!("Table '{}' not found or has no columns", ctx.stream_name);
     }
 
+    // Build parallel pg_types vector for json/jsonb extraction in Arrow encoder.
+    let all_pg_types: Vec<String> = schema_rows
+        .iter()
+        .map(|row| row.get::<_, String>(1))
+        .collect();
+
     // Apply projection pushdown: filter to selected columns if specified.
     // Column order follows table ordinal position, not user-specified order.
-    let columns: Vec<ColumnSchema> = match &ctx.selected_columns {
+    let (columns, pg_types): (Vec<ColumnSchema>, Vec<String>) = match &ctx.selected_columns {
         Some(selected) if !selected.is_empty() => {
             let unknown: Vec<&str> = selected
                 .iter()
@@ -187,10 +194,11 @@ async fn read_stream_inner(
                 );
             }
 
-            let filtered: Vec<ColumnSchema> = all_columns
+            let (filtered, filtered_pg_types): (Vec<ColumnSchema>, Vec<String>) = all_columns
                 .into_iter()
-                .filter(|c| selected.iter().any(|s| s == &c.name))
-                .collect();
+                .zip(all_pg_types.into_iter())
+                .filter(|(c, _)| selected.iter().any(|s| s == &c.name))
+                .unzip();
             if filtered.is_empty() {
                 bail!(
                     "None of the selected columns {:?} found in table '{}'",
@@ -207,9 +215,9 @@ async fn read_stream_inner(
                     );
                 }
             }
-            filtered
+            (filtered, filtered_pg_types)
         }
-        _ => all_columns,
+        _ => (all_columns, all_pg_types),
     };
 
     let arrow_schema = build_arrow_schema(&columns);
@@ -341,6 +349,7 @@ async fn read_stream_inner(
                     if let Err(e) = emit_accumulated_rows(
                         &mut accumulated_rows,
                         &columns,
+                        &pg_types,
                         &arrow_schema,
                         &ctx.stream_name,
                         &mut state,
@@ -395,6 +404,7 @@ async fn read_stream_inner(
             if let Err(e) = emit_accumulated_rows(
                 &mut accumulated_rows,
                 &columns,
+                &pg_types,
                 &arrow_schema,
                 &ctx.stream_name,
                 &mut state,
