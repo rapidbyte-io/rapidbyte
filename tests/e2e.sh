@@ -35,6 +35,7 @@ cleanup() {
     rm -f /tmp/rapidbyte_e2e_incr_state.db
     rm -f /tmp/rapidbyte_e2e_replace_state.db
     rm -f /tmp/rapidbyte_e2e_upsert_state.db
+    rm -f /tmp/rapidbyte_e2e_all_types_state.db
 }
 
 # ── Step 1: Build everything ────────────────────────────────────────
@@ -85,11 +86,16 @@ USER_COUNT=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgr
     psql -U postgres -d rapidbyte_test -t -A -c "SELECT COUNT(*) FROM public.users")
 ORDER_COUNT=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
     psql -U postgres -d rapidbyte_test -t -A -c "SELECT COUNT(*) FROM public.orders")
+ALL_TYPES_COUNT=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -t -A -c "SELECT COUNT(*) FROM public.all_types")
 
-echo "  Source: users=$USER_COUNT, orders=$ORDER_COUNT"
+echo "  Source: users=$USER_COUNT, orders=$ORDER_COUNT, all_types=$ALL_TYPES_COUNT"
 
 if [ "$USER_COUNT" -ne 3 ] || [ "$ORDER_COUNT" -ne 3 ]; then
     fail "Seed data mismatch: expected users=3, orders=3"
+fi
+if [ "$ALL_TYPES_COUNT" -ne 2 ]; then
+    fail "Seed data mismatch: expected all_types=2, got $ALL_TYPES_COUNT"
 fi
 
 # ── Step 5: Run rapidbyte pipeline ──────────────────────────────────
@@ -168,6 +174,130 @@ echo -e "${GREEN}═════════════════════
 echo -e "${GREEN}  FULL REFRESH E2E TEST PASSED             ${NC}"
 echo -e "${GREEN}  Source: public.users(3) + public.orders(3)${NC}"
 echo -e "${GREEN}  Dest:   raw.users($DEST_USERS) + raw.orders($DEST_ORDERS) ${NC}"
+echo -e "${GREEN}═══════════════════════════════════════════${NC}"
+
+# ══════════════════════════════════════════════════════════════════════
+# ── All PG Types Test ─────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+
+info "=== All PG Types Test ==="
+
+rm -f /tmp/rapidbyte_e2e_all_types_state.db
+
+# Run pipeline to sync all_types through source -> dest
+info "Running all_types pipeline..."
+"$PROJECT_ROOT/target/debug/rapidbyte" run \
+    "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_all_types.yaml" \
+    --log-level info 2>&1
+
+# Verify row count
+DEST_ALL_TYPES=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -t -A -c "SELECT COUNT(*) FROM raw_types.all_types")
+info "Destination: raw_types.all_types=$DEST_ALL_TYPES"
+if [ "$DEST_ALL_TYPES" -ne 2 ]; then
+    fail "raw_types.all_types row count mismatch: expected 2, got $DEST_ALL_TYPES"
+fi
+
+# Verify NULL row: all nullable columns should be NULL
+NULL_COUNT=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -t -A -c \
+    "SELECT COUNT(*) FROM raw_types.all_types
+     WHERE col_smallint IS NULL AND col_int IS NULL AND col_bigint IS NULL
+       AND col_real IS NULL AND col_double IS NULL AND col_bool IS NULL
+       AND col_text IS NULL AND col_varchar IS NULL AND col_char IS NULL
+       AND col_timestamp IS NULL AND col_timestamptz IS NULL AND col_date IS NULL
+       AND col_bytea IS NULL
+       AND col_json IS NULL AND col_jsonb IS NULL
+       AND col_numeric IS NULL AND col_uuid IS NULL
+       AND col_time IS NULL AND col_timetz IS NULL AND col_interval IS NULL
+       AND col_inet IS NULL AND col_cidr IS NULL AND col_macaddr IS NULL")
+if [ "$NULL_COUNT" -ne 1 ]; then
+    fail "Expected exactly 1 all-NULL row, got $NULL_COUNT"
+fi
+info "NULL row verified (1 row with all NULLs)"
+
+# Verify data row: spot-check integer types
+DATA_INTS=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -t -A -c \
+    "SELECT col_smallint, col_int, col_bigint FROM raw_types.all_types WHERE col_smallint IS NOT NULL")
+if [ "$DATA_INTS" != "1|100|1000000000000" ]; then
+    fail "Integer columns mismatch: got '$DATA_INTS', expected '1|100|1000000000000'"
+fi
+info "Integer types verified (smallint, int, bigint)"
+
+# Verify boolean
+DATA_BOOL=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -t -A -c \
+    "SELECT col_bool FROM raw_types.all_types WHERE col_bool IS NOT NULL")
+if [ "$DATA_BOOL" != "t" ]; then
+    fail "Boolean mismatch: got '$DATA_BOOL', expected 't'"
+fi
+info "Boolean type verified"
+
+# Verify text types
+DATA_TEXT=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -t -A -c \
+    "SELECT col_text FROM raw_types.all_types WHERE col_text IS NOT NULL")
+if [ "$DATA_TEXT" != "hello world" ]; then
+    fail "Text mismatch: got '$DATA_TEXT', expected 'hello world'"
+fi
+info "Text types verified"
+
+# Verify date
+DATA_DATE=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -t -A -c \
+    "SELECT col_date FROM raw_types.all_types WHERE col_date IS NOT NULL")
+if [ "$DATA_DATE" != "2024-01-15" ]; then
+    fail "Date mismatch: got '$DATA_DATE', expected '2024-01-15'"
+fi
+info "Date type verified"
+
+# Verify UUID (text-cast type)
+DATA_UUID=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -t -A -c \
+    "SELECT col_uuid FROM raw_types.all_types WHERE col_uuid IS NOT NULL")
+if [ "$DATA_UUID" != "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11" ]; then
+    fail "UUID mismatch: got '$DATA_UUID', expected 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'"
+fi
+info "UUID type verified"
+
+# Verify JSONB
+DATA_JSONB=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -t -A -c \
+    "SELECT col_jsonb::text FROM raw_types.all_types WHERE col_jsonb IS NOT NULL")
+# JSONB normalizes key order; check it contains expected content
+if ! echo "$DATA_JSONB" | grep -q '"a"'; then
+    fail "JSONB mismatch: got '$DATA_JSONB', expected it to contain '\"a\"'"
+fi
+info "JSONB type verified"
+
+# Count total non-null columns in the data row to verify all columns came through
+NON_NULL_COLS=$(docker compose -f "$PROJECT_ROOT/docker-compose.yml" exec -T postgres \
+    psql -U postgres -d rapidbyte_test -t -A -c \
+    "SELECT
+        (col_smallint IS NOT NULL)::int + (col_int IS NOT NULL)::int +
+        (col_bigint IS NOT NULL)::int + (col_real IS NOT NULL)::int +
+        (col_double IS NOT NULL)::int + (col_bool IS NOT NULL)::int +
+        (col_text IS NOT NULL)::int + (col_varchar IS NOT NULL)::int +
+        (col_char IS NOT NULL)::int + (col_timestamp IS NOT NULL)::int +
+        (col_timestamptz IS NOT NULL)::int + (col_date IS NOT NULL)::int +
+        (col_bytea IS NOT NULL)::int + (col_json IS NOT NULL)::int +
+        (col_jsonb IS NOT NULL)::int + (col_numeric IS NOT NULL)::int +
+        (col_uuid IS NOT NULL)::int + (col_time IS NOT NULL)::int +
+        (col_timetz IS NOT NULL)::int + (col_interval IS NOT NULL)::int +
+        (col_inet IS NOT NULL)::int + (col_cidr IS NOT NULL)::int +
+        (col_macaddr IS NOT NULL)::int
+     FROM raw_types.all_types WHERE col_smallint IS NOT NULL")
+if [ "$NON_NULL_COLS" -ne 23 ]; then
+    fail "Data row has $NON_NULL_COLS non-null columns, expected 23 (all columns)"
+fi
+info "All 23 typed columns round-tripped with non-null values"
+
+echo ""
+echo -e "${GREEN}═══════════════════════════════════════════${NC}"
+echo -e "${GREEN}  ALL PG TYPES TEST PASSED                 ${NC}"
+echo -e "${GREEN}  2 rows (1 data + 1 NULL) round-tripped   ${NC}"
+echo -e "${GREEN}  23 typed columns verified                 ${NC}"
 echo -e "${GREEN}═══════════════════════════════════════════${NC}"
 
 # ══════════════════════════════════════════════════════════════════════

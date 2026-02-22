@@ -9,6 +9,7 @@ services:
       - "5433:5432"
     volumes:
       - ./tests/fixtures/sql/source_seed.sql:/docker-entrypoint-initdb.d/01_seed.sql:ro
+      - ./tests/fixtures/sql/all_types.sql:/docker-entrypoint-initdb.d/02_all_types.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 2s
