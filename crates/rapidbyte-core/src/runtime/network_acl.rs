@@ -161,7 +161,9 @@ pub(crate) fn derive_network_acl(
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_host;
+    use super::*;
+    use rapidbyte_types::manifest::{NetworkPermissions, Permissions};
+    use std::collections::HashSet;
 
     #[test]
     fn normalize_host_preserves_ipv6_literal() {
@@ -179,5 +181,160 @@ mod tests {
     fn normalize_host_strips_port_for_single_colon_hosts() {
         assert_eq!(normalize_host("example.com:5432"), "example.com");
         assert_eq!(normalize_host("127.0.0.1:5432"), "127.0.0.1");
+    }
+
+    // ── ACL allows() tests ──────────────────────────────────────────
+
+    #[test]
+    fn acl_exact_host_match() {
+        let mut acl = NetworkAcl::default();
+        acl.add_host("db.example.com");
+        assert!(acl.allows("db.example.com"));
+        assert!(!acl.allows("other.example.com"));
+        assert!(!acl.allows("example.com"));
+    }
+
+    #[test]
+    fn acl_wildcard_suffix_match() {
+        let mut acl = NetworkAcl::default();
+        acl.add_host("*.example.com");
+        assert!(acl.allows("db.example.com"));
+        assert!(acl.allows("foo.bar.example.com"));
+        assert!(!acl.allows("example.com"));
+        assert!(!acl.allows("evil.com"));
+    }
+
+    #[test]
+    fn acl_star_allows_all() {
+        let mut acl = NetworkAcl::default();
+        acl.add_host("*");
+        assert!(acl.allows("anything.example.com"));
+        assert!(acl.allows("127.0.0.1"));
+    }
+
+    #[test]
+    fn acl_allow_all_constructor() {
+        let acl = NetworkAcl::allow_all();
+        assert!(acl.allows("anything"));
+    }
+
+    #[test]
+    fn acl_empty_denied() {
+        let acl = NetworkAcl::default();
+        assert!(!acl.allows(""));
+        assert!(!acl.allows("  "));
+    }
+
+    #[test]
+    fn acl_case_insensitive() {
+        let mut acl = NetworkAcl::default();
+        acl.add_host("DB.Example.COM");
+        assert!(acl.allows("db.example.com"));
+        assert!(acl.allows("DB.EXAMPLE.COM"));
+    }
+
+    #[test]
+    fn acl_host_with_port_stripped() {
+        let mut acl = NetworkAcl::default();
+        acl.add_host("db.example.com:5432");
+        assert!(acl.allows("db.example.com"));
+    }
+
+    // ── extract_host_from_url() tests ───────────────────────────────
+
+    #[test]
+    fn extract_host_basic() {
+        assert_eq!(
+            extract_host_from_url("postgres://db.example.com:5432/mydb"),
+            Some("db.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_host_with_auth() {
+        assert_eq!(
+            extract_host_from_url("https://user:pass@api.example.com/path"),
+            Some("api.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_host_ipv6() {
+        assert_eq!(
+            extract_host_from_url("postgres://[::1]:5432/mydb"),
+            Some("::1".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_host_no_scheme_returns_none() {
+        assert_eq!(extract_host_from_url("not-a-url"), None);
+    }
+
+    // ── collect_runtime_hosts() tests ───────────────────────────────
+
+    #[test]
+    fn collect_hosts_from_host_key() {
+        let config = serde_json::json!({"host": "db.example.com", "port": 5432});
+        let mut hosts = HashSet::new();
+        collect_runtime_hosts(&config, &mut hosts);
+        assert!(hosts.contains("db.example.com"));
+    }
+
+    #[test]
+    fn collect_hosts_from_nested_hostname() {
+        let config = serde_json::json!({"nested": {"hostname": "nested.example.com"}});
+        let mut hosts = HashSet::new();
+        collect_runtime_hosts(&config, &mut hosts);
+        assert!(hosts.contains("nested.example.com"));
+    }
+
+    #[test]
+    fn collect_hosts_from_url_key() {
+        let config = serde_json::json!({"connection_url": "postgres://db.example.com:5432/mydb"});
+        let mut hosts = HashSet::new();
+        collect_runtime_hosts(&config, &mut hosts);
+        assert!(hosts.contains("db.example.com"));
+    }
+
+    // ── derive_network_acl() tests ──────────────────────────────────
+
+    #[test]
+    fn derive_acl_no_permissions_allows_all() {
+        let config = serde_json::json!({});
+        let acl = derive_network_acl(None, &config);
+        assert!(acl.allows("anything.com"));
+    }
+
+    #[test]
+    fn derive_acl_with_allowed_domains() {
+        let perms = Permissions {
+            network: NetworkPermissions {
+                allowed_domains: Some(vec!["db.example.com".to_string()]),
+                allow_runtime_config_domains: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config = serde_json::json!({});
+        let acl = derive_network_acl(Some(&perms), &config);
+        assert!(acl.allows("db.example.com"));
+        assert!(!acl.allows("other.com"));
+    }
+
+    #[test]
+    fn derive_acl_with_runtime_config_domains() {
+        let perms = Permissions {
+            network: NetworkPermissions {
+                allowed_domains: None,
+                allow_runtime_config_domains: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config = serde_json::json!({"host": "dynamic.example.com", "port": 5432});
+        let acl = derive_network_acl(Some(&perms), &config);
+        assert!(acl.allows("dynamic.example.com"));
+        assert!(!acl.allows("other.com"));
     }
 }
