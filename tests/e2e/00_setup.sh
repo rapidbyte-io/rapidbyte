@@ -33,6 +33,9 @@ info "Connectors staged in $CONNECTOR_DIR"
 
 section "Setup: PostgreSQL"
 
+info "Resetting PostgreSQL test environment..."
+docker compose -f "$COMPOSE_FILE" down -v --remove-orphans >/dev/null 2>&1 || true
+
 info "Starting PostgreSQL via Docker Compose..."
 docker compose -f "$COMPOSE_FILE" up -d
 
