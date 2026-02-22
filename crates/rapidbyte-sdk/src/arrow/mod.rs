@@ -6,5 +6,9 @@
 //! - Type conversion between protocol and Arrow types (`types`)
 
 pub mod ipc;
+pub mod schema;
+pub mod types;
 
 pub use ipc::{decode_ipc, encode_ipc};
+pub use schema::build_arrow_schema;
+pub use types::arrow_data_type;
