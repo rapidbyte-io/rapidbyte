@@ -5,11 +5,18 @@ use std::net::IpAddr;
 
 use rapidbyte_types::manifest::Permissions;
 
+#[derive(Debug, Clone)]
+struct IntersectedAcl {
+    left: NetworkAcl,
+    right: NetworkAcl,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NetworkAcl {
     allow_all: bool,
     exact_hosts: HashSet<String>,
     suffix_wildcards: Vec<String>,
+    inner: Option<Box<IntersectedAcl>>,
 }
 
 impl NetworkAcl {
@@ -36,9 +43,34 @@ impl NetworkAcl {
         self.exact_hosts.insert(host);
     }
 
+    fn intersect(self, other: NetworkAcl) -> NetworkAcl {
+        if self.allow_all && other.allow_all {
+            return NetworkAcl::allow_all();
+        }
+        if self.allow_all {
+            return other;
+        }
+        if other.allow_all {
+            return self;
+        }
+        NetworkAcl {
+            allow_all: false,
+            exact_hosts: HashSet::new(),
+            suffix_wildcards: Vec::new(),
+            inner: Some(Box::new(IntersectedAcl {
+                left: self,
+                right: other,
+            })),
+        }
+    }
+
     pub(crate) fn allows(&self, host: &str) -> bool {
         if self.allow_all {
             return true;
+        }
+
+        if let Some(ref inner) = self.inner {
+            return inner.left.allows(host) && inner.right.allows(host);
         }
 
         let normalized = normalize_host(host);
@@ -134,17 +166,18 @@ fn collect_runtime_hosts(value: &serde_json::Value, hosts: &mut HashSet<String>)
 pub(crate) fn derive_network_acl(
     permissions: Option<&Permissions>,
     config: &serde_json::Value,
+    pipeline_allowed_hosts: Option<&[String]>,
 ) -> NetworkAcl {
     let Some(perms) = permissions else {
         // Backwards compatibility for connectors without manifests.
         return NetworkAcl::allow_all();
     };
 
-    let mut acl = NetworkAcl::default();
+    let mut manifest_acl = NetworkAcl::default();
 
     if let Some(domains) = &perms.network.allowed_domains {
         for domain in domains {
-            acl.add_host(domain);
+            manifest_acl.add_host(domain);
         }
     }
 
@@ -152,11 +185,20 @@ pub(crate) fn derive_network_acl(
         let mut dynamic_hosts = HashSet::new();
         collect_runtime_hosts(config, &mut dynamic_hosts);
         for host in dynamic_hosts {
-            acl.add_host(&host);
+            manifest_acl.add_host(&host);
         }
     }
 
-    acl
+    match pipeline_allowed_hosts {
+        Some(hosts) => {
+            let mut pipeline_acl = NetworkAcl::default();
+            for host in hosts {
+                pipeline_acl.add_host(host);
+            }
+            manifest_acl.intersect(pipeline_acl)
+        }
+        None => manifest_acl,
+    }
 }
 
 #[cfg(test)]
@@ -302,7 +344,7 @@ mod tests {
     #[test]
     fn derive_acl_no_permissions_allows_all() {
         let config = serde_json::json!({});
-        let acl = derive_network_acl(None, &config);
+        let acl = derive_network_acl(None, &config, None);
         assert!(acl.allows("anything.com"));
     }
 
@@ -317,7 +359,7 @@ mod tests {
             ..Default::default()
         };
         let config = serde_json::json!({});
-        let acl = derive_network_acl(Some(&perms), &config);
+        let acl = derive_network_acl(Some(&perms), &config, None);
         assert!(acl.allows("db.example.com"));
         assert!(!acl.allows("other.com"));
     }
@@ -333,8 +375,105 @@ mod tests {
             ..Default::default()
         };
         let config = serde_json::json!({"host": "dynamic.example.com", "port": 5432});
-        let acl = derive_network_acl(Some(&perms), &config);
+        let acl = derive_network_acl(Some(&perms), &config, None);
         assert!(acl.allows("dynamic.example.com"));
         assert!(!acl.allows("other.com"));
+    }
+
+    // ── Pipeline ACL intersection tests ────────────────────────────
+
+    #[test]
+    fn derive_acl_pipeline_hosts_intersects_manifest() {
+        let perms = Permissions {
+            network: NetworkPermissions {
+                allowed_domains: Some(vec![
+                    "db.example.com".to_string(),
+                    "api.example.com".to_string(),
+                ]),
+                allow_runtime_config_domains: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let pipeline_hosts = vec!["db.example.com".to_string()];
+        let config = serde_json::json!({});
+        let acl = derive_network_acl(Some(&perms), &config, Some(&pipeline_hosts));
+        assert!(acl.allows("db.example.com"));
+        assert!(!acl.allows("api.example.com"));
+        assert!(!acl.allows("evil.com"));
+    }
+
+    #[test]
+    fn derive_acl_pipeline_cannot_widen_manifest() {
+        let perms = Permissions {
+            network: NetworkPermissions {
+                allowed_domains: Some(vec!["db.example.com".to_string()]),
+                allow_runtime_config_domains: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let pipeline_hosts = vec!["db.example.com".to_string(), "evil.com".to_string()];
+        let config = serde_json::json!({});
+        let acl = derive_network_acl(Some(&perms), &config, Some(&pipeline_hosts));
+        assert!(acl.allows("db.example.com"));
+        assert!(!acl.allows("evil.com"));
+    }
+
+    #[test]
+    fn derive_acl_pipeline_none_preserves_manifest() {
+        let perms = Permissions {
+            network: NetworkPermissions {
+                allowed_domains: Some(vec!["db.example.com".to_string()]),
+                allow_runtime_config_domains: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config = serde_json::json!({});
+        let acl = derive_network_acl(Some(&perms), &config, None);
+        assert!(acl.allows("db.example.com"));
+        assert!(!acl.allows("other.com"));
+    }
+
+    #[test]
+    fn derive_acl_pipeline_wildcard_intersects_manifest_wildcard() {
+        let perms = Permissions {
+            network: NetworkPermissions {
+                allowed_domains: Some(vec!["*.example.com".to_string()]),
+                allow_runtime_config_domains: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let pipeline_hosts = vec!["db.example.com".to_string()];
+        let config = serde_json::json!({});
+        let acl = derive_network_acl(Some(&perms), &config, Some(&pipeline_hosts));
+        assert!(acl.allows("db.example.com"));
+        assert!(!acl.allows("api.example.com"));
+    }
+
+    #[test]
+    fn derive_acl_no_manifest_ignores_pipeline() {
+        let config = serde_json::json!({});
+        let pipeline_hosts = vec!["db.example.com".to_string()];
+        let acl = derive_network_acl(None, &config, Some(&pipeline_hosts));
+        assert!(acl.allows("anything.com"));
+    }
+
+    #[test]
+    fn derive_acl_pipeline_empty_hosts_blocks_all() {
+        let perms = Permissions {
+            network: NetworkPermissions {
+                allowed_domains: Some(vec!["db.example.com".to_string()]),
+                allow_runtime_config_domains: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let pipeline_hosts: Vec<String> = vec![];
+        let config = serde_json::json!({});
+        let acl = derive_network_acl(Some(&perms), &config, Some(&pipeline_hosts));
+        assert!(!acl.allows("db.example.com"));
     }
 }

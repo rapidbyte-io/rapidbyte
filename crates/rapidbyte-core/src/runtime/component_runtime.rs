@@ -187,7 +187,7 @@ impl ComponentHostState {
             batch,
             checkpoints,
             sockets: SocketManager {
-                acl: derive_network_acl(permissions, config),
+                acl: derive_network_acl(permissions, config, None),
                 sockets: HashMap::new(),
                 next_handle: 1,
             },
