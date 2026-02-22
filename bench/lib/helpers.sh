@@ -70,6 +70,32 @@ stage_connectors() {
        "$CONNECTOR_DIR/source_postgres.manifest.json"
     cp "$PROJECT_ROOT/connectors/dest-postgres/manifest.json" \
        "$CONNECTOR_DIR/dest_postgres.manifest.json"
+
+    # Strip custom sections from release builds (guard for bench-compare across refs)
+    if [ "$mode" = "release" ] && [ -x "$PROJECT_ROOT/scripts/strip-wasm.sh" ]; then
+        "$PROJECT_ROOT/scripts/strip-wasm.sh" "$CONNECTOR_DIR/source_postgres.wasm"
+        "$PROJECT_ROOT/scripts/strip-wasm.sh" "$CONNECTOR_DIR/dest_postgres.wasm"
+    fi
+}
+
+# Report staged connector binary sizes.
+report_wasm_sizes() {
+    if [ -d "$CONNECTOR_DIR" ]; then
+        info "Connector binary sizes:"
+        for wasm in "$CONNECTOR_DIR"/*.wasm; do
+            [ -f "$wasm" ] || continue
+            local name size
+            name="$(basename "$wasm")"
+            size="$(wc -c < "$wasm" | tr -d ' ')"
+            local human
+            if [ "$size" -ge 1048576 ]; then
+                human="$(python3 -c "print(f'{$size/1048576:.1f} MB')")"
+            else
+                human="$(python3 -c "print(f'{$size/1024:.0f} KB')")"
+            fi
+            info "  $name: $human ($size bytes)"
+        done
+    fi
 }
 
 # ── Docker helpers ───────────────────────────────────────────────

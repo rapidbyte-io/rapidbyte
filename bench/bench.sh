@@ -90,6 +90,7 @@ echo ""
 build_host "$BUILD_MODE"
 build_connectors "$BUILD_MODE"
 stage_connectors "$BUILD_MODE"
+report_wasm_sizes
 
 # ── Cleanup trap ─────────────────────────────────────────────────
 cleanup() {

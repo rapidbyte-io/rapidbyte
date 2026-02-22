@@ -32,11 +32,13 @@ bench/
 ## Commands
 
 ```bash
-just build              # Build host binary
-just build-connectors   # Build both connectors (wasm32-wasip2)
+just build              # Build host binary (debug)
+just build-connectors   # Build both connectors (wasm32-wasip2, debug)
+just release            # Build host binary (release, optimized)
+just release-connectors # Build + strip both connectors (wasm32-wasip2, release, LTO+O3)
 just test               # cargo test --workspace (host tests)
 just e2e                # Full E2E: build, Docker PG, pipeline, verify
-just bench              # All connectors, default rows
+just bench              # All connectors, default rows (uses release builds)
 just bench postgres     # Postgres connector, default rows
 just bench postgres 50000           # Postgres, 50K rows
 just bench postgres 50000 --iters 5 # Postgres, 50K rows, 5 iterations
