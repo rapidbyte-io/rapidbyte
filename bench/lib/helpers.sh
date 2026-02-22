@@ -71,8 +71,8 @@ stage_connectors() {
     cp "$PROJECT_ROOT/connectors/dest-postgres/manifest.json" \
        "$CONNECTOR_DIR/dest_postgres.manifest.json"
 
-    # Strip custom sections from release builds
-    if [ "$mode" = "release" ]; then
+    # Strip custom sections from release builds (guard for bench-compare across refs)
+    if [ "$mode" = "release" ] && [ -x "$PROJECT_ROOT/scripts/strip-wasm.sh" ]; then
         "$PROJECT_ROOT/scripts/strip-wasm.sh" "$CONNECTOR_DIR/source_postgres.wasm"
         "$PROJECT_ROOT/scripts/strip-wasm.sh" "$CONNECTOR_DIR/dest_postgres.wasm"
     fi
