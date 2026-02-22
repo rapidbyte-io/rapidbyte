@@ -11,3 +11,4 @@ serde_json = { workspace = true }
 # runtime/network features via workspace defaults.
 tokio = { version = "1.36", default-features = false, features = ["io-util"] }
 wit-bindgen = "0.46"
+arrow = { version = "53", default-features = false, features = ["ipc"] }
