@@ -34,6 +34,10 @@ lint:
 e2e:
     ./tests/e2e.sh
 
+# Run a single E2E scenario by name (e.g. just e2e-scenario 01_full_refresh)
+e2e-scenario name:
+    RAPIDBYTE_CONNECTOR_DIR=target/connectors bash tests/e2e/{{name}}.sh
+
 # Benchmark postgres connectors: INSERT vs COPY comparison (10K rows default)
 bench-connector-postgres rows="10000":
     ./tests/bench.sh --rows {{rows}} --iters 3
