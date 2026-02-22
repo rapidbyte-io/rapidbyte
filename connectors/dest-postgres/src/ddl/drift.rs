@@ -2,7 +2,6 @@
 
 use std::collections::HashSet;
 
-use anyhow::Context;
 use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 
@@ -40,7 +39,7 @@ async fn get_existing_columns(
     client: &Client,
     schema_name: &str,
     table_name: &str,
-) -> anyhow::Result<Vec<(String, String, bool)>> {
+) -> Result<Vec<(String, String, bool)>, String> {
     let rows = client
         .query(
             "SELECT column_name, data_type, is_nullable \
@@ -50,7 +49,7 @@ async fn get_existing_columns(
             &[&schema_name, &table_name],
         )
         .await
-        .context("Failed to query existing columns")?;
+        .map_err(|e| format!("Failed to query existing columns: {e}"))?;
 
     Ok(rows
         .iter()
@@ -69,7 +68,7 @@ pub(crate) async fn detect_schema_drift(
     schema_name: &str,
     table_name: &str,
     arrow_schema: &rapidbyte_sdk::arrow::datatypes::Schema,
-) -> anyhow::Result<Option<SchemaDrift>> {
+) -> Result<Option<SchemaDrift>, String> {
     let existing = get_existing_columns(client, schema_name, table_name).await?;
     if existing.is_empty() {
         return Ok(None);
@@ -150,15 +149,15 @@ pub(crate) async fn apply_schema_policy(
     policy: &SchemaEvolutionPolicy,
     ignored_columns: &mut HashSet<String>,
     type_null_columns: &mut HashSet<String>,
-) -> anyhow::Result<()> {
+) -> Result<(), String> {
     // Handle new columns.
     for (col_name, pg_type) in &drift.new_columns {
         match policy.new_column {
             ColumnPolicy::Fail => {
-                anyhow::bail!(
+                return Err(format!(
                     "Schema evolution: new column '{}' detected but policy is 'fail'",
                     col_name
-                );
+                ));
             }
             ColumnPolicy::Add => {
                 let sql = format!(
@@ -170,7 +169,7 @@ pub(crate) async fn apply_schema_policy(
                 client
                     .execute(&sql, &[])
                     .await
-                    .with_context(|| format!("ALTER TABLE ADD COLUMN '{}' failed", col_name))?;
+                    .map_err(|e| format!("ALTER TABLE ADD COLUMN '{}' failed: {e}", col_name))?;
                 host_ffi::log(
                     2,
                     &format!("dest-postgres: added column '{}' {}", col_name, pg_type),
@@ -193,10 +192,10 @@ pub(crate) async fn apply_schema_policy(
     for col_name in &drift.removed_columns {
         match policy.removed_column {
             ColumnPolicy::Fail => {
-                anyhow::bail!(
+                return Err(format!(
                     "Schema evolution: column '{}' removed but policy is 'fail'",
                     col_name
-                );
+                ));
             }
             ColumnPolicy::Ignore | ColumnPolicy::Add => {
                 host_ffi::log(
@@ -214,12 +213,10 @@ pub(crate) async fn apply_schema_policy(
     for (col_name, old_type, new_type) in &drift.type_changes {
         match policy.type_change {
             TypeChangePolicy::Fail => {
-                anyhow::bail!(
+                return Err(format!(
                     "Schema evolution: type change for '{}' ({} -> {}) but policy is 'fail'",
-                    col_name,
-                    old_type,
-                    new_type
-                );
+                    col_name, old_type, new_type
+                ));
             }
             TypeChangePolicy::Coerce => {
                 let col_ident = quote_identifier(col_name);
@@ -231,9 +228,9 @@ pub(crate) async fn apply_schema_policy(
                     col_ident,
                     new_type
                 );
-                client.execute(&sql, &[]).await.with_context(|| {
+                client.execute(&sql, &[]).await.map_err(|e| {
                     format!(
-                        "Schema evolution: ALTER COLUMN '{}' TYPE {} failed",
+                        "Schema evolution: ALTER COLUMN '{}' TYPE {} failed: {e}",
                         col_name, new_type
                     )
                 })?;
@@ -262,12 +259,10 @@ pub(crate) async fn apply_schema_policy(
     for (col_name, was_nullable, now_nullable) in &drift.nullability_changes {
         match policy.nullability_change {
             NullabilityPolicy::Fail => {
-                anyhow::bail!(
+                return Err(format!(
                     "Schema evolution: nullability change for '{}' ({} -> {}) but policy is 'fail'",
-                    col_name,
-                    was_nullable,
-                    now_nullable
-                );
+                    col_name, was_nullable, now_nullable
+                ));
             }
             NullabilityPolicy::Allow => {
                 let col_ident = quote_identifier(col_name);
@@ -301,8 +296,8 @@ pub(crate) async fn apply_schema_policy(
                     client
                         .execute(&sql, &[])
                         .await
-                        .with_context(|| {
-                            format!("ALTER TABLE DROP NOT NULL on '{}' failed", col_name)
+                        .map_err(|e| {
+                            format!("ALTER TABLE DROP NOT NULL on '{}' failed: {e}", col_name)
                         })?;
                     host_ffi::log(
                         2,

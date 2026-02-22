@@ -1,6 +1,5 @@
 //! SQL and cursor parameter helpers for source incremental reads.
 
-use anyhow::{anyhow, bail, Context};
 use chrono::{DateTime, SecondsFormat, Utc};
 use pg_escape::quote_identifier;
 use rapidbyte_sdk::host_ffi;
@@ -50,7 +49,7 @@ pub(crate) fn build_base_query(
     ctx: &StreamContext,
     columns: &[ColumnSchema],
     pg_types: &[String],
-) -> anyhow::Result<CursorQuery> {
+) -> Result<CursorQuery, String> {
     let col_list = columns
         .iter()
         .zip(pg_types.iter())
@@ -109,9 +108,9 @@ pub(crate) fn build_base_query(
             }
 
             let (bind, cast) =
-                cursor_bind_param(&resolved_cursor_type, last_value).with_context(|| {
+                cursor_bind_param(&resolved_cursor_type, last_value).map_err(|e| {
                     format!(
-                        "Invalid incremental cursor value for stream '{}' field '{}'",
+                        "Invalid incremental cursor value for stream '{}' field '{}': {e}",
                         ctx.stream_name, ci.cursor_field
                     )
                 })?;
@@ -162,18 +161,18 @@ pub(crate) fn build_base_query(
 pub(crate) fn cursor_bind_param(
     cursor_type: &CursorType,
     value: &CursorValue,
-) -> anyhow::Result<(CursorBindParam, &'static str)> {
+) -> Result<(CursorBindParam, &'static str), String> {
     match cursor_type {
         CursorType::Int64 => {
             let n = match value {
                 CursorValue::Int64(v) => *v,
                 CursorValue::Utf8(v) => v
                     .parse::<i64>()
-                    .with_context(|| format!("failed to parse '{}' as i64", v))?,
+                    .map_err(|e| format!("failed to parse '{}' as i64: {e}", v))?,
                 CursorValue::Decimal { value, .. } => value
                     .parse::<i64>()
-                    .with_context(|| format!("failed to parse decimal '{}' as i64", value))?,
-                _ => bail!("cursor value is incompatible with int64 cursor type"),
+                    .map_err(|e| format!("failed to parse decimal '{}' as i64: {e}", value))?,
+                _ => return Err("cursor value is incompatible with int64 cursor type".to_string()),
             };
             Ok((CursorBindParam::Int64(n), "bigint"))
         }
@@ -186,7 +185,7 @@ pub(crate) fn cursor_bind_param(
                 CursorValue::Decimal { value, .. } => value.clone(),
                 CursorValue::Json(v) => v.to_string(),
                 CursorValue::Lsn(v) => v.clone(),
-                CursorValue::Null => bail!("null cursor cannot be used as a predicate"),
+                CursorValue::Null => return Err("null cursor cannot be used as a predicate".to_string()),
             };
             Ok((CursorBindParam::Text(text), "text"))
         }
@@ -196,7 +195,7 @@ pub(crate) fn cursor_bind_param(
                 CursorValue::Int64(v) => timestamp_millis_to_rfc3339(*v)?,
                 CursorValue::Utf8(v) => v.clone(),
                 CursorValue::TimestampMicros(v) => timestamp_micros_to_rfc3339(*v)?,
-                _ => bail!("cursor value is incompatible with timestamp_millis cursor type"),
+                _ => return Err("cursor value is incompatible with timestamp_millis cursor type".to_string()),
             };
             // Double-cast: bind as text (tokio-postgres supports String→text),
             // then PG casts text→timestamp for the comparison.
@@ -208,7 +207,7 @@ pub(crate) fn cursor_bind_param(
                 CursorValue::Int64(v) => timestamp_micros_to_rfc3339(*v)?,
                 CursorValue::Utf8(v) => v.clone(),
                 CursorValue::TimestampMillis(v) => timestamp_millis_to_rfc3339(*v)?,
-                _ => bail!("cursor value is incompatible with timestamp_micros cursor type"),
+                _ => return Err("cursor value is incompatible with timestamp_micros cursor type".to_string()),
             };
             // Double-cast: bind as text (tokio-postgres supports String→text),
             // then PG casts text→timestamp for the comparison.
@@ -219,7 +218,7 @@ pub(crate) fn cursor_bind_param(
                 CursorValue::Decimal { value, .. } => value.clone(),
                 CursorValue::Utf8(v) => v.clone(),
                 CursorValue::Int64(v) => v.to_string(),
-                _ => bail!("cursor value is incompatible with decimal cursor type"),
+                _ => return Err("cursor value is incompatible with decimal cursor type".to_string()),
             };
             Ok((CursorBindParam::Text(decimal), "numeric"))
         }
@@ -227,9 +226,9 @@ pub(crate) fn cursor_bind_param(
             let json = match value {
                 CursorValue::Json(v) => v.clone(),
                 CursorValue::Utf8(v) => serde_json::from_str::<serde_json::Value>(v)
-                    .with_context(|| format!("failed to parse '{}' as json", v))?,
+                    .map_err(|e| format!("failed to parse '{}' as json: {e}", v))?,
                 CursorValue::Null => serde_json::Value::Null,
-                _ => bail!("cursor value is incompatible with json cursor type"),
+                _ => return Err("cursor value is incompatible with json cursor type".to_string()),
             };
             Ok((CursorBindParam::Json(json), "jsonb"))
         }
@@ -239,25 +238,25 @@ pub(crate) fn cursor_bind_param(
             let text = match value {
                 CursorValue::Lsn(v) => v.clone(),
                 CursorValue::Utf8(v) => v.clone(),
-                _ => bail!("cursor value is incompatible with lsn cursor type"),
+                _ => return Err("cursor value is incompatible with lsn cursor type".to_string()),
             };
             Ok((CursorBindParam::Text(text), "pg_lsn"))
         }
     }
 }
 
-pub(crate) fn timestamp_millis_to_rfc3339(ms: i64) -> anyhow::Result<String> {
+pub(crate) fn timestamp_millis_to_rfc3339(ms: i64) -> Result<String, String> {
     let dt: DateTime<Utc> = DateTime::from_timestamp_millis(ms)
-        .ok_or_else(|| anyhow!("invalid timestamp millis value: {}", ms))?;
+        .ok_or_else(|| format!("invalid timestamp millis value: {}", ms))?;
     Ok(dt.to_rfc3339_opts(SecondsFormat::Millis, true))
 }
 
-pub(crate) fn timestamp_micros_to_rfc3339(us: i64) -> anyhow::Result<String> {
+pub(crate) fn timestamp_micros_to_rfc3339(us: i64) -> Result<String, String> {
     let secs = us.div_euclid(1_000_000);
     let micros = us.rem_euclid(1_000_000) as u32;
     let nanos = micros * 1_000;
     let dt: DateTime<Utc> = DateTime::from_timestamp(secs, nanos)
-        .ok_or_else(|| anyhow!("invalid timestamp micros value: {}", us))?;
+        .ok_or_else(|| format!("invalid timestamp micros value: {}", us))?;
     Ok(dt.to_rfc3339_opts(SecondsFormat::Micros, true))
 }
 
@@ -334,7 +333,7 @@ mod tests {
             &CursorValue::Utf8("not_an_int".into()),
         )
         .expect_err("invalid int64 should fail");
-        assert!(format!("{:#}", err).contains("failed to parse 'not_an_int' as i64"));
+        assert!(err.contains("failed to parse 'not_an_int' as i64"));
     }
 
     #[test]

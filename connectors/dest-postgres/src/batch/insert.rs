@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use anyhow::Context;
 use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use pg_escape::quote_identifier;
@@ -30,7 +29,7 @@ pub(crate) fn build_upsert_clause(
     write_mode: Option<&WriteMode>,
     arrow_schema: &Arc<Schema>,
     active_cols: &[usize],
-) -> anyhow::Result<Option<String>> {
+) -> Result<Option<String>, String> {
     if let Some(WriteMode::Upsert { primary_key }) = write_mode {
         let pk_cols = primary_key
             .iter()
@@ -70,7 +69,7 @@ pub(crate) async fn insert_batch(
     ctx: &mut WriteContext<'_>,
     arrow_schema: &Arc<Schema>,
     batches: &[RecordBatch],
-) -> anyhow::Result<u64> {
+) -> Result<u64, String> {
     if batches.is_empty() {
         return Ok(0);
     }
@@ -93,7 +92,7 @@ pub(crate) async fn insert_batch(
         ctx.type_null_columns,
     )
     .await
-    .with_context(|| format!("Failed to ensure table/schema for {}", ctx.stream_name))?;
+    .map_err(|e| format!("Failed to ensure table/schema for {}: {e}", ctx.stream_name))?;
 
     let active_cols = active_column_indices(arrow_schema, ctx.ignored_columns);
     if active_cols.is_empty() {
@@ -113,7 +112,7 @@ pub(crate) async fn insert_batch(
     for batch in batches {
         let num_rows = batch.num_rows();
 
-        let typed_cols = downcast_columns(batch, &active_cols).map_err(|e| anyhow::anyhow!(e))?;
+        let typed_cols = downcast_columns(batch, &active_cols)?;
         let type_null_flags: Vec<bool> = active_cols
             .iter()
             .map(|&i| ctx.type_null_columns.contains(arrow_schema.field(i).name()))
@@ -161,9 +160,9 @@ pub(crate) async fn insert_batch(
             ctx.client
                 .execute(&sql, &param_refs)
                 .await
-                .with_context(|| {
+                .map_err(|e| {
                     format!(
-                        "Multi-value INSERT failed for {}, rows {}-{}",
+                        "Multi-value INSERT failed for {}, rows {}-{}: {e}",
                         ctx.stream_name, chunk_start, chunk_end
                     )
                 })?;

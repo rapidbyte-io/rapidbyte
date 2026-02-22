@@ -7,7 +7,6 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{anyhow, bail, Context};
 use rapidbyte_sdk::arrow::array::StringBuilder;
 use rapidbyte_sdk::arrow::datatypes::{DataType, Field, Schema};
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
@@ -65,9 +64,7 @@ pub async fn read_cdc_changes(
     config: &Config,
     connect_secs: f64,
 ) -> Result<ReadSummary, String> {
-    read_cdc_inner(client, ctx, config, connect_secs)
-        .await
-        .map_err(|e| format!("{:#}", e))
+    read_cdc_inner(client, ctx, config, connect_secs).await
 }
 
 async fn read_cdc_inner(
@@ -75,7 +72,7 @@ async fn read_cdc_inner(
     ctx: &StreamContext,
     config: &Config,
     connect_secs: f64,
-) -> anyhow::Result<ReadSummary> {
+) -> Result<ReadSummary, String> {
     host_ffi::log(2, &format!("CDC reading stream: {}", ctx.stream_name));
 
     let query_start = Instant::now();
@@ -98,7 +95,7 @@ async fn read_cdc_inner(
     let schema_rows = client
         .query(schema_query, &[&ctx.stream_name])
         .await
-        .with_context(|| format!("Schema query failed for {}", ctx.stream_name))?;
+        .map_err(|e| format!("Schema query failed for {}: {e}", ctx.stream_name))?;
 
     let table_columns: Vec<ColumnSchema> = schema_rows
         .iter()
@@ -115,7 +112,7 @@ async fn read_cdc_inner(
         .collect();
 
     if table_columns.is_empty() {
-        bail!("Table '{}' not found or has no columns", ctx.stream_name);
+        return Err(format!("Table '{}' not found or has no columns", ctx.stream_name));
     }
 
     // Build Arrow schema: table columns + _rb_op metadata column
@@ -127,7 +124,7 @@ async fn read_cdc_inner(
     let change_rows = client
         .query(changes_query, &[&slot_name, &CDC_MAX_CHANGES])
         .await
-        .with_context(|| format!("pg_logical_slot_get_changes failed for slot {}", slot_name))?;
+        .map_err(|e| format!("pg_logical_slot_get_changes failed for slot {}: {e}", slot_name))?;
 
     let query_secs = query_start.elapsed().as_secs_f64();
 
@@ -173,7 +170,7 @@ async fn read_cdc_inner(
             batches_emitted += 1;
 
             host_ffi::emit_batch(&batch)
-                .map_err(|e| anyhow!("emit_batch failed: {}", e.message))?;
+                .map_err(|e| format!("emit_batch failed: {}", e.message))?;
 
             emit_read_metrics(&ctx.stream_name, total_records, total_bytes);
             accumulated_changes.clear();
@@ -191,7 +188,7 @@ async fn read_cdc_inner(
         batches_emitted += 1;
 
         host_ffi::emit_batch(&batch)
-            .map_err(|e| anyhow!("emit_batch failed: {}", e.message))?;
+            .map_err(|e| format!("emit_batch failed: {}", e.message))?;
 
         emit_read_metrics(&ctx.stream_name, total_records, total_bytes);
     }
@@ -211,7 +208,7 @@ async fn read_cdc_inner(
         };
         // CDC uses get_changes (destructive) so checkpoint MUST succeed to avoid data loss.
         host_ffi::checkpoint("source-postgres", &ctx.stream_name, &cp).map_err(|e| {
-            anyhow!(
+            format!(
                 "CDC checkpoint failed (WAL already consumed): {}",
                 e.message
             )
@@ -254,7 +251,7 @@ async fn read_cdc_inner(
 
 /// Ensure the logical replication slot exists, creating it if necessary.
 /// Uses try-create to avoid TOCTOU race between check and create.
-async fn ensure_replication_slot(client: &Client, slot_name: &str) -> anyhow::Result<()> {
+async fn ensure_replication_slot(client: &Client, slot_name: &str) -> Result<(), String> {
     host_ffi::log(
         3,
         &format!("Ensuring replication slot '{}' exists", slot_name),
@@ -291,7 +288,7 @@ async fn ensure_replication_slot(client: &Client, slot_name: &str) -> anyhow::Re
                     &format!("Replication slot '{}' already exists", slot_name),
                 );
             } else {
-                return Err(anyhow::anyhow!(
+                return Err(format!(
                     "Failed to create logical replication slot '{}'. \
                      Ensure wal_level=logical in postgresql.conf: {}",
                     slot_name,
@@ -393,17 +390,17 @@ fn parse_columns(s: &str) -> Vec<(String, String, String)> {
 ///
 /// Informal grammar:
 /// - `value = quoted | unquoted`
-/// - `quoted = \"'\" ( char | \"''\" )* \"'\"` (`''` escapes a literal `'`)
+/// - `quoted = "'" ( char | "''" )* "'"` (`''` escapes a literal `'`)
 /// - `unquoted = [^ ]+` (terminated by space or EOF)
 ///
 /// Edge cases:
 /// - `'O''Brien'` -> `O'Brien`
-/// - `'élève'` / CJK text -> preserved via char-wise iteration
-/// - `null` -> literal string `\"null\"` (null semantics handled by caller)
+/// - `'eleve'` / CJK text -> preserved via char-wise iteration
+/// - `null` -> literal string `"null"` (null semantics handled by caller)
 /// - unterminated quoted value returns the accumulated payload
 fn parse_value(s: &str) -> (String, &str) {
     if s.starts_with('\'') {
-        // Quoted string value — iterate by char to handle multi-byte UTF-8 correctly
+        // Quoted string value -- iterate by char to handle multi-byte UTF-8 correctly
         let inner = &s[1..]; // skip opening quote
         let mut value = String::new();
         let mut chars = inner.char_indices();
@@ -455,7 +452,7 @@ fn changes_to_batch(
     changes: &[CdcChange],
     table_columns: &[ColumnSchema],
     schema: &Arc<Schema>,
-) -> anyhow::Result<RecordBatch> {
+) -> Result<RecordBatch, String> {
     let num_rows = changes.len();
 
     // Build one StringBuilder per table column + 1 for _rb_op
@@ -492,7 +489,7 @@ fn changes_to_batch(
     arrays.push(Arc::new(op_builder.finish()));
 
     let batch =
-        RecordBatch::try_new(schema.clone(), arrays).context("Failed to create CDC RecordBatch")?;
+        RecordBatch::try_new(schema.clone(), arrays).map_err(|e| format!("Failed to create CDC RecordBatch: {e}"))?;
 
     Ok(batch)
 }
@@ -512,11 +509,11 @@ fn lsn_gt(a: &str, b: &str) -> bool {
 
     match (parse_lsn(a), parse_lsn(b)) {
         (Some(a), Some(b)) => a > b,
-        _ => false, // unparseable LSN — don't advance
+        _ => false, // unparseable LSN -- don't advance
     }
 }
 
-// ─── Tests ─────────────────────────────────────────────────────────────────
+// --- Tests ---
 
 #[cfg(test)]
 mod tests {

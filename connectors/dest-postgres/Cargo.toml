@@ -16,7 +16,6 @@ serde_json = "1"
 chrono = "0.4"
 bytes = "1"
 futures-util = "0.3"
-anyhow = "1"
 pg_escape = "0.1"
 wit-bindgen = "0.46"
 

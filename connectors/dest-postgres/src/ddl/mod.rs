@@ -6,7 +6,6 @@ mod type_map;
 
 use std::collections::HashSet;
 
-use anyhow::Context;
 use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 
@@ -24,7 +23,7 @@ async fn ensure_table(
     qualified_table: &str,
     arrow_schema: &rapidbyte_sdk::arrow::datatypes::Schema,
     primary_key: Option<&[String]>,
-) -> anyhow::Result<()> {
+) -> Result<(), String> {
     let columns_ddl: Vec<String> = arrow_schema
         .fields()
         .iter()
@@ -59,7 +58,7 @@ async fn ensure_table(
     client
         .execute(&ddl, &[])
         .await
-        .with_context(|| format!("Failed to create table {}", qualified_table))?;
+        .map_err(|e| format!("Failed to create table {}: {e}", qualified_table))?;
 
     Ok(())
 }
@@ -75,7 +74,7 @@ pub(crate) async fn ensure_table_and_schema(
     arrow_schema: &rapidbyte_sdk::arrow::datatypes::Schema,
     ignored_columns: &mut HashSet<String>,
     type_null_columns: &mut HashSet<String>,
-) -> anyhow::Result<()> {
+) -> Result<(), String> {
     let qualified_table = format!(
         "{}.{}",
         quote_identifier(target_schema),
@@ -90,7 +89,7 @@ pub(crate) async fn ensure_table_and_schema(
     client
         .execute(&create_schema, &[])
         .await
-        .with_context(|| format!("Failed to create schema '{}'", target_schema))?;
+        .map_err(|e| format!("Failed to create schema '{}': {e}", target_schema))?;
 
     let pk = match write_mode {
         Some(WriteMode::Upsert { primary_key }) => Some(primary_key.as_slice()),

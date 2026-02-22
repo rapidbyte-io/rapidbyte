@@ -12,7 +12,6 @@ mod typed_col;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use anyhow::Context;
 use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
@@ -61,16 +60,6 @@ pub(crate) async fn write_batch(
     arrow_schema: &Arc<Schema>,
     batches: &[RecordBatch],
 ) -> Result<WriteResult, String> {
-    write_batch_inner(ctx, arrow_schema, batches)
-        .await
-        .map_err(|e| format!("{:#}", e))
-}
-
-async fn write_batch_inner(
-    ctx: &mut WriteContext<'_>,
-    arrow_schema: &Arc<Schema>,
-    batches: &[RecordBatch],
-) -> anyhow::Result<WriteResult> {
     if batches.is_empty() {
         return Ok(WriteResult {
             rows_written: 0,
@@ -87,8 +76,8 @@ async fn write_batch_inner(
         (insert_batch(ctx, arrow_schema, batches).await, "INSERT")
     };
 
-    let rows_written = result.with_context(|| {
-        format!("{} failed for stream {}", method_name, ctx.stream_name)
+    let rows_written = result.map_err(|e| {
+        format!("{} failed for stream {}: {e}", method_name, ctx.stream_name)
     })?;
 
     Ok(WriteResult {

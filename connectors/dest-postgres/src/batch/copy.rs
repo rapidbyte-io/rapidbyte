@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use anyhow::Context;
 use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use bytes::Bytes;
@@ -22,7 +21,7 @@ pub(crate) async fn copy_batch(
     ctx: &mut WriteContext<'_>,
     arrow_schema: &Arc<Schema>,
     batches: &[RecordBatch],
-) -> anyhow::Result<u64> {
+) -> Result<u64, String> {
     if batches.is_empty() {
         return Ok(0);
     }
@@ -45,7 +44,7 @@ pub(crate) async fn copy_batch(
         ctx.type_null_columns,
     )
     .await
-    .with_context(|| format!("Failed to ensure table/schema for {}", ctx.stream_name))?;
+    .map_err(|e| format!("Failed to ensure table/schema for {}: {e}", ctx.stream_name))?;
 
     let active_cols = active_column_indices(arrow_schema, ctx.ignored_columns);
     if active_cols.is_empty() {
@@ -67,7 +66,7 @@ pub(crate) async fn copy_batch(
         .client
         .copy_in(&copy_stmt)
         .await
-        .context("COPY start failed")?;
+        .map_err(|e| format!("COPY start failed: {e}"))?;
     let mut sink = Box::pin(sink);
 
     let flush_threshold = ctx
@@ -79,7 +78,7 @@ pub(crate) async fn copy_batch(
     let mut buf = Vec::with_capacity(flush_threshold);
 
     for batch in batches {
-        let typed_cols = downcast_columns(batch, &active_cols).map_err(|e| anyhow::anyhow!(e))?;
+        let typed_cols = downcast_columns(batch, &active_cols)?;
         let type_null_flags: Vec<bool> = active_cols
             .iter()
             .map(|&i| ctx.type_null_columns.contains(arrow_schema.field(i).name()))
@@ -102,7 +101,7 @@ pub(crate) async fn copy_batch(
             if buf.len() >= flush_threshold {
                 sink.send(Bytes::from(std::mem::take(&mut buf)))
                     .await
-                    .context("COPY send failed")?;
+                    .map_err(|e| format!("COPY send failed: {e}"))?;
                 buf = Vec::with_capacity(flush_threshold);
             }
         }
@@ -111,10 +110,10 @@ pub(crate) async fn copy_batch(
     if !buf.is_empty() {
         sink.send(Bytes::from(buf))
             .await
-            .context("COPY send failed")?;
+            .map_err(|e| format!("COPY send failed: {e}"))?;
     }
 
-    let _rows = sink.as_mut().finish().await.context("COPY finish failed")?;
+    let _rows = sink.as_mut().finish().await.map_err(|e| format!("COPY finish failed: {e}"))?;
 
     host_ffi::log(
         2,

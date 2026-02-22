@@ -1,6 +1,5 @@
 //! PostgreSQL client connection and validation helpers for source-postgres.
 
-use anyhow::{anyhow, Context};
 use tokio_postgres::{Client, Config as PgConfig, NoTls};
 
 use rapidbyte_sdk::errors::{ConnectorError, ValidationResult, ValidationStatus};
@@ -8,10 +7,6 @@ use rapidbyte_sdk::host_ffi;
 
 /// Connect to PostgreSQL using the provided config.
 pub(crate) async fn connect(config: &crate::config::Config) -> Result<Client, String> {
-    connect_inner(config).await.map_err(|e| format!("{:#}", e))
-}
-
-async fn connect_inner(config: &crate::config::Config) -> anyhow::Result<Client> {
     let mut pg = PgConfig::new();
     pg.host(&config.host);
     pg.port(config.port);
@@ -22,11 +17,11 @@ async fn connect_inner(config: &crate::config::Config) -> anyhow::Result<Client>
     pg.dbname(&config.database);
 
     let stream = rapidbyte_sdk::host_tcp::HostTcpStream::connect(&config.host, config.port)
-        .map_err(|e| anyhow!("Connection failed: {e}"))?;
+        .map_err(|e| format!("Connection failed: {e}"))?;
     let (client, connection) = pg
         .connect_raw(stream, NoTls)
         .await
-        .context("Connection failed")?;
+        .map_err(|e| format!("Connection failed: {e}"))?;
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {

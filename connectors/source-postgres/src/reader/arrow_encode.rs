@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use anyhow::Context;
 use rapidbyte_sdk::arrow::array::{
     BinaryBuilder, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array, Int32Array,
     Int64Array, StringBuilder, TimestampMicrosecondArray,
@@ -23,12 +22,12 @@ pub(crate) fn rows_to_record_batch(
     columns: &[ColumnSchema],
     pg_types: &[String],
     schema: &Arc<Schema>,
-) -> anyhow::Result<RecordBatch> {
+) -> Result<RecordBatch, String> {
     let arrays: Vec<Arc<dyn rapidbyte_sdk::arrow::array::Array>> = columns
         .iter()
         .enumerate()
         .map(
-            |(col_idx, col)| -> anyhow::Result<Arc<dyn rapidbyte_sdk::arrow::array::Array>> {
+            |(col_idx, col)| -> Result<Arc<dyn rapidbyte_sdk::arrow::array::Array>, String> {
                 match col.data_type.as_str() {
                     "Int16" => {
                         let arr: Int16Array = rows
@@ -137,8 +136,8 @@ pub(crate) fn rows_to_record_batch(
                 }
             },
         )
-        .collect::<anyhow::Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>, String>>()?;
 
-    RecordBatch::try_new(schema.clone(), arrays).context("Failed to create RecordBatch")
+    RecordBatch::try_new(schema.clone(), arrays).map_err(|e| format!("Failed to create RecordBatch: {e}"))
 }
 

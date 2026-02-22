@@ -9,7 +9,6 @@ mod query;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{anyhow, bail, Context};
 use rapidbyte_sdk::arrow::datatypes::Schema;
 use chrono::NaiveDateTime;
 use tokio_postgres::Client;
@@ -107,7 +106,7 @@ fn emit_accumulated_rows(
     stream_name: &str,
     state: &mut EmitState,
     estimated_bytes: &mut usize,
-) -> anyhow::Result<()> {
+) -> Result<(), String> {
     let encode_start = Instant::now();
     let batch = rows_to_record_batch(rows, columns, pg_types, schema)?;
     state.arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
@@ -116,7 +115,7 @@ fn emit_accumulated_rows(
     state.total_bytes += batch.get_array_memory_size() as u64;
     state.batches_emitted += 1;
 
-    host_ffi::emit_batch(&batch).map_err(|e| anyhow!("emit_batch failed: {}", e.message))?;
+    host_ffi::emit_batch(&batch).map_err(|e| format!("emit_batch failed: {}", e.message))?;
     emit_read_metrics(stream_name, state.total_records, state.total_bytes);
 
     rows.clear();
@@ -130,16 +129,14 @@ pub async fn read_stream(
     ctx: &StreamContext,
     connect_secs: f64,
 ) -> Result<ReadSummary, String> {
-    read_stream_inner(client, ctx, connect_secs)
-        .await
-        .map_err(|e| format!("{:#}", e))
+    read_stream_inner(client, ctx, connect_secs).await
 }
 
 async fn read_stream_inner(
     client: &Client,
     ctx: &StreamContext,
     connect_secs: f64,
-) -> anyhow::Result<ReadSummary> {
+) -> Result<ReadSummary, String> {
     host_ffi::log(2, &format!("Reading stream: {}", ctx.stream_name));
 
     let query_start = Instant::now();
@@ -152,7 +149,7 @@ async fn read_stream_inner(
     let schema_rows = client
         .query(schema_query, &[&ctx.stream_name])
         .await
-        .with_context(|| format!("Schema query failed for {}", ctx.stream_name))?;
+        .map_err(|e| format!("Schema query failed for {}: {e}", ctx.stream_name))?;
 
     let all_columns: Vec<ColumnSchema> = schema_rows
         .iter()
@@ -169,7 +166,7 @@ async fn read_stream_inner(
         .collect();
 
     if all_columns.is_empty() {
-        bail!("Table '{}' not found or has no columns", ctx.stream_name);
+        return Err(format!("Table '{}' not found or has no columns", ctx.stream_name));
     }
 
     // Build parallel pg_types vector for json/jsonb extraction in Arrow encoder.
@@ -188,11 +185,11 @@ async fn read_stream_inner(
                 .map(|s| s.as_str())
                 .collect();
             if !unknown.is_empty() {
-                bail!(
+                return Err(format!(
                     "Selected columns {:?} not found in table '{}'",
                     unknown,
                     ctx.stream_name
-                );
+                ));
             }
 
             let (filtered, filtered_pg_types): (Vec<ColumnSchema>, Vec<String>) = all_columns
@@ -201,19 +198,19 @@ async fn read_stream_inner(
                 .filter(|(c, _)| selected.iter().any(|s| s == &c.name))
                 .unzip();
             if filtered.is_empty() {
-                bail!(
+                return Err(format!(
                     "None of the selected columns {:?} found in table '{}'",
                     selected,
                     ctx.stream_name
-                );
+                ));
             }
             if let (SyncMode::Incremental, Some(ci)) = (&ctx.sync_mode, &ctx.cursor_info) {
                 if !filtered.iter().any(|c| c.name == ci.cursor_field) {
-                    bail!(
+                    return Err(format!(
                         "Cursor field '{}' must be included in selected columns for incremental stream '{}'",
                         ci.cursor_field,
                         ctx.stream_name
-                    );
+                    ));
                 }
             }
             (filtered, filtered_pg_types)
@@ -226,7 +223,7 @@ async fn read_stream_inner(
     client
         .execute("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ", &[])
         .await
-        .context("BEGIN failed")?;
+        .map_err(|e| format!("BEGIN failed: {e}"))?;
 
     let cursor_query = build_base_query(ctx, &columns, &pg_types)?;
 
@@ -240,13 +237,13 @@ async fn read_stream_inner(
             client
                 .execute(&declare, &params)
                 .await
-                .context("DECLARE CURSOR failed")?;
+                .map_err(|e| format!("DECLARE CURSOR failed: {e}"))?;
         }
         None => {
             client
                 .execute(&declare, &[])
                 .await
-                .context("DECLARE CURSOR failed")?;
+                .map_err(|e| format!("DECLARE CURSOR failed: {e}"))?;
         }
     }
 
@@ -272,7 +269,7 @@ async fn read_stream_inner(
                 .iter()
                 .position(|c| c.name == ci.cursor_field)
                 .ok_or_else(|| {
-                    anyhow!(
+                    format!(
                         "Cursor field '{}' not found in schema for table '{}'",
                         ci.cursor_field,
                         ctx.stream_name
@@ -298,14 +295,14 @@ async fn read_stream_inner(
         arrow_encode_nanos: 0,
     };
 
-    let mut loop_error: Option<anyhow::Error> = None;
+    let mut loop_error: Option<String> = None;
 
     let fetch_start = Instant::now();
     loop {
         let rows = match client.query(&fetch_query, &[]).await {
             Ok(r) => r,
             Err(e) => {
-                loop_error = Some(anyhow!("FETCH failed for {}: {}", ctx.stream_name, e));
+                loop_error = Some(format!("FETCH failed for {}: {}", ctx.stream_name, e));
                 break;
             }
         };
@@ -318,7 +315,7 @@ async fn read_stream_inner(
                 if estimated_row_bytes > max_record_bytes {
                     match ctx.policies.on_data_error {
                         DataErrorPolicy::Fail => {
-                            loop_error = Some(anyhow!(
+                            loop_error = Some(format!(
                                 "Record exceeds max_record_bytes ({} > {})",
                                 estimated_row_bytes,
                                 max_record_bytes,
@@ -459,7 +456,7 @@ async fn read_stream_inner(
         client
             .execute("COMMIT", &[])
             .await
-            .context("COMMIT failed")?;
+            .map_err(|e| format!("COMMIT failed: {e}"))?;
     }
 
     if let Some(e) = loop_error {

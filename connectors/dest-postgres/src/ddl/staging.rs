@@ -1,6 +1,5 @@
 //! Replace-mode staging table lifecycle helpers.
 
-use anyhow::Context;
 use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 
@@ -11,7 +10,7 @@ async fn drop_staging_table(
     client: &Client,
     target_schema: &str,
     stream_name: &str,
-) -> anyhow::Result<()> {
+) -> Result<(), String> {
     let staging_table = format!(
         "{}.{}",
         quote_identifier(target_schema),
@@ -21,7 +20,7 @@ async fn drop_staging_table(
     client
         .execute(&sql, &[])
         .await
-        .with_context(|| format!("DROP staging table failed for {}", staging_table))?;
+        .map_err(|e| format!("DROP staging table failed for {}: {e}", staging_table))?;
     host_ffi::log(
         3,
         &format!("dest-postgres: dropped staging table {}", staging_table),
@@ -34,7 +33,7 @@ pub(crate) async fn swap_staging_table(
     client: &Client,
     target_schema: &str,
     stream_name: &str,
-) -> anyhow::Result<()> {
+) -> Result<(), String> {
     let target_table = format!(
         "{}.{}",
         quote_identifier(target_schema),
@@ -50,12 +49,12 @@ pub(crate) async fn swap_staging_table(
     client
         .execute("BEGIN", &[])
         .await
-        .context("Swap BEGIN failed")?;
+        .map_err(|e| format!("Swap BEGIN failed: {e}"))?;
 
     let drop_sql = format!("DROP TABLE IF EXISTS {} CASCADE", target_table);
     if let Err(e) = client.execute(&drop_sql, &[]).await {
         let _ = client.execute("ROLLBACK", &[]).await;
-        anyhow::bail!("Swap DROP failed for {}: {}", target_table, e);
+        return Err(format!("Swap DROP failed for {}: {}", target_table, e));
     }
 
     let rename_sql = format!(
@@ -64,13 +63,13 @@ pub(crate) async fn swap_staging_table(
     );
     if let Err(e) = client.execute(&rename_sql, &[]).await {
         let _ = client.execute("ROLLBACK", &[]).await;
-        anyhow::bail!("Swap RENAME failed: {}", e);
+        return Err(format!("Swap RENAME failed: {}", e));
     }
 
     client
         .execute("COMMIT", &[])
         .await
-        .context("Swap COMMIT failed")?;
+        .map_err(|e| format!("Swap COMMIT failed: {e}"))?;
 
     host_ffi::log(
         2,
@@ -87,7 +86,7 @@ pub(crate) async fn prepare_staging(
     client: &Client,
     target_schema: &str,
     stream_name: &str,
-) -> anyhow::Result<String> {
+) -> Result<String, String> {
     drop_staging_table(client, target_schema, stream_name).await?;
     Ok(format!("{}__rb_staging", stream_name))
 }
