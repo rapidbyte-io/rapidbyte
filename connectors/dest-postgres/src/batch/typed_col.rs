@@ -142,6 +142,9 @@ pub(crate) fn sql_param_value<'a>(col: &'a TypedCol<'a>, row_idx: usize) -> SqlP
                 let micros = arr.value(row_idx);
                 let secs = micros.div_euclid(1_000_000);
                 let nsecs = (micros.rem_euclid(1_000_000) * 1_000) as u32;
+                // Use NaiveDateTime for INSERT bind params. This works with TIMESTAMP
+                // columns (which our DDL creates). For pre-existing TIMESTAMPTZ columns,
+                // use COPY load method which is text-based and handles both.
                 let dt = DateTime::from_timestamp(secs, nsecs).map(|dt| dt.naive_utc());
                 SqlParamValue::Timestamp(dt)
             }

@@ -94,9 +94,17 @@ pub(crate) fn rows_to_record_batch(
                         let arr: TimestampMicrosecondArray = rows
                             .iter()
                             .map(|row| {
+                                // Try NaiveDateTime first (TIMESTAMP without TZ),
+                                // then DateTime<Utc> (TIMESTAMPTZ). tokio-postgres
+                                // uses different FromSql impls for each PG type.
                                 row.try_get::<_, NaiveDateTime>(col_idx)
                                     .ok()
                                     .map(|dt| dt.and_utc().timestamp_micros())
+                                    .or_else(|| {
+                                        row.try_get::<_, chrono::DateTime<chrono::Utc>>(col_idx)
+                                            .ok()
+                                            .map(|dt| dt.timestamp_micros())
+                                    })
                             })
                             .collect();
                         Ok(Arc::new(arr))

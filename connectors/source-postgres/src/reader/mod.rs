@@ -45,8 +45,8 @@ pub(crate) fn estimate_row_bytes(columns: &[ColumnSchema]) -> usize {
     for col in columns {
         total += match col.data_type.as_str() {
             "Int16" => 2,
-            "Int32" | "Float32" => 4,
-            "Int64" | "Float64" => 8,
+            "Int32" | "Float32" | "Date32" => 4,
+            "Int64" | "Float64" | "TimestampMicros" => 8,
             "Boolean" => 1,
             _ => 64,
         };
@@ -390,6 +390,11 @@ async fn read_stream_inner(
                             .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(|n| n.to_string()))
                             .or_else(|| {
                                 row.try_get::<_, NaiveDateTime>(col_idx)
+                                    .ok()
+                                    .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
+                            })
+                            .or_else(|| {
+                                row.try_get::<_, chrono::DateTime<chrono::Utc>>(col_idx)
                                     .ok()
                                     .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
                             })
