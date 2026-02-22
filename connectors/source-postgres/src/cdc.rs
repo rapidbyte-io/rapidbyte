@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context};
-use arrow::array::StringBuilder;
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use rapidbyte_sdk::arrow::array::StringBuilder;
+use rapidbyte_sdk::arrow::datatypes::{DataType, Field, Schema};
+use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::host_ffi;
@@ -18,7 +18,6 @@ use rapidbyte_sdk::protocol::{
     Checkpoint, CheckpointKind, ColumnSchema, CursorValue, ReadSummary, StreamContext,
 };
 
-use crate::arrow_util::batch_to_ipc;
 use crate::config::Config;
 use crate::metrics::emit_read_metrics;
 use crate::schema::pg_type_to_arrow;
@@ -166,14 +165,14 @@ async fn read_cdc_inner(
         // Flush batch if accumulated enough
         if accumulated_changes.len() >= BATCH_SIZE {
             let encode_start = Instant::now();
-            let ipc_bytes = changes_to_ipc(&accumulated_changes, &table_columns, &arrow_schema)?;
+            let batch = changes_to_batch(&accumulated_changes, &table_columns, &arrow_schema)?;
             arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
 
             total_records += accumulated_changes.len() as u64;
-            total_bytes += ipc_bytes.len() as u64;
+            total_bytes += batch.get_array_memory_size() as u64;
             batches_emitted += 1;
 
-            host_ffi::emit_batch(&ipc_bytes)
+            host_ffi::emit_batch(&batch)
                 .map_err(|e| anyhow!("emit_batch failed: {}", e.message))?;
 
             emit_read_metrics(&ctx.stream_name, total_records, total_bytes);
@@ -184,14 +183,14 @@ async fn read_cdc_inner(
     // Flush remaining changes
     if !accumulated_changes.is_empty() {
         let encode_start = Instant::now();
-        let ipc_bytes = changes_to_ipc(&accumulated_changes, &table_columns, &arrow_schema)?;
+        let batch = changes_to_batch(&accumulated_changes, &table_columns, &arrow_schema)?;
         arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
 
         total_records += accumulated_changes.len() as u64;
-        total_bytes += ipc_bytes.len() as u64;
+        total_bytes += batch.get_array_memory_size() as u64;
         batches_emitted += 1;
 
-        host_ffi::emit_batch(&ipc_bytes)
+        host_ffi::emit_batch(&batch)
             .map_err(|e| anyhow!("emit_batch failed: {}", e.message))?;
 
         emit_read_metrics(&ctx.stream_name, total_records, total_bytes);
@@ -451,12 +450,12 @@ fn build_cdc_arrow_schema(columns: &[ColumnSchema]) -> Arc<Schema> {
     Arc::new(Schema::new(fields))
 }
 
-/// Convert accumulated CDC changes into an Arrow IPC-encoded RecordBatch.
-fn changes_to_ipc(
+/// Convert accumulated CDC changes into an Arrow RecordBatch.
+fn changes_to_batch(
     changes: &[CdcChange],
     table_columns: &[ColumnSchema],
     schema: &Arc<Schema>,
-) -> anyhow::Result<Vec<u8>> {
+) -> anyhow::Result<RecordBatch> {
     let num_rows = changes.len();
 
     // Build one StringBuilder per table column + 1 for _rb_op
@@ -486,16 +485,16 @@ fn changes_to_ipc(
         op_builder.append_value(change.op.as_str());
     }
 
-    let mut arrays: Vec<Arc<dyn arrow::array::Array>> = col_builders
+    let mut arrays: Vec<Arc<dyn rapidbyte_sdk::arrow::array::Array>> = col_builders
         .into_iter()
-        .map(|mut b| Arc::new(b.finish()) as Arc<dyn arrow::array::Array>)
+        .map(|mut b| Arc::new(b.finish()) as Arc<dyn rapidbyte_sdk::arrow::array::Array>)
         .collect();
     arrays.push(Arc::new(op_builder.finish()));
 
     let batch =
         RecordBatch::try_new(schema.clone(), arrays).context("Failed to create CDC RecordBatch")?;
 
-    batch_to_ipc(&batch)
+    Ok(batch)
 }
 
 /// Compare two LSN strings (format: "X/YYYYYYYY").
@@ -727,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn test_changes_to_ipc() {
+    fn test_changes_to_batch() {
         let columns = vec![
             ColumnSchema {
                 name: "id".to_string(),
@@ -758,16 +757,9 @@ mod tests {
             },
         ];
 
-        let ipc_bytes = changes_to_ipc(&changes, &columns, &schema).unwrap();
-        assert!(!ipc_bytes.is_empty());
-
-        // Decode and verify
-        let cursor = std::io::Cursor::new(&ipc_bytes);
-        let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).unwrap();
-        let batches: Vec<RecordBatch> = reader.into_iter().filter_map(|b| b.ok()).collect();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].num_rows(), 2);
-        assert_eq!(batches[0].num_columns(), 3); // id, name, _rb_op
+        let batch = changes_to_batch(&changes, &columns, &schema).unwrap();
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.num_columns(), 3); // id, name, _rb_op
     }
 
     #[test]

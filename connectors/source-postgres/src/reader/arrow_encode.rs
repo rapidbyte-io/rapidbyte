@@ -3,38 +3,14 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use arrow::array::{
+use rapidbyte_sdk::arrow::array::{
     BinaryBuilder, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array, Int32Array,
     Int64Array, StringBuilder, TimestampMicrosecondArray,
 };
 use chrono::{NaiveDate, NaiveDateTime};
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use rapidbyte_sdk::arrow::datatypes::Schema;
+use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use rapidbyte_sdk::protocol::ColumnSchema;
-
-pub(crate) fn build_arrow_schema(columns: &[ColumnSchema]) -> Arc<Schema> {
-    let fields: Vec<Field> = columns
-        .iter()
-        .map(|col| {
-            let dt = match col.data_type.as_str() {
-                "Int16" => DataType::Int16,
-                "Int32" => DataType::Int32,
-                "Int64" => DataType::Int64,
-                "Float32" => DataType::Float32,
-                "Float64" => DataType::Float64,
-                "Boolean" => DataType::Boolean,
-                "TimestampMicros" => {
-                    DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None)
-                }
-                "Date32" => DataType::Date32,
-                "Binary" => DataType::Binary,
-                _ => DataType::Utf8,
-            };
-            Field::new(&col.name, dt, col.nullable)
-        })
-        .collect();
-    Arc::new(Schema::new(fields))
-}
 
 pub(crate) fn rows_to_record_batch(
     rows: &[tokio_postgres::Row],
@@ -42,11 +18,11 @@ pub(crate) fn rows_to_record_batch(
     pg_types: &[String],
     schema: &Arc<Schema>,
 ) -> anyhow::Result<RecordBatch> {
-    let arrays: Vec<Arc<dyn arrow::array::Array>> = columns
+    let arrays: Vec<Arc<dyn rapidbyte_sdk::arrow::array::Array>> = columns
         .iter()
         .enumerate()
         .map(
-            |(col_idx, col)| -> anyhow::Result<Arc<dyn arrow::array::Array>> {
+            |(col_idx, col)| -> anyhow::Result<Arc<dyn rapidbyte_sdk::arrow::array::Array>> {
                 match col.data_type.as_str() {
                     "Int16" => {
                         let arr: Int16Array = rows
@@ -160,58 +136,3 @@ pub(crate) fn rows_to_record_batch(
     RecordBatch::try_new(schema.clone(), arrays).context("Failed to create RecordBatch")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rapidbyte_sdk::protocol::ArrowDataType;
-
-    #[test]
-    fn build_arrow_schema_maps_timestamp_date_binary() {
-        let columns = vec![
-            ColumnSchema {
-                name: "created_at".to_string(),
-                data_type: ArrowDataType::TimestampMicros,
-                nullable: true,
-            },
-            ColumnSchema {
-                name: "birth_date".to_string(),
-                data_type: ArrowDataType::Date32,
-                nullable: true,
-            },
-            ColumnSchema {
-                name: "avatar".to_string(),
-                data_type: ArrowDataType::Binary,
-                nullable: true,
-            },
-        ];
-        let schema = build_arrow_schema(&columns);
-        assert_eq!(
-            *schema.field(0).data_type(),
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None)
-        );
-        assert_eq!(*schema.field(1).data_type(), DataType::Date32);
-        assert_eq!(*schema.field(2).data_type(), DataType::Binary);
-    }
-
-    #[test]
-    fn build_arrow_schema_maps_types() {
-        let columns = vec![
-            ColumnSchema {
-                name: "id".to_string(),
-                data_type: ArrowDataType::Int64,
-                nullable: false,
-            },
-            ColumnSchema {
-                name: "name".to_string(),
-                data_type: ArrowDataType::Utf8,
-                nullable: true,
-            },
-        ];
-        let schema = build_arrow_schema(&columns);
-        assert_eq!(schema.fields().len(), 2);
-        assert_eq!(schema.field(0).name(), "id");
-        assert_eq!(schema.field(1).name(), "name");
-        assert_eq!(*schema.field(0).data_type(), DataType::Int64);
-        assert_eq!(*schema.field(1).data_type(), DataType::Utf8);
-    }
-}

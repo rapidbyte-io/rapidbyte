@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context};
-use arrow::datatypes::Schema;
+use rapidbyte_sdk::arrow::datatypes::Schema;
 use chrono::NaiveDateTime;
 use tokio_postgres::Client;
 
@@ -20,11 +20,11 @@ use rapidbyte_sdk::protocol::{
     DEFAULT_MAX_BATCH_BYTES, DEFAULT_MAX_RECORD_BYTES,
 };
 
-use crate::arrow_util::batch_to_ipc;
 use crate::metrics::emit_read_metrics;
 use crate::schema::pg_type_to_arrow;
 
-use self::arrow_encode::{build_arrow_schema, rows_to_record_batch};
+use rapidbyte_sdk::arrow::build_arrow_schema;
+use self::arrow_encode::rows_to_record_batch;
 use self::query::build_base_query;
 
 /// Maximum number of rows per Arrow RecordBatch.
@@ -109,14 +109,14 @@ fn emit_accumulated_rows(
     estimated_bytes: &mut usize,
 ) -> anyhow::Result<()> {
     let encode_start = Instant::now();
-    let ipc_bytes = rows_to_record_batch(rows, columns, pg_types, schema).and_then(|batch| batch_to_ipc(&batch))?;
+    let batch = rows_to_record_batch(rows, columns, pg_types, schema)?;
     state.arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
 
     state.total_records += rows.len() as u64;
-    state.total_bytes += ipc_bytes.len() as u64;
+    state.total_bytes += batch.get_array_memory_size() as u64;
     state.batches_emitted += 1;
 
-    host_ffi::emit_batch(&ipc_bytes).map_err(|e| anyhow!("emit_batch failed: {}", e))?;
+    host_ffi::emit_batch(&batch).map_err(|e| anyhow!("emit_batch failed: {}", e.message))?;
     emit_read_metrics(stream_name, state.total_records, state.total_bytes);
 
     rows.clear();

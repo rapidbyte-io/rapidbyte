@@ -3,7 +3,6 @@
 //! Implements discovery and read paths (full-refresh, incremental cursor reads,
 //! and CDC logical replication) and streams Arrow IPC batches to the host.
 
-mod arrow_util;
 mod cdc;
 mod client;
 pub mod config;
