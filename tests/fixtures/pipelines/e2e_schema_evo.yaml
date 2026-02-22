@@ -1,0 +1,34 @@
+version: "1.0"
+pipeline: e2e_schema_evo
+
+source:
+  use: source-postgres
+  config:
+    host: localhost
+    port: 5433
+    user: postgres
+    password: postgres
+    database: rapidbyte_test
+  streams:
+    - name: evo_test
+      sync_mode: full_refresh
+
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+    port: 5433
+    user: postgres
+    password: postgres
+    database: rapidbyte_test
+    schema: raw_evo
+  write_mode: append
+  schema_evolution:
+    new_column: add
+    removed_column: ignore
+    type_change: coerce
+    nullability_change: allow
+
+state:
+  backend: sqlite
+  connection: /tmp/rapidbyte_e2e_evo_state.db
