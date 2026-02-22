@@ -136,7 +136,6 @@ mod tests {
                 network: NetworkPermissions {
                     allowed_domains: None,
                     allow_runtime_config_domains: true,
-                    tls: TlsRequirement::Optional,
                 },
                 env: EnvPermissions {
                     allowed_vars: vec!["PGSSLROOTCERT".to_string()],
@@ -175,13 +174,7 @@ mod tests {
                 checksum: None,
                 min_memory_mb: None,
             },
-            permissions: Permissions {
-                network: NetworkPermissions {
-                    tls: TlsRequirement::Forbidden,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
+            permissions: Permissions::default(),
             roles: Roles {
                 transform: Some(TransformCapabilities {}),
                 ..Default::default()
@@ -190,14 +183,12 @@ mod tests {
         };
         assert!(manifest.supports_role(ConnectorRole::Transform));
         assert!(!manifest.supports_role(ConnectorRole::Source));
-        assert_eq!(manifest.permissions.network.tls, TlsRequirement::Forbidden);
     }
 
     #[test]
     fn test_permissions_defaults() {
         let perms = Permissions::default();
         assert!(perms.network.allowed_domains.is_none());
-        assert_eq!(perms.network.tls, TlsRequirement::Optional);
         assert!(!perms.network.allow_runtime_config_domains);
         assert!(perms.env.allowed_vars.is_empty());
         assert!(perms.fs.preopens.is_empty());
@@ -221,7 +212,6 @@ mod tests {
             },
             "permissions": {
                 "network": {
-                    "tls": "optional",
                     "allow_runtime_config_domains": true
                 },
                 "env": {

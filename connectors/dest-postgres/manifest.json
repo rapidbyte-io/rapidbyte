@@ -10,7 +10,6 @@
     },
     "permissions": {
         "network": {
-            "tls": "optional",
             "allow_runtime_config_domains": true
         },
         "env": {

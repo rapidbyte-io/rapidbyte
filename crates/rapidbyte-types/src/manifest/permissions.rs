@@ -1,15 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-/// TLS requirement for connector network access.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum TlsRequirement {
-    Required,
-    #[default]
-    Optional,
-    Forbidden,
-}
-
 /// Network permissions declared by a connector.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
@@ -21,9 +11,6 @@ pub struct NetworkPermissions {
     /// If true, the host can inspect validated config for fields like
     /// "host" or "url" and dynamically allow network access at runtime.
     pub allow_runtime_config_domains: bool,
-
-    /// TLS requirement for outbound connections.
-    pub tls: TlsRequirement,
 }
 
 /// Filesystem permissions for the WASI sandbox.
