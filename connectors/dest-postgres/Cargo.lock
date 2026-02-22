@@ -355,7 +355,9 @@ checksum = "7e36cc9d416881d2e24f9a963be5fb1cd90966419ac844274161d10488b3e825"
 dependencies = [
  "android-tzdata",
  "iana-time-zone",
+ "js-sys",
  "num-traits",
+ "wasm-bindgen",
  "windows-targets 0.52.6",
 ]
 
@@ -438,6 +440,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "bytes",
+ "chrono",
  "futures-util",
  "pg_escape",
  "rapidbyte-sdk",
@@ -1036,6 +1039,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "54b858f82211e84682fecd373f68e1ceae642d8d751a1ebd13f33de6257b3e20"
 dependencies = [
  "bytes",
+ "chrono",
  "fallible-iterator",
  "postgres-protocol",
  "serde_core",
