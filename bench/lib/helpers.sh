@@ -78,6 +78,26 @@ stage_connectors() {
     fi
 }
 
+# Report staged connector binary sizes.
+report_wasm_sizes() {
+    if [ -d "$CONNECTOR_DIR" ]; then
+        info "Connector binary sizes:"
+        for wasm in "$CONNECTOR_DIR"/*.wasm; do
+            [ -f "$wasm" ] || continue
+            local name size
+            name="$(basename "$wasm")"
+            size="$(wc -c < "$wasm" | tr -d ' ')"
+            local human
+            if [ "$size" -ge 1048576 ]; then
+                human="$(python3 -c "print(f'{$size/1048576:.1f} MB')")"
+            else
+                human="$(python3 -c "print(f'{$size/1024:.0f} KB')")"
+            fi
+            info "  $name: $human ($size bytes)"
+        done
+    fi
+}
+
 # ── Docker helpers ───────────────────────────────────────────────
 start_postgres() {
     info "Starting Docker Compose..."
