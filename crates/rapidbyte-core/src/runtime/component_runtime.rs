@@ -144,6 +144,18 @@ fn intersect_preopens(
     }
 }
 
+/// Resolve a limit by taking the minimum of manifest and pipeline values.
+/// When only one side provides a value, that value is used.
+/// When neither provides a value, returns None.
+pub(crate) fn resolve_min_limit(manifest: Option<u64>, pipeline: Option<u64>) -> Option<u64> {
+    match (manifest, pipeline) {
+        (Some(m), Some(p)) => Some(m.min(p)),
+        (Some(m), None) => Some(m),
+        (None, Some(p)) => Some(p),
+        (None, None) => None,
+    }
+}
+
 fn build_wasi_ctx(
     permissions: Option<&Permissions>,
     overrides: Option<&SandboxOverrides>,
@@ -990,5 +1002,24 @@ mod tests {
         let manifest = vec!["/data".into()];
         let result = intersect_preopens(&manifest, Some(&vec![]));
         assert!(result.is_empty());
+    }
+
+    // ── resolve_min_limit tests ────────────────────────────────────────
+
+    #[test]
+    fn resolve_limit_min_of_both() {
+        assert_eq!(resolve_min_limit(Some(100), Some(50)), Some(50));
+        assert_eq!(resolve_min_limit(Some(50), Some(100)), Some(50));
+    }
+
+    #[test]
+    fn resolve_limit_one_side_only() {
+        assert_eq!(resolve_min_limit(Some(100), None), Some(100));
+        assert_eq!(resolve_min_limit(None, Some(50)), Some(50));
+    }
+
+    #[test]
+    fn resolve_limit_neither() {
+        assert_eq!(resolve_min_limit(None, None), None);
     }
 }
