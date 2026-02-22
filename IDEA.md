@@ -35,7 +35,8 @@ Arrow IPC batch exchange — no JVM, no Docker, no sidecar processes.
 - **Runtime:** Wasmtime component model, `wasm32-wasip2` target.
 - **Protocol:** Version 2. Interface contract: `wit/rapidbyte-connector.wit`.
 - **Data format:** Arrow IPC record batches flow between stages via bounded `mpsc` channels.
-- **State:** SQLite (`rusqlite` bundled) for run metadata, cursor/checkpoint state, and DLQ records.
+- **State:** Pluggable backend (SQLite bundled, S3 and PostgreSQL planned) for run metadata,
+  cursor/checkpoint state, and DLQ records.
 - **Networking:** Connectors have no direct WASI socket access. All outbound TCP is mediated
   through host imports (`connect-tcp`, `socket-read`, `socket-write`, `socket-close`) with
   manifest-declared network ACLs.
@@ -115,13 +116,23 @@ The host validates config against the schema before instantiating the Wasm guest
 
 ```
 rapidbyte run <pipeline.yaml>       Execute a data pipeline
+rapidbyte run <pipeline.yaml> --dry-run --limit 100
+                                    Preview mode: pull N records, run transforms, print results
 rapidbyte check <pipeline.yaml>     Validate config, manifests, and connectivity
 rapidbyte discover <pipeline.yaml>  Discover available streams from a source
 rapidbyte connectors                List available connector plugins
 rapidbyte scaffold <name>           Scaffold a new connector project
 ```
 
-Global flag: `--log-level` (error/warn/info/debug/trace). Also respects `RUST_LOG`.
+Global flags: `--log-level` (error/warn/info/debug/trace), `--dry-run`, `--limit N`.
+Also respects `RUST_LOG`.
+
+### Dry Run & Local Testing
+
+`--dry-run --limit N` connects to the source, pulls N records, pushes them through
+transforms, and outputs the resulting Arrow batch as JSON or table format to stdout —
+without writing to the destination. Gives data engineers instant feedback on schema
+evolution and transform configs without touching production.
 
 ## Pipeline YAML
 
@@ -135,6 +146,9 @@ source:
     host: localhost
     port: 5432
     user: app
+    password: ${DB_PASS}                           # env var substitution
+    # password: aws-secrets://prod/db-pass         # cloud secret URI (planned)
+    # password: 1password://vaults/infra/db-pass   # 1Password URI (planned)
     database: mydb
   streams:
     - name: users
@@ -145,6 +159,20 @@ source:
 transforms:                                       # optional, zero or more
   - use: transform-mask
     config: { fields: [email] }
+
+  - use: rapidbyte/transform-validate             # data contract enforcement (planned)
+    config:
+      rules:
+        - assert_not_null: user_id
+        - assert_regex: { field: email, pattern: "^.+@.+\\..+$" }
+      on_fail: dlq                                # send bad rows to DLQ
+
+  - use: rapidbyte/transform-sql                  # in-flight SQL via DataFusion (planned)
+    config:
+      query: |
+        SELECT user_id, count(order_id) as total_orders, sum(amount) as ltv
+        FROM batch
+        GROUP BY user_id
 
 destination:
   use: dest-postgres
@@ -164,8 +192,10 @@ destination:
     nullability_change: allow                     # allow | fail
 
 state:
-  backend: sqlite
+  backend: sqlite                                 # sqlite | s3 | postgres (planned)
   connection: /var/lib/rapidbyte/state.db
+  # backend: s3                                   # ephemeral-friendly (planned)
+  # connection: s3://my-bucket/rapidbyte/state
 
 resources:
   parallelism: 4
@@ -196,14 +226,42 @@ resources:
 
 ## CDC (Change Data Capture)
 
-PostgreSQL logical replication using `test_decoding` output plugin:
+PostgreSQL logical replication with two plugin tiers:
+
+### Current: `test_decoding`
 
 - Calls `pg_logical_slot_get_changes()` to consume WAL changes.
-- Parses INSERT, UPDATE, DELETE operations from `test_decoding` output.
+- Parses INSERT, UPDATE, DELETE operations from `test_decoding` text output.
 - Adds `_rb_op` metadata column with operation type (`insert`/`update`/`delete`).
 - Tracks WAL LSN as cursor for checkpoint recovery.
 - Batches changes into Arrow record batches (10,000 rows per batch).
 - Destructive slot consumption requires checkpoint safety for exactly-once delivery.
+
+### Planned (P0): `pgoutput`
+
+`pgoutput` is the native binary logical replication protocol used by standard PostgreSQL
+logical replication. It replaces `test_decoding` as the primary CDC plugin:
+
+- **Binary protocol** — no text parsing, preserves rich type information.
+- **Native support** — no extension installation required, works with all managed PG
+  services (RDS, Cloud SQL, Aurora, Supabase).
+- **Relation messages** — the protocol sends column types and names inline, enabling
+  automatic schema discovery from the WAL stream itself.
+- **Streaming transactions** — supports large transactions streamed in chunks rather
+  than buffered entirely in memory.
+
+### CDC Edge Cases
+
+**Schema evolution mid-stream:** When `ALTER TABLE` occurs during an active replication
+stream, `pgoutput` sends a new Relation message with the updated schema. Rapidbyte must
+detect this and dynamically adapt the Arrow schema between batches without crashing the
+pipeline. The destination applies schema evolution policies to handle the DDL delta.
+
+**TOAST / out-of-line data:** PostgreSQL drops large column values (e.g., big JSON blobs)
+from WAL unless `REPLICA IDENTITY FULL` is set on the table. When TOAST values are
+unchanged in an UPDATE, the WAL contains a sentinel "unchanged toast" marker. Rapidbyte
+must either fetch the missing value from the source table or emit a structured warning
+so operators know data was dropped. Default behavior: log warning + emit DLQ record.
 
 ## Schema Evolution
 
@@ -227,6 +285,88 @@ Records that fail during writing are routed to a DLQ instead of failing the pipe
 - `DlqRecord`: stream_name, record_json, error_message, error_category, failed_at timestamp.
 - Maximum 10,000 records held in memory per run (prevents unbounded growth).
 - Persisted to the SQLite state backend at the end of each run.
+
+## Secrets Management (GitOps Native)
+
+Pipeline YAML supports environment variable substitution (`${DB_PASS}`). Planned:
+direct secret resolution from cloud providers via URIs at runtime.
+
+**Supported resolvers (planned):**
+
+| URI scheme | Provider |
+|------------|----------|
+| `aws-secrets://secret-name` | AWS Secrets Manager |
+| `aws-ssm://parameter-name` | AWS SSM Parameter Store |
+| `gcp-secrets://project/secret/version` | GCP Secret Manager |
+| `1password://vault/item/field` | 1Password |
+| `vault://secret/path#key` | HashiCorp Vault |
+
+This enables committing `pipeline.yaml` to Git with zero secrets in the file.
+Rapidbyte resolves URIs at startup before passing config to connectors.
+
+## In-Flight Data Validation (Data Contracts)
+
+A built-in validation transform enforces data contracts on Arrow batches in-flight:
+
+```yaml
+transforms:
+  - use: rapidbyte/transform-validate
+    config:
+      rules:
+        - assert_not_null: user_id
+        - assert_not_null: email
+        - assert_regex: { field: email, pattern: "^.+@.+\\..+$" }
+        - assert_range: { field: age, min: 0, max: 150 }
+        - assert_unique: order_id
+      on_fail: dlq    # dlq | fail | skip
+```
+
+Because Rapidbyte uses Arrow, rule evaluation is vectorized over column arrays —
+computationally trivial even at high throughput. Failing rows route to the DLQ while
+the pipeline continues processing valid records.
+
+## In-Flight SQL Transforms (DataFusion)
+
+DataFusion embedded into `rapidbyte-core` enables SQL transforms on Arrow batches
+as they flow through the pipeline:
+
+```yaml
+transforms:
+  - use: rapidbyte/transform-sql
+    config:
+      query: |
+        SELECT user_id, count(order_id) as total_orders, sum(amount) as ltv
+        FROM batch
+        GROUP BY user_id
+```
+
+Arrow IPC batches are registered as DataFusion table providers. The SQL executes
+in-memory, producing new Arrow batches that continue downstream. This eliminates
+the dual cost of ELT pipelines — move data with Fivetran, then transform in Snowflake
+with dbt. Rapidbyte aggregates, filters, and reshapes data before it reaches the
+warehouse, saving significant compute costs.
+
+## Cloud-Native State Backends
+
+SQLite is the default state backend — ideal for single-node and local development.
+For ephemeral environments (GitHub Actions, AWS Lambda, K8s CronJobs), pluggable
+backends allow state to survive node termination:
+
+| Backend | Status | Use case |
+|---------|--------|----------|
+| `sqlite` | Implemented | Local, single-node, dev |
+| `s3` | Planned (P0) | Ephemeral CI/CD, serverless, K8s Jobs |
+| `postgres` | Planned (P1) | Teams with existing PG infrastructure |
+
+```yaml
+state:
+  backend: s3
+  connection: s3://my-bucket/rapidbyte/state
+```
+
+State operations (`get`/`put`/`cas`) are abstracted behind a `StateBackend` trait.
+S3 backend uses conditional writes (`If-None-Match` / ETags) for compare-and-set
+to prevent concurrent pipeline runs from corrupting checkpoints.
 
 ## Projection Pushdown
 
@@ -289,7 +429,15 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 | `source-postgres` | Source | Snapshot, incremental cursor, CDC. `tokio-postgres` over `HostTcpStream`. |
 | `dest-postgres` | Destination | INSERT and COPY modes. Batch commits. DDL auto-creation. Schema evolution. |
 
-### Roadmap
+### Built-in Transforms (planned)
+
+| Transform | Priority | Notes |
+|-----------|----------|-------|
+| `transform-sql` | P0 | DataFusion SQL on Arrow batches in-flight |
+| `transform-validate` | P1 | Data contracts: not-null, regex, range, unique |
+| `transform-mask` | P1 | Field masking / PII redaction |
+
+### Connector Roadmap
 
 | Connector | Priority | Notes |
 |-----------|----------|-------|
@@ -309,7 +457,7 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 - Source, Destination, Transform connector lifecycle
 - Connector manifests with config schema validation
 - Pipeline YAML configuration
-- Three sync modes: full_refresh, incremental, CDC
+- Three sync modes: full_refresh, incremental, CDC (`test_decoding`)
 - Three write modes: append, replace, upsert
 - Schema evolution policies (4 dimensions)
 - Dead letter queue with SQLite persistence
@@ -322,23 +470,33 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 - Host-proxied TCP networking with ACLs
 - Connector metrics and host timing breakdown
 - SQLite state backend for checkpoints and run history
+- Full PG type correctness (timestamp, date, bytea, json, uuid, numeric, etc.)
 - E2E test suite and benchmarking scripts
+
+### Critical path (P0)
+
+- **`pgoutput` CDC plugin** — binary protocol, no text parsing, native PG support,
+  schema evolution mid-stream, TOAST handling
+- **S3 state backend** — enables ephemeral deployments (CI/CD, Lambda, K8s Jobs)
+- **Dry run mode** (`--dry-run --limit N`) — instant feedback loop for pipeline dev
+- **DataFusion SQL transforms** — in-flight aggregation/filtering before warehouse
 
 ### Near-term (P1)
 
+- Data validation transforms (data contracts, assert rules)
+- Secrets management (AWS Secrets Manager, GCP, Vault, 1Password URIs)
+- PostgreSQL state backend
 - TUI progress display during pipeline runs
 - OCI registry for connector distribution (`rapidbyte pull`)
-- Additional connectors: MySQL, S3/Parquet, BigQuery
+- Additional connectors: MySQL source, S3/Parquet dest, BigQuery dest
 - OpenTelemetry metrics and trace export
-- Prometheus metrics endpoint
-- `pgoutput` CDC plugin (in addition to `test_decoding`)
+- DLQ replay and routing to destination tables
 
 ### Future (P2)
 
-- DataFusion integration for in-pipeline SQL transforms
 - Pipeline hooks / middleware (pre-batch, post-commit callbacks)
 - Managed cloud service with scheduling and monitoring
 - Connector marketplace
 - Distributed tracing across pipeline stages
-- PostgreSQL state backend option (in addition to SQLite)
-- DLQ replay and routing to destination tables
+- Additional connectors: Snowflake, DuckDB, HTTP source, S3 source
+- Prometheus metrics endpoint
