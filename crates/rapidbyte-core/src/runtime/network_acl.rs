@@ -354,7 +354,6 @@ mod tests {
             network: NetworkPermissions {
                 allowed_domains: Some(vec!["db.example.com".to_string()]),
                 allow_runtime_config_domains: false,
-                ..Default::default()
             },
             ..Default::default()
         };
@@ -370,7 +369,6 @@ mod tests {
             network: NetworkPermissions {
                 allowed_domains: None,
                 allow_runtime_config_domains: true,
-                ..Default::default()
             },
             ..Default::default()
         };
@@ -391,7 +389,6 @@ mod tests {
                     "api.example.com".to_string(),
                 ]),
                 allow_runtime_config_domains: false,
-                ..Default::default()
             },
             ..Default::default()
         };
@@ -409,7 +406,6 @@ mod tests {
             network: NetworkPermissions {
                 allowed_domains: Some(vec!["db.example.com".to_string()]),
                 allow_runtime_config_domains: false,
-                ..Default::default()
             },
             ..Default::default()
         };
@@ -426,7 +422,6 @@ mod tests {
             network: NetworkPermissions {
                 allowed_domains: Some(vec!["db.example.com".to_string()]),
                 allow_runtime_config_domains: false,
-                ..Default::default()
             },
             ..Default::default()
         };
@@ -442,7 +437,6 @@ mod tests {
             network: NetworkPermissions {
                 allowed_domains: Some(vec!["*.example.com".to_string()]),
                 allow_runtime_config_domains: false,
-                ..Default::default()
             },
             ..Default::default()
         };
@@ -467,7 +461,6 @@ mod tests {
             network: NetworkPermissions {
                 allowed_domains: Some(vec!["db.example.com".to_string()]),
                 allow_runtime_config_domains: false,
-                ..Default::default()
             },
             ..Default::default()
         };

@@ -403,6 +403,7 @@ pub fn emit_batch(batch: &RecordBatch) -> Result<(), ConnectorError> {
 /// Receive the next Arrow RecordBatch from the host pipeline.
 ///
 /// Returns `None` when there are no more batches.
+#[allow(clippy::type_complexity)]
 pub fn next_batch(
     max_bytes: u64,
 ) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, ConnectorError> {

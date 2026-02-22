@@ -968,7 +968,7 @@ mod tests {
     #[test]
     fn intersect_env_vars_empty_blocks_all() {
         let manifest = vec!["A".into(), "B".into()];
-        let result = intersect_env_vars(&manifest, Some(&vec![]));
+        let result = intersect_env_vars(&manifest, Some(&[]));
         assert!(result.is_empty());
     }
 
@@ -1000,7 +1000,7 @@ mod tests {
     #[test]
     fn intersect_preopens_empty_blocks_all() {
         let manifest = vec!["/data".into()];
-        let result = intersect_preopens(&manifest, Some(&vec![]));
+        let result = intersect_preopens(&manifest, Some(&[]));
         assert!(result.is_empty());
     }
 
