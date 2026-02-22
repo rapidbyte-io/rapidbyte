@@ -139,6 +139,7 @@ pub(crate) fn run_source_stream(
         permissions,
         source_config,
         compression,
+        None,
     )
     .map_err(PipelineError::Infrastructure)?;
 
@@ -285,6 +286,7 @@ pub(crate) fn run_destination_stream(
         permissions,
         dest_config,
         compression,
+        None,
     )
     .map_err(PipelineError::Infrastructure)?;
 
@@ -444,6 +446,7 @@ pub(crate) fn run_transform_stream(
         permissions,
         transform_config,
         compression,
+        None,
     )
     .map_err(PipelineError::Infrastructure)?;
 
@@ -542,6 +545,7 @@ pub(crate) fn validate_connector(
         state,
         permissions,
         config,
+        None,
     )?;
 
     let mut store = Store::new(&module.engine, host_state);
@@ -652,6 +656,7 @@ pub(crate) fn run_discover(
         state,
         permissions,
         config,
+        None,
     )?;
 
     let mut store = Store::new(&module.engine, host_state);

@@ -1,6 +1,6 @@
 //! Host-side runtime state and host import implementations for connector components.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
@@ -102,7 +102,51 @@ fn lock_mutex<'a, T>(mutex: &'a Mutex<T>, name: &str) -> Result<MutexGuard<'a, T
         .map_err(|_| ConnectorError::internal("MUTEX_POISONED", format!("{} mutex poisoned", name)))
 }
 
-fn build_wasi_ctx(permissions: Option<&Permissions>) -> Result<WasiCtx> {
+/// Pipeline-level sandbox overrides passed alongside manifest permissions.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SandboxOverrides {
+    pub allowed_hosts: Option<Vec<String>>,
+    pub allowed_vars: Option<Vec<String>>,
+    pub allowed_preopens: Option<Vec<String>>,
+    pub max_memory_bytes: Option<u64>,
+    pub timeout_seconds: Option<u64>,
+}
+
+fn intersect_env_vars(manifest_vars: &[String], pipeline_vars: Option<&[String]>) -> Vec<String> {
+    match pipeline_vars {
+        None => manifest_vars.to_vec(),
+        Some(allowed) => {
+            let allowed_set: HashSet<&str> = allowed.iter().map(|s| s.as_str()).collect();
+            manifest_vars
+                .iter()
+                .filter(|v| allowed_set.contains(v.as_str()))
+                .cloned()
+                .collect()
+        }
+    }
+}
+
+fn intersect_preopens(
+    manifest_preopens: &[String],
+    pipeline_preopens: Option<&[String]>,
+) -> Vec<String> {
+    match pipeline_preopens {
+        None => manifest_preopens.to_vec(),
+        Some(allowed) => {
+            let allowed_set: HashSet<&str> = allowed.iter().map(|s| s.as_str()).collect();
+            manifest_preopens
+                .iter()
+                .filter(|p| allowed_set.contains(p.as_str()))
+                .cloned()
+                .collect()
+        }
+    }
+}
+
+fn build_wasi_ctx(
+    permissions: Option<&Permissions>,
+    overrides: Option<&SandboxOverrides>,
+) -> Result<WasiCtx> {
     let mut builder = WasiCtxBuilder::new();
     builder.allow_blocking_current_thread(true);
 
@@ -112,13 +156,21 @@ fn build_wasi_ctx(permissions: Option<&Permissions>) -> Result<WasiCtx> {
     builder.allow_ip_name_lookup(false);
 
     if let Some(perms) = permissions {
-        for var in &perms.env.allowed_vars {
+        let effective_vars = intersect_env_vars(
+            &perms.env.allowed_vars,
+            overrides.and_then(|o| o.allowed_vars.as_deref()),
+        );
+        for var in &effective_vars {
             if let Ok(value) = std::env::var(var) {
                 builder.env(var, &value);
             }
         }
 
-        for dir in &perms.fs.preopens {
+        let effective_preopens = intersect_preopens(
+            &perms.fs.preopens,
+            overrides.and_then(|o| o.allowed_preopens.as_deref()),
+        );
+        for dir in &effective_preopens {
             let path = Path::new(dir);
             if !path.exists() {
                 tracing::warn!(
@@ -181,17 +233,22 @@ impl ComponentHostState {
         checkpoints: CheckpointCollector,
         permissions: Option<&Permissions>,
         config: &serde_json::Value,
+        overrides: Option<&SandboxOverrides>,
     ) -> Result<Self> {
         Ok(Self {
             identity,
             batch,
             checkpoints,
             sockets: SocketManager {
-                acl: derive_network_acl(permissions, config, None),
+                acl: derive_network_acl(
+                    permissions,
+                    config,
+                    overrides.and_then(|o| o.allowed_hosts.as_deref()),
+                ),
                 sockets: HashMap::new(),
                 next_handle: 1,
             },
-            ctx: build_wasi_ctx(permissions)?,
+            ctx: build_wasi_ctx(permissions, overrides)?,
             table: ResourceTable::new(),
         })
     }
@@ -208,6 +265,7 @@ impl ComponentHostState {
         permissions: Option<&Permissions>,
         config: &serde_json::Value,
         compression: Option<CompressionCodec>,
+        overrides: Option<&SandboxOverrides>,
     ) -> Result<Self> {
         Self::from_parts(
             ConnectorIdentity {
@@ -230,6 +288,7 @@ impl ComponentHostState {
             },
             permissions,
             config,
+            overrides,
         )
     }
 
@@ -246,6 +305,7 @@ impl ComponentHostState {
         permissions: Option<&Permissions>,
         config: &serde_json::Value,
         compression: Option<CompressionCodec>,
+        overrides: Option<&SandboxOverrides>,
     ) -> Result<Self> {
         Self::from_parts(
             ConnectorIdentity {
@@ -268,6 +328,7 @@ impl ComponentHostState {
             },
             permissions,
             config,
+            overrides,
         )
     }
 
@@ -285,6 +346,7 @@ impl ComponentHostState {
         permissions: Option<&Permissions>,
         config: &serde_json::Value,
         compression: Option<CompressionCodec>,
+        overrides: Option<&SandboxOverrides>,
     ) -> Result<Self> {
         Self::from_parts(
             ConnectorIdentity {
@@ -307,6 +369,7 @@ impl ComponentHostState {
             },
             permissions,
             config,
+            overrides,
         )
     }
 
@@ -317,6 +380,7 @@ impl ComponentHostState {
         state_backend: Arc<dyn StateBackend>,
         permissions: Option<&Permissions>,
         config: &serde_json::Value,
+        overrides: Option<&SandboxOverrides>,
     ) -> Result<Self> {
         Self::from_parts(
             ConnectorIdentity {
@@ -339,6 +403,7 @@ impl ComponentHostState {
             },
             permissions,
             config,
+            overrides,
         )
     }
 
@@ -850,11 +915,68 @@ mod tests {
             state,
             None,
             &serde_json::json!({}),
+            None,
         )
         .unwrap();
         assert_eq!(
             host.scoped_state_key(StateScope::Pipeline, "offset"),
             "offset".to_string()
         );
+    }
+
+    // ── intersect_env_vars tests ─────────────────────────────────────
+
+    #[test]
+    fn intersect_env_vars_filters() {
+        let manifest = vec!["A".into(), "B".into(), "C".into()];
+        let pipeline = vec!["A".into(), "C".into()];
+        let result = intersect_env_vars(&manifest, Some(&pipeline));
+        assert_eq!(result, vec!["A".to_string(), "C".to_string()]);
+    }
+
+    #[test]
+    fn intersect_env_vars_none_preserves_all() {
+        let manifest = vec!["A".into(), "B".into()];
+        let result = intersect_env_vars(&manifest, None);
+        assert_eq!(result, vec!["A".to_string(), "B".to_string()]);
+    }
+
+    #[test]
+    fn intersect_env_vars_empty_blocks_all() {
+        let manifest = vec!["A".into(), "B".into()];
+        let result = intersect_env_vars(&manifest, Some(&vec![]));
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn intersect_env_vars_pipeline_cannot_widen() {
+        let manifest = vec!["A".into()];
+        let pipeline = vec!["A".into(), "SECRET".into()];
+        let result = intersect_env_vars(&manifest, Some(&pipeline));
+        assert_eq!(result, vec!["A".to_string()]);
+    }
+
+    // ── intersect_preopens tests ─────────────────────────────────────
+
+    #[test]
+    fn intersect_preopens_filters() {
+        let manifest = vec!["/data".into(), "/tmp".into()];
+        let pipeline = vec!["/data".into()];
+        let result = intersect_preopens(&manifest, Some(&pipeline));
+        assert_eq!(result, vec!["/data".to_string()]);
+    }
+
+    #[test]
+    fn intersect_preopens_none_preserves_all() {
+        let manifest = vec!["/data".into(), "/tmp".into()];
+        let result = intersect_preopens(&manifest, None);
+        assert_eq!(result, vec!["/data".to_string(), "/tmp".to_string()]);
+    }
+
+    #[test]
+    fn intersect_preopens_empty_blocks_all() {
+        let manifest = vec!["/data".into()];
+        let result = intersect_preopens(&manifest, Some(&vec![]));
+        assert!(result.is_empty());
     }
 }
