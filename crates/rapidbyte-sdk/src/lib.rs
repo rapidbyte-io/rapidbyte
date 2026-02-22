@@ -3,6 +3,7 @@
 //! Provides traits, protocol types, and host-import wrappers for building
 //! WASI-based data pipeline connectors.
 
+pub mod arrow;
 pub mod connector;
 pub mod host_ffi;
 pub mod host_tcp;
