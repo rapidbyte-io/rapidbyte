@@ -18,8 +18,9 @@ info "Test 1: Pipeline with valid permissions completes successfully"
 
 run_pipeline "$PROJECT_ROOT/tests/fixtures/pipelines/e2e_permissions.yaml"
 
+SOURCE_USERS=$(pg_exec "SELECT COUNT(*) FROM public.users")
 DEST_USERS=$(pg_exec "SELECT COUNT(*) FROM raw.users")
-assert_eq_num "$DEST_USERS" 3 "Restricted pipeline copies all rows"
+assert_eq_num "$DEST_USERS" "$SOURCE_USERS" "Restricted pipeline copies all rows"
 
 RUN_STATUS=$(state_query "$STATE_FILE" "SELECT status FROM sync_runs ORDER BY id DESC LIMIT 1")
 assert_eq "$RUN_STATUS" "completed" "Pipeline run status is completed"
