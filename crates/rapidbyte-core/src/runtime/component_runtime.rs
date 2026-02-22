@@ -14,6 +14,7 @@ use rapidbyte_types::manifest::Permissions;
 use rapidbyte_types::protocol::{Checkpoint, DlqRecord, Iso8601Timestamp, StateScope};
 use tokio::sync::mpsc;
 use wasmtime::component::ResourceTable;
+use wasmtime::{StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::state::backend::{CursorState, PipelineId, StateBackend, StreamName};
@@ -222,8 +223,18 @@ pub struct ComponentHostState {
     pub(crate) batch: BatchRouter,
     pub(crate) checkpoints: CheckpointCollector,
     pub(crate) sockets: SocketManager,
+    pub(crate) store_limits: StoreLimits,
     ctx: WasiCtx,
     table: ResourceTable,
+}
+
+fn build_store_limits(overrides: Option<&SandboxOverrides>) -> StoreLimits {
+    let mut builder = StoreLimitsBuilder::new();
+    if let Some(max_bytes) = overrides.and_then(|o| o.max_memory_bytes) {
+        builder = builder.memory_size(max_bytes as usize);
+    }
+    builder = builder.trap_on_grow_failure(true);
+    builder.build()
 }
 
 impl ComponentHostState {
@@ -248,6 +259,7 @@ impl ComponentHostState {
                 sockets: HashMap::new(),
                 next_handle: 1,
             },
+            store_limits: build_store_limits(overrides),
             ctx: build_wasi_ctx(permissions, overrides)?,
             table: ResourceTable::new(),
         })

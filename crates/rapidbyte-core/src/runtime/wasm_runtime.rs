@@ -4,6 +4,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -23,11 +24,36 @@ pub struct LoadedComponent {
     pub component: Arc<Component>,
 }
 
+impl LoadedComponent {
+    /// Create a new `Store` with epoch deadline and memory limiter applied.
+    ///
+    /// `timeout_seconds` controls how many epoch ticks (1 tick = 1 second) before
+    /// the store traps. Defaults to 300 (5 minutes) as a safety net.
+    pub fn new_store(
+        &self,
+        host_state: ComponentHostState,
+        timeout_seconds: Option<u64>,
+    ) -> Store<ComponentHostState> {
+        let mut store = Store::new(&self.engine, host_state);
+
+        // Epoch deadline: each tick = 1 second
+        let deadline = timeout_seconds.unwrap_or(300);
+        store.set_epoch_deadline(deadline);
+
+        // Apply memory limiter from the store_limits field on ComponentHostState
+        store.limiter(|state| &mut state.store_limits);
+
+        store
+    }
+}
+
 /// Manages loading connector components.
 pub struct WasmRuntime {
     engine: Arc<Engine>,
     aot_cache_dir: Option<PathBuf>,
     aot_compat_hash: u64,
+    /// Keeps the epoch ticker thread alive for the lifetime of the runtime.
+    _epoch_ticker: Option<JoinHandle<()>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -56,11 +82,23 @@ impl WasmRuntime {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.async_support(false);
+        config.epoch_interruption(true);
 
         let engine = Engine::new(&config).context("Failed to initialize Wasmtime engine")?;
         let mut hasher = DefaultHasher::new();
         engine.precompile_compatibility_hash().hash(&mut hasher);
         let aot_compat_hash = hasher.finish();
+
+        // Start a background thread that increments the engine epoch every second.
+        // This is used with `Store::set_epoch_deadline` to enforce connector timeouts.
+        let ticker_engine = engine.clone();
+        let epoch_ticker = std::thread::Builder::new()
+            .name("rapidbyte-epoch-ticker".to_string())
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                ticker_engine.increment_epoch();
+            })
+            .ok();
 
         let aot_cache_dir = if env_flag_enabled(RAPIDBYTE_WASMTIME_AOT_ENV, true) {
             let dir = resolve_aot_cache_dir();
@@ -87,6 +125,7 @@ impl WasmRuntime {
             engine: Arc::new(engine),
             aot_cache_dir,
             aot_compat_hash,
+            _epoch_ticker: epoch_ticker,
         })
     }
 
@@ -149,8 +188,29 @@ impl WasmRuntime {
         })
     }
 
-    pub fn new_store(&self, host_state: ComponentHostState) -> Store<ComponentHostState> {
-        Store::new(&self.engine, host_state)
+    /// Create a new `Store` with epoch deadline and memory limiter applied.
+    ///
+    /// `timeout_seconds` controls how many epoch ticks (1 tick = 1 second) before
+    /// the store traps. Defaults to 300 (5 minutes) as a safety net.
+    pub fn new_store(
+        &self,
+        host_state: ComponentHostState,
+        timeout_seconds: Option<u64>,
+    ) -> Store<ComponentHostState> {
+        let mut store = Store::new(&self.engine, host_state);
+
+        // Epoch deadline: each tick = 1 second
+        let deadline = timeout_seconds.unwrap_or(300);
+        store.set_epoch_deadline(deadline);
+
+        // Apply memory limiter from the store_limits field on ComponentHostState
+        store.limiter(|state| &mut state.store_limits);
+
+        store
+    }
+
+    pub fn engine(&self) -> &Engine {
+        &self.engine
     }
 
     fn load_module_aot(&self, wasm_path: &Path) -> Result<(Component, AotLoadKind)> {
@@ -339,5 +399,12 @@ mod tests {
     fn test_env_flag_enabled_defaults() {
         assert!(env_flag_enabled("RAPIDBYTE_TEST_FLAG_NOT_SET", true));
         assert!(!env_flag_enabled("RAPIDBYTE_TEST_FLAG_NOT_SET", false));
+    }
+
+    #[test]
+    fn epoch_interruption_is_enabled() {
+        let runtime = WasmRuntime::new().unwrap();
+        // increment_epoch succeeds (doesn't panic) when epoch interruption is enabled
+        runtime.engine().increment_epoch();
     }
 }

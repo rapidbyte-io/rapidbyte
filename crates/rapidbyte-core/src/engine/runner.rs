@@ -5,7 +5,6 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
-use wasmtime::Store;
 
 use rapidbyte_types::errors::ValidationResult;
 use rapidbyte_types::manifest::Permissions;
@@ -143,7 +142,7 @@ pub(crate) fn run_source_stream(
     )
     .map_err(PipelineError::Infrastructure)?;
 
-    let mut store = Store::new(&module.engine, host_state);
+    let mut store = module.new_store(host_state, None);
     let linker = create_component_linker(&module.engine, "source", |linker| {
         source_bindings::RapidbyteSource::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
             linker,
@@ -291,7 +290,7 @@ pub(crate) fn run_destination_stream(
     .map_err(PipelineError::Infrastructure)?;
 
     (|| {
-        let mut store = Store::new(&module.engine, host_state);
+        let mut store = module.new_store(host_state, None);
         let linker = create_component_linker(&module.engine, "destination", |linker| {
             dest_bindings::RapidbyteDestination::add_to_linker::<
                     _,
@@ -450,7 +449,7 @@ pub(crate) fn run_transform_stream(
     )
     .map_err(PipelineError::Infrastructure)?;
 
-    let mut store = Store::new(&module.engine, host_state);
+    let mut store = module.new_store(host_state, None);
     let linker = create_component_linker(&module.engine, "transform", |linker| {
         transform_bindings::RapidbyteTransform::add_to_linker::<
             _,
@@ -548,7 +547,7 @@ pub(crate) fn validate_connector(
         None,
     )?;
 
-    let mut store = Store::new(&module.engine, host_state);
+    let mut store = module.new_store(host_state, None);
     let config_json = serde_json::to_string(config)?;
 
     match role {
@@ -659,7 +658,7 @@ pub(crate) fn run_discover(
         None,
     )?;
 
-    let mut store = Store::new(&module.engine, host_state);
+    let mut store = module.new_store(host_state, None);
     let linker = create_component_linker(&module.engine, "source", |linker| {
         source_bindings::RapidbyteSource::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
             linker,
