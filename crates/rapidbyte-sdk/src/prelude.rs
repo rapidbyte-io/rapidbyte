@@ -18,4 +18,3 @@ pub use crate::protocol::{
     WriteMode, WritePerf, WriteSummary,
 };
 pub use crate::arrow::{self, build_arrow_schema, decode_ipc, encode_ipc, arrow_data_type};
-pub use crate::arrow::arrow_reexport;

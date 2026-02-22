@@ -392,12 +392,27 @@ pub fn log(level: i32, message: &str) {
     host_imports().log(level, message)
 }
 
-pub fn emit_batch(ipc_bytes: &[u8]) -> Result<(), ConnectorError> {
-    host_imports().emit_batch(ipc_bytes)
+/// Emit an Arrow RecordBatch to the host pipeline.
+///
+/// The batch is serialized to IPC format internally.
+pub fn emit_batch(batch: &RecordBatch) -> Result<(), ConnectorError> {
+    let ipc_bytes = crate::arrow::ipc::encode_ipc(batch)?;
+    host_imports().emit_batch(&ipc_bytes)
 }
 
-pub fn next_batch(max_bytes: u64) -> Result<Option<Vec<u8>>, ConnectorError> {
-    host_imports().next_batch(max_bytes)
+/// Receive the next Arrow RecordBatch from the host pipeline.
+///
+/// Returns `None` when there are no more batches.
+pub fn next_batch(
+    max_bytes: u64,
+) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, ConnectorError> {
+    match host_imports().next_batch(max_bytes)? {
+        Some(ipc_bytes) => {
+            let (schema, batches) = crate::arrow::ipc::decode_ipc(&ipc_bytes)?;
+            Ok(Some((schema, batches)))
+        }
+        None => Ok(None),
+    }
 }
 
 pub fn state_get(scope: StateScope, key: &str) -> Result<Option<String>, ConnectorError> {
@@ -454,31 +469,6 @@ pub fn socket_close(handle: u64) {
     host_imports().socket_close(handle)
 }
 
-/// Emit an Arrow RecordBatch to the host pipeline.
-///
-/// This is the primary API for source connectors to send data. The batch
-/// is serialized to IPC format internally — connectors never handle raw bytes.
-pub fn emit_record_batch(batch: &RecordBatch) -> Result<(), ConnectorError> {
-    let ipc_bytes = crate::arrow::ipc::encode_ipc(batch)?;
-    host_imports().emit_batch(&ipc_bytes)
-}
-
-/// Receive the next Arrow RecordBatch from the host pipeline.
-///
-/// Returns `None` when there are no more batches. The IPC bytes from the
-/// host are decoded into schema + batches internally.
-pub fn next_record_batch(
-    max_bytes: u64,
-) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, ConnectorError> {
-    match host_imports().next_batch(max_bytes)? {
-        Some(ipc_bytes) => {
-            let (schema, batches) = crate::arrow::ipc::decode_ipc(&ipc_bytes)?;
-            Ok(Some((schema, batches)))
-        }
-        None => Ok(None),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,13 +483,13 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_native_stub_next_batch_none() {
-        let batch = next_batch(1024).expect("next batch");
-        assert!(batch.is_none());
+        let result = next_batch(1024).expect("next batch");
+        assert!(result.is_none());
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn test_emit_record_batch_encodes_and_calls_host() {
+    fn test_emit_batch_encodes_and_calls_host() {
         use arrow::array::Int32Array;
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
@@ -508,8 +498,7 @@ mod tests {
         let batch =
             RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1]))]).unwrap();
 
-        // StubHostImports.emit_batch returns Ok(()) — just verifying no panic
-        let result = emit_record_batch(&batch);
+        let result = emit_batch(&batch);
         assert!(result.is_ok());
     }
 }
