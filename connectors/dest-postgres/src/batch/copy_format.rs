@@ -4,7 +4,13 @@ use std::io::Write;
 
 use rapidbyte_sdk::arrow::array::Array;
 use chrono::{DateTime, NaiveDate};
+use std::sync::LazyLock;
 use crate::batch::typed_col::TypedCol;
+
+/// Unix epoch date — used as the base for Arrow Date32 day offsets.
+static UNIX_EPOCH_DATE: LazyLock<NaiveDate> = LazyLock::new(|| {
+    NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch date is always valid")
+});
 
 /// Format a pre-downcast value at a given row index for COPY text format.
 ///
@@ -120,7 +126,7 @@ pub(crate) fn format_copy_typed_value(buf: &mut Vec<u8>, col: &TypedCol<'_>, row
                 return;
             }
             let days = arr.value(row_idx);
-            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            let epoch = *UNIX_EPOCH_DATE;
             if let Some(date) = epoch.checked_add_signed(chrono::Duration::days(days as i64)) {
                 let _ = write!(buf, "{}", date);
             } else {

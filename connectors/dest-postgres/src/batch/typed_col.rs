@@ -7,7 +7,13 @@ use rapidbyte_sdk::arrow::array::{
 use rapidbyte_sdk::arrow::datatypes::DataType;
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
+use std::sync::LazyLock;
 use tokio_postgres::types::ToSql;
+
+/// Unix epoch date — used as the base for Arrow Date32 day offsets.
+static UNIX_EPOCH_DATE: LazyLock<NaiveDate> = LazyLock::new(|| {
+    NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch date is always valid")
+});
 
 /// Pre-downcast Arrow column reference. Eliminates per-cell `downcast_ref()` calls
 /// by resolving the concrete array type once per column per batch.
@@ -154,7 +160,7 @@ pub(crate) fn sql_param_value<'a>(col: &'a TypedCol<'a>, row_idx: usize) -> SqlP
                 SqlParamValue::Date(None)
             } else {
                 let days = arr.value(row_idx);
-                let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                let epoch = *UNIX_EPOCH_DATE;
                 let date = epoch.checked_add_signed(chrono::Duration::days(days as i64));
                 SqlParamValue::Date(date)
             }

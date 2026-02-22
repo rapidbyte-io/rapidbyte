@@ -8,7 +8,13 @@ use rapidbyte_sdk::arrow::array::{
     Int64Array, StringBuilder, TimestampMicrosecondArray,
 };
 use chrono::{NaiveDate, NaiveDateTime};
+use std::sync::LazyLock;
 use rapidbyte_sdk::arrow::datatypes::Schema;
+
+/// Unix epoch date — used as the base for Arrow Date32 day offsets.
+static UNIX_EPOCH_DATE: LazyLock<NaiveDate> = LazyLock::new(|| {
+    NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch date is always valid")
+});
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use rapidbyte_sdk::protocol::ColumnSchema;
 
@@ -86,7 +92,7 @@ pub(crate) fn rows_to_record_batch(
                         Ok(Arc::new(arr))
                     }
                     "Date32" => {
-                        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+                        let epoch = *UNIX_EPOCH_DATE;
                         let arr: Date32Array = rows
                             .iter()
                             .map(|row| {
