@@ -3,7 +3,59 @@
 use anyhow::{bail, Result};
 use rapidbyte_types::protocol::SyncMode;
 
-use crate::pipeline::types::{PipelineConfig, PipelineWriteMode};
+use crate::pipeline::types::{
+    parse_byte_size, PipelineConfig, PipelineLimits, PipelinePermissions, PipelineWriteMode,
+};
+
+/// Validate host patterns in allowed_hosts lists.
+/// Only `*.domain` single-level wildcards are supported.
+fn validate_host_patterns(hosts: &[String], context: &str, errors: &mut Vec<String>) {
+    for host in hosts {
+        let trimmed = host.trim();
+        if trimmed.is_empty() {
+            errors.push(format!("{}: empty host pattern", context));
+            continue;
+        }
+        if trimmed.contains('*') && !trimmed.starts_with("*.") {
+            errors.push(format!(
+                "{}: Invalid host pattern '{}' \u{2014} only '*.domain' wildcards supported",
+                context, host
+            ));
+        }
+        if trimmed.starts_with("*.") && trimmed[2..].contains('*') {
+            errors.push(format!(
+                "{}: Invalid host pattern '{}' \u{2014} nested wildcards not supported",
+                context, host
+            ));
+        }
+    }
+}
+
+/// Validate connector-level permission and limit overrides.
+fn validate_connector_overrides(
+    permissions: Option<&PipelinePermissions>,
+    limits: Option<&PipelineLimits>,
+    context: &str,
+    errors: &mut Vec<String>,
+) {
+    if let Some(perms) = permissions {
+        if let Some(ref hosts) = perms.network.allowed_hosts {
+            validate_host_patterns(hosts, context, errors);
+        }
+    }
+    if let Some(lim) = limits {
+        if let Some(ref mem) = lim.max_memory {
+            if parse_byte_size(mem).is_err() {
+                errors.push(format!("{}: invalid max_memory '{}'", context, mem));
+            }
+        }
+        if let Some(timeout) = lim.timeout_seconds {
+            if timeout == 0 {
+                errors.push(format!("{}: timeout_seconds must be > 0", context));
+            }
+        }
+    }
+}
 
 /// Validate a parsed pipeline configuration.
 /// Returns Ok(()) if valid, Err with all validation errors if not.
@@ -55,6 +107,28 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
 
     if config.resources.max_inflight_batches == 0 {
         errors.push("max_inflight_batches must be at least 1".to_string());
+    }
+
+    // Validate connector-level permission/limit overrides
+    validate_connector_overrides(
+        config.source.permissions.as_ref(),
+        config.source.limits.as_ref(),
+        "source",
+        &mut errors,
+    );
+    validate_connector_overrides(
+        config.destination.permissions.as_ref(),
+        config.destination.limits.as_ref(),
+        "destination",
+        &mut errors,
+    );
+    for (i, transform) in config.transforms.iter().enumerate() {
+        validate_connector_overrides(
+            transform.permissions.as_ref(),
+            transform.limits.as_ref(),
+            &format!("transforms[{}]", i),
+            &mut errors,
+        );
     }
 
     if errors.is_empty() {
@@ -217,5 +291,101 @@ destination:
 "#;
         let config = parse_pipeline_str(yaml).unwrap();
         assert!(validate_pipeline(&config).is_ok());
+    }
+
+    #[test]
+    fn test_valid_pipeline_permissions_passes() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+  permissions:
+    network:
+      allowed_hosts: [db.example.com, "*.internal.corp", "127.0.0.1"]
+  limits:
+    max_memory: 128mb
+    timeout_seconds: 60
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        assert!(validate_pipeline(&config).is_ok());
+    }
+
+    #[test]
+    fn test_nested_wildcard_host_fails() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+  permissions:
+    network:
+      allowed_hosts: ["*.*.example.com"]
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        let err = validate_pipeline(&config).unwrap_err().to_string();
+        assert!(err.contains("Invalid host pattern"));
+    }
+
+    #[test]
+    fn test_invalid_max_memory_fails() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+  limits:
+    max_memory: not-a-size
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        let err = validate_pipeline(&config).unwrap_err().to_string();
+        assert!(err.contains("max_memory"));
+    }
+
+    #[test]
+    fn test_zero_timeout_fails() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+  limits:
+    timeout_seconds: 0
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        let err = validate_pipeline(&config).unwrap_err().to_string();
+        assert!(err.contains("timeout_seconds"));
     }
 }
