@@ -5,8 +5,8 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use anyhow::Context;
-use arrow::datatypes::Schema;
-use arrow::record_batch::RecordBatch;
+use rapidbyte_sdk::arrow::datatypes::Schema;
+use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use pg_escape::quote_identifier;
 use tokio_postgres::types::ToSql;
 
@@ -190,8 +190,8 @@ mod tests {
 
     fn schema_with_id_name() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
-            arrow::datatypes::Field::new("id", arrow::datatypes::DataType::Int64, false),
-            arrow::datatypes::Field::new("name", arrow::datatypes::DataType::Utf8, true),
+            rapidbyte_sdk::arrow::datatypes::Field::new("id", rapidbyte_sdk::arrow::datatypes::DataType::Int64, false),
+            rapidbyte_sdk::arrow::datatypes::Field::new("name", rapidbyte_sdk::arrow::datatypes::DataType::Utf8, true),
         ]))
     }
 

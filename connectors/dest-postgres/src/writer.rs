@@ -4,11 +4,12 @@
 //! watermark-based resume, and Replace-mode staging swap.
 
 use std::collections::HashSet;
-use std::io::Cursor;
+use std::sync::Arc;
 use std::time::Instant;
 
-use arrow::ipc::reader::StreamReader;
 use pg_escape::quote_identifier;
+use rapidbyte_sdk::arrow::datatypes::Schema;
+use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::errors::{CommitState, ConnectorError};
@@ -56,8 +57,8 @@ pub async fn write_stream(
     loop {
         match host_ffi::next_batch(ctx.limits.max_batch_bytes) {
             Ok(None) => break,
-            Ok(Some(buf)) => {
-                if let Err(e) = session.process_batch(&buf).await {
+            Ok(Some((schema, batches))) => {
+                if let Err(e) = session.process_batch(&schema, &batches).await {
                     loop_error = Some(e);
                     break;
                 }
@@ -91,7 +92,7 @@ pub async fn write_stream(
             connect_secs,
             flush_secs: result.flush_secs,
             commit_secs: result.commit_secs,
-            arrow_decode_secs: result.arrow_decode_secs,
+            arrow_decode_secs: 0.0,
         }),
     })
 }
@@ -122,7 +123,6 @@ pub struct SessionResult {
     pub checkpoint_count: u64,
     pub flush_secs: f64,
     pub commit_secs: f64,
-    pub arrow_decode_secs: f64,
 }
 
 struct WriteStats {
@@ -133,7 +133,6 @@ struct WriteStats {
     checkpoint_count: u64,
     bytes_since_commit: u64,
     rows_since_commit: u64,
-    arrow_decode_nanos: u64,
 }
 
 /// Manages lifecycle of writing a single stream to PostgreSQL.
@@ -265,7 +264,6 @@ impl<'a> WriteSession<'a> {
                 checkpoint_count: 0,
                 bytes_since_commit: 0,
                 rows_since_commit: 0,
-                arrow_decode_nanos: 0,
             },
             created_tables: HashSet::new(),
             ignored_columns: HashSet::new(),
@@ -273,13 +271,18 @@ impl<'a> WriteSession<'a> {
         })
     }
 
-    /// Process a single IPC batch.
-    pub async fn process_batch(&mut self, ipc_bytes: &[u8]) -> Result<(), String> {
-        let n = ipc_bytes.len();
+    /// Process a decoded Arrow batch.
+    pub async fn process_batch(
+        &mut self,
+        schema: &Arc<Schema>,
+        batches: &[RecordBatch],
+    ) -> Result<(), String> {
+        // Calculate byte size from batches
+        let n: usize = batches.iter().map(|b| b.get_array_memory_size()).sum();
 
-        // Exactly-once: skip already-committed batches.
+        // Watermark resume: skip already-committed batches
         if self.watermark_records > 0 && self.cumulative_records < self.watermark_records {
-            let batch_rows = count_ipc_rows(ipc_bytes)?;
+            let batch_rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
             self.cumulative_records += batch_rows;
             if self.cumulative_records <= self.watermark_records {
                 host_ffi::log(
@@ -313,9 +316,8 @@ impl<'a> WriteSession<'a> {
             copy_flush_bytes: self.copy_flush_bytes,
         };
 
-        let (result, decode_nanos) = write_batch(&mut write_ctx, ipc_bytes).await?;
+        let result = write_batch(&mut write_ctx, schema, batches).await?;
 
-        self.stats.arrow_decode_nanos += decode_nanos;
         self.stats.total_rows += result.rows_written;
         self.stats.total_failed += result.rows_failed;
         self.stats.total_bytes += n as u64;
@@ -467,7 +469,6 @@ impl<'a> WriteSession<'a> {
             checkpoint_count: self.stats.checkpoint_count,
             flush_secs,
             commit_secs,
-            arrow_decode_secs: self.stats.arrow_decode_nanos as f64 / 1e9,
         })
     }
 
@@ -551,19 +552,6 @@ async fn set_watermark(
         .await
         .map_err(|e| format!("Failed to set watermark: {}", e))?;
     Ok(())
-}
-
-/// Count number of rows in an Arrow IPC payload.
-fn count_ipc_rows(ipc_bytes: &[u8]) -> Result<u64, String> {
-    let cursor = Cursor::new(ipc_bytes);
-    let reader =
-        StreamReader::try_new(cursor, None).map_err(|e| format!("IPC decode failed: {}", e))?;
-    let mut total = 0u64;
-    for batch in reader {
-        let batch = batch.map_err(|e| format!("IPC batch read failed: {}", e))?;
-        total += batch.num_rows() as u64;
-    }
-    Ok(total)
 }
 
 /// Clear watermark for a stream after successful completion.

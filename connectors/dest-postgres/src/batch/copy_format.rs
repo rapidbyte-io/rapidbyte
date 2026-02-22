@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use arrow::array::Array;
+use rapidbyte_sdk::arrow::array::Array;
 use chrono::{DateTime, NaiveDate};
 use crate::batch::typed_col::TypedCol;
 
@@ -144,7 +144,7 @@ pub(crate) fn format_copy_typed_value(buf: &mut Vec<u8>, col: &TypedCol<'_>, row
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{
+    use rapidbyte_sdk::arrow::array::{
         BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array,
         Int32Array, Int64Array, StringArray, TimestampMicrosecondArray,
     };

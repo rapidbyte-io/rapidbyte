@@ -1,11 +1,11 @@
 //! Typed Arrow column helpers used by INSERT/COPY write paths.
 
-use arrow::array::{
+use rapidbyte_sdk::arrow::array::{
     Array, AsArray, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array,
     Int16Array, Int32Array, Int64Array, TimestampMicrosecondArray,
 };
-use arrow::datatypes::DataType;
-use arrow::record_batch::RecordBatch;
+use rapidbyte_sdk::arrow::datatypes::DataType;
+use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use tokio_postgres::types::ToSql;
 
@@ -18,7 +18,7 @@ pub(crate) enum TypedCol<'a> {
     Float32(&'a Float32Array),
     Float64(&'a Float64Array),
     Boolean(&'a BooleanArray),
-    Utf8(&'a arrow::array::StringArray),
+    Utf8(&'a rapidbyte_sdk::arrow::array::StringArray),
     TimestampMicros(&'a TimestampMicrosecondArray),
     Date32(&'a Date32Array),
     Binary(&'a BinaryArray),
@@ -42,7 +42,7 @@ pub(crate) fn downcast_columns<'a>(
                 DataType::Float64 => TypedCol::Float64(col.as_any().downcast_ref().unwrap()),
                 DataType::Boolean => TypedCol::Boolean(col.as_any().downcast_ref().unwrap()),
                 DataType::Utf8 => TypedCol::Utf8(col.as_string::<i32>()),
-                DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, _) => {
+                DataType::Timestamp(rapidbyte_sdk::arrow::datatypes::TimeUnit::Microsecond, _) => {
                     TypedCol::TimestampMicros(col.as_any().downcast_ref().unwrap())
                 }
                 DataType::Date32 => TypedCol::Date32(col.as_any().downcast_ref().unwrap()),
@@ -172,7 +172,7 @@ pub(crate) fn sql_param_value<'a>(col: &'a TypedCol<'a>, row_idx: usize) -> SqlP
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Int32Array, StringArray};
+    use rapidbyte_sdk::arrow::array::{Int32Array, StringArray};
 
     #[test]
     fn sql_param_value_handles_numeric_and_nulls() {
@@ -206,8 +206,8 @@ mod tests {
 
     #[test]
     fn downcast_columns_handles_timestamp_date_binary() {
-        use arrow::array::{BinaryArray, Date32Array, TimestampMicrosecondArray};
-        use arrow::datatypes::{Field, Schema, TimeUnit};
+        use rapidbyte_sdk::arrow::array::{BinaryArray, Date32Array, TimestampMicrosecondArray};
+        use rapidbyte_sdk::arrow::datatypes::{Field, Schema, TimeUnit};
         use std::sync::Arc;
 
         let schema = Arc::new(Schema::new(vec![
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn sql_param_value_handles_timestamp() {
-        use arrow::array::TimestampMicrosecondArray;
+        use rapidbyte_sdk::arrow::array::TimestampMicrosecondArray;
         // 2024-01-15 09:50:00 UTC = 1705312200000000 micros
         let arr = TimestampMicrosecondArray::from(vec![Some(1705312200000000i64), None]);
         let col = TypedCol::TimestampMicros(&arr);
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn sql_param_value_handles_date32() {
-        use arrow::array::Date32Array;
+        use rapidbyte_sdk::arrow::array::Date32Array;
         // 2024-01-15 = 19737 days since epoch
         let arr = Date32Array::from(vec![Some(19737), None]);
         let col = TypedCol::Date32(&arr);
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn sql_param_value_handles_binary() {
-        use arrow::array::BinaryArray;
+        use rapidbyte_sdk::arrow::array::BinaryArray;
         let arr = BinaryArray::from(vec![Some(b"hello" as &[u8]), None]);
         let col = TypedCol::Binary(&arr);
 

@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use arrow::datatypes::Schema;
-use arrow::record_batch::RecordBatch;
+use rapidbyte_sdk::arrow::datatypes::Schema;
+use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use futures_util::SinkExt;
 use pg_escape::quote_identifier;

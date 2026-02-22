@@ -22,7 +22,7 @@ pub(crate) use self::staging::{prepare_staging, swap_staging_table};
 async fn ensure_table(
     client: &Client,
     qualified_table: &str,
-    arrow_schema: &arrow::datatypes::Schema,
+    arrow_schema: &rapidbyte_sdk::arrow::datatypes::Schema,
     primary_key: Option<&[String]>,
 ) -> anyhow::Result<()> {
     let columns_ddl: Vec<String> = arrow_schema
@@ -72,7 +72,7 @@ pub(crate) async fn ensure_table_and_schema(
     created_tables: &mut HashSet<String>,
     write_mode: Option<&WriteMode>,
     schema_policy: Option<&SchemaEvolutionPolicy>,
-    arrow_schema: &arrow::datatypes::Schema,
+    arrow_schema: &rapidbyte_sdk::arrow::datatypes::Schema,
     ignored_columns: &mut HashSet<String>,
     type_null_columns: &mut HashSet<String>,
 ) -> anyhow::Result<()> {

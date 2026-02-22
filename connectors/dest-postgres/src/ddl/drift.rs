@@ -68,7 +68,7 @@ pub(crate) async fn detect_schema_drift(
     client: &Client,
     schema_name: &str,
     table_name: &str,
-    arrow_schema: &arrow::datatypes::Schema,
+    arrow_schema: &rapidbyte_sdk::arrow::datatypes::Schema,
 ) -> anyhow::Result<Option<SchemaDrift>> {
     let existing = get_existing_columns(client, schema_name, table_name).await?;
     if existing.is_empty() {

@@ -1,6 +1,6 @@
-//! Arrow IPC batch write dispatch (INSERT/COPY).
+//! Arrow batch write dispatch (INSERT/COPY).
 //!
-//! This module decodes incoming IPC payloads and dispatches to COPY or INSERT.
+//! This module dispatches decoded Arrow batches to COPY or INSERT.
 //! Per-row fallback paths are intentionally removed: batch write failures are
 //! terminal and return an error immediately.
 
@@ -10,14 +10,11 @@ mod insert;
 mod typed_col;
 
 use std::collections::HashSet;
-use std::io::Cursor;
 use std::sync::Arc;
-use std::time::Instant;
 
 use anyhow::Context;
-use arrow::datatypes::Schema;
-use arrow::ipc::reader::StreamReader;
-use arrow::record_batch::RecordBatch;
+use rapidbyte_sdk::arrow::datatypes::Schema;
+use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::protocol::{SchemaEvolutionPolicy, WriteMode};
@@ -54,67 +51,48 @@ pub(crate) struct WriteContext<'a> {
     pub(crate) copy_flush_bytes: Option<usize>,
 }
 
-/// Decode Arrow IPC bytes into schema and record batches.
-fn decode_ipc(ipc_bytes: &[u8]) -> anyhow::Result<(Arc<Schema>, Vec<RecordBatch>)> {
-    let cursor = Cursor::new(ipc_bytes);
-    let reader = StreamReader::try_new(cursor, None).context("Failed to read Arrow IPC")?;
-    let schema = reader.schema();
-    let batches: Vec<_> = reader
-        .collect::<Result<Vec<_>, _>>()
-        .context("Failed to read IPC batches")?;
-    Ok((schema, batches))
-}
-
-/// Write an Arrow IPC batch to PostgreSQL.
+/// Write decoded Arrow batches to PostgreSQL.
 ///
 /// Dispatches to COPY or INSERT based on `ctx.load_method`. If the load method
 /// is COPY but write mode is Upsert, dispatches to INSERT because COPY does not
 /// support `ON CONFLICT`.
 pub(crate) async fn write_batch(
     ctx: &mut WriteContext<'_>,
-    ipc_bytes: &[u8],
-) -> Result<(WriteResult, u64), String> {
-    write_batch_inner(ctx, ipc_bytes)
+    arrow_schema: &Arc<Schema>,
+    batches: &[RecordBatch],
+) -> Result<WriteResult, String> {
+    write_batch_inner(ctx, arrow_schema, batches)
         .await
         .map_err(|e| format!("{:#}", e))
 }
 
 async fn write_batch_inner(
     ctx: &mut WriteContext<'_>,
-    ipc_bytes: &[u8],
-) -> anyhow::Result<(WriteResult, u64)> {
-    let decode_start = Instant::now();
-    let (arrow_schema, batches) = decode_ipc(ipc_bytes)?;
-    let decode_nanos = decode_start.elapsed().as_nanos() as u64;
-
+    arrow_schema: &Arc<Schema>,
+    batches: &[RecordBatch],
+) -> anyhow::Result<WriteResult> {
     if batches.is_empty() {
-        return Ok((
-            WriteResult {
-                rows_written: 0,
-                rows_failed: 0,
-            },
-            decode_nanos,
-        ));
+        return Ok(WriteResult {
+            rows_written: 0,
+            rows_failed: 0,
+        });
     }
 
     let use_copy =
         ctx.load_method == LoadMethod::Copy && !matches!(ctx.write_mode, Some(WriteMode::Upsert { .. }));
 
     let (result, method_name) = if use_copy {
-        (copy_batch(ctx, &arrow_schema, &batches).await, "COPY")
+        (copy_batch(ctx, arrow_schema, batches).await, "COPY")
     } else {
-        (insert_batch(ctx, &arrow_schema, &batches).await, "INSERT")
+        (insert_batch(ctx, arrow_schema, batches).await, "INSERT")
     };
 
     let rows_written = result.with_context(|| {
         format!("{} failed for stream {}", method_name, ctx.stream_name)
     })?;
 
-    Ok((
-        WriteResult {
-            rows_written,
-            rows_failed: 0,
-        },
-        decode_nanos,
-    ))
+    Ok(WriteResult {
+        rows_written,
+        rows_failed: 0,
+    })
 }

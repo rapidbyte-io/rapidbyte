@@ -1,6 +1,6 @@
 //! Arrow <-> PostgreSQL type mapping helpers.
 
-use arrow::datatypes::DataType;
+use rapidbyte_sdk::arrow::datatypes::DataType;
 
 /// Map Arrow data types back to PostgreSQL column types.
 pub(crate) fn arrow_to_pg_type(dt: &DataType) -> &'static str {
@@ -72,14 +72,14 @@ mod tests {
     fn arrow_to_pg_type_maps_timestamp_date_binary() {
         assert_eq!(
             arrow_to_pg_type(&DataType::Timestamp(
-                arrow::datatypes::TimeUnit::Microsecond,
+                rapidbyte_sdk::arrow::datatypes::TimeUnit::Microsecond,
                 None
             )),
             "TIMESTAMP"
         );
         assert_eq!(
             arrow_to_pg_type(&DataType::Timestamp(
-                arrow::datatypes::TimeUnit::Microsecond,
+                rapidbyte_sdk::arrow::datatypes::TimeUnit::Microsecond,
                 Some("UTC".into())
             )),
             "TIMESTAMPTZ"
