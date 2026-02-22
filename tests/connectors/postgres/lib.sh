@@ -5,21 +5,9 @@
 _PG_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$_PG_LIB_DIR/../../lib/helpers.sh"
 
-# Override COMPOSE_FILE to point at postgres-specific compose
+# Set COMPOSE_FILE for postgres (used by pg_exec/pg_cmd in shared helpers)
 COMPOSE_FILE="$_PG_LIB_DIR/docker-compose.yml"
 
 # PG fixture paths
 PG_FIXTURES="$_PG_LIB_DIR/fixtures"
 PG_PIPELINES="$PG_FIXTURES/pipelines"
-
-# Execute SQL and return trimmed result.
-pg_exec() {
-    docker compose -f "$COMPOSE_FILE" exec -T postgres \
-        psql -U postgres -d rapidbyte_test -t -A -c "$1"
-}
-
-# Execute SQL command (no result needed, quiet mode).
-pg_cmd() {
-    docker compose -f "$COMPOSE_FILE" exec -T postgres \
-        psql -U postgres -d rapidbyte_test -c "$1" -q
-}

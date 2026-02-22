@@ -4,7 +4,6 @@
 _HELPERS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$_HELPERS_DIR/../.." && pwd)"
 CONNECTOR_DIR="$PROJECT_ROOT/target/connectors"
-COMPOSE_FILE="$PROJECT_ROOT/docker-compose.yml"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 
@@ -16,6 +15,7 @@ cyan()  { echo -e "${CYAN}$*${NC}"; }
 section() { echo -e "\n${CYAN}=== $* ===${NC}"; }
 
 # Execute SQL against the test database, return trimmed result.
+# Requires COMPOSE_FILE to be set by the caller (connector lib or bench helpers).
 pg_exec() {
     docker compose -f "$COMPOSE_FILE" exec -T postgres \
         psql -U postgres -d rapidbyte_test -t -A -c "$1"
