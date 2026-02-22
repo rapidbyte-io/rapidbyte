@@ -17,3 +17,5 @@ pub use crate::protocol::{
     SchemaHint, StateScope, Stream, StreamContext, StreamLimits, SyncMode, TransformSummary,
     WriteMode, WritePerf, WriteSummary,
 };
+pub use crate::arrow::{self, build_arrow_schema, decode_ipc, encode_ipc, arrow_data_type};
+pub use crate::arrow::arrow_reexport;

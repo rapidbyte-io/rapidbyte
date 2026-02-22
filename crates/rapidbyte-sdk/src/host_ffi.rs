@@ -1,9 +1,12 @@
 //! Guest-side host import wrappers for the component model.
 
+use std::sync::Arc;
 use std::sync::OnceLock;
 
 #[cfg(target_arch = "wasm32")]
 use crate::errors::{BackoffClass, CommitState, ErrorScope};
+use arrow::datatypes::Schema;
+use arrow::record_batch::RecordBatch;
 use crate::errors::{ConnectorError, ErrorCategory};
 use crate::protocol::{Checkpoint, Metric, StateScope};
 #[cfg(target_arch = "wasm32")]
@@ -451,6 +454,31 @@ pub fn socket_close(handle: u64) {
     host_imports().socket_close(handle)
 }
 
+/// Emit an Arrow RecordBatch to the host pipeline.
+///
+/// This is the primary API for source connectors to send data. The batch
+/// is serialized to IPC format internally — connectors never handle raw bytes.
+pub fn emit_record_batch(batch: &RecordBatch) -> Result<(), ConnectorError> {
+    let ipc_bytes = crate::arrow::ipc::encode_ipc(batch)?;
+    host_imports().emit_batch(&ipc_bytes)
+}
+
+/// Receive the next Arrow RecordBatch from the host pipeline.
+///
+/// Returns `None` when there are no more batches. The IPC bytes from the
+/// host are decoded into schema + batches internally.
+pub fn next_record_batch(
+    max_bytes: u64,
+) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, ConnectorError> {
+    match host_imports().next_batch(max_bytes)? {
+        Some(ipc_bytes) => {
+            let (schema, batches) = crate::arrow::ipc::decode_ipc(&ipc_bytes)?;
+            Ok(Some((schema, batches)))
+        }
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,5 +495,21 @@ mod tests {
     fn test_native_stub_next_batch_none() {
         let batch = next_batch(1024).expect("next batch");
         assert!(batch.is_none());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_emit_record_batch_encodes_and_calls_host() {
+        use arrow::array::Int32Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1]))]).unwrap();
+
+        // StubHostImports.emit_batch returns Ok(()) — just verifying no panic
+        let result = emit_record_batch(&batch);
+        assert!(result.is_ok());
     }
 }
