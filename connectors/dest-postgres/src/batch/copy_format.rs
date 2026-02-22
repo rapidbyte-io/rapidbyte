@@ -144,7 +144,10 @@ pub(crate) fn format_copy_typed_value(buf: &mut Vec<u8>, col: &TypedCol<'_>, row
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Float64Array, StringArray};
+    use arrow::array::{
+        BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array,
+        Int32Array, Int64Array, StringArray, TimestampMicrosecondArray,
+    };
 
     #[test]
     fn format_copy_typed_value_escapes_utf8_text() {
@@ -171,5 +174,151 @@ mod tests {
         let mut buf = Vec::new();
         format_copy_typed_value(&mut buf, &col, 2);
         assert_eq!(String::from_utf8(buf).expect("utf8"), "-Infinity");
+    }
+
+    #[test]
+    fn format_copy_timestamp_microseconds() {
+        // 2024-01-15 10:30:00 UTC = 1705312200 seconds * 1_000_000 micros
+        let micros = 1705312200_i64 * 1_000_000;
+        let arr = TimestampMicrosecondArray::from(vec![Some(micros)]);
+        let col = TypedCol::TimestampMicros(&arr);
+        let mut buf = Vec::new();
+        format_copy_typed_value(&mut buf, &col, 0);
+        let result = String::from_utf8(buf).unwrap();
+        assert!(result.starts_with("2024-01-15 10:30:00"), "got: {}", result);
+    }
+
+    #[test]
+    fn format_copy_timestamp_epoch() {
+        let arr = TimestampMicrosecondArray::from(vec![Some(0)]);
+        let col = TypedCol::TimestampMicros(&arr);
+        let mut buf = Vec::new();
+        format_copy_typed_value(&mut buf, &col, 0);
+        let result = String::from_utf8(buf).unwrap();
+        assert!(result.starts_with("1970-01-01 00:00:00"), "got: {}", result);
+    }
+
+    #[test]
+    fn format_copy_date32_epoch() {
+        // 0 days since epoch = "1970-01-01"
+        let arr = Date32Array::from(vec![Some(0)]);
+        let col = TypedCol::Date32(&arr);
+        let mut buf = Vec::new();
+        format_copy_typed_value(&mut buf, &col, 0);
+        assert_eq!(String::from_utf8(buf).unwrap(), "1970-01-01");
+    }
+
+    #[test]
+    fn format_copy_date32_specific() {
+        // 2024-01-15 = days since 1970-01-01
+        // Days from 1970-01-01 to 2024-01-15 = 19738
+        let arr = Date32Array::from(vec![Some(19738)]);
+        let col = TypedCol::Date32(&arr);
+        let mut buf = Vec::new();
+        format_copy_typed_value(&mut buf, &col, 0);
+        assert_eq!(String::from_utf8(buf).unwrap(), "2024-01-15");
+    }
+
+    #[test]
+    fn format_copy_binary_hex() {
+        // [0xDE, 0xAD, 0xBE, 0xEF] -> "\\xdeadbeef"
+        let arr = BinaryArray::from(vec![Some(&[0xDE_u8, 0xAD, 0xBE, 0xEF] as &[u8])]);
+        let col = TypedCol::Binary(&arr);
+        let mut buf = Vec::new();
+        format_copy_typed_value(&mut buf, &col, 0);
+        assert_eq!(String::from_utf8(buf).unwrap(), "\\\\xdeadbeef");
+    }
+
+    #[test]
+    fn format_copy_binary_empty() {
+        let arr = BinaryArray::from(vec![Some(&[] as &[u8])]);
+        let col = TypedCol::Binary(&arr);
+        let mut buf = Vec::new();
+        format_copy_typed_value(&mut buf, &col, 0);
+        assert_eq!(String::from_utf8(buf).unwrap(), "\\\\x");
+    }
+
+    #[test]
+    fn format_copy_timestamp_null() {
+        let arr = TimestampMicrosecondArray::from(vec![None as Option<i64>]);
+        let col = TypedCol::TimestampMicros(&arr);
+        let mut buf = Vec::new();
+        format_copy_typed_value(&mut buf, &col, 0);
+        assert_eq!(String::from_utf8(buf).unwrap(), "\\N");
+    }
+
+    #[test]
+    fn format_copy_date_null() {
+        let arr = Date32Array::from(vec![None as Option<i32>]);
+        let col = TypedCol::Date32(&arr);
+        let mut buf = Vec::new();
+        format_copy_typed_value(&mut buf, &col, 0);
+        assert_eq!(String::from_utf8(buf).unwrap(), "\\N");
+    }
+
+    #[test]
+    fn format_copy_binary_null() {
+        let arr = BinaryArray::from(vec![None as Option<&[u8]>]);
+        let col = TypedCol::Binary(&arr);
+        let mut buf = Vec::new();
+        format_copy_typed_value(&mut buf, &col, 0);
+        assert_eq!(String::from_utf8(buf).unwrap(), "\\N");
+    }
+
+    #[test]
+    fn format_copy_int_types() {
+        let arr16 = Int16Array::from(vec![Some(-32768_i16)]);
+        let col = TypedCol::Int16(&arr16);
+        let mut buf = Vec::new();
+        format_copy_typed_value(&mut buf, &col, 0);
+        assert_eq!(String::from_utf8(buf).unwrap(), "-32768");
+
+        let arr32 = Int32Array::from(vec![Some(2147483647_i32)]);
+        let col = TypedCol::Int32(&arr32);
+        let mut buf = Vec::new();
+        format_copy_typed_value(&mut buf, &col, 0);
+        assert_eq!(String::from_utf8(buf).unwrap(), "2147483647");
+
+        let arr64 = Int64Array::from(vec![Some(-9223372036854775808_i64)]);
+        let col = TypedCol::Int64(&arr64);
+        let mut buf = Vec::new();
+        format_copy_typed_value(&mut buf, &col, 0);
+        assert_eq!(String::from_utf8(buf).unwrap(), "-9223372036854775808");
+    }
+
+    #[test]
+    fn format_copy_boolean() {
+        let arr = BooleanArray::from(vec![Some(true), Some(false)]);
+        let col = TypedCol::Boolean(&arr);
+
+        let mut buf = Vec::new();
+        format_copy_typed_value(&mut buf, &col, 0);
+        assert_eq!(String::from_utf8(buf).unwrap(), "t");
+
+        let mut buf = Vec::new();
+        format_copy_typed_value(&mut buf, &col, 1);
+        assert_eq!(String::from_utf8(buf).unwrap(), "f");
+    }
+
+    #[test]
+    fn format_copy_float32_specials() {
+        let arr = Float32Array::from(vec![
+            Some(f32::NAN),
+            Some(f32::INFINITY),
+            Some(f32::NEG_INFINITY),
+        ]);
+        let col = TypedCol::Float32(&arr);
+
+        let mut buf = Vec::new();
+        format_copy_typed_value(&mut buf, &col, 0);
+        assert_eq!(String::from_utf8(buf).unwrap(), "NaN");
+
+        let mut buf = Vec::new();
+        format_copy_typed_value(&mut buf, &col, 1);
+        assert_eq!(String::from_utf8(buf).unwrap(), "Infinity");
+
+        let mut buf = Vec::new();
+        format_copy_typed_value(&mut buf, &col, 2);
+        assert_eq!(String::from_utf8(buf).unwrap(), "-Infinity");
     }
 }
