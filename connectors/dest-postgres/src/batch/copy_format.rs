@@ -3,6 +3,7 @@
 use std::io::Write;
 
 use arrow::array::Array;
+use chrono::{DateTime, NaiveDate};
 use crate::batch::typed_col::TypedCol;
 
 /// Format a pre-downcast value at a given row index for COPY text format.
@@ -97,6 +98,44 @@ pub(crate) fn format_copy_typed_value(buf: &mut Vec<u8>, col: &TypedCol<'_>, row
                     0 => {}
                     _ => buf.push(byte),
                 }
+            }
+        }
+        TypedCol::TimestampMicros(arr) => {
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
+            let micros = arr.value(row_idx);
+            let secs = micros.div_euclid(1_000_000);
+            let nsecs = (micros.rem_euclid(1_000_000) * 1_000) as u32;
+            if let Some(dt) = DateTime::from_timestamp(secs, nsecs) {
+                let _ = write!(buf, "{}", dt.naive_utc().format("%Y-%m-%d %H:%M:%S%.f"));
+            } else {
+                buf.extend_from_slice(b"\\N");
+            }
+        }
+        TypedCol::Date32(arr) => {
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
+            let days = arr.value(row_idx);
+            let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            if let Some(date) = epoch.checked_add_signed(chrono::Duration::days(days as i64)) {
+                let _ = write!(buf, "{}", date);
+            } else {
+                buf.extend_from_slice(b"\\N");
+            }
+        }
+        TypedCol::Binary(arr) => {
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
+            // COPY text format for bytea: hex encoding with \\x prefix
+            buf.extend_from_slice(b"\\\\x");
+            for byte in arr.value(row_idx) {
+                let _ = write!(buf, "{:02x}", byte);
             }
         }
     }
