@@ -70,6 +70,12 @@ stage_connectors() {
        "$CONNECTOR_DIR/source_postgres.manifest.json"
     cp "$PROJECT_ROOT/connectors/dest-postgres/manifest.json" \
        "$CONNECTOR_DIR/dest_postgres.manifest.json"
+
+    # Strip custom sections from release builds
+    if [ "$mode" = "release" ]; then
+        "$PROJECT_ROOT/scripts/strip-wasm.sh" "$CONNECTOR_DIR/source_postgres.wasm"
+        "$PROJECT_ROOT/scripts/strip-wasm.sh" "$CONNECTOR_DIR/dest_postgres.wasm"
+    fi
 }
 
 # ── Docker helpers ───────────────────────────────────────────────
