@@ -1,0 +1,42 @@
+version: "1.0"
+pipeline: test_pg_to_pg_restricted
+source:
+  use: source-postgres
+  config:
+    host: localhost
+    port: 5432
+    user: postgres
+    password: postgres
+    database: rapidbyte_test
+    schema: public
+  streams:
+    - name: users
+      sync_mode: full_refresh
+  permissions:
+    network:
+      allowed_hosts:
+        - localhost
+        - "127.0.0.1"
+    env:
+      allowed_vars: [PGPASSWORD]
+  limits:
+    max_memory: 128mb
+    timeout_seconds: 120
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+    port: 5432
+    user: postgres
+    password: postgres
+    database: rapidbyte_test
+    schema: raw
+  write_mode: replace
+  permissions:
+    network:
+      allowed_hosts:
+        - localhost
+        - "127.0.0.1"
+  limits:
+    max_memory: 128mb
+    timeout_seconds: 120

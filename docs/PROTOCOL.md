@@ -203,3 +203,42 @@ Removed in v2:
 Replaced by:
 - Wasmtime component worlds generated from WIT
 - typed canonical ABI for all host/guest calls
+
+### Pipeline-Level Permissions & Limits
+
+Pipeline operators can restrict connector sandbox capabilities and resource usage
+beyond what the connector manifest declares. Add `permissions` and/or `limits`
+blocks to any connector in the pipeline:
+
+    source:
+      use: source-postgres
+      config: { ... }
+      permissions:
+        network:
+          allowed_hosts: [db.production.internal, "*.analytics.corp"]
+        env:
+          allowed_vars: [DATABASE_URL]
+        fs:
+          allowed_preopens: [/data/exports]
+      limits:
+        max_memory: 128mb
+        timeout_seconds: 60
+
+**Permissions** are capability-based (can/cannot access X). Effective permissions
+use set intersection — a capability is granted only if both manifest and pipeline
+allow it.
+
+**Limits** are quantitative bounds (how much). Effective limit = min(manifest, pipeline).
+
+| Category | Manifest field | Pipeline field | Merge rule |
+|----------|---------------|----------------|------------|
+| Network | `allowed_domains` | `allowed_hosts` | Set intersection |
+| Env vars | `allowed_vars` | `allowed_vars` | Set intersection |
+| Filesystem | `preopens` | `allowed_preopens` | Set intersection |
+| Memory | `limits.max_memory` | `limits.max_memory` | min() |
+| Timeout | `limits.timeout_seconds` | `limits.timeout_seconds` | min() |
+
+- Pipeline can only narrow, never widen.
+- Omitted fields leave the manifest values unchanged.
+- Empty lists (`[]`) block all access for that category.
+- Default limits when neither specifies: memory = unlimited, timeout = 300s.
