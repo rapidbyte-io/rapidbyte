@@ -1,0 +1,37 @@
+version: "1.0"
+pipeline: e2e_permissions_blocked
+
+source:
+  use: source-postgres
+  config:
+    host: localhost
+    port: 5433
+    user: postgres
+    password: postgres
+    database: rapidbyte_test
+  streams:
+    - name: users
+      sync_mode: full_refresh
+  permissions:
+    network:
+      allowed_hosts:
+        - nonexistent.example.com
+
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+    port: 5433
+    user: postgres
+    password: postgres
+    database: rapidbyte_test
+    schema: raw
+  write_mode: replace
+  permissions:
+    network:
+      allowed_hosts:
+        - nonexistent.example.com
+
+state:
+  backend: sqlite
+  connection: /tmp/rapidbyte_e2e_perms_blocked_state.db

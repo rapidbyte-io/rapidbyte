@@ -1,0 +1,33 @@
+version: "1.0"
+pipeline: e2e_permissions_low_memory
+
+source:
+  use: source-postgres
+  config:
+    host: localhost
+    port: 5433
+    user: postgres
+    password: postgres
+    database: rapidbyte_test
+  streams:
+    - name: users
+      sync_mode: full_refresh
+  limits:
+    max_memory: 64kb
+
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+    port: 5433
+    user: postgres
+    password: postgres
+    database: rapidbyte_test
+    schema: raw
+  write_mode: replace
+  limits:
+    max_memory: 64kb
+
+state:
+  backend: sqlite
+  connection: /tmp/rapidbyte_e2e_perms_lowmem_state.db

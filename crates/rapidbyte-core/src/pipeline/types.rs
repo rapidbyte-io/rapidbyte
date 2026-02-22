@@ -621,9 +621,9 @@ destination:
 
     #[test]
     fn test_fixture_pipeline_with_permissions_parses() {
-        let yaml = include_str!("../../../../tests/fixtures/pipeline_with_permissions.yaml");
+        let yaml = include_str!("../../../../tests/fixtures/pipelines/e2e_permissions.yaml");
         let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.pipeline, "test_pg_to_pg_restricted");
+        assert_eq!(config.pipeline, "e2e_permissions");
         let src_perms = config.source.permissions.as_ref().unwrap();
         assert_eq!(
             src_perms.network.allowed_hosts,
@@ -631,7 +631,7 @@ destination:
         );
         assert_eq!(src_perms.env.allowed_vars, Some(vec!["PGPASSWORD".to_string()]));
         let src_limits = config.source.limits.as_ref().unwrap();
-        assert_eq!(src_limits.max_memory, Some("128mb".to_string()));
+        assert_eq!(src_limits.max_memory, Some("256mb".to_string()));
         assert_eq!(src_limits.timeout_seconds, Some(120));
     }
 
