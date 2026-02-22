@@ -1,7 +1,7 @@
 //! Typed Arrow column helpers used by INSERT/COPY write paths.
 
 use rapidbyte_sdk::arrow::array::{
-    Array, AsArray, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array,
+    Array, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array,
     Int16Array, Int32Array, Int64Array, TimestampMicrosecondArray,
 };
 use rapidbyte_sdk::arrow::datatypes::DataType;
@@ -47,7 +47,7 @@ pub(crate) fn downcast_columns<'a>(
                 DataType::Float32 => Ok(TypedCol::Float32(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected Float32Array)"))?)),
                 DataType::Float64 => Ok(TypedCol::Float64(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected Float64Array)"))?)),
                 DataType::Boolean => Ok(TypedCol::Boolean(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected BooleanArray)"))?)),
-                DataType::Utf8 => Ok(TypedCol::Utf8(col.as_string::<i32>())),
+                DataType::Utf8 => Ok(TypedCol::Utf8(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected StringArray)"))?)),
                 DataType::Timestamp(rapidbyte_sdk::arrow::datatypes::TimeUnit::Microsecond, _) => {
                     Ok(TypedCol::TimestampMicros(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected TimestampMicrosecondArray)"))?))
                 }

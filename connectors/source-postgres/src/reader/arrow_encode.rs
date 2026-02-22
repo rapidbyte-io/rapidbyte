@@ -9,13 +9,13 @@ use rapidbyte_sdk::arrow::array::{
 use chrono::{NaiveDate, NaiveDateTime};
 use std::sync::LazyLock;
 use rapidbyte_sdk::arrow::datatypes::Schema;
+use rapidbyte_sdk::arrow::record_batch::RecordBatch;
+use rapidbyte_sdk::protocol::ColumnSchema;
 
 /// Unix epoch date — used as the base for Arrow Date32 day offsets.
 static UNIX_EPOCH_DATE: LazyLock<NaiveDate> = LazyLock::new(|| {
     NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch date is always valid")
 });
-use rapidbyte_sdk::arrow::record_batch::RecordBatch;
-use rapidbyte_sdk::protocol::ColumnSchema;
 
 pub(crate) fn rows_to_record_batch(
     rows: &[tokio_postgres::Row],
