@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use rapidbyte_types::errors::ValidationResult;
-use rapidbyte_types::manifest::{ConnectorManifest, Permissions};
+use rapidbyte_types::manifest::{ConnectorManifest, Permissions, ResourceLimits};
 use rapidbyte_types::protocol::{
     Catalog, ConnectorRole, CursorInfo, CursorType, CursorValue, DlqRecord, ProtocolVersion,
     ReadSummary, SchemaHint, StreamContext, StreamLimits, StreamPolicies, SyncMode, WriteSummary,
@@ -21,7 +21,8 @@ use super::runner::{
 };
 use crate::pipeline::types::{parse_byte_size, PipelineConfig, StateBackendKind};
 use crate::runtime::component_runtime::{
-    self, parse_connector_ref, Frame, HostTimings, LoadedComponent, WasmRuntime,
+    self, parse_connector_ref, resolve_min_limit, Frame, HostTimings, LoadedComponent,
+    SandboxOverrides, WasmRuntime,
 };
 use crate::state::backend::{PipelineId, RunStats, RunStatus, StateBackend, StreamName};
 use crate::state::sqlite::SqliteStateBackend;
@@ -67,6 +68,7 @@ struct LoadedTransformModule {
     config: serde_json::Value,
     load_ms: u64,
     permissions: Option<Permissions>,
+    manifest_limits: ResourceLimits,
 }
 
 struct LoadedModules {
@@ -293,6 +295,10 @@ async fn load_modules(
                 .map_err(PipelineError::Infrastructure)?;
         }
         let transform_perms = manifest.as_ref().map(|m| m.permissions.clone());
+        let transform_manifest_limits = manifest
+            .as_ref()
+            .map(|m| m.limits.clone())
+            .unwrap_or_default();
         let load_start = Instant::now();
         let module = runtime
             .load_module(&wasm_path)
@@ -306,6 +312,7 @@ async fn load_modules(
             config: tc.config.clone(),
             load_ms,
             permissions: transform_perms,
+            manifest_limits: transform_manifest_limits,
         });
     }
 
@@ -417,6 +424,42 @@ fn build_stream_contexts(
     })
 }
 
+/// Build `SandboxOverrides` from pipeline permissions/limits and manifest resource limits.
+/// Returns `None` if no overrides are specified from either side.
+fn build_sandbox_overrides(
+    pipeline_perms: Option<&crate::pipeline::types::PipelinePermissions>,
+    pipeline_limits: Option<&crate::pipeline::types::PipelineLimits>,
+    manifest_limits: &ResourceLimits,
+) -> Option<SandboxOverrides> {
+    let manifest_mem = manifest_limits
+        .max_memory
+        .as_ref()
+        .and_then(|s| parse_byte_size(s).ok());
+    let pipeline_mem = pipeline_limits
+        .and_then(|l| l.max_memory.as_ref())
+        .and_then(|s| parse_byte_size(s).ok());
+
+    let manifest_timeout = manifest_limits.timeout_seconds;
+    let pipeline_timeout = pipeline_limits.and_then(|l| l.timeout_seconds);
+
+    let has_overrides = pipeline_perms.is_some()
+        || pipeline_limits.is_some()
+        || manifest_limits.max_memory.is_some()
+        || manifest_limits.timeout_seconds.is_some();
+
+    if has_overrides {
+        Some(SandboxOverrides {
+            allowed_hosts: pipeline_perms.and_then(|p| p.network.allowed_hosts.clone()),
+            allowed_vars: pipeline_perms.and_then(|p| p.env.allowed_vars.clone()),
+            allowed_preopens: pipeline_perms.and_then(|p| p.fs.allowed_preopens.clone()),
+            max_memory_bytes: resolve_min_limit(manifest_mem, pipeline_mem),
+            timeout_seconds: resolve_min_limit(manifest_timeout, pipeline_timeout),
+        })
+    } else {
+        None
+    }
+}
+
 async fn execute_streams(
     config: &PipelineConfig,
     connectors: &ResolvedConnectors,
@@ -445,6 +488,43 @@ async fn execute_streams(
         "Starting per-stream pipeline execution"
     );
 
+    let source_manifest_limits = connectors
+        .source_manifest
+        .as_ref()
+        .map(|m| &m.limits)
+        .cloned()
+        .unwrap_or_default();
+    let source_overrides = build_sandbox_overrides(
+        config.source.permissions.as_ref(),
+        config.source.limits.as_ref(),
+        &source_manifest_limits,
+    );
+
+    let dest_manifest_limits = connectors
+        .dest_manifest
+        .as_ref()
+        .map(|m| &m.limits)
+        .cloned()
+        .unwrap_or_default();
+    let dest_overrides = build_sandbox_overrides(
+        config.destination.permissions.as_ref(),
+        config.destination.limits.as_ref(),
+        &dest_manifest_limits,
+    );
+
+    let transform_overrides: Vec<Option<SandboxOverrides>> = config
+        .transforms
+        .iter()
+        .zip(modules.transform_modules.iter())
+        .map(|(tc, tm)| {
+            build_sandbox_overrides(
+                tc.permissions.as_ref(),
+                tc.limits.as_ref(),
+                &tm.manifest_limits,
+            )
+        })
+        .collect();
+
     let mut stream_join_handles: Vec<tokio::task::JoinHandle<Result<StreamResult, StreamError>>> =
         Vec::with_capacity(stream_build.stream_ctxs.len());
     let run_dlq_records: Arc<Mutex<Vec<DlqRecord>>> = Arc::new(Mutex::new(Vec::new()));
@@ -470,6 +550,9 @@ async fn execute_streams(
         let dest_connector_version = dest_connector_version.clone();
         let source_permissions = connectors.source_permissions.clone();
         let dest_permissions = connectors.dest_permissions.clone();
+        let source_overrides = source_overrides.clone();
+        let dest_overrides = dest_overrides.clone();
+        let transform_overrides = transform_overrides.clone();
         let run_dlq_records = run_dlq_records.clone();
         let compression = stream_build.compression;
         let transforms = modules.transform_modules.clone();
@@ -511,7 +594,7 @@ async fn execute_streams(
                     stats_src,
                     source_permissions.as_ref(),
                     compression,
-                    None,
+                    source_overrides.as_ref(),
                 )
             });
 
@@ -522,6 +605,7 @@ async fn execute_streams(
                 let state_t = state_dst.clone();
                 let stream_ctx_t = stream_ctx.clone();
                 let pipeline_name_t = pipeline_name.clone();
+                let t_overrides = transform_overrides.get(i).cloned().flatten();
                 let t_handle = tokio::task::spawn_blocking(move || {
                     run_transform_stream(
                         &t.module,
@@ -535,7 +619,7 @@ async fn execute_streams(
                         &stream_ctx_t,
                         t.permissions.as_ref(),
                         compression,
-                        None,
+                        t_overrides.as_ref(),
                     )
                 });
                 transform_handles.push((i, t_handle));
@@ -555,7 +639,7 @@ async fn execute_streams(
                     stats_dst,
                     dest_permissions.as_ref(),
                     compression,
-                    None,
+                    dest_overrides.as_ref(),
                 )
             });
 
