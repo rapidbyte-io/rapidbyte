@@ -250,7 +250,7 @@ fn test_arrow_ipc_realistic_schema() {
 /// - Destination PostgreSQL on TEST_DEST_PG_HOST:TEST_DEST_PG_PORT
 /// - Both must accept user=postgres, password=postgres
 /// - Databases source_test and dest_test must exist
-/// - Source must be seeded with tests/fixtures/sql/source_seed.sql
+/// - Source must be seeded with tests/connectors/postgres/fixtures/sql/source_seed.sql
 /// - Connector .wasm files must be built and RAPIDBYTE_CONNECTOR_DIR set
 #[tokio::test]
 #[ignore]
