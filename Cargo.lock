@@ -2321,6 +2321,7 @@ name = "rapidbyte-sdk"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "rapidbyte-sdk-macros",
  "rapidbyte-types",
  "serde",
  "serde_json",

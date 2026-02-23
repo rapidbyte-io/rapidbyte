@@ -5,7 +5,7 @@ edition.workspace = true
 
 [features]
 default = ["runtime", "build"]
-runtime = ["dep:tokio", "dep:wit-bindgen", "dep:arrow"]
+runtime = ["dep:tokio", "dep:wit-bindgen", "dep:arrow", "dep:rapidbyte-sdk-macros"]
 build = []
 
 [dependencies]
@@ -17,3 +17,4 @@ serde_json = { workspace = true }
 tokio = { version = "1.36", default-features = false, features = ["io-util"], optional = true }
 wit-bindgen = { version = "0.46", optional = true }
 arrow = { version = "53", default-features = false, features = ["ipc"], optional = true }
+rapidbyte-sdk-macros = { path = "macros", optional = true }
