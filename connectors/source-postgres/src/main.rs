@@ -6,6 +6,7 @@
 mod cdc;
 mod client;
 pub mod config;
+mod discovery;
 mod metrics;
 mod reader;
 pub mod schema;
@@ -40,7 +41,7 @@ impl Source for SourcePostgres {
         let client = client::connect(&self.config)
             .await
             .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
-        schema::discover_catalog(&client)
+        discovery::discover_catalog(&client)
             .await
             .map(|streams| Catalog { streams })
             .map_err(|e| ConnectorError::transient_db("DISCOVERY_FAILED", e))
