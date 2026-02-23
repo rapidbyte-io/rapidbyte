@@ -316,12 +316,8 @@ pub async fn read_stream(
                         let val = row
                             .try_get::<_, String>(col_idx)
                             .ok()
-                            .or_else(|| {
-                                row.try_get::<_, i64>(col_idx).ok().map(|n| n.to_string())
-                            })
-                            .or_else(|| {
-                                row.try_get::<_, i32>(col_idx).ok().map(|n| n.to_string())
-                            })
+                            .or_else(|| row.try_get::<_, i64>(col_idx).ok().map(|n| n.to_string()))
+                            .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(|n| n.to_string()))
                             .or_else(|| {
                                 row.try_get::<_, NaiveDateTime>(col_idx)
                                     .ok()
@@ -404,11 +400,9 @@ pub async fn read_stream(
 
     // ── 8. Checkpoint ─────────────────────────────────────────────────
     let checkpoint_count = if let Some(t) = tracker {
-        if let Some(cp) = t.into_checkpoint(
-            &stream.stream_name,
-            state.total_records,
-            state.total_bytes,
-        ) {
+        if let Some(cp) =
+            t.into_checkpoint(&stream.stream_name, state.total_records, state.total_bytes)
+        {
             let cursor_field = cp.cursor_field.as_deref().unwrap_or("");
             let cursor_value = cp
                 .cursor_value

@@ -92,8 +92,7 @@ pub(crate) fn build_base_query(
                 });
             }
 
-            let resolved_cursor_type =
-                effective_cursor_type(ci.cursor_type, cursor_arrow_type);
+            let resolved_cursor_type = effective_cursor_type(ci.cursor_type, cursor_arrow_type);
             if resolved_cursor_type != ci.cursor_type {
                 ctx.log(
                     LogLevel::Debug,
@@ -278,7 +277,9 @@ pub(crate) fn timestamp_micros_to_rfc3339(us: i64) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapidbyte_sdk::protocol::{CursorInfo, StreamContext, StreamLimits, StreamPolicies, SyncMode};
+    use rapidbyte_sdk::protocol::{
+        CursorInfo, StreamContext, StreamLimits, StreamPolicies, SyncMode,
+    };
 
     fn columns_for_cursor() -> Vec<Column> {
         vec![
@@ -344,8 +345,7 @@ mod tests {
         let mut stream = base_context();
         stream.stream_name = "User".to_string();
         let columns = vec![Column::new("select", "text", true)];
-        let query =
-            build_base_query(&ctx, &stream, &columns).expect("query should build");
+        let query = build_base_query(&ctx, &stream, &columns).expect("query should build");
         assert_eq!(query.sql, "SELECT \"select\" FROM \"User\"");
         assert!(query.bind.is_none());
     }
@@ -361,8 +361,8 @@ mod tests {
             last_value: Some(CursorValue::Int64(7)),
         });
 
-        let query = build_base_query(&ctx, &stream, &columns_for_cursor())
-            .expect("query should build");
+        let query =
+            build_base_query(&ctx, &stream, &columns_for_cursor()).expect("query should build");
         assert_eq!(
             query.sql,
             "SELECT id, name FROM users WHERE id > $1::bigint ORDER BY id"
@@ -378,8 +378,7 @@ mod tests {
             Column::new("id", "bigint", false),
             Column::new("external_id", "uuid", true),
         ];
-        let query =
-            build_base_query(&ctx, &stream, &columns).expect("query should build");
+        let query = build_base_query(&ctx, &stream, &columns).expect("query should build");
         // uuid needs ::text cast, bigint does not
         assert!(
             query.sql.contains("external_id::text AS external_id"),

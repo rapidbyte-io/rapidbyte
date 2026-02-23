@@ -12,7 +12,6 @@ mod encode;
 mod metrics;
 mod query;
 mod reader;
-pub mod schema;
 pub mod types;
 
 use std::time::Instant;

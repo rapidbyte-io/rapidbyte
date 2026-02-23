@@ -96,7 +96,9 @@ pub fn resolve(pg_type: &str) -> TypeInfo {
         }
 
         // Timestamps -- native FromSql (NaiveDateTime / DateTime<Utc>)
-        "timestamp" | "timestamp without time zone" | "timestamp with time zone"
+        "timestamp"
+        | "timestamp without time zone"
+        | "timestamp with time zone"
         | "timestamptz" => TypeInfo {
             arrow_type: ArrowDataType::TimestampMicros,
             needs_cast: false,
@@ -121,15 +123,36 @@ pub fn resolve(pg_type: &str) -> TypeInfo {
         },
 
         // Types that need text cast -- no native FromSql in tokio-postgres
-        "uuid" | "numeric" | "decimal" | "money" | "time" | "time without time zone"
-        | "time with time zone" | "timetz" | "interval" | "inet" | "cidr" | "macaddr"
-        | "macaddr8" | "bit" | "bit varying" | "varbit" | "xml" | "pg_lsn" | "tsquery"
-        | "tsvector" | "point" | "line" | "lseg" | "box" | "path" | "polygon" | "circle" => {
-            TypeInfo {
-                arrow_type: ArrowDataType::Utf8,
-                needs_cast: true,
-            }
-        }
+        "uuid"
+        | "numeric"
+        | "decimal"
+        | "money"
+        | "time"
+        | "time without time zone"
+        | "time with time zone"
+        | "timetz"
+        | "interval"
+        | "inet"
+        | "cidr"
+        | "macaddr"
+        | "macaddr8"
+        | "bit"
+        | "bit varying"
+        | "varbit"
+        | "xml"
+        | "pg_lsn"
+        | "tsquery"
+        | "tsvector"
+        | "point"
+        | "line"
+        | "lseg"
+        | "box"
+        | "path"
+        | "polygon"
+        | "circle" => TypeInfo {
+            arrow_type: ArrowDataType::Utf8,
+            needs_cast: true,
+        },
 
         // Array types (any[]) -- cast to text representation
         t if t.starts_with('_') || t.ends_with("[]") => TypeInfo {
@@ -356,7 +379,15 @@ mod tests {
 
     #[test]
     fn search_and_bit_types_need_cast() {
-        for pg in ["tsquery", "tsvector", "bit", "bit varying", "varbit", "xml", "pg_lsn"] {
+        for pg in [
+            "tsquery",
+            "tsvector",
+            "bit",
+            "bit varying",
+            "varbit",
+            "xml",
+            "pg_lsn",
+        ] {
             let info = resolve(pg);
             assert_eq!(
                 info.arrow_type,
