@@ -8,6 +8,7 @@ mod client;
 pub mod config;
 mod cursor;
 mod discovery;
+mod encode;
 mod metrics;
 mod reader;
 pub mod schema;
