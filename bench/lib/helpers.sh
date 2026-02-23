@@ -17,6 +17,7 @@ fi
 source "$PROJECT_ROOT/tests/lib/helpers.sh"
 
 CONNECTOR_DIR="$PROJECT_ROOT/target/connectors"
+export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
 COMPOSE_FILE="$PROJECT_ROOT/docker-compose.yml"
 RESULTS_DIR="$PROJECT_ROOT/target/bench_results"
 RESULTS_FILE="$RESULTS_DIR/results.jsonl"
@@ -146,16 +147,23 @@ run_pipeline_bench() {
     local target_dir="release"
     [ "$build_mode" != "release" ] && target_dir="debug"
 
-    local output
+    local output exit_code=0
     output=$("$PROJECT_ROOT/target/$target_dir/rapidbyte" run \
         "$pipeline_yaml" \
-        --log-level warn 2>&1)
+        --log-level warn 2>&1) || exit_code=$?
+
+    if [ "$exit_code" -ne 0 ]; then
+        echo "Pipeline failed (exit code $exit_code):" >&2
+        echo "$output" >&2
+        return 1
+    fi
 
     local json_line
-    json_line=$(echo "$output" | grep "@@BENCH_JSON@@" | sed 's/@@BENCH_JSON@@//')
+    json_line=$(echo "$output" | grep "@@BENCH_JSON@@" | sed 's/@@BENCH_JSON@@//') || true
 
     if [ -z "$json_line" ]; then
-        echo "" # Empty signals failure
+        echo "Pipeline succeeded but no @@BENCH_JSON@@ marker found. Output:" >&2
+        echo "$output" >&2
         return 1
     fi
 

@@ -39,10 +39,10 @@ for mode in "${BENCH_MODES[@]}"; do
 
         echo -n "  [$mode] Iteration $i/$BENCH_ITERS ... "
 
-        json_line=$(run_pipeline_bench "$pipeline" "$BUILD_MODE")
+        json_line=$(run_pipeline_bench "$pipeline" "$BUILD_MODE") || true
 
         if [ -z "$json_line" ]; then
-            echo "FAILED (no JSON output)"
+            echo "FAILED (see error above)"
             continue
         fi
 
