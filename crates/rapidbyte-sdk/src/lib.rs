@@ -41,4 +41,3 @@ pub use rapidbyte_sdk_macros::ConfigSchema;
 /// Re-export the `#[connector]` attribute macro.
 #[cfg(feature = "runtime")]
 pub use rapidbyte_sdk_macros::connector;
-

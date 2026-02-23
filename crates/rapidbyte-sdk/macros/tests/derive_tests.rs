@@ -39,7 +39,10 @@ fn non_option_fields_are_required() {
     assert!(required.contains(&"port"));
     assert!(required.contains(&"user"));
     assert!(required.contains(&"database"));
-    assert!(!required.contains(&"password"), "Option<T> must not be required");
+    assert!(
+        !required.contains(&"password"),
+        "Option<T> must not be required"
+    );
 }
 
 #[test]
@@ -52,7 +55,10 @@ fn maps_rust_types_to_json_schema_types() {
 #[test]
 fn doc_comments_become_description() {
     let schema: Value = serde_json::from_str(BasicConfig::SCHEMA_JSON).unwrap();
-    assert_eq!(schema["properties"]["host"]["description"], "Database hostname");
+    assert_eq!(
+        schema["properties"]["host"]["description"],
+        "Database hostname"
+    );
     assert_eq!(schema["properties"]["port"]["description"], "Database port");
 }
 
@@ -94,7 +100,9 @@ fn schema_advanced_attribute() {
 #[test]
 fn schema_example_attribute() {
     let schema: Value = serde_json::from_str(ExtendedConfig::SCHEMA_JSON).unwrap();
-    let examples = schema["properties"]["slot_name"]["examples"].as_array().unwrap();
+    let examples = schema["properties"]["slot_name"]["examples"]
+        .as_array()
+        .unwrap();
     assert_eq!(examples, &[Value::String("pg_main".into())]);
 }
 
@@ -107,8 +115,13 @@ fn schema_env_attribute() {
 #[test]
 fn schema_values_attribute() {
     let schema: Value = serde_json::from_str(ExtendedConfig::SCHEMA_JSON).unwrap();
-    let vals = schema["properties"]["load_method"]["enum"].as_array().unwrap();
-    assert_eq!(vals, &[Value::String("insert".into()), Value::String("copy".into())]);
+    let vals = schema["properties"]["load_method"]["enum"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        vals,
+        &[Value::String("insert".into()), Value::String("copy".into())]
+    );
 }
 
 #[test]

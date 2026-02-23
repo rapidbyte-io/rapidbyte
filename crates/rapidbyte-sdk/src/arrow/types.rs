@@ -1,7 +1,7 @@
 //! Conversion between protocol-level ArrowDataType and arrow crate DataType.
 
-use arrow::datatypes::{DataType, TimeUnit};
 use crate::protocol::ArrowDataType;
+use arrow::datatypes::{DataType, TimeUnit};
 
 /// Convert protocol ArrowDataType to the actual arrow crate DataType.
 ///
@@ -54,9 +54,15 @@ mod tests {
         assert_eq!(arrow_data_type(ArrowDataType::Float32), DataType::Float32);
         assert_eq!(arrow_data_type(ArrowDataType::Float64), DataType::Float64);
         assert_eq!(arrow_data_type(ArrowDataType::Utf8), DataType::Utf8);
-        assert_eq!(arrow_data_type(ArrowDataType::LargeUtf8), DataType::LargeUtf8);
+        assert_eq!(
+            arrow_data_type(ArrowDataType::LargeUtf8),
+            DataType::LargeUtf8
+        );
         assert_eq!(arrow_data_type(ArrowDataType::Binary), DataType::Binary);
-        assert_eq!(arrow_data_type(ArrowDataType::LargeBinary), DataType::LargeBinary);
+        assert_eq!(
+            arrow_data_type(ArrowDataType::LargeBinary),
+            DataType::LargeBinary
+        );
         assert_eq!(arrow_data_type(ArrowDataType::Date32), DataType::Date32);
         assert_eq!(arrow_data_type(ArrowDataType::Date64), DataType::Date64);
         assert_eq!(

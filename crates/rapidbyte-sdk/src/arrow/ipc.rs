@@ -16,8 +16,9 @@ use crate::errors::ConnectorError;
 /// Encode a RecordBatch into Arrow IPC stream bytes.
 pub fn encode_ipc(batch: &RecordBatch) -> Result<Vec<u8>, ConnectorError> {
     let mut buf = Vec::new();
-    let mut writer = StreamWriter::try_new(&mut buf, batch.schema().as_ref())
-        .map_err(|e| ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC writer init: {e}")))?;
+    let mut writer = StreamWriter::try_new(&mut buf, batch.schema().as_ref()).map_err(|e| {
+        ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC writer init: {e}"))
+    })?;
     writer
         .write(batch)
         .map_err(|e| ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC write: {e}")))?;
@@ -30,8 +31,9 @@ pub fn encode_ipc(batch: &RecordBatch) -> Result<Vec<u8>, ConnectorError> {
 /// Decode Arrow IPC stream bytes into schema and record batches.
 pub fn decode_ipc(ipc_bytes: &[u8]) -> Result<(Arc<Schema>, Vec<RecordBatch>), ConnectorError> {
     let cursor = Cursor::new(ipc_bytes);
-    let reader = StreamReader::try_new(cursor, None)
-        .map_err(|e| ConnectorError::internal("ARROW_IPC_DECODE", format!("IPC reader init: {e}")))?;
+    let reader = StreamReader::try_new(cursor, None).map_err(|e| {
+        ConnectorError::internal("ARROW_IPC_DECODE", format!("IPC reader init: {e}"))
+    })?;
     let schema = reader.schema();
     let batches: Vec<_> = reader
         .collect::<Result<Vec<_>, _>>()

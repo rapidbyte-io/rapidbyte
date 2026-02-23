@@ -127,7 +127,12 @@ impl Context {
         error_message: &str,
         error_category: ErrorCategory,
     ) -> Result<(), ConnectorError> {
-        host_ffi::emit_dlq_record(&self.stream_name, record_json, error_message, error_category)
+        host_ffi::emit_dlq_record(
+            &self.stream_name,
+            record_json,
+            error_message,
+            error_category,
+        )
     }
 }
 

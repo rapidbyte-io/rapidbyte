@@ -168,7 +168,10 @@ impl ManifestBuilder {
 
     /// Allow network access to hosts from runtime pipeline config.
     pub fn allow_runtime_network(mut self) -> Self {
-        self.manifest.permissions.network.allow_runtime_config_domains = true;
+        self.manifest
+            .permissions
+            .network
+            .allow_runtime_config_domains = true;
         self
     }
 
@@ -181,15 +184,13 @@ impl ManifestBuilder {
 
     /// Set allowed environment variables.
     pub fn env_vars(mut self, vars: &[&str]) -> Self {
-        self.manifest.permissions.env.allowed_vars =
-            vars.iter().map(|s| s.to_string()).collect();
+        self.manifest.permissions.env.allowed_vars = vars.iter().map(|s| s.to_string()).collect();
         self
     }
 
     /// Add filesystem preopens.
     pub fn fs_preopens(mut self, paths: &[&str]) -> Self {
-        self.manifest.permissions.fs.preopens =
-            paths.iter().map(|s| s.to_string()).collect();
+        self.manifest.permissions.fs.preopens = paths.iter().map(|s| s.to_string()).collect();
         self
     }
 
@@ -244,8 +245,7 @@ impl ManifestBuilder {
             );
         }
 
-        let json = serde_json::to_vec_pretty(&self.manifest)
-            .expect("failed to serialize manifest");
+        let json = serde_json::to_vec_pretty(&self.manifest).expect("failed to serialize manifest");
 
         let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
         let out_path = std::path::Path::new(&out_dir);
@@ -304,7 +304,10 @@ mod tests {
         assert_eq!(emitter.manifest.id, "test/dest");
         assert!(emitter.manifest.roles.destination.is_some());
         let dst = emitter.manifest.roles.destination.as_ref().unwrap();
-        assert_eq!(dst.supported_write_modes, vec![WriteMode::Append, WriteMode::Replace]);
+        assert_eq!(
+            dst.supported_write_modes,
+            vec![WriteMode::Append, WriteMode::Replace]
+        );
         assert_eq!(dst.features, vec![DestinationFeature::BulkLoadCopy]);
     }
 
@@ -318,8 +321,17 @@ mod tests {
             .env_vars(&["FOO", "BAR"])
             .allowed_domains(&["example.com"]);
 
-        assert!(emitter.manifest.permissions.network.allow_runtime_config_domains);
-        assert_eq!(emitter.manifest.permissions.env.allowed_vars, vec!["FOO", "BAR"]);
+        assert!(
+            emitter
+                .manifest
+                .permissions
+                .network
+                .allow_runtime_config_domains
+        );
+        assert_eq!(
+            emitter.manifest.permissions.env.allowed_vars,
+            vec!["FOO", "BAR"]
+        );
         assert_eq!(
             emitter.manifest.permissions.network.allowed_domains,
             Some(vec!["example.com".to_string()])
@@ -346,7 +358,10 @@ mod tests {
             .min_memory("64mb")
             .timeout_seconds(300);
 
-        assert_eq!(emitter.manifest.limits.max_memory, Some("256mb".to_string()));
+        assert_eq!(
+            emitter.manifest.limits.max_memory,
+            Some("256mb".to_string())
+        );
         assert_eq!(emitter.manifest.limits.min_memory, Some("64mb".to_string()));
         assert_eq!(emitter.manifest.limits.timeout_seconds, Some(300));
     }

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use arrow::datatypes::{Field, Schema};
 
-use crate::protocol::ColumnSchema;
 use super::types::arrow_data_type;
+use crate::protocol::ColumnSchema;
 
 /// Build an Arrow Schema from protocol column definitions.
 ///

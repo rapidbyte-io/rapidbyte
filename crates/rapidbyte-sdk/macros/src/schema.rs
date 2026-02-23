@@ -61,10 +61,7 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
         serde_json::Value::String("http://json-schema.org/draft-07/schema#".into()),
     );
     schema.insert("type".into(), serde_json::Value::String("object".into()));
-    schema.insert(
-        "properties".into(),
-        serde_json::Value::Object(properties),
-    );
+    schema.insert("properties".into(), serde_json::Value::Object(properties));
     if !required.is_empty() {
         schema.insert("required".into(), serde_json::Value::Array(required));
     }
@@ -136,8 +133,8 @@ fn rust_type_to_json_schema(ty: &str) -> String {
         "String" | "str" => "string",
         "bool" => "boolean",
         "f32" | "f64" => "number",
-        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64"
-        | "i128" | "isize" => "integer",
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128"
+        | "isize" => "integer",
         _ => "string", // custom types fall back to string
     }
     .to_string()
@@ -173,10 +170,7 @@ fn parse_schema_attrs(
             } else if meta.path.is_ident("env") {
                 let _eq: syn::Token![=] = meta.input.parse()?;
                 let lit: syn::LitStr = meta.input.parse()?;
-                prop.insert(
-                    "x-env-var".into(),
-                    serde_json::Value::String(lit.value()),
-                );
+                prop.insert("x-env-var".into(), serde_json::Value::String(lit.value()));
             } else if meta.path.is_ident("values") {
                 let content;
                 syn::parenthesized!(content in meta.input);

@@ -9,7 +9,10 @@ use crate::protocol::{
 };
 
 /// Default validation response for connectors that do not implement validation.
-pub fn default_validation<C>(_config: &C, _ctx: &Context) -> Result<ValidationResult, ConnectorError> {
+pub fn default_validation<C>(
+    _config: &C,
+    _ctx: &Context,
+) -> Result<ValidationResult, ConnectorError> {
     Ok(ValidationResult {
         status: ValidationStatus::Success,
         message: "Validation not implemented".to_string(),
@@ -28,14 +31,21 @@ pub trait Source: Sized {
 
     async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError>;
 
-    async fn validate(config: &Self::Config, ctx: &Context) -> Result<ValidationResult, ConnectorError> {
+    async fn validate(
+        config: &Self::Config,
+        ctx: &Context,
+    ) -> Result<ValidationResult, ConnectorError> {
         let _ = ctx;
         default_validation(config, ctx)
     }
 
     async fn discover(&mut self, ctx: &Context) -> Result<Catalog, ConnectorError>;
 
-    async fn read(&mut self, ctx: &Context, stream: StreamContext) -> Result<ReadSummary, ConnectorError>;
+    async fn read(
+        &mut self,
+        ctx: &Context,
+        stream: StreamContext,
+    ) -> Result<ReadSummary, ConnectorError>;
 
     async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {
         default_close(ctx).await
@@ -49,12 +59,19 @@ pub trait Destination: Sized {
 
     async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError>;
 
-    async fn validate(config: &Self::Config, ctx: &Context) -> Result<ValidationResult, ConnectorError> {
+    async fn validate(
+        config: &Self::Config,
+        ctx: &Context,
+    ) -> Result<ValidationResult, ConnectorError> {
         let _ = ctx;
         default_validation(config, ctx)
     }
 
-    async fn write(&mut self, ctx: &Context, stream: StreamContext) -> Result<WriteSummary, ConnectorError>;
+    async fn write(
+        &mut self,
+        ctx: &Context,
+        stream: StreamContext,
+    ) -> Result<WriteSummary, ConnectorError>;
 
     async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {
         default_close(ctx).await
@@ -68,12 +85,19 @@ pub trait Transform: Sized {
 
     async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError>;
 
-    async fn validate(config: &Self::Config, ctx: &Context) -> Result<ValidationResult, ConnectorError> {
+    async fn validate(
+        config: &Self::Config,
+        ctx: &Context,
+    ) -> Result<ValidationResult, ConnectorError> {
         let _ = ctx;
         default_validation(config, ctx)
     }
 
-    async fn transform(&mut self, ctx: &Context, stream: StreamContext) -> Result<TransformSummary, ConnectorError>;
+    async fn transform(
+        &mut self,
+        ctx: &Context,
+        stream: StreamContext,
+    ) -> Result<TransformSummary, ConnectorError>;
 
     async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {
         default_close(ctx).await
@@ -119,7 +143,11 @@ mod tests {
             Ok(Catalog { streams: vec![] })
         }
 
-        async fn read(&mut self, _ctx: &Context, _stream: StreamContext) -> Result<ReadSummary, ConnectorError> {
+        async fn read(
+            &mut self,
+            _ctx: &Context,
+            _stream: StreamContext,
+        ) -> Result<ReadSummary, ConnectorError> {
             Ok(ReadSummary {
                 records_read: 0,
                 bytes_read: 0,
@@ -149,7 +177,11 @@ mod tests {
             ))
         }
 
-        async fn write(&mut self, _ctx: &Context, _stream: StreamContext) -> Result<WriteSummary, ConnectorError> {
+        async fn write(
+            &mut self,
+            _ctx: &Context,
+            _stream: StreamContext,
+        ) -> Result<WriteSummary, ConnectorError> {
             Ok(WriteSummary {
                 records_written: 0,
                 bytes_written: 0,

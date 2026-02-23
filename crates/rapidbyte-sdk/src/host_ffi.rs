@@ -3,14 +3,14 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use arrow::datatypes::Schema;
-use arrow::record_batch::RecordBatch;
 #[cfg(target_arch = "wasm32")]
 use crate::errors::{BackoffClass, CommitState, ErrorScope};
 use crate::errors::{ConnectorError, ErrorCategory};
 use crate::protocol::{Checkpoint, Metric, StateScope};
 #[cfg(target_arch = "wasm32")]
 use crate::protocol::{CheckpointKind, PayloadEnvelope, ProtocolVersion};
+use arrow::datatypes::Schema;
+use arrow::record_batch::RecordBatch;
 
 #[cfg(target_arch = "wasm32")]
 mod bindings {

@@ -84,11 +84,7 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
 
     // Write build.rs
     let build_rs = gen_build_rs(name, &display_name, role, &service_name);
-    write_file(
-        &base_dir.join("build.rs"),
-        &build_rs,
-        &mut created_files,
-    )?;
+    write_file(&base_dir.join("build.rs"), &build_rs, &mut created_files)?;
 
     // Write source files
     match role {

@@ -6,8 +6,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use arrow::array::{
-    BooleanArray, Float64Array, Int32Array, Int64Array, StringArray,
-    TimestampMicrosecondArray,
+    BooleanArray, Float64Array, Int32Array, Int64Array, StringArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::ipc::reader::StreamReader;
@@ -90,16 +89,12 @@ fn bench_arrow_decode(c: &mut Criterion) {
         let encoded = encode_batch(&batch);
         group.throughput(Throughput::Elements(rows as u64));
 
-        group.bench_with_input(
-            BenchmarkId::from_parameter(rows),
-            &encoded,
-            |b, encoded| {
-                b.iter(|| {
-                    let reader = StreamReader::try_new(Cursor::new(encoded), None).unwrap();
-                    let _batches: Vec<_> = reader.collect::<Result<_, _>>().unwrap();
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(rows), &encoded, |b, encoded| {
+            b.iter(|| {
+                let reader = StreamReader::try_new(Cursor::new(encoded), None).unwrap();
+                let _batches: Vec<_> = reader.collect::<Result<_, _>>().unwrap();
+            });
+        });
     }
     group.finish();
 }
@@ -122,5 +117,10 @@ fn bench_arrow_roundtrip(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_arrow_encode, bench_arrow_decode, bench_arrow_roundtrip);
+criterion_group!(
+    benches,
+    bench_arrow_encode,
+    bench_arrow_decode,
+    bench_arrow_roundtrip
+);
 criterion_main!(benches);

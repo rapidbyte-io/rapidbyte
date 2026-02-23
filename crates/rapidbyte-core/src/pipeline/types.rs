@@ -573,7 +573,10 @@ destination:
         let src_perms = config.source.permissions.as_ref().unwrap();
         assert_eq!(
             src_perms.network.allowed_hosts,
-            Some(vec!["db.example.com".to_string(), "*.internal.corp".to_string()])
+            Some(vec![
+                "db.example.com".to_string(),
+                "*.internal.corp".to_string()
+            ])
         );
         assert_eq!(
             src_perms.env.allowed_vars,
@@ -599,7 +602,8 @@ destination:
 
     #[test]
     fn test_pipeline_permissions_and_limits_absent() {
-        let config: PipelineConfig = serde_yaml::from_str(r#"
+        let config: PipelineConfig = serde_yaml::from_str(
+            r#"
 version: "1.0"
 pipeline: test
 source:
@@ -612,7 +616,9 @@ destination:
   use: dest-postgres
   config: {}
   write_mode: append
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(config.source.permissions.is_none());
         assert!(config.source.limits.is_none());
         assert!(config.destination.permissions.is_none());
@@ -621,7 +627,9 @@ destination:
 
     #[test]
     fn test_fixture_pipeline_with_permissions_parses() {
-        let yaml = include_str!("../../../../tests/connectors/postgres/fixtures/pipelines/e2e_permissions.yaml");
+        let yaml = include_str!(
+            "../../../../tests/connectors/postgres/fixtures/pipelines/e2e_permissions.yaml"
+        );
         let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.pipeline, "e2e_permissions");
         let src_perms = config.source.permissions.as_ref().unwrap();
@@ -629,7 +637,10 @@ destination:
             src_perms.network.allowed_hosts,
             Some(vec!["localhost".to_string(), "127.0.0.1".to_string()])
         );
-        assert_eq!(src_perms.env.allowed_vars, Some(vec!["PGPASSWORD".to_string()]));
+        assert_eq!(
+            src_perms.env.allowed_vars,
+            Some(vec!["PGPASSWORD".to_string()])
+        );
         let src_limits = config.source.limits.as_ref().unwrap();
         assert_eq!(src_limits.max_memory, Some("256mb".to_string()));
         assert_eq!(src_limits.timeout_seconds, Some(120));
@@ -637,7 +648,8 @@ destination:
 
     #[test]
     fn test_pipeline_limits_only_no_permissions() {
-        let config: PipelineConfig = serde_yaml::from_str(r#"
+        let config: PipelineConfig = serde_yaml::from_str(
+            r#"
 version: "1.0"
 pipeline: test
 source:
@@ -652,7 +664,9 @@ destination:
   use: dest-postgres
   config: {}
   write_mode: append
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         assert!(config.source.permissions.is_none());
         let limits = config.source.limits.as_ref().unwrap();
         assert_eq!(limits.timeout_seconds, Some(30));

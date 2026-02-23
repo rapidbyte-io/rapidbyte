@@ -207,7 +207,8 @@ mod tests {
             config_schema: None,
         };
         let manifest_json = serde_json::to_vec(&manifest).unwrap();
-        let schema_json = br#"{"type":"object","required":["host"],"properties":{"host":{"type":"string"}}}"#;
+        let schema_json =
+            br#"{"type":"object","required":["host"],"properties":{"host":{"type":"string"}}}"#;
 
         let mut module = Module::new();
         module.section(&CustomSection {
