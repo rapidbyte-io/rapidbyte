@@ -1,19 +1,27 @@
 //! Source PostgreSQL connector configuration.
 
 use rapidbyte_sdk::errors::ConnectorError;
+use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;
 
 /// PostgreSQL connection config from pipeline YAML.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ConfigSchema)]
 pub struct Config {
+    /// Database hostname
     pub host: String,
+    /// Database port
     #[serde(default = "default_port")]
+    #[schema(default = 5432)]
     pub port: u16,
+    /// Database user
     pub user: String,
+    /// Database password
     #[serde(default)]
+    #[schema(secret)]
     pub password: String,
+    /// Database name
     pub database: String,
-    /// Logical replication slot name for CDC mode. Defaults to `rapidbyte_{stream_name}`.
+    /// Logical replication slot name for CDC mode. Defaults to rapidbyte_{stream_name}.
     #[serde(default)]
     pub replication_slot: Option<String>,
 }

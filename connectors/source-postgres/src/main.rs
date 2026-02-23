@@ -85,3 +85,4 @@ impl Source for SourcePostgres {
 
 rapidbyte_sdk::connector_main!(source, SourcePostgres);
 rapidbyte_sdk::embed_manifest!();
+rapidbyte_sdk::embed_config_schema!(config::Config);
