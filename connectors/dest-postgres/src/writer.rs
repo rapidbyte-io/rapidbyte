@@ -14,9 +14,9 @@ use tokio_postgres::Client;
 use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::protocol::SchemaEvolutionPolicy;
 
-use crate::batch::{write_batch, WriteContext};
 use crate::config::LoadMethod;
-use crate::ddl::{prepare_staging, swap_staging_table};
+use crate::decode;
+use crate::ddl::{ensure_table_and_schema, prepare_staging, swap_staging_table};
 
 /// Entry point for writing a single stream.
 pub async fn write_stream(
@@ -84,7 +84,7 @@ pub async fn write_stream(
         bytes_written: result.total_bytes,
         batches_written: result.batches_written,
         checkpoint_count: result.checkpoint_count,
-        records_failed: result.total_failed,
+        records_failed: 0,
         perf: Some(WritePerf {
             connect_secs,
             flush_secs: result.flush_secs,
@@ -115,7 +115,6 @@ pub struct CheckpointConfig {
 pub struct SessionResult {
     pub total_rows: u64,
     pub total_bytes: u64,
-    pub total_failed: u64,
     pub batches_written: u64,
     pub checkpoint_count: u64,
     pub flush_secs: f64,
@@ -125,7 +124,6 @@ pub struct SessionResult {
 struct WriteStats {
     total_rows: u64,
     total_bytes: u64,
-    total_failed: u64,
     batches_written: u64,
     checkpoint_count: u64,
     bytes_since_commit: u64,
@@ -259,7 +257,6 @@ impl<'a> WriteSession<'a> {
             stats: WriteStats {
                 total_rows: 0,
                 total_bytes: 0,
-                total_failed: 0,
                 batches_written: 0,
                 checkpoint_count: 0,
                 bytes_since_commit: 0,
@@ -277,7 +274,6 @@ impl<'a> WriteSession<'a> {
         schema: &Arc<Schema>,
         batches: &[RecordBatch],
     ) -> Result<(), String> {
-        // Calculate byte size from batches
         let n: usize = batches.iter().map(|b| b.get_array_memory_size()).sum();
 
         // Watermark resume: skip already-committed batches
@@ -303,26 +299,74 @@ impl<'a> WriteSession<'a> {
             );
         }
 
-        let mut write_ctx = WriteContext {
-            client: self.client,
-            target_schema: self.target_schema,
-            stream_name: &self.effective_stream,
-            created_tables: &mut self.created_tables,
-            write_mode: self.effective_write_mode.as_ref(),
-            schema_policy: Some(&self.schema_policy),
-            load_method: self.load_method,
-            ignored_columns: &mut self.ignored_columns,
-            type_null_columns: &mut self.type_null_columns,
-            copy_flush_bytes: self.copy_flush_bytes,
+        // Ensure DDL (hoisted from insert/copy paths)
+        let qualified_table =
+            decode::qualified_name(self.target_schema, &self.effective_stream);
+        ensure_table_and_schema(
+            self.ctx,
+            self.client,
+            self.target_schema,
+            &self.effective_stream,
+            &mut self.created_tables,
+            self.effective_write_mode.as_ref(),
+            Some(&self.schema_policy),
+            schema,
+            &mut self.ignored_columns,
+            &mut self.type_null_columns,
+        )
+        .await?;
+
+        // Pre-compute column info
+        let active_cols = decode::active_column_indices(schema, &self.ignored_columns);
+        if active_cols.is_empty() {
+            self.ctx.log(
+                LogLevel::Warn,
+                "dest-postgres: all columns ignored, skipping batch",
+            );
+            return Ok(());
+        }
+        let type_null_flags =
+            decode::type_null_flags(&active_cols, schema, &self.type_null_columns);
+
+        // Dispatch to write path
+        let use_copy = self.load_method == LoadMethod::Copy
+            && !matches!(self.effective_write_mode, Some(WriteMode::Upsert { .. }));
+
+        let rows_written = if use_copy {
+            crate::copy::write(
+                self.ctx,
+                self.client,
+                &qualified_table,
+                &active_cols,
+                schema,
+                batches,
+                &type_null_flags,
+                self.copy_flush_bytes,
+            )
+            .await?
+        } else {
+            let upsert_clause = decode::build_upsert_clause(
+                self.effective_write_mode.as_ref(),
+                schema,
+                &active_cols,
+            );
+            crate::insert::write(
+                self.ctx,
+                self.client,
+                &qualified_table,
+                &active_cols,
+                schema,
+                batches,
+                upsert_clause.as_deref(),
+                &type_null_flags,
+            )
+            .await?
         };
 
-        let result = write_batch(self.ctx, &mut write_ctx, schema, batches).await?;
-
-        self.stats.total_rows += result.rows_written;
-        self.stats.total_failed += result.rows_failed;
+        self.stats.total_rows += rows_written;
         self.stats.total_bytes += n as u64;
         self.stats.bytes_since_commit += n as u64;
-        self.stats.rows_since_commit += result.rows_written;
+        self.stats.rows_since_commit += rows_written;
         self.stats.batches_written += 1;
 
         let _ = self.ctx.metric(&Metric {
@@ -456,7 +500,6 @@ impl<'a> WriteSession<'a> {
         Ok(SessionResult {
             total_rows: self.stats.total_rows,
             total_bytes: self.stats.total_bytes,
-            total_failed: self.stats.total_failed,
             batches_written: self.stats.batches_written,
             checkpoint_count: self.stats.checkpoint_count,
             flush_secs,

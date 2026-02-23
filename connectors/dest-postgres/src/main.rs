@@ -3,7 +3,6 @@
 //! Receives Arrow IPC batches from the host and writes them to PostgreSQL
 //! with transactional checkpoints and schema evolution handling.
 
-mod batch;
 mod client;
 mod config;
 mod copy;
