@@ -3,10 +3,11 @@
 use serde::de::DeserializeOwned;
 
 use crate::context::Context;
-use crate::errors::{ConnectorError, ValidationResult, ValidationStatus};
-use crate::protocol::{
-    Catalog, ConnectorInfo, ReadSummary, StreamContext, TransformSummary, WriteSummary,
-};
+use crate::error::{ConnectorError, ValidationResult, ValidationStatus};
+use crate::catalog::Catalog;
+use crate::metric::{ReadSummary, TransformSummary, WriteSummary};
+use crate::stream::StreamContext;
+use crate::wire::ConnectorInfo;
 
 /// Default validation response for connectors that do not implement validation.
 pub fn default_validation<C>(
@@ -109,11 +110,11 @@ pub trait Transform: Sized {
 mod tests {
     use super::*;
     use crate::context::Context;
-    use crate::errors::{ConnectorError, ValidationResult, ValidationStatus};
-    use crate::protocol::{
-        Catalog, ConnectorInfo, ProtocolVersion, ReadSummary, StreamContext, TransformSummary,
-        WriteSummary,
-    };
+    use crate::error::{ConnectorError, ValidationResult, ValidationStatus};
+    use crate::catalog::Catalog;
+    use crate::metric::{ReadSummary, TransformSummary, WriteSummary};
+    use crate::stream::StreamContext;
+    use crate::wire::{ConnectorInfo, ProtocolVersion};
     use serde::Deserialize;
 
     #[derive(Debug, Deserialize)]

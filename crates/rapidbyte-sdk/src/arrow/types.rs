@@ -1,6 +1,6 @@
 //! Conversion between protocol-level ArrowDataType and arrow crate DataType.
 
-use crate::protocol::ArrowDataType;
+use crate::arrow_types::ArrowDataType;
 use arrow::datatypes::{DataType, TimeUnit};
 
 /// Convert protocol ArrowDataType to the actual arrow crate DataType.
@@ -33,6 +33,8 @@ pub fn arrow_data_type(proto: ArrowDataType) -> DataType {
         // JSON and Decimal128 have no dedicated Arrow type — store as Utf8 strings.
         ArrowDataType::Decimal128 => DataType::Utf8,
         ArrowDataType::Json => DataType::Utf8,
+        // Future-proof: treat unknown variants as Utf8.
+        _ => DataType::Utf8,
     }
 }
 

@@ -11,7 +11,7 @@ use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 
-use crate::errors::ConnectorError;
+use crate::error::ConnectorError;
 
 /// Encode a RecordBatch into Arrow IPC stream bytes.
 pub fn encode_ipc(batch: &RecordBatch) -> Result<Vec<u8>, ConnectorError> {

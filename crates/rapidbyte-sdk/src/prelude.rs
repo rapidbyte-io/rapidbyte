@@ -11,24 +11,24 @@ pub use crate::connector::{Destination, Source, Transform};
 pub use crate::context::{Context, LogLevel};
 
 // Errors
-pub use crate::errors::{
-    CommitState, ConnectorError, ConnectorResult, ValidationResult, ValidationStatus,
-};
+pub use crate::error::{CommitState, ConnectorError, ValidationResult, ValidationStatus};
 
 // Protocol types — lifecycle
-pub use crate::protocol::{ConnectorInfo, Feature, ProtocolVersion, DEFAULT_MAX_BATCH_BYTES};
+pub use crate::wire::{ConnectorInfo, Feature, ProtocolVersion};
 
 // Protocol types — streams and catalog
-pub use crate::protocol::{
-    Catalog, ColumnSchema, CursorInfo, CursorValue, Stream, StreamContext, StreamLimits, SyncMode,
-    WriteMode,
-};
+pub use crate::catalog::{Catalog, ColumnSchema, Stream};
+pub use crate::cursor::{CursorInfo, CursorValue};
+pub use crate::stream::{StreamContext, StreamLimits};
+pub use crate::wire::{SyncMode, WriteMode};
 
 // Protocol types — data flow
-pub use crate::protocol::{ArrowDataType, Checkpoint, CheckpointKind, Metric, MetricValue};
+pub use crate::arrow_types::ArrowDataType;
+pub use crate::checkpoint::{Checkpoint, CheckpointKind};
+pub use crate::metric::{Metric, MetricValue};
 
 // Protocol types — summaries
-pub use crate::protocol::{ReadPerf, ReadSummary, TransformSummary, WritePerf, WriteSummary};
+pub use crate::metric::{ReadPerf, ReadSummary, TransformSummary, WritePerf, WriteSummary};
 
 // Arrow helpers
 pub use crate::arrow::{self, arrow_data_type, build_arrow_schema, decode_ipc, encode_ipc};

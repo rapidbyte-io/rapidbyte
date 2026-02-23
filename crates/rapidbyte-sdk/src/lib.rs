@@ -19,9 +19,16 @@ pub mod host_tcp;
 pub mod prelude;
 
 // Type re-exports — always available (no feature gate)
-pub use rapidbyte_types::errors;
+pub use rapidbyte_types::arrow as arrow_types;
+pub use rapidbyte_types::catalog;
+pub use rapidbyte_types::checkpoint;
+pub use rapidbyte_types::cursor;
+pub use rapidbyte_types::envelope;
+pub use rapidbyte_types::error;
 pub use rapidbyte_types::manifest;
-pub use rapidbyte_types::protocol;
+pub use rapidbyte_types::metric;
+pub use rapidbyte_types::stream;
+pub use rapidbyte_types::wire;
 
 #[cfg(feature = "runtime")]
 pub use wit_bindgen;

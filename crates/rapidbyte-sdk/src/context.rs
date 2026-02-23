@@ -8,9 +8,10 @@ use std::sync::Arc;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 
-use crate::errors::{ConnectorError, ErrorCategory};
+use crate::checkpoint::{Checkpoint, StateScope};
+use crate::error::{ConnectorError, ErrorCategory};
 use crate::host_ffi;
-use crate::protocol::{Checkpoint, Metric, StateScope};
+use crate::metric::Metric;
 
 /// Log severity levels used by [`Context::log`].
 #[repr(i32)]
@@ -225,7 +226,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_checkpoint_delegates() {
-        use crate::protocol::CheckpointKind;
+        use crate::checkpoint::CheckpointKind;
 
         let ctx = Context::new("my-conn", "my-stream");
         let cp = Checkpoint {
@@ -244,7 +245,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_metric_delegates() {
-        use crate::protocol::MetricValue;
+        use crate::metric::MetricValue;
 
         let ctx = Context::new("my-conn", "my-stream");
         let m = Metric {

@@ -6,7 +6,7 @@ use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::errors::ConnectorError;
+use crate::error::ConnectorError;
 use crate::host_ffi::{self, SocketReadResult, SocketWriteResult};
 
 /// TCP stream backed by host-side socket operations.

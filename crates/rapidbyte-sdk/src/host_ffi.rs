@@ -3,12 +3,17 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
+use crate::checkpoint::{Checkpoint, StateScope};
 #[cfg(target_arch = "wasm32")]
-use crate::errors::{BackoffClass, CommitState, ErrorScope};
-use crate::errors::{ConnectorError, ErrorCategory};
-use crate::protocol::{Checkpoint, Metric, StateScope};
+use crate::checkpoint::CheckpointKind;
 #[cfg(target_arch = "wasm32")]
-use crate::protocol::{CheckpointKind, PayloadEnvelope, ProtocolVersion};
+use crate::envelope::PayloadEnvelope;
+#[cfg(target_arch = "wasm32")]
+use crate::error::{BackoffClass, CommitState, ErrorScope};
+use crate::error::{ConnectorError, ErrorCategory};
+use crate::metric::Metric;
+#[cfg(target_arch = "wasm32")]
+use crate::wire::ProtocolVersion;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 
@@ -73,6 +78,18 @@ pub trait HostImports: Send + Sync {
     fn socket_read(&self, handle: u64, len: u64) -> Result<SocketReadResult, ConnectorError>;
     fn socket_write(&self, handle: u64, data: &[u8]) -> Result<SocketWriteResult, ConnectorError>;
     fn socket_close(&self, handle: u64);
+}
+
+/// FFI helper: convert `StateScope` to its integer representation for
+/// host import calls. The types crate no longer carries this method
+/// because FFI encoding belongs at the boundary.
+#[cfg(target_arch = "wasm32")]
+const fn state_scope_to_i32(scope: StateScope) -> i32 {
+    match scope {
+        StateScope::Pipeline => 0,
+        StateScope::Stream => 1,
+        StateScope::ConnectorInstance => 2,
+    }
 }
 
 static HOST_IMPORTS: OnceLock<Box<dyn HostImports>> = OnceLock::new();
@@ -171,12 +188,12 @@ impl HostImports for WasmHostImports {
     }
 
     fn state_get(&self, scope: StateScope, key: &str) -> Result<Option<String>, ConnectorError> {
-        bindings::rapidbyte::connector::host::state_get(scope.to_i32() as u32, key)
+        bindings::rapidbyte::connector::host::state_get(state_scope_to_i32(scope) as u32, key)
             .map_err(from_component_error)
     }
 
     fn state_put(&self, scope: StateScope, key: &str, value: &str) -> Result<(), ConnectorError> {
-        bindings::rapidbyte::connector::host::state_put(scope.to_i32() as u32, key, value)
+        bindings::rapidbyte::connector::host::state_put(state_scope_to_i32(scope) as u32, key, value)
             .map_err(from_component_error)
     }
 
@@ -188,7 +205,7 @@ impl HostImports for WasmHostImports {
         new_value: &str,
     ) -> Result<bool, ConnectorError> {
         bindings::rapidbyte::connector::host::state_cas(
-            scope.to_i32() as u32,
+            state_scope_to_i32(scope) as u32,
             key,
             expected,
             new_value,

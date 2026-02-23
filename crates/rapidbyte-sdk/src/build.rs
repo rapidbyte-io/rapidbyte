@@ -4,7 +4,7 @@
 //! Requires the `build` feature.
 
 use crate::manifest::*;
-use crate::protocol::{ProtocolVersion, SyncMode, WriteMode};
+use crate::wire::{Feature, ProtocolVersion, SyncMode, WriteMode};
 
 /// Fluent builder for declaring and emitting a connector manifest at build time.
 ///
@@ -12,7 +12,7 @@ use crate::protocol::{ProtocolVersion, SyncMode, WriteMode};
 ///
 /// ```ignore
 /// use rapidbyte_sdk::build::ManifestBuilder;
-/// use rapidbyte_sdk::protocol::SyncMode;
+/// use rapidbyte_sdk::wire::SyncMode;
 ///
 /// fn main() {
 ///     ManifestBuilder::source("rapidbyte/source-postgres")
@@ -148,16 +148,16 @@ impl ManifestBuilder {
         self
     }
 
-    /// Set source features (e.g., `SourceFeature::Cdc`).
-    pub fn source_features(mut self, features: Vec<SourceFeature>) -> Self {
+    /// Set source features (e.g., `Feature::Cdc`).
+    pub fn source_features(mut self, features: Vec<Feature>) -> Self {
         if let Some(ref mut src) = self.manifest.roles.source {
             src.features = features;
         }
         self
     }
 
-    /// Set destination features (e.g., `DestinationFeature::BulkLoadCopy`).
-    pub fn dest_features(mut self, features: Vec<DestinationFeature>) -> Self {
+    /// Set destination features (e.g., `Feature::BulkLoadCopy`).
+    pub fn dest_features(mut self, features: Vec<Feature>) -> Self {
         if let Some(ref mut dst) = self.manifest.roles.destination {
             dst.features = features;
         }
@@ -299,7 +299,7 @@ mod tests {
             .name("Test Dest")
             .version("2.0.0")
             .write_modes(&[WriteMode::Append, WriteMode::Replace])
-            .dest_features(vec![DestinationFeature::BulkLoadCopy]);
+            .dest_features(vec![Feature::BulkLoadCopy]);
 
         assert_eq!(emitter.manifest.id, "test/dest");
         assert!(emitter.manifest.roles.destination.is_some());
@@ -308,7 +308,7 @@ mod tests {
             dst.supported_write_modes,
             vec![WriteMode::Append, WriteMode::Replace]
         );
-        assert_eq!(dst.features, vec![DestinationFeature::BulkLoadCopy]);
+        assert_eq!(dst.features, vec![Feature::BulkLoadCopy]);
     }
 
     #[test]

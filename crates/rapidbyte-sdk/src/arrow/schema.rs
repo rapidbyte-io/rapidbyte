@@ -5,7 +5,7 @@ use std::sync::Arc;
 use arrow::datatypes::{Field, Schema};
 
 use super::types::arrow_data_type;
-use crate::protocol::ColumnSchema;
+use crate::catalog::ColumnSchema;
 
 /// Build an Arrow Schema from protocol column definitions.
 ///
@@ -22,7 +22,7 @@ pub fn build_arrow_schema(columns: &[ColumnSchema]) -> Arc<Schema> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ArrowDataType;
+    use crate::arrow_types::ArrowDataType;
     use arrow::datatypes::{DataType, TimeUnit};
 
     #[test]
