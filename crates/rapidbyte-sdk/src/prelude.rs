@@ -5,6 +5,7 @@
 //! ```
 
 pub use crate::connector::{Destination, Source, Transform};
+pub use crate::context::{Context, LogLevel};
 pub use crate::errors::{
     BackoffClass, CommitState, ConnectorError, ConnectorResult, ErrorCategory, ErrorScope,
     ValidationResult, ValidationStatus,

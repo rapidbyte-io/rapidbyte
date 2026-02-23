@@ -10,6 +10,8 @@ pub mod build;
 #[cfg(feature = "runtime")]
 pub mod connector;
 #[cfg(feature = "runtime")]
+pub mod context;
+#[cfg(feature = "runtime")]
 pub mod host_ffi;
 #[cfg(feature = "runtime")]
 pub mod host_tcp;
