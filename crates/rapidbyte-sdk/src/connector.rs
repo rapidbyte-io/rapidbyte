@@ -2,13 +2,14 @@
 
 use serde::de::DeserializeOwned;
 
+use crate::context::Context;
 use crate::errors::{ConnectorError, ValidationResult, ValidationStatus};
 use crate::protocol::{
     Catalog, ConnectorInfo, ReadSummary, StreamContext, TransformSummary, WriteSummary,
 };
 
 /// Default validation response for connectors that do not implement validation.
-pub fn default_validation<C>(_config: &C) -> Result<ValidationResult, ConnectorError> {
+pub fn default_validation<C>(_config: &C, _ctx: &Context) -> Result<ValidationResult, ConnectorError> {
     Ok(ValidationResult {
         status: ValidationStatus::Success,
         message: "Validation not implemented".to_string(),
@@ -16,7 +17,7 @@ pub fn default_validation<C>(_config: &C) -> Result<ValidationResult, ConnectorE
 }
 
 /// Default close implementation.
-pub async fn default_close() -> Result<(), ConnectorError> {
+pub async fn default_close(_ctx: &Context) -> Result<(), ConnectorError> {
     Ok(())
 }
 
@@ -27,16 +28,17 @@ pub trait Source: Sized {
 
     async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError>;
 
-    async fn validate(config: &Self::Config) -> Result<ValidationResult, ConnectorError> {
-        default_validation(config)
+    async fn validate(config: &Self::Config, ctx: &Context) -> Result<ValidationResult, ConnectorError> {
+        let _ = ctx;
+        default_validation(config, ctx)
     }
 
-    async fn discover(&mut self) -> Result<Catalog, ConnectorError>;
+    async fn discover(&mut self, ctx: &Context) -> Result<Catalog, ConnectorError>;
 
-    async fn read(&mut self, ctx: StreamContext) -> Result<ReadSummary, ConnectorError>;
+    async fn read(&mut self, ctx: &Context, stream: StreamContext) -> Result<ReadSummary, ConnectorError>;
 
-    async fn close(&mut self) -> Result<(), ConnectorError> {
-        default_close().await
+    async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {
+        default_close(ctx).await
     }
 }
 
@@ -47,14 +49,15 @@ pub trait Destination: Sized {
 
     async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError>;
 
-    async fn validate(config: &Self::Config) -> Result<ValidationResult, ConnectorError> {
-        default_validation(config)
+    async fn validate(config: &Self::Config, ctx: &Context) -> Result<ValidationResult, ConnectorError> {
+        let _ = ctx;
+        default_validation(config, ctx)
     }
 
-    async fn write(&mut self, ctx: StreamContext) -> Result<WriteSummary, ConnectorError>;
+    async fn write(&mut self, ctx: &Context, stream: StreamContext) -> Result<WriteSummary, ConnectorError>;
 
-    async fn close(&mut self) -> Result<(), ConnectorError> {
-        default_close().await
+    async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {
+        default_close(ctx).await
     }
 }
 
@@ -65,14 +68,15 @@ pub trait Transform: Sized {
 
     async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError>;
 
-    async fn validate(config: &Self::Config) -> Result<ValidationResult, ConnectorError> {
-        default_validation(config)
+    async fn validate(config: &Self::Config, ctx: &Context) -> Result<ValidationResult, ConnectorError> {
+        let _ = ctx;
+        default_validation(config, ctx)
     }
 
-    async fn transform(&mut self, ctx: StreamContext) -> Result<TransformSummary, ConnectorError>;
+    async fn transform(&mut self, ctx: &Context, stream: StreamContext) -> Result<TransformSummary, ConnectorError>;
 
-    async fn close(&mut self) -> Result<(), ConnectorError> {
-        default_close().await
+    async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {
+        default_close(ctx).await
     }
 }
 
@@ -112,6 +116,7 @@ macro_rules! __rb_connector_common {
         // gets its own distinct static variables.
         static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
         static CONFIG_JSON: OnceLock<String> = OnceLock::new();
+        static CONTEXT: OnceLock<$crate::context::Context> = OnceLock::new();
 
         fn get_runtime() -> &'static tokio::runtime::Runtime {
             RUNTIME.get_or_init(|| {
@@ -262,6 +267,7 @@ macro_rules! __rb_guest_lifecycle_methods {
                 .block_on(<$connector_type as $connector_trait>::init(config))
                 .map_err(to_component_error)?;
 
+            let _ = CONTEXT.set($crate::context::Context::new(env!("CARGO_PKG_NAME"), ""));
             *get_state().borrow_mut() = Some(instance);
             Ok(())
         }
@@ -271,19 +277,21 @@ macro_rules! __rb_guest_lifecycle_methods {
             $bindings_mod::rapidbyte::connector::types::ConnectorError,
         > {
             let config: <$connector_type as $connector_trait>::Config = parse_saved_config()?;
+            let ctx = CONTEXT.get().expect("open must be called before validate");
 
             let rt = get_runtime();
-            rt.block_on(<$connector_type as $connector_trait>::validate(&config))
+            rt.block_on(<$connector_type as $connector_trait>::validate(&config, ctx))
                 .map(to_component_validation)
                 .map_err(to_component_error)
         }
 
         fn close() -> Result<(), $bindings_mod::rapidbyte::connector::types::ConnectorError> {
             let rt = get_runtime();
+            let ctx = CONTEXT.get().expect("open must be called before close");
             let state_cell = get_state();
             let mut state_ref = state_cell.borrow_mut();
             if let Some(conn) = state_ref.as_mut() {
-                rt.block_on(<$connector_type as $connector_trait>::close(conn))
+                rt.block_on(<$connector_type as $connector_trait>::close(conn, ctx))
                     .map_err(to_component_error)?;
             }
             *state_ref = None;
@@ -319,13 +327,14 @@ macro_rules! connector_main {
             fn discover(
             ) -> Result<String, __rb_source_bindings::rapidbyte::connector::types::ConnectorError>
             {
+                let ctx = CONTEXT.get().expect("Connector not opened");
                 let rt = get_runtime();
                 let state_cell = get_state();
                 let mut state_ref = state_cell.borrow_mut();
                 let conn = state_ref.as_mut().expect("Connector not opened");
 
                 let catalog = rt
-                    .block_on(<$connector_type as $crate::connector::Source>::discover(conn))
+                    .block_on(<$connector_type as $crate::connector::Source>::discover(conn, ctx))
                     .map_err(to_component_error)?;
 
                 serde_json::to_string(&catalog).map_err(|e| {
@@ -342,14 +351,16 @@ macro_rules! connector_main {
                 __rb_source_bindings::rapidbyte::connector::types::ReadSummary,
                 __rb_source_bindings::rapidbyte::connector::types::ConnectorError,
             > {
-                let ctx = parse_stream_context(ctx_json)?;
+                let stream = parse_stream_context(ctx_json)?;
+                let base_ctx = CONTEXT.get().expect("Connector not opened");
+                let ctx = base_ctx.with_stream(&stream.stream_name);
                 let rt = get_runtime();
                 let state_cell = get_state();
                 let mut state_ref = state_cell.borrow_mut();
                 let conn = state_ref.as_mut().expect("Connector not opened");
 
                 let summary = rt
-                    .block_on(<$connector_type as $crate::connector::Source>::read(conn, ctx))
+                    .block_on(<$connector_type as $crate::connector::Source>::read(conn, &ctx, stream))
                     .map_err(to_component_error)?;
 
                 Ok(__rb_source_bindings::rapidbyte::connector::types::ReadSummary {
@@ -390,7 +401,9 @@ macro_rules! connector_main {
                 __rb_dest_bindings::rapidbyte::connector::types::WriteSummary,
                 __rb_dest_bindings::rapidbyte::connector::types::ConnectorError,
             > {
-                let ctx = parse_stream_context(ctx_json)?;
+                let stream = parse_stream_context(ctx_json)?;
+                let base_ctx = CONTEXT.get().expect("Connector not opened");
+                let ctx = base_ctx.with_stream(&stream.stream_name);
                 let rt = get_runtime();
                 let state_cell = get_state();
                 let mut state_ref = state_cell.borrow_mut();
@@ -398,7 +411,7 @@ macro_rules! connector_main {
 
                 let summary = rt
                     .block_on(<$connector_type as $crate::connector::Destination>::write(
-                        conn, ctx,
+                        conn, &ctx, stream,
                     ))
                     .map_err(to_component_error)?;
 
@@ -438,7 +451,9 @@ macro_rules! connector_main {
                 __rb_transform_bindings::rapidbyte::connector::types::TransformSummary,
                 __rb_transform_bindings::rapidbyte::connector::types::ConnectorError,
             > {
-                let ctx = parse_stream_context(ctx_json)?;
+                let stream = parse_stream_context(ctx_json)?;
+                let base_ctx = CONTEXT.get().expect("Connector not opened");
+                let ctx = base_ctx.with_stream(&stream.stream_name);
                 let rt = get_runtime();
                 let state_cell = get_state();
                 let mut state_ref = state_cell.borrow_mut();
@@ -446,7 +461,7 @@ macro_rules! connector_main {
 
                 let summary = rt
                     .block_on(<$connector_type as $crate::connector::Transform>::transform(
-                        conn, ctx,
+                        conn, &ctx, stream,
                     ))
                     .map_err(to_component_error)?;
 
@@ -472,6 +487,7 @@ macro_rules! connector_main {
 #[allow(dead_code, unused_imports)]
 mod tests {
     use super::*;
+    use crate::context::Context;
     use crate::errors::{ConnectorError, ValidationResult, ValidationStatus};
     use crate::protocol::{
         Catalog, ConnectorInfo, ProtocolVersion, ReadSummary, StreamContext, TransformSummary,
@@ -502,11 +518,11 @@ mod tests {
             ))
         }
 
-        async fn discover(&mut self) -> Result<Catalog, ConnectorError> {
+        async fn discover(&mut self, _ctx: &Context) -> Result<Catalog, ConnectorError> {
             Ok(Catalog { streams: vec![] })
         }
 
-        async fn read(&mut self, _ctx: StreamContext) -> Result<ReadSummary, ConnectorError> {
+        async fn read(&mut self, _ctx: &Context, _stream: StreamContext) -> Result<ReadSummary, ConnectorError> {
             Ok(ReadSummary {
                 records_read: 0,
                 bytes_read: 0,
@@ -536,7 +552,7 @@ mod tests {
             ))
         }
 
-        async fn write(&mut self, _ctx: StreamContext) -> Result<WriteSummary, ConnectorError> {
+        async fn write(&mut self, _ctx: &Context, _stream: StreamContext) -> Result<WriteSummary, ConnectorError> {
             Ok(WriteSummary {
                 records_written: 0,
                 bytes_written: 0,
@@ -568,7 +584,8 @@ mod tests {
 
         async fn transform(
             &mut self,
-            _ctx: StreamContext,
+            _ctx: &Context,
+            _stream: StreamContext,
         ) -> Result<TransformSummary, ConnectorError> {
             Ok(TransformSummary {
                 records_in: 0,
