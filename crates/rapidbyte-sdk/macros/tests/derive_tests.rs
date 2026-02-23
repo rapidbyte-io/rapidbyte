@@ -157,6 +157,41 @@ fn all_numeric_types_map_correctly() {
     assert_eq!(schema["properties"]["enabled"]["type"], "boolean");
 }
 
+// -- serde(default) excludes from required ------------------------------------
+
+#[derive(Deserialize, ConfigSchema)]
+struct SerdeDefaultConfig {
+    pub host: String,
+    #[serde(default)]
+    pub load_method: String,
+    #[serde(default = "default_port")]
+    pub port: u16,
+}
+
+fn default_port() -> u16 {
+    5432
+}
+
+#[test]
+fn serde_default_fields_not_required() {
+    let schema: Value = serde_json::from_str(SerdeDefaultConfig::SCHEMA_JSON).unwrap();
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(required.contains(&"host"), "host should be required");
+    assert!(
+        !required.contains(&"load_method"),
+        "serde(default) field must not be required"
+    );
+    assert!(
+        !required.contains(&"port"),
+        "serde(default = \"...\") field must not be required"
+    );
+}
+
 // -- Combined attributes ------------------------------------------------------
 
 #[derive(Deserialize, ConfigSchema)]

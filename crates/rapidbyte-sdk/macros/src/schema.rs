@@ -45,7 +45,8 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
             serde_json::Value::String(rust_type_to_json_schema(&inner_type_name)),
         );
 
-        if !is_optional {
+        let has_serde_default = has_serde_default_attr(&field.attrs);
+        if !is_optional && !has_serde_default {
             required.push(serde_json::Value::String(field_name.clone()));
         }
 
@@ -100,6 +101,23 @@ fn extract_doc_comment(attrs: &[syn::Attribute]) -> Option<String> {
     } else {
         Some(lines.join(" "))
     }
+}
+
+/// Check if a field has `#[serde(default)]` or `#[serde(default = "...")]`.
+fn has_serde_default_attr(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("serde") {
+            return false;
+        }
+        let mut found = false;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("default") {
+                found = true;
+            }
+            Ok(())
+        });
+        found
+    })
 }
 
 /// Returns `(is_optional, inner_type_name)`.
