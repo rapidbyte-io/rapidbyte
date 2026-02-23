@@ -1,6 +1,6 @@
 //! Schema drift detection and policy application.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use pg_escape::quote_identifier;
 use tokio_postgres::Client;
@@ -105,22 +105,25 @@ pub(crate) async fn detect_schema_drift(
     let mut type_changes = Vec::new();
     let mut nullability_changes = Vec::new();
 
+    let existing_map: HashMap<&str, (&str, bool)> = existing
+        .iter()
+        .map(|(n, t, nullable)| (n.as_str(), (t.as_str(), *nullable)))
+        .collect();
+
     for field in arrow_schema.fields() {
-        if let Some((_, old_type, old_nullable)) =
-            existing.iter().find(|(n, _, _)| n == field.name())
-        {
+        if let Some(&(old_type, old_nullable)) = existing_map.get(field.name().as_str()) {
             let new_pg_type = arrow_to_pg_type(field.data_type());
             if !pg_types_compatible(old_type, new_pg_type) {
                 type_changes.push((
                     field.name().clone(),
-                    old_type.clone(),
+                    old_type.to_owned(),
                     new_pg_type.to_string(),
                 ));
             }
-            if *old_nullable != field.is_nullable() {
+            if old_nullable != field.is_nullable() {
                 nullability_changes.push((
                     field.name().clone(),
-                    *old_nullable,
+                    old_nullable,
                     field.is_nullable(),
                 ));
             }
@@ -303,4 +306,30 @@ pub(crate) async fn apply_schema_policy(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_drift_default_is_empty() {
+        let drift = SchemaDrift::default();
+        assert!(drift.is_empty());
+    }
+
+    #[test]
+    fn schema_drift_detects_all_categories() {
+        let drift = SchemaDrift {
+            new_columns: vec![("age".into(), "INTEGER".into())],
+            removed_columns: vec!["old_col".into()],
+            type_changes: vec![("name".into(), "integer".into(), "TEXT".into())],
+            nullability_changes: vec![("id".into(), true, false)],
+        };
+        assert!(!drift.is_empty());
+        assert_eq!(drift.new_columns.len(), 1);
+        assert_eq!(drift.removed_columns.len(), 1);
+        assert_eq!(drift.type_changes.len(), 1);
+        assert_eq!(drift.nullability_changes.len(), 1);
+    }
 }

@@ -79,11 +79,7 @@ pub(crate) async fn ensure_table_and_schema(
     ignored_columns: &mut HashSet<String>,
     type_null_columns: &mut HashSet<String>,
 ) -> Result<(), String> {
-    let qualified_table = format!(
-        "{}.{}",
-        quote_identifier(target_schema),
-        quote_identifier(stream_name)
-    );
+    let qualified_table = crate::decode::qualified_name(target_schema, stream_name);
 
     if created_tables.contains(&qualified_table) {
         return Ok(());
