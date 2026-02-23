@@ -8,6 +8,7 @@ mod client;
 mod config;
 mod ddl;
 mod decode;
+mod insert;
 mod type_map;
 mod watermark;
 mod writer;
