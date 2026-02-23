@@ -19,7 +19,6 @@ use crate::protocol::{ProtocolVersion, SyncMode, WriteMode};
 ///         .name("PostgreSQL Source")
 ///         .sync_modes(&[SyncMode::FullRefresh, SyncMode::Incremental])
 ///         .allow_runtime_network()
-///         .config_schema_file("config_schema.json")
 ///         .emit();
 /// }
 /// ```
@@ -211,29 +210,6 @@ impl ManifestEmitter {
         self
     }
 
-    // -- Config schema -----------------------------------------------
-
-    /// Set config schema from inline JSON string.
-    pub fn config_schema(mut self, json: &str) -> Self {
-        self.manifest.config_schema = Some(
-            serde_json::from_str(json).expect("config_schema is not valid JSON"),
-        );
-        self
-    }
-
-    /// Set config schema from a file path (relative to crate root).
-    /// Automatically adds `cargo::rerun-if-changed` for the file.
-    pub fn config_schema_file(mut self, path: &str) -> Self {
-        let content = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("failed to read {}: {}", path, e));
-        self.manifest.config_schema = Some(
-            serde_json::from_str(&content)
-                .unwrap_or_else(|e| panic!("{} is not valid JSON: {}", path, e)),
-        );
-        self.rerun_files.push(path.to_string());
-        self
-    }
-
     // -- Emit --------------------------------------------------------
 
     /// Validate, serialize, and write manifest files to OUT_DIR.
@@ -358,18 +334,6 @@ mod tests {
 
         assert!(emitter.manifest.roles.transform.is_some());
         assert!(emitter.manifest.roles.source.is_none());
-    }
-
-    #[test]
-    fn test_config_schema_inline() {
-        let schema = r#"{"type": "object", "required": ["host"]}"#;
-        let emitter = ManifestEmitter::source("test/source")
-            .name("Test")
-            .version("1.0.0")
-            .sync_modes(&[SyncMode::FullRefresh])
-            .config_schema(schema);
-
-        assert!(emitter.manifest.config_schema.is_some());
     }
 
     #[test]
