@@ -9,6 +9,7 @@ pub mod config;
 mod metrics;
 mod reader;
 pub mod schema;
+pub mod types;
 
 use std::time::Instant;
 
