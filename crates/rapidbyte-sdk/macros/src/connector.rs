@@ -425,24 +425,27 @@ fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
 fn gen_embeds(struct_name: &Ident, trait_path: &TokenStream) -> TokenStream {
     quote! {
         // Embed the manifest JSON as a `rapidbyte_manifest_v1` custom section.
+        // Only on wasm32 — native builds don't support this link section format.
+        #[cfg(target_arch = "wasm32")]
         include!(concat!(env!("OUT_DIR"), "/rapidbyte_manifest_embed.rs"));
 
         // Embed the config schema as a `rapidbyte_config_schema_v1` Wasm custom section.
+        #[cfg(target_arch = "wasm32")]
         const __RB_SCHEMA_BYTES: &[u8] =
             <<#struct_name as #trait_path>::Config as ::rapidbyte_sdk::ConfigSchema>::SCHEMA_JSON
                 .as_bytes();
 
+        #[cfg(target_arch = "wasm32")]
         #[link_section = "rapidbyte_config_schema_v1"]
         #[used]
-        static __RAPIDBYTE_CONFIG_SCHEMA: [u8; __RB_SCHEMA_BYTES.len()] = {
-            let src = __RB_SCHEMA_BYTES;
-            let mut dst = [0u8; __RB_SCHEMA_BYTES.len()];
+        static __RAPIDBYTE_CONFIG_SCHEMA: [u8; { __RB_SCHEMA_BYTES.len() }] = {
+            let mut arr = [0u8; __RB_SCHEMA_BYTES.len()];
             let mut i = 0;
-            while i < src.len() {
-                dst[i] = src[i];
+            while i < __RB_SCHEMA_BYTES.len() {
+                arr[i] = __RB_SCHEMA_BYTES[i];
                 i += 1;
             }
-            dst
+            arr
         };
     }
 }
