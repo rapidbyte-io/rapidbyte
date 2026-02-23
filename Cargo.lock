@@ -2309,6 +2309,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "wasm-encoder 0.243.0",
+ "wasmparser 0.243.0",
  "wasmtime",
  "wasmtime-wasi",
  "zstd",

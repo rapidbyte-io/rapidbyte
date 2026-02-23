@@ -29,8 +29,7 @@ use super::network_acl::{derive_network_acl, NetworkAcl};
 use crate::engine::compression::CompressionCodec;
 
 pub use super::connector_resolve::{
-    load_connector_manifest, manifest_path_from_wasm, parse_connector_ref, resolve_connector_path,
-    verify_wasm_checksum,
+    load_connector_manifest, parse_connector_ref, resolve_connector_path,
 };
 pub use super::wasm_runtime::{LoadedComponent, WasmRuntime};
 pub use super::wit_bindings::{

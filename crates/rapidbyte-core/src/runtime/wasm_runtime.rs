@@ -12,11 +12,18 @@ use chrono::Utc;
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store};
 
+use sha2::{Digest, Sha256};
+
 use super::component_runtime::ComponentHostState;
-use super::connector_resolve::sha256_hex;
 
 const RAPIDBYTE_WASMTIME_AOT_ENV: &str = "RAPIDBYTE_WASMTIME_AOT";
 const RAPIDBYTE_WASMTIME_AOT_DIR_ENV: &str = "RAPIDBYTE_WASMTIME_AOT_DIR";
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
 
 #[derive(Clone)]
 pub struct LoadedComponent {

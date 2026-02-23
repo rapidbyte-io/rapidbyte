@@ -4,12 +4,20 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use rapidbyte_types::manifest::ConnectorManifest;
-use sha2::{Digest, Sha256};
+use wasmparser::{Parser, Payload};
 
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+const MANIFEST_SECTION_NAME: &str = "rapidbyte_manifest_v1";
+
+/// Extract a ConnectorManifest from a wasm binary's custom section.
+pub fn extract_manifest_from_wasm(wasm_bytes: &[u8]) -> Option<ConnectorManifest> {
+    for payload in Parser::new(0).parse_all(wasm_bytes) {
+        if let Ok(Payload::CustomSection(reader)) = payload {
+            if reader.name() == MANIFEST_SECTION_NAME {
+                return serde_json::from_slice(reader.data()).ok();
+            }
+        }
+    }
+    None
 }
 
 /// Parse a connector reference into (connector_id, connector_version).
@@ -78,55 +86,18 @@ pub fn resolve_connector_path(connector_ref: &str) -> Result<PathBuf> {
     )
 }
 
-/// Derive the manifest file path from a WASM binary path.
-/// `source_postgres.wasm` -> `source_postgres.manifest.json`
-pub fn manifest_path_from_wasm(wasm_path: &Path) -> PathBuf {
-    let stem = wasm_path.file_stem().unwrap_or_default().to_string_lossy();
-    wasm_path.with_file_name(format!("{}.manifest.json", stem))
-}
-
-/// Verify WASM binary checksum against the manifest-declared value.
-pub fn verify_wasm_checksum(wasm_path: &Path, expected: &str) -> Result<bool> {
-    // Strip algorithm prefix (e.g., "sha256:abcd..." -> "abcd...")
-    let expected_hex = expected.strip_prefix("sha256:").unwrap_or(expected);
-
-    let bytes = std::fs::read(wasm_path)
-        .with_context(|| format!("Failed to read WASM binary: {}", wasm_path.display()))?;
-    let actual = sha256_hex(&bytes);
-
-    Ok(actual == expected_hex)
-}
-
-/// Load a connector manifest from disk. Returns None if the manifest file
-/// doesn't exist (backwards-compatible with connectors that don't have one yet).
+/// Load a connector manifest from the embedded custom section in a .wasm binary.
 pub fn load_connector_manifest(wasm_path: &Path) -> Result<Option<ConnectorManifest>> {
-    let manifest_path = manifest_path_from_wasm(wasm_path);
-    if !manifest_path.exists() {
-        return Ok(None);
-    }
-    let content = std::fs::read_to_string(&manifest_path)
-        .with_context(|| format!("Failed to read manifest: {}", manifest_path.display()))?;
-    let manifest: ConnectorManifest = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse manifest: {}", manifest_path.display()))?;
-
-    if let Some(ref expected) = manifest.artifact.checksum {
-        let valid = verify_wasm_checksum(wasm_path, expected)?;
-        if !valid {
-            anyhow::bail!(
-                "WASM checksum mismatch for {}. Expected: {}, file may be corrupted or tampered.",
-                wasm_path.display(),
-                expected,
-            );
-        }
-        tracing::debug!(path = %wasm_path.display(), "WASM checksum verified");
-    }
-
-    Ok(Some(manifest))
+    let wasm_bytes = std::fs::read(wasm_path)
+        .with_context(|| format!("Failed to read wasm binary: {}", wasm_path.display()))?;
+    Ok(extract_manifest_from_wasm(&wasm_bytes))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rapidbyte_types::manifest::{Permissions, ResourceLimits, Roles, SourceCapabilities};
+    use rapidbyte_types::protocol::{ConnectorRole, ProtocolVersion, SyncMode};
 
     #[test]
     fn test_parse_connector_ref_with_namespace_version() {
@@ -143,11 +114,85 @@ mod tests {
     }
 
     #[test]
-    fn test_manifest_path_from_wasm() {
-        let path = Path::new("/tmp/source_postgres.wasm");
-        assert_eq!(
-            manifest_path_from_wasm(path),
-            PathBuf::from("/tmp/source_postgres.manifest.json")
-        );
+    fn test_extract_manifest_from_wasm_bytes() {
+        use std::borrow::Cow;
+        use wasm_encoder::{CustomSection, Module};
+
+        let manifest = ConnectorManifest {
+            id: "test/example".to_string(),
+            name: "Example".to_string(),
+            version: "0.1.0".to_string(),
+            description: "".to_string(),
+            author: None,
+            license: None,
+            protocol_version: ProtocolVersion::V2,
+            permissions: Permissions::default(),
+            limits: ResourceLimits::default(),
+            roles: Roles {
+                source: Some(SourceCapabilities {
+                    supported_sync_modes: vec![SyncMode::FullRefresh],
+                    features: vec![],
+                }),
+                ..Default::default()
+            },
+            config_schema: None,
+        };
+        let json = serde_json::to_vec(&manifest).unwrap();
+
+        let mut module = Module::new();
+        module.section(&CustomSection {
+            name: Cow::Borrowed("rapidbyte_manifest_v1"),
+            data: Cow::Borrowed(&json),
+        });
+        let wasm_bytes = module.finish();
+
+        let extracted = extract_manifest_from_wasm(&wasm_bytes);
+        assert!(extracted.is_some());
+        let m = extracted.unwrap();
+        assert_eq!(m.id, "test/example");
+        assert!(m.supports_role(ConnectorRole::Source));
+    }
+
+    #[test]
+    fn test_extract_manifest_missing_section() {
+        use wasm_encoder::Module;
+        let wasm_bytes = Module::new().finish();
+        assert!(extract_manifest_from_wasm(&wasm_bytes).is_none());
+    }
+
+    #[test]
+    fn test_load_manifest_from_wasm_file() {
+        use std::borrow::Cow;
+        use wasm_encoder::{CustomSection, Module};
+
+        let manifest = ConnectorManifest {
+            id: "embedded/test".to_string(),
+            name: "Embedded".to_string(),
+            version: "1.0.0".to_string(),
+            description: "".to_string(),
+            author: None,
+            license: None,
+            protocol_version: ProtocolVersion::V2,
+            permissions: Permissions::default(),
+            limits: ResourceLimits::default(),
+            roles: Roles::default(),
+            config_schema: None,
+        };
+        let json = serde_json::to_vec(&manifest).unwrap();
+
+        let mut module = Module::new();
+        module.section(&CustomSection {
+            name: Cow::Borrowed("rapidbyte_manifest_v1"),
+            data: Cow::Borrowed(&json),
+        });
+
+        let tmp = std::env::temp_dir().join("test_embedded_manifest.wasm");
+        std::fs::write(&tmp, module.finish()).unwrap();
+
+        let loaded = load_connector_manifest(&tmp).unwrap();
+        assert!(loaded.is_some());
+        assert_eq!(loaded.unwrap().id, "embedded/test");
+
+        std::fs::remove_file(&tmp).ok();
     }
 }
