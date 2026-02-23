@@ -90,14 +90,6 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
         &mut created_files,
     )?;
 
-    // Write config_schema.json
-    let config_schema = gen_config_schema(&service_name);
-    write_file(
-        &base_dir.join("config_schema.json"),
-        &config_schema,
-        &mut created_files,
-    )?;
-
     // Write source files
     match role {
         Role::Source => {
@@ -267,7 +259,6 @@ fn main() {{
         .description("Source connector for {service_name}")
         .sync_modes(&[SyncMode::FullRefresh])
         .allow_runtime_network()
-        .config_schema_file("config_schema.json")
         .emit();
 }}
 "#
@@ -282,30 +273,11 @@ fn main() {{
         .description("Destination connector for {service_name}")
         .write_modes(&[WriteMode::Append])
         .allow_runtime_network()
-        .config_schema_file("config_schema.json")
         .emit();
 }}
 "#
         ),
     }
-}
-
-fn gen_config_schema(service_name: &str) -> String {
-    format!(
-        r#"{{
-    "$schema": "http://json-schema.org/draft-07/schema#",
-    "type": "object",
-    "required": ["host", "user", "database"],
-    "properties": {{
-        "host": {{ "type": "string", "description": "{service_name} hostname" }},
-        "port": {{ "type": "integer", "default": 3306 }},
-        "user": {{ "type": "string" }},
-        "password": {{ "type": "string", "default": "" }},
-        "database": {{ "type": "string" }}
-    }}
-}}
-"#
-    )
 }
 
 fn gen_source_main(struct_name: &str) -> String {
@@ -357,6 +329,7 @@ impl Source for {struct_name} {{
 
 rapidbyte_sdk::connector_main!(source, {struct_name});
 rapidbyte_sdk::embed_manifest!();
+rapidbyte_sdk::embed_config_schema!(config::Config);
 "#
     )
 }
@@ -405,22 +378,31 @@ impl Destination for {struct_name} {{
 
 rapidbyte_sdk::connector_main!(destination, {struct_name});
 rapidbyte_sdk::embed_manifest!();
+rapidbyte_sdk::embed_config_schema!(config::Config);
 "#
     )
 }
 
 fn gen_config() -> String {
-    r#"use serde::Deserialize;
+    r#"use rapidbyte_sdk::ConfigSchema;
+use serde::Deserialize;
 
 /// Connection config deserialized from pipeline YAML.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, ConfigSchema)]
 pub struct Config {
+    /// Hostname
     pub host: String,
+    /// Port
     #[serde(default = "default_port")]
+    #[schema(default = 3306)]
     pub port: u16,
+    /// Database user
     pub user: String,
+    /// Database password
     #[serde(default)]
+    #[schema(secret)]
     pub password: String,
+    /// Database name
     pub database: String,
 }
 
