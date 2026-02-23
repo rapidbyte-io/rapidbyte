@@ -13,7 +13,6 @@ pub mod schema;
 use std::time::Instant;
 
 use rapidbyte_sdk::prelude::*;
-use rapidbyte_sdk::protocol::DEFAULT_MAX_BATCH_BYTES;
 
 #[rapidbyte_sdk::connector(source)]
 pub struct SourcePostgres {

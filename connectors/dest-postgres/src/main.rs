@@ -10,7 +10,6 @@ mod ddl;
 mod writer;
 
 use rapidbyte_sdk::prelude::*;
-use rapidbyte_sdk::protocol::DEFAULT_MAX_BATCH_BYTES;
 
 use config::LoadMethod;
 
