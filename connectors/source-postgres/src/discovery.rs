@@ -59,6 +59,40 @@ pub async fn discover_catalog(client: &Client) -> Result<Vec<Stream>, String> {
     Ok(streams)
 }
 
+/// Query column metadata for a single table in the `public` schema.
+pub(crate) async fn query_table_columns(
+    client: &Client,
+    table_name: &str,
+) -> Result<Vec<Column>, String> {
+    let query = "SELECT column_name, data_type, is_nullable \
+        FROM information_schema.columns \
+        WHERE table_schema = 'public' AND table_name = $1 \
+        ORDER BY ordinal_position";
+
+    let rows = client
+        .query(query, &[&table_name])
+        .await
+        .map_err(|e| format!("Schema query failed for {table_name}: {e}"))?;
+
+    let columns: Vec<Column> = rows
+        .iter()
+        .map(|row| {
+            let name: String = row.get(0);
+            let data_type: String = row.get(1);
+            let nullable: bool = row.get::<_, String>(2) == "YES";
+            Column::new(&name, &data_type, nullable)
+        })
+        .collect();
+
+    if columns.is_empty() {
+        return Err(format!(
+            "Table '{table_name}' not found or has no columns"
+        ));
+    }
+
+    Ok(columns)
+}
+
 fn build_stream(table: &str, columns: &[Column]) -> Stream {
     Stream {
         name: table.to_string(),

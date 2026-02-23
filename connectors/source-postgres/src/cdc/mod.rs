@@ -68,32 +68,8 @@ async fn read_cdc_inner(
     ensure_replication_slot(client, ctx, &slot_name).await?;
 
     // 3. Get table schema for Arrow construction
-    let schema_query = "SELECT column_name, data_type, is_nullable \
-        FROM information_schema.columns \
-        WHERE table_schema = 'public' AND table_name = $1 \
-        ORDER BY ordinal_position";
-
-    let schema_rows = client
-        .query(schema_query, &[&stream.stream_name])
-        .await
-        .map_err(|e| format!("Schema query failed for {}: {e}", stream.stream_name))?;
-
-    let table_columns: Vec<Column> = schema_rows
-        .iter()
-        .map(|row| {
-            let name: String = row.get(0);
-            let data_type: String = row.get(1);
-            let nullable: bool = row.get::<_, String>(2) == "YES";
-            Column::new(&name, &data_type, nullable)
-        })
-        .collect();
-
-    if table_columns.is_empty() {
-        return Err(format!(
-            "Table '{}' not found or has no columns",
-            stream.stream_name
-        ));
-    }
+    let table_columns =
+        crate::discovery::query_table_columns(client, &stream.stream_name).await?;
 
     // Build Arrow schema: table columns + _rb_op metadata column
     let arrow_schema = build_cdc_arrow_schema(&table_columns);

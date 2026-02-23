@@ -96,32 +96,7 @@ pub async fn read_stream(
     let query_start = Instant::now();
 
     // ── 1. Schema resolution ──────────────────────────────────────────
-    let schema_query = "SELECT column_name, data_type, is_nullable \
-        FROM information_schema.columns \
-        WHERE table_schema = 'public' AND table_name = $1 \
-        ORDER BY ordinal_position";
-
-    let schema_rows = client
-        .query(schema_query, &[&stream.stream_name])
-        .await
-        .map_err(|e| format!("Schema query failed for {}: {e}", stream.stream_name))?;
-
-    let all_columns: Vec<Column> = schema_rows
-        .iter()
-        .map(|row| {
-            let name: String = row.get(0);
-            let pg_type: String = row.get(1);
-            let nullable: bool = row.get::<_, String>(2) == "YES";
-            Column::new(&name, &pg_type, nullable)
-        })
-        .collect();
-
-    if all_columns.is_empty() {
-        return Err(format!(
-            "Table '{}' not found or has no columns",
-            stream.stream_name
-        ));
-    }
+    let all_columns = crate::discovery::query_table_columns(client, &stream.stream_name).await?;
 
     // ── 2. Projection pushdown ────────────────────────────────────────
     let columns: Vec<Column> = match &stream.selected_columns {
