@@ -181,58 +181,28 @@ impl<'a> SqlParamValue<'a> {
     }
 }
 
+/// Extract nullable value from a typed Arrow array into a `SqlParamValue`.
+macro_rules! null_param {
+    ($arr:expr, $row:expr, $variant:ident) => {
+        if $arr.is_null($row) {
+            SqlParamValue::$variant(None)
+        } else {
+            SqlParamValue::$variant(Some($arr.value($row)))
+        }
+    };
+}
+
 pub(crate) fn sql_param_value<'a>(col: &'a TypedCol<'a>, row_idx: usize) -> SqlParamValue<'a> {
     match col {
         TypedCol::Null => SqlParamValue::Text(None),
-        TypedCol::Int16(arr) => {
-            if arr.is_null(row_idx) {
-                SqlParamValue::Int16(None)
-            } else {
-                SqlParamValue::Int16(Some(arr.value(row_idx)))
-            }
-        }
-        TypedCol::Int32(arr) => {
-            if arr.is_null(row_idx) {
-                SqlParamValue::Int32(None)
-            } else {
-                SqlParamValue::Int32(Some(arr.value(row_idx)))
-            }
-        }
-        TypedCol::Int64(arr) => {
-            if arr.is_null(row_idx) {
-                SqlParamValue::Int64(None)
-            } else {
-                SqlParamValue::Int64(Some(arr.value(row_idx)))
-            }
-        }
-        TypedCol::Float32(arr) => {
-            if arr.is_null(row_idx) {
-                SqlParamValue::Float32(None)
-            } else {
-                SqlParamValue::Float32(Some(arr.value(row_idx)))
-            }
-        }
-        TypedCol::Float64(arr) => {
-            if arr.is_null(row_idx) {
-                SqlParamValue::Float64(None)
-            } else {
-                SqlParamValue::Float64(Some(arr.value(row_idx)))
-            }
-        }
-        TypedCol::Boolean(arr) => {
-            if arr.is_null(row_idx) {
-                SqlParamValue::Boolean(None)
-            } else {
-                SqlParamValue::Boolean(Some(arr.value(row_idx)))
-            }
-        }
-        TypedCol::Utf8(arr) => {
-            if arr.is_null(row_idx) {
-                SqlParamValue::Text(None)
-            } else {
-                SqlParamValue::Text(Some(arr.value(row_idx)))
-            }
-        }
+        TypedCol::Int16(arr) => null_param!(arr, row_idx, Int16),
+        TypedCol::Int32(arr) => null_param!(arr, row_idx, Int32),
+        TypedCol::Int64(arr) => null_param!(arr, row_idx, Int64),
+        TypedCol::Float32(arr) => null_param!(arr, row_idx, Float32),
+        TypedCol::Float64(arr) => null_param!(arr, row_idx, Float64),
+        TypedCol::Boolean(arr) => null_param!(arr, row_idx, Boolean),
+        TypedCol::Utf8(arr) => null_param!(arr, row_idx, Text),
+        TypedCol::Binary(arr) => null_param!(arr, row_idx, Bytes),
         TypedCol::TimestampMicros(arr) => {
             if arr.is_null(row_idx) {
                 SqlParamValue::Timestamp(None)
@@ -251,13 +221,6 @@ pub(crate) fn sql_param_value<'a>(col: &'a TypedCol<'a>, row_idx: usize) -> SqlP
                 let days = arr.value(row_idx);
                 let date = UNIX_EPOCH_DATE.checked_add_signed(chrono::Duration::days(days as i64));
                 SqlParamValue::Date(date)
-            }
-        }
-        TypedCol::Binary(arr) => {
-            if arr.is_null(row_idx) {
-                SqlParamValue::Bytes(None)
-            } else {
-                SqlParamValue::Bytes(Some(arr.value(row_idx)))
             }
         }
     }
