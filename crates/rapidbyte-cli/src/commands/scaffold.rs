@@ -82,11 +82,19 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
         &mut created_files,
     )?;
 
-    // Write manifest.json
-    let manifest = gen_manifest(name, &name_underscored, &display_name, role, &service_name);
+    // Write build.rs
+    let build_rs = gen_build_rs(name, &display_name, role, &service_name);
     write_file(
-        &base_dir.join("manifest.json"),
-        &manifest,
+        &base_dir.join("build.rs"),
+        &build_rs,
+        &mut created_files,
+    )?;
+
+    // Write config_schema.json
+    let config_schema = gen_config_schema(&service_name);
+    write_file(
+        &base_dir.join("config_schema.json"),
+        &config_schema,
         &mut created_files,
     )?;
 
@@ -233,6 +241,9 @@ serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
 tokio = {{ version = "1.36", features = ["rt", "macros", "io-util"] }}
 arrow = {{ version = "53", features = ["ipc"] }}
+
+[build-dependencies]
+rapidbyte-sdk = {{ path = "../../crates/rapidbyte-sdk", default-features = false, features = ["build"] }}
 "#
     )
 }
@@ -244,48 +255,53 @@ target = "wasm32-wasip2"
     .to_string()
 }
 
-fn gen_manifest(
-    name: &str,
-    name_underscored: &str,
-    display_name: &str,
-    role: Role,
-    service_name: &str,
-) -> String {
-    let role_str = role.as_str();
+fn gen_build_rs(name: &str, display_name: &str, role: Role, service_name: &str) -> String {
+    match role {
+        Role::Source => format!(
+            r#"use rapidbyte_sdk::build::ManifestEmitter;
+use rapidbyte_sdk::protocol::SyncMode;
+
+fn main() {{
+    ManifestEmitter::source("rapidbyte/{name}")
+        .name("{display_name}")
+        .description("Source connector for {service_name}")
+        .sync_modes(&[SyncMode::FullRefresh])
+        .allow_runtime_network()
+        .config_schema_file("config_schema.json")
+        .emit();
+}}
+"#
+        ),
+        Role::Destination => format!(
+            r#"use rapidbyte_sdk::build::ManifestEmitter;
+use rapidbyte_sdk::protocol::WriteMode;
+
+fn main() {{
+    ManifestEmitter::destination("rapidbyte/{name}")
+        .name("{display_name}")
+        .description("Destination connector for {service_name}")
+        .write_modes(&[WriteMode::Append])
+        .allow_runtime_network()
+        .config_schema_file("config_schema.json")
+        .emit();
+}}
+"#
+        ),
+    }
+}
+
+fn gen_config_schema(service_name: &str) -> String {
     format!(
         r#"{{
-    "manifest_version": "1.0",
-    "id": "rapidbyte/{name}",
-    "name": "{display_name}",
-    "version": "0.1.0",
-    "description": "{role_str} connector for {service_name}",
-    "protocol_version": "2",
-    "artifact": {{
-        "entry_point": "{name_underscored}.wasm"
-    }},
-    "permissions": {{
-        "network": {{
-            "tls": "optional",
-            "allow_runtime_config_domains": true
-        }}
-    }},
-    "roles": {{
-        "{role_str}": {{
-            "supported_sync_modes": ["full_refresh"],
-            "features": []
-        }}
-    }},
-    "config_schema": {{
-        "$schema": "http://json-schema.org/draft-07/schema#",
-        "type": "object",
-        "required": ["host", "user", "database"],
-        "properties": {{
-            "host": {{ "type": "string" }},
-            "port": {{ "type": "integer", "default": 3306 }},
-            "user": {{ "type": "string" }},
-            "password": {{ "type": "string", "default": "" }},
-            "database": {{ "type": "string" }}
-        }}
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "required": ["host", "user", "database"],
+    "properties": {{
+        "host": {{ "type": "string", "description": "{service_name} hostname" }},
+        "port": {{ "type": "integer", "default": 3306 }},
+        "user": {{ "type": "string" }},
+        "password": {{ "type": "string", "default": "" }},
+        "database": {{ "type": "string" }}
     }}
 }}
 "#
@@ -340,6 +356,7 @@ impl Source for {struct_name} {{
 }}
 
 rapidbyte_sdk::connector_main!(source, {struct_name});
+rapidbyte_sdk::embed_manifest!();
 "#
     )
 }
@@ -387,6 +404,7 @@ impl Destination for {struct_name} {{
 }}
 
 rapidbyte_sdk::connector_main!(destination, {struct_name});
+rapidbyte_sdk::embed_manifest!();
 "#
     )
 }
