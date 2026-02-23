@@ -10,6 +10,7 @@ mod cursor;
 mod discovery;
 mod encode;
 mod metrics;
+mod query;
 mod reader;
 pub mod schema;
 pub mod types;
