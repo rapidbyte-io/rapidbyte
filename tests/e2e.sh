@@ -55,7 +55,6 @@ for connector in "${CONNECTORS[@]}"; do
         info "Building $dir..."
         (cd "$PROJECT_ROOT/connectors/$dir" && cargo build --quiet)
         cp "$PROJECT_ROOT/connectors/$dir/target/wasm32-wasip2/debug/${wasm}.wasm" "$CONNECTOR_DIR/"
-        cp "$PROJECT_ROOT/connectors/$dir/manifest.json" "$CONNECTOR_DIR/${wasm}.manifest.json"
     done
     export RAPIDBYTE_CONNECTOR_DIR="$CONNECTOR_DIR"
 
