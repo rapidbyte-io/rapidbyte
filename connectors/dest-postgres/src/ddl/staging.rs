@@ -19,14 +19,14 @@ async fn drop_staging_table(
 ) -> Result<(), String> {
     let staging_table =
         crate::decode::qualified_name(target_schema, &staging_name(stream_name));
-    let sql = format!("DROP TABLE IF EXISTS {} CASCADE", staging_table);
+    let sql = format!("DROP TABLE IF EXISTS {staging_table} CASCADE");
     client
         .execute(&sql, &[])
         .await
-        .map_err(|e| format!("DROP staging table failed for {}: {e}", staging_table))?;
+        .map_err(|e| format!("DROP staging table failed for {staging_table}: {e}"))?;
     ctx.log(
         LogLevel::Debug,
-        &format!("dest-postgres: dropped staging table {}", staging_table),
+        &format!("dest-postgres: dropped staging table {staging_table}"),
     );
     Ok(())
 }
@@ -48,19 +48,18 @@ pub(crate) async fn swap_staging_table(
         .await
         .map_err(|e| format!("Swap BEGIN failed: {e}"))?;
 
-    let drop_sql = format!("DROP TABLE IF EXISTS {} CASCADE", target_table);
+    let drop_sql = format!("DROP TABLE IF EXISTS {target_table} CASCADE");
     if let Err(e) = client.execute(&drop_sql, &[]).await {
         let _ = client.execute("ROLLBACK", &[]).await;
-        return Err(format!("Swap DROP failed for {}: {}", target_table, e));
+        return Err(format!("Swap DROP failed for {target_table}: {e}"));
     }
 
     let rename_sql = format!(
-        "ALTER TABLE {} RENAME TO {}",
-        staging_table, staging_name_only
+        "ALTER TABLE {staging_table} RENAME TO {staging_name_only}"
     );
     if let Err(e) = client.execute(&rename_sql, &[]).await {
         let _ = client.execute("ROLLBACK", &[]).await;
-        return Err(format!("Swap RENAME failed: {}", e));
+        return Err(format!("Swap RENAME failed: {e}"));
     }
 
     client
@@ -71,8 +70,7 @@ pub(crate) async fn swap_staging_table(
     ctx.log(
         LogLevel::Info,
         &format!(
-            "dest-postgres: atomic swap {} -> {}",
-            staging_table, target_table
+            "dest-postgres: atomic swap {staging_table} -> {target_table}"
         ),
     );
     Ok(())

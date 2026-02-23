@@ -1,6 +1,6 @@
-//! Destination connector for PostgreSQL.
+//! Destination connector for `PostgreSQL`.
 //!
-//! Receives Arrow IPC batches from the host and writes them to PostgreSQL
+//! Receives Arrow IPC batches from the host and writes them to `PostgreSQL`
 //! with transactional checkpoints and schema evolution handling.
 
 mod client;

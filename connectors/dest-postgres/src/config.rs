@@ -1,4 +1,4 @@
-//! Destination PostgreSQL connector configuration.
+//! Destination `PostgreSQL` connector configuration.
 
 use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;
@@ -20,7 +20,7 @@ impl std::fmt::Display for LoadMethod {
     }
 }
 
-/// PostgreSQL connection config from pipeline YAML.
+/// `PostgreSQL` connection config from pipeline YAML.
 #[derive(Debug, Clone, Deserialize, ConfigSchema)]
 pub struct Config {
     /// Database hostname

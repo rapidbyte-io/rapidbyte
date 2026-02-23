@@ -1,10 +1,10 @@
-//! PostgreSQL client connection and validation helpers for dest-postgres.
+//! `PostgreSQL` client connection and validation helpers for dest-postgres.
 
 use tokio_postgres::{Client, Config as PgConfig, NoTls};
 
 use rapidbyte_sdk::prelude::*;
 
-/// Connect to PostgreSQL using the provided config.
+/// Connect to `PostgreSQL` using the provided config.
 pub(crate) async fn connect(config: &crate::config::Config) -> Result<Client, String> {
     let mut pg = PgConfig::new();
     pg.host(&config.host);
@@ -24,14 +24,14 @@ pub(crate) async fn connect(config: &crate::config::Config) -> Result<Client, St
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            rapidbyte_sdk::host_ffi::log(0, &format!("PostgreSQL connection error: {}", e));
+            rapidbyte_sdk::host_ffi::log(0, &format!("PostgreSQL connection error: {e}"));
         }
     });
 
     Ok(client)
 }
 
-/// Validate PostgreSQL connectivity and target schema.
+/// Validate `PostgreSQL` connectivity and target schema.
 pub(crate) async fn validate(
     config: &crate::config::Config,
 ) -> Result<ValidationResult, ConnectorError> {
@@ -42,7 +42,7 @@ pub(crate) async fn validate(
     client.query_one("SELECT 1", &[]).await.map_err(|e| {
         ConnectorError::transient_network(
             "CONNECTION_TEST_FAILED",
-            format!("Connection test failed: {}", e),
+            format!("Connection test failed: {e}"),
         )
     })?;
 

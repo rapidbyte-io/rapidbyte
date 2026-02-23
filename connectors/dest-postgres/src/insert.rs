@@ -1,6 +1,6 @@
 //! Multi-value INSERT write path.
 //!
-//! Writes Arrow RecordBatch data to PostgreSQL via batched multi-value INSERT
+//! Writes Arrow `RecordBatch` data to `PostgreSQL` via batched multi-value INSERT
 //! statements. Supports upsert via ON CONFLICT clause.
 
 use std::fmt::Write as _;

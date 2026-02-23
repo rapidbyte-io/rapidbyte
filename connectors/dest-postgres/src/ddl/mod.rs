@@ -60,7 +60,7 @@ async fn create_table(
                 .map(|k| quote_identifier(k))
                 .collect::<Vec<_>>()
                 .join(", ");
-            ddl_parts.push(format!("PRIMARY KEY ({})", pk));
+            ddl_parts.push(format!("PRIMARY KEY ({pk})"));
         }
     }
 
@@ -72,13 +72,13 @@ async fn create_table(
 
     ctx.log(
         LogLevel::Debug,
-        &format!("dest-postgres: ensuring table: {}", ddl),
+        &format!("dest-postgres: ensuring table: {ddl}"),
     );
 
     client
         .execute(&ddl, &[])
         .await
-        .map_err(|e| format!("Failed to create table {}: {e}", qualified_table))?;
+        .map_err(|e| format!("Failed to create table {qualified_table}: {e}"))?;
 
     Ok(())
 }
@@ -109,7 +109,7 @@ impl SchemaState {
         client
             .execute(&create_schema, &[])
             .await
-            .map_err(|e| format!("Failed to create schema '{}': {e}", target_schema))?;
+            .map_err(|e| format!("Failed to create schema '{target_schema}': {e}"))?;
 
         let pk = match write_mode {
             Some(WriteMode::Upsert { primary_key }) => Some(primary_key.as_slice()),

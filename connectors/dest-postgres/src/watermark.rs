@@ -22,7 +22,7 @@ pub(crate) async fn ensure_table(client: &Client, target_schema: &str) -> Result
     client
         .execute(&create_schema, &[])
         .await
-        .map_err(|e| format!("Failed to create schema '{}': {}", target_schema, e))?;
+        .map_err(|e| format!("Failed to create schema '{target_schema}': {e}"))?;
 
     let ddl = format!(
         "CREATE TABLE IF NOT EXISTS {} (
@@ -36,7 +36,7 @@ pub(crate) async fn ensure_table(client: &Client, target_schema: &str) -> Result
     client
         .execute(&ddl, &[])
         .await
-        .map_err(|e| format!("Failed to create watermarks table: {}", e))?;
+        .map_err(|e| format!("Failed to create watermarks table: {e}"))?;
     Ok(())
 }
 
@@ -53,10 +53,13 @@ pub(crate) async fn get(
     match client.query_opt(&sql, &[&stream_name]).await {
         Ok(Some(row)) => {
             let val: i64 = row.get(0);
-            Ok(val as u64)
+            // Safety: records_committed stored as BIGINT (i64) is always non-negative.
+            #[allow(clippy::cast_sign_loss)]
+            let count = val as u64;
+            Ok(count)
         }
         Ok(None) => Ok(0),
-        Err(e) => Err(format!("Failed to get watermark: {}", e)),
+        Err(e) => Err(format!("Failed to get watermark: {e}")),
     }
 }
 
@@ -80,12 +83,16 @@ pub(crate) async fn set(
             &sql,
             &[
                 &stream_name,
+                // Safety: row/byte counts are always non-negative and won't exceed i64::MAX
+                // in practice. PostgreSQL BIGINT is i64.
+                #[allow(clippy::cast_possible_wrap)]
                 &(records_committed as i64),
+                #[allow(clippy::cast_possible_wrap)]
                 &(bytes_committed as i64),
             ],
         )
         .await
-        .map_err(|e| format!("Failed to set watermark: {}", e))?;
+        .map_err(|e| format!("Failed to set watermark: {e}"))?;
     Ok(())
 }
 
@@ -102,7 +109,7 @@ pub(crate) async fn clear(
     client
         .execute(&sql, &[&stream_name])
         .await
-        .map_err(|e| format!("Failed to clear watermark: {}", e))?;
+        .map_err(|e| format!("Failed to clear watermark: {e}"))?;
     Ok(())
 }
 

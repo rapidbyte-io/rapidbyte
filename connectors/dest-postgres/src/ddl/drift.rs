@@ -15,13 +15,13 @@ use crate::type_map::{arrow_to_pg_type, pg_types_compatible};
 /// Detected differences between an incoming Arrow schema and an existing PG table.
 #[derive(Debug, Default)]
 pub(crate) struct SchemaDrift {
-    /// Columns present in the Arrow schema but not in the existing table (name, pg_type).
+    /// Columns present in the Arrow schema but not in the existing table (name, `pg_type`).
     pub(crate) new_columns: Vec<(String, String)>,
     /// Columns present in the existing table but not in the Arrow schema.
     pub(crate) removed_columns: Vec<String>,
-    /// Columns whose PG type differs (name, old_pg_type, new_pg_type).
+    /// Columns whose PG type differs (name, `old_pg_type`, `new_pg_type`).
     pub(crate) type_changes: Vec<(String, String, String)>,
-    /// Columns whose nullability differs (name, was_nullable, now_nullable).
+    /// Columns whose nullability differs (name, `was_nullable`, `now_nullable`).
     pub(crate) nullability_changes: Vec<(String, bool, bool)>,
 }
 
@@ -34,7 +34,7 @@ impl SchemaDrift {
     }
 }
 
-/// Fetch existing column names, types, and nullability from information_schema.
+/// Fetch existing column names, types, and nullability from `information_schema`.
 async fn get_existing_columns(
     client: &Client,
     schema_name: &str,
@@ -144,6 +144,7 @@ use super::SchemaState;
 
 impl SchemaState {
     /// Apply schema evolution policy to detected drift, executing DDL as needed.
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn apply_policy(
         &mut self,
         ctx: &Context,
@@ -157,8 +158,7 @@ impl SchemaState {
             match policy.new_column {
                 ColumnPolicy::Fail => {
                     return Err(format!(
-                        "Schema evolution: new column '{}' detected but policy is 'fail'",
-                        col_name
+                        "Schema evolution: new column '{col_name}' detected but policy is 'fail'"
                     ));
                 }
                 ColumnPolicy::Add => {
@@ -171,10 +171,10 @@ impl SchemaState {
                     client
                         .execute(&sql, &[])
                         .await
-                        .map_err(|e| format!("ALTER TABLE ADD COLUMN '{}' failed: {e}", col_name))?;
+                        .map_err(|e| format!("ALTER TABLE ADD COLUMN '{col_name}' failed: {e}"))?;
                     ctx.log(
                         LogLevel::Info,
-                        &format!("dest-postgres: added column '{}' {}", col_name, pg_type),
+                        &format!("dest-postgres: added column '{col_name}' {pg_type}"),
                     );
                 }
                 ColumnPolicy::Ignore => {
@@ -182,8 +182,7 @@ impl SchemaState {
                     ctx.log(
                         LogLevel::Info,
                         &format!(
-                            "dest-postgres: ignoring new column '{}' per schema policy (excluded from writes)",
-                            col_name
+                            "dest-postgres: ignoring new column '{col_name}' per schema policy (excluded from writes)"
                         ),
                     );
                 }
@@ -195,16 +194,14 @@ impl SchemaState {
             match policy.removed_column {
                 ColumnPolicy::Fail => {
                     return Err(format!(
-                        "Schema evolution: column '{}' removed but policy is 'fail'",
-                        col_name
+                        "Schema evolution: column '{col_name}' removed but policy is 'fail'"
                     ));
                 }
                 ColumnPolicy::Ignore | ColumnPolicy::Add => {
                     ctx.log(
                         LogLevel::Info,
                         &format!(
-                            "dest-postgres: column '{}' removed from source, keeping in table per policy",
-                            col_name
+                            "dest-postgres: column '{col_name}' removed from source, keeping in table per policy"
                         ),
                     );
                 }
@@ -216,27 +213,23 @@ impl SchemaState {
             match policy.type_change {
                 TypeChangePolicy::Fail => {
                     return Err(format!(
-                        "Schema evolution: type change for '{}' ({} -> {}) but policy is 'fail'",
-                        col_name, old_type, new_type
+                        "Schema evolution: type change for '{col_name}' ({old_type} -> {new_type}) but policy is 'fail'"
                     ));
                 }
                 TypeChangePolicy::Coerce => {
                     let col_ident = quote_identifier(col_name);
                     let sql = format!(
-                        "ALTER TABLE {} ALTER COLUMN {} TYPE {} USING {}::{}",
-                        qualified_table, col_ident, new_type, col_ident, new_type
+                        "ALTER TABLE {qualified_table} ALTER COLUMN {col_ident} TYPE {new_type} USING {col_ident}::{new_type}"
                     );
                     client.execute(&sql, &[]).await.map_err(|e| {
                         format!(
-                            "Schema evolution: ALTER COLUMN '{}' TYPE {} failed: {e}",
-                            col_name, new_type
+                            "Schema evolution: ALTER COLUMN '{col_name}' TYPE {new_type} failed: {e}"
                         )
                     })?;
                     ctx.log(
                         LogLevel::Info,
                         &format!(
-                            "dest-postgres: coerced '{}' from {} to {}",
-                            col_name, old_type, new_type
+                            "dest-postgres: coerced '{col_name}' from {old_type} to {new_type}"
                         ),
                     );
                 }
@@ -245,8 +238,7 @@ impl SchemaState {
                     ctx.log(
                         LogLevel::Info,
                         &format!(
-                            "dest-postgres: type change for '{}' ({} -> {}), policy=Null — values will be NULL",
-                            col_name, old_type, new_type
+                            "dest-postgres: type change for '{col_name}' ({old_type} -> {new_type}), policy=Null — values will be NULL"
                         ),
                     );
                 }
@@ -258,45 +250,41 @@ impl SchemaState {
             match policy.nullability_change {
                 NullabilityPolicy::Fail => {
                     return Err(format!(
-                        "Schema evolution: nullability change for '{}' ({} -> {}) but policy is 'fail'",
-                        col_name, was_nullable, now_nullable
+                        "Schema evolution: nullability change for '{col_name}' ({was_nullable} -> {now_nullable}) but policy is 'fail'"
                     ));
                 }
                 NullabilityPolicy::Allow => {
                     let col_ident = quote_identifier(col_name);
                     if *was_nullable && !now_nullable {
                         let sql = format!(
-                            "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
-                            qualified_table, col_ident
+                            "ALTER TABLE {qualified_table} ALTER COLUMN {col_ident} SET NOT NULL"
                         );
                         match client.execute(&sql, &[]).await {
                             Ok(_) => {
                                 ctx.log(
                                     LogLevel::Info,
-                                    &format!("dest-postgres: SET NOT NULL on '{}'", col_name),
+                                    &format!("dest-postgres: SET NOT NULL on '{col_name}'"),
                                 );
                             }
                             Err(e) => {
                                 ctx.log(
                                     LogLevel::Warn,
                                     &format!(
-                                        "dest-postgres: SET NOT NULL on '{}' failed (existing NULLs?): {}",
-                                        col_name, e
+                                        "dest-postgres: SET NOT NULL on '{col_name}' failed (existing NULLs?): {e}"
                                     ),
                                 );
                             }
                         }
                     } else if !was_nullable && *now_nullable {
                         let sql = format!(
-                            "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
-                            qualified_table, col_ident
+                            "ALTER TABLE {qualified_table} ALTER COLUMN {col_ident} DROP NOT NULL"
                         );
                         client.execute(&sql, &[]).await.map_err(|e| {
-                            format!("ALTER TABLE DROP NOT NULL on '{}' failed: {e}", col_name)
+                            format!("ALTER TABLE DROP NOT NULL on '{col_name}' failed: {e}")
                         })?;
                         ctx.log(
                             LogLevel::Info,
-                            &format!("dest-postgres: DROP NOT NULL on '{}'", col_name),
+                            &format!("dest-postgres: DROP NOT NULL on '{col_name}'"),
                         );
                     }
                 }

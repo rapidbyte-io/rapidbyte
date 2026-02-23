@@ -1,4 +1,4 @@
-//! Stream write session lifecycle for destination PostgreSQL connector.
+//! Stream write session lifecycle for destination `PostgreSQL` connector.
 //!
 //! Owns connection/session orchestration around batch writes, checkpoints,
 //! watermark-based resume, and Replace-mode staging swap.
@@ -61,7 +61,7 @@ pub async fn write_stream(
                 }
             }
             Err(e) => {
-                loop_error = Some(format!("next_batch failed: {}", e));
+                loop_error = Some(format!("next_batch failed: {e}"));
                 break;
             }
         }
@@ -103,14 +103,14 @@ pub struct SessionConfig {
     pub copy_flush_bytes: Option<usize>,
 }
 
-/// Checkpoint threshold configuration extracted from StreamLimits.
+/// Checkpoint threshold configuration extracted from `StreamLimits`.
 pub struct CheckpointConfig {
     pub bytes: u64,
     pub rows: u64,
     pub seconds: u64,
 }
 
-/// Result of a completed write session, used to build WriteSummary.
+/// Result of a completed write session, used to build `WriteSummary`.
 pub struct SessionResult {
     pub total_rows: u64,
     pub total_bytes: u64,
@@ -129,7 +129,7 @@ struct WriteStats {
     rows_since_commit: u64,
 }
 
-/// Manages lifecycle of writing a single stream to PostgreSQL.
+/// Manages lifecycle of writing a single stream to `PostgreSQL`.
 pub struct WriteSession<'a> {
     ctx: &'a Context,
     client: &'a Client,
@@ -178,8 +178,7 @@ impl<'a> WriteSession<'a> {
             ctx.log(
                 LogLevel::Warn,
                 &format!(
-                    "dest-postgres: watermarks table creation failed (non-fatal): {}",
-                    e
+                    "dest-postgres: watermarks table creation failed (non-fatal): {e}"
                 ),
             );
         }
@@ -188,12 +187,11 @@ impl<'a> WriteSession<'a> {
         let (effective_stream, effective_write_mode) = if is_replace {
             let staging_name = prepare_staging(ctx, client, target_schema, stream_name)
                 .await
-                .map_err(|e| format!("{:#}", e))?;
+                .map_err(|e| format!("{e:#}"))?;
             ctx.log(
                 LogLevel::Info,
                 &format!(
-                    "dest-postgres: Replace mode — writing to staging table '{}'",
-                    staging_name
+                    "dest-postgres: Replace mode — writing to staging table '{staging_name}'"
                 ),
             );
             (staging_name, Some(WriteMode::Append))
@@ -201,15 +199,16 @@ impl<'a> WriteSession<'a> {
             (stream_name.to_owned(), write_mode)
         };
 
-        let watermark_records = if !is_replace {
+        let watermark_records = if is_replace {
+            0
+        } else {
             match crate::watermark::get(client, target_schema, stream_name).await {
                 Ok(w) => {
                     if w > 0 {
                         ctx.log(
                             LogLevel::Info,
                             &format!(
-                                "dest-postgres: resuming from watermark — {} records already committed for stream '{}'",
-                                w, stream_name
+                                "dest-postgres: resuming from watermark — {w} records already committed for stream '{stream_name}'"
                             ),
                         );
                     }
@@ -219,15 +218,12 @@ impl<'a> WriteSession<'a> {
                     ctx.log(
                         LogLevel::Warn,
                         &format!(
-                            "dest-postgres: watermark query failed (starting fresh): {}",
-                            e
+                            "dest-postgres: watermark query failed (starting fresh): {e}"
                         ),
                     );
                     0
                 }
             }
-        } else {
-            0
         };
 
         let qualified_table = decode::qualified_name(target_schema, &effective_stream);
@@ -235,7 +231,7 @@ impl<'a> WriteSession<'a> {
         client
             .execute("BEGIN", &[])
             .await
-            .map_err(|e| format!("BEGIN failed: {}", e))?;
+            .map_err(|e| format!("BEGIN failed: {e}"))?;
 
         let now = Instant::now();
         Ok(WriteSession {
@@ -273,7 +269,7 @@ impl<'a> WriteSession<'a> {
         schema: &Arc<Schema>,
         batches: &[RecordBatch],
     ) -> Result<(), String> {
-        let n: usize = batches.iter().map(|b| b.get_array_memory_size()).sum();
+        let n: usize = batches.iter().map(RecordBatch::get_array_memory_size).sum();
 
         // Watermark resume: skip already-committed batches
         if self.watermark_records > 0 && self.cumulative_records < self.watermark_records {
@@ -403,12 +399,12 @@ impl<'a> WriteSession<'a> {
             self.stats.total_bytes,
         )
         .await
-        .map_err(|e| format!("Watermark update failed: {}", e))?;
+        .map_err(|e| format!("Watermark update failed: {e}"))?;
 
         self.client
             .execute("COMMIT", &[])
             .await
-            .map_err(|e| format!("Checkpoint COMMIT failed: {}", e))?;
+            .map_err(|e| format!("Checkpoint COMMIT failed: {e}"))?;
 
         let _ = self.ctx.checkpoint(&self.build_checkpoint());
         self.stats.checkpoint_count += 1;
@@ -427,7 +423,7 @@ impl<'a> WriteSession<'a> {
         self.client
             .execute("BEGIN", &[])
             .await
-            .map_err(|e| format!("Post-checkpoint BEGIN failed: {}", e))?;
+            .map_err(|e| format!("Post-checkpoint BEGIN failed: {e}"))?;
 
         Ok(())
     }
@@ -444,13 +440,13 @@ impl<'a> WriteSession<'a> {
             self.stats.total_bytes,
         )
         .await
-        .map_err(|e| format!("Watermark update failed: {}", e))?;
+        .map_err(|e| format!("Watermark update failed: {e}"))?;
 
         let commit_start = Instant::now();
         self.client
             .execute("COMMIT", &[])
             .await
-            .map_err(|e| format!("COMMIT failed: {}", e))?;
+            .map_err(|e| format!("COMMIT failed: {e}"))?;
         let commit_secs = commit_start.elapsed().as_secs_f64();
 
         let _ = self.ctx.checkpoint(&self.build_checkpoint());
@@ -459,7 +455,7 @@ impl<'a> WriteSession<'a> {
         if self.is_replace {
             swap_staging_table(self.ctx, self.client, self.target_schema, &self.stream_name)
                 .await
-                .map_err(|e| format!("{:#}", e))?;
+                .map_err(|e| format!("{e:#}"))?;
         }
 
         let _ = crate::watermark::clear(self.client, self.target_schema, &self.stream_name).await;

@@ -1,6 +1,6 @@
 //! COPY FROM STDIN write path.
 //!
-//! Streams Arrow RecordBatch data to PostgreSQL via the COPY binary protocol.
+//! Streams Arrow `RecordBatch` data to `PostgreSQL` via the COPY binary protocol.
 //! Flushes at configurable byte thresholds to bound memory usage.
 
 use bytes::Bytes;
@@ -16,7 +16,7 @@ use crate::decode::{downcast_columns, write_binary_field, WriteTarget};
 /// Default COPY flush buffer size (4 MB).
 const DEFAULT_FLUSH_BYTES: usize = 4 * 1024 * 1024;
 
-/// PostgreSQL binary COPY signature (11 bytes).
+/// `PostgreSQL` binary COPY signature (11 bytes).
 const PGCOPY_SIGNATURE: [u8; 11] = *b"PGCOPY\n\xff\r\n\x00";
 /// Flags field (4 bytes): no OIDs.
 const PGCOPY_FLAGS: [u8; 4] = 0_i32.to_be_bytes();
@@ -67,6 +67,9 @@ pub(crate) async fn write(
     buf.extend_from_slice(&PGCOPY_FLAGS);
     buf.extend_from_slice(&PGCOPY_EXT_LEN);
 
+    // Safety: PG COPY binary tuple header uses i16 for field count;
+    // tables with >32,767 columns are not supported.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let num_fields = target.active_cols.len() as i16;
 
     for batch in batches {

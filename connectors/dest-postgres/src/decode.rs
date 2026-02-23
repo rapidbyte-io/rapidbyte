@@ -1,4 +1,4 @@
-//! Arrow RecordBatch decoding helpers for INSERT and COPY write paths.
+//! Arrow `RecordBatch` decoding helpers for INSERT and COPY write paths.
 //!
 //! Provides typed column extraction (one downcast per column per batch),
 //! SQL parameter value extraction for INSERT, binary COPY serialization,
@@ -68,7 +68,7 @@ pub(crate) fn build_upsert_clause(
             .collect();
 
         if update_cols.is_empty() {
-            Some(format!(" ON CONFLICT ({}) DO NOTHING", pk_cols))
+            Some(format!(" ON CONFLICT ({pk_cols}) DO NOTHING"))
         } else {
             Some(format!(
                 " ON CONFLICT ({}) DO UPDATE SET {}",
@@ -121,7 +121,7 @@ pub(crate) enum TypedCol<'a> {
     Null,
 }
 
-/// Pre-downcast active columns from a RecordBatch into TypedCol references.
+/// Pre-downcast active columns from a `RecordBatch` into `TypedCol` references.
 pub(crate) fn downcast_columns<'a>(
     batch: &'a RecordBatch,
     active_cols: &[usize],
@@ -164,7 +164,7 @@ pub(crate) enum SqlParamValue<'a> {
     Bytes(Option<&'a [u8]>),
 }
 
-impl<'a> SqlParamValue<'a> {
+impl SqlParamValue<'_> {
     pub(crate) fn as_tosql(&self) -> &(dyn ToSql + Sync) {
         match self {
             Self::Int16(v) => v,
@@ -209,6 +209,8 @@ pub(crate) fn sql_param_value<'a>(col: &'a TypedCol<'a>, row_idx: usize) -> SqlP
             } else {
                 let micros = arr.value(row_idx);
                 let secs = micros.div_euclid(1_000_000);
+                // Safety: rem_euclid(1_000_000) * 1_000 yields max 999_999_000, well within u32::MAX.
+                #[allow(clippy::cast_possible_truncation)]
                 let nsecs = (micros.rem_euclid(1_000_000) * 1_000) as u32;
                 let dt = DateTime::from_timestamp(secs, nsecs).map(|dt| dt.naive_utc());
                 SqlParamValue::Timestamp(dt)
@@ -219,7 +221,7 @@ pub(crate) fn sql_param_value<'a>(col: &'a TypedCol<'a>, row_idx: usize) -> SqlP
                 SqlParamValue::Date(None)
             } else {
                 let days = arr.value(row_idx);
-                let date = UNIX_EPOCH_DATE.checked_add_signed(chrono::Duration::days(days as i64));
+                let date = UNIX_EPOCH_DATE.checked_add_signed(chrono::Duration::days(i64::from(days)));
                 SqlParamValue::Date(date)
             }
         }
@@ -228,16 +230,16 @@ pub(crate) fn sql_param_value<'a>(col: &'a TypedCol<'a>, row_idx: usize) -> SqlP
 
 // ── Binary COPY format ──────────────────────────────────────────────
 
-/// PostgreSQL epoch offset: microseconds between 1970-01-01 and 2000-01-01.
+/// `PostgreSQL` epoch offset: microseconds between 1970-01-01 and 2000-01-01.
 const PG_EPOCH_OFFSET_MICROS: i64 = 946_684_800_000_000;
 
-/// PostgreSQL epoch offset: days between 1970-01-01 and 2000-01-01.
+/// `PostgreSQL` epoch offset: days between 1970-01-01 and 2000-01-01.
 const PG_EPOCH_OFFSET_DAYS: i32 = 10_957;
 
 /// Binary NULL indicator: field length = -1.
 const BINARY_NULL: [u8; 4] = (-1_i32).to_be_bytes();
 
-/// Write a fixed-size numeric field in PostgreSQL binary format.
+/// Write a fixed-size numeric field in `PostgreSQL` binary format.
 macro_rules! binary_fixed {
     ($arr:expr, $buf:expr, $row:expr, $len:literal) => {
         if $arr.is_null($row) {
@@ -249,7 +251,7 @@ macro_rules! binary_fixed {
     };
 }
 
-/// Write a single field in PostgreSQL binary COPY format.
+/// Write a single field in `PostgreSQL` binary COPY format.
 ///
 /// Binary format per field: 4-byte length (i32, big-endian, -1 for NULL) + data bytes.
 /// All integers use network byte order (big-endian). Timestamps are microseconds
@@ -275,7 +277,11 @@ pub(crate) fn write_binary_field(buf: &mut Vec<u8>, col: &TypedCol<'_>, row_idx:
                 buf.extend_from_slice(&BINARY_NULL);
             } else {
                 let val = arr.value(row_idx).as_bytes();
-                buf.extend_from_slice(&(val.len() as i32).to_be_bytes());
+                // Safety: PG COPY binary field lengths are i32; individual field values
+                // in a RecordBatch will never exceed i32::MAX (~2 GB).
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                let len = val.len() as i32;
+                buf.extend_from_slice(&len.to_be_bytes());
                 buf.extend_from_slice(val);
             }
         }
@@ -302,7 +308,11 @@ pub(crate) fn write_binary_field(buf: &mut Vec<u8>, col: &TypedCol<'_>, row_idx:
                 buf.extend_from_slice(&BINARY_NULL);
             } else {
                 let val = arr.value(row_idx);
-                buf.extend_from_slice(&(val.len() as i32).to_be_bytes());
+                // Safety: PG COPY binary field lengths are i32; individual field values
+                // in a RecordBatch will never exceed i32::MAX (~2 GB).
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                let len = val.len() as i32;
+                buf.extend_from_slice(&len.to_be_bytes());
                 buf.extend_from_slice(val);
             }
         }

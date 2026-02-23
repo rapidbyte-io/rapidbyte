@@ -1,8 +1,8 @@
-//! Arrow <-> PostgreSQL type mapping helpers.
+//! Arrow <-> `PostgreSQL` type mapping helpers.
 
 use rapidbyte_sdk::arrow::datatypes::DataType;
 
-/// Map Arrow data types back to PostgreSQL column types.
+/// Map Arrow data types back to `PostgreSQL` column types.
 pub(crate) fn arrow_to_pg_type(dt: &DataType) -> &'static str {
     match dt {
         DataType::Int16 => "SMALLINT",
@@ -11,11 +11,11 @@ pub(crate) fn arrow_to_pg_type(dt: &DataType) -> &'static str {
         DataType::Float32 => "REAL",
         DataType::Float64 => "DOUBLE PRECISION",
         DataType::Boolean => "BOOLEAN",
-        DataType::Utf8 => "TEXT",
         DataType::Timestamp(_, Some(_)) => "TIMESTAMPTZ",
         DataType::Timestamp(_, None) => "TIMESTAMP",
         DataType::Date32 => "DATE",
         DataType::Binary => "BYTEA",
+        // Utf8 and all other unsupported types default to TEXT.
         _ => "TEXT",
     }
 }
@@ -49,7 +49,7 @@ fn normalize_pg_type(t: &str) -> &str {
     }
 }
 
-/// Check if an information_schema type and DDL type refer to the same type.
+/// Check if an `information_schema` type and DDL type refer to the same type.
 pub(crate) fn pg_types_compatible(info_schema_type: &str, ddl_type: &str) -> bool {
     let a = info_schema_type.to_lowercase();
     let b = ddl_type.to_lowercase();
