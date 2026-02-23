@@ -1,10 +1,7 @@
-//! Full-refresh and incremental stream reads using server-side cursors.
+//! Full-refresh and incremental stream reading.
 //!
-//! Builds typed cursor predicates, fetches rows in chunks via DECLARE/FETCH,
-//! encodes records to Arrow IPC, and emits batches/checkpoints to the host.
-
-mod arrow_encode;
-mod query;
+//! Orchestrates: schema resolution -> query building -> server-side cursor ->
+//! fetch loop -> Arrow batch emission -> checkpoint.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -14,16 +11,13 @@ use tokio_postgres::Client;
 
 use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::prelude::*;
-use rapidbyte_sdk::protocol::{
-    ColumnSchema, CursorType, DataErrorPolicy, DEFAULT_MAX_BATCH_BYTES, DEFAULT_MAX_RECORD_BYTES,
-};
+use rapidbyte_sdk::protocol::{DataErrorPolicy, DEFAULT_MAX_BATCH_BYTES, DEFAULT_MAX_RECORD_BYTES};
 
+use crate::cursor::CursorTracker;
+use crate::encode;
 use crate::metrics::emit_read_metrics;
-use crate::schema::pg_type_to_arrow;
-
-use self::arrow_encode::rows_to_record_batch;
-use self::query::build_base_query;
-use rapidbyte_sdk::arrow::build_arrow_schema;
+use crate::query;
+use crate::types::Column;
 
 /// Maximum number of rows per Arrow RecordBatch.
 const BATCH_SIZE: usize = 10_000;
@@ -38,16 +32,17 @@ const CURSOR_NAME: &str = "rb_cursor";
 const BATCH_OVERHEAD_BYTES: usize = 256;
 
 /// Estimate byte size of a single row for max_record_bytes checking.
-pub(crate) fn estimate_row_bytes(columns: &[ColumnSchema]) -> usize {
+pub(crate) fn estimate_row_bytes(columns: &[Column]) -> usize {
     let mut total = 0usize;
     for col in columns {
-        total += match col.data_type.as_str() {
-            "Int16" => 2,
-            "Int32" | "Float32" | "Date32" => 4,
-            "Int64" | "Float64" | "TimestampMicros" => 8,
-            "Boolean" => 1,
+        total += match col.arrow_type {
+            ArrowDataType::Int16 => 2,
+            ArrowDataType::Int32 | ArrowDataType::Float32 | ArrowDataType::Date32 => 4,
+            ArrowDataType::Int64 | ArrowDataType::Float64 | ArrowDataType::TimestampMicros => 8,
+            ArrowDataType::Boolean => 1,
             _ => 64,
         };
+        // 1-byte null bitmap overhead per column.
         total += 1;
     }
     total
@@ -60,54 +55,17 @@ struct EmitState {
     arrow_encode_nanos: u64,
 }
 
-enum MaxCursorValue {
-    Int(i64),
-    Text(String),
-}
-
-impl MaxCursorValue {
-    fn update_int(current: &mut Option<Self>, value: i64) {
-        match current {
-            Some(Self::Int(existing)) => {
-                if value > *existing {
-                    *existing = value;
-                }
-            }
-            _ => *current = Some(Self::Int(value)),
-        }
-    }
-
-    fn update_text(current: &mut Option<Self>, value: String) {
-        match current {
-            Some(Self::Text(existing)) => {
-                if value > *existing {
-                    *existing = value;
-                }
-            }
-            _ => *current = Some(Self::Text(value)),
-        }
-    }
-
-    fn as_checkpoint_string(&self) -> String {
-        match self {
-            Self::Int(v) => v.to_string(),
-            Self::Text(v) => v.clone(),
-        }
-    }
-}
-
 /// Encode and emit all currently accumulated rows as one Arrow IPC batch.
 fn emit_accumulated_rows(
     rows: &mut Vec<tokio_postgres::Row>,
-    columns: &[ColumnSchema],
-    pg_types: &[String],
+    columns: &[Column],
     schema: &Arc<Schema>,
     ctx: &Context,
     state: &mut EmitState,
     estimated_bytes: &mut usize,
 ) -> Result<(), String> {
     let encode_start = Instant::now();
-    let batch = rows_to_record_batch(rows, columns, pg_types, schema)?;
+    let batch = encode::rows_to_record_batch(rows, columns, schema)?;
     state.arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
 
     state.total_records += rows.len() as u64;
@@ -130,15 +88,6 @@ pub async fn read_stream(
     stream: &StreamContext,
     connect_secs: f64,
 ) -> Result<ReadSummary, String> {
-    read_stream_inner(client, ctx, stream, connect_secs).await
-}
-
-async fn read_stream_inner(
-    client: &Client,
-    ctx: &Context,
-    stream: &StreamContext,
-    connect_secs: f64,
-) -> Result<ReadSummary, String> {
     ctx.log(
         LogLevel::Info,
         &format!("Reading stream: {}", stream.stream_name),
@@ -146,6 +95,7 @@ async fn read_stream_inner(
 
     let query_start = Instant::now();
 
+    // ── 1. Schema resolution ──────────────────────────────────────────
     let schema_query = "SELECT column_name, data_type, is_nullable \
         FROM information_schema.columns \
         WHERE table_schema = 'public' AND table_name = $1 \
@@ -156,17 +106,13 @@ async fn read_stream_inner(
         .await
         .map_err(|e| format!("Schema query failed for {}: {e}", stream.stream_name))?;
 
-    let all_columns: Vec<ColumnSchema> = schema_rows
+    let all_columns: Vec<Column> = schema_rows
         .iter()
         .map(|row| {
             let name: String = row.get(0);
-            let data_type: String = row.get(1);
+            let pg_type: String = row.get(1);
             let nullable: bool = row.get::<_, String>(2) == "YES";
-            ColumnSchema {
-                name,
-                data_type: pg_type_to_arrow(&data_type),
-                nullable,
-            }
+            Column::new(&name, &pg_type, nullable)
         })
         .collect();
 
@@ -177,15 +123,8 @@ async fn read_stream_inner(
         ));
     }
 
-    // Build parallel pg_types vector for json/jsonb extraction in Arrow encoder.
-    let all_pg_types: Vec<String> = schema_rows
-        .iter()
-        .map(|row| row.get::<_, String>(1))
-        .collect();
-
-    // Apply projection pushdown: filter to selected columns if specified.
-    // Column order follows table ordinal position, not user-specified order.
-    let (columns, pg_types): (Vec<ColumnSchema>, Vec<String>) = match &stream.selected_columns {
+    // ── 2. Projection pushdown ────────────────────────────────────────
+    let columns: Vec<Column> = match &stream.selected_columns {
         Some(selected) if !selected.is_empty() => {
             let unknown: Vec<&str> = selected
                 .iter()
@@ -199,11 +138,10 @@ async fn read_stream_inner(
                 ));
             }
 
-            let (filtered, filtered_pg_types): (Vec<ColumnSchema>, Vec<String>) = all_columns
+            let filtered: Vec<Column> = all_columns
                 .into_iter()
-                .zip(all_pg_types.into_iter())
-                .filter(|(c, _)| selected.iter().any(|s| s == &c.name))
-                .unzip();
+                .filter(|c| selected.iter().any(|s| s == &c.name))
+                .collect();
             if filtered.is_empty() {
                 return Err(format!(
                     "None of the selected columns {:?} found in table '{}'",
@@ -219,19 +157,21 @@ async fn read_stream_inner(
                     ));
                 }
             }
-            (filtered, filtered_pg_types)
+            filtered
         }
-        _ => (all_columns, all_pg_types),
+        _ => all_columns,
     };
 
-    let arrow_schema = build_arrow_schema(&columns);
+    // ── 3. Arrow schema ───────────────────────────────────────────────
+    let arrow_schema = encode::arrow_schema(&columns);
 
+    // ── 4. Transaction + server-side cursor ───────────────────────────
     client
         .execute("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ", &[])
         .await
         .map_err(|e| format!("BEGIN failed: {e}"))?;
 
-    let cursor_query = build_base_query(ctx, stream, &columns, &pg_types)?;
+    let cursor_query = query::build_base_query(ctx, stream, &columns)?;
 
     let declare = format!(
         "DECLARE {} NO SCROLL CURSOR FOR {}",
@@ -255,6 +195,7 @@ async fn read_stream_inner(
 
     let query_secs = query_start.elapsed().as_secs_f64();
 
+    // ── 5. Limits + cursor tracker setup ──────────────────────────────
     let max_batch_bytes = if stream.limits.max_batch_bytes > 0 {
         stream.limits.max_batch_bytes as usize
     } else {
@@ -269,26 +210,10 @@ async fn read_stream_inner(
     let estimated_row_bytes = estimate_row_bytes(&columns);
     let mut records_skipped: u64 = 0;
 
-    let cursor_col_idx = if let Some(ci) = stream.cursor_info.as_ref() {
-        Some(
-            columns
-                .iter()
-                .position(|c| c.name == ci.cursor_field)
-                .ok_or_else(|| {
-                    format!(
-                        "Cursor field '{}' not found in schema for table '{}'",
-                        ci.cursor_field, stream.stream_name
-                    )
-                })?,
-        )
-    } else {
-        None
+    let mut tracker: Option<CursorTracker> = match stream.cursor_info.as_ref() {
+        Some(ci) => Some(CursorTracker::new(ci, &columns)?),
+        None => None,
     };
-    let track_cursor_as_int = matches!(
-        stream.cursor_info.as_ref().map(|ci| ci.cursor_type),
-        Some(CursorType::Int64)
-    );
-    let mut max_cursor_value: Option<MaxCursorValue> = None;
 
     let fetch_query = format!("FETCH {} FROM {}", FETCH_CHUNK, CURSOR_NAME);
     let mut accumulated_rows: Vec<tokio_postgres::Row> = Vec::new();
@@ -302,6 +227,7 @@ async fn read_stream_inner(
 
     let mut loop_error: Option<String> = None;
 
+    // ── 6. Fetch loop ─────────────────────────────────────────────────
     let fetch_start = Instant::now();
     loop {
         let rows = match client.query(&fetch_query, &[]).await {
@@ -353,7 +279,6 @@ async fn read_stream_inner(
                     if let Err(e) = emit_accumulated_rows(
                         &mut accumulated_rows,
                         &columns,
-                        &pg_types,
                         &arrow_schema,
                         ctx,
                         &mut state,
@@ -370,27 +295,33 @@ async fn read_stream_inner(
 
                 estimated_bytes += estimated_row_bytes;
 
-                if let Some(col_idx) = cursor_col_idx {
-                    // IMPORTANT: PostgreSQL SERIAL is INT4 (i32), not INT8 (i64).
-                    // tokio-postgres `try_get()` requires exact type matches, so we
-                    // must chain i64 -> i32 fallbacks. The host orchestrator currently
-                    // hardcodes CursorType::Utf8 for incremental state, so the catch-all
-                    // arm is common. Do not remove the i32 fallback or incremental
-                    // tracking can silently stop advancing on SERIAL cursor columns.
-                    if track_cursor_as_int {
+                // ── Cursor extraction ─────────────────────────────────
+                // IMPORTANT: PostgreSQL SERIAL is INT4 (i32), not INT8 (i64).
+                // tokio-postgres `try_get()` requires exact type matches, so we
+                // must chain i64 -> i32 fallbacks. The host orchestrator currently
+                // hardcodes CursorType::Utf8 for incremental state, so the catch-all
+                // arm is common. Do not remove the i32 fallback or incremental
+                // tracking can silently stop advancing on SERIAL cursor columns.
+                if let Some(ref mut t) = tracker {
+                    let col_idx = t.col_idx();
+                    if t.is_int_strategy() {
                         let val = row
                             .try_get::<_, i64>(col_idx)
                             .ok()
                             .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(i64::from));
                         if let Some(val) = val {
-                            MaxCursorValue::update_int(&mut max_cursor_value, val);
+                            t.observe_int(val);
                         }
                     } else {
                         let val = row
                             .try_get::<_, String>(col_idx)
                             .ok()
-                            .or_else(|| row.try_get::<_, i64>(col_idx).ok().map(|n| n.to_string()))
-                            .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(|n| n.to_string()))
+                            .or_else(|| {
+                                row.try_get::<_, i64>(col_idx).ok().map(|n| n.to_string())
+                            })
+                            .or_else(|| {
+                                row.try_get::<_, i32>(col_idx).ok().map(|n| n.to_string())
+                            })
                             .or_else(|| {
                                 row.try_get::<_, NaiveDateTime>(col_idx)
                                     .ok()
@@ -412,7 +343,7 @@ async fn read_stream_inner(
                                     .map(|v| v.to_string())
                             });
                         if let Some(val) = val {
-                            MaxCursorValue::update_text(&mut max_cursor_value, val);
+                            t.observe_text(&val);
                         }
                     }
                 }
@@ -430,7 +361,6 @@ async fn read_stream_inner(
             if let Err(e) = emit_accumulated_rows(
                 &mut accumulated_rows,
                 &columns,
-                &pg_types,
                 &arrow_schema,
                 ctx,
                 &mut state,
@@ -448,6 +378,7 @@ async fn read_stream_inner(
 
     let fetch_secs = fetch_start.elapsed().as_secs_f64();
 
+    // ── 7. Cleanup ────────────────────────────────────────────────────
     let close_query = format!("CLOSE {}", CURSOR_NAME);
     if let Err(e) = client.execute(&close_query, &[]).await {
         ctx.log(
@@ -471,32 +402,39 @@ async fn read_stream_inner(
         return Err(e);
     }
 
-    let checkpoint_count = if let (Some(ci), Some(max_val)) =
-        (stream.cursor_info.as_ref(), max_cursor_value.as_ref())
-    {
-        let max_val = max_val.as_checkpoint_string();
-        let cp = rapidbyte_sdk::protocol::Checkpoint {
-            id: 1,
-            kind: rapidbyte_sdk::protocol::CheckpointKind::Source,
-            stream: stream.stream_name.clone(),
-            cursor_field: Some(ci.cursor_field.clone()),
-            cursor_value: Some(rapidbyte_sdk::protocol::CursorValue::Utf8(max_val.clone())),
-            records_processed: state.total_records,
-            bytes_processed: state.total_bytes,
-        };
-        let _ = ctx.checkpoint(&cp);
-        ctx.log(
-            LogLevel::Info,
-            &format!(
-                "Source checkpoint: stream={} cursor_field={} cursor_value={}",
-                stream.stream_name, ci.cursor_field, max_val
-            ),
-        );
-        1u64
+    // ── 8. Checkpoint ─────────────────────────────────────────────────
+    let checkpoint_count = if let Some(t) = tracker {
+        if let Some(cp) = t.into_checkpoint(
+            &stream.stream_name,
+            state.total_records,
+            state.total_bytes,
+        ) {
+            let cursor_field = cp.cursor_field.as_deref().unwrap_or("");
+            let cursor_value = cp
+                .cursor_value
+                .as_ref()
+                .map(|v| match v {
+                    CursorValue::Utf8(s) => s.clone(),
+                    _ => format!("{v:?}"),
+                })
+                .unwrap_or_default();
+            let _ = ctx.checkpoint(&cp);
+            ctx.log(
+                LogLevel::Info,
+                &format!(
+                    "Source checkpoint: stream={} cursor_field={} cursor_value={}",
+                    stream.stream_name, cursor_field, cursor_value
+                ),
+            );
+            1u64
+        } else {
+            0u64
+        }
     } else {
         0u64
     };
 
+    // ── 9. Summary ────────────────────────────────────────────────────
     ctx.log(
         LogLevel::Info,
         &format!(
@@ -523,28 +461,14 @@ async fn read_stream_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapidbyte_sdk::protocol::ArrowDataType;
 
     #[test]
     fn estimate_row_bytes_matches_expected_mix() {
         let columns = vec![
-            ColumnSchema {
-                name: "id".to_string(),
-                data_type: ArrowDataType::Int64,
-                nullable: false,
-            },
-            ColumnSchema {
-                name: "name".to_string(),
-                data_type: ArrowDataType::Utf8,
-                nullable: true,
-            },
-            ColumnSchema {
-                name: "active".to_string(),
-                data_type: ArrowDataType::Boolean,
-                nullable: false,
-            },
+            Column::new("id", "bigint", false),
+            Column::new("name", "text", true),
+            Column::new("active", "boolean", false),
         ];
-
         // Int64(8)+Utf8(64)+Boolean(1) plus 1-byte null bitmap overhead per column.
         assert_eq!(estimate_row_bytes(&columns), 8 + 64 + 1 + 3);
     }
