@@ -5,6 +5,11 @@ use tokio_postgres::Client;
 
 use rapidbyte_sdk::prelude::*;
 
+/// Build the unqualified staging table name for a stream.
+fn staging_name(stream_name: &str) -> String {
+    format!("{stream_name}__rb_staging")
+}
+
 /// Drop an existing staging table if it exists.
 async fn drop_staging_table(
     ctx: &Context,
@@ -12,11 +17,8 @@ async fn drop_staging_table(
     target_schema: &str,
     stream_name: &str,
 ) -> Result<(), String> {
-    let staging_table = format!(
-        "{}.{}",
-        quote_identifier(target_schema),
-        quote_identifier(&format!("{}__rb_staging", stream_name))
-    );
+    let staging_table =
+        crate::decode::qualified_name(target_schema, &staging_name(stream_name));
     let sql = format!("DROP TABLE IF EXISTS {} CASCADE", staging_table);
     client
         .execute(&sql, &[])
@@ -36,16 +38,9 @@ pub(crate) async fn swap_staging_table(
     target_schema: &str,
     stream_name: &str,
 ) -> Result<(), String> {
-    let target_table = format!(
-        "{}.{}",
-        quote_identifier(target_schema),
-        quote_identifier(stream_name)
-    );
-    let staging_table = format!(
-        "{}.{}",
-        quote_identifier(target_schema),
-        quote_identifier(&format!("{}__rb_staging", stream_name))
-    );
+    let target_table = crate::decode::qualified_name(target_schema, stream_name);
+    let staging_table =
+        crate::decode::qualified_name(target_schema, &staging_name(stream_name));
     let staging_name_only = quote_identifier(stream_name);
 
     client
@@ -91,5 +86,5 @@ pub(crate) async fn prepare_staging(
     stream_name: &str,
 ) -> Result<String, String> {
     drop_staging_table(ctx, client, target_schema, stream_name).await?;
-    Ok(format!("{}__rb_staging", stream_name))
+    Ok(staging_name(stream_name))
 }

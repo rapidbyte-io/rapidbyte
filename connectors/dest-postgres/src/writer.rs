@@ -369,6 +369,19 @@ impl<'a> WriteSession<'a> {
         Ok(())
     }
 
+    /// Build a checkpoint struct from the current session state.
+    fn build_checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            id: self.stats.checkpoint_count + 1,
+            kind: CheckpointKind::Dest,
+            stream: self.stream_name.clone(),
+            cursor_field: None,
+            cursor_value: None,
+            records_processed: self.stats.total_rows,
+            bytes_processed: self.stats.total_bytes,
+        }
+    }
+
     /// Commit and reopen transaction when checkpoint thresholds are reached.
     async fn maybe_checkpoint(&mut self) -> Result<(), String> {
         let cfg = &self.checkpoint_config;
@@ -397,16 +410,7 @@ impl<'a> WriteSession<'a> {
             .await
             .map_err(|e| format!("Checkpoint COMMIT failed: {}", e))?;
 
-        let cp = Checkpoint {
-            id: self.stats.checkpoint_count + 1,
-            kind: CheckpointKind::Dest,
-            stream: self.stream_name.clone(),
-            cursor_field: None,
-            cursor_value: None,
-            records_processed: self.stats.total_rows,
-            bytes_processed: self.stats.total_bytes,
-        };
-        let _ = self.ctx.checkpoint(&cp);
+        let _ = self.ctx.checkpoint(&self.build_checkpoint());
         self.stats.checkpoint_count += 1;
         self.stats.bytes_since_commit = 0;
         self.stats.rows_since_commit = 0;
@@ -449,16 +453,7 @@ impl<'a> WriteSession<'a> {
             .map_err(|e| format!("COMMIT failed: {}", e))?;
         let commit_secs = commit_start.elapsed().as_secs_f64();
 
-        let cp = Checkpoint {
-            id: self.stats.checkpoint_count + 1,
-            kind: CheckpointKind::Dest,
-            stream: self.stream_name.clone(),
-            cursor_field: None,
-            cursor_value: None,
-            records_processed: self.stats.total_rows,
-            bytes_processed: self.stats.total_bytes,
-        };
-        let _ = self.ctx.checkpoint(&cp);
+        let _ = self.ctx.checkpoint(&self.build_checkpoint());
         self.stats.checkpoint_count += 1;
 
         if self.is_replace {
