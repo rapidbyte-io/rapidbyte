@@ -8,7 +8,7 @@ use bytes::Bytes;
 use futures_util::SinkExt;
 use pg_escape::quote_identifier;
 
-use rapidbyte_sdk::host_ffi;
+use rapidbyte_sdk::prelude::*;
 
 use crate::batch::copy_format::format_copy_typed_value;
 use crate::batch::insert::active_column_indices;
@@ -18,6 +18,7 @@ use crate::ddl::ensure_table_and_schema;
 
 /// Write via PostgreSQL COPY protocol and return rows written.
 pub(crate) async fn copy_batch(
+    sdk_ctx: &Context,
     ctx: &mut WriteContext<'_>,
     arrow_schema: &Arc<Schema>,
     batches: &[RecordBatch],
@@ -33,6 +34,7 @@ pub(crate) async fn copy_batch(
     );
 
     ensure_table_and_schema(
+        sdk_ctx,
         ctx.client,
         ctx.target_schema,
         ctx.stream_name,
@@ -48,7 +50,7 @@ pub(crate) async fn copy_batch(
 
     let active_cols = active_column_indices(arrow_schema, ctx.ignored_columns);
     if active_cols.is_empty() {
-        host_ffi::log(1, "dest-postgres: all columns ignored, skipping COPY batch");
+        sdk_ctx.log(LogLevel::Warn, "dest-postgres: all columns ignored, skipping COPY batch");
         return Ok(0);
     }
 
@@ -115,8 +117,8 @@ pub(crate) async fn copy_batch(
 
     let _rows = sink.as_mut().finish().await.map_err(|e| format!("COPY finish failed: {e}"))?;
 
-    host_ffi::log(
-        2,
+    sdk_ctx.log(
+        LogLevel::Info,
         &format!(
             "dest-postgres: COPY wrote {} rows to {}",
             total_rows, qualified_table

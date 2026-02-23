@@ -9,8 +9,8 @@ use std::collections::HashSet;
 use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 
-use rapidbyte_sdk::host_ffi;
-use rapidbyte_sdk::protocol::{SchemaEvolutionPolicy, WriteMode};
+use rapidbyte_sdk::prelude::*;
+use rapidbyte_sdk::protocol::SchemaEvolutionPolicy;
 
 use self::drift::{apply_schema_policy, detect_schema_drift};
 use self::type_map::arrow_to_pg_type;
@@ -19,6 +19,7 @@ pub(crate) use self::staging::{prepare_staging, swap_staging_table};
 
 /// Create the target table if it doesn't exist, based on the Arrow schema.
 async fn ensure_table(
+    ctx: &Context,
     client: &Client,
     qualified_table: &str,
     arrow_schema: &rapidbyte_sdk::arrow::datatypes::Schema,
@@ -53,7 +54,7 @@ async fn ensure_table(
         ddl_parts.join(", ")
     );
 
-    host_ffi::log(3, &format!("dest-postgres: ensuring table: {}", ddl));
+    ctx.log(LogLevel::Debug, &format!("dest-postgres: ensuring table: {}", ddl));
 
     client
         .execute(&ddl, &[])
@@ -65,6 +66,7 @@ async fn ensure_table(
 
 /// Ensure target schema, table, and schema drift handling are complete.
 pub(crate) async fn ensure_table_and_schema(
+    ctx: &Context,
     client: &Client,
     target_schema: &str,
     stream_name: &str,
@@ -95,13 +97,13 @@ pub(crate) async fn ensure_table_and_schema(
         Some(WriteMode::Upsert { primary_key }) => Some(primary_key.as_slice()),
         _ => None,
     };
-    ensure_table(client, &qualified_table, arrow_schema, pk).await?;
+    ensure_table(ctx, client, &qualified_table, arrow_schema, pk).await?;
     created_tables.insert(qualified_table.clone());
 
     if let Some(policy) = schema_policy {
         if let Some(drift) = detect_schema_drift(client, target_schema, stream_name, arrow_schema).await? {
-            host_ffi::log(
-                2,
+            ctx.log(
+                LogLevel::Info,
                 &format!(
                     "dest-postgres: schema drift detected for {}: {} new, {} removed, {} type changes, {} nullability changes",
                     qualified_table,
@@ -112,6 +114,7 @@ pub(crate) async fn ensure_table_and_schema(
                 ),
             );
             apply_schema_policy(
+                ctx,
                 client,
                 &qualified_table,
                 &drift,

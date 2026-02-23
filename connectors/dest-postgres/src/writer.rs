@@ -12,11 +12,8 @@ use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
 
-use rapidbyte_sdk::errors::{CommitState, ConnectorError};
-use rapidbyte_sdk::host_ffi;
-use rapidbyte_sdk::protocol::{
-    Metric, MetricValue, SchemaEvolutionPolicy, StreamContext, WriteMode, WritePerf, WriteSummary,
-};
+use rapidbyte_sdk::prelude::*;
+use rapidbyte_sdk::protocol::SchemaEvolutionPolicy;
 
 use crate::batch::{write_batch, WriteContext};
 use crate::config::LoadMethod;
@@ -25,7 +22,8 @@ use crate::ddl::{prepare_staging, swap_staging_table};
 /// Entry point for writing a single stream.
 pub async fn write_stream(
     config: &crate::config::Config,
-    ctx: &StreamContext,
+    ctx: &Context,
+    stream: &StreamContext,
 ) -> Result<WriteSummary, ConnectorError> {
     let connect_start = Instant::now();
     let client = crate::client::connect(config)
@@ -34,17 +32,18 @@ pub async fn write_stream(
     let connect_secs = connect_start.elapsed().as_secs_f64();
 
     let mut session = WriteSession::begin(
+        ctx,
         &client,
         &config.schema,
         SessionConfig {
-            stream_name: ctx.stream_name.clone(),
-            write_mode: ctx.write_mode.clone(),
+            stream_name: stream.stream_name.clone(),
+            write_mode: stream.write_mode.clone(),
             load_method: config.load_method,
-            schema_policy: ctx.policies.schema_evolution,
+            schema_policy: stream.policies.schema_evolution,
             checkpoint: CheckpointConfig {
-                interval_bytes: ctx.limits.checkpoint_interval_bytes,
-                interval_rows: ctx.limits.checkpoint_interval_rows,
-                interval_seconds: ctx.limits.checkpoint_interval_seconds,
+                interval_bytes: stream.limits.checkpoint_interval_bytes,
+                interval_rows: stream.limits.checkpoint_interval_rows,
+                interval_seconds: stream.limits.checkpoint_interval_seconds,
             },
             copy_flush_bytes: config.copy_flush_bytes,
         },
@@ -55,7 +54,7 @@ pub async fn write_stream(
     let mut loop_error: Option<String> = None;
 
     loop {
-        match host_ffi::next_batch(ctx.limits.max_batch_bytes) {
+        match ctx.next_batch(stream.limits.max_batch_bytes) {
             Ok(None) => break,
             Ok(Some((schema, batches))) => {
                 if let Err(e) = session.process_batch(&schema, &batches).await {
@@ -137,6 +136,7 @@ struct WriteStats {
 
 /// Manages lifecycle of writing a single stream to PostgreSQL.
 pub struct WriteSession<'a> {
+    ctx: &'a Context,
     client: &'a Client,
     target_schema: &'a str,
 
@@ -172,6 +172,7 @@ pub struct WriteSession<'a> {
 impl<'a> WriteSession<'a> {
     /// Open a write session and BEGIN the first transaction.
     pub async fn begin(
+        ctx: &'a Context,
         client: &'a Client,
         target_schema: &'a str,
         config: SessionConfig,
@@ -180,8 +181,8 @@ impl<'a> WriteSession<'a> {
         let write_mode = config.write_mode;
 
         if let Err(e) = ensure_watermarks_table(client, target_schema).await {
-            host_ffi::log(
-                1,
+            ctx.log(
+                LogLevel::Warn,
                 &format!(
                     "dest-postgres: watermarks table creation failed (non-fatal): {}",
                     e
@@ -191,11 +192,11 @@ impl<'a> WriteSession<'a> {
 
         let is_replace = matches!(write_mode, Some(WriteMode::Replace));
         let (effective_stream, effective_write_mode) = if is_replace {
-            let staging_name = prepare_staging(client, target_schema, stream_name)
+            let staging_name = prepare_staging(ctx, client, target_schema, stream_name)
                 .await
                 .map_err(|e| format!("{:#}", e))?;
-            host_ffi::log(
-                2,
+            ctx.log(
+                LogLevel::Info,
                 &format!(
                     "dest-postgres: Replace mode — writing to staging table '{}'",
                     staging_name
@@ -210,8 +211,8 @@ impl<'a> WriteSession<'a> {
             match get_watermark(client, target_schema, stream_name).await {
                 Ok(w) => {
                     if w > 0 {
-                        host_ffi::log(
-                            2,
+                        ctx.log(
+                            LogLevel::Info,
                             &format!(
                                 "dest-postgres: resuming from watermark — {} records already committed for stream '{}'",
                                 w, stream_name
@@ -221,8 +222,8 @@ impl<'a> WriteSession<'a> {
                     w
                 }
                 Err(e) => {
-                    host_ffi::log(
-                        1,
+                    ctx.log(
+                        LogLevel::Warn,
                         &format!(
                             "dest-postgres: watermark query failed (starting fresh): {}",
                             e
@@ -242,6 +243,7 @@ impl<'a> WriteSession<'a> {
 
         let now = Instant::now();
         Ok(WriteSession {
+            ctx,
             client,
             target_schema,
             stream_name: config.stream_name,
@@ -285,8 +287,8 @@ impl<'a> WriteSession<'a> {
             let batch_rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
             self.cumulative_records += batch_rows;
             if self.cumulative_records <= self.watermark_records {
-                host_ffi::log(
-                    3,
+                self.ctx.log(
+                    LogLevel::Debug,
                     &format!(
                         "dest-postgres: skipping batch ({}/{} records already committed)",
                         self.cumulative_records, self.watermark_records
@@ -294,8 +296,8 @@ impl<'a> WriteSession<'a> {
                 );
                 return Ok(());
             }
-            host_ffi::log(
-                2,
+            self.ctx.log(
+                LogLevel::Info,
                 &format!(
                     "dest-postgres: resuming writes at cumulative record {}",
                     self.cumulative_records
@@ -316,7 +318,7 @@ impl<'a> WriteSession<'a> {
             copy_flush_bytes: self.copy_flush_bytes,
         };
 
-        let result = write_batch(&mut write_ctx, schema, batches).await?;
+        let result = write_batch(self.ctx, &mut write_ctx, schema, batches).await?;
 
         self.stats.total_rows += result.rows_written;
         self.stats.total_failed += result.rows_failed;
@@ -325,24 +327,16 @@ impl<'a> WriteSession<'a> {
         self.stats.rows_since_commit += result.rows_written;
         self.stats.batches_written += 1;
 
-        let _ = host_ffi::metric(
-            "dest-postgres",
-            &self.stream_name,
-            &Metric {
-                name: "records_written".to_string(),
-                value: MetricValue::Counter(self.stats.total_rows),
-                labels: vec![],
-            },
-        );
-        let _ = host_ffi::metric(
-            "dest-postgres",
-            &self.stream_name,
-            &Metric {
-                name: "bytes_written".to_string(),
-                value: MetricValue::Counter(self.stats.total_bytes),
-                labels: vec![],
-            },
-        );
+        let _ = self.ctx.metric(&Metric {
+            name: "records_written".to_string(),
+            value: MetricValue::Counter(self.stats.total_rows),
+            labels: vec![],
+        });
+        let _ = self.ctx.metric(&Metric {
+            name: "bytes_written".to_string(),
+            value: MetricValue::Counter(self.stats.total_bytes),
+            labels: vec![],
+        });
 
         self.maybe_checkpoint().await?;
 
@@ -377,23 +371,23 @@ impl<'a> WriteSession<'a> {
             .await
             .map_err(|e| format!("Checkpoint COMMIT failed: {}", e))?;
 
-        let cp = rapidbyte_sdk::protocol::Checkpoint {
+        let cp = Checkpoint {
             id: self.stats.checkpoint_count + 1,
-            kind: rapidbyte_sdk::protocol::CheckpointKind::Dest,
+            kind: CheckpointKind::Dest,
             stream: self.stream_name.clone(),
             cursor_field: None,
             cursor_value: None,
             records_processed: self.stats.total_rows,
             bytes_processed: self.stats.total_bytes,
         };
-        let _ = host_ffi::checkpoint("dest-postgres", &self.stream_name, &cp);
+        let _ = self.ctx.checkpoint(&cp);
         self.stats.checkpoint_count += 1;
         self.stats.bytes_since_commit = 0;
         self.stats.rows_since_commit = 0;
         self.last_checkpoint_time = Instant::now();
 
-        host_ffi::log(
-            3,
+        self.ctx.log(
+            LogLevel::Debug,
             &format!(
                 "dest-postgres: checkpoint {} — committed {} rows, {} bytes so far",
                 self.stats.checkpoint_count, self.stats.total_rows, self.stats.total_bytes
@@ -429,28 +423,28 @@ impl<'a> WriteSession<'a> {
             .map_err(|e| format!("COMMIT failed: {}", e))?;
         let commit_secs = commit_start.elapsed().as_secs_f64();
 
-        let cp = rapidbyte_sdk::protocol::Checkpoint {
+        let cp = Checkpoint {
             id: self.stats.checkpoint_count + 1,
-            kind: rapidbyte_sdk::protocol::CheckpointKind::Dest,
+            kind: CheckpointKind::Dest,
             stream: self.stream_name.clone(),
             cursor_field: None,
             cursor_value: None,
             records_processed: self.stats.total_rows,
             bytes_processed: self.stats.total_bytes,
         };
-        let _ = host_ffi::checkpoint("dest-postgres", &self.stream_name, &cp);
+        let _ = self.ctx.checkpoint(&cp);
         self.stats.checkpoint_count += 1;
 
         if self.is_replace {
-            swap_staging_table(self.client, self.target_schema, &self.stream_name)
+            swap_staging_table(self.ctx, self.client, self.target_schema, &self.stream_name)
                 .await
                 .map_err(|e| format!("{:#}", e))?;
         }
 
         let _ = clear_watermark(self.client, self.target_schema, &self.stream_name).await;
 
-        host_ffi::log(
-            2,
+        self.ctx.log(
+            LogLevel::Info,
             &format!(
                 "dest-postgres: flushed {} rows in {} batches via {} (flush={:.3}s commit={:.3}s)",
                 self.stats.total_rows,

@@ -16,7 +16,8 @@ use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
 
-use rapidbyte_sdk::protocol::{SchemaEvolutionPolicy, WriteMode};
+use rapidbyte_sdk::prelude::*;
+use rapidbyte_sdk::protocol::SchemaEvolutionPolicy;
 
 use crate::config::LoadMethod;
 
@@ -56,6 +57,7 @@ pub(crate) struct WriteContext<'a> {
 /// is COPY but write mode is Upsert, dispatches to INSERT because COPY does not
 /// support `ON CONFLICT`.
 pub(crate) async fn write_batch(
+    sdk_ctx: &Context,
     ctx: &mut WriteContext<'_>,
     arrow_schema: &Arc<Schema>,
     batches: &[RecordBatch],
@@ -71,9 +73,9 @@ pub(crate) async fn write_batch(
         ctx.load_method == LoadMethod::Copy && !matches!(ctx.write_mode, Some(WriteMode::Upsert { .. }));
 
     let (result, method_name) = if use_copy {
-        (copy_batch(ctx, arrow_schema, batches).await, "COPY")
+        (copy_batch(sdk_ctx, ctx, arrow_schema, batches).await, "COPY")
     } else {
-        (insert_batch(ctx, arrow_schema, batches).await, "INSERT")
+        (insert_batch(sdk_ctx, ctx, arrow_schema, batches).await, "INSERT")
     };
 
     let rows_written = result.map_err(|e| {

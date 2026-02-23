@@ -3,10 +3,11 @@
 use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 
-use rapidbyte_sdk::host_ffi;
+use rapidbyte_sdk::prelude::*;
 
 /// Drop an existing staging table if it exists.
 async fn drop_staging_table(
+    ctx: &Context,
     client: &Client,
     target_schema: &str,
     stream_name: &str,
@@ -21,8 +22,8 @@ async fn drop_staging_table(
         .execute(&sql, &[])
         .await
         .map_err(|e| format!("DROP staging table failed for {}: {e}", staging_table))?;
-    host_ffi::log(
-        3,
+    ctx.log(
+        LogLevel::Debug,
         &format!("dest-postgres: dropped staging table {}", staging_table),
     );
     Ok(())
@@ -30,6 +31,7 @@ async fn drop_staging_table(
 
 /// Atomically swap a staging table into the target position.
 pub(crate) async fn swap_staging_table(
+    ctx: &Context,
     client: &Client,
     target_schema: &str,
     stream_name: &str,
@@ -71,8 +73,8 @@ pub(crate) async fn swap_staging_table(
         .await
         .map_err(|e| format!("Swap COMMIT failed: {e}"))?;
 
-    host_ffi::log(
-        2,
+    ctx.log(
+        LogLevel::Info,
         &format!(
             "dest-postgres: atomic swap {} -> {}",
             staging_table, target_table
@@ -83,10 +85,11 @@ pub(crate) async fn swap_staging_table(
 
 /// Prepare a fresh staging table for Replace mode.
 pub(crate) async fn prepare_staging(
+    ctx: &Context,
     client: &Client,
     target_schema: &str,
     stream_name: &str,
 ) -> Result<String, String> {
-    drop_staging_table(client, target_schema, stream_name).await?;
+    drop_staging_table(ctx, client, target_schema, stream_name).await?;
     Ok(format!("{}__rb_staging", stream_name))
 }

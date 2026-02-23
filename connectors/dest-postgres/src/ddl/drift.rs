@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 
-use rapidbyte_sdk::host_ffi;
+use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::protocol::{
     ColumnPolicy, NullabilityPolicy, SchemaEvolutionPolicy, TypeChangePolicy,
 };
@@ -143,6 +143,7 @@ pub(crate) async fn detect_schema_drift(
 
 /// Apply schema evolution policy to detected drift, executing DDL as needed.
 pub(crate) async fn apply_schema_policy(
+    ctx: &Context,
     client: &Client,
     qualified_table: &str,
     drift: &SchemaDrift,
@@ -170,15 +171,15 @@ pub(crate) async fn apply_schema_policy(
                     .execute(&sql, &[])
                     .await
                     .map_err(|e| format!("ALTER TABLE ADD COLUMN '{}' failed: {e}", col_name))?;
-                host_ffi::log(
-                    2,
+                ctx.log(
+                    LogLevel::Info,
                     &format!("dest-postgres: added column '{}' {}", col_name, pg_type),
                 );
             }
             ColumnPolicy::Ignore => {
                 ignored_columns.insert(col_name.clone());
-                host_ffi::log(
-                    2,
+                ctx.log(
+                    LogLevel::Info,
                     &format!(
                         "dest-postgres: ignoring new column '{}' per schema policy (excluded from writes)",
                         col_name
@@ -198,8 +199,8 @@ pub(crate) async fn apply_schema_policy(
                 ));
             }
             ColumnPolicy::Ignore | ColumnPolicy::Add => {
-                host_ffi::log(
-                    2,
+                ctx.log(
+                    LogLevel::Info,
                     &format!(
                         "dest-postgres: column '{}' removed from source, keeping in table per policy",
                         col_name
@@ -234,8 +235,8 @@ pub(crate) async fn apply_schema_policy(
                         col_name, new_type
                     )
                 })?;
-                host_ffi::log(
-                    2,
+                ctx.log(
+                    LogLevel::Info,
                     &format!(
                         "dest-postgres: coerced '{}' from {} to {}",
                         col_name, old_type, new_type
@@ -244,8 +245,8 @@ pub(crate) async fn apply_schema_policy(
             }
             TypeChangePolicy::Null => {
                 type_null_columns.insert(col_name.clone());
-                host_ffi::log(
-                    2,
+                ctx.log(
+                    LogLevel::Info,
                     &format!(
                         "dest-postgres: type change for '{}' ({} -> {}), policy=Null — values will be NULL",
                         col_name, old_type, new_type
@@ -273,14 +274,14 @@ pub(crate) async fn apply_schema_policy(
                     );
                     match client.execute(&sql, &[]).await {
                         Ok(_) => {
-                            host_ffi::log(
-                                2,
+                            ctx.log(
+                                LogLevel::Info,
                                 &format!("dest-postgres: SET NOT NULL on '{}'", col_name),
                             );
                         }
                         Err(e) => {
-                            host_ffi::log(
-                                1,
+                            ctx.log(
+                                LogLevel::Warn,
                                 &format!(
                                     "dest-postgres: SET NOT NULL on '{}' failed (existing NULLs?): {}",
                                     col_name, e
@@ -299,8 +300,8 @@ pub(crate) async fn apply_schema_policy(
                         .map_err(|e| {
                             format!("ALTER TABLE DROP NOT NULL on '{}' failed: {e}", col_name)
                         })?;
-                    host_ffi::log(
-                        2,
+                    ctx.log(
+                        LogLevel::Info,
                         &format!("dest-postgres: DROP NOT NULL on '{}'", col_name),
                     );
                 }

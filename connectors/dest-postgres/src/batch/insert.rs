@@ -9,8 +9,7 @@ use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use pg_escape::quote_identifier;
 use tokio_postgres::types::ToSql;
 
-use rapidbyte_sdk::host_ffi;
-use rapidbyte_sdk::protocol::WriteMode;
+use rapidbyte_sdk::prelude::*;
 
 use crate::batch::typed_col::{downcast_columns, sql_param_value, SqlParamValue};
 use crate::batch::{WriteContext, INSERT_CHUNK_SIZE};
@@ -66,6 +65,7 @@ pub(crate) fn build_upsert_clause(
 
 /// Write via multi-value INSERT and return rows written.
 pub(crate) async fn insert_batch(
+    sdk_ctx: &Context,
     ctx: &mut WriteContext<'_>,
     arrow_schema: &Arc<Schema>,
     batches: &[RecordBatch],
@@ -81,6 +81,7 @@ pub(crate) async fn insert_batch(
     );
 
     ensure_table_and_schema(
+        sdk_ctx,
         ctx.client,
         ctx.target_schema,
         ctx.stream_name,
@@ -96,7 +97,7 @@ pub(crate) async fn insert_batch(
 
     let active_cols = active_column_indices(arrow_schema, ctx.ignored_columns);
     if active_cols.is_empty() {
-        host_ffi::log(1, "dest-postgres: all columns ignored, skipping batch");
+        sdk_ctx.log(LogLevel::Warn, "dest-postgres: all columns ignored, skipping batch");
         return Ok(0);
     }
     let upsert_clause = build_upsert_clause(ctx.write_mode, arrow_schema, &active_cols)?;
@@ -171,8 +172,8 @@ pub(crate) async fn insert_batch(
         }
     }
 
-    host_ffi::log(
-        2,
+    sdk_ctx.log(
+        LogLevel::Info,
         &format!(
             "dest-postgres: wrote {} rows to {}",
             total_rows, qualified_table
