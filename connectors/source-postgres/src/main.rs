@@ -6,6 +6,7 @@
 mod cdc;
 mod client;
 pub mod config;
+mod cursor;
 mod discovery;
 mod metrics;
 mod reader;
