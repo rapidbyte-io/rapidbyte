@@ -250,11 +250,11 @@ target = "wasm32-wasip2"
 fn gen_build_rs(name: &str, display_name: &str, role: Role, service_name: &str) -> String {
     match role {
         Role::Source => format!(
-            r#"use rapidbyte_sdk::build::ManifestEmitter;
+            r#"use rapidbyte_sdk::build::ManifestBuilder;
 use rapidbyte_sdk::protocol::SyncMode;
 
 fn main() {{
-    ManifestEmitter::source("rapidbyte/{name}")
+    ManifestBuilder::source("rapidbyte/{name}")
         .name("{display_name}")
         .description("Source connector for {service_name}")
         .sync_modes(&[SyncMode::FullRefresh])
@@ -264,11 +264,11 @@ fn main() {{
 "#
         ),
         Role::Destination => format!(
-            r#"use rapidbyte_sdk::build::ManifestEmitter;
+            r#"use rapidbyte_sdk::build::ManifestBuilder;
 use rapidbyte_sdk::protocol::WriteMode;
 
 fn main() {{
-    ManifestEmitter::destination("rapidbyte/{name}")
+    ManifestBuilder::destination("rapidbyte/{name}")
         .name("{display_name}")
         .description("Destination connector for {service_name}")
         .write_modes(&[WriteMode::Append])

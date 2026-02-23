@@ -27,7 +27,7 @@ pub use wit_bindgen;
 /// Embed the manifest JSON as a `rapidbyte_manifest_v1` custom section.
 ///
 /// Call this once at crate root (e.g., `src/main.rs`) after `connector_main!`.
-/// Requires a `build.rs` that calls `ManifestEmitter::emit()`.
+/// Requires a `build.rs` that calls `ManifestBuilder::emit()`.
 #[macro_export]
 macro_rules! embed_manifest {
     () => {

@@ -1,9 +1,9 @@
-use rapidbyte_sdk::build::ManifestEmitter;
+use rapidbyte_sdk::build::ManifestBuilder;
 use rapidbyte_sdk::manifest::DestinationFeature;
 use rapidbyte_sdk::protocol::WriteMode;
 
 fn main() {
-    ManifestEmitter::destination("rapidbyte/dest-postgres")
+    ManifestBuilder::destination("rapidbyte/dest-postgres")
         .name("PostgreSQL Destination")
         .description("Writes data to PostgreSQL using INSERT or COPY")
         .write_modes(&[WriteMode::Append, WriteMode::Replace])

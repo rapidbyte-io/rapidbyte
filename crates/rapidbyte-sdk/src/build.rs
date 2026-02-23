@@ -11,23 +11,23 @@ use crate::protocol::{ProtocolVersion, SyncMode, WriteMode};
 /// # Example (source connector `build.rs`)
 ///
 /// ```ignore
-/// use rapidbyte_sdk::build::ManifestEmitter;
+/// use rapidbyte_sdk::build::ManifestBuilder;
 /// use rapidbyte_sdk::protocol::SyncMode;
 ///
 /// fn main() {
-///     ManifestEmitter::source("rapidbyte/source-postgres")
+///     ManifestBuilder::source("rapidbyte/source-postgres")
 ///         .name("PostgreSQL Source")
 ///         .sync_modes(&[SyncMode::FullRefresh, SyncMode::Incremental])
 ///         .allow_runtime_network()
 ///         .emit();
 /// }
 /// ```
-pub struct ManifestEmitter {
+pub struct ManifestBuilder {
     manifest: ConnectorManifest,
     rerun_files: Vec<String>,
 }
 
-impl ManifestEmitter {
+impl ManifestBuilder {
     /// Start building a source connector manifest.
     pub fn source(id: impl Into<String>) -> Self {
         Self {
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn test_source_emitter_constructs_manifest() {
-        let emitter = ManifestEmitter::source("test/source")
+        let emitter = ManifestBuilder::source("test/source")
             .name("Test Source")
             .version("1.0.0")
             .description("A test source")
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn test_destination_emitter_constructs_manifest() {
-        let emitter = ManifestEmitter::destination("test/dest")
+        let emitter = ManifestBuilder::destination("test/dest")
             .name("Test Dest")
             .version("2.0.0")
             .write_modes(&[WriteMode::Append, WriteMode::Replace])
@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn test_permissions_builder() {
-        let emitter = ManifestEmitter::source("test/source")
+        let emitter = ManifestBuilder::source("test/source")
             .name("Test")
             .version("1.0.0")
             .sync_modes(&[SyncMode::FullRefresh])
@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_transform_emitter() {
-        let emitter = ManifestEmitter::transform("test/transform")
+        let emitter = ManifestBuilder::transform("test/transform")
             .name("Test Transform")
             .version("1.0.0");
 
@@ -338,7 +338,7 @@ mod tests {
 
     #[test]
     fn test_limits_builder() {
-        let emitter = ManifestEmitter::source("test/source")
+        let emitter = ManifestBuilder::source("test/source")
             .name("Test")
             .version("1.0.0")
             .sync_modes(&[SyncMode::FullRefresh])

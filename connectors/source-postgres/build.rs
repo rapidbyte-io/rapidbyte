@@ -1,8 +1,8 @@
-use rapidbyte_sdk::build::ManifestEmitter;
+use rapidbyte_sdk::build::ManifestBuilder;
 use rapidbyte_sdk::protocol::SyncMode;
 
 fn main() {
-    ManifestEmitter::source("rapidbyte/source-postgres")
+    ManifestBuilder::source("rapidbyte/source-postgres")
         .name("PostgreSQL Source")
         .description("Reads data from PostgreSQL tables using streaming queries")
         .sync_modes(&[SyncMode::FullRefresh, SyncMode::Incremental])
