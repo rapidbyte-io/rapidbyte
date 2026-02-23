@@ -12,7 +12,7 @@ use rapidbyte_sdk::arrow::datatypes::{DataType, Field, Schema};
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
 
-use rapidbyte_sdk::host_ffi;
+use rapidbyte_sdk::context::{Context, LogLevel};
 use rapidbyte_sdk::protocol::{
     Checkpoint, CheckpointKind, ColumnSchema, CursorValue, ReadSummary, StreamContext,
 };
@@ -60,20 +60,22 @@ struct CdcChange {
 /// Read CDC changes from a logical replication slot using `pg_logical_slot_get_changes()`.
 pub async fn read_cdc_changes(
     client: &Client,
-    ctx: &StreamContext,
+    ctx: &Context,
+    stream: &StreamContext,
     config: &Config,
     connect_secs: f64,
 ) -> Result<ReadSummary, String> {
-    read_cdc_inner(client, ctx, config, connect_secs).await
+    read_cdc_inner(client, ctx, stream, config, connect_secs).await
 }
 
 async fn read_cdc_inner(
     client: &Client,
-    ctx: &StreamContext,
+    ctx: &Context,
+    stream: &StreamContext,
     config: &Config,
     connect_secs: f64,
 ) -> Result<ReadSummary, String> {
-    host_ffi::log(2, &format!("CDC reading stream: {}", ctx.stream_name));
+    ctx.log(LogLevel::Info, &format!("CDC reading stream: {}", stream.stream_name));
 
     let query_start = Instant::now();
 
@@ -81,10 +83,10 @@ async fn read_cdc_inner(
     let slot_name = config
         .replication_slot
         .clone()
-        .unwrap_or_else(|| format!("{}{}", SLOT_PREFIX, ctx.stream_name));
+        .unwrap_or_else(|| format!("{}{}", SLOT_PREFIX, stream.stream_name));
 
     // 2. Ensure replication slot exists (idempotent)
-    ensure_replication_slot(client, &slot_name).await?;
+    ensure_replication_slot(client, ctx, &slot_name).await?;
 
     // 3. Get table schema for Arrow construction
     let schema_query = "SELECT column_name, data_type, is_nullable \
@@ -93,9 +95,9 @@ async fn read_cdc_inner(
         ORDER BY ordinal_position";
 
     let schema_rows = client
-        .query(schema_query, &[&ctx.stream_name])
+        .query(schema_query, &[&stream.stream_name])
         .await
-        .map_err(|e| format!("Schema query failed for {}: {e}", ctx.stream_name))?;
+        .map_err(|e| format!("Schema query failed for {}: {e}", stream.stream_name))?;
 
     let table_columns: Vec<ColumnSchema> = schema_rows
         .iter()
@@ -112,7 +114,7 @@ async fn read_cdc_inner(
         .collect();
 
     if table_columns.is_empty() {
-        return Err(format!("Table '{}' not found or has no columns", ctx.stream_name));
+        return Err(format!("Table '{}' not found or has no columns", stream.stream_name));
     }
 
     // Build Arrow schema: table columns + _rb_op metadata column
@@ -137,7 +139,7 @@ async fn read_cdc_inner(
     let mut max_lsn: Option<String> = None;
 
     // 5. Parse changes, filter to our table, accumulate into batches
-    let target_table = format!("public.{}", ctx.stream_name);
+    let target_table = format!("public.{}", stream.stream_name);
     let mut accumulated_changes: Vec<CdcChange> = Vec::new();
 
     for row in &change_rows {
@@ -154,7 +156,7 @@ async fn read_cdc_inner(
 
         // Parse change line; skip BEGIN/COMMIT/non-matching tables
         if let Some(change) = parse_change_line(&data) {
-            if change.table == target_table || change.table == ctx.stream_name {
+            if change.table == target_table || change.table == stream.stream_name {
                 accumulated_changes.push(change);
             }
         }
@@ -169,10 +171,10 @@ async fn read_cdc_inner(
             total_bytes += batch.get_array_memory_size() as u64;
             batches_emitted += 1;
 
-            host_ffi::emit_batch(&batch)
+            ctx.emit_batch(&batch)
                 .map_err(|e| format!("emit_batch failed: {}", e.message))?;
 
-            emit_read_metrics(&ctx.stream_name, total_records, total_bytes);
+            emit_read_metrics(ctx, total_records, total_bytes);
             accumulated_changes.clear();
         }
     }
@@ -187,10 +189,10 @@ async fn read_cdc_inner(
         total_bytes += batch.get_array_memory_size() as u64;
         batches_emitted += 1;
 
-        host_ffi::emit_batch(&batch)
+        ctx.emit_batch(&batch)
             .map_err(|e| format!("emit_batch failed: {}", e.message))?;
 
-        emit_read_metrics(&ctx.stream_name, total_records, total_bytes);
+        emit_read_metrics(ctx, total_records, total_bytes);
     }
 
     let fetch_secs = fetch_start.elapsed().as_secs_f64();
@@ -200,37 +202,37 @@ async fn read_cdc_inner(
         let cp = Checkpoint {
             id: 1,
             kind: CheckpointKind::Source,
-            stream: ctx.stream_name.clone(),
+            stream: stream.stream_name.clone(),
             cursor_field: Some("lsn".to_string()),
             cursor_value: Some(CursorValue::Lsn(lsn.clone())),
             records_processed: total_records,
             bytes_processed: total_bytes,
         };
         // CDC uses get_changes (destructive) so checkpoint MUST succeed to avoid data loss.
-        host_ffi::checkpoint("source-postgres", &ctx.stream_name, &cp).map_err(|e| {
+        ctx.checkpoint(&cp).map_err(|e| {
             format!(
                 "CDC checkpoint failed (WAL already consumed): {}",
                 e.message
             )
         })?;
-        host_ffi::log(
-            2,
-            &format!("CDC checkpoint: stream={} lsn={}", ctx.stream_name, lsn),
+        ctx.log(
+            LogLevel::Info,
+            &format!("CDC checkpoint: stream={} lsn={}", stream.stream_name, lsn),
         );
         1u64
     } else {
-        host_ffi::log(
-            2,
-            &format!("CDC: no new changes for stream '{}'", ctx.stream_name),
+        ctx.log(
+            LogLevel::Info,
+            &format!("CDC: no new changes for stream '{}'", stream.stream_name),
         );
         0u64
     };
 
-    host_ffi::log(
-        2,
+    ctx.log(
+        LogLevel::Info,
         &format!(
             "CDC stream '{}' complete: {} records, {} bytes, {} batches",
-            ctx.stream_name, total_records, total_bytes, batches_emitted
+            stream.stream_name, total_records, total_bytes, batches_emitted
         ),
     );
 
@@ -251,9 +253,9 @@ async fn read_cdc_inner(
 
 /// Ensure the logical replication slot exists, creating it if necessary.
 /// Uses try-create to avoid TOCTOU race between check and create.
-async fn ensure_replication_slot(client: &Client, slot_name: &str) -> Result<(), String> {
-    host_ffi::log(
-        3,
+async fn ensure_replication_slot(client: &Client, ctx: &Context, slot_name: &str) -> Result<(), String> {
+    ctx.log(
+        LogLevel::Debug,
         &format!("Ensuring replication slot '{}' exists", slot_name),
     );
 
@@ -267,8 +269,8 @@ async fn ensure_replication_slot(client: &Client, slot_name: &str) -> Result<(),
 
     match result {
         Ok(_) => {
-            host_ffi::log(
-                2,
+            ctx.log(
+                LogLevel::Info,
                 &format!(
                     "Created replication slot '{}' with test_decoding",
                     slot_name
@@ -283,8 +285,8 @@ async fn ensure_replication_slot(client: &Client, slot_name: &str) -> Result<(),
                 .unwrap_or(false);
 
             if is_duplicate {
-                host_ffi::log(
-                    3,
+                ctx.log(
+                    LogLevel::Debug,
                     &format!("Replication slot '{}' already exists", slot_name),
                 );
             } else {

@@ -9,11 +9,11 @@ mod query;
 use std::sync::Arc;
 use std::time::Instant;
 
-use rapidbyte_sdk::arrow::datatypes::Schema;
 use chrono::NaiveDateTime;
 use tokio_postgres::Client;
 
-use rapidbyte_sdk::host_ffi;
+use rapidbyte_sdk::arrow::datatypes::Schema;
+use rapidbyte_sdk::context::{Context, LogLevel};
 use rapidbyte_sdk::protocol::{
     ColumnSchema, CursorType, DataErrorPolicy, ReadSummary, StreamContext, SyncMode,
     DEFAULT_MAX_BATCH_BYTES, DEFAULT_MAX_RECORD_BYTES,
@@ -103,7 +103,7 @@ fn emit_accumulated_rows(
     columns: &[ColumnSchema],
     pg_types: &[String],
     schema: &Arc<Schema>,
-    stream_name: &str,
+    ctx: &Context,
     state: &mut EmitState,
     estimated_bytes: &mut usize,
 ) -> Result<(), String> {
@@ -115,8 +115,8 @@ fn emit_accumulated_rows(
     state.total_bytes += batch.get_array_memory_size() as u64;
     state.batches_emitted += 1;
 
-    host_ffi::emit_batch(&batch).map_err(|e| format!("emit_batch failed: {}", e.message))?;
-    emit_read_metrics(stream_name, state.total_records, state.total_bytes);
+    ctx.emit_batch(&batch).map_err(|e| format!("emit_batch failed: {}", e.message))?;
+    emit_read_metrics(ctx, state.total_records, state.total_bytes);
 
     rows.clear();
     *estimated_bytes = BATCH_OVERHEAD_BYTES;
@@ -126,18 +126,20 @@ fn emit_accumulated_rows(
 /// Read a single stream using server-side cursors.
 pub async fn read_stream(
     client: &Client,
-    ctx: &StreamContext,
+    ctx: &Context,
+    stream: &StreamContext,
     connect_secs: f64,
 ) -> Result<ReadSummary, String> {
-    read_stream_inner(client, ctx, connect_secs).await
+    read_stream_inner(client, ctx, stream, connect_secs).await
 }
 
 async fn read_stream_inner(
     client: &Client,
-    ctx: &StreamContext,
+    ctx: &Context,
+    stream: &StreamContext,
     connect_secs: f64,
 ) -> Result<ReadSummary, String> {
-    host_ffi::log(2, &format!("Reading stream: {}", ctx.stream_name));
+    ctx.log(LogLevel::Info, &format!("Reading stream: {}", stream.stream_name));
 
     let query_start = Instant::now();
 
@@ -147,9 +149,9 @@ async fn read_stream_inner(
         ORDER BY ordinal_position";
 
     let schema_rows = client
-        .query(schema_query, &[&ctx.stream_name])
+        .query(schema_query, &[&stream.stream_name])
         .await
-        .map_err(|e| format!("Schema query failed for {}: {e}", ctx.stream_name))?;
+        .map_err(|e| format!("Schema query failed for {}: {e}", stream.stream_name))?;
 
     let all_columns: Vec<ColumnSchema> = schema_rows
         .iter()
@@ -166,7 +168,7 @@ async fn read_stream_inner(
         .collect();
 
     if all_columns.is_empty() {
-        return Err(format!("Table '{}' not found or has no columns", ctx.stream_name));
+        return Err(format!("Table '{}' not found or has no columns", stream.stream_name));
     }
 
     // Build parallel pg_types vector for json/jsonb extraction in Arrow encoder.
@@ -177,7 +179,7 @@ async fn read_stream_inner(
 
     // Apply projection pushdown: filter to selected columns if specified.
     // Column order follows table ordinal position, not user-specified order.
-    let (columns, pg_types): (Vec<ColumnSchema>, Vec<String>) = match &ctx.selected_columns {
+    let (columns, pg_types): (Vec<ColumnSchema>, Vec<String>) = match &stream.selected_columns {
         Some(selected) if !selected.is_empty() => {
             let unknown: Vec<&str> = selected
                 .iter()
@@ -188,7 +190,7 @@ async fn read_stream_inner(
                 return Err(format!(
                     "Selected columns {:?} not found in table '{}'",
                     unknown,
-                    ctx.stream_name
+                    stream.stream_name
                 ));
             }
 
@@ -201,15 +203,15 @@ async fn read_stream_inner(
                 return Err(format!(
                     "None of the selected columns {:?} found in table '{}'",
                     selected,
-                    ctx.stream_name
+                    stream.stream_name
                 ));
             }
-            if let (SyncMode::Incremental, Some(ci)) = (&ctx.sync_mode, &ctx.cursor_info) {
+            if let (SyncMode::Incremental, Some(ci)) = (&stream.sync_mode, &stream.cursor_info) {
                 if !filtered.iter().any(|c| c.name == ci.cursor_field) {
                     return Err(format!(
                         "Cursor field '{}' must be included in selected columns for incremental stream '{}'",
                         ci.cursor_field,
-                        ctx.stream_name
+                        stream.stream_name
                     ));
                 }
             }
@@ -225,7 +227,7 @@ async fn read_stream_inner(
         .await
         .map_err(|e| format!("BEGIN failed: {e}"))?;
 
-    let cursor_query = build_base_query(ctx, &columns, &pg_types)?;
+    let cursor_query = build_base_query(ctx, stream, &columns, &pg_types)?;
 
     let declare = format!(
         "DECLARE {} NO SCROLL CURSOR FOR {}",
@@ -249,21 +251,21 @@ async fn read_stream_inner(
 
     let query_secs = query_start.elapsed().as_secs_f64();
 
-    let max_batch_bytes = if ctx.limits.max_batch_bytes > 0 {
-        ctx.limits.max_batch_bytes as usize
+    let max_batch_bytes = if stream.limits.max_batch_bytes > 0 {
+        stream.limits.max_batch_bytes as usize
     } else {
         DEFAULT_MAX_BATCH_BYTES as usize
     };
 
-    let max_record_bytes = if ctx.limits.max_record_bytes > 0 {
-        ctx.limits.max_record_bytes as usize
+    let max_record_bytes = if stream.limits.max_record_bytes > 0 {
+        stream.limits.max_record_bytes as usize
     } else {
         DEFAULT_MAX_RECORD_BYTES as usize
     };
     let estimated_row_bytes = estimate_row_bytes(&columns);
     let mut records_skipped: u64 = 0;
 
-    let cursor_col_idx = if let Some(ci) = ctx.cursor_info.as_ref() {
+    let cursor_col_idx = if let Some(ci) = stream.cursor_info.as_ref() {
         Some(
             columns
                 .iter()
@@ -272,7 +274,7 @@ async fn read_stream_inner(
                     format!(
                         "Cursor field '{}' not found in schema for table '{}'",
                         ci.cursor_field,
-                        ctx.stream_name
+                        stream.stream_name
                     )
                 })?,
         )
@@ -280,7 +282,7 @@ async fn read_stream_inner(
         None
     };
     let track_cursor_as_int = matches!(
-        ctx.cursor_info.as_ref().map(|ci| ci.cursor_type),
+        stream.cursor_info.as_ref().map(|ci| ci.cursor_type),
         Some(CursorType::Int64)
     );
     let mut max_cursor_value: Option<MaxCursorValue> = None;
@@ -302,7 +304,7 @@ async fn read_stream_inner(
         let rows = match client.query(&fetch_query, &[]).await {
             Ok(r) => r,
             Err(e) => {
-                loop_error = Some(format!("FETCH failed for {}: {}", ctx.stream_name, e));
+                loop_error = Some(format!("FETCH failed for {}: {}", stream.stream_name, e));
                 break;
             }
         };
@@ -313,7 +315,7 @@ async fn read_stream_inner(
             let mut valid_rows: Vec<tokio_postgres::Row> = Vec::with_capacity(rows.len());
             for row in rows {
                 if estimated_row_bytes > max_record_bytes {
-                    match ctx.policies.on_data_error {
+                    match stream.policies.on_data_error {
                         DataErrorPolicy::Fail => {
                             loop_error = Some(format!(
                                 "Record exceeds max_record_bytes ({} > {})",
@@ -324,8 +326,8 @@ async fn read_stream_inner(
                         }
                         _ => {
                             records_skipped += 1;
-                            host_ffi::log(
-                                1,
+                            ctx.log(
+                                LogLevel::Warn,
                                 &format!(
                                     "Skipping oversized record: {} bytes > max_record_bytes {}",
                                     estimated_row_bytes, max_record_bytes,
@@ -349,7 +351,7 @@ async fn read_stream_inner(
                         &columns,
                         &pg_types,
                         &arrow_schema,
-                        &ctx.stream_name,
+                        ctx,
                         &mut state,
                         &mut estimated_bytes,
                     ) {
@@ -424,7 +426,7 @@ async fn read_stream_inner(
                 &columns,
                 &pg_types,
                 &arrow_schema,
-                &ctx.stream_name,
+                ctx,
                 &mut state,
                 &mut estimated_bytes,
             ) {
@@ -442,11 +444,11 @@ async fn read_stream_inner(
 
     let close_query = format!("CLOSE {}", CURSOR_NAME);
     if let Err(e) = client.execute(&close_query, &[]).await {
-        host_ffi::log(
-            1,
+        ctx.log(
+            LogLevel::Warn,
             &format!(
                 "Warning: cursor CLOSE failed for stream '{}': {} (non-fatal, transaction cleanup will close it)",
-                ctx.stream_name, e
+                stream.stream_name, e
             ),
         );
     }
@@ -464,23 +466,23 @@ async fn read_stream_inner(
     }
 
     let checkpoint_count =
-        if let (Some(ci), Some(max_val)) = (ctx.cursor_info.as_ref(), max_cursor_value.as_ref()) {
+        if let (Some(ci), Some(max_val)) = (stream.cursor_info.as_ref(), max_cursor_value.as_ref()) {
             let max_val = max_val.as_checkpoint_string();
             let cp = rapidbyte_sdk::protocol::Checkpoint {
                 id: 1,
                 kind: rapidbyte_sdk::protocol::CheckpointKind::Source,
-                stream: ctx.stream_name.clone(),
+                stream: stream.stream_name.clone(),
                 cursor_field: Some(ci.cursor_field.clone()),
                 cursor_value: Some(rapidbyte_sdk::protocol::CursorValue::Utf8(max_val.clone())),
                 records_processed: state.total_records,
                 bytes_processed: state.total_bytes,
             };
-            let _ = host_ffi::checkpoint("source-postgres", &ctx.stream_name, &cp);
-            host_ffi::log(
-                2,
+            let _ = ctx.checkpoint(&cp);
+            ctx.log(
+                LogLevel::Info,
                 &format!(
                     "Source checkpoint: stream={} cursor_field={} cursor_value={}",
-                    ctx.stream_name, ci.cursor_field, max_val
+                    stream.stream_name, ci.cursor_field, max_val
                 ),
             );
             1u64
@@ -488,11 +490,11 @@ async fn read_stream_inner(
             0u64
         };
 
-    host_ffi::log(
-        2,
+    ctx.log(
+        LogLevel::Info,
         &format!(
             "Stream '{}' complete: {} records, {} bytes, {} batches",
-            ctx.stream_name, state.total_records, state.total_bytes, state.batches_emitted
+            stream.stream_name, state.total_records, state.total_bytes, state.batches_emitted
         ),
     );
 

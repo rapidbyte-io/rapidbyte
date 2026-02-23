@@ -3,7 +3,6 @@
 use tokio_postgres::{Client, Config as PgConfig, NoTls};
 
 use rapidbyte_sdk::errors::{ConnectorError, ValidationResult, ValidationStatus};
-use rapidbyte_sdk::host_ffi;
 
 /// Connect to PostgreSQL using the provided config.
 pub(crate) async fn connect(config: &crate::config::Config) -> Result<Client, String> {
@@ -25,7 +24,7 @@ pub(crate) async fn connect(config: &crate::config::Config) -> Result<Client, St
 
     tokio::spawn(async move {
         if let Err(e) = connection.await {
-            host_ffi::log(0, &format!("PostgreSQL connection error: {}", e));
+            rapidbyte_sdk::host_ffi::log(0, &format!("PostgreSQL connection error: {}", e));
         }
     });
 

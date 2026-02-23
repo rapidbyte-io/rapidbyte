@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use pg_escape::quote_identifier;
-use rapidbyte_sdk::host_ffi;
+use rapidbyte_sdk::context::{Context, LogLevel};
 use rapidbyte_sdk::protocol::{ColumnSchema, CursorType, CursorValue, StreamContext, SyncMode};
 use tokio_postgres::types::ToSql;
 
@@ -46,7 +46,8 @@ pub(crate) fn effective_cursor_type(
 }
 
 pub(crate) fn build_base_query(
-    ctx: &StreamContext,
+    ctx: &Context,
+    stream: &StreamContext,
     columns: &[ColumnSchema],
     pg_types: &[String],
 ) -> Result<CursorQuery, String> {
@@ -64,8 +65,8 @@ pub(crate) fn build_base_query(
         .collect::<Vec<_>>()
         .join(", ");
 
-    if let (SyncMode::Incremental, Some(ci)) = (&ctx.sync_mode, &ctx.cursor_info) {
-        let table_name = quote_identifier(&ctx.stream_name);
+    if let (SyncMode::Incremental, Some(ci)) = (&stream.sync_mode, &stream.cursor_info) {
+        let table_name = quote_identifier(&stream.stream_name);
         let cursor_field = quote_identifier(&ci.cursor_field);
         let cursor_column_arrow_type = columns
             .iter()
@@ -75,11 +76,11 @@ pub(crate) fn build_base_query(
 
         if let Some(last_value) = ci.last_value.as_ref() {
             if matches!(last_value, CursorValue::Null) {
-                host_ffi::log(
-                    2,
+                ctx.log(
+                    LogLevel::Info,
                     &format!(
                         "Incremental read (null prior cursor): {} ORDER BY {}",
-                        ctx.stream_name, cursor_field
+                        stream.stream_name, cursor_field
                     ),
                 );
                 return Ok(CursorQuery {
@@ -94,11 +95,11 @@ pub(crate) fn build_base_query(
             let resolved_cursor_type =
                 effective_cursor_type(ci.cursor_type, cursor_column_arrow_type);
             if resolved_cursor_type != ci.cursor_type {
-                host_ffi::log(
-                    3,
+                ctx.log(
+                    LogLevel::Debug,
                     &format!(
                         "Incremental cursor type adjusted: stream={} field={} declared={:?} inferred={} effective={:?}",
-                        ctx.stream_name,
+                        stream.stream_name,
                         ci.cursor_field,
                         ci.cursor_type,
                         cursor_column_arrow_type,
@@ -111,15 +112,15 @@ pub(crate) fn build_base_query(
                 cursor_bind_param(&resolved_cursor_type, last_value).map_err(|e| {
                     format!(
                         "Invalid incremental cursor value for stream '{}' field '{}': {e}",
-                        ctx.stream_name, ci.cursor_field
+                        stream.stream_name, ci.cursor_field
                     )
                 })?;
 
-            host_ffi::log(
-                2,
+            ctx.log(
+                LogLevel::Info,
                 &format!(
                     "Incremental read: {} WHERE {} > $1::{}",
-                    ctx.stream_name, cursor_field, cast
+                    stream.stream_name, cursor_field, cast
                 ),
             );
 
@@ -132,11 +133,11 @@ pub(crate) fn build_base_query(
             });
         }
 
-        host_ffi::log(
-            2,
+        ctx.log(
+            LogLevel::Info,
             &format!(
                 "Incremental read (no prior cursor): {} ORDER BY {}",
-                ctx.stream_name, cursor_field
+                stream.stream_name, cursor_field
             ),
         );
         return Ok(CursorQuery {
@@ -152,7 +153,7 @@ pub(crate) fn build_base_query(
         sql: format!(
             "SELECT {} FROM {}",
             col_list,
-            quote_identifier(&ctx.stream_name)
+            quote_identifier(&stream.stream_name)
         ),
         bind: None,
     })
@@ -197,8 +198,8 @@ pub(crate) fn cursor_bind_param(
                 CursorValue::TimestampMicros(v) => timestamp_micros_to_rfc3339(*v)?,
                 _ => return Err("cursor value is incompatible with timestamp_millis cursor type".to_string()),
             };
-            // Double-cast: bind as text (tokio-postgres supports String→text),
-            // then PG casts text→timestamp for the comparison.
+            // Double-cast: bind as text (tokio-postgres supports String->text),
+            // then PG casts text->timestamp for the comparison.
             Ok((CursorBindParam::Text(ts), "text::timestamp"))
         }
         CursorType::TimestampMicros => {
@@ -209,8 +210,8 @@ pub(crate) fn cursor_bind_param(
                 CursorValue::TimestampMillis(v) => timestamp_millis_to_rfc3339(*v)?,
                 _ => return Err("cursor value is incompatible with timestamp_micros cursor type".to_string()),
             };
-            // Double-cast: bind as text (tokio-postgres supports String→text),
-            // then PG casts text→timestamp for the comparison.
+            // Double-cast: bind as text (tokio-postgres supports String->text),
+            // then PG casts text->timestamp for the comparison.
             Ok((CursorBindParam::Text(ts), "text::timestamp"))
         }
         CursorType::Decimal => {
@@ -338,24 +339,26 @@ mod tests {
 
     #[test]
     fn build_base_query_full_refresh_quotes_identifiers() {
-        let mut ctx = base_context();
-        ctx.stream_name = "User".to_string();
+        let ctx = Context::new("source-postgres", "");
+        let mut stream = base_context();
+        stream.stream_name = "User".to_string();
         let columns = vec![ColumnSchema {
             name: "select".to_string(),
             data_type: ArrowDataType::Utf8,
             nullable: true,
         }];
         let pg_types = vec!["text".to_string()];
-        let query = build_base_query(&ctx, &columns, &pg_types).expect("query should build");
+        let query = build_base_query(&ctx, &stream, &columns, &pg_types).expect("query should build");
         assert_eq!(query.sql, "SELECT \"select\" FROM \"User\"");
         assert!(query.bind.is_none());
     }
 
     #[test]
     fn build_base_query_incremental_with_bind() {
-        let mut ctx = base_context();
-        ctx.sync_mode = SyncMode::Incremental;
-        ctx.cursor_info = Some(CursorInfo {
+        let ctx = Context::new("source-postgres", "");
+        let mut stream = base_context();
+        stream.sync_mode = SyncMode::Incremental;
+        stream.cursor_info = Some(CursorInfo {
             cursor_field: "id".to_string(),
             cursor_type: CursorType::Int64,
             last_value: Some(CursorValue::Int64(7)),
@@ -363,7 +366,7 @@ mod tests {
 
         let pg_types = vec!["bigint".to_string(), "text".to_string()];
         let query =
-            build_base_query(&ctx, &columns_for_cursor(), &pg_types).expect("query should build");
+            build_base_query(&ctx, &stream, &columns_for_cursor(), &pg_types).expect("query should build");
         assert_eq!(
             query.sql,
             "SELECT id, name FROM users WHERE id > $1::bigint ORDER BY id"
@@ -373,7 +376,8 @@ mod tests {
 
     #[test]
     fn build_base_query_applies_text_cast_for_uuid() {
-        let ctx = base_context();
+        let ctx = Context::new("source-postgres", "");
+        let stream = base_context();
         let columns = vec![
             ColumnSchema {
                 name: "id".to_string(),
@@ -387,7 +391,7 @@ mod tests {
             },
         ];
         let pg_types = vec!["bigint".to_string(), "uuid".to_string()];
-        let query = build_base_query(&ctx, &columns, &pg_types).expect("query should build");
+        let query = build_base_query(&ctx, &stream, &columns, &pg_types).expect("query should build");
         // uuid needs ::text cast, bigint does not
         assert!(query.sql.contains("\"external_id\"::text AS \"external_id\""));
         assert!(!query.sql.contains("\"id\"::text"));
