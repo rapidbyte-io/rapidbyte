@@ -21,7 +21,7 @@ use crate::config::Config;
 use crate::metrics::emit_read_metrics;
 use crate::types::Column;
 
-use parser::*;
+use parser::{lsn_gt, parse_change_line, CdcChange};
 
 /// Maximum number of change rows per Arrow RecordBatch.
 const BATCH_SIZE: usize = 10_000;
@@ -127,10 +127,7 @@ pub async fn read_cdc_changes(
         let data: String = row.get(1);
 
         // Track max LSN
-        if max_lsn
-            .as_ref()
-            .map_or(true, |current| lsn_gt(&lsn, current))
-        {
+        if max_lsn.as_ref().is_none_or(|current| lsn_gt(&lsn, current)) {
             max_lsn = Some(lsn.clone());
         }
 
@@ -333,6 +330,7 @@ fn changes_to_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::parser::CdcOp;
 
     #[test]
     fn test_build_cdc_arrow_schema() {
