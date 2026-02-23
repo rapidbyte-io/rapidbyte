@@ -121,11 +121,7 @@ pub(crate) async fn detect_schema_drift(
                 ));
             }
             if old_nullable != field.is_nullable() {
-                nullability_changes.push((
-                    field.name().clone(),
-                    old_nullable,
-                    field.is_nullable(),
-                ));
+                nullability_changes.push((field.name().clone(), old_nullable, field.is_nullable()));
             }
         }
     }

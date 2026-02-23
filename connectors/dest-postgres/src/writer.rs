@@ -15,8 +15,8 @@ use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::protocol::SchemaEvolutionPolicy;
 
 use crate::config::LoadMethod;
-use crate::decode;
 use crate::ddl::{ensure_table_and_schema, prepare_staging, swap_staging_table};
+use crate::decode;
 
 /// Entry point for writing a single stream.
 pub async fn write_stream(
@@ -300,8 +300,7 @@ impl<'a> WriteSession<'a> {
         }
 
         // Ensure DDL (hoisted from insert/copy paths)
-        let qualified_table =
-            decode::qualified_name(self.target_schema, &self.effective_stream);
+        let qualified_table = decode::qualified_name(self.target_schema, &self.effective_stream);
         ensure_table_and_schema(
             self.ctx,
             self.client,

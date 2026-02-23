@@ -176,25 +176,53 @@ pub(crate) fn sql_param_value<'a>(col: &'a TypedCol<'a>, row_idx: usize) -> SqlP
     match col {
         TypedCol::Null => SqlParamValue::Text(None),
         TypedCol::Int16(arr) => {
-            if arr.is_null(row_idx) { SqlParamValue::Int16(None) } else { SqlParamValue::Int16(Some(arr.value(row_idx))) }
+            if arr.is_null(row_idx) {
+                SqlParamValue::Int16(None)
+            } else {
+                SqlParamValue::Int16(Some(arr.value(row_idx)))
+            }
         }
         TypedCol::Int32(arr) => {
-            if arr.is_null(row_idx) { SqlParamValue::Int32(None) } else { SqlParamValue::Int32(Some(arr.value(row_idx))) }
+            if arr.is_null(row_idx) {
+                SqlParamValue::Int32(None)
+            } else {
+                SqlParamValue::Int32(Some(arr.value(row_idx)))
+            }
         }
         TypedCol::Int64(arr) => {
-            if arr.is_null(row_idx) { SqlParamValue::Int64(None) } else { SqlParamValue::Int64(Some(arr.value(row_idx))) }
+            if arr.is_null(row_idx) {
+                SqlParamValue::Int64(None)
+            } else {
+                SqlParamValue::Int64(Some(arr.value(row_idx)))
+            }
         }
         TypedCol::Float32(arr) => {
-            if arr.is_null(row_idx) { SqlParamValue::Float32(None) } else { SqlParamValue::Float32(Some(arr.value(row_idx))) }
+            if arr.is_null(row_idx) {
+                SqlParamValue::Float32(None)
+            } else {
+                SqlParamValue::Float32(Some(arr.value(row_idx)))
+            }
         }
         TypedCol::Float64(arr) => {
-            if arr.is_null(row_idx) { SqlParamValue::Float64(None) } else { SqlParamValue::Float64(Some(arr.value(row_idx))) }
+            if arr.is_null(row_idx) {
+                SqlParamValue::Float64(None)
+            } else {
+                SqlParamValue::Float64(Some(arr.value(row_idx)))
+            }
         }
         TypedCol::Boolean(arr) => {
-            if arr.is_null(row_idx) { SqlParamValue::Boolean(None) } else { SqlParamValue::Boolean(Some(arr.value(row_idx))) }
+            if arr.is_null(row_idx) {
+                SqlParamValue::Boolean(None)
+            } else {
+                SqlParamValue::Boolean(Some(arr.value(row_idx)))
+            }
         }
         TypedCol::Utf8(arr) => {
-            if arr.is_null(row_idx) { SqlParamValue::Text(None) } else { SqlParamValue::Text(Some(arr.value(row_idx))) }
+            if arr.is_null(row_idx) {
+                SqlParamValue::Text(None)
+            } else {
+                SqlParamValue::Text(Some(arr.value(row_idx)))
+            }
         }
         TypedCol::TimestampMicros(arr) => {
             if arr.is_null(row_idx) {
@@ -217,7 +245,11 @@ pub(crate) fn sql_param_value<'a>(col: &'a TypedCol<'a>, row_idx: usize) -> SqlP
             }
         }
         TypedCol::Binary(arr) => {
-            if arr.is_null(row_idx) { SqlParamValue::Bytes(None) } else { SqlParamValue::Bytes(Some(arr.value(row_idx))) }
+            if arr.is_null(row_idx) {
+                SqlParamValue::Bytes(None)
+            } else {
+                SqlParamValue::Bytes(Some(arr.value(row_idx)))
+            }
         }
     }
 }
@@ -235,39 +267,74 @@ pub(crate) fn format_copy_value(buf: &mut Vec<u8>, col: &TypedCol<'_>, row_idx: 
     match col {
         TypedCol::Null => buf.extend_from_slice(b"\\N"),
         TypedCol::Int16(arr) => {
-            if arr.is_null(row_idx) { buf.extend_from_slice(b"\\N"); return; }
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
             let _ = write!(buf, "{}", arr.value(row_idx));
         }
         TypedCol::Int32(arr) => {
-            if arr.is_null(row_idx) { buf.extend_from_slice(b"\\N"); return; }
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
             let _ = write!(buf, "{}", arr.value(row_idx));
         }
         TypedCol::Int64(arr) => {
-            if arr.is_null(row_idx) { buf.extend_from_slice(b"\\N"); return; }
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
             let _ = write!(buf, "{}", arr.value(row_idx));
         }
         TypedCol::Float32(arr) => {
-            if arr.is_null(row_idx) { buf.extend_from_slice(b"\\N"); return; }
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
             let v = arr.value(row_idx);
-            if v.is_nan() { buf.extend_from_slice(b"NaN"); }
-            else if v.is_infinite() {
-                if v > 0.0 { buf.extend_from_slice(b"Infinity"); } else { buf.extend_from_slice(b"-Infinity"); }
-            } else { let _ = write!(buf, "{}", v); }
+            if v.is_nan() {
+                buf.extend_from_slice(b"NaN");
+            } else if v.is_infinite() {
+                if v > 0.0 {
+                    buf.extend_from_slice(b"Infinity");
+                } else {
+                    buf.extend_from_slice(b"-Infinity");
+                }
+            } else {
+                let _ = write!(buf, "{}", v);
+            }
         }
         TypedCol::Float64(arr) => {
-            if arr.is_null(row_idx) { buf.extend_from_slice(b"\\N"); return; }
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
             let v = arr.value(row_idx);
-            if v.is_nan() { buf.extend_from_slice(b"NaN"); }
-            else if v.is_infinite() {
-                if v > 0.0 { buf.extend_from_slice(b"Infinity"); } else { buf.extend_from_slice(b"-Infinity"); }
-            } else { let _ = write!(buf, "{}", v); }
+            if v.is_nan() {
+                buf.extend_from_slice(b"NaN");
+            } else if v.is_infinite() {
+                if v > 0.0 {
+                    buf.extend_from_slice(b"Infinity");
+                } else {
+                    buf.extend_from_slice(b"-Infinity");
+                }
+            } else {
+                let _ = write!(buf, "{}", v);
+            }
         }
         TypedCol::Boolean(arr) => {
-            if arr.is_null(row_idx) { buf.extend_from_slice(b"\\N"); return; }
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
             buf.push(if arr.value(row_idx) { b't' } else { b'f' });
         }
         TypedCol::Utf8(arr) => {
-            if arr.is_null(row_idx) { buf.extend_from_slice(b"\\N"); return; }
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
             for byte in arr.value(row_idx).bytes() {
                 match byte {
                     b'\\' => buf.extend_from_slice(b"\\\\"),
@@ -280,23 +347,38 @@ pub(crate) fn format_copy_value(buf: &mut Vec<u8>, col: &TypedCol<'_>, row_idx: 
             }
         }
         TypedCol::TimestampMicros(arr) => {
-            if arr.is_null(row_idx) { buf.extend_from_slice(b"\\N"); return; }
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
             let micros = arr.value(row_idx);
             let secs = micros.div_euclid(1_000_000);
             let nsecs = (micros.rem_euclid(1_000_000) * 1_000) as u32;
             if let Some(dt) = DateTime::from_timestamp(secs, nsecs) {
                 let _ = write!(buf, "{}", dt.naive_utc().format("%Y-%m-%d %H:%M:%S%.f"));
-            } else { buf.extend_from_slice(b"\\N"); }
+            } else {
+                buf.extend_from_slice(b"\\N");
+            }
         }
         TypedCol::Date32(arr) => {
-            if arr.is_null(row_idx) { buf.extend_from_slice(b"\\N"); return; }
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
             let days = arr.value(row_idx);
-            if let Some(date) = UNIX_EPOCH_DATE.checked_add_signed(chrono::Duration::days(days as i64)) {
+            if let Some(date) =
+                UNIX_EPOCH_DATE.checked_add_signed(chrono::Duration::days(days as i64))
+            {
                 let _ = write!(buf, "{}", date);
-            } else { buf.extend_from_slice(b"\\N"); }
+            } else {
+                buf.extend_from_slice(b"\\N");
+            }
         }
         TypedCol::Binary(arr) => {
-            if arr.is_null(row_idx) { buf.extend_from_slice(b"\\N"); return; }
+            if arr.is_null(row_idx) {
+                buf.extend_from_slice(b"\\N");
+                return;
+            }
             buf.extend_from_slice(b"\\\\x");
             for byte in arr.value(row_idx) {
                 let _ = write!(buf, "{:02x}", byte);
@@ -309,8 +391,8 @@ pub(crate) fn format_copy_value(buf: &mut Vec<u8>, col: &TypedCol<'_>, row_idx: 
 mod tests {
     use super::*;
     use rapidbyte_sdk::arrow::array::{
-        BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array,
-        Int32Array, Int64Array, StringArray, TimestampMicrosecondArray,
+        BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array, Int32Array,
+        StringArray, TimestampMicrosecondArray,
     };
     use rapidbyte_sdk::arrow::datatypes::{Field, TimeUnit};
 
@@ -342,16 +424,19 @@ mod tests {
             Field::new("id", DataType::Int64, false),
             Field::new("name", DataType::Utf8, true),
         ]));
-        let mode = WriteMode::Upsert { primary_key: vec!["id".to_string()] };
+        let mode = WriteMode::Upsert {
+            primary_key: vec!["id".to_string()],
+        };
         let clause = build_upsert_clause(Some(&mode), &schema, &[0, 1]).expect("upsert clause");
-        assert_eq!(clause, " ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name");
+        assert_eq!(
+            clause,
+            " ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name"
+        );
     }
 
     #[test]
     fn build_upsert_clause_none_for_append() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-        ]));
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
         assert!(build_upsert_clause(Some(&WriteMode::Append), &schema, &[0]).is_none());
         assert!(build_upsert_clause(None, &schema, &[0]).is_none());
     }
@@ -410,7 +495,11 @@ mod tests {
         let ts_arr = TimestampMicrosecondArray::from(vec![Some(1705312200000000i64)]);
         let d_arr = Date32Array::from(vec![Some(19737)]);
         let b_arr = BinaryArray::from(vec![Some(b"test" as &[u8])]);
-        let batch = RecordBatch::try_new(schema, vec![Arc::new(ts_arr), Arc::new(d_arr), Arc::new(b_arr)]).unwrap();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(ts_arr), Arc::new(d_arr), Arc::new(b_arr)],
+        )
+        .unwrap();
         let cols = downcast_columns(&batch, &[0, 1, 2]).unwrap();
         assert!(matches!(cols[0], TypedCol::TimestampMicros(_)));
         assert!(matches!(cols[1], TypedCol::Date32(_)));
@@ -423,7 +512,10 @@ mod tests {
         let col = TypedCol::TimestampMicros(&arr);
         match sql_param_value(&col, 0) {
             SqlParamValue::Timestamp(Some(dt)) => {
-                assert_eq!(dt.format("%Y-%m-%d %H:%M:%S").to_string(), "2024-01-15 09:50:00");
+                assert_eq!(
+                    dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+                    "2024-01-15 09:50:00"
+                );
             }
             _ => panic!("expected Timestamp(Some)"),
         }
@@ -474,7 +566,11 @@ mod tests {
 
     #[test]
     fn format_copy_value_formats_float_specials() {
-        let arr = Float64Array::from(vec![Some(f64::NAN), Some(f64::INFINITY), Some(-f64::INFINITY)]);
+        let arr = Float64Array::from(vec![
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(-f64::INFINITY),
+        ]);
         let col = TypedCol::Float64(&arr);
         let mut buf = Vec::new();
         format_copy_value(&mut buf, &col, 0);
@@ -548,7 +644,11 @@ mod tests {
 
     #[test]
     fn format_copy_float32_specials() {
-        let arr = Float32Array::from(vec![Some(f32::NAN), Some(f32::INFINITY), Some(f32::NEG_INFINITY)]);
+        let arr = Float32Array::from(vec![
+            Some(f32::NAN),
+            Some(f32::INFINITY),
+            Some(f32::NEG_INFINITY),
+        ]);
         let col = TypedCol::Float32(&arr);
         let mut buf = Vec::new();
         format_copy_value(&mut buf, &col, 0);

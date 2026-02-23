@@ -3,9 +3,10 @@
 use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LoadMethod {
+    #[default]
     Insert,
     Copy,
 }
@@ -56,19 +57,4 @@ fn default_port() -> u16 {
 
 fn default_schema() -> String {
     "public".to_string()
-}
-
-impl Config {
-    pub fn connection_string(&self) -> String {
-        format!(
-            "host={} port={} user={} password={} dbname={}",
-            self.host, self.port, self.user, self.password, self.database
-        )
-    }
-}
-
-impl Default for LoadMethod {
-    fn default() -> Self {
-        Self::Insert
-    }
 }

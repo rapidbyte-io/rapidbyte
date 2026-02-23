@@ -67,6 +67,7 @@ async fn ensure_table(
 }
 
 /// Ensure target schema, table, and schema drift handling are complete.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn ensure_table_and_schema(
     ctx: &Context,
     client: &Client,

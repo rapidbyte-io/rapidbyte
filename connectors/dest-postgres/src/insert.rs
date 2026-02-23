@@ -26,6 +26,7 @@ const CHUNK_SIZE: usize = 1000;
 /// - `active_cols`: indices of non-ignored columns
 /// - `upsert_clause`: optional ON CONFLICT clause
 /// - `type_null_flags`: per-column flag forcing NULL for type-incompatible columns
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn write(
     ctx: &Context,
     client: &Client,
@@ -57,8 +58,7 @@ pub(crate) async fn write(
             let chunk_size = chunk_end - chunk_start;
 
             let header = format!("INSERT INTO {} ({}) VALUES ", qualified_table, col_list);
-            let mut sql =
-                String::with_capacity(header.len() + chunk_size * typed_cols.len() * 6);
+            let mut sql = String::with_capacity(header.len() + chunk_size * typed_cols.len() * 6);
             sql.push_str(&header);
 
             let mut params: Vec<SqlParamValue<'_>> =
@@ -104,7 +104,10 @@ pub(crate) async fn write(
 
     ctx.log(
         LogLevel::Info,
-        &format!("dest-postgres: wrote {} rows to {}", total_rows, qualified_table),
+        &format!(
+            "dest-postgres: wrote {} rows to {}",
+            total_rows, qualified_table
+        ),
     );
 
     Ok(total_rows)

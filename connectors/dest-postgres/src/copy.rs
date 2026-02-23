@@ -26,6 +26,7 @@ const DEFAULT_FLUSH_BYTES: usize = 4 * 1024 * 1024;
 /// - `active_cols`: indices of non-ignored columns
 /// - `type_null_flags`: per-column flag forcing NULL for type-incompatible columns
 /// - `flush_bytes`: optional flush threshold override
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn write(
     ctx: &Context,
     client: &Client,
@@ -100,7 +101,10 @@ pub(crate) async fn write(
 
     ctx.log(
         LogLevel::Info,
-        &format!("dest-postgres: COPY wrote {} rows to {}", total_rows, qualified_table),
+        &format!(
+            "dest-postgres: COPY wrote {} rows to {}",
+            total_rows, qualified_table
+        ),
     );
 
     Ok(total_rows)
