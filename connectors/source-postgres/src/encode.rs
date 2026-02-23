@@ -84,15 +84,15 @@ fn encode_column(rows: &[Row], idx: usize, col: &Column) -> Result<Arc<dyn Array
             let vals: Vec<Option<bool>> = rows.iter().map(|r| r.try_get(idx).ok()).collect();
             Ok(Arc::new(BooleanArray::from(vals)))
         }
-        ArrowDataType::TimestampMicros => encode_timestamp(rows, idx),
-        ArrowDataType::Date32 => encode_date(rows, idx),
-        ArrowDataType::Binary => encode_binary(rows, idx),
-        _ if col.is_json() => encode_json(rows, idx),
-        _ => encode_utf8(rows, idx),
+        ArrowDataType::TimestampMicros => Ok(encode_timestamp(rows, idx)),
+        ArrowDataType::Date32 => Ok(encode_date(rows, idx)),
+        ArrowDataType::Binary => Ok(encode_binary(rows, idx)),
+        _ if col.is_json() => Ok(encode_json(rows, idx)),
+        _ => Ok(encode_utf8(rows, idx)),
     }
 }
 
-fn encode_timestamp(rows: &[Row], idx: usize) -> Result<Arc<dyn Array>, String> {
+fn encode_timestamp(rows: &[Row], idx: usize) -> Arc<dyn Array> {
     let vals: Vec<Option<i64>> = rows
         .iter()
         .map(|r| {
@@ -108,10 +108,10 @@ fn encode_timestamp(rows: &[Row], idx: usize) -> Result<Arc<dyn Array>, String> 
                 .ok()
         })
         .collect();
-    Ok(Arc::new(TimestampMicrosecondArray::from(vals)))
+    Arc::new(TimestampMicrosecondArray::from(vals))
 }
 
-fn encode_date(rows: &[Row], idx: usize) -> Result<Arc<dyn Array>, String> {
+fn encode_date(rows: &[Row], idx: usize) -> Arc<dyn Array> {
     let vals: Vec<Option<i32>> = rows
         .iter()
         .map(|r| {
@@ -120,10 +120,10 @@ fn encode_date(rows: &[Row], idx: usize) -> Result<Arc<dyn Array>, String> {
                 .map(|d| (d - *UNIX_EPOCH_DATE).num_days() as i32)
         })
         .collect();
-    Ok(Arc::new(Date32Array::from(vals)))
+    Arc::new(Date32Array::from(vals))
 }
 
-fn encode_binary(rows: &[Row], idx: usize) -> Result<Arc<dyn Array>, String> {
+fn encode_binary(rows: &[Row], idx: usize) -> Arc<dyn Array> {
     let mut builder = BinaryBuilder::with_capacity(rows.len(), rows.len() * 64);
     for row in rows {
         match row.try_get::<_, Vec<u8>>(idx) {
@@ -131,10 +131,10 @@ fn encode_binary(rows: &[Row], idx: usize) -> Result<Arc<dyn Array>, String> {
             Err(_) => builder.append_null(),
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Arc::new(builder.finish())
 }
 
-fn encode_json(rows: &[Row], idx: usize) -> Result<Arc<dyn Array>, String> {
+fn encode_json(rows: &[Row], idx: usize) -> Arc<dyn Array> {
     let mut builder = StringBuilder::with_capacity(rows.len(), rows.len() * 64);
     for row in rows {
         match row.try_get::<_, serde_json::Value>(idx) {
@@ -142,10 +142,10 @@ fn encode_json(rows: &[Row], idx: usize) -> Result<Arc<dyn Array>, String> {
             Err(_) => builder.append_null(),
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Arc::new(builder.finish())
 }
 
-fn encode_utf8(rows: &[Row], idx: usize) -> Result<Arc<dyn Array>, String> {
+fn encode_utf8(rows: &[Row], idx: usize) -> Arc<dyn Array> {
     let mut builder = StringBuilder::with_capacity(rows.len(), rows.len() * 32);
     for row in rows {
         match row.try_get::<_, String>(idx) {
@@ -153,5 +153,5 @@ fn encode_utf8(rows: &[Row], idx: usize) -> Result<Arc<dyn Array>, String> {
             Err(_) => builder.append_null(),
         }
     }
-    Ok(Arc::new(builder.finish()))
+    Arc::new(builder.finish())
 }
