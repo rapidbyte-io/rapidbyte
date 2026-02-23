@@ -49,6 +49,10 @@ pub trait ConfigSchema {
 #[cfg(feature = "runtime")]
 pub use rapidbyte_sdk_macros::ConfigSchema;
 
+/// Re-export the `#[connector]` attribute macro.
+#[cfg(feature = "runtime")]
+pub use rapidbyte_sdk_macros::connector;
+
 /// Embed the config schema as a `rapidbyte_config_schema_v1` Wasm custom section.
 ///
 /// Place at crate root after `connector_main!` and `embed_manifest!`:

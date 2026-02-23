@@ -3,6 +3,7 @@
 //! This crate is an internal implementation detail of `rapidbyte-sdk`.
 //! Do not depend on it directly — use `rapidbyte_sdk::ConfigSchema` instead.
 
+mod connector;
 mod schema;
 
 use proc_macro::TokenStream;
@@ -24,4 +25,28 @@ pub fn derive_config_schema(input: TokenStream) -> TokenStream {
     schema::expand(input.into())
         .unwrap_or_else(|e| e.to_compile_error())
         .into()
+}
+
+/// Attribute macro that generates all component glue for a connector struct.
+///
+/// Replaces `connector_main!`, `embed_manifest!`, and `embed_config_schema!`
+/// with a single annotation:
+///
+/// ```ignore
+/// #[connector(source)]
+/// pub struct MySource { ... }
+/// ```
+///
+/// Accepted roles: `source`, `destination`, `transform`.
+///
+/// The annotated struct must implement the corresponding trait
+/// (`Source`, `Destination`, or `Transform` from `rapidbyte_sdk::connector`).
+#[proc_macro_attribute]
+pub fn connector(attr: TokenStream, item: TokenStream) -> TokenStream {
+    let role = syn::parse_macro_input!(attr as connector::ConnectorRole);
+    let input = syn::parse_macro_input!(item as syn::ItemStruct);
+    match connector::expand(role, input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
 }
