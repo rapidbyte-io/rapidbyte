@@ -39,9 +39,9 @@ pub async fn write_stream(
             load_method: config.load_method,
             schema_policy: stream.policies.schema_evolution,
             checkpoint: CheckpointConfig {
-                interval_bytes: stream.limits.checkpoint_interval_bytes,
-                interval_rows: stream.limits.checkpoint_interval_rows,
-                interval_seconds: stream.limits.checkpoint_interval_seconds,
+                bytes: stream.limits.checkpoint_interval_bytes,
+                rows: stream.limits.checkpoint_interval_rows,
+                seconds: stream.limits.checkpoint_interval_seconds,
             },
             copy_flush_bytes: config.copy_flush_bytes,
         },
@@ -105,9 +105,9 @@ pub struct SessionConfig {
 
 /// Checkpoint threshold configuration extracted from StreamLimits.
 pub struct CheckpointConfig {
-    pub interval_bytes: u64,
-    pub interval_rows: u64,
-    pub interval_seconds: u64,
+    pub bytes: u64,
+    pub rows: u64,
+    pub seconds: u64,
 }
 
 /// Result of a completed write session, used to build WriteSummary.
@@ -198,7 +198,7 @@ impl<'a> WriteSession<'a> {
             );
             (staging_name, Some(WriteMode::Append))
         } else {
-            (stream_name.to_string(), write_mode.clone())
+            (stream_name.to_owned(), write_mode)
         };
 
         let watermark_records = if !is_replace {
@@ -385,11 +385,11 @@ impl<'a> WriteSession<'a> {
     /// Commit and reopen transaction when checkpoint thresholds are reached.
     async fn maybe_checkpoint(&mut self) -> Result<(), String> {
         let cfg = &self.checkpoint_config;
-        let should_checkpoint = (cfg.interval_bytes > 0
-            && self.stats.bytes_since_commit >= cfg.interval_bytes)
-            || (cfg.interval_rows > 0 && self.stats.rows_since_commit >= cfg.interval_rows)
-            || (cfg.interval_seconds > 0
-                && self.last_checkpoint_time.elapsed().as_secs() >= cfg.interval_seconds);
+        let should_checkpoint = (cfg.bytes > 0
+            && self.stats.bytes_since_commit >= cfg.bytes)
+            || (cfg.rows > 0 && self.stats.rows_since_commit >= cfg.rows)
+            || (cfg.seconds > 0
+                && self.last_checkpoint_time.elapsed().as_secs() >= cfg.seconds);
 
         if !should_checkpoint {
             return Ok(());
