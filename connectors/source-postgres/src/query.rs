@@ -193,8 +193,7 @@ pub(crate) fn cursor_bind_param(
         }
         CursorType::TimestampMillis => {
             let ts = match value {
-                CursorValue::TimestampMillis(v) => timestamp_millis_to_rfc3339(*v)?,
-                CursorValue::Int64(v) => timestamp_millis_to_rfc3339(*v)?,
+                CursorValue::TimestampMillis(v) | CursorValue::Int64(v) => timestamp_millis_to_rfc3339(*v)?,
                 CursorValue::Utf8(v) => v.clone(),
                 CursorValue::TimestampMicros(v) => timestamp_micros_to_rfc3339(*v)?,
                 _ => {
@@ -210,8 +209,7 @@ pub(crate) fn cursor_bind_param(
         }
         CursorType::TimestampMicros => {
             let ts = match value {
-                CursorValue::TimestampMicros(v) => timestamp_micros_to_rfc3339(*v)?,
-                CursorValue::Int64(v) => timestamp_micros_to_rfc3339(*v)?,
+                CursorValue::TimestampMicros(v) | CursorValue::Int64(v) => timestamp_micros_to_rfc3339(*v)?,
                 CursorValue::Utf8(v) => v.clone(),
                 CursorValue::TimestampMillis(v) => timestamp_millis_to_rfc3339(*v)?,
                 _ => {
