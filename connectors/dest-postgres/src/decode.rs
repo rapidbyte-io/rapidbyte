@@ -94,6 +94,16 @@ pub(crate) fn type_null_flags(
         .collect()
 }
 
+// ── WriteTarget: pre-computed column metadata ───────────────────────
+
+/// Pre-computed column metadata shared by INSERT and COPY write paths.
+pub(crate) struct WriteTarget<'a> {
+    pub(crate) table: &'a str,
+    pub(crate) active_cols: &'a [usize],
+    pub(crate) schema: &'a Arc<Schema>,
+    pub(crate) type_null_flags: &'a [bool],
+}
+
 // ── TypedCol: pre-downcast Arrow columns ─────────────────────────────
 
 /// Pre-downcast Arrow column reference. Eliminates per-cell `downcast_ref()` calls

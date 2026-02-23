@@ -138,6 +138,7 @@ pub struct WriteSession<'a> {
     // Stream identity
     stream_name: String,
     effective_stream: String,
+    qualified_table: String,
     effective_write_mode: Option<WriteMode>,
 
     // Config
@@ -229,6 +230,8 @@ impl<'a> WriteSession<'a> {
             0
         };
 
+        let qualified_table = decode::qualified_name(target_schema, &effective_stream);
+
         client
             .execute("BEGIN", &[])
             .await
@@ -241,6 +244,7 @@ impl<'a> WriteSession<'a> {
             target_schema,
             stream_name: config.stream_name,
             effective_stream,
+            qualified_table,
             effective_write_mode,
             load_method: config.load_method,
             schema_policy: config.schema_policy,
@@ -295,7 +299,6 @@ impl<'a> WriteSession<'a> {
         }
 
         // Ensure DDL (hoisted from insert/copy paths)
-        let qualified_table = decode::qualified_name(self.target_schema, &self.effective_stream);
         self.schema_state
             .ensure_table(
                 self.ctx,
@@ -320,39 +323,28 @@ impl<'a> WriteSession<'a> {
         let type_null_flags =
             decode::type_null_flags(&active_cols, schema, &self.schema_state.type_null_columns);
 
+        let target = decode::WriteTarget {
+            table: &self.qualified_table,
+            active_cols: &active_cols,
+            schema,
+            type_null_flags: &type_null_flags,
+        };
+
         // Dispatch to write path
         let use_copy = self.load_method == LoadMethod::Copy
             && !matches!(self.effective_write_mode, Some(WriteMode::Upsert { .. }));
 
         let rows_written = if use_copy {
-            crate::copy::write(
-                self.ctx,
-                self.client,
-                &qualified_table,
-                &active_cols,
-                schema,
-                batches,
-                &type_null_flags,
-                self.copy_flush_bytes,
-            )
-            .await?
+            crate::copy::write(self.ctx, self.client, &target, batches, self.copy_flush_bytes)
+                .await?
         } else {
             let upsert_clause = decode::build_upsert_clause(
                 self.effective_write_mode.as_ref(),
                 schema,
                 &active_cols,
             );
-            crate::insert::write(
-                self.ctx,
-                self.client,
-                &qualified_table,
-                &active_cols,
-                schema,
-                batches,
-                upsert_clause.as_deref(),
-                &type_null_flags,
-            )
-            .await?
+            crate::insert::write(self.ctx, self.client, &target, batches, upsert_clause.as_deref())
+                .await?
         };
 
         self.stats.total_rows += rows_written;

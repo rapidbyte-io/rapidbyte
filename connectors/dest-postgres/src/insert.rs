@@ -4,17 +4,15 @@
 //! statements. Supports upsert via ON CONFLICT clause.
 
 use std::fmt::Write as _;
-use std::sync::Arc;
 
 use pg_escape::quote_identifier;
-use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use tokio_postgres::types::ToSql;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::prelude::*;
 
-use crate::decode::{downcast_columns, sql_param_value, SqlParamValue};
+use crate::decode::{downcast_columns, sql_param_value, SqlParamValue, WriteTarget};
 
 /// Maximum rows per multi-value INSERT statement (PG parameter limit).
 const CHUNK_SIZE: usize = 1000;
@@ -22,28 +20,23 @@ const CHUNK_SIZE: usize = 1000;
 /// Write batches via multi-value INSERT. Returns rows written.
 ///
 /// Parameters are all pre-computed by the session layer:
-/// - `qualified_table`: schema-qualified table name
-/// - `active_cols`: indices of non-ignored columns
+/// - `target`: pre-computed column metadata (table, active columns, schema, type-null flags)
 /// - `upsert_clause`: optional ON CONFLICT clause
-/// - `type_null_flags`: per-column flag forcing NULL for type-incompatible columns
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn write(
     ctx: &Context,
     client: &Client,
-    qualified_table: &str,
-    active_cols: &[usize],
-    arrow_schema: &Arc<Schema>,
+    target: &WriteTarget<'_>,
     batches: &[RecordBatch],
     upsert_clause: Option<&str>,
-    type_null_flags: &[bool],
 ) -> Result<u64, String> {
-    if batches.is_empty() || active_cols.is_empty() {
+    if batches.is_empty() || target.active_cols.is_empty() {
         return Ok(0);
     }
 
-    let col_list = active_cols
+    let col_list = target
+        .active_cols
         .iter()
-        .map(|&i| quote_identifier(arrow_schema.field(i).name()))
+        .map(|&i| quote_identifier(target.schema.field(i).name()))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -51,13 +44,13 @@ pub(crate) async fn write(
 
     for batch in batches {
         let num_rows = batch.num_rows();
-        let typed_cols = downcast_columns(batch, active_cols)?;
+        let typed_cols = downcast_columns(batch, target.active_cols)?;
 
         for chunk_start in (0..num_rows).step_by(CHUNK_SIZE) {
             let chunk_end = (chunk_start + CHUNK_SIZE).min(num_rows);
             let chunk_size = chunk_end - chunk_start;
 
-            let header = format!("INSERT INTO {} ({}) VALUES ", qualified_table, col_list);
+            let header = format!("INSERT INTO {} ({}) VALUES ", target.table, col_list);
             let mut sql = String::with_capacity(header.len() + chunk_size * typed_cols.len() * 6);
             sql.push_str(&header);
 
@@ -73,7 +66,7 @@ pub(crate) async fn write(
                     if pos > 0 {
                         sql.push_str(", ");
                     }
-                    let value = if type_null_flags[pos] {
+                    let value = if target.type_null_flags[pos] {
                         SqlParamValue::Text(None)
                     } else {
                         sql_param_value(typed_col, row_idx)
@@ -94,7 +87,7 @@ pub(crate) async fn write(
             client.execute(&sql, &param_refs).await.map_err(|e| {
                 format!(
                     "INSERT failed for {}, rows {}-{}: {e}",
-                    qualified_table, chunk_start, chunk_end
+                    target.table, chunk_start, chunk_end
                 )
             })?;
 
@@ -106,7 +99,7 @@ pub(crate) async fn write(
         LogLevel::Info,
         &format!(
             "dest-postgres: wrote {} rows to {}",
-            total_rows, qualified_table
+            total_rows, target.table
         ),
     );
 

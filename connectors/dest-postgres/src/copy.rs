@@ -3,18 +3,15 @@
 //! Streams Arrow RecordBatch data to PostgreSQL via the COPY text protocol.
 //! Flushes at configurable byte thresholds to bound memory usage.
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use futures_util::SinkExt;
 use pg_escape::quote_identifier;
-use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::prelude::*;
 
-use crate::decode::{downcast_columns, format_copy_value};
+use crate::decode::{downcast_columns, format_copy_value, WriteTarget};
 
 /// Default COPY flush buffer size (4 MB).
 const DEFAULT_FLUSH_BYTES: usize = 4 * 1024 * 1024;
@@ -22,33 +19,28 @@ const DEFAULT_FLUSH_BYTES: usize = 4 * 1024 * 1024;
 /// Write batches via COPY FROM STDIN. Returns rows written.
 ///
 /// Parameters are all pre-computed by the session layer:
-/// - `qualified_table`: schema-qualified table name
-/// - `active_cols`: indices of non-ignored columns
-/// - `type_null_flags`: per-column flag forcing NULL for type-incompatible columns
+/// - `target`: pre-computed column metadata (table, active columns, schema, type-null flags)
 /// - `flush_bytes`: optional flush threshold override
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn write(
     ctx: &Context,
     client: &Client,
-    qualified_table: &str,
-    active_cols: &[usize],
-    arrow_schema: &Arc<Schema>,
+    target: &WriteTarget<'_>,
     batches: &[RecordBatch],
-    type_null_flags: &[bool],
     flush_bytes: Option<usize>,
 ) -> Result<u64, String> {
-    if batches.is_empty() || active_cols.is_empty() {
+    if batches.is_empty() || target.active_cols.is_empty() {
         return Ok(0);
     }
 
-    let col_list = active_cols
+    let col_list = target
+        .active_cols
         .iter()
-        .map(|&i| quote_identifier(arrow_schema.field(i).name()))
+        .map(|&i| quote_identifier(target.schema.field(i).name()))
         .collect::<Vec<_>>()
         .join(", ");
     let copy_stmt = format!(
         "COPY {} ({}) FROM STDIN WITH (FORMAT text)",
-        qualified_table, col_list
+        target.table, col_list
     );
 
     let sink = client
@@ -62,14 +54,14 @@ pub(crate) async fn write(
     let mut buf = Vec::with_capacity(flush_threshold);
 
     for batch in batches {
-        let typed_cols = downcast_columns(batch, active_cols)?;
+        let typed_cols = downcast_columns(batch, target.active_cols)?;
 
         for row_idx in 0..batch.num_rows() {
             for (pos, typed_col) in typed_cols.iter().enumerate() {
                 if pos > 0 {
                     buf.push(b'\t');
                 }
-                if type_null_flags[pos] {
+                if target.type_null_flags[pos] {
                     buf.extend_from_slice(b"\\N");
                 } else {
                     format_copy_value(&mut buf, typed_col, row_idx);
@@ -103,7 +95,7 @@ pub(crate) async fn write(
         LogLevel::Info,
         &format!(
             "dest-postgres: COPY wrote {} rows to {}",
-            total_rows, qualified_table
+            total_rows, target.table
         ),
     );
 
