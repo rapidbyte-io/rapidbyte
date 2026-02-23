@@ -1,10 +1,10 @@
-//! Source PostgreSQL connector configuration.
+//! Source `PostgreSQL` connector configuration.
 
 use rapidbyte_sdk::errors::ConnectorError;
 use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;
 
-/// PostgreSQL connection config from pipeline YAML.
+/// `PostgreSQL` connection config from pipeline YAML.
 #[derive(Debug, Clone, Deserialize, ConfigSchema)]
 pub struct Config {
     /// Database hostname
@@ -21,7 +21,7 @@ pub struct Config {
     pub password: String,
     /// Database name
     pub database: String,
-    /// Logical replication slot name for CDC mode. Defaults to rapidbyte_{stream_name}.
+    /// Logical replication slot name for CDC mode. Defaults to rapidbyte_{`stream_name`}.
     #[serde(default)]
     pub replication_slot: Option<String>,
 }
@@ -31,6 +31,8 @@ fn default_port() -> u16 {
 }
 
 impl Config {
+    /// # Errors
+    /// Returns `Err` if `replication_slot` is empty or exceeds the 63-byte `PostgreSQL` limit.
     pub fn validate(&self) -> Result<(), ConnectorError> {
         if let Some(slot) = self.replication_slot.as_ref() {
             if slot.is_empty() {
@@ -43,8 +45,7 @@ impl Config {
                 return Err(ConnectorError::config(
                     "INVALID_CONFIG",
                     format!(
-                        "replication_slot '{}' exceeds PostgreSQL 63-byte limit",
-                        slot
+                        "replication_slot '{slot}' exceeds PostgreSQL 63-byte limit"
                     ),
                 ));
             }
@@ -52,6 +53,7 @@ impl Config {
         Ok(())
     }
 
+    #[must_use] 
     pub fn connection_string(&self) -> String {
         format!(
             "host={} port={} user={} password={} dbname={}",

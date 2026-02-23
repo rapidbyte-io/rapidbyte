@@ -1,4 +1,4 @@
-//! Schema introspection for PostgreSQL.
+//! Schema introspection for `PostgreSQL`.
 //!
 //! Queries `information_schema` to discover available tables and columns,
 //! returning `Stream` definitions for the catalog.
@@ -10,7 +10,7 @@ use crate::types::Column;
 
 /// Discover all base tables and columns in the `public` schema.
 pub async fn discover_catalog(client: &Client) -> Result<Vec<Stream>, String> {
-    let query = r#"
+    let query = r"
         SELECT
             t.table_name,
             c.column_name,
@@ -22,7 +22,7 @@ pub async fn discover_catalog(client: &Client) -> Result<Vec<Stream>, String> {
         WHERE t.table_schema = 'public'
             AND t.table_type = 'BASE TABLE'
         ORDER BY t.table_name, c.ordinal_position
-    "#;
+    ";
 
     let rows = client
         .query(query, &[])

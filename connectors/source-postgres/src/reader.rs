@@ -19,7 +19,7 @@ use crate::metrics::emit_read_metrics;
 use crate::query;
 use crate::types::Column;
 
-/// Maximum number of rows per Arrow RecordBatch.
+/// Maximum number of rows per Arrow `RecordBatch`.
 const BATCH_SIZE: usize = 10_000;
 
 /// Number of rows to fetch per server-side cursor iteration.
@@ -31,7 +31,7 @@ const CURSOR_NAME: &str = "rb_cursor";
 /// Initial fixed overhead estimate for an empty batch payload.
 const BATCH_OVERHEAD_BYTES: usize = 256;
 
-/// Estimate byte size of a single row for max_record_bytes checking.
+/// Estimate byte size of a single row for `max_record_bytes` checking.
 pub(crate) fn estimate_row_bytes(columns: &[Column]) -> usize {
     let mut total = 0usize;
     for col in columns {
@@ -66,7 +66,11 @@ fn emit_accumulated_rows(
 ) -> Result<(), String> {
     let encode_start = Instant::now();
     let batch = encode::rows_to_record_batch(rows, columns, schema)?;
-    state.arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
+    // Safety: encode timing in nanos will not exceed u64::MAX for any realistic duration.
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        state.arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
+    }
 
     state.total_records += rows.len() as u64;
     state.total_bytes += batch.get_array_memory_size() as u64;
@@ -82,6 +86,7 @@ fn emit_accumulated_rows(
 }
 
 /// Read a single stream using server-side cursors.
+#[allow(clippy::too_many_lines)]
 pub async fn read_stream(
     client: &Client,
     ctx: &Context,
@@ -104,7 +109,7 @@ pub async fn read_stream(
             let unknown: Vec<&str> = selected
                 .iter()
                 .filter(|name| !all_columns.iter().any(|c| c.name == **name))
-                .map(|s| s.as_str())
+                .map(std::string::String::as_str)
                 .collect();
             if !unknown.is_empty() {
                 return Err(format!(
@@ -171,12 +176,16 @@ pub async fn read_stream(
     let query_secs = query_start.elapsed().as_secs_f64();
 
     // ── 5. Limits + cursor tracker setup ──────────────────────────────
+    // Safety: wasm32 target has 32-bit pointers; these u64 limits are always
+    // within practical memory bounds so truncation is acceptable.
+    #[allow(clippy::cast_possible_truncation)]
     let max_batch_bytes = if stream.limits.max_batch_bytes > 0 {
         stream.limits.max_batch_bytes as usize
     } else {
         DEFAULT_MAX_BATCH_BYTES as usize
     };
 
+    #[allow(clippy::cast_possible_truncation)]
     let max_record_bytes = if stream.limits.max_record_bytes > 0 {
         stream.limits.max_record_bytes as usize
     } else {
@@ -190,7 +199,7 @@ pub async fn read_stream(
         None => None,
     };
 
-    let fetch_query = format!("FETCH {} FROM {}", FETCH_CHUNK, CURSOR_NAME);
+    let fetch_query = format!("FETCH {FETCH_CHUNK} FROM {CURSOR_NAME}");
     let mut accumulated_rows: Vec<tokio_postgres::Row> = Vec::new();
     let mut estimated_bytes: usize = BATCH_OVERHEAD_BYTES;
     let mut state = EmitState {
@@ -219,26 +228,20 @@ pub async fn read_stream(
             let mut valid_rows: Vec<tokio_postgres::Row> = Vec::with_capacity(rows.len());
             for row in rows {
                 if estimated_row_bytes > max_record_bytes {
-                    match stream.policies.on_data_error {
-                        DataErrorPolicy::Fail => {
-                            loop_error = Some(format!(
-                                "Record exceeds max_record_bytes ({} > {})",
-                                estimated_row_bytes, max_record_bytes,
-                            ));
-                            break;
-                        }
-                        _ => {
-                            records_skipped += 1;
-                            ctx.log(
-                                LogLevel::Warn,
-                                &format!(
-                                    "Skipping oversized record: {} bytes > max_record_bytes {}",
-                                    estimated_row_bytes, max_record_bytes,
-                                ),
-                            );
-                            continue;
-                        }
+                    if stream.policies.on_data_error == DataErrorPolicy::Fail {
+                        loop_error = Some(format!(
+                            "Record exceeds max_record_bytes ({estimated_row_bytes} > {max_record_bytes})",
+                        ));
+                        break;
                     }
+                    records_skipped += 1;
+                    ctx.log(
+                        LogLevel::Warn,
+                        &format!(
+                            "Skipping oversized record: {estimated_row_bytes} bytes > max_record_bytes {max_record_bytes}",
+                        ),
+                    );
+                    continue;
                 }
                 valid_rows.push(row);
             }
@@ -350,7 +353,7 @@ pub async fn read_stream(
     let fetch_secs = fetch_start.elapsed().as_secs_f64();
 
     // ── 7. Cleanup ────────────────────────────────────────────────────
-    let close_query = format!("CLOSE {}", CURSOR_NAME);
+    let close_query = format!("CLOSE {CURSOR_NAME}");
     if let Err(e) = client.execute(&close_query, &[]).await {
         ctx.log(
             LogLevel::Warn,
@@ -412,6 +415,10 @@ pub async fn read_stream(
         ),
     );
 
+    // Safety: nanosecond timing precision loss beyond 52 bits is acceptable for metrics.
+    #[allow(clippy::cast_precision_loss)]
+    let arrow_encode_secs = state.arrow_encode_nanos as f64 / 1e9;
+
     Ok(ReadSummary {
         records_read: state.total_records,
         bytes_read: state.total_bytes,
@@ -422,7 +429,7 @@ pub async fn read_stream(
             connect_secs,
             query_secs,
             fetch_secs,
-            arrow_encode_secs: state.arrow_encode_nanos as f64 / 1e9,
+            arrow_encode_secs,
         }),
     })
 }

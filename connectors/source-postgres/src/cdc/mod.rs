@@ -1,4 +1,4 @@
-//! Change Data Capture via PostgreSQL logical replication slots.
+//! Change Data Capture via `PostgreSQL` logical replication slots.
 //!
 //! Reads WAL changes through `pg_logical_slot_get_changes` with the
 //! `test_decoding` plugin, parses decoded rows, emits Arrow IPC batches,
@@ -23,11 +23,11 @@ use crate::types::Column;
 
 use parser::{lsn_gt, parse_change_line, CdcChange};
 
-/// Maximum number of change rows per Arrow RecordBatch.
+/// Maximum number of change rows per Arrow `RecordBatch`.
 const BATCH_SIZE: usize = 10_000;
 
 /// Maximum WAL changes consumed per CDC invocation to avoid unbounded memory use.
-/// Type is i32 because pg_logical_slot_get_changes() expects int4.
+/// Type is i32 because `pg_logical_slot_get_changes()` expects int4.
 const CDC_MAX_CHANGES: i32 = 100_000;
 
 /// Default replication slot prefix. Full slot names are `rapidbyte_{stream_name}`.
@@ -49,7 +49,11 @@ fn emit_cdc_batch(
 ) -> Result<(), String> {
     let encode_start = Instant::now();
     let batch = changes_to_batch(changes, table_columns, schema)?;
-    state.arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
+    // Safety: encode timing in nanos will not exceed u64::MAX for any realistic duration.
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        state.arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
+    }
 
     state.total_records += changes.len() as u64;
     state.total_bytes += batch.get_array_memory_size() as u64;
@@ -64,6 +68,7 @@ fn emit_cdc_batch(
 }
 
 /// Read CDC changes from a logical replication slot using `pg_logical_slot_get_changes()`.
+#[allow(clippy::too_many_lines)]
 pub async fn read_cdc_changes(
     client: &Client,
     ctx: &Context,
@@ -102,8 +107,7 @@ pub async fn read_cdc_changes(
         .await
         .map_err(|e| {
             format!(
-                "pg_logical_slot_get_changes failed for slot {}: {e}",
-                slot_name
+                "pg_logical_slot_get_changes failed for slot {slot_name}: {e}"
             )
         })?;
 
@@ -202,6 +206,10 @@ pub async fn read_cdc_changes(
         ),
     );
 
+    // Safety: nanosecond timing precision loss beyond 52 bits is acceptable for metrics.
+    #[allow(clippy::cast_precision_loss)]
+    let arrow_encode_secs = state.arrow_encode_nanos as f64 / 1e9;
+
     Ok(ReadSummary {
         records_read: state.total_records,
         bytes_read: state.total_bytes,
@@ -212,7 +220,7 @@ pub async fn read_cdc_changes(
             connect_secs,
             query_secs,
             fetch_secs,
-            arrow_encode_secs: state.arrow_encode_nanos as f64 / 1e9,
+            arrow_encode_secs,
         }),
     })
 }
@@ -226,7 +234,7 @@ async fn ensure_replication_slot(
 ) -> Result<(), String> {
     ctx.log(
         LogLevel::Debug,
-        &format!("Ensuring replication slot '{}' exists", slot_name),
+        &format!("Ensuring replication slot '{slot_name}' exists"),
     );
 
     // Try to create; if it already exists, PG raises duplicate_object (42710).
@@ -242,8 +250,7 @@ async fn ensure_replication_slot(
             ctx.log(
                 LogLevel::Info,
                 &format!(
-                    "Created replication slot '{}' with test_decoding",
-                    slot_name
+                    "Created replication slot '{slot_name}' with test_decoding"
                 ),
             );
         }
@@ -251,19 +258,17 @@ async fn ensure_replication_slot(
             // Check for duplicate_object error (SQLSTATE 42710)
             let is_duplicate = e
                 .as_db_error()
-                .map(|db| db.code().code() == "42710")
-                .unwrap_or(false);
+                .is_some_and(|db| db.code().code() == "42710");
 
             if is_duplicate {
                 ctx.log(
                     LogLevel::Debug,
-                    &format!("Replication slot '{}' already exists", slot_name),
+                    &format!("Replication slot '{slot_name}' already exists"),
                 );
             } else {
                 return Err(format!(
-                    "Failed to create logical replication slot '{}'. \
-                     Ensure wal_level=logical in postgresql.conf: {}",
-                    slot_name, e
+                    "Failed to create logical replication slot '{slot_name}'. \
+                     Ensure wal_level=logical in postgresql.conf: {e}"
                 ));
             }
         }
@@ -286,7 +291,7 @@ fn build_cdc_arrow_schema(columns: &[Column]) -> Arc<Schema> {
     Arc::new(Schema::new(fields))
 }
 
-/// Convert accumulated CDC changes into an Arrow RecordBatch.
+/// Convert accumulated CDC changes into an Arrow `RecordBatch`.
 fn changes_to_batch(
     changes: &[CdcChange],
     table_columns: &[Column],

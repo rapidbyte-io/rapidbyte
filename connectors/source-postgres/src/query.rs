@@ -32,7 +32,7 @@ pub(crate) struct CursorQuery {
 
 pub(crate) fn effective_cursor_type(
     cursor_type: CursorType,
-    arrow_type: &ArrowDataType,
+    arrow_type: ArrowDataType,
 ) -> CursorType {
     match (cursor_type, arrow_type) {
         // Host state currently stores incremental cursor values as UTF-8.
@@ -57,7 +57,7 @@ pub(crate) fn build_base_query(
         .map(|c| {
             let ident = quote_identifier(&c.name);
             if c.needs_cast {
-                format!("{}::text AS {}", ident, ident)
+                format!("{ident}::text AS {ident}")
             } else {
                 ident.to_string()
             }
@@ -71,8 +71,7 @@ pub(crate) fn build_base_query(
         let cursor_arrow_type = columns
             .iter()
             .find(|c| c.name == ci.cursor_field)
-            .map(|c| &c.arrow_type)
-            .unwrap_or(&ArrowDataType::Utf8);
+            .map_or(&ArrowDataType::Utf8, |c| &c.arrow_type);
 
         if let Some(last_value) = ci.last_value.as_ref() {
             if matches!(last_value, CursorValue::Null) {
@@ -85,14 +84,13 @@ pub(crate) fn build_base_query(
                 );
                 return Ok(CursorQuery {
                     sql: format!(
-                        "SELECT {} FROM {} ORDER BY {}",
-                        col_list, table_name, cursor_field
+                        "SELECT {col_list} FROM {table_name} ORDER BY {cursor_field}"
                     ),
                     bind: None,
                 });
             }
 
-            let resolved_cursor_type = effective_cursor_type(ci.cursor_type, cursor_arrow_type);
+            let resolved_cursor_type = effective_cursor_type(ci.cursor_type, *cursor_arrow_type);
             if resolved_cursor_type != ci.cursor_type {
                 ctx.log(
                     LogLevel::Debug,
@@ -108,7 +106,7 @@ pub(crate) fn build_base_query(
             }
 
             let (bind, cast) =
-                cursor_bind_param(&resolved_cursor_type, last_value).map_err(|e| {
+                cursor_bind_param(resolved_cursor_type, last_value).map_err(|e| {
                     format!(
                         "Invalid incremental cursor value for stream '{}' field '{}': {e}",
                         stream.stream_name, ci.cursor_field
@@ -125,8 +123,7 @@ pub(crate) fn build_base_query(
 
             return Ok(CursorQuery {
                 sql: format!(
-                    "SELECT {} FROM {} WHERE {} > $1::{} ORDER BY {}",
-                    col_list, table_name, cursor_field, cast, cursor_field
+                    "SELECT {col_list} FROM {table_name} WHERE {cursor_field} > $1::{cast} ORDER BY {cursor_field}"
                 ),
                 bind: Some(bind),
             });
@@ -141,8 +138,7 @@ pub(crate) fn build_base_query(
         );
         return Ok(CursorQuery {
             sql: format!(
-                "SELECT {} FROM {} ORDER BY {}",
-                col_list, table_name, cursor_field
+                "SELECT {col_list} FROM {table_name} ORDER BY {cursor_field}"
             ),
             bind: None,
         });
@@ -159,7 +155,7 @@ pub(crate) fn build_base_query(
 }
 
 pub(crate) fn cursor_bind_param(
-    cursor_type: &CursorType,
+    cursor_type: CursorType,
     value: &CursorValue,
 ) -> Result<(CursorBindParam, &'static str), String> {
     match cursor_type {
@@ -168,23 +164,22 @@ pub(crate) fn cursor_bind_param(
                 CursorValue::Int64(v) => *v,
                 CursorValue::Utf8(v) => v
                     .parse::<i64>()
-                    .map_err(|e| format!("failed to parse '{}' as i64: {e}", v))?,
+                    .map_err(|e| format!("failed to parse '{v}' as i64: {e}"))?,
                 CursorValue::Decimal { value, .. } => value
                     .parse::<i64>()
-                    .map_err(|e| format!("failed to parse decimal '{}' as i64: {e}", value))?,
+                    .map_err(|e| format!("failed to parse decimal '{value}' as i64: {e}"))?,
                 _ => return Err("cursor value is incompatible with int64 cursor type".to_string()),
             };
             Ok((CursorBindParam::Int64(n), "bigint"))
         }
         CursorType::Utf8 => {
             let text = match value {
-                CursorValue::Utf8(v) => v.clone(),
                 CursorValue::Int64(v) => v.to_string(),
                 CursorValue::TimestampMillis(v) => timestamp_millis_to_rfc3339(*v)?,
                 CursorValue::TimestampMicros(v) => timestamp_micros_to_rfc3339(*v)?,
                 CursorValue::Decimal { value, .. } => value.clone(),
                 CursorValue::Json(v) => v.to_string(),
-                CursorValue::Lsn(v) => v.clone(),
+                CursorValue::Utf8(v) | CursorValue::Lsn(v) => v.clone(),
                 CursorValue::Null => {
                     return Err("null cursor cannot be used as a predicate".to_string())
                 }
@@ -238,7 +233,7 @@ pub(crate) fn cursor_bind_param(
             let json = match value {
                 CursorValue::Json(v) => v.clone(),
                 CursorValue::Utf8(v) => serde_json::from_str::<serde_json::Value>(v)
-                    .map_err(|e| format!("failed to parse '{}' as json: {e}", v))?,
+                    .map_err(|e| format!("failed to parse '{v}' as json: {e}"))?,
                 CursorValue::Null => serde_json::Value::Null,
                 _ => return Err("cursor value is incompatible with json cursor type".to_string()),
             };
@@ -248,8 +243,7 @@ pub(crate) fn cursor_bind_param(
             // LSN cursors are used in CDC mode and are not applicable to
             // incremental queries. Treat as text if encountered here.
             let text = match value {
-                CursorValue::Lsn(v) => v.clone(),
-                CursorValue::Utf8(v) => v.clone(),
+                CursorValue::Lsn(v) | CursorValue::Utf8(v) => v.clone(),
                 _ => return Err("cursor value is incompatible with lsn cursor type".to_string()),
             };
             Ok((CursorBindParam::Text(text), "pg_lsn"))
@@ -259,16 +253,18 @@ pub(crate) fn cursor_bind_param(
 
 pub(crate) fn timestamp_millis_to_rfc3339(ms: i64) -> Result<String, String> {
     let dt: DateTime<Utc> = DateTime::from_timestamp_millis(ms)
-        .ok_or_else(|| format!("invalid timestamp millis value: {}", ms))?;
+        .ok_or_else(|| format!("invalid timestamp millis value: {ms}"))?;
     Ok(dt.to_rfc3339_opts(SecondsFormat::Millis, true))
 }
 
 pub(crate) fn timestamp_micros_to_rfc3339(us: i64) -> Result<String, String> {
     let secs = us.div_euclid(1_000_000);
+    // Safety: rem_euclid(1_000_000) is always in 0..999_999 which fits in u32.
+    #[allow(clippy::cast_possible_truncation)]
     let micros = us.rem_euclid(1_000_000) as u32;
     let nanos = micros * 1_000;
     let dt: DateTime<Utc> = DateTime::from_timestamp(secs, nanos)
-        .ok_or_else(|| format!("invalid timestamp micros value: {}", us))?;
+        .ok_or_else(|| format!("invalid timestamp micros value: {us}"))?;
     Ok(dt.to_rfc3339_opts(SecondsFormat::Micros, true))
 }
 
@@ -302,11 +298,11 @@ mod tests {
     #[test]
     fn effective_cursor_type_promotes_numeric_utf8() {
         assert_eq!(
-            effective_cursor_type(CursorType::Utf8, &ArrowDataType::Int64),
+            effective_cursor_type(CursorType::Utf8, ArrowDataType::Int64),
             CursorType::Int64
         );
         assert_eq!(
-            effective_cursor_type(CursorType::Utf8, &ArrowDataType::Utf8),
+            effective_cursor_type(CursorType::Utf8, ArrowDataType::Utf8),
             CursorType::Utf8
         );
     }
@@ -314,14 +310,14 @@ mod tests {
     #[test]
     fn effective_cursor_type_promotes_timestamp_utf8() {
         assert_eq!(
-            effective_cursor_type(CursorType::Utf8, &ArrowDataType::TimestampMicros),
+            effective_cursor_type(CursorType::Utf8, ArrowDataType::TimestampMicros),
             CursorType::TimestampMicros
         );
     }
 
     #[test]
     fn cursor_bind_param_parses_int64_from_utf8() {
-        let (bind, cast) = cursor_bind_param(&CursorType::Int64, &CursorValue::Utf8("42".into()))
+        let (bind, cast) = cursor_bind_param(CursorType::Int64, &CursorValue::Utf8("42".into()))
             .expect("bind should parse");
         match bind {
             CursorBindParam::Int64(v) => assert_eq!(v, 42),
@@ -332,7 +328,7 @@ mod tests {
 
     #[test]
     fn cursor_bind_param_rejects_bad_int64() {
-        let err = cursor_bind_param(&CursorType::Int64, &CursorValue::Utf8("not_an_int".into()))
+        let err = cursor_bind_param(CursorType::Int64, &CursorValue::Utf8("not_an_int".into()))
             .expect_err("invalid int64 should fail");
         assert!(err.contains("failed to parse 'not_an_int' as i64"));
     }

@@ -1,11 +1,11 @@
-//! Unified PostgreSQL -> Arrow type registry.
+//! Unified `PostgreSQL` -> Arrow type registry.
 //!
 //! Single source of truth for type mapping, text-cast decisions,
 //! and column metadata. Every downstream module works with `Column`.
 
 use rapidbyte_sdk::prelude::*;
 
-/// Resolved type information for a PostgreSQL column type.
+/// Resolved type information for a `PostgreSQL` column type.
 pub struct TypeInfo {
     /// Target Arrow data type.
     pub arrow_type: ArrowDataType,
@@ -28,6 +28,7 @@ pub struct Column {
 
 impl Column {
     /// Build a `Column` from a PG type name, resolving Arrow type and cast requirement.
+    #[must_use] 
     pub fn new(name: &str, pg_type: &str, nullable: bool) -> Self {
         let info = resolve(pg_type);
         Self {
@@ -40,11 +41,13 @@ impl Column {
     }
 
     /// Whether this column is json or jsonb (needs special Arrow encoding).
+    #[must_use] 
     pub fn is_json(&self) -> bool {
         self.pg_type == "json" || self.pg_type == "jsonb"
     }
 
     /// Convert to SDK `ColumnSchema` for catalog discovery.
+    #[must_use] 
     pub fn to_schema(&self) -> ColumnSchema {
         ColumnSchema {
             name: self.name.clone(),
@@ -54,7 +57,8 @@ impl Column {
     }
 }
 
-/// Resolve a PostgreSQL type name to its Arrow type and cast requirement.
+/// Resolve a `PostgreSQL` type name to its Arrow type and cast requirement.
+#[must_use] 
 pub fn resolve(pg_type: &str) -> TypeInfo {
     match pg_type {
         // Integer types -- native FromSql

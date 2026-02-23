@@ -1,9 +1,9 @@
-//! Pure parsing functions for PostgreSQL `test_decoding` output.
+//! Pure parsing functions for `PostgreSQL` `test_decoding` output.
 //!
 //! No I/O, no async, no host imports -- only deterministic text parsing
 //! of the WAL change format emitted by `pg_logical_slot_get_changes()`.
 
-/// CDC operation type extracted from test_decoding output.
+/// CDC operation type extracted from `test_decoding` output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CdcOp {
     Insert,
@@ -21,7 +21,7 @@ impl CdcOp {
     }
 }
 
-/// A single parsed change from test_decoding output.
+/// A single parsed change from `test_decoding` output.
 #[derive(Debug, Clone)]
 pub(crate) struct CdcChange {
     pub(crate) op: CdcOp,
@@ -29,7 +29,7 @@ pub(crate) struct CdcChange {
     pub(crate) columns: Vec<(String, String, String)>, // (name, pg_type, value)
 }
 
-/// Parse a single test_decoding output line into a CdcChange.
+/// Parse a single `test_decoding` output line into a `CdcChange`.
 ///
 /// Format examples:
 ///   BEGIN 12345
@@ -77,7 +77,7 @@ pub(crate) fn parse_change_line(line: &str) -> Option<CdcChange> {
     Some(CdcChange { op, table, columns })
 }
 
-/// Parse test_decoding column values from a string like:
+/// Parse `test_decoding` column values from a string like:
 ///   id[integer]:1 name[text]:'John' active[boolean]:t
 pub(crate) fn parse_columns(s: &str) -> Vec<(String, String, String)> {
     let mut columns = Vec::new();
@@ -113,7 +113,7 @@ pub(crate) fn parse_columns(s: &str) -> Vec<(String, String, String)> {
     columns
 }
 
-/// Parse a single value from test_decoding output.
+/// Parse a single value from `test_decoding` output.
 ///
 /// Informal grammar:
 /// - `value = quoted | unquoted`

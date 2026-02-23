@@ -1,4 +1,4 @@
-//! Source connector for PostgreSQL.
+//! Source connector for `PostgreSQL`.
 //!
 //! Implements discovery and read paths (full-refresh, incremental cursor reads,
 //! and CDC logical replication) and streams Arrow IPC batches to the host.

@@ -1,4 +1,4 @@
-//! Arrow RecordBatch encoding from PostgreSQL rows.
+//! Arrow `RecordBatch` encoding from `PostgreSQL` rows.
 //!
 //! Converts `tokio_postgres::Row` slices into Arrow `RecordBatch` using the
 //! `Column` type registry. Each `Column` carries its `ArrowDataType` and PG
@@ -38,7 +38,7 @@ pub fn arrow_schema(columns: &[Column]) -> Arc<Schema> {
     Arc::new(Schema::new(fields))
 }
 
-/// Encode PostgreSQL rows into an Arrow `RecordBatch`.
+/// Encode `PostgreSQL` rows into an Arrow `RecordBatch`.
 ///
 /// Matches on `col.arrow_type` (enum) and delegates to specialised per-type
 /// encoders. JSON columns are detected via `col.is_json()` instead of a
@@ -52,43 +52,43 @@ pub fn rows_to_record_batch(
         .iter()
         .enumerate()
         .map(|(i, col)| encode_column(rows, i, col))
-        .collect::<Result<_, _>>()?;
+        .collect();
 
     RecordBatch::try_new(schema.clone(), arrays)
         .map_err(|e| format!("failed to create RecordBatch: {e}"))
 }
 
-fn encode_column(rows: &[Row], idx: usize, col: &Column) -> Result<Arc<dyn Array>, String> {
+fn encode_column(rows: &[Row], idx: usize, col: &Column) -> Arc<dyn Array> {
     match col.arrow_type {
         ArrowDataType::Int16 => {
             let vals: Vec<Option<i16>> = rows.iter().map(|r| r.try_get(idx).ok()).collect();
-            Ok(Arc::new(Int16Array::from(vals)))
+            Arc::new(Int16Array::from(vals))
         }
         ArrowDataType::Int32 => {
             let vals: Vec<Option<i32>> = rows.iter().map(|r| r.try_get(idx).ok()).collect();
-            Ok(Arc::new(Int32Array::from(vals)))
+            Arc::new(Int32Array::from(vals))
         }
         ArrowDataType::Int64 => {
             let vals: Vec<Option<i64>> = rows.iter().map(|r| r.try_get(idx).ok()).collect();
-            Ok(Arc::new(Int64Array::from(vals)))
+            Arc::new(Int64Array::from(vals))
         }
         ArrowDataType::Float32 => {
             let vals: Vec<Option<f32>> = rows.iter().map(|r| r.try_get(idx).ok()).collect();
-            Ok(Arc::new(Float32Array::from(vals)))
+            Arc::new(Float32Array::from(vals))
         }
         ArrowDataType::Float64 => {
             let vals: Vec<Option<f64>> = rows.iter().map(|r| r.try_get(idx).ok()).collect();
-            Ok(Arc::new(Float64Array::from(vals)))
+            Arc::new(Float64Array::from(vals))
         }
         ArrowDataType::Boolean => {
             let vals: Vec<Option<bool>> = rows.iter().map(|r| r.try_get(idx).ok()).collect();
-            Ok(Arc::new(BooleanArray::from(vals)))
+            Arc::new(BooleanArray::from(vals))
         }
-        ArrowDataType::TimestampMicros => Ok(encode_timestamp(rows, idx)),
-        ArrowDataType::Date32 => Ok(encode_date(rows, idx)),
-        ArrowDataType::Binary => Ok(encode_binary(rows, idx)),
-        _ if col.is_json() => Ok(encode_json(rows, idx)),
-        _ => Ok(encode_utf8(rows, idx)),
+        ArrowDataType::TimestampMicros => encode_timestamp(rows, idx),
+        ArrowDataType::Date32 => encode_date(rows, idx),
+        ArrowDataType::Binary => encode_binary(rows, idx),
+        _ if col.is_json() => encode_json(rows, idx),
+        _ => encode_utf8(rows, idx),
     }
 }
 
@@ -115,9 +115,12 @@ fn encode_date(rows: &[Row], idx: usize) -> Arc<dyn Array> {
     let vals: Vec<Option<i32>> = rows
         .iter()
         .map(|r| {
-            r.try_get::<_, NaiveDate>(idx)
-                .ok()
-                .map(|d| (d - *UNIX_EPOCH_DATE).num_days() as i32)
+            r.try_get::<_, NaiveDate>(idx).ok().map(|d| {
+                // Safety: Date32 represents days since epoch; realistic dates always fit in i32.
+                #[allow(clippy::cast_possible_truncation)]
+                let days = (d - *UNIX_EPOCH_DATE).num_days() as i32;
+                days
+            })
         })
         .collect();
     Arc::new(Date32Array::from(vals))
