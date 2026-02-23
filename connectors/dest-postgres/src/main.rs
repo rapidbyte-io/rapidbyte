@@ -6,6 +6,7 @@
 mod batch;
 mod client;
 mod config;
+mod copy;
 mod ddl;
 mod decode;
 mod insert;
