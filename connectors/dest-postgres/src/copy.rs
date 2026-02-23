@@ -1,6 +1,6 @@
 //! COPY FROM STDIN write path.
 //!
-//! Streams Arrow RecordBatch data to PostgreSQL via the COPY text protocol.
+//! Streams Arrow RecordBatch data to PostgreSQL via the COPY binary protocol.
 //! Flushes at configurable byte thresholds to bound memory usage.
 
 use bytes::Bytes;
@@ -11,10 +11,19 @@ use tokio_postgres::Client;
 
 use rapidbyte_sdk::prelude::*;
 
-use crate::decode::{downcast_columns, format_copy_value, WriteTarget};
+use crate::decode::{downcast_columns, write_binary_field, WriteTarget};
 
 /// Default COPY flush buffer size (4 MB).
 const DEFAULT_FLUSH_BYTES: usize = 4 * 1024 * 1024;
+
+/// PostgreSQL binary COPY signature (11 bytes).
+const PGCOPY_SIGNATURE: [u8; 11] = *b"PGCOPY\n\xff\r\n\x00";
+/// Flags field (4 bytes): no OIDs.
+const PGCOPY_FLAGS: [u8; 4] = 0_i32.to_be_bytes();
+/// Header extension area length (4 bytes): none.
+const PGCOPY_EXT_LEN: [u8; 4] = 0_i32.to_be_bytes();
+/// File trailer: field count = -1 signals end of data.
+const PGCOPY_TRAILER: [u8; 2] = (-1_i16).to_be_bytes();
 
 /// Write batches via COPY FROM STDIN. Returns rows written.
 ///
@@ -39,7 +48,7 @@ pub(crate) async fn write(
         .collect::<Vec<_>>()
         .join(", ");
     let copy_stmt = format!(
-        "COPY {} ({}) FROM STDIN WITH (FORMAT text)",
+        "COPY {} ({}) FROM STDIN WITH (FORMAT binary)",
         target.table, col_list
     );
 
@@ -53,21 +62,29 @@ pub(crate) async fn write(
     let mut total_rows: u64 = 0;
     let mut buf = Vec::with_capacity(flush_threshold);
 
+    // Write binary header (19 bytes)
+    buf.extend_from_slice(&PGCOPY_SIGNATURE);
+    buf.extend_from_slice(&PGCOPY_FLAGS);
+    buf.extend_from_slice(&PGCOPY_EXT_LEN);
+
+    let num_fields = target.active_cols.len() as i16;
+
     for batch in batches {
         let typed_cols = downcast_columns(batch, target.active_cols)?;
 
         for row_idx in 0..batch.num_rows() {
+            // Tuple header: field count
+            buf.extend_from_slice(&num_fields.to_be_bytes());
+
+            // Fields
             for (pos, typed_col) in typed_cols.iter().enumerate() {
-                if pos > 0 {
-                    buf.push(b'\t');
-                }
                 if target.type_null_flags[pos] {
-                    buf.extend_from_slice(b"\\N");
+                    buf.extend_from_slice(&(-1_i32).to_be_bytes());
                 } else {
-                    format_copy_value(&mut buf, typed_col, row_idx);
+                    write_binary_field(&mut buf, typed_col, row_idx);
                 }
             }
-            buf.push(b'\n');
+
             total_rows += 1;
 
             if buf.len() >= flush_threshold {
@@ -79,11 +96,13 @@ pub(crate) async fn write(
         }
     }
 
-    if !buf.is_empty() {
-        sink.send(Bytes::from(buf))
-            .await
-            .map_err(|e| format!("COPY send failed: {e}"))?;
-    }
+    // Write trailer
+    buf.extend_from_slice(&PGCOPY_TRAILER);
+
+    // Send final buffer (always non-empty due to trailer)
+    sink.send(Bytes::from(buf))
+        .await
+        .map_err(|e| format!("COPY send failed: {e}"))?;
 
     let _rows = sink
         .as_mut()

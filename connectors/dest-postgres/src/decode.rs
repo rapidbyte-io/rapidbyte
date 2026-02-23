@@ -1,11 +1,10 @@
 //! Arrow RecordBatch decoding helpers for INSERT and COPY write paths.
 //!
 //! Provides typed column extraction (one downcast per column per batch),
-//! SQL parameter value extraction for INSERT, COPY text serialization,
+//! SQL parameter value extraction for INSERT, binary COPY serialization,
 //! and shared helpers for column filtering and SQL building.
 
 use std::collections::HashSet;
-use std::io::Write;
 use std::sync::{Arc, LazyLock};
 
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
@@ -264,134 +263,84 @@ pub(crate) fn sql_param_value<'a>(col: &'a TypedCol<'a>, row_idx: usize) -> SqlP
     }
 }
 
-// ── COPY text format serialization ───────────────────────────────────
+// ── Binary COPY format ──────────────────────────────────────────────
 
-/// Format a pre-downcast value at a given row index for COPY text format.
+/// PostgreSQL epoch offset: microseconds between 1970-01-01 and 2000-01-01.
+const PG_EPOCH_OFFSET_MICROS: i64 = 946_684_800_000_000;
+
+/// PostgreSQL epoch offset: days between 1970-01-01 and 2000-01-01.
+const PG_EPOCH_OFFSET_DAYS: i32 = 10_957;
+
+/// Binary NULL indicator: field length = -1.
+const BINARY_NULL: [u8; 4] = (-1_i32).to_be_bytes();
+
+/// Write a fixed-size numeric field in PostgreSQL binary format.
+macro_rules! binary_fixed {
+    ($arr:expr, $buf:expr, $row:expr, $len:literal) => {
+        if $arr.is_null($row) {
+            $buf.extend_from_slice(&BINARY_NULL);
+        } else {
+            $buf.extend_from_slice(&{ $len as i32 }.to_be_bytes());
+            $buf.extend_from_slice(&$arr.value($row).to_be_bytes());
+        }
+    };
+}
+
+/// Write a single field in PostgreSQL binary COPY format.
 ///
-/// COPY text format rules:
-/// - NULL: `\N`
-/// - Strings: backslash-escape `\`, tab, newline, CR; strip null bytes
-/// - Booleans: `t` / `f`
-/// - Numbers: decimal representation (NaN, Infinity as literals)
-pub(crate) fn format_copy_value(buf: &mut Vec<u8>, col: &TypedCol<'_>, row_idx: usize) {
+/// Binary format per field: 4-byte length (i32, big-endian, -1 for NULL) + data bytes.
+/// All integers use network byte order (big-endian). Timestamps are microseconds
+/// since 2000-01-01, dates are days since 2000-01-01.
+pub(crate) fn write_binary_field(buf: &mut Vec<u8>, col: &TypedCol<'_>, row_idx: usize) {
     match col {
-        TypedCol::Null => buf.extend_from_slice(b"\\N"),
-        TypedCol::Int16(arr) => {
-            if arr.is_null(row_idx) {
-                buf.extend_from_slice(b"\\N");
-                return;
-            }
-            let _ = write!(buf, "{}", arr.value(row_idx));
-        }
-        TypedCol::Int32(arr) => {
-            if arr.is_null(row_idx) {
-                buf.extend_from_slice(b"\\N");
-                return;
-            }
-            let _ = write!(buf, "{}", arr.value(row_idx));
-        }
-        TypedCol::Int64(arr) => {
-            if arr.is_null(row_idx) {
-                buf.extend_from_slice(b"\\N");
-                return;
-            }
-            let _ = write!(buf, "{}", arr.value(row_idx));
-        }
-        TypedCol::Float32(arr) => {
-            if arr.is_null(row_idx) {
-                buf.extend_from_slice(b"\\N");
-                return;
-            }
-            let v = arr.value(row_idx);
-            if v.is_nan() {
-                buf.extend_from_slice(b"NaN");
-            } else if v.is_infinite() {
-                if v > 0.0 {
-                    buf.extend_from_slice(b"Infinity");
-                } else {
-                    buf.extend_from_slice(b"-Infinity");
-                }
-            } else {
-                let _ = write!(buf, "{}", v);
-            }
-        }
-        TypedCol::Float64(arr) => {
-            if arr.is_null(row_idx) {
-                buf.extend_from_slice(b"\\N");
-                return;
-            }
-            let v = arr.value(row_idx);
-            if v.is_nan() {
-                buf.extend_from_slice(b"NaN");
-            } else if v.is_infinite() {
-                if v > 0.0 {
-                    buf.extend_from_slice(b"Infinity");
-                } else {
-                    buf.extend_from_slice(b"-Infinity");
-                }
-            } else {
-                let _ = write!(buf, "{}", v);
-            }
-        }
+        TypedCol::Null => buf.extend_from_slice(&BINARY_NULL),
+        TypedCol::Int16(arr) => binary_fixed!(arr, buf, row_idx, 2_i32),
+        TypedCol::Int32(arr) => binary_fixed!(arr, buf, row_idx, 4_i32),
+        TypedCol::Int64(arr) => binary_fixed!(arr, buf, row_idx, 8_i32),
+        TypedCol::Float32(arr) => binary_fixed!(arr, buf, row_idx, 4_i32),
+        TypedCol::Float64(arr) => binary_fixed!(arr, buf, row_idx, 8_i32),
         TypedCol::Boolean(arr) => {
             if arr.is_null(row_idx) {
-                buf.extend_from_slice(b"\\N");
-                return;
+                buf.extend_from_slice(&BINARY_NULL);
+            } else {
+                buf.extend_from_slice(&1_i32.to_be_bytes());
+                buf.push(u8::from(arr.value(row_idx)));
             }
-            buf.push(if arr.value(row_idx) { b't' } else { b'f' });
         }
         TypedCol::Utf8(arr) => {
             if arr.is_null(row_idx) {
-                buf.extend_from_slice(b"\\N");
-                return;
-            }
-            for byte in arr.value(row_idx).bytes() {
-                match byte {
-                    b'\\' => buf.extend_from_slice(b"\\\\"),
-                    b'\t' => buf.extend_from_slice(b"\\t"),
-                    b'\n' => buf.extend_from_slice(b"\\n"),
-                    b'\r' => buf.extend_from_slice(b"\\r"),
-                    0 => {}
-                    _ => buf.push(byte),
-                }
+                buf.extend_from_slice(&BINARY_NULL);
+            } else {
+                let val = arr.value(row_idx).as_bytes();
+                buf.extend_from_slice(&(val.len() as i32).to_be_bytes());
+                buf.extend_from_slice(val);
             }
         }
         TypedCol::TimestampMicros(arr) => {
             if arr.is_null(row_idx) {
-                buf.extend_from_slice(b"\\N");
-                return;
-            }
-            let micros = arr.value(row_idx);
-            let secs = micros.div_euclid(1_000_000);
-            let nsecs = (micros.rem_euclid(1_000_000) * 1_000) as u32;
-            if let Some(dt) = DateTime::from_timestamp(secs, nsecs) {
-                let _ = write!(buf, "{}", dt.naive_utc().format("%Y-%m-%d %H:%M:%S%.f"));
+                buf.extend_from_slice(&BINARY_NULL);
             } else {
-                buf.extend_from_slice(b"\\N");
+                buf.extend_from_slice(&8_i32.to_be_bytes());
+                let pg_micros = arr.value(row_idx) - PG_EPOCH_OFFSET_MICROS;
+                buf.extend_from_slice(&pg_micros.to_be_bytes());
             }
         }
         TypedCol::Date32(arr) => {
             if arr.is_null(row_idx) {
-                buf.extend_from_slice(b"\\N");
-                return;
-            }
-            let days = arr.value(row_idx);
-            if let Some(date) =
-                UNIX_EPOCH_DATE.checked_add_signed(chrono::Duration::days(days as i64))
-            {
-                let _ = write!(buf, "{}", date);
+                buf.extend_from_slice(&BINARY_NULL);
             } else {
-                buf.extend_from_slice(b"\\N");
+                buf.extend_from_slice(&4_i32.to_be_bytes());
+                let pg_days = arr.value(row_idx) - PG_EPOCH_OFFSET_DAYS;
+                buf.extend_from_slice(&pg_days.to_be_bytes());
             }
         }
         TypedCol::Binary(arr) => {
             if arr.is_null(row_idx) {
-                buf.extend_from_slice(b"\\N");
-                return;
-            }
-            buf.extend_from_slice(b"\\\\x");
-            for byte in arr.value(row_idx) {
-                let _ = write!(buf, "{:02x}", byte);
+                buf.extend_from_slice(&BINARY_NULL);
+            } else {
+                let val = arr.value(row_idx);
+                buf.extend_from_slice(&(val.len() as i32).to_be_bytes());
+                buf.extend_from_slice(val);
             }
         }
     }
@@ -401,8 +350,8 @@ pub(crate) fn format_copy_value(buf: &mut Vec<u8>, col: &TypedCol<'_>, row_idx: 
 mod tests {
     use super::*;
     use rapidbyte_sdk::arrow::array::{
-        BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array, Int32Array,
-        StringArray, TimestampMicrosecondArray,
+        BinaryArray, BooleanArray, Date32Array, Float64Array, Int16Array, Int32Array, StringArray,
+        TimestampMicrosecondArray,
     };
     use rapidbyte_sdk::arrow::datatypes::{Field, TimeUnit};
 
@@ -563,105 +512,104 @@ mod tests {
         }
     }
 
-    // ── COPY text format ─────────────────────────────────────────────
+    // ── Binary COPY format ──────────────────────────────────────────
 
     #[test]
-    fn format_copy_value_escapes_utf8_text() {
-        let arr = StringArray::from(vec![Some("a\tb\nc\rd\\e\0f")]);
-        let col = TypedCol::Utf8(&arr);
+    fn binary_field_int16() {
+        let arr = Int16Array::from(vec![Some(256_i16), None]);
+        let col = TypedCol::Int16(&arr);
         let mut buf = Vec::new();
-        format_copy_value(&mut buf, &col, 0);
-        assert_eq!(String::from_utf8(buf).expect("utf8"), "a\\tb\\nc\\rd\\\\ef");
+        write_binary_field(&mut buf, &col, 0);
+        assert_eq!(buf, [0, 0, 0, 2, 1, 0]);
+        let mut buf = Vec::new();
+        write_binary_field(&mut buf, &col, 1);
+        assert_eq!(buf, [0xFF, 0xFF, 0xFF, 0xFF]);
     }
 
     #[test]
-    fn format_copy_value_formats_float_specials() {
-        let arr = Float64Array::from(vec![
-            Some(f64::NAN),
-            Some(f64::INFINITY),
-            Some(-f64::INFINITY),
-        ]);
+    fn binary_field_int32() {
+        let arr = Int32Array::from(vec![Some(42)]);
+        let col = TypedCol::Int32(&arr);
+        let mut buf = Vec::new();
+        write_binary_field(&mut buf, &col, 0);
+        assert_eq!(buf, [0, 0, 0, 4, 0, 0, 0, 42]);
+    }
+
+    #[test]
+    fn binary_field_int64() {
+        let arr = Int64Array::from(vec![Some(1_000_000)]);
+        let col = TypedCol::Int64(&arr);
+        let mut buf = Vec::new();
+        write_binary_field(&mut buf, &col, 0);
+        let mut expected = vec![0, 0, 0, 8];
+        expected.extend_from_slice(&1_000_000_i64.to_be_bytes());
+        assert_eq!(buf, expected);
+    }
+
+    #[test]
+    fn binary_field_float64() {
+        let arr = Float64Array::from(vec![Some(3.14)]);
         let col = TypedCol::Float64(&arr);
         let mut buf = Vec::new();
-        format_copy_value(&mut buf, &col, 0);
-        assert_eq!(String::from_utf8(buf).unwrap(), "NaN");
-        let mut buf = Vec::new();
-        format_copy_value(&mut buf, &col, 1);
-        assert_eq!(String::from_utf8(buf).unwrap(), "Infinity");
-        let mut buf = Vec::new();
-        format_copy_value(&mut buf, &col, 2);
-        assert_eq!(String::from_utf8(buf).unwrap(), "-Infinity");
+        write_binary_field(&mut buf, &col, 0);
+        let mut expected = vec![0, 0, 0, 8];
+        expected.extend_from_slice(&3.14_f64.to_be_bytes());
+        assert_eq!(buf, expected);
     }
 
     #[test]
-    fn format_copy_timestamp() {
-        let micros = 1705312200_i64 * 1_000_000;
-        let arr = TimestampMicrosecondArray::from(vec![Some(micros)]);
-        let col = TypedCol::TimestampMicros(&arr);
-        let mut buf = Vec::new();
-        format_copy_value(&mut buf, &col, 0);
-        let result = String::from_utf8(buf).unwrap();
-        assert!(result.starts_with("2024-01-15 09:50:00"), "got: {}", result);
-    }
-
-    #[test]
-    fn format_copy_date32() {
-        let arr = Date32Array::from(vec![Some(19737)]);
-        let col = TypedCol::Date32(&arr);
-        let mut buf = Vec::new();
-        format_copy_value(&mut buf, &col, 0);
-        assert_eq!(String::from_utf8(buf).unwrap(), "2024-01-15");
-    }
-
-    #[test]
-    fn format_copy_binary_hex() {
-        let arr = BinaryArray::from(vec![Some(&[0xDE_u8, 0xAD, 0xBE, 0xEF] as &[u8])]);
-        let col = TypedCol::Binary(&arr);
-        let mut buf = Vec::new();
-        format_copy_value(&mut buf, &col, 0);
-        assert_eq!(String::from_utf8(buf).unwrap(), "\\\\xdeadbeef");
-    }
-
-    #[test]
-    fn format_copy_nulls() {
-        let arr = TimestampMicrosecondArray::from(vec![None as Option<i64>]);
-        let col = TypedCol::TimestampMicros(&arr);
-        let mut buf = Vec::new();
-        format_copy_value(&mut buf, &col, 0);
-        assert_eq!(String::from_utf8(buf).unwrap(), "\\N");
-    }
-
-    #[test]
-    fn format_copy_int_types() {
-        let arr16 = Int16Array::from(vec![Some(-32768_i16)]);
-        let col = TypedCol::Int16(&arr16);
-        let mut buf = Vec::new();
-        format_copy_value(&mut buf, &col, 0);
-        assert_eq!(String::from_utf8(buf).unwrap(), "-32768");
-    }
-
-    #[test]
-    fn format_copy_boolean() {
+    fn binary_field_boolean() {
         let arr = BooleanArray::from(vec![Some(true), Some(false)]);
         let col = TypedCol::Boolean(&arr);
         let mut buf = Vec::new();
-        format_copy_value(&mut buf, &col, 0);
-        assert_eq!(String::from_utf8(buf).unwrap(), "t");
+        write_binary_field(&mut buf, &col, 0);
+        assert_eq!(buf, [0, 0, 0, 1, 1]);
         let mut buf = Vec::new();
-        format_copy_value(&mut buf, &col, 1);
-        assert_eq!(String::from_utf8(buf).unwrap(), "f");
+        write_binary_field(&mut buf, &col, 1);
+        assert_eq!(buf, [0, 0, 0, 1, 0]);
     }
 
     #[test]
-    fn format_copy_float32_specials() {
-        let arr = Float32Array::from(vec![
-            Some(f32::NAN),
-            Some(f32::INFINITY),
-            Some(f32::NEG_INFINITY),
-        ]);
-        let col = TypedCol::Float32(&arr);
+    fn binary_field_utf8() {
+        let arr = StringArray::from(vec![Some("hello")]);
+        let col = TypedCol::Utf8(&arr);
         let mut buf = Vec::new();
-        format_copy_value(&mut buf, &col, 0);
-        assert_eq!(String::from_utf8(buf).unwrap(), "NaN");
+        write_binary_field(&mut buf, &col, 0);
+        assert_eq!(buf, [0, 0, 0, 5, b'h', b'e', b'l', b'l', b'o']);
+    }
+
+    #[test]
+    fn binary_field_timestamp_micros() {
+        let arrow_micros = 1705312200_i64 * 1_000_000;
+        let pg_micros = arrow_micros - 946_684_800_000_000;
+        let arr = TimestampMicrosecondArray::from(vec![Some(arrow_micros)]);
+        let col = TypedCol::TimestampMicros(&arr);
+        let mut buf = Vec::new();
+        write_binary_field(&mut buf, &col, 0);
+        let mut expected = vec![0, 0, 0, 8];
+        expected.extend_from_slice(&pg_micros.to_be_bytes());
+        assert_eq!(buf, expected);
+    }
+
+    #[test]
+    fn binary_field_date32() {
+        let arrow_days = 19737;
+        let pg_days = arrow_days - 10957;
+        let arr = Date32Array::from(vec![Some(arrow_days)]);
+        let col = TypedCol::Date32(&arr);
+        let mut buf = Vec::new();
+        write_binary_field(&mut buf, &col, 0);
+        let mut expected = vec![0, 0, 0, 4];
+        expected.extend_from_slice(&pg_days.to_be_bytes());
+        assert_eq!(buf, expected);
+    }
+
+    #[test]
+    fn binary_field_bytea() {
+        let arr = BinaryArray::from(vec![Some(&[0xDE_u8, 0xAD, 0xBE, 0xEF] as &[u8])]);
+        let col = TypedCol::Binary(&arr);
+        let mut buf = Vec::new();
+        write_binary_field(&mut buf, &col, 0);
+        assert_eq!(buf, [0, 0, 0, 4, 0xDE, 0xAD, 0xBE, 0xEF]);
     }
 }
