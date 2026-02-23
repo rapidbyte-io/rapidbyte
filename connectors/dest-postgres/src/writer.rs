@@ -3,7 +3,6 @@
 //! Owns connection/session orchestration around batch writes, checkpoints,
 //! watermark-based resume, and Replace-mode staging swap.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,7 +14,7 @@ use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::protocol::SchemaEvolutionPolicy;
 
 use crate::config::LoadMethod;
-use crate::ddl::{ensure_table_and_schema, prepare_staging, swap_staging_table};
+use crate::ddl::{prepare_staging, swap_staging_table};
 use crate::decode;
 
 /// Entry point for writing a single stream.
@@ -160,9 +159,7 @@ pub struct WriteSession<'a> {
     stats: WriteStats,
 
     // Schema tracking
-    created_tables: HashSet<String>,
-    ignored_columns: HashSet<String>,
-    type_null_columns: HashSet<String>,
+    schema_state: crate::ddl::SchemaState,
 }
 
 impl<'a> WriteSession<'a> {
@@ -262,9 +259,7 @@ impl<'a> WriteSession<'a> {
                 bytes_since_commit: 0,
                 rows_since_commit: 0,
             },
-            created_tables: HashSet::new(),
-            ignored_columns: HashSet::new(),
-            type_null_columns: HashSet::new(),
+            schema_state: crate::ddl::SchemaState::new(),
         })
     }
 
@@ -301,22 +296,20 @@ impl<'a> WriteSession<'a> {
 
         // Ensure DDL (hoisted from insert/copy paths)
         let qualified_table = decode::qualified_name(self.target_schema, &self.effective_stream);
-        ensure_table_and_schema(
-            self.ctx,
-            self.client,
-            self.target_schema,
-            &self.effective_stream,
-            &mut self.created_tables,
-            self.effective_write_mode.as_ref(),
-            Some(&self.schema_policy),
-            schema,
-            &mut self.ignored_columns,
-            &mut self.type_null_columns,
-        )
-        .await?;
+        self.schema_state
+            .ensure_table(
+                self.ctx,
+                self.client,
+                self.target_schema,
+                &self.effective_stream,
+                self.effective_write_mode.as_ref(),
+                Some(&self.schema_policy),
+                schema,
+            )
+            .await?;
 
         // Pre-compute column info
-        let active_cols = decode::active_column_indices(schema, &self.ignored_columns);
+        let active_cols = decode::active_column_indices(schema, &self.schema_state.ignored_columns);
         if active_cols.is_empty() {
             self.ctx.log(
                 LogLevel::Warn,
@@ -325,7 +318,7 @@ impl<'a> WriteSession<'a> {
             return Ok(());
         }
         let type_null_flags =
-            decode::type_null_flags(&active_cols, schema, &self.type_null_columns);
+            decode::type_null_flags(&active_cols, schema, &self.schema_state.type_null_columns);
 
         // Dispatch to write path
         let use_copy = self.load_method == LoadMethod::Copy
