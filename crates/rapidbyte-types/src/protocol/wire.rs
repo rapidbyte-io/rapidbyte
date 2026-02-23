@@ -116,7 +116,6 @@ pub enum Feature {
     Cdc,
     SchemaAutoMigrate,
     BulkLoadCopy,
-    BulkLoadCopyBinary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

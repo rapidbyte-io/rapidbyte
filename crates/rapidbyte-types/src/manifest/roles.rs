@@ -25,7 +25,6 @@ pub enum DestinationFeature {
     ExactlyOnce,
     SchemaAutoMigrate,
     BulkLoadCopy,
-    BulkLoadCopyBinary,
 }
 
 /// Capabilities declared when a connector supports the Destination role.
