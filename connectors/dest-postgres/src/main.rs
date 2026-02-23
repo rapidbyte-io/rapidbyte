@@ -35,7 +35,7 @@ impl Destination for DestPostgres {
             ConnectorInfo {
                 protocol_version: ProtocolVersion::V2,
                 features,
-                default_max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
+                default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
             },
         ))
     }

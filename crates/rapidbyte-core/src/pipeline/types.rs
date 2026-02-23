@@ -1,6 +1,7 @@
 //! Pipeline configuration types and config parsing helpers.
 
-use rapidbyte_types::protocol::{DataErrorPolicy, SchemaEvolutionPolicy, SyncMode, WriteMode};
+use rapidbyte_types::stream::{DataErrorPolicy, SchemaEvolutionPolicy};
+use rapidbyte_types::wire::{SyncMode, WriteMode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -359,10 +360,10 @@ destination:
         assert_eq!(
             se,
             SchemaEvolutionPolicy {
-                new_column: rapidbyte_types::protocol::ColumnPolicy::Ignore,
-                removed_column: rapidbyte_types::protocol::ColumnPolicy::Ignore,
-                type_change: rapidbyte_types::protocol::TypeChangePolicy::Coerce,
-                nullability_change: rapidbyte_types::protocol::NullabilityPolicy::Allow,
+                new_column: rapidbyte_types::stream::ColumnPolicy::Ignore,
+                removed_column: rapidbyte_types::stream::ColumnPolicy::Ignore,
+                type_change: rapidbyte_types::stream::TypeChangePolicy::Coerce,
+                nullability_change: rapidbyte_types::stream::NullabilityPolicy::Allow,
             }
         );
     }

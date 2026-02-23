@@ -6,7 +6,7 @@ use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::prelude::*;
-use rapidbyte_sdk::protocol::{
+use rapidbyte_sdk::stream::{
     ColumnPolicy, NullabilityPolicy, SchemaEvolutionPolicy, TypeChangePolicy,
 };
 

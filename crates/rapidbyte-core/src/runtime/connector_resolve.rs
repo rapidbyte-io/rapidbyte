@@ -119,7 +119,7 @@ pub fn load_connector_manifest(wasm_path: &Path) -> Result<Option<ConnectorManif
 mod tests {
     use super::*;
     use rapidbyte_types::manifest::{Permissions, ResourceLimits, Roles, SourceCapabilities};
-    use rapidbyte_types::protocol::{ConnectorRole, ProtocolVersion, SyncMode};
+    use rapidbyte_types::wire::{ConnectorRole, ProtocolVersion, SyncMode};
 
     #[test]
     fn test_parse_connector_ref_with_namespace_version() {

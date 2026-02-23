@@ -3,7 +3,7 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use pg_escape::quote_identifier;
 use rapidbyte_sdk::prelude::*;
-use rapidbyte_sdk::protocol::CursorType;
+use rapidbyte_sdk::cursor::CursorType;
 use tokio_postgres::types::ToSql;
 
 use crate::types::Column;
@@ -161,8 +161,8 @@ pub(crate) fn cursor_bind_param(
     match cursor_type {
         CursorType::Int64 => {
             let n = match value {
-                CursorValue::Int64(v) => *v,
-                CursorValue::Utf8(v) => v
+                CursorValue::Int64 { value: v } => *v,
+                CursorValue::Utf8 { value: v } => v
                     .parse::<i64>()
                     .map_err(|e| format!("failed to parse '{v}' as i64: {e}"))?,
                 CursorValue::Decimal { value, .. } => value
@@ -174,23 +174,24 @@ pub(crate) fn cursor_bind_param(
         }
         CursorType::Utf8 => {
             let text = match value {
-                CursorValue::Int64(v) => v.to_string(),
-                CursorValue::TimestampMillis(v) => timestamp_millis_to_rfc3339(*v)?,
-                CursorValue::TimestampMicros(v) => timestamp_micros_to_rfc3339(*v)?,
+                CursorValue::Int64 { value: v } => v.to_string(),
+                CursorValue::TimestampMillis { value: v } => timestamp_millis_to_rfc3339(*v)?,
+                CursorValue::TimestampMicros { value: v } => timestamp_micros_to_rfc3339(*v)?,
                 CursorValue::Decimal { value, .. } => value.clone(),
-                CursorValue::Json(v) => v.to_string(),
-                CursorValue::Utf8(v) | CursorValue::Lsn(v) => v.clone(),
+                CursorValue::Json { value: v } => v.to_string(),
+                CursorValue::Utf8 { value: v } | CursorValue::Lsn { value: v } => v.clone(),
                 CursorValue::Null => {
                     return Err("null cursor cannot be used as a predicate".to_string())
                 }
+                _ => return Err("cursor value is incompatible with utf8 cursor type".to_string()),
             };
             Ok((CursorBindParam::Text(text), "text"))
         }
         CursorType::TimestampMillis => {
             let ts = match value {
-                CursorValue::TimestampMillis(v) | CursorValue::Int64(v) => timestamp_millis_to_rfc3339(*v)?,
-                CursorValue::Utf8(v) => v.clone(),
-                CursorValue::TimestampMicros(v) => timestamp_micros_to_rfc3339(*v)?,
+                CursorValue::TimestampMillis { value: v } | CursorValue::Int64 { value: v } => timestamp_millis_to_rfc3339(*v)?,
+                CursorValue::Utf8 { value: v } => v.clone(),
+                CursorValue::TimestampMicros { value: v } => timestamp_micros_to_rfc3339(*v)?,
                 _ => {
                     return Err(
                         "cursor value is incompatible with timestamp_millis cursor type"
@@ -204,9 +205,9 @@ pub(crate) fn cursor_bind_param(
         }
         CursorType::TimestampMicros => {
             let ts = match value {
-                CursorValue::TimestampMicros(v) | CursorValue::Int64(v) => timestamp_micros_to_rfc3339(*v)?,
-                CursorValue::Utf8(v) => v.clone(),
-                CursorValue::TimestampMillis(v) => timestamp_millis_to_rfc3339(*v)?,
+                CursorValue::TimestampMicros { value: v } | CursorValue::Int64 { value: v } => timestamp_micros_to_rfc3339(*v)?,
+                CursorValue::Utf8 { value: v } => v.clone(),
+                CursorValue::TimestampMillis { value: v } => timestamp_millis_to_rfc3339(*v)?,
                 _ => {
                     return Err(
                         "cursor value is incompatible with timestamp_micros cursor type"
@@ -221,8 +222,8 @@ pub(crate) fn cursor_bind_param(
         CursorType::Decimal => {
             let decimal = match value {
                 CursorValue::Decimal { value, .. } => value.clone(),
-                CursorValue::Utf8(v) => v.clone(),
-                CursorValue::Int64(v) => v.to_string(),
+                CursorValue::Utf8 { value: v } => v.clone(),
+                CursorValue::Int64 { value: v } => v.to_string(),
                 _ => {
                     return Err("cursor value is incompatible with decimal cursor type".to_string())
                 }
@@ -231,8 +232,8 @@ pub(crate) fn cursor_bind_param(
         }
         CursorType::Json => {
             let json = match value {
-                CursorValue::Json(v) => v.clone(),
-                CursorValue::Utf8(v) => serde_json::from_str::<serde_json::Value>(v)
+                CursorValue::Json { value: v } => v.clone(),
+                CursorValue::Utf8 { value: v } => serde_json::from_str::<serde_json::Value>(v)
                     .map_err(|e| format!("failed to parse '{v}' as json: {e}"))?,
                 CursorValue::Null => serde_json::Value::Null,
                 _ => return Err("cursor value is incompatible with json cursor type".to_string()),
@@ -243,11 +244,12 @@ pub(crate) fn cursor_bind_param(
             // LSN cursors are used in CDC mode and are not applicable to
             // incremental queries. Treat as text if encountered here.
             let text = match value {
-                CursorValue::Lsn(v) | CursorValue::Utf8(v) => v.clone(),
+                CursorValue::Lsn { value: v } | CursorValue::Utf8 { value: v } => v.clone(),
                 _ => return Err("cursor value is incompatible with lsn cursor type".to_string()),
             };
             Ok((CursorBindParam::Text(text), "pg_lsn"))
         }
+        _ => Err(format!("unsupported cursor type: {cursor_type:?}")),
     }
 }
 
@@ -271,9 +273,10 @@ pub(crate) fn timestamp_micros_to_rfc3339(us: i64) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapidbyte_sdk::protocol::{
-        CursorInfo, StreamContext, StreamLimits, StreamPolicies, SyncMode,
-    };
+    use rapidbyte_sdk::catalog::SchemaHint;
+    use rapidbyte_sdk::cursor::CursorInfo;
+    use rapidbyte_sdk::stream::{StreamContext, StreamLimits, StreamPolicies};
+    use rapidbyte_sdk::wire::SyncMode;
 
     fn columns_for_cursor() -> Vec<Column> {
         vec![
@@ -285,7 +288,7 @@ mod tests {
     fn base_context() -> StreamContext {
         StreamContext {
             stream_name: "users".to_string(),
-            schema: rapidbyte_sdk::protocol::SchemaHint::Columns(vec![]),
+            schema: SchemaHint::Columns(vec![]),
             sync_mode: SyncMode::FullRefresh,
             cursor_info: None,
             limits: StreamLimits::default(),
@@ -317,7 +320,7 @@ mod tests {
 
     #[test]
     fn cursor_bind_param_parses_int64_from_utf8() {
-        let (bind, cast) = cursor_bind_param(CursorType::Int64, &CursorValue::Utf8("42".into()))
+        let (bind, cast) = cursor_bind_param(CursorType::Int64, &CursorValue::Utf8 { value: "42".into() })
             .expect("bind should parse");
         match bind {
             CursorBindParam::Int64(v) => assert_eq!(v, 42),
@@ -328,7 +331,7 @@ mod tests {
 
     #[test]
     fn cursor_bind_param_rejects_bad_int64() {
-        let err = cursor_bind_param(CursorType::Int64, &CursorValue::Utf8("not_an_int".into()))
+        let err = cursor_bind_param(CursorType::Int64, &CursorValue::Utf8 { value: "not_an_int".into() })
             .expect_err("invalid int64 should fail");
         assert!(err.contains("failed to parse 'not_an_int' as i64"));
     }
@@ -352,7 +355,7 @@ mod tests {
         stream.cursor_info = Some(CursorInfo {
             cursor_field: "id".to_string(),
             cursor_type: CursorType::Int64,
-            last_value: Some(CursorValue::Int64(7)),
+            last_value: Some(CursorValue::Int64 { value: 7 }),
         });
 
         let query =

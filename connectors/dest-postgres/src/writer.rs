@@ -11,7 +11,7 @@ use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::prelude::*;
-use rapidbyte_sdk::protocol::SchemaEvolutionPolicy;
+use rapidbyte_sdk::stream::SchemaEvolutionPolicy;
 
 use crate::config::LoadMethod;
 use crate::ddl::{prepare_staging, swap_staging_table};

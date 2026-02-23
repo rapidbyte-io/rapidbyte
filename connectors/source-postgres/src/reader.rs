@@ -11,7 +11,7 @@ use tokio_postgres::Client;
 
 use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::prelude::*;
-use rapidbyte_sdk::protocol::{DataErrorPolicy, DEFAULT_MAX_BATCH_BYTES, DEFAULT_MAX_RECORD_BYTES};
+use rapidbyte_sdk::stream::DataErrorPolicy;
 
 use crate::cursor::CursorTracker;
 use crate::encode;
@@ -182,14 +182,14 @@ pub async fn read_stream(
     let max_batch_bytes = if stream.limits.max_batch_bytes > 0 {
         stream.limits.max_batch_bytes as usize
     } else {
-        DEFAULT_MAX_BATCH_BYTES as usize
+        StreamLimits::DEFAULT_MAX_BATCH_BYTES as usize
     };
 
     #[allow(clippy::cast_possible_truncation)]
     let max_record_bytes = if stream.limits.max_record_bytes > 0 {
         stream.limits.max_record_bytes as usize
     } else {
-        DEFAULT_MAX_RECORD_BYTES as usize
+        StreamLimits::DEFAULT_MAX_RECORD_BYTES as usize
     };
     let estimated_row_bytes = estimate_row_bytes(&columns);
     let mut records_skipped: u64 = 0;
@@ -386,7 +386,7 @@ pub async fn read_stream(
                 .cursor_value
                 .as_ref()
                 .map(|v| match v {
-                    CursorValue::Utf8(s) => s.clone(),
+                    CursorValue::Utf8 { value: s } => s.clone(),
                     _ => format!("{v:?}"),
                 })
                 .unwrap_or_default();
@@ -425,7 +425,7 @@ pub async fn read_stream(
         batches_emitted: state.batches_emitted,
         checkpoint_count,
         records_skipped,
-        perf: Some(rapidbyte_sdk::protocol::ReadPerf {
+        perf: Some(ReadPerf {
             connect_secs,
             query_secs,
             fetch_secs,

@@ -1,5 +1,5 @@
 use rapidbyte_sdk::build::ManifestBuilder;
-use rapidbyte_sdk::protocol::SyncMode;
+use rapidbyte_sdk::wire::SyncMode;
 
 fn main() {
     ManifestBuilder::source("rapidbyte/source-postgres")

@@ -247,7 +247,7 @@ fn gen_build_rs(name: &str, display_name: &str, role: Role, service_name: &str) 
     match role {
         Role::Source => format!(
             r#"use rapidbyte_sdk::build::ManifestBuilder;
-use rapidbyte_sdk::protocol::SyncMode;
+use rapidbyte_sdk::wire::SyncMode;
 
 fn main() {{
     ManifestBuilder::source("rapidbyte/{name}")
@@ -261,7 +261,7 @@ fn main() {{
         ),
         Role::Destination => format!(
             r#"use rapidbyte_sdk::build::ManifestBuilder;
-use rapidbyte_sdk::protocol::WriteMode;
+use rapidbyte_sdk::wire::WriteMode;
 
 fn main() {{
     ManifestBuilder::destination("rapidbyte/{name}")
@@ -299,7 +299,7 @@ impl Source for {struct_name} {{
             ConnectorInfo {{
                 protocol_version: ProtocolVersion::V2,
                 features: vec![],
-                default_max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
+                default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
             }},
         ))
     }}
@@ -347,7 +347,7 @@ impl Destination for {struct_name} {{
             ConnectorInfo {{
                 protocol_version: ProtocolVersion::V2,
                 features: vec![],
-                default_max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
+                default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
             }},
         ))
     }}

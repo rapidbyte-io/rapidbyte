@@ -5,12 +5,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use rapidbyte_types::errors::ValidationResult;
+use rapidbyte_types::catalog::{Catalog, SchemaHint};
+use rapidbyte_types::cursor::{CursorInfo, CursorType, CursorValue};
+use rapidbyte_types::envelope::DlqRecord;
+use rapidbyte_types::error::ValidationResult;
 use rapidbyte_types::manifest::{ConnectorManifest, Permissions, ResourceLimits};
-use rapidbyte_types::protocol::{
-    Catalog, ConnectorRole, CursorInfo, CursorType, CursorValue, DlqRecord, ProtocolVersion,
-    ReadSummary, SchemaHint, StreamContext, StreamLimits, StreamPolicies, SyncMode, WriteSummary,
-};
+use rapidbyte_types::metric::{ReadSummary, WriteSummary};
+use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
+use rapidbyte_types::wire::{ConnectorRole, ProtocolVersion, SyncMode};
 use tokio::sync::mpsc;
 
 use super::checkpoint::correlate_and_persist_cursors;
@@ -30,8 +32,8 @@ use crate::state::sqlite::SqliteStateBackend;
 struct StreamResult {
     read_summary: ReadSummary,
     write_summary: WriteSummary,
-    source_checkpoints: Vec<rapidbyte_types::protocol::Checkpoint>,
-    dest_checkpoints: Vec<rapidbyte_types::protocol::Checkpoint>,
+    source_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
+    dest_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
     src_host_timings: HostTimings,
     dst_host_timings: HostTimings,
     src_duration: f64,
@@ -88,8 +90,8 @@ struct StreamBuild {
 struct AggregatedStreamResults {
     total_read_summary: ReadSummary,
     total_write_summary: WriteSummary,
-    source_checkpoints: Vec<rapidbyte_types::protocol::Checkpoint>,
-    dest_checkpoints: Vec<rapidbyte_types::protocol::Checkpoint>,
+    source_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
+    dest_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
     src_timings: HostTimings,
     dst_timings: HostTimings,
     max_src_duration: f64,
@@ -371,7 +373,7 @@ fn build_stream_contexts(
                             .get_cursor(&pipeline_id, &StreamName(s.name.clone()))
                             .map_err(PipelineError::Infrastructure)?
                             .and_then(|cs| cs.cursor_value)
-                            .map(CursorValue::Utf8);
+                            .map(|v| CursorValue::Utf8 { value: v });
                         Some(CursorInfo {
                             cursor_field: cursor_field.clone(),
                             cursor_type: CursorType::Utf8,
@@ -386,7 +388,7 @@ fn build_stream_contexts(
                         .get_cursor(&pipeline_id, &StreamName(s.name.clone()))
                         .map_err(PipelineError::Infrastructure)?
                         .and_then(|cs| cs.cursor_value)
-                        .map(CursorValue::Lsn);
+                        .map(|v| CursorValue::Lsn { value: v });
                     Some(CursorInfo {
                         cursor_field: "lsn".to_string(),
                         cursor_type: CursorType::Lsn,
@@ -399,7 +401,7 @@ fn build_stream_contexts(
             Ok::<_, PipelineError>(StreamContext {
                 stream_name: s.name.clone(),
                 schema: SchemaHint::Columns(vec![]),
-                sync_mode: s.sync_mode.clone(),
+                sync_mode: s.sync_mode,
                 cursor_info,
                 limits: limits.clone(),
                 policies: StreamPolicies {
@@ -1247,7 +1249,7 @@ mod tests {
                 config: serde_json::json!({}),
                 write_mode: crate::pipeline::types::PipelineWriteMode::Append,
                 primary_key: vec![],
-                on_data_error: rapidbyte_types::protocol::DataErrorPolicy::Fail,
+                on_data_error: rapidbyte_types::stream::DataErrorPolicy::Fail,
                 schema_evolution: None,
                 permissions: None,
                 limits: None,

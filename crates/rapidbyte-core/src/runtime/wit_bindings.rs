@@ -1,7 +1,7 @@
 //! WIT binding glue: error type converters between SDK types and world-specific WIT types,
 //! `Host` trait impls for all three worlds, and validation result converters.
 
-use rapidbyte_types::errors::{
+use rapidbyte_types::error::{
     BackoffClass, CommitState, ConnectorError, ErrorCategory, ErrorScope, ValidationResult,
     ValidationStatus,
 };
@@ -55,7 +55,7 @@ macro_rules! define_error_converters {
                     ErrorCategory::TransientDb => CErrorCategory::TransientDb,
                     ErrorCategory::Data => CErrorCategory::Data,
                     ErrorCategory::Schema => CErrorCategory::Schema,
-                    ErrorCategory::Internal => CErrorCategory::Internal,
+                    ErrorCategory::Internal | _ => CErrorCategory::Internal,
                 },
                 scope: match error.scope {
                     ErrorScope::Stream => CErrorScope::PerStream,

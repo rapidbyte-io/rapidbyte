@@ -1,6 +1,6 @@
 //! DLQ persistence helper used by the orchestrator.
 
-use rapidbyte_types::protocol::DlqRecord;
+use rapidbyte_types::envelope::DlqRecord;
 
 use crate::state::backend::{PipelineId, StateBackend};
 

@@ -1,7 +1,7 @@
 //! Semantic validation for parsed pipeline configuration values.
 
 use anyhow::{bail, Result};
-use rapidbyte_types::protocol::SyncMode;
+use rapidbyte_types::wire::SyncMode;
 
 use crate::pipeline::types::{
     parse_byte_size, PipelineConfig, PipelineLimits, PipelinePermissions, PipelineWriteMode,

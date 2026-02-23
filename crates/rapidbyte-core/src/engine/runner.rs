@@ -6,12 +6,14 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
-use rapidbyte_types::errors::ValidationResult;
+use rapidbyte_types::catalog::Catalog;
+use rapidbyte_types::checkpoint::Checkpoint;
+use rapidbyte_types::envelope::DlqRecord;
+use rapidbyte_types::error::ValidationResult;
 use rapidbyte_types::manifest::Permissions;
-use rapidbyte_types::protocol::{
-    Catalog, Checkpoint, ConnectorRole, DlqRecord, ReadSummary, StreamContext, TransformSummary,
-    WriteSummary,
-};
+use rapidbyte_types::metric::{ReadSummary, TransformSummary, WriteSummary};
+use rapidbyte_types::stream::StreamContext;
+use rapidbyte_types::wire::ConnectorRole;
 
 use super::compression::CompressionCodec;
 use super::errors::PipelineError;
@@ -638,7 +640,6 @@ pub(crate) fn validate_connector(
             let _ = iface.call_close(&mut store);
             result
         }
-        ConnectorRole::Utility => anyhow::bail!("Utility connector validation is not implemented"),
     }
 }
 

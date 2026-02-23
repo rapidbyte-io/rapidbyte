@@ -1,7 +1,8 @@
 //! Checkpoint correlation and cursor advancement logic.
 
 use anyhow::Result;
-use rapidbyte_types::protocol::{Checkpoint, CursorValue};
+use rapidbyte_types::checkpoint::Checkpoint;
+use rapidbyte_types::cursor::CursorValue;
 
 use crate::state::backend::{CursorState, PipelineId, StateBackend, StreamName};
 
@@ -34,14 +35,15 @@ pub(crate) fn correlate_and_persist_cursors(
         }
 
         let value_str = match cursor_value {
-            CursorValue::Utf8(s) => s.clone(),
-            CursorValue::Int64(n) => n.to_string(),
-            CursorValue::TimestampMillis(ms) => ms.to_string(),
-            CursorValue::TimestampMicros(us) => us.to_string(),
+            CursorValue::Utf8 { value } => value.clone(),
+            CursorValue::Int64 { value } => value.to_string(),
+            CursorValue::TimestampMillis { value } => value.to_string(),
+            CursorValue::TimestampMicros { value } => value.to_string(),
             CursorValue::Decimal { value, .. } => value.clone(),
-            CursorValue::Json(v) => v.to_string(),
-            CursorValue::Lsn(s) => s.clone(),
+            CursorValue::Json { value } => value.to_string(),
+            CursorValue::Lsn { value } => value.clone(),
             CursorValue::Null => continue,
+            _ => continue,
         };
 
         let cursor = CursorState {
@@ -67,7 +69,8 @@ pub(crate) fn correlate_and_persist_cursors(
 mod tests {
     use super::*;
     use crate::state::sqlite::SqliteStateBackend;
-    use rapidbyte_types::protocol::{CheckpointKind, ProtocolVersion};
+    use rapidbyte_types::checkpoint::CheckpointKind;
+    use rapidbyte_types::wire::ProtocolVersion;
 
     fn make_source_checkpoint(stream: &str, cursor_field: &str, cursor_value: &str) -> Checkpoint {
         Checkpoint {
@@ -75,7 +78,7 @@ mod tests {
             kind: CheckpointKind::Source,
             stream: stream.to_string(),
             cursor_field: Some(cursor_field.to_string()),
-            cursor_value: Some(CursorValue::Utf8(cursor_value.to_string())),
+            cursor_value: Some(CursorValue::Utf8 { value: cursor_value.to_string() }),
             records_processed: 100,
             bytes_processed: 5000,
         }
@@ -155,14 +158,14 @@ mod tests {
 
     #[test]
     fn test_checkpoint_envelope_roundtrip_via_host_parsing() {
-        use rapidbyte_types::protocol::PayloadEnvelope;
+        use rapidbyte_types::envelope::PayloadEnvelope;
 
         let source_cp = Checkpoint {
             id: 1,
             kind: CheckpointKind::Source,
             stream: "users".to_string(),
             cursor_field: Some("id".to_string()),
-            cursor_value: Some(CursorValue::Int64(42)),
+            cursor_value: Some(CursorValue::Int64 { value: 42 }),
             records_processed: 100,
             bytes_processed: 5000,
         };

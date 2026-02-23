@@ -97,7 +97,7 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
     quote! {
         use std::cell::RefCell;
         use std::sync::OnceLock;
-        use ::rapidbyte_sdk::errors::{BackoffClass, CommitState, ErrorCategory, ErrorScope};
+        use ::rapidbyte_sdk::error::{BackoffClass, CommitState, ErrorCategory, ErrorScope};
 
         static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
         static CONFIG_JSON: OnceLock<String> = OnceLock::new();
@@ -122,14 +122,14 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
         }
 
         fn to_component_error(
-            error: ::rapidbyte_sdk::errors::ConnectorError,
+            error: ::rapidbyte_sdk::error::ConnectorError,
         ) -> __rb_bindings::rapidbyte::connector::types::ConnectorError {
             use __rb_bindings::rapidbyte::connector::types::{
                 BackoffClass as CBackoffClass, CommitState as CCommitState,
                 ConnectorError as CConnectorError, ErrorCategory as CErrorCategory,
                 ErrorScope as CErrorScope,
             };
-            use ::rapidbyte_sdk::errors::{
+            use ::rapidbyte_sdk::error::{
                 BackoffClass, CommitState, ErrorCategory, ErrorScope,
             };
 
@@ -143,14 +143,14 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
                     ErrorCategory::TransientDb => CErrorCategory::TransientDb,
                     ErrorCategory::Data => CErrorCategory::Data,
                     ErrorCategory::Schema => CErrorCategory::Schema,
-                    ErrorCategory::Internal => CErrorCategory::Internal,
+                    ErrorCategory::Internal | _ => CErrorCategory::Internal,
                 },
                 scope: match error.scope {
                     ErrorScope::Stream => CErrorScope::PerStream,
                     ErrorScope::Batch => CErrorScope::PerBatch,
                     ErrorScope::Record => CErrorScope::PerRecord,
                 },
-                code: error.code.0,
+                code: error.code,
                 message: error.message,
                 retryable: error.retryable,
                 retry_after_ms: error.retry_after_ms,
@@ -172,11 +172,11 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
         fn parse_stream_context(
             ctx_json: String,
         ) -> Result<
-            ::rapidbyte_sdk::protocol::StreamContext,
+            ::rapidbyte_sdk::stream::StreamContext,
             __rb_bindings::rapidbyte::connector::types::ConnectorError,
         > {
             serde_json::from_str(&ctx_json).map_err(|e| {
-                to_component_error(::rapidbyte_sdk::errors::ConnectorError::config(
+                to_component_error(::rapidbyte_sdk::error::ConnectorError::config(
                     "INVALID_STREAM_CTX",
                     format!("Invalid StreamContext JSON: {}", e),
                 ))
@@ -187,7 +187,7 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
             config_json: &str,
         ) -> Result<T, __rb_bindings::rapidbyte::connector::types::ConnectorError> {
             serde_json::from_str(config_json).map_err(|e| {
-                to_component_error(::rapidbyte_sdk::errors::ConnectorError::config(
+                to_component_error(::rapidbyte_sdk::error::ConnectorError::config(
                     "INVALID_CONFIG",
                     format!("Config parse error: {}", e),
                 ))
@@ -201,12 +201,12 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
         }
 
         fn to_component_validation(
-            result: ::rapidbyte_sdk::errors::ValidationResult,
+            result: ::rapidbyte_sdk::error::ValidationResult,
         ) -> __rb_bindings::rapidbyte::connector::types::ValidationResult {
             use __rb_bindings::rapidbyte::connector::types::{
                 ValidationResult as CValidationResult, ValidationStatus as CValidationStatus,
             };
-            use ::rapidbyte_sdk::errors::ValidationStatus;
+            use ::rapidbyte_sdk::error::ValidationStatus;
 
             CValidationResult {
                 status: match result.status {
@@ -321,7 +321,7 @@ fn gen_source_methods(struct_name: &Ident, trait_path: &TokenStream) -> TokenStr
                 .map_err(to_component_error)?;
 
             serde_json::to_string(&catalog).map_err(|e| {
-                to_component_error(::rapidbyte_sdk::errors::ConnectorError::internal(
+                to_component_error(::rapidbyte_sdk::error::ConnectorError::internal(
                     "SERIALIZE_CATALOG",
                     e.to_string(),
                 ))

@@ -1,6 +1,5 @@
 use rapidbyte_sdk::build::ManifestBuilder;
-use rapidbyte_sdk::manifest::DestinationFeature;
-use rapidbyte_sdk::protocol::WriteMode;
+use rapidbyte_sdk::wire::{Feature, WriteMode};
 
 fn main() {
     ManifestBuilder::destination("rapidbyte/dest-postgres")
@@ -13,7 +12,7 @@ fn main() {
                 primary_key: vec![],
             },
         ])
-        .dest_features(vec![DestinationFeature::BulkLoadCopy])
+        .dest_features(vec![Feature::BulkLoadCopy])
         .allow_runtime_network()
         .env_vars(&["PGSSLROOTCERT"])
         .emit();

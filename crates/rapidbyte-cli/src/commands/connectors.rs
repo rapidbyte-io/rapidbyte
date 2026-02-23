@@ -37,9 +37,6 @@ pub async fn execute() -> Result<()> {
                         if manifest.roles.transform.is_some() {
                             roles.push("Transform");
                         }
-                        if manifest.roles.utility.is_some() {
-                            roles.push("Utility");
-                        }
 
                         println!(
                             "  {} ({}@{})  [{}]",

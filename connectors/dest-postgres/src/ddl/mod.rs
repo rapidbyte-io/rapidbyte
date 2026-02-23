@@ -9,7 +9,7 @@ use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::prelude::*;
-use rapidbyte_sdk::protocol::SchemaEvolutionPolicy;
+use rapidbyte_sdk::stream::SchemaEvolutionPolicy;
 
 use self::drift::detect_schema_drift;
 use crate::type_map::arrow_to_pg_type;

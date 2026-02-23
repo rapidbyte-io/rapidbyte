@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::Connection;
 
-use rapidbyte_types::protocol::DlqRecord;
+use rapidbyte_types::envelope::DlqRecord;
 
 use super::backend::{CursorState, PipelineId, RunStats, RunStatus, StateBackend, StreamName};
 use super::schema;
@@ -251,7 +251,7 @@ impl StateBackend for SqliteStateBackend {
                 record.record_json,
                 record.error_message,
                 record.error_category.to_string(),
-                record.failed_at.0.as_str(),
+                record.failed_at.as_str(),
             ])?;
             count += 1;
         }
@@ -265,8 +265,8 @@ impl StateBackend for SqliteStateBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapidbyte_types::errors::ErrorCategory;
-    use rapidbyte_types::protocol::Iso8601Timestamp;
+    use rapidbyte_types::envelope::Timestamp;
+    use rapidbyte_types::error::ErrorCategory;
 
     fn pid(name: &str) -> PipelineId {
         PipelineId(name.to_string())
@@ -530,14 +530,14 @@ mod tests {
                 record_json: r#"{"id":1}"#.to_string(),
                 error_message: "not-null violation".to_string(),
                 error_category: ErrorCategory::Data,
-                failed_at: Iso8601Timestamp("2026-02-21T12:00:00+00:00".to_string()),
+                failed_at: Timestamp::new("2026-02-21T12:00:00+00:00".to_string()),
             },
             DlqRecord {
                 stream_name: "users".to_string(),
                 record_json: r#"{"id":2}"#.to_string(),
                 error_message: "type mismatch".to_string(),
                 error_category: ErrorCategory::Data,
-                failed_at: Iso8601Timestamp("2026-02-21T12:00:01+00:00".to_string()),
+                failed_at: Timestamp::new("2026-02-21T12:00:01+00:00".to_string()),
             },
         ];
 

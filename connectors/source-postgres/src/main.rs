@@ -33,7 +33,7 @@ impl Source for SourcePostgres {
             ConnectorInfo {
                 protocol_version: ProtocolVersion::V2,
                 features: vec![Feature::Cdc],
-                default_max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
+                default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
             },
         ))
     }

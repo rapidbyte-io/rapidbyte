@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rapidbyte_types::protocol::DlqRecord;
+use rapidbyte_types::envelope::DlqRecord;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PipelineId(pub String);

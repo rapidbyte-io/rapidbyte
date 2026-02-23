@@ -174,7 +174,7 @@ pub async fn read_cdc_changes(
             kind: CheckpointKind::Source,
             stream: stream.stream_name.clone(),
             cursor_field: Some("lsn".to_string()),
-            cursor_value: Some(CursorValue::Lsn(lsn.clone())),
+            cursor_value: Some(CursorValue::Lsn { value: lsn.clone() }),
             records_processed: state.total_records,
             bytes_processed: state.total_bytes,
         };
@@ -216,7 +216,7 @@ pub async fn read_cdc_changes(
         batches_emitted: state.batches_emitted,
         checkpoint_count,
         records_skipped: 0,
-        perf: Some(rapidbyte_sdk::protocol::ReadPerf {
+        perf: Some(ReadPerf {
             connect_secs,
             query_secs,
             fetch_secs,

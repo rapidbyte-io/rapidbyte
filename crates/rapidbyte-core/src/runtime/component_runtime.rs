@@ -9,9 +9,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rapidbyte_types::errors::{ConnectorError, ErrorCategory};
+use rapidbyte_types::checkpoint::{Checkpoint, StateScope};
+use rapidbyte_types::envelope::{DlqRecord, Timestamp};
+use rapidbyte_types::error::{ConnectorError, ErrorCategory};
 use rapidbyte_types::manifest::Permissions;
-use rapidbyte_types::protocol::{Checkpoint, DlqRecord, Iso8601Timestamp, StateScope};
 use tokio::sync::mpsc;
 use wasmtime::component::ResourceTable;
 use wasmtime::{StoreLimits, StoreLimitsBuilder};
@@ -534,9 +535,17 @@ impl ComponentHostState {
             ));
         }
 
-        let scope = StateScope::try_from(scope as i32).map_err(|_| {
-            ConnectorError::config("INVALID_SCOPE", format!("Invalid scope: {}", scope))
-        })?;
+        let scope = match scope {
+            0 => StateScope::Pipeline,
+            1 => StateScope::Stream,
+            2 => StateScope::ConnectorInstance,
+            _ => {
+                return Err(ConnectorError::config(
+                    "INVALID_SCOPE",
+                    format!("Invalid scope: {scope}"),
+                ))
+            }
+        };
 
         let scoped_key = self.scoped_state_key(scope, &key);
         self.identity
@@ -559,9 +568,17 @@ impl ComponentHostState {
             ));
         }
 
-        let scope = StateScope::try_from(scope as i32).map_err(|_| {
-            ConnectorError::config("INVALID_SCOPE", format!("Invalid scope: {}", scope))
-        })?;
+        let scope = match scope {
+            0 => StateScope::Pipeline,
+            1 => StateScope::Stream,
+            2 => StateScope::ConnectorInstance,
+            _ => {
+                return Err(ConnectorError::config(
+                    "INVALID_SCOPE",
+                    format!("Invalid scope: {scope}"),
+                ))
+            }
+        };
 
         let scoped_key = self.scoped_state_key(scope, &key);
         let cursor = CursorState {
@@ -590,9 +607,17 @@ impl ComponentHostState {
             ));
         }
 
-        let scope = StateScope::try_from(scope as i32).map_err(|_| {
-            ConnectorError::config("INVALID_SCOPE", format!("Invalid scope: {}", scope))
-        })?;
+        let scope = match scope {
+            0 => StateScope::Pipeline,
+            1 => StateScope::Stream,
+            2 => StateScope::ConnectorInstance,
+            _ => {
+                return Err(ConnectorError::config(
+                    "INVALID_SCOPE",
+                    format!("Invalid scope: {scope}"),
+                ))
+            }
+        };
 
         let scoped_key = self.scoped_state_key(scope, &key);
         self.identity
@@ -901,7 +926,7 @@ impl ComponentHostState {
             record_json,
             error_message,
             error_category: parse_error_category(&error_category),
-            failed_at: Iso8601Timestamp(chrono::Utc::now().to_rfc3339()),
+            failed_at: Timestamp::new(chrono::Utc::now().to_rfc3339()),
         });
         Ok(())
     }

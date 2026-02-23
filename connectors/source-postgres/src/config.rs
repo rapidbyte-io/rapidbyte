@@ -1,6 +1,6 @@
 //! Source `PostgreSQL` connector configuration.
 
-use rapidbyte_sdk::errors::ConnectorError;
+use rapidbyte_sdk::error::ConnectorError;
 use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;
 
