@@ -7,7 +7,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
-use pg_escape::quote_identifier;
 use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
@@ -179,7 +178,7 @@ impl<'a> WriteSession<'a> {
         let stream_name = &config.stream_name;
         let write_mode = config.write_mode;
 
-        if let Err(e) = ensure_watermarks_table(client, target_schema).await {
+        if let Err(e) = crate::watermark::ensure_table(client, target_schema).await {
             ctx.log(
                 LogLevel::Warn,
                 &format!(
@@ -207,7 +206,7 @@ impl<'a> WriteSession<'a> {
         };
 
         let watermark_records = if !is_replace {
-            match get_watermark(client, target_schema, stream_name).await {
+            match crate::watermark::get(client, target_schema, stream_name).await {
                 Ok(w) => {
                     if w > 0 {
                         ctx.log(
@@ -355,7 +354,7 @@ impl<'a> WriteSession<'a> {
             return Ok(());
         }
 
-        set_watermark(
+        crate::watermark::set(
             self.client,
             self.target_schema,
             &self.stream_name,
@@ -405,7 +404,7 @@ impl<'a> WriteSession<'a> {
     pub async fn commit(mut self) -> Result<SessionResult, String> {
         let flush_secs = self.flush_start.elapsed().as_secs_f64();
 
-        set_watermark(
+        crate::watermark::set(
             self.client,
             self.target_schema,
             &self.stream_name,
@@ -440,7 +439,7 @@ impl<'a> WriteSession<'a> {
                 .map_err(|e| format!("{:#}", e))?;
         }
 
-        let _ = clear_watermark(self.client, self.target_schema, &self.stream_name).await;
+        let _ = crate::watermark::clear(self.client, self.target_schema, &self.stream_name).await;
 
         self.ctx.log(
             LogLevel::Info,
@@ -469,98 +468,4 @@ impl<'a> WriteSession<'a> {
     pub async fn rollback(self) {
         let _ = self.client.execute("ROLLBACK", &[]).await;
     }
-}
-
-/// Ensure the __rb_watermarks metadata table exists.
-async fn ensure_watermarks_table(client: &Client, target_schema: &str) -> Result<(), String> {
-    let create_schema = format!(
-        "CREATE SCHEMA IF NOT EXISTS {}",
-        quote_identifier(target_schema)
-    );
-    client
-        .execute(&create_schema, &[])
-        .await
-        .map_err(|e| format!("Failed to create schema '{}': {}", target_schema, e))?;
-
-    let qualified = format!("{}.__rb_watermarks", quote_identifier(target_schema));
-    let ddl = format!(
-        "CREATE TABLE IF NOT EXISTS {} (
-            stream_name TEXT PRIMARY KEY,
-            records_committed BIGINT NOT NULL DEFAULT 0,
-            bytes_committed BIGINT NOT NULL DEFAULT 0,
-            committed_at TIMESTAMP NOT NULL DEFAULT NOW()
-        )",
-        qualified
-    );
-    client
-        .execute(&ddl, &[])
-        .await
-        .map_err(|e| format!("Failed to create watermarks table: {}", e))?;
-    Ok(())
-}
-
-/// Get watermark (records committed) for a stream. Returns 0 if none.
-async fn get_watermark(
-    client: &Client,
-    target_schema: &str,
-    stream_name: &str,
-) -> Result<u64, String> {
-    let qualified = format!("{}.__rb_watermarks", quote_identifier(target_schema));
-    let sql = format!(
-        "SELECT records_committed FROM {} WHERE stream_name = $1",
-        qualified
-    );
-    match client.query_opt(&sql, &[&stream_name]).await {
-        Ok(Some(row)) => {
-            let val: i64 = row.get(0);
-            Ok(val as u64)
-        }
-        Ok(None) => Ok(0),
-        Err(e) => Err(format!("Failed to get watermark: {}", e)),
-    }
-}
-
-/// Upsert watermark row inside the same transaction as data writes.
-async fn set_watermark(
-    client: &Client,
-    target_schema: &str,
-    stream_name: &str,
-    records_committed: u64,
-    bytes_committed: u64,
-) -> Result<(), String> {
-    let qualified = format!("{}.__rb_watermarks", quote_identifier(target_schema));
-    let sql = format!(
-        "INSERT INTO {} (stream_name, records_committed, bytes_committed, committed_at)
-         VALUES ($1, $2, $3, NOW())
-         ON CONFLICT (stream_name)
-         DO UPDATE SET records_committed = $2, bytes_committed = $3, committed_at = NOW()",
-        qualified
-    );
-    client
-        .execute(
-            &sql,
-            &[
-                &stream_name,
-                &(records_committed as i64),
-                &(bytes_committed as i64),
-            ],
-        )
-        .await
-        .map_err(|e| format!("Failed to set watermark: {}", e))?;
-    Ok(())
-}
-
-/// Clear watermark for a stream after successful completion.
-async fn clear_watermark(
-    client: &Client,
-    target_schema: &str,
-    stream_name: &str,
-) -> Result<(), String> {
-    let qualified = format!("{}.__rb_watermarks", quote_identifier(target_schema));
-    let sql = format!("DELETE FROM {} WHERE stream_name = $1", qualified);
-    client
-        .execute(&sql, &[&stream_name])
-        .await
-        .map_err(|e| format!("Failed to clear watermark: {}", e))?;
-    Ok(())
 }

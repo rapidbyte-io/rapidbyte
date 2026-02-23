@@ -7,6 +7,7 @@ mod batch;
 mod client;
 mod config;
 mod ddl;
+mod watermark;
 mod writer;
 
 use rapidbyte_sdk::prelude::*;
