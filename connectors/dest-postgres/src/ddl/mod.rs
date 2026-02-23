@@ -2,7 +2,6 @@
 
 mod drift;
 mod staging;
-mod type_map;
 
 use std::collections::HashSet;
 
@@ -13,7 +12,7 @@ use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::protocol::SchemaEvolutionPolicy;
 
 use self::drift::{apply_schema_policy, detect_schema_drift};
-use self::type_map::arrow_to_pg_type;
+use crate::type_map::arrow_to_pg_type;
 
 pub(crate) use self::staging::{prepare_staging, swap_staging_table};
 

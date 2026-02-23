@@ -7,6 +7,7 @@ mod batch;
 mod client;
 mod config;
 mod ddl;
+mod type_map;
 mod watermark;
 mod writer;
 
