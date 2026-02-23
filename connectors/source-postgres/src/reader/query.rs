@@ -186,7 +186,9 @@ pub(crate) fn cursor_bind_param(
                 CursorValue::Decimal { value, .. } => value.clone(),
                 CursorValue::Json(v) => v.to_string(),
                 CursorValue::Lsn(v) => v.clone(),
-                CursorValue::Null => return Err("null cursor cannot be used as a predicate".to_string()),
+                CursorValue::Null => {
+                    return Err("null cursor cannot be used as a predicate".to_string())
+                }
             };
             Ok((CursorBindParam::Text(text), "text"))
         }
@@ -196,7 +198,12 @@ pub(crate) fn cursor_bind_param(
                 CursorValue::Int64(v) => timestamp_millis_to_rfc3339(*v)?,
                 CursorValue::Utf8(v) => v.clone(),
                 CursorValue::TimestampMicros(v) => timestamp_micros_to_rfc3339(*v)?,
-                _ => return Err("cursor value is incompatible with timestamp_millis cursor type".to_string()),
+                _ => {
+                    return Err(
+                        "cursor value is incompatible with timestamp_millis cursor type"
+                            .to_string(),
+                    )
+                }
             };
             // Double-cast: bind as text (tokio-postgres supports String->text),
             // then PG casts text->timestamp for the comparison.
@@ -208,7 +215,12 @@ pub(crate) fn cursor_bind_param(
                 CursorValue::Int64(v) => timestamp_micros_to_rfc3339(*v)?,
                 CursorValue::Utf8(v) => v.clone(),
                 CursorValue::TimestampMillis(v) => timestamp_millis_to_rfc3339(*v)?,
-                _ => return Err("cursor value is incompatible with timestamp_micros cursor type".to_string()),
+                _ => {
+                    return Err(
+                        "cursor value is incompatible with timestamp_micros cursor type"
+                            .to_string(),
+                    )
+                }
             };
             // Double-cast: bind as text (tokio-postgres supports String->text),
             // then PG casts text->timestamp for the comparison.
@@ -219,7 +231,9 @@ pub(crate) fn cursor_bind_param(
                 CursorValue::Decimal { value, .. } => value.clone(),
                 CursorValue::Utf8(v) => v.clone(),
                 CursorValue::Int64(v) => v.to_string(),
-                _ => return Err("cursor value is incompatible with decimal cursor type".to_string()),
+                _ => {
+                    return Err("cursor value is incompatible with decimal cursor type".to_string())
+                }
             };
             Ok((CursorBindParam::Text(decimal), "numeric"))
         }
@@ -329,11 +343,8 @@ mod tests {
 
     #[test]
     fn cursor_bind_param_rejects_bad_int64() {
-        let err = cursor_bind_param(
-            &CursorType::Int64,
-            &CursorValue::Utf8("not_an_int".into()),
-        )
-        .expect_err("invalid int64 should fail");
+        let err = cursor_bind_param(&CursorType::Int64, &CursorValue::Utf8("not_an_int".into()))
+            .expect_err("invalid int64 should fail");
         assert!(err.contains("failed to parse 'not_an_int' as i64"));
     }
 
@@ -348,7 +359,8 @@ mod tests {
             nullable: true,
         }];
         let pg_types = vec!["text".to_string()];
-        let query = build_base_query(&ctx, &stream, &columns, &pg_types).expect("query should build");
+        let query =
+            build_base_query(&ctx, &stream, &columns, &pg_types).expect("query should build");
         assert_eq!(query.sql, "SELECT \"select\" FROM \"User\"");
         assert!(query.bind.is_none());
     }
@@ -365,8 +377,8 @@ mod tests {
         });
 
         let pg_types = vec!["bigint".to_string(), "text".to_string()];
-        let query =
-            build_base_query(&ctx, &stream, &columns_for_cursor(), &pg_types).expect("query should build");
+        let query = build_base_query(&ctx, &stream, &columns_for_cursor(), &pg_types)
+            .expect("query should build");
         assert_eq!(
             query.sql,
             "SELECT id, name FROM users WHERE id > $1::bigint ORDER BY id"
@@ -391,9 +403,12 @@ mod tests {
             },
         ];
         let pg_types = vec!["bigint".to_string(), "uuid".to_string()];
-        let query = build_base_query(&ctx, &stream, &columns, &pg_types).expect("query should build");
+        let query =
+            build_base_query(&ctx, &stream, &columns, &pg_types).expect("query should build");
         // uuid needs ::text cast, bigint does not
-        assert!(query.sql.contains("\"external_id\"::text AS \"external_id\""));
+        assert!(query
+            .sql
+            .contains("\"external_id\"::text AS \"external_id\""));
         assert!(!query.sql.contains("\"id\"::text"));
     }
 }

@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use rapidbyte_sdk::arrow::datatypes::Schema;
-use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use futures_util::SinkExt;
 use pg_escape::quote_identifier;
+use rapidbyte_sdk::arrow::datatypes::Schema;
+use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 
 use rapidbyte_sdk::prelude::*;
 
@@ -50,7 +50,10 @@ pub(crate) async fn copy_batch(
 
     let active_cols = active_column_indices(arrow_schema, ctx.ignored_columns);
     if active_cols.is_empty() {
-        sdk_ctx.log(LogLevel::Warn, "dest-postgres: all columns ignored, skipping COPY batch");
+        sdk_ctx.log(
+            LogLevel::Warn,
+            "dest-postgres: all columns ignored, skipping COPY batch",
+        );
         return Ok(0);
     }
 
@@ -115,7 +118,11 @@ pub(crate) async fn copy_batch(
             .map_err(|e| format!("COPY send failed: {e}"))?;
     }
 
-    let _rows = sink.as_mut().finish().await.map_err(|e| format!("COPY finish failed: {e}"))?;
+    let _rows = sink
+        .as_mut()
+        .finish()
+        .await
+        .map_err(|e| format!("COPY finish failed: {e}"))?;
 
     sdk_ctx.log(
         LogLevel::Info,

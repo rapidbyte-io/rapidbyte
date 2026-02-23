@@ -64,7 +64,10 @@ mod tests {
     fn pg_types_compatible_normalizes_aliases() {
         assert!(pg_types_compatible("integer", "INT4"));
         assert!(pg_types_compatible("character varying", "TEXT"));
-        assert!(pg_types_compatible("timestamp with time zone", "timestamptz"));
+        assert!(pg_types_compatible(
+            "timestamp with time zone",
+            "timestamptz"
+        ));
         assert!(!pg_types_compatible("bigint", "text"));
     }
 
@@ -97,8 +100,14 @@ mod tests {
         assert!(pg_types_compatible("character varying", "TEXT"));
         assert!(pg_types_compatible("name", "TEXT"));
         assert!(pg_types_compatible("bpchar", "TEXT"));
-        assert!(pg_types_compatible("timestamp with time zone", "timestamptz"));
-        assert!(pg_types_compatible("timestamp without time zone", "TIMESTAMP"));
+        assert!(pg_types_compatible(
+            "timestamp with time zone",
+            "timestamptz"
+        ));
+        assert!(pg_types_compatible(
+            "timestamp without time zone",
+            "TIMESTAMP"
+        ));
         assert!(pg_types_compatible("numeric", "DECIMAL"));
         assert!(pg_types_compatible("date", "DATE"));
         assert!(pg_types_compatible("time without time zone", "TIME"));

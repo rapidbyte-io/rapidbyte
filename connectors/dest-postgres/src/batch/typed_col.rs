@@ -1,19 +1,18 @@
 //! Typed Arrow column helpers used by INSERT/COPY write paths.
 
+use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use rapidbyte_sdk::arrow::array::{
-    Array, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array,
-    Int16Array, Int32Array, Int64Array, TimestampMicrosecondArray,
+    Array, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array,
+    Int32Array, Int64Array, TimestampMicrosecondArray,
 };
 use rapidbyte_sdk::arrow::datatypes::DataType;
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
-use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use std::sync::LazyLock;
 use tokio_postgres::types::ToSql;
 
 /// Unix epoch date — used as the base for Arrow Date32 day offsets.
-static UNIX_EPOCH_DATE: LazyLock<NaiveDate> = LazyLock::new(|| {
-    NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch date is always valid")
-});
+static UNIX_EPOCH_DATE: LazyLock<NaiveDate> =
+    LazyLock::new(|| NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch date is always valid"));
 
 /// Pre-downcast Arrow column reference. Eliminates per-cell `downcast_ref()` calls
 /// by resolving the concrete array type once per column per batch.

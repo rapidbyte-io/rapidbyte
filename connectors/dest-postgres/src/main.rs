@@ -36,11 +36,18 @@ impl Destination for DestPostgres {
         ))
     }
 
-    async fn validate(config: &Self::Config, _ctx: &Context) -> Result<ValidationResult, ConnectorError> {
+    async fn validate(
+        config: &Self::Config,
+        _ctx: &Context,
+    ) -> Result<ValidationResult, ConnectorError> {
         client::validate(config).await
     }
 
-    async fn write(&mut self, ctx: &Context, stream: StreamContext) -> Result<WriteSummary, ConnectorError> {
+    async fn write(
+        &mut self,
+        ctx: &Context,
+        stream: StreamContext,
+    ) -> Result<WriteSummary, ConnectorError> {
         writer::write_stream(&self.config, ctx, &stream).await
     }
 

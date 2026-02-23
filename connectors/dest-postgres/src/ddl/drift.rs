@@ -223,11 +223,7 @@ pub(crate) async fn apply_schema_policy(
                 let col_ident = quote_identifier(col_name);
                 let sql = format!(
                     "ALTER TABLE {} ALTER COLUMN {} TYPE {} USING {}::{}",
-                    qualified_table,
-                    col_ident,
-                    new_type,
-                    col_ident,
-                    new_type
+                    qualified_table, col_ident, new_type, col_ident, new_type
                 );
                 client.execute(&sql, &[]).await.map_err(|e| {
                     format!(
@@ -294,12 +290,9 @@ pub(crate) async fn apply_schema_policy(
                         "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL",
                         qualified_table, col_ident
                     );
-                    client
-                        .execute(&sql, &[])
-                        .await
-                        .map_err(|e| {
-                            format!("ALTER TABLE DROP NOT NULL on '{}' failed: {e}", col_name)
-                        })?;
+                    client.execute(&sql, &[]).await.map_err(|e| {
+                        format!("ALTER TABLE DROP NOT NULL on '{}' failed: {e}", col_name)
+                    })?;
                     ctx.log(
                         LogLevel::Info,
                         &format!("dest-postgres: DROP NOT NULL on '{}'", col_name),

@@ -21,9 +21,9 @@ use rapidbyte_sdk::protocol::{
 use crate::metrics::emit_read_metrics;
 use crate::schema::pg_type_to_arrow;
 
-use rapidbyte_sdk::arrow::build_arrow_schema;
 use self::arrow_encode::rows_to_record_batch;
 use self::query::build_base_query;
+use rapidbyte_sdk::arrow::build_arrow_schema;
 
 /// Maximum number of rows per Arrow RecordBatch.
 const BATCH_SIZE: usize = 10_000;
@@ -114,7 +114,8 @@ fn emit_accumulated_rows(
     state.total_bytes += batch.get_array_memory_size() as u64;
     state.batches_emitted += 1;
 
-    ctx.emit_batch(&batch).map_err(|e| format!("emit_batch failed: {}", e.message))?;
+    ctx.emit_batch(&batch)
+        .map_err(|e| format!("emit_batch failed: {}", e.message))?;
     emit_read_metrics(ctx, state.total_records, state.total_bytes);
 
     rows.clear();
@@ -138,7 +139,10 @@ async fn read_stream_inner(
     stream: &StreamContext,
     connect_secs: f64,
 ) -> Result<ReadSummary, String> {
-    ctx.log(LogLevel::Info, &format!("Reading stream: {}", stream.stream_name));
+    ctx.log(
+        LogLevel::Info,
+        &format!("Reading stream: {}", stream.stream_name),
+    );
 
     let query_start = Instant::now();
 
@@ -167,7 +171,10 @@ async fn read_stream_inner(
         .collect();
 
     if all_columns.is_empty() {
-        return Err(format!("Table '{}' not found or has no columns", stream.stream_name));
+        return Err(format!(
+            "Table '{}' not found or has no columns",
+            stream.stream_name
+        ));
     }
 
     // Build parallel pg_types vector for json/jsonb extraction in Arrow encoder.
@@ -188,8 +195,7 @@ async fn read_stream_inner(
             if !unknown.is_empty() {
                 return Err(format!(
                     "Selected columns {:?} not found in table '{}'",
-                    unknown,
-                    stream.stream_name
+                    unknown, stream.stream_name
                 ));
             }
 
@@ -201,8 +207,7 @@ async fn read_stream_inner(
             if filtered.is_empty() {
                 return Err(format!(
                     "None of the selected columns {:?} found in table '{}'",
-                    selected,
-                    stream.stream_name
+                    selected, stream.stream_name
                 ));
             }
             if let (SyncMode::Incremental, Some(ci)) = (&stream.sync_mode, &stream.cursor_info) {
@@ -272,8 +277,7 @@ async fn read_stream_inner(
                 .ok_or_else(|| {
                     format!(
                         "Cursor field '{}' not found in schema for table '{}'",
-                        ci.cursor_field,
-                        stream.stream_name
+                        ci.cursor_field, stream.stream_name
                     )
                 })?,
         )
@@ -318,8 +322,7 @@ async fn read_stream_inner(
                         DataErrorPolicy::Fail => {
                             loop_error = Some(format!(
                                 "Record exceeds max_record_bytes ({} > {})",
-                                estimated_row_bytes,
-                                max_record_bytes,
+                                estimated_row_bytes, max_record_bytes,
                             ));
                             break;
                         }
@@ -344,7 +347,9 @@ async fn read_stream_inner(
             }
 
             for row in valid_rows {
-                if !accumulated_rows.is_empty() && estimated_bytes + estimated_row_bytes >= max_batch_bytes {
+                if !accumulated_rows.is_empty()
+                    && estimated_bytes + estimated_row_bytes >= max_batch_bytes
+                {
                     if let Err(e) = emit_accumulated_rows(
                         &mut accumulated_rows,
                         &columns,
@@ -417,7 +422,9 @@ async fn read_stream_inner(
         }
 
         let should_emit = !accumulated_rows.is_empty()
-            && (estimated_bytes >= max_batch_bytes || accumulated_rows.len() >= BATCH_SIZE || exhausted);
+            && (estimated_bytes >= max_batch_bytes
+                || accumulated_rows.len() >= BATCH_SIZE
+                || exhausted);
 
         if should_emit {
             if let Err(e) = emit_accumulated_rows(
@@ -464,30 +471,31 @@ async fn read_stream_inner(
         return Err(e);
     }
 
-    let checkpoint_count =
-        if let (Some(ci), Some(max_val)) = (stream.cursor_info.as_ref(), max_cursor_value.as_ref()) {
-            let max_val = max_val.as_checkpoint_string();
-            let cp = rapidbyte_sdk::protocol::Checkpoint {
-                id: 1,
-                kind: rapidbyte_sdk::protocol::CheckpointKind::Source,
-                stream: stream.stream_name.clone(),
-                cursor_field: Some(ci.cursor_field.clone()),
-                cursor_value: Some(rapidbyte_sdk::protocol::CursorValue::Utf8(max_val.clone())),
-                records_processed: state.total_records,
-                bytes_processed: state.total_bytes,
-            };
-            let _ = ctx.checkpoint(&cp);
-            ctx.log(
-                LogLevel::Info,
-                &format!(
-                    "Source checkpoint: stream={} cursor_field={} cursor_value={}",
-                    stream.stream_name, ci.cursor_field, max_val
-                ),
-            );
-            1u64
-        } else {
-            0u64
+    let checkpoint_count = if let (Some(ci), Some(max_val)) =
+        (stream.cursor_info.as_ref(), max_cursor_value.as_ref())
+    {
+        let max_val = max_val.as_checkpoint_string();
+        let cp = rapidbyte_sdk::protocol::Checkpoint {
+            id: 1,
+            kind: rapidbyte_sdk::protocol::CheckpointKind::Source,
+            stream: stream.stream_name.clone(),
+            cursor_field: Some(ci.cursor_field.clone()),
+            cursor_value: Some(rapidbyte_sdk::protocol::CursorValue::Utf8(max_val.clone())),
+            records_processed: state.total_records,
+            bytes_processed: state.total_bytes,
         };
+        let _ = ctx.checkpoint(&cp);
+        ctx.log(
+            LogLevel::Info,
+            &format!(
+                "Source checkpoint: stream={} cursor_field={} cursor_value={}",
+                stream.stream_name, ci.cursor_field, max_val
+            ),
+        );
+        1u64
+    } else {
+        0u64
+    };
 
     ctx.log(
         LogLevel::Info,

@@ -2,15 +2,14 @@
 
 use std::io::Write;
 
-use rapidbyte_sdk::arrow::array::Array;
-use chrono::{DateTime, NaiveDate};
-use std::sync::LazyLock;
 use crate::batch::typed_col::TypedCol;
+use chrono::{DateTime, NaiveDate};
+use rapidbyte_sdk::arrow::array::Array;
+use std::sync::LazyLock;
 
 /// Unix epoch date — used as the base for Arrow Date32 day offsets.
-static UNIX_EPOCH_DATE: LazyLock<NaiveDate> = LazyLock::new(|| {
-    NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch date is always valid")
-});
+static UNIX_EPOCH_DATE: LazyLock<NaiveDate> =
+    LazyLock::new(|| NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch date is always valid"));
 
 /// Format a pre-downcast value at a given row index for COPY text format.
 ///
@@ -151,8 +150,8 @@ pub(crate) fn format_copy_typed_value(buf: &mut Vec<u8>, col: &TypedCol<'_>, row
 mod tests {
     use super::*;
     use rapidbyte_sdk::arrow::array::{
-        BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array,
-        Int32Array, Int64Array, StringArray, TimestampMicrosecondArray,
+        BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array, Int32Array,
+        Int64Array, StringArray, TimestampMicrosecondArray,
     };
 
     #[test]
@@ -166,7 +165,11 @@ mod tests {
 
     #[test]
     fn format_copy_typed_value_formats_float_specials() {
-        let arr = Float64Array::from(vec![Some(f64::NAN), Some(f64::INFINITY), Some(-f64::INFINITY)]);
+        let arr = Float64Array::from(vec![
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(-f64::INFINITY),
+        ]);
         let col = TypedCol::Float64(&arr);
 
         let mut buf = Vec::new();

@@ -71,9 +71,8 @@ pub async fn write_stream(
 
     if let Some(err) = loop_error {
         session.rollback().await;
-        return Err(
-            ConnectorError::transient_db("WRITE_FAILED", err).with_commit_state(CommitState::BeforeCommit),
-        );
+        return Err(ConnectorError::transient_db("WRITE_FAILED", err)
+            .with_commit_state(CommitState::BeforeCommit));
     }
 
     let result = session.commit().await.map_err(|e| {
@@ -474,7 +473,10 @@ impl<'a> WriteSession<'a> {
 
 /// Ensure the __rb_watermarks metadata table exists.
 async fn ensure_watermarks_table(client: &Client, target_schema: &str) -> Result<(), String> {
-    let create_schema = format!("CREATE SCHEMA IF NOT EXISTS {}", quote_identifier(target_schema));
+    let create_schema = format!(
+        "CREATE SCHEMA IF NOT EXISTS {}",
+        quote_identifier(target_schema)
+    );
     client
         .execute(&create_schema, &[])
         .await

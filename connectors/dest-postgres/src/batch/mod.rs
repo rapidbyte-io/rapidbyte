@@ -69,18 +69,23 @@ pub(crate) async fn write_batch(
         });
     }
 
-    let use_copy =
-        ctx.load_method == LoadMethod::Copy && !matches!(ctx.write_mode, Some(WriteMode::Upsert { .. }));
+    let use_copy = ctx.load_method == LoadMethod::Copy
+        && !matches!(ctx.write_mode, Some(WriteMode::Upsert { .. }));
 
     let (result, method_name) = if use_copy {
-        (copy_batch(sdk_ctx, ctx, arrow_schema, batches).await, "COPY")
+        (
+            copy_batch(sdk_ctx, ctx, arrow_schema, batches).await,
+            "COPY",
+        )
     } else {
-        (insert_batch(sdk_ctx, ctx, arrow_schema, batches).await, "INSERT")
+        (
+            insert_batch(sdk_ctx, ctx, arrow_schema, batches).await,
+            "INSERT",
+        )
     };
 
-    let rows_written = result.map_err(|e| {
-        format!("{} failed for stream {}: {e}", method_name, ctx.stream_name)
-    })?;
+    let rows_written = result
+        .map_err(|e| format!("{} failed for stream {}: {e}", method_name, ctx.stream_name))?;
 
     Ok(WriteResult {
         rows_written,

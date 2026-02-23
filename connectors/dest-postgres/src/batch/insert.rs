@@ -4,9 +4,9 @@ use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
 
+use pg_escape::quote_identifier;
 use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
-use pg_escape::quote_identifier;
 use tokio_postgres::types::ToSql;
 
 use rapidbyte_sdk::prelude::*;
@@ -97,7 +97,10 @@ pub(crate) async fn insert_batch(
 
     let active_cols = active_column_indices(arrow_schema, ctx.ignored_columns);
     if active_cols.is_empty() {
-        sdk_ctx.log(LogLevel::Warn, "dest-postgres: all columns ignored, skipping batch");
+        sdk_ctx.log(
+            LogLevel::Warn,
+            "dest-postgres: all columns ignored, skipping batch",
+        );
         return Ok(0);
     }
     let upsert_clause = build_upsert_clause(ctx.write_mode, arrow_schema, &active_cols)?;
@@ -158,15 +161,12 @@ pub(crate) async fn insert_batch(
             let param_refs: Vec<&(dyn ToSql + Sync)> =
                 params.iter().map(SqlParamValue::as_tosql).collect();
 
-            ctx.client
-                .execute(&sql, &param_refs)
-                .await
-                .map_err(|e| {
-                    format!(
-                        "Multi-value INSERT failed for {}, rows {}-{}: {e}",
-                        ctx.stream_name, chunk_start, chunk_end
-                    )
-                })?;
+            ctx.client.execute(&sql, &param_refs).await.map_err(|e| {
+                format!(
+                    "Multi-value INSERT failed for {}, rows {}-{}: {e}",
+                    ctx.stream_name, chunk_start, chunk_end
+                )
+            })?;
 
             total_rows += chunk_size as u64;
         }
@@ -190,8 +190,16 @@ mod tests {
 
     fn schema_with_id_name() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
-            rapidbyte_sdk::arrow::datatypes::Field::new("id", rapidbyte_sdk::arrow::datatypes::DataType::Int64, false),
-            rapidbyte_sdk::arrow::datatypes::Field::new("name", rapidbyte_sdk::arrow::datatypes::DataType::Utf8, true),
+            rapidbyte_sdk::arrow::datatypes::Field::new(
+                "id",
+                rapidbyte_sdk::arrow::datatypes::DataType::Int64,
+                false,
+            ),
+            rapidbyte_sdk::arrow::datatypes::Field::new(
+                "name",
+                rapidbyte_sdk::arrow::datatypes::DataType::Utf8,
+                true,
+            ),
         ]))
     }
 

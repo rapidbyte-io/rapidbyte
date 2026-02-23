@@ -43,8 +43,8 @@ pub(crate) fn pg_type_to_arrow(pg_type: &str) -> ArrowDataType {
 pub(crate) fn needs_text_cast(pg_type: &str) -> bool {
     match pg_type {
         // Integer types — native FromSql
-        "integer" | "int4" | "serial" | "bigint" | "int8" | "bigserial"
-        | "smallint" | "int2" | "smallserial" => false,
+        "integer" | "int4" | "serial" | "bigint" | "int8" | "bigserial" | "smallint" | "int2"
+        | "smallserial" => false,
         // Float types — native FromSql
         "real" | "float4" | "double precision" | "float8" => false,
         // Boolean — native FromSql
@@ -183,8 +183,14 @@ mod tests {
             pg_type_to_arrow("timestamp with time zone"),
             ArrowDataType::TimestampMicros
         );
-        assert_eq!(pg_type_to_arrow("timestamp"), ArrowDataType::TimestampMicros);
-        assert_eq!(pg_type_to_arrow("timestamptz"), ArrowDataType::TimestampMicros);
+        assert_eq!(
+            pg_type_to_arrow("timestamp"),
+            ArrowDataType::TimestampMicros
+        );
+        assert_eq!(
+            pg_type_to_arrow("timestamptz"),
+            ArrowDataType::TimestampMicros
+        );
 
         // Date — now Date32
         assert_eq!(pg_type_to_arrow("date"), ArrowDataType::Date32);

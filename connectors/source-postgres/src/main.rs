@@ -45,12 +45,19 @@ impl Source for SourcePostgres {
             .map_err(|e| ConnectorError::transient_db("DISCOVERY_FAILED", e))
     }
 
-    async fn validate(config: &Self::Config, ctx: &Context) -> Result<ValidationResult, ConnectorError> {
+    async fn validate(
+        config: &Self::Config,
+        ctx: &Context,
+    ) -> Result<ValidationResult, ConnectorError> {
         let _ = ctx;
         client::validate(config).await
     }
 
-    async fn read(&mut self, ctx: &Context, stream: StreamContext) -> Result<ReadSummary, ConnectorError> {
+    async fn read(
+        &mut self,
+        ctx: &Context,
+        stream: StreamContext,
+    ) -> Result<ReadSummary, ConnectorError> {
         let connect_start = Instant::now();
         let client = client::connect(&self.config)
             .await
@@ -58,9 +65,11 @@ impl Source for SourcePostgres {
         let connect_secs = connect_start.elapsed().as_secs_f64();
 
         match stream.sync_mode {
-            SyncMode::Cdc => cdc::read_cdc_changes(&client, ctx, &stream, &self.config, connect_secs)
-                .await
-                .map_err(|e| ConnectorError::internal("CDC_READ_FAILED", e)),
+            SyncMode::Cdc => {
+                cdc::read_cdc_changes(&client, ctx, &stream, &self.config, connect_secs)
+                    .await
+                    .map_err(|e| ConnectorError::internal("CDC_READ_FAILED", e))
+            }
             _ => reader::read_stream(&client, ctx, &stream, connect_secs)
                 .await
                 .map_err(|e| ConnectorError::internal("READ_FAILED", e)),

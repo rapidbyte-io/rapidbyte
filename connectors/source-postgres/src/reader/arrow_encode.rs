@@ -2,20 +2,19 @@
 
 use std::sync::Arc;
 
+use chrono::{NaiveDate, NaiveDateTime};
 use rapidbyte_sdk::arrow::array::{
     BinaryBuilder, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array, Int32Array,
     Int64Array, StringBuilder, TimestampMicrosecondArray,
 };
-use chrono::{NaiveDate, NaiveDateTime};
-use std::sync::LazyLock;
 use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use rapidbyte_sdk::protocol::ColumnSchema;
+use std::sync::LazyLock;
 
 /// Unix epoch date — used as the base for Arrow Date32 day offsets.
-static UNIX_EPOCH_DATE: LazyLock<NaiveDate> = LazyLock::new(|| {
-    NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch date is always valid")
-});
+static UNIX_EPOCH_DATE: LazyLock<NaiveDate> =
+    LazyLock::new(|| NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch date is always valid"));
 
 pub(crate) fn rows_to_record_batch(
     rows: &[tokio_postgres::Row],
@@ -103,8 +102,7 @@ pub(crate) fn rows_to_record_batch(
                         Ok(Arc::new(arr))
                     }
                     "Binary" => {
-                        let mut builder =
-                            BinaryBuilder::with_capacity(rows.len(), rows.len() * 64);
+                        let mut builder = BinaryBuilder::with_capacity(rows.len(), rows.len() * 64);
                         for row in rows {
                             match row.try_get::<_, Vec<u8>>(col_idx).ok() {
                                 Some(bytes) => builder.append_value(&bytes),
@@ -115,8 +113,7 @@ pub(crate) fn rows_to_record_batch(
                     }
                     _ => {
                         // Utf8 path: handles text, varchar, json/jsonb, and all ::text-cast types.
-                        let mut builder =
-                            StringBuilder::with_capacity(rows.len(), rows.len() * 32);
+                        let mut builder = StringBuilder::with_capacity(rows.len(), rows.len() * 32);
                         let pg_type = pg_types.get(col_idx).map(|s| s.as_str()).unwrap_or("");
                         for row in rows {
                             let val = if pg_type == "json" || pg_type == "jsonb" {
@@ -138,6 +135,6 @@ pub(crate) fn rows_to_record_batch(
         )
         .collect::<Result<Vec<_>, String>>()?;
 
-    RecordBatch::try_new(schema.clone(), arrays).map_err(|e| format!("Failed to create RecordBatch: {e}"))
+    RecordBatch::try_new(schema.clone(), arrays)
+        .map_err(|e| format!("Failed to create RecordBatch: {e}"))
 }
-

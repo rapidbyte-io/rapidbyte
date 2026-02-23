@@ -73,7 +73,10 @@ async fn read_cdc_inner(
     config: &Config,
     connect_secs: f64,
 ) -> Result<ReadSummary, String> {
-    ctx.log(LogLevel::Info, &format!("CDC reading stream: {}", stream.stream_name));
+    ctx.log(
+        LogLevel::Info,
+        &format!("CDC reading stream: {}", stream.stream_name),
+    );
 
     let query_start = Instant::now();
 
@@ -112,7 +115,10 @@ async fn read_cdc_inner(
         .collect();
 
     if table_columns.is_empty() {
-        return Err(format!("Table '{}' not found or has no columns", stream.stream_name));
+        return Err(format!(
+            "Table '{}' not found or has no columns",
+            stream.stream_name
+        ));
     }
 
     // Build Arrow schema: table columns + _rb_op metadata column
@@ -124,7 +130,12 @@ async fn read_cdc_inner(
     let change_rows = client
         .query(changes_query, &[&slot_name, &CDC_MAX_CHANGES])
         .await
-        .map_err(|e| format!("pg_logical_slot_get_changes failed for slot {}: {e}", slot_name))?;
+        .map_err(|e| {
+            format!(
+                "pg_logical_slot_get_changes failed for slot {}: {e}",
+                slot_name
+            )
+        })?;
 
     let query_secs = query_start.elapsed().as_secs_f64();
 
@@ -251,7 +262,11 @@ async fn read_cdc_inner(
 
 /// Ensure the logical replication slot exists, creating it if necessary.
 /// Uses try-create to avoid TOCTOU race between check and create.
-async fn ensure_replication_slot(client: &Client, ctx: &Context, slot_name: &str) -> Result<(), String> {
+async fn ensure_replication_slot(
+    client: &Client,
+    ctx: &Context,
+    slot_name: &str,
+) -> Result<(), String> {
     ctx.log(
         LogLevel::Debug,
         &format!("Ensuring replication slot '{}' exists", slot_name),
@@ -291,8 +306,7 @@ async fn ensure_replication_slot(client: &Client, ctx: &Context, slot_name: &str
                 return Err(format!(
                     "Failed to create logical replication slot '{}'. \
                      Ensure wal_level=logical in postgresql.conf: {}",
-                    slot_name,
-                    e
+                    slot_name, e
                 ));
             }
         }
@@ -488,8 +502,8 @@ fn changes_to_batch(
         .collect();
     arrays.push(Arc::new(op_builder.finish()));
 
-    let batch =
-        RecordBatch::try_new(schema.clone(), arrays).map_err(|e| format!("Failed to create CDC RecordBatch: {e}"))?;
+    let batch = RecordBatch::try_new(schema.clone(), arrays)
+        .map_err(|e| format!("Failed to create CDC RecordBatch: {e}"))?;
 
     Ok(batch)
 }

@@ -54,7 +54,10 @@ async fn ensure_table(
         ddl_parts.join(", ")
     );
 
-    ctx.log(LogLevel::Debug, &format!("dest-postgres: ensuring table: {}", ddl));
+    ctx.log(
+        LogLevel::Debug,
+        &format!("dest-postgres: ensuring table: {}", ddl),
+    );
 
     client
         .execute(&ddl, &[])
@@ -87,7 +90,10 @@ pub(crate) async fn ensure_table_and_schema(
         return Ok(());
     }
 
-    let create_schema = format!("CREATE SCHEMA IF NOT EXISTS {}", quote_identifier(target_schema));
+    let create_schema = format!(
+        "CREATE SCHEMA IF NOT EXISTS {}",
+        quote_identifier(target_schema)
+    );
     client
         .execute(&create_schema, &[])
         .await
@@ -101,7 +107,9 @@ pub(crate) async fn ensure_table_and_schema(
     created_tables.insert(qualified_table.clone());
 
     if let Some(policy) = schema_policy {
-        if let Some(drift) = detect_schema_drift(client, target_schema, stream_name, arrow_schema).await? {
+        if let Some(drift) =
+            detect_schema_drift(client, target_schema, stream_name, arrow_schema).await?
+        {
             ctx.log(
                 LogLevel::Info,
                 &format!(
