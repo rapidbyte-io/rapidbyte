@@ -2329,6 +2329,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "rapidbyte-sdk-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn",
+]
+
+[[package]]
 name = "rapidbyte-types"
 version = "0.1.0"
 dependencies = [

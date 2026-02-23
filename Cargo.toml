@@ -4,6 +4,7 @@ members = [
     "crates/rapidbyte-cli",
     "crates/rapidbyte-core",
     "crates/rapidbyte-sdk",
+    "crates/rapidbyte-sdk/macros",
     "crates/rapidbyte-types",
 ]
 # Connectors target wasm32-wasip2 — build separately
