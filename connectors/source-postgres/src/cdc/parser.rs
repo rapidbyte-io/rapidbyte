@@ -85,17 +85,16 @@ pub(crate) fn parse_columns(s: &str) -> Vec<(String, String, String)> {
 
     while !remaining.is_empty() {
         // Find column name: everything before '['
-        let bracket_start = match remaining.find('[') {
-            Some(pos) => pos,
-            None => break,
+        let Some(bracket_start) = remaining.find('[') else {
+            break;
         };
         let col_name = remaining[..bracket_start].to_string();
 
         // Find type: everything between '[' and ']'
-        let bracket_end = match remaining[bracket_start..].find(']') {
-            Some(pos) => bracket_start + pos,
-            None => break,
+        let Some(bracket_end_offset) = remaining[bracket_start..].find(']') else {
+            break;
         };
+        let bracket_end = bracket_start + bracket_end_offset;
         let col_type = remaining[bracket_start + 1..bracket_end].to_string();
 
         // After ']' should be ':'
@@ -127,9 +126,8 @@ pub(crate) fn parse_columns(s: &str) -> Vec<(String, String, String)> {
 /// - `null` -> literal string `"null"` (null semantics handled by caller)
 /// - unterminated quoted value returns the accumulated payload
 pub(crate) fn parse_value(s: &str) -> (String, &str) {
-    if s.starts_with('\'') {
+    if let Some(inner) = s.strip_prefix('\'') {
         // Quoted string value -- iterate by char to handle multi-byte UTF-8 correctly
-        let inner = &s[1..]; // skip opening quote
         let mut value = String::new();
         let mut chars = inner.char_indices();
         loop {
