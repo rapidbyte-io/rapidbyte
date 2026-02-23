@@ -68,17 +68,12 @@ stage_connectors() {
     cp "$PROJECT_ROOT/connectors/dest-postgres/target/$wasm_dir/dest_postgres.wasm" \
        "$CONNECTOR_DIR/"
 
-    # Strip custom sections from release builds, re-embed manifest afterward
+    # Strip custom sections from release builds, re-embed rapidbyte_* sections afterward
     if [ "$mode" = "release" ] && [ -x "$PROJECT_ROOT/scripts/strip-wasm.sh" ]; then
-        local src_manifest dest_manifest
-        src_manifest=$(find "$PROJECT_ROOT/connectors/source-postgres/target" \
-            -path '*/out/rapidbyte_manifest.json' -print -quit)
-        dest_manifest=$(find "$PROJECT_ROOT/connectors/dest-postgres/target" \
-            -path '*/out/rapidbyte_manifest.json' -print -quit)
         "$PROJECT_ROOT/scripts/strip-wasm.sh" "$CONNECTOR_DIR/source_postgres.wasm" \
-            "$CONNECTOR_DIR/source_postgres.wasm" "$src_manifest"
+            "$CONNECTOR_DIR/source_postgres.wasm"
         "$PROJECT_ROOT/scripts/strip-wasm.sh" "$CONNECTOR_DIR/dest_postgres.wasm" \
-            "$CONNECTOR_DIR/dest_postgres.wasm" "$dest_manifest"
+            "$CONNECTOR_DIR/dest_postgres.wasm"
     fi
 }
 

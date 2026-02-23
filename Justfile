@@ -13,8 +13,6 @@ build-connectors:
     mkdir -p target/connectors
     cp connectors/source-postgres/target/wasm32-wasip2/debug/source_postgres.wasm target/connectors/
     cp connectors/dest-postgres/target/wasm32-wasip2/debug/dest_postgres.wasm target/connectors/
-    cp connectors/source-postgres/manifest.json target/connectors/source_postgres.manifest.json
-    cp connectors/dest-postgres/manifest.json target/connectors/dest_postgres.manifest.json
 
 release:
     cargo build --release
@@ -25,10 +23,8 @@ release-connectors:
     mkdir -p target/connectors
     cp connectors/source-postgres/target/wasm32-wasip2/release/source_postgres.wasm target/connectors/
     cp connectors/dest-postgres/target/wasm32-wasip2/release/dest_postgres.wasm target/connectors/
-    ./scripts/strip-wasm.sh target/connectors/source_postgres.wasm
-    ./scripts/strip-wasm.sh target/connectors/dest_postgres.wasm
-    cp connectors/source-postgres/manifest.json target/connectors/source_postgres.manifest.json
-    cp connectors/dest-postgres/manifest.json target/connectors/dest_postgres.manifest.json
+    ./scripts/strip-wasm.sh target/connectors/source_postgres.wasm target/connectors/source_postgres.wasm
+    ./scripts/strip-wasm.sh target/connectors/dest_postgres.wasm target/connectors/dest_postgres.wasm
 
 test:
     cargo test
