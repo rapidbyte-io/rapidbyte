@@ -289,6 +289,7 @@ pub mod schema;
 
 use rapidbyte_sdk::prelude::*;
 
+#[rapidbyte_sdk::connector(source)]
 pub struct {struct_name} {{
     config: config::Config,
 }}
@@ -297,39 +298,33 @@ impl Source for {struct_name} {{
     type Config = config::Config;
 
     async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {{
-        host_ffi::log(2, &format!("{{}}: init with host={{}} db={{}}",
-            env!("CARGO_PKG_NAME"), config.host, config.database));
         Ok((
             Self {{ config }},
             ConnectorInfo {{
                 protocol_version: ProtocolVersion::V2,
                 features: vec![],
-                default_max_batch_bytes: 64 * 1024 * 1024,
+                default_max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
             }},
         ))
     }}
 
-    async fn discover(&mut self) -> Result<Catalog, ConnectorError> {{
+    async fn discover(&mut self, _ctx: &Context) -> Result<Catalog, ConnectorError> {{
         schema::discover_catalog(&self.config)
     }}
 
-    async fn validate(config: &Self::Config) -> Result<ValidationResult, ConnectorError> {{
+    async fn validate(config: &Self::Config, _ctx: &Context) -> Result<ValidationResult, ConnectorError> {{
         client::validate(config).await
     }}
 
-    async fn read(&mut self, ctx: StreamContext) -> Result<ReadSummary, ConnectorError> {{
-        reader::read_stream(&self.config, &ctx).await
+    async fn read(&mut self, ctx: &Context, stream: StreamContext) -> Result<ReadSummary, ConnectorError> {{
+        reader::read_stream(&self.config, ctx, &stream).await
     }}
 
-    async fn close(&mut self) -> Result<(), ConnectorError> {{
-        host_ffi::log(2, &format!("{{}}: close", env!("CARGO_PKG_NAME")));
+    async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {{
+        ctx.log(LogLevel::Info, &format!("{{}}: close", env!("CARGO_PKG_NAME")));
         Ok(())
     }}
 }}
-
-rapidbyte_sdk::connector_main!(source, {struct_name});
-rapidbyte_sdk::embed_manifest!();
-rapidbyte_sdk::embed_config_schema!(config::Config);
 "#
     )
 }
@@ -342,6 +337,7 @@ mod writer;
 
 use rapidbyte_sdk::prelude::*;
 
+#[rapidbyte_sdk::connector(destination)]
 pub struct {struct_name} {{
     config: config::Config,
 }}
@@ -350,35 +346,29 @@ impl Destination for {struct_name} {{
     type Config = config::Config;
 
     async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {{
-        host_ffi::log(2, &format!("{{}}: init with host={{}} db={{}}",
-            env!("CARGO_PKG_NAME"), config.host, config.database));
         Ok((
             Self {{ config }},
             ConnectorInfo {{
                 protocol_version: ProtocolVersion::V2,
                 features: vec![],
-                default_max_batch_bytes: 64 * 1024 * 1024,
+                default_max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
             }},
         ))
     }}
 
-    async fn validate(config: &Self::Config) -> Result<ValidationResult, ConnectorError> {{
+    async fn validate(config: &Self::Config, _ctx: &Context) -> Result<ValidationResult, ConnectorError> {{
         client::validate(config).await
     }}
 
-    async fn write(&mut self, ctx: StreamContext) -> Result<WriteSummary, ConnectorError> {{
-        writer::write_stream(&self.config, &ctx).await
+    async fn write(&mut self, ctx: &Context, stream: StreamContext) -> Result<WriteSummary, ConnectorError> {{
+        writer::write_stream(&self.config, ctx, &stream).await
     }}
 
-    async fn close(&mut self) -> Result<(), ConnectorError> {{
-        host_ffi::log(2, &format!("{{}}: close", env!("CARGO_PKG_NAME")));
+    async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {{
+        ctx.log(LogLevel::Info, &format!("{{}}: close", env!("CARGO_PKG_NAME")));
         Ok(())
     }}
 }}
-
-rapidbyte_sdk::connector_main!(destination, {struct_name});
-rapidbyte_sdk::embed_manifest!();
-rapidbyte_sdk::embed_config_schema!(config::Config);
 "#
     )
 }
@@ -442,9 +432,9 @@ fn gen_reader_rs() -> String {
     r#"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
-pub async fn read_stream(config: &Config, ctx: &StreamContext) -> Result<ReadSummary, ConnectorError> {
+pub async fn read_stream(config: &Config, ctx: &Context, stream: &StreamContext) -> Result<ReadSummary, ConnectorError> {
     // TODO: Implement stream reading
-    let _ = (config, ctx);
+    let _ = (config, ctx, stream);
     Ok(ReadSummary {
         records_read: 0,
         bytes_read: 0,
@@ -475,9 +465,9 @@ fn gen_writer_rs() -> String {
     r#"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
-pub async fn write_stream(config: &Config, ctx: &StreamContext) -> Result<WriteSummary, ConnectorError> {
+pub async fn write_stream(config: &Config, ctx: &Context, stream: &StreamContext) -> Result<WriteSummary, ConnectorError> {
     // TODO: Implement stream writing
-    let _ = (config, ctx);
+    let _ = (config, ctx, stream);
     Ok(WriteSummary {
         records_written: 0,
         bytes_written: 0,
