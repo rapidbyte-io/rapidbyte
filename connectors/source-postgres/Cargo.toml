@@ -17,6 +17,9 @@ chrono = "0.4"
 pg_escape = "0.1"
 wit-bindgen = "0.46"
 
+[build-dependencies]
+rapidbyte-sdk = { path = "../../crates/rapidbyte-sdk", default-features = false, features = ["build"] }
+
 [patch.crates-io]
 whoami = { path = "../../crates/whoami-shim" }
 
