@@ -3,10 +3,10 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-#[cfg(target_arch = "wasm32")]
-use crate::errors::{BackoffClass, CommitState, ErrorScope};
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
+#[cfg(target_arch = "wasm32")]
+use crate::errors::{BackoffClass, CommitState, ErrorScope};
 use crate::errors::{ConnectorError, ErrorCategory};
 use crate::protocol::{Checkpoint, Metric, StateScope};
 #[cfg(target_arch = "wasm32")]
@@ -104,55 +104,39 @@ pub fn set_host_imports(imports: Box<dyn HostImports>) -> Result<(), Box<dyn Hos
 fn from_component_error(
     err: bindings::rapidbyte::connector::types::ConnectorError,
 ) -> ConnectorError {
+    use bindings::rapidbyte::connector::types as ct;
+
     ConnectorError {
-        category: crate::__rb_map_enum_variants!(
-            err.category,
-            bindings::rapidbyte::connector::types::ErrorCategory => ErrorCategory,
-            {
-                Config => Config,
-                Auth => Auth,
-                Permission => Permission,
-                RateLimit => RateLimit,
-                TransientNetwork => TransientNetwork,
-                TransientDb => TransientDb,
-                Data => Data,
-                Schema => Schema,
-                Internal => Internal
-            }
-        ),
-        scope: crate::__rb_map_enum_variants!(
-            err.scope,
-            bindings::rapidbyte::connector::types::ErrorScope => ErrorScope,
-            {
-                PerStream => Stream,
-                PerBatch => Batch,
-                PerRecord => Record
-            }
-        ),
+        category: match err.category {
+            ct::ErrorCategory::Config => ErrorCategory::Config,
+            ct::ErrorCategory::Auth => ErrorCategory::Auth,
+            ct::ErrorCategory::Permission => ErrorCategory::Permission,
+            ct::ErrorCategory::RateLimit => ErrorCategory::RateLimit,
+            ct::ErrorCategory::TransientNetwork => ErrorCategory::TransientNetwork,
+            ct::ErrorCategory::TransientDb => ErrorCategory::TransientDb,
+            ct::ErrorCategory::Data => ErrorCategory::Data,
+            ct::ErrorCategory::Schema => ErrorCategory::Schema,
+            ct::ErrorCategory::Internal => ErrorCategory::Internal,
+        },
+        scope: match err.scope {
+            ct::ErrorScope::PerStream => ErrorScope::Stream,
+            ct::ErrorScope::PerBatch => ErrorScope::Batch,
+            ct::ErrorScope::PerRecord => ErrorScope::Record,
+        },
         code: err.code.into(),
         message: err.message,
         retryable: err.retryable,
         retry_after_ms: err.retry_after_ms,
-        backoff_class: crate::__rb_map_enum_variants!(
-            err.backoff_class,
-            bindings::rapidbyte::connector::types::BackoffClass => BackoffClass,
-            {
-                Fast => Fast,
-                Normal => Normal,
-                Slow => Slow
-            }
-        ),
+        backoff_class: match err.backoff_class {
+            ct::BackoffClass::Fast => BackoffClass::Fast,
+            ct::BackoffClass::Normal => BackoffClass::Normal,
+            ct::BackoffClass::Slow => BackoffClass::Slow,
+        },
         safe_to_retry: err.safe_to_retry,
-        commit_state: err.commit_state.map(|s| {
-            crate::__rb_map_enum_variants!(
-                s,
-                bindings::rapidbyte::connector::types::CommitState => CommitState,
-                {
-                    BeforeCommit => BeforeCommit,
-                    AfterCommitUnknown => AfterCommitUnknown,
-                    AfterCommitConfirmed => AfterCommitConfirmed
-                }
-            )
+        commit_state: err.commit_state.map(|s| match s {
+            ct::CommitState::BeforeCommit => CommitState::BeforeCommit,
+            ct::CommitState::AfterCommitUnknown => CommitState::AfterCommitUnknown,
+            ct::CommitState::AfterCommitConfirmed => CommitState::AfterCommitConfirmed,
         }),
         details: err
             .details_json
