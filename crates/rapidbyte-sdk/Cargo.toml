@@ -3,12 +3,17 @@ name = "rapidbyte-sdk"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["runtime", "build"]
+runtime = ["dep:tokio", "dep:wit-bindgen", "dep:arrow"]
+build = []
+
 [dependencies]
 rapidbyte-types = { path = "../rapidbyte-types" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Keep SDK tokio features minimal so wasm connectors don't inherit host-only
 # runtime/network features via workspace defaults.
-tokio = { version = "1.36", default-features = false, features = ["io-util"] }
-wit-bindgen = "0.46"
-arrow = { version = "53", default-features = false, features = ["ipc"] }
+tokio = { version = "1.36", default-features = false, features = ["io-util"], optional = true }
+wit-bindgen = { version = "0.46", optional = true }
+arrow = { version = "53", default-features = false, features = ["ipc"], optional = true }
