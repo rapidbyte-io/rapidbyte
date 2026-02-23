@@ -33,18 +33,38 @@ const CDC_MAX_CHANGES: i32 = 100_000;
 /// Default replication slot prefix. Full slot names are `rapidbyte_{stream_name}`.
 const SLOT_PREFIX: &str = "rapidbyte_";
 
-/// Read CDC changes from a logical replication slot using `pg_logical_slot_get_changes()`.
-pub async fn read_cdc_changes(
-    client: &Client,
-    ctx: &Context,
-    stream: &StreamContext,
-    config: &Config,
-    connect_secs: f64,
-) -> Result<ReadSummary, String> {
-    read_cdc_inner(client, ctx, stream, config, connect_secs).await
+struct CdcEmitState {
+    total_records: u64,
+    total_bytes: u64,
+    batches_emitted: u64,
+    arrow_encode_nanos: u64,
 }
 
-async fn read_cdc_inner(
+fn emit_cdc_batch(
+    changes: &mut Vec<CdcChange>,
+    table_columns: &[Column],
+    schema: &Arc<Schema>,
+    ctx: &Context,
+    state: &mut CdcEmitState,
+) -> Result<(), String> {
+    let encode_start = Instant::now();
+    let batch = changes_to_batch(changes, table_columns, schema)?;
+    state.arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
+
+    state.total_records += changes.len() as u64;
+    state.total_bytes += batch.get_array_memory_size() as u64;
+    state.batches_emitted += 1;
+
+    ctx.emit_batch(&batch)
+        .map_err(|e| format!("emit_batch failed: {}", e.message))?;
+    emit_read_metrics(ctx, state.total_records, state.total_bytes);
+
+    changes.clear();
+    Ok(())
+}
+
+/// Read CDC changes from a logical replication slot using `pg_logical_slot_get_changes()`.
+pub async fn read_cdc_changes(
     client: &Client,
     ctx: &Context,
     stream: &StreamContext,
@@ -90,11 +110,12 @@ async fn read_cdc_inner(
     let query_secs = query_start.elapsed().as_secs_f64();
 
     let fetch_start = Instant::now();
-    let mut arrow_encode_nanos: u64 = 0;
-
-    let mut total_records: u64 = 0;
-    let mut total_bytes: u64 = 0;
-    let mut batches_emitted: u64 = 0;
+    let mut state = CdcEmitState {
+        total_records: 0,
+        total_bytes: 0,
+        batches_emitted: 0,
+        arrow_encode_nanos: 0,
+    };
     let mut max_lsn: Option<String> = None;
 
     // 5. Parse changes, filter to our table, accumulate into batches
@@ -122,36 +143,25 @@ async fn read_cdc_inner(
 
         // Flush batch if accumulated enough
         if accumulated_changes.len() >= BATCH_SIZE {
-            let encode_start = Instant::now();
-            let batch = changes_to_batch(&accumulated_changes, &table_columns, &arrow_schema)?;
-            arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
-
-            total_records += accumulated_changes.len() as u64;
-            total_bytes += batch.get_array_memory_size() as u64;
-            batches_emitted += 1;
-
-            ctx.emit_batch(&batch)
-                .map_err(|e| format!("emit_batch failed: {}", e.message))?;
-
-            emit_read_metrics(ctx, total_records, total_bytes);
-            accumulated_changes.clear();
+            emit_cdc_batch(
+                &mut accumulated_changes,
+                &table_columns,
+                &arrow_schema,
+                ctx,
+                &mut state,
+            )?;
         }
     }
 
     // Flush remaining changes
     if !accumulated_changes.is_empty() {
-        let encode_start = Instant::now();
-        let batch = changes_to_batch(&accumulated_changes, &table_columns, &arrow_schema)?;
-        arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
-
-        total_records += accumulated_changes.len() as u64;
-        total_bytes += batch.get_array_memory_size() as u64;
-        batches_emitted += 1;
-
-        ctx.emit_batch(&batch)
-            .map_err(|e| format!("emit_batch failed: {}", e.message))?;
-
-        emit_read_metrics(ctx, total_records, total_bytes);
+        emit_cdc_batch(
+            &mut accumulated_changes,
+            &table_columns,
+            &arrow_schema,
+            ctx,
+            &mut state,
+        )?;
     }
 
     let fetch_secs = fetch_start.elapsed().as_secs_f64();
@@ -164,8 +174,8 @@ async fn read_cdc_inner(
             stream: stream.stream_name.clone(),
             cursor_field: Some("lsn".to_string()),
             cursor_value: Some(CursorValue::Lsn(lsn.clone())),
-            records_processed: total_records,
-            bytes_processed: total_bytes,
+            records_processed: state.total_records,
+            bytes_processed: state.total_bytes,
         };
         // CDC uses get_changes (destructive) so checkpoint MUST succeed to avoid data loss.
         ctx.checkpoint(&cp).map_err(|e| {
@@ -191,21 +201,21 @@ async fn read_cdc_inner(
         LogLevel::Info,
         &format!(
             "CDC stream '{}' complete: {} records, {} bytes, {} batches",
-            stream.stream_name, total_records, total_bytes, batches_emitted
+            stream.stream_name, state.total_records, state.total_bytes, state.batches_emitted
         ),
     );
 
     Ok(ReadSummary {
-        records_read: total_records,
-        bytes_read: total_bytes,
-        batches_emitted,
+        records_read: state.total_records,
+        bytes_read: state.total_bytes,
+        batches_emitted: state.batches_emitted,
         checkpoint_count,
         records_skipped: 0,
         perf: Some(rapidbyte_sdk::protocol::ReadPerf {
             connect_secs,
             query_secs,
             fetch_secs,
-            arrow_encode_secs: arrow_encode_nanos as f64 / 1e9,
+            arrow_encode_secs: state.arrow_encode_nanos as f64 / 1e9,
         }),
     })
 }
