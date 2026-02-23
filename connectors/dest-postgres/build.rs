@@ -13,6 +13,5 @@ fn main() {
         ])
         .allow_runtime_network()
         .env_vars(&["PGSSLROOTCERT"])
-        .config_schema_file("config_schema.json")
         .emit();
 }

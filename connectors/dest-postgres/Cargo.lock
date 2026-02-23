@@ -1068,11 +1068,22 @@ name = "rapidbyte-sdk"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "rapidbyte-sdk-macros",
  "rapidbyte-types",
  "serde",
  "serde_json",
  "tokio",
  "wit-bindgen 0.46.0",
+]
+
+[[package]]
+name = "rapidbyte-sdk-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn",
 ]
 
 [[package]]
