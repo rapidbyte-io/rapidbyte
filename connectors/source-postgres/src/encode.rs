@@ -11,9 +11,9 @@ use rapidbyte_sdk::arrow::array::{
     Array, BinaryBuilder, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array,
     Int32Array, Int64Array, StringBuilder, TimestampMicrosecondArray,
 };
-use rapidbyte_sdk::arrow::datatypes::{Field, Schema};
+use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
-use rapidbyte_sdk::prelude::{arrow_data_type, ArrowDataType};
+use rapidbyte_sdk::prelude::{build_arrow_schema, ArrowDataType};
 use std::sync::LazyLock;
 use tokio_postgres::Row;
 
@@ -25,17 +25,11 @@ static UNIX_EPOCH_DATE: LazyLock<NaiveDate> =
 
 /// Build an Arrow `Schema` from column definitions.
 ///
-/// Uses the SDK's `arrow_data_type` mapping so the type conversion stays in
-/// one place (the SDK).
+/// Delegates to the SDK's `build_arrow_schema` so the type conversion stays
+/// in one place.
 pub fn arrow_schema(columns: &[Column]) -> Arc<Schema> {
-    let fields: Vec<Field> = columns
-        .iter()
-        .map(|col| {
-            let dt = arrow_data_type(col.arrow_type);
-            Field::new(&col.name, dt, col.nullable)
-        })
-        .collect();
-    Arc::new(Schema::new(fields))
+    let col_schemas: Vec<_> = columns.iter().map(Column::to_schema).collect();
+    build_arrow_schema(&col_schemas)
 }
 
 /// Encode `PostgreSQL` rows into an Arrow `RecordBatch`.
