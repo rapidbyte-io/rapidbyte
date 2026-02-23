@@ -61,3 +61,4 @@ impl Destination for DestPostgres {
 }
 
 rapidbyte_sdk::connector_main!(destination, DestPostgres);
+rapidbyte_sdk::embed_manifest!();
