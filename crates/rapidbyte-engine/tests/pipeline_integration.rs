@@ -224,11 +224,11 @@ fn test_arrow_ipc_realistic_schema() {
     .unwrap();
 
     // Encode to IPC
-    let ipc_bytes = rapidbyte_engine::arrow_utils::record_batch_to_ipc(&batch).unwrap();
+    let ipc_bytes = rapidbyte_engine::arrow::record_batch_to_ipc(&batch).unwrap();
     assert!(!ipc_bytes.is_empty());
 
     // Decode back
-    let decoded = rapidbyte_engine::arrow_utils::ipc_to_record_batches(&ipc_bytes).unwrap();
+    let decoded = rapidbyte_engine::arrow::ipc_to_record_batches(&ipc_bytes).unwrap();
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].num_rows(), 3);
     assert_eq!(decoded[0].num_columns(), 4);

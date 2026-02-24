@@ -1,6 +1,6 @@
 //! Core runtime/orchestration crate for Rapidbyte pipeline execution.
 
-pub mod arrow_utils;
+pub mod arrow;
 pub mod checkpoint;
 pub(crate) mod dlq;
 pub mod errors;
