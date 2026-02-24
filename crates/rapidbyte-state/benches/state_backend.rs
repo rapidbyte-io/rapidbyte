@@ -6,26 +6,15 @@
 use chrono::Utc;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
-use rapidbyte_core::state::backend::{
-    CursorState, PipelineId, RunStats, RunStatus, StateBackend, StreamName,
-};
-use rapidbyte_core::state::sqlite::SqliteStateBackend;
-
-fn make_pipeline(name: &str) -> PipelineId {
-    PipelineId(name.to_string())
-}
-
-fn make_stream(name: &str) -> StreamName {
-    StreamName(name.to_string())
-}
+use rapidbyte_state::prelude::*;
 
 fn bench_run_lifecycle(c: &mut Criterion) {
     let mut group = c.benchmark_group("state/run_lifecycle");
 
     group.bench_function("start_and_complete", |b| {
         let backend = SqliteStateBackend::in_memory().unwrap();
-        let pipeline = make_pipeline("bench_pipeline");
-        let stream = make_stream("bench_stream");
+        let pipeline = PipelineId::new("bench_pipeline");
+        let stream = StreamName::new("bench_stream");
 
         b.iter(|| {
             let run_id = backend.start_run(&pipeline, &stream).unwrap();
@@ -56,9 +45,9 @@ fn bench_persist_cursor(c: &mut Criterion) {
             &stream_count,
             |b, &stream_count| {
                 let backend = SqliteStateBackend::in_memory().unwrap();
-                let pipeline = make_pipeline("bench_pipeline");
+                let pipeline = PipelineId::new("bench_pipeline");
                 let streams: Vec<StreamName> = (0..stream_count)
-                    .map(|i| make_stream(&format!("stream_{i}")))
+                    .map(|i| StreamName::new(format!("stream_{i}")))
                     .collect();
                 let mut counter = 0u64;
 
@@ -90,9 +79,9 @@ fn bench_get_cursor(c: &mut Criterion) {
             &stream_count,
             |b, &stream_count| {
                 let backend = SqliteStateBackend::in_memory().unwrap();
-                let pipeline = make_pipeline("bench_pipeline");
+                let pipeline = PipelineId::new("bench_pipeline");
                 let streams: Vec<StreamName> = (0..stream_count)
-                    .map(|i| make_stream(&format!("stream_{i}")))
+                    .map(|i| StreamName::new(format!("stream_{i}")))
                     .collect();
 
                 // Pre-populate cursors

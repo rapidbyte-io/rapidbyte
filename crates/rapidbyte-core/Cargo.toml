@@ -35,7 +35,3 @@ libc = "0.2"
 [[bench]]
 name = "arrow_codec"
 harness = false
-
-[[bench]]
-name = "state_backend"
-harness = false

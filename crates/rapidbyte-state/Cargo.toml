@@ -13,5 +13,9 @@ tracing = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 
+[[bench]]
+name = "state_backend"
+harness = false
+
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
