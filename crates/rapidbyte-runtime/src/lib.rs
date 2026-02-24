@@ -4,3 +4,5 @@
 //! connector resolution, and network/sandbox policies.
 
 #![warn(clippy::pedantic)]
+
+pub mod error;
