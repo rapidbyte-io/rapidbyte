@@ -47,16 +47,6 @@ struct StreamResult {
     transform_durations: Vec<f64>,
 }
 
-struct StreamError {
-    error: PipelineError,
-}
-
-impl From<PipelineError> for StreamError {
-    fn from(error: PipelineError) -> Self {
-        Self { error }
-    }
-}
-
 #[derive(Clone)]
 struct LoadedTransformModule {
     module: LoadedComponent,
@@ -464,7 +454,7 @@ async fn execute_streams(
         })
         .collect();
 
-    let mut stream_join_handles: Vec<tokio::task::JoinHandle<Result<StreamResult, StreamError>>> =
+    let mut stream_join_handles: Vec<tokio::task::JoinHandle<Result<StreamResult, PipelineError>>> =
         Vec::with_capacity(stream_build.stream_ctxs.len());
     let run_dlq_records: Arc<Mutex<Vec<DlqRecord>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -509,10 +499,8 @@ async fn execute_streams(
             ) = channels.into_iter().unzip();
 
             let source_tx = senders.remove(0);
-            let dest_rx = receivers.pop().ok_or_else(|| StreamError {
-                error: PipelineError::Infrastructure(anyhow::anyhow!(
-                    "Missing destination receiver"
-                )),
+            let dest_rx = receivers.pop().ok_or_else(|| {
+                PipelineError::Infrastructure(anyhow::anyhow!("Missing destination receiver"))
             })?;
 
             let stream_ctx_for_src = stream_ctx.clone();
@@ -582,24 +570,24 @@ async fn execute_streams(
                 )
             });
 
-            let src_result = src_handle.await.map_err(|e| StreamError {
-                error: PipelineError::Infrastructure(anyhow::anyhow!(
+            let src_result = src_handle.await.map_err(|e| {
+                PipelineError::Infrastructure(anyhow::anyhow!(
                     "Source task panicked for stream '{}': {}",
                     stream_ctx.stream_name,
                     e
-                )),
+                ))
             })?;
 
             let mut transform_durations = Vec::new();
             let mut first_transform_error: Option<PipelineError> = None;
             for (i, t_handle) in transform_handles {
-                let result = t_handle.await.map_err(|e| StreamError {
-                    error: PipelineError::Infrastructure(anyhow::anyhow!(
+                let result = t_handle.await.map_err(|e| {
+                    PipelineError::Infrastructure(anyhow::anyhow!(
                         "Transform {} task panicked for stream '{}': {}",
                         i,
                         stream_ctx.stream_name,
                         e
-                    )),
+                    ))
                 })?;
                 match result {
                     Ok(result) => {
@@ -627,25 +615,23 @@ async fn execute_streams(
                 }
             }
 
-            let dst_result = dst_handle.await.map_err(|e| StreamError {
-                error: PipelineError::Infrastructure(anyhow::anyhow!(
+            let dst_result = dst_handle.await.map_err(|e| {
+                PipelineError::Infrastructure(anyhow::anyhow!(
                     "Destination task panicked for stream '{}': {}",
                     stream_ctx.stream_name,
                     e
-                )),
+                ))
             })?;
 
             drop(permit);
 
             if let Some(transform_err) = first_transform_error {
-                return Err(StreamError {
-                    error: transform_err,
-                });
+                return Err(transform_err);
             }
 
-            let src = src_result.map_err(|src_err| StreamError { error: src_err })?;
+            let src = src_result?;
 
-            let dst = dst_result.map_err(|dst_err| StreamError { error: dst_err })?;
+            let dst = dst_result?;
 
             Ok(StreamResult {
                 read_summary: src.summary,
@@ -731,7 +717,7 @@ async fn execute_streams(
                 }
                 transform_durations.extend(sr.transform_durations);
             }
-            Err(StreamError { error }) => {
+            Err(error) => {
                 tracing::error!("Stream failed: {}", error);
                 if first_error.is_none() {
                     first_error = Some(error);
