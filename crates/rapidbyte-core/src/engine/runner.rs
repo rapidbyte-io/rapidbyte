@@ -15,14 +15,14 @@ use rapidbyte_types::metric::{ReadSummary, TransformSummary, WriteSummary};
 use rapidbyte_types::stream::StreamContext;
 use rapidbyte_types::wire::ConnectorRole;
 
-use super::compression::CompressionCodec;
 use super::errors::PipelineError;
-use crate::runtime::component_runtime::{
-    self, dest_bindings, dest_error_to_sdk, source_bindings, source_error_to_sdk,
-    transform_bindings, transform_error_to_sdk, ComponentHostState, Frame, HostTimings,
-    LoadedComponent, SandboxOverrides, WasmRuntime,
+use rapidbyte_runtime::wasmtime_reexport::HasSelf;
+use rapidbyte_runtime::{
+    create_component_linker, dest_bindings, dest_error_to_sdk, dest_validation_to_sdk,
+    source_bindings, source_error_to_sdk, source_validation_to_sdk, transform_bindings,
+    transform_error_to_sdk, transform_validation_to_sdk, ComponentHostState, CompressionCodec,
+    Frame, HostTimings, LoadedComponent, SandboxOverrides, WasmRuntime,
 };
-use crate::runtime::wasm_runtime::create_component_linker;
 use rapidbyte_state::{SqliteStateBackend, StateBackend};
 use rapidbyte_types::state::RunStats;
 
@@ -86,7 +86,7 @@ pub struct CheckResult {
 }
 
 fn handle_close_result<E, F>(
-    result: std::result::Result<std::result::Result<(), E>, wasmtime::Error>,
+    result: std::result::Result<std::result::Result<(), E>, rapidbyte_runtime::wasmtime_reexport::Error>,
     role: &str,
     stream_name: &str,
     convert: F,
@@ -130,25 +130,28 @@ pub(crate) fn run_source_stream(
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let source_timings = Arc::new(Mutex::new(HostTimings::default()));
 
-    let host_state = ComponentHostState::for_source(
-        pipeline_name.to_string(),
-        connector_id.to_string(),
-        stream_ctx.stream_name.clone(),
-        state_backend,
-        sender.clone(),
-        source_checkpoints.clone(),
-        source_timings.clone(),
-        permissions,
-        source_config,
-        compression,
-        overrides,
-    )
-    .map_err(PipelineError::Infrastructure)?;
+    let mut builder = ComponentHostState::builder()
+        .pipeline(pipeline_name)
+        .connector_id(connector_id)
+        .stream(stream_ctx.stream_name.clone())
+        .state_backend(state_backend)
+        .sender(sender.clone())
+        .source_checkpoints(source_checkpoints.clone())
+        .timings(source_timings.clone())
+        .config(source_config)
+        .compression(compression);
+    if let Some(p) = permissions {
+        builder = builder.permissions(p);
+    }
+    if let Some(o) = overrides {
+        builder = builder.overrides(o);
+    }
+    let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
     let timeout = overrides.and_then(|o| o.timeout_seconds);
     let mut store = module.new_store(host_state, timeout);
     let linker = create_component_linker(&module.engine, "source", |linker| {
-        source_bindings::RapidbyteSource::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
+        source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(
             linker,
             |state| state,
         )
@@ -278,21 +281,24 @@ pub(crate) fn run_destination_stream(
     let dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let dest_timings = Arc::new(Mutex::new(HostTimings::default()));
 
-    let host_state = ComponentHostState::for_destination(
-        pipeline_name.to_string(),
-        connector_id.to_string(),
-        stream_ctx.stream_name.clone(),
-        state_backend,
-        receiver,
-        dest_checkpoints.clone(),
-        dlq_records.clone(),
-        dest_timings.clone(),
-        permissions,
-        dest_config,
-        compression,
-        overrides,
-    )
-    .map_err(PipelineError::Infrastructure)?;
+    let mut builder = ComponentHostState::builder()
+        .pipeline(pipeline_name)
+        .connector_id(connector_id)
+        .stream(stream_ctx.stream_name.clone())
+        .state_backend(state_backend)
+        .receiver(receiver)
+        .dest_checkpoints(dest_checkpoints.clone())
+        .dlq_records(dlq_records.clone())
+        .timings(dest_timings.clone())
+        .config(dest_config)
+        .compression(compression);
+    if let Some(p) = permissions {
+        builder = builder.permissions(p);
+    }
+    if let Some(o) = overrides {
+        builder = builder.overrides(o);
+    }
+    let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
     let timeout = overrides.and_then(|o| o.timeout_seconds);
     (|| {
@@ -300,7 +306,7 @@ pub(crate) fn run_destination_stream(
         let linker = create_component_linker(&module.engine, "destination", |linker| {
             dest_bindings::RapidbyteDestination::add_to_linker::<
                     _,
-                    wasmtime::component::HasSelf<_>,
+                    HasSelf<_>,
                 >(linker, |state| state)
                 .context("Failed to add rapidbyte destination host imports")?;
             Ok(())
@@ -439,29 +445,32 @@ pub(crate) fn run_transform_stream(
     let dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let timings = Arc::new(Mutex::new(HostTimings::default()));
 
-    let host_state = ComponentHostState::for_transform(
-        pipeline_name.to_string(),
-        connector_id.to_string(),
-        stream_ctx.stream_name.clone(),
-        state_backend,
-        sender.clone(),
-        receiver,
-        source_checkpoints,
-        dest_checkpoints,
-        timings,
-        permissions,
-        transform_config,
-        compression,
-        overrides,
-    )
-    .map_err(PipelineError::Infrastructure)?;
+    let mut builder = ComponentHostState::builder()
+        .pipeline(pipeline_name)
+        .connector_id(connector_id)
+        .stream(stream_ctx.stream_name.clone())
+        .state_backend(state_backend)
+        .sender(sender.clone())
+        .receiver(receiver)
+        .source_checkpoints(source_checkpoints)
+        .dest_checkpoints(dest_checkpoints)
+        .timings(timings)
+        .config(transform_config)
+        .compression(compression);
+    if let Some(p) = permissions {
+        builder = builder.permissions(p);
+    }
+    if let Some(o) = overrides {
+        builder = builder.overrides(o);
+    }
+    let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
     let timeout = overrides.and_then(|o| o.timeout_seconds);
     let mut store = module.new_store(host_state, timeout);
     let linker = create_component_linker(&module.engine, "transform", |linker| {
         transform_bindings::RapidbyteTransform::add_to_linker::<
             _,
-            wasmtime::component::HasSelf<_>,
+            HasSelf<_>,
         >(linker, |state| state)
         .context("Failed to add rapidbyte transform host imports")?;
         Ok(())
@@ -545,15 +554,17 @@ pub(crate) fn validate_connector(
     let module = runtime.load_module(wasm_path)?;
     let state = Arc::new(SqliteStateBackend::in_memory()?);
 
-    let host_state = ComponentHostState::for_validation(
-        "check".to_string(),
-        connector_id.to_string(),
-        "check".to_string(),
-        state,
-        permissions,
-        config,
-        None,
-    )?;
+    let mut builder = ComponentHostState::builder()
+        .pipeline("check")
+        .connector_id(connector_id)
+        .stream("check")
+        .state_backend(state)
+        .config(config)
+        .compression(None);
+    if let Some(p) = permissions {
+        builder = builder.permissions(p);
+    }
+    let host_state = builder.build()?;
 
     let mut store = module.new_store(host_state, None);
     let config_json = serde_json::to_string(config)?;
@@ -563,7 +574,7 @@ pub(crate) fn validate_connector(
             let linker = create_component_linker(&module.engine, "source", |linker| {
                 source_bindings::RapidbyteSource::add_to_linker::<
                     _,
-                    wasmtime::component::HasSelf<_>,
+                    HasSelf<_>,
                 >(linker, |state| state)?;
                 Ok(())
             })?;
@@ -580,7 +591,7 @@ pub(crate) fn validate_connector(
 
             let result = iface
                 .call_validate(&mut store)?
-                .map(component_runtime::source_validation_to_sdk)
+                .map(source_validation_to_sdk)
                 .map_err(source_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!(e.to_string()));
             let _ = iface.call_close(&mut store);
@@ -590,7 +601,7 @@ pub(crate) fn validate_connector(
             let linker = create_component_linker(&module.engine, "destination", |linker| {
                 dest_bindings::RapidbyteDestination::add_to_linker::<
                     _,
-                    wasmtime::component::HasSelf<_>,
+                    HasSelf<_>,
                 >(linker, |state| state)?;
                 Ok(())
             })?;
@@ -607,7 +618,7 @@ pub(crate) fn validate_connector(
 
             let result = iface
                 .call_validate(&mut store)?
-                .map(component_runtime::dest_validation_to_sdk)
+                .map(dest_validation_to_sdk)
                 .map_err(dest_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!(e.to_string()));
             let _ = iface.call_close(&mut store);
@@ -617,7 +628,7 @@ pub(crate) fn validate_connector(
             let linker = create_component_linker(&module.engine, "transform", |linker| {
                 transform_bindings::RapidbyteTransform::add_to_linker::<
                     _,
-                    wasmtime::component::HasSelf<_>,
+                    HasSelf<_>,
                 >(linker, |state| state)?;
                 Ok(())
             })?;
@@ -634,7 +645,7 @@ pub(crate) fn validate_connector(
 
             let result = iface
                 .call_validate(&mut store)?
-                .map(component_runtime::transform_validation_to_sdk)
+                .map(transform_validation_to_sdk)
                 .map_err(transform_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!(e.to_string()));
             let _ = iface.call_close(&mut store);
@@ -655,19 +666,21 @@ pub(crate) fn run_discover(
     let module = runtime.load_module(wasm_path)?;
 
     let state = Arc::new(SqliteStateBackend::in_memory()?);
-    let host_state = ComponentHostState::for_validation(
-        "discover".to_string(),
-        connector_id.to_string(),
-        "discover".to_string(),
-        state,
-        permissions,
-        config,
-        None,
-    )?;
+    let mut builder = ComponentHostState::builder()
+        .pipeline("discover")
+        .connector_id(connector_id)
+        .stream("discover")
+        .state_backend(state)
+        .config(config)
+        .compression(None);
+    if let Some(p) = permissions {
+        builder = builder.permissions(p);
+    }
+    let host_state = builder.build()?;
 
     let mut store = module.new_store(host_state, None);
     let linker = create_component_linker(&module.engine, "source", |linker| {
-        source_bindings::RapidbyteSource::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
+        source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(
             linker,
             |state| state,
         )?;

@@ -22,8 +22,8 @@ use super::runner::{
     validate_connector, CheckResult, DestTiming, PipelineCounts, PipelineResult, SourceTiming,
 };
 use crate::pipeline::types::{parse_byte_size, PipelineConfig, StateBackendKind};
-use crate::runtime::component_runtime::{
-    self, parse_connector_ref, resolve_min_limit, Frame, HostTimings, LoadedComponent,
+use rapidbyte_runtime::{
+    parse_connector_ref, resolve_min_limit, Frame, HostTimings, LoadedComponent,
     SandboxOverrides, WasmRuntime,
 };
 use rapidbyte_state::{SqliteStateBackend, StateBackend};
@@ -83,7 +83,7 @@ struct LoadedModules {
 
 struct StreamBuild {
     limits: StreamLimits,
-    compression: Option<crate::engine::compression::CompressionCodec>,
+    compression: Option<rapidbyte_runtime::CompressionCodec>,
     stream_ctxs: Vec<StreamContext>,
 }
 
@@ -202,9 +202,9 @@ async fn execute_pipeline_once(
 }
 
 fn resolve_connectors(config: &PipelineConfig) -> Result<ResolvedConnectors, PipelineError> {
-    let source_wasm = component_runtime::resolve_connector_path(&config.source.use_ref)
+    let source_wasm = rapidbyte_runtime::resolve_connector_path(&config.source.use_ref)
         .map_err(PipelineError::Infrastructure)?;
-    let dest_wasm = component_runtime::resolve_connector_path(&config.destination.use_ref)
+    let dest_wasm = rapidbyte_runtime::resolve_connector_path(&config.destination.use_ref)
         .map_err(PipelineError::Infrastructure)?;
 
     let source_manifest =
@@ -287,7 +287,7 @@ async fn load_modules(
 
     let mut transform_modules = Vec::with_capacity(config.transforms.len());
     for tc in &config.transforms {
-        let wasm_path = component_runtime::resolve_connector_path(&tc.use_ref)
+        let wasm_path = rapidbyte_runtime::resolve_connector_path(&tc.use_ref)
             .map_err(PipelineError::Infrastructure)?;
         let manifest =
             load_and_validate_manifest(&wasm_path, &tc.use_ref, ConnectorRole::Transform)
@@ -1051,7 +1051,7 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
 
     let mut transform_tasks = Vec::with_capacity(config.transforms.len());
     for (index, tc) in config.transforms.iter().enumerate() {
-        let wasm_path = component_runtime::resolve_connector_path(&tc.use_ref)?;
+        let wasm_path = rapidbyte_runtime::resolve_connector_path(&tc.use_ref)?;
         let manifest =
             load_and_validate_manifest(&wasm_path, &tc.use_ref, ConnectorRole::Transform)?;
         if let Some(ref m) = manifest {
@@ -1103,7 +1103,7 @@ pub async fn discover_connector(
     connector_ref: &str,
     config: &serde_json::Value,
 ) -> Result<Catalog> {
-    let wasm_path = component_runtime::resolve_connector_path(connector_ref)?;
+    let wasm_path = rapidbyte_runtime::resolve_connector_path(connector_ref)?;
     let manifest = load_and_validate_manifest(&wasm_path, connector_ref, ConnectorRole::Source)?;
     let permissions = manifest.as_ref().map(|m| m.permissions.clone());
     let (connector_id, connector_version) = parse_connector_ref(connector_ref);
@@ -1169,7 +1169,7 @@ fn load_and_validate_manifest(
     connector_ref: &str,
     expected_role: ConnectorRole,
 ) -> Result<Option<ConnectorManifest>> {
-    let manifest = component_runtime::load_connector_manifest(wasm_path)?;
+    let manifest = rapidbyte_runtime::load_connector_manifest(wasm_path)?;
 
     if let Some(ref m) = manifest {
         if !m.supports_role(expected_role) {

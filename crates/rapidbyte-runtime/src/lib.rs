@@ -40,3 +40,9 @@ pub use connector::{load_connector_manifest, parse_connector_ref, resolve_connec
 pub use engine::{create_component_linker, HasStoreLimits, LoadedComponent, WasmRuntime};
 pub use host_state::{ComponentHostState, Frame, HostTimings};
 pub use sandbox::{resolve_min_limit, SandboxOverrides};
+
+/// Re-export Wasmtime types needed by downstream crates (e.g. for `add_to_linker` calls).
+pub mod wasmtime_reexport {
+    pub use wasmtime::component::HasSelf;
+    pub use wasmtime::Error;
+}

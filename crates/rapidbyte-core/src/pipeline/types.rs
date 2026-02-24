@@ -5,7 +5,7 @@ use rapidbyte_types::wire::{SyncMode, WriteMode};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::engine::compression::CompressionCodec;
+use rapidbyte_runtime::CompressionCodec;
 
 const DEFAULT_STATE_BACKEND: StateBackendKind = StateBackendKind::Sqlite;
 const DEFAULT_MAX_MEMORY: &str = "256mb";
