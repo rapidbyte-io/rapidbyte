@@ -18,6 +18,7 @@ const RAPIDBYTE_WASMTIME_AOT_DIR_ENV: &str = "RAPIDBYTE_WASMTIME_AOT_DIR";
 
 /// Trait for host state types that provide Wasmtime store limits.
 pub trait HasStoreLimits: wasmtime_wasi::WasiView + Send {
+    /// Return a mutable reference to the store limits for memory bounding.
     fn store_limits(&mut self) -> &mut StoreLimits;
 }
 
@@ -57,6 +58,8 @@ impl LoadedComponent {
 }
 
 /// Manages loading connector components.
+///
+/// Wraps a Wasmtime `Engine` with optional AOT caching and epoch-based timeout.
 pub struct WasmRuntime {
     engine: Arc<Engine>,
     aot_cache_dir: Option<PathBuf>,
@@ -71,6 +74,11 @@ enum AotLoadKind {
     Compiled,
 }
 
+/// Create a component linker with WASI imports and connector bindings.
+///
+/// # Errors
+///
+/// Returns an error if WASI imports or connector bindings fail to register.
 pub fn create_component_linker<T, F>(
     engine: &Engine,
     role: &str,
@@ -82,12 +90,17 @@ where
 {
     let mut linker = Linker::new(engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
-        .with_context(|| format!("Failed to add WASI imports for {}", role))?;
+        .with_context(|| format!("Failed to add WASI imports for {role}"))?;
     add_bindings(&mut linker)?;
     Ok(linker)
 }
 
 impl WasmRuntime {
+    /// Create a new Wasmtime runtime with epoch interruption and optional AOT caching.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Wasmtime engine fails to initialize.
     pub fn new() -> Result<Self> {
         let mut config = Config::new();
         config.wasm_component_model(true);
@@ -140,6 +153,10 @@ impl WasmRuntime {
     }
 
     /// Load a component from a file on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the wasm component cannot be loaded or compiled.
     pub fn load_module(&self, wasm_path: &Path) -> Result<LoadedComponent> {
         let load_start = Instant::now();
         let mut aot_load_kind: Option<AotLoadKind> = None;
@@ -167,6 +184,7 @@ impl WasmRuntime {
             })?
         };
 
+        #[allow(clippy::cast_possible_truncation)]
         let load_ms = load_start.elapsed().as_millis() as u64;
         match aot_load_kind {
             Some(AotLoadKind::CacheHit) => {
@@ -198,6 +216,8 @@ impl WasmRuntime {
         })
     }
 
+    /// Returns a reference to the underlying Wasmtime engine.
+    #[must_use]
     pub fn engine(&self) -> &Engine {
         &self.engine
     }
@@ -276,8 +296,8 @@ impl WasmRuntime {
         let stem = sanitize_cache_component_name(stem);
         let short_hash = &wasm_hash[..wasm_hash.len().min(16)];
         cache_dir.join(format!(
-            "{}-{}-{:016x}.cwasm",
-            stem, short_hash, self.aot_compat_hash
+            "{stem}-{short_hash}-{:016x}.cwasm",
+            self.aot_compat_hash
         ))
     }
 }
@@ -349,8 +369,7 @@ fn write_file_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         .and_then(|s| s.to_str())
         .unwrap_or("artifact");
     let tmp = parent.join(format!(
-        ".{}.{}.{}.tmp",
-        filename,
+        ".{filename}.{}.{}.tmp",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

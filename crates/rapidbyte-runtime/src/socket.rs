@@ -5,17 +5,18 @@ use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
 
-/// Default milliseconds to wait for socket readiness before returning WouldBlock.
-/// Override with RAPIDBYTE_SOCKET_POLL_MS env var for performance tuning.
+/// Default milliseconds to wait for socket readiness before returning `WouldBlock`.
+/// Override with `RAPIDBYTE_SOCKET_POLL_MS` env var for performance tuning.
 pub const SOCKET_READY_POLL_MS: i32 = 1;
 
-/// Number of consecutive WouldBlock events before activating poll(1ms).
-/// At ~2M iterations/sec CPU speed, 1024 iterations ≈ 0.5ms of spinning.
-/// This avoids adding 1ms poll overhead to transient WouldBlocks during active streaming.
+/// Number of consecutive `WouldBlock` events before activating poll(1ms).
+/// At ~2M iterations/sec CPU speed, 1024 iterations is roughly 0.5ms of spinning.
+/// This avoids adding 1ms poll overhead to transient `WouldBlock` results during active streaming.
 pub const SOCKET_POLL_ACTIVATION_THRESHOLD: u32 = 1024;
 
 /// Interest direction for socket readiness polling.
 #[cfg(unix)]
+#[derive(Clone, Copy)]
 pub enum SocketInterest {
     Read,
     Write,
@@ -31,8 +32,12 @@ pub enum SocketInterest {
 ///   observability, then treated as "ready" to let I/O surface the real error).
 ///
 /// Handles EINTR by retrying. POLLERR/POLLHUP/POLLNVAL are returned as
-/// `Ok(true)` so that the subsequent read()/write() surfaces the real error
+/// `Ok(true)` so that the subsequent `read()`/`write()` surfaces the real error
 /// through normal error handling.
+///
+/// # Errors
+///
+/// Returns an `io::Error` on a non-EINTR poll failure.
 #[cfg(unix)]
 pub fn wait_socket_ready(
     stream: &TcpStream,
@@ -49,7 +54,7 @@ pub fn wait_socket_ready(
         revents: 0,
     };
     loop {
-        let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        let ret = unsafe { libc::poll(&raw mut pfd, 1, timeout_ms) };
         if ret < 0 {
             let err = std::io::Error::last_os_error();
             if err.kind() == std::io::ErrorKind::Interrupted {
@@ -65,6 +70,7 @@ pub fn wait_socket_ready(
 }
 
 /// Read the socket poll timeout, allowing env override for perf tuning.
+#[must_use]
 pub fn socket_poll_timeout_ms() -> i32 {
     static CACHED: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
@@ -75,13 +81,18 @@ pub fn socket_poll_timeout_ms() -> i32 {
     })
 }
 
-/// Per-socket state tracking the TCP stream and consecutive WouldBlock streaks.
+/// Per-socket state tracking the TCP stream and consecutive `WouldBlock` streaks.
 pub struct SocketEntry {
     pub stream: TcpStream,
     pub read_would_block_streak: u32,
     pub write_would_block_streak: u32,
 }
 
+/// Resolve a hostname and port to a list of socket addresses.
+///
+/// # Errors
+///
+/// Returns an `io::Error` if DNS resolution fails or yields no addresses.
 pub fn resolve_socket_addrs(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return Ok(vec![SocketAddr::new(ip, port)]);

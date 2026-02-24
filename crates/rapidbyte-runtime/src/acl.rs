@@ -37,7 +37,7 @@ impl NetworkAcl {
             return;
         }
         if let Some(suffix) = host.strip_prefix("*.") {
-            self.suffix_wildcards.push(format!(".{}", suffix));
+            self.suffix_wildcards.push(format!(".{suffix}"));
             return;
         }
         self.exact_hosts.insert(host);
@@ -64,6 +64,7 @@ impl NetworkAcl {
         }
     }
 
+    #[must_use]
     pub fn allows(&self, host: &str) -> bool {
         if self.allow_all {
             return true;
@@ -163,6 +164,7 @@ fn collect_runtime_hosts(value: &serde_json::Value, hosts: &mut HashSet<String>)
     }
 }
 
+#[must_use]
 pub fn derive_network_acl(
     permissions: Option<&Permissions>,
     config: &serde_json::Value,

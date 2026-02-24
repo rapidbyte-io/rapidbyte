@@ -27,6 +27,10 @@ pub enum CompressionError {
 }
 
 /// Compress bytes using the given codec.
+///
+/// # Errors
+///
+/// Returns an error if compression fails.
 pub fn compress(codec: CompressionCodec, data: &[u8]) -> Result<Vec<u8>, CompressionError> {
     match codec {
         CompressionCodec::Lz4 => Ok(lz4_flex::compress_prepend_size(data)),
@@ -36,6 +40,10 @@ pub fn compress(codec: CompressionCodec, data: &[u8]) -> Result<Vec<u8>, Compres
 }
 
 /// Decompress bytes using the given codec.
+///
+/// # Errors
+///
+/// Returns an error if decompression fails.
 pub fn decompress(codec: CompressionCodec, data: &[u8]) -> Result<Vec<u8>, CompressionError> {
     match codec {
         CompressionCodec::Lz4 => lz4_flex::decompress_size_prepended(data)

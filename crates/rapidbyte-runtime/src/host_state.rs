@@ -1,8 +1,7 @@
 //! Host-side runtime state and host import implementations for connector components.
 //!
-//! The `_impl` methods mirror the WIT-generated calling convention (owned `String` / `Vec<u8>`),
-//! and inner types are consumed by the not-yet-wired bindings module, so many items appear
-//! unused at this point in the extraction.
+//! The `*_impl` methods mirror the WIT-generated calling convention (owned `String` / `Vec<u8>`),
+//! and inner types are consumed by the bindings module.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -290,6 +289,9 @@ impl HostStateBuilder {
     }
 }
 
+// The `_impl` methods intentionally take owned `String`/`Vec<u8>` to match the
+// WIT-generated calling convention used by the bindings module.
+#[allow(clippy::needless_pass_by_value)]
 impl ComponentHostState {
     /// Create a builder for `ComponentHostState`.
     #[must_use]
