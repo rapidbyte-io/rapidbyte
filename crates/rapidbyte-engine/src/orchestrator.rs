@@ -17,9 +17,10 @@ use tokio::sync::mpsc;
 
 use crate::checkpoint::correlate_and_persist_cursors;
 use crate::error::{compute_backoff, PipelineError};
+use crate::result::{CheckResult, DestTiming, PipelineCounts, PipelineResult, SourceTiming};
 use crate::runner::{
     run_destination_stream, run_discover, run_source_stream, run_transform_stream,
-    validate_connector, CheckResult, DestTiming, PipelineCounts, PipelineResult, SourceTiming,
+    validate_connector,
 };
 use crate::config::types::{parse_byte_size, PipelineConfig, StateBackendKind};
 use rapidbyte_runtime::{

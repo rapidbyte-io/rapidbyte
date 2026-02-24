@@ -22,6 +22,7 @@ pub mod config;
 pub(crate) mod dlq;
 pub mod error;
 pub mod orchestrator;
+pub mod result;
 pub mod runner;
 
 // Top-level re-exports for convenience.
@@ -30,4 +31,4 @@ pub use config::types::PipelineConfig;
 pub use config::validator::validate_pipeline;
 pub use error::PipelineError;
 pub use orchestrator::{check_pipeline, discover_connector, run_pipeline};
-pub use runner::{CheckResult, PipelineResult};
+pub use result::{CheckResult, PipelineResult};
