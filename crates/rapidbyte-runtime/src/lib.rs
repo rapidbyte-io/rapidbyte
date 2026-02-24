@@ -8,3 +8,4 @@
 pub mod acl;
 pub mod compression;
 pub mod error;
+pub mod socket;
