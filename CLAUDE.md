@@ -54,11 +54,12 @@ just release            # Build host binary (release, optimized)
 just release-connectors # Build + strip both connectors (wasm32-wasip2, release, LTO+O3)
 just test               # cargo test --workspace (host tests)
 just e2e                # Full E2E: build, Docker PG, pipeline, verify
-just bench              # All connectors, default rows (uses release builds)
-just bench postgres     # Postgres connector, default rows
-just bench postgres 50000           # Postgres, 50K rows
-just bench postgres 50000 --iters 5 # Postgres, 50K rows, 5 iterations
-just bench-compare main feature     # Compare benchmarks between refs
+just bench --profile medium                        # All connectors, medium profile (50K rows)
+just bench postgres --profile medium               # Postgres, medium profile, 50K rows
+just bench postgres 100000 --profile small         # Postgres, small profile (~500 B/row), 100K rows
+just bench postgres --profile large                # Postgres, large profile (~50 KB/row), 10K rows
+just bench postgres --profile small --iters 5      # Postgres, small profile, 5 iterations
+just bench-compare main feature                    # Compare benchmarks between refs
 cargo bench             # Criterion micro-benchmarks (Arrow codec, state backend)
 just fmt                # cargo fmt
 just lint               # cargo clippy

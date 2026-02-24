@@ -48,7 +48,7 @@ e2e *args="":
 e2e-scenario path:
     RAPIDBYTE_CONNECTOR_DIR=target/connectors bash tests/connectors/{{path}}.sh
 
-# Run benchmarks: bench [CONNECTOR] [ROWS] [--iters N] [--profile]
+# Run benchmarks: bench [CONNECTOR] [ROWS] --profile PROFILE [--iters N] [--cpu-profile]
 bench *args="":
     ./bench/bench.sh {{args}}
 
