@@ -3,9 +3,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rapidbyte_types::error::ValidationStatus;
 
-use rapidbyte_core::engine::orchestrator;
-use rapidbyte_core::pipeline::parser;
-use rapidbyte_core::pipeline::validator;
+use rapidbyte_engine::engine::orchestrator;
+use rapidbyte_engine::pipeline::parser;
+use rapidbyte_engine::pipeline::validator;
 
 /// Execute the `check` command: validate pipeline config and connector connectivity.
 pub async fn execute(pipeline_path: &Path) -> Result<()> {

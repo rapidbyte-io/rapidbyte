@@ -8,7 +8,7 @@ name = "rapidbyte"
 path = "src/main.rs"
 
 [dependencies]
-rapidbyte-core = { path = "../rapidbyte-core" }
+rapidbyte-engine = { path = "../rapidbyte-engine" }
 rapidbyte-runtime = { path = "../rapidbyte-runtime" }
 rapidbyte-types = { path = "../rapidbyte-types" }
 tokio = { workspace = true }

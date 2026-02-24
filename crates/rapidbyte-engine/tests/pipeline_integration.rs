@@ -3,9 +3,9 @@
 //! These tests verify the full pipeline processing path from YAML parsing
 //! through validation, using real fixture files.
 
-use rapidbyte_core::pipeline::parser;
-use rapidbyte_core::pipeline::types::{PipelineWriteMode, StateBackendKind};
-use rapidbyte_core::pipeline::validator;
+use rapidbyte_engine::pipeline::parser;
+use rapidbyte_engine::pipeline::types::{PipelineWriteMode, StateBackendKind};
+use rapidbyte_engine::pipeline::validator;
 use rapidbyte_state::{SqliteStateBackend, StateBackend};
 use rapidbyte_types::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
 
@@ -224,11 +224,11 @@ fn test_arrow_ipc_realistic_schema() {
     .unwrap();
 
     // Encode to IPC
-    let ipc_bytes = rapidbyte_core::arrow_utils::record_batch_to_ipc(&batch).unwrap();
+    let ipc_bytes = rapidbyte_engine::arrow_utils::record_batch_to_ipc(&batch).unwrap();
     assert!(!ipc_bytes.is_empty());
 
     // Decode back
-    let decoded = rapidbyte_core::arrow_utils::ipc_to_record_batches(&ipc_bytes).unwrap();
+    let decoded = rapidbyte_engine::arrow_utils::ipc_to_record_batches(&ipc_bytes).unwrap();
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].num_rows(), 3);
     assert_eq!(decoded[0].num_columns(), 4);
@@ -277,7 +277,7 @@ async fn test_pg_to_pg_full_pipeline() {
 
     validator::validate_pipeline(&config).expect("Pipeline validation failed");
 
-    let result = rapidbyte_core::engine::orchestrator::run_pipeline(&config)
+    let result = rapidbyte_engine::engine::orchestrator::run_pipeline(&config)
         .await
         .expect("Pipeline run failed");
 

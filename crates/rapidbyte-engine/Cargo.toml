@@ -1,5 +1,5 @@
 [package]
-name = "rapidbyte-core"
+name = "rapidbyte-engine"
 version.workspace = true
 edition.workspace = true
 

@@ -2420,7 +2420,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "rapidbyte-core",
+ "rapidbyte-engine",
  "rapidbyte-runtime",
  "rapidbyte-types",
  "serde_json",
@@ -2430,7 +2430,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rapidbyte-core"
+name = "rapidbyte-engine"
 version = "0.1.0"
 dependencies = [
  "anyhow",
