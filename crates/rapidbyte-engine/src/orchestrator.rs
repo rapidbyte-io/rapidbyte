@@ -72,6 +72,23 @@ struct StreamBuild {
     stream_ctxs: Vec<StreamContext>,
 }
 
+struct StreamParams {
+    pipeline_name: String,
+    source_config: serde_json::Value,
+    dest_config: serde_json::Value,
+    source_connector_id: String,
+    source_connector_version: String,
+    dest_connector_id: String,
+    dest_connector_version: String,
+    source_permissions: Option<Permissions>,
+    dest_permissions: Option<Permissions>,
+    source_overrides: Option<SandboxOverrides>,
+    dest_overrides: Option<SandboxOverrides>,
+    transform_overrides: Vec<Option<SandboxOverrides>>,
+    compression: Option<rapidbyte_runtime::CompressionCodec>,
+    channel_capacity: usize,
+}
+
 struct AggregatedStreamResults {
     total_read_summary: ReadSummary,
     total_write_summary: WriteSummary,
@@ -396,15 +413,11 @@ async fn execute_streams(
     stream_build: &StreamBuild,
     state: Arc<dyn StateBackend>,
 ) -> Result<AggregatedStreamResults, PipelineError> {
-    let source_config = config.source.config.clone();
-    let dest_config = config.destination.config.clone();
-    let pipeline_name = config.pipeline.clone();
     let (source_connector_id, source_connector_version) =
         parse_connector_ref(&config.source.use_ref);
     let (dest_connector_id, dest_connector_version) =
         parse_connector_ref(&config.destination.use_ref);
     let stats = Arc::new(Mutex::new(RunStats::default()));
-    let channel_capacity = usize::max(1, stream_build.limits.max_inflight_batches as usize);
     let num_transforms = config.transforms.len();
     let parallelism = config.resources.parallelism.max(1) as usize;
     let semaphore = Arc::new(tokio::sync::Semaphore::new(parallelism));
@@ -423,24 +436,12 @@ async fn execute_streams(
         .map(|m| &m.limits)
         .cloned()
         .unwrap_or_default();
-    let source_overrides = build_sandbox_overrides(
-        config.source.permissions.as_ref(),
-        config.source.limits.as_ref(),
-        &source_manifest_limits,
-    );
-
     let dest_manifest_limits = connectors
         .dest_manifest
         .as_ref()
         .map(|m| &m.limits)
         .cloned()
         .unwrap_or_default();
-    let dest_overrides = build_sandbox_overrides(
-        config.destination.permissions.as_ref(),
-        config.destination.limits.as_ref(),
-        &dest_manifest_limits,
-    );
-
     let transform_overrides: Vec<Option<SandboxOverrides>> = config
         .transforms
         .iter()
@@ -454,6 +455,31 @@ async fn execute_streams(
         })
         .collect();
 
+    let params = Arc::new(StreamParams {
+        pipeline_name: config.pipeline.clone(),
+        source_config: config.source.config.clone(),
+        dest_config: config.destination.config.clone(),
+        source_connector_id,
+        source_connector_version,
+        dest_connector_id,
+        dest_connector_version,
+        source_permissions: connectors.source_permissions.clone(),
+        dest_permissions: connectors.dest_permissions.clone(),
+        source_overrides: build_sandbox_overrides(
+            config.source.permissions.as_ref(),
+            config.source.limits.as_ref(),
+            &source_manifest_limits,
+        ),
+        dest_overrides: build_sandbox_overrides(
+            config.destination.permissions.as_ref(),
+            config.destination.limits.as_ref(),
+            &dest_manifest_limits,
+        ),
+        transform_overrides,
+        compression: stream_build.compression,
+        channel_capacity: usize::max(1, stream_build.limits.max_inflight_batches as usize),
+    });
+
     let mut stream_join_handles: Vec<tokio::task::JoinHandle<Result<StreamResult, PipelineError>>> =
         Vec::with_capacity(stream_build.stream_ctxs.len());
     let run_dlq_records: Arc<Mutex<Vec<DlqRecord>>> = Arc::new(Mutex::new(Vec::new()));
@@ -463,6 +489,7 @@ async fn execute_streams(
             PipelineError::Infrastructure(anyhow::anyhow!("Semaphore closed: {e}"))
         })?;
 
+        let params = params.clone();
         let source_module = modules.source_module.clone();
         let dest_module = modules.dest_module.clone();
         let state_src = state.clone();
@@ -470,27 +497,14 @@ async fn execute_streams(
         let stats_src = stats.clone();
         let stats_dst = stats.clone();
         let stream_ctx = stream_ctx.clone();
-        let pipeline_name = pipeline_name.clone();
-        let source_config = source_config.clone();
-        let dest_config = dest_config.clone();
-        let source_connector_id = source_connector_id.clone();
-        let source_connector_version = source_connector_version.clone();
-        let dest_connector_id = dest_connector_id.clone();
-        let dest_connector_version = dest_connector_version.clone();
-        let source_permissions = connectors.source_permissions.clone();
-        let dest_permissions = connectors.dest_permissions.clone();
-        let source_overrides = source_overrides.clone();
-        let dest_overrides = dest_overrides.clone();
-        let transform_overrides = transform_overrides.clone();
         let run_dlq_records = run_dlq_records.clone();
-        let compression = stream_build.compression;
         let transforms = modules.transform_modules.clone();
 
         let handle = tokio::spawn(async move {
             let num_t = transforms.len();
             let mut channels = Vec::with_capacity(num_t + 1);
             for _ in 0..=num_t {
-                channels.push(mpsc::channel::<Frame>(channel_capacity));
+                channels.push(mpsc::channel::<Frame>(params.channel_capacity));
             }
 
             let (mut senders, mut receivers): (
@@ -505,23 +519,22 @@ async fn execute_streams(
 
             let stream_ctx_for_src = stream_ctx.clone();
             let stream_ctx_for_dst = stream_ctx.clone();
-            let pipeline_name_src = pipeline_name.clone();
-            let pipeline_name_dst = pipeline_name.clone();
 
+            let params_src = params.clone();
             let src_handle = tokio::task::spawn_blocking(move || {
                 run_source_stream(
                     &source_module,
                     source_tx,
                     state_src,
-                    &pipeline_name_src,
-                    &source_connector_id,
-                    &source_connector_version,
-                    &source_config,
+                    &params_src.pipeline_name,
+                    &params_src.source_connector_id,
+                    &params_src.source_connector_version,
+                    &params_src.source_config,
                     &stream_ctx_for_src,
                     stats_src,
-                    source_permissions.as_ref(),
-                    compression,
-                    source_overrides.as_ref(),
+                    params_src.source_permissions.as_ref(),
+                    params_src.compression,
+                    params_src.source_overrides.as_ref(),
                 )
             });
 
@@ -531,22 +544,21 @@ async fn execute_streams(
                 let tx = senders.remove(0);
                 let state_t = state_dst.clone();
                 let stream_ctx_t = stream_ctx.clone();
-                let pipeline_name_t = pipeline_name.clone();
-                let t_overrides = transform_overrides.get(i).cloned().flatten();
+                let params_t = params.clone();
                 let t_handle = tokio::task::spawn_blocking(move || {
                     run_transform_stream(
                         &t.module,
                         rx,
                         tx,
                         state_t,
-                        &pipeline_name_t,
+                        &params_t.pipeline_name,
                         &t.connector_id,
                         &t.connector_version,
                         &t.config,
                         &stream_ctx_t,
                         t.permissions.as_ref(),
-                        compression,
-                        t_overrides.as_ref(),
+                        params_t.compression,
+                        params_t.transform_overrides.get(i).and_then(Option::as_ref),
                     )
                 });
                 transform_handles.push((i, t_handle));
@@ -558,15 +570,15 @@ async fn execute_streams(
                     dest_rx,
                     run_dlq_records,
                     state_dst,
-                    &pipeline_name_dst,
-                    &dest_connector_id,
-                    &dest_connector_version,
-                    &dest_config,
+                    &params.pipeline_name,
+                    &params.dest_connector_id,
+                    &params.dest_connector_version,
+                    &params.dest_config,
                     &stream_ctx_for_dst,
                     stats_dst,
-                    dest_permissions.as_ref(),
-                    compression,
-                    dest_overrides.as_ref(),
+                    params.dest_permissions.as_ref(),
+                    params.compression,
+                    params.dest_overrides.as_ref(),
                 )
             });
 
