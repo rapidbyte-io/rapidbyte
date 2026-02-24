@@ -15,8 +15,6 @@
 pub mod backend;
 pub mod error;
 #[cfg(feature = "sqlite")]
-pub mod schema;
-#[cfg(feature = "sqlite")]
 pub mod sqlite;
 
 // Top-level re-exports for convenience.
