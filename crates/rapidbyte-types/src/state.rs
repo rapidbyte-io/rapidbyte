@@ -1,6 +1,6 @@
 //! State backend model types.
 //!
-//! Pure data types used by [`StateBackend`](rapidbyte_state::StateBackend)
+//! Pure data types used by `StateBackend`
 //! implementations. Kept in the types crate so both host and state crates
 //! can share them without circular dependencies.
 

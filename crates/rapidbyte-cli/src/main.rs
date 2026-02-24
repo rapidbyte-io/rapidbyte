@@ -43,7 +43,7 @@ enum Commands {
     Scaffold {
         /// Connector name (e.g., "source-mysql", "dest-snowflake")
         name: String,
-        /// Output directory (default: ./connectors/<name>)
+        /// Output directory (default: `./connectors/<name>`)
         #[arg(short, long)]
         output: Option<String>,
     },
