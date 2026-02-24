@@ -8,6 +8,7 @@ rapidbyte-types = { path = "../rapidbyte-types" }
 rapidbyte-state = { path = "../rapidbyte-state", default-features = false }
 
 anyhow = { workspace = true }
+chrono = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }

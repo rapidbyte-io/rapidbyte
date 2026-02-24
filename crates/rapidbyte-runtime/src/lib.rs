@@ -10,5 +10,7 @@ pub mod compression;
 pub mod connector;
 pub mod engine;
 pub mod error;
+#[allow(dead_code, clippy::needless_pass_by_value)]
+pub mod host_state;
 pub mod sandbox;
 pub mod socket;

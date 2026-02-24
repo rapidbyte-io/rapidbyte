@@ -2462,6 +2462,7 @@ name = "rapidbyte-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "libc",
  "lz4_flex",
  "rapidbyte-state",
