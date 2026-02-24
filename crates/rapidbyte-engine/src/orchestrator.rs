@@ -665,16 +665,16 @@ async fn execute_streams(
                     )),
                 })?;
                 match result {
-                    Ok((duration, summary)) => {
+                    Ok(result) => {
                         tracing::info!(
                             transform_index = i,
                             stream = stream_ctx.stream_name,
-                            duration_secs = duration,
-                            records_in = summary.records_in,
-                            records_out = summary.records_out,
+                            duration_secs = result.duration_secs,
+                            records_in = result.summary.records_in,
+                            records_out = result.summary.records_out,
                             "Transform stage completed for stream"
                         );
-                        transform_durations.push(duration);
+                        transform_durations.push(result.duration_secs);
                     }
                     Err(e) => {
                         tracing::error!(
@@ -706,29 +706,21 @@ async fn execute_streams(
                 });
             }
 
-            let (src_dur, read_summary, source_checkpoints, src_host_timings) =
-                src_result.map_err(|src_err| StreamError { error: src_err })?;
+            let src = src_result.map_err(|src_err| StreamError { error: src_err })?;
 
-            let (
-                dst_dur,
-                write_summary,
-                vm_setup_secs,
-                recv_secs,
-                dest_checkpoints,
-                dst_host_timings,
-            ) = dst_result.map_err(|dst_err| StreamError { error: dst_err })?;
+            let dst = dst_result.map_err(|dst_err| StreamError { error: dst_err })?;
 
             Ok(StreamResult {
-                read_summary,
-                write_summary,
-                source_checkpoints,
-                dest_checkpoints,
-                src_host_timings,
-                dst_host_timings,
-                src_duration: src_dur,
-                dst_duration: dst_dur,
-                vm_setup_secs,
-                recv_secs,
+                read_summary: src.summary,
+                write_summary: dst.summary,
+                source_checkpoints: src.checkpoints,
+                dest_checkpoints: dst.checkpoints,
+                src_host_timings: src.host_timings,
+                dst_host_timings: dst.host_timings,
+                src_duration: src.duration_secs,
+                dst_duration: dst.duration_secs,
+                vm_setup_secs: dst.vm_setup_secs,
+                recv_secs: dst.recv_secs,
                 transform_durations,
             })
         });

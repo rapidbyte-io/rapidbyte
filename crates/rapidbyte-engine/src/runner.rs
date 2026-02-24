@@ -85,6 +85,30 @@ pub struct CheckResult {
     pub state_ok: bool,
 }
 
+/// Result of running a source connector for a single stream.
+pub(crate) struct SourceRunResult {
+    pub duration_secs: f64,
+    pub summary: ReadSummary,
+    pub checkpoints: Vec<Checkpoint>,
+    pub host_timings: HostTimings,
+}
+
+/// Result of running a destination connector for a single stream.
+pub(crate) struct DestRunResult {
+    pub duration_secs: f64,
+    pub summary: WriteSummary,
+    pub vm_setup_secs: f64,
+    pub recv_secs: f64,
+    pub checkpoints: Vec<Checkpoint>,
+    pub host_timings: HostTimings,
+}
+
+/// Result of running a transform connector for a single stream.
+pub(crate) struct TransformRunResult {
+    pub duration_secs: f64,
+    pub summary: TransformSummary,
+}
+
 fn handle_close_result<E, F>(
     result: std::result::Result<std::result::Result<(), E>, rapidbyte_runtime::wasmtime_reexport::Error>,
     role: &str,
@@ -124,7 +148,7 @@ pub(crate) fn run_source_stream(
     permissions: Option<&Permissions>,
     compression: Option<CompressionCodec>,
     overrides: Option<&SandboxOverrides>,
-) -> Result<(f64, ReadSummary, Vec<Checkpoint>, HostTimings), PipelineError> {
+) -> Result<SourceRunResult, PipelineError> {
     let phase_start = Instant::now();
 
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
@@ -250,16 +274,16 @@ pub(crate) fn run_source_stream(
         })?
         .clone();
 
-    Ok((
-        phase_start.elapsed().as_secs_f64(),
+    Ok(SourceRunResult {
+        duration_secs: phase_start.elapsed().as_secs_f64(),
         summary,
         checkpoints,
-        source_host_timings,
-    ))
+        host_timings: source_host_timings,
+    })
 }
 
 /// Run a destination connector for a single stream.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_destination_stream(
     module: &LoadedComponent,
     receiver: mpsc::Receiver<Frame>,
@@ -274,7 +298,7 @@ pub(crate) fn run_destination_stream(
     permissions: Option<&Permissions>,
     compression: Option<CompressionCodec>,
     overrides: Option<&SandboxOverrides>,
-) -> Result<(f64, WriteSummary, f64, f64, Vec<Checkpoint>, HostTimings), PipelineError> {
+) -> Result<DestRunResult, PipelineError> {
     let phase_start = Instant::now();
     let vm_setup_start = Instant::now();
 
@@ -412,14 +436,14 @@ pub(crate) fn run_destination_stream(
             })?
             .clone();
 
-        Ok((
-            phase_start.elapsed().as_secs_f64(),
+        Ok(DestRunResult {
+            duration_secs: phase_start.elapsed().as_secs_f64(),
             summary,
             vm_setup_secs,
             recv_secs,
             checkpoints,
-            dest_host_timings,
-        ))
+            host_timings: dest_host_timings,
+        })
     })()
 }
 
@@ -438,7 +462,7 @@ pub(crate) fn run_transform_stream(
     permissions: Option<&Permissions>,
     compression: Option<CompressionCodec>,
     overrides: Option<&SandboxOverrides>,
-) -> Result<(f64, TransformSummary), PipelineError> {
+) -> Result<TransformRunResult, PipelineError> {
     let phase_start = Instant::now();
 
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
@@ -537,7 +561,10 @@ pub(crate) fn run_transform_stream(
         |err| transform_error_to_sdk(err).to_string(),
     );
 
-    Ok((phase_start.elapsed().as_secs_f64(), summary))
+    Ok(TransformRunResult {
+        duration_secs: phase_start.elapsed().as_secs_f64(),
+        summary,
+    })
 }
 
 pub(crate) fn validate_connector(
