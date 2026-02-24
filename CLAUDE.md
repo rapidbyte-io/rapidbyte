@@ -7,8 +7,11 @@ Data pipeline engine using WASI component connectors (Wasmtime runtime).
 ```
 crates/
   rapidbyte-cli/     # CLI binary (`rapidbyte run`, `rapidbyte check`)
-  rapidbyte-core/    # Pipeline orchestrator, Wasmtime component runtime, state backend
+  rapidbyte-engine/  # Pipeline orchestrator, config parsing, Arrow utils
+  rapidbyte-runtime/ # Wasmtime component runtime, host imports, sandbox
   rapidbyte-sdk/     # Connector SDK (protocol types, component host bindings)
+  rapidbyte-state/   # State backend (SQLite, Postgres)
+  rapidbyte-types/   # Shared protocol types
 connectors/
   source-postgres/   # Source connector (wasm32-wasip2 target)
   dest-postgres/     # Destination connector (wasm32-wasip2 target)
@@ -26,7 +29,7 @@ bench/
   analyze.py         # Historical results viewer
 ```
 
-- Workspace has 3 crates. Connectors are excluded from workspace and build separately.
+- Workspace has 7 crates (cli, engine, runtime, sdk, sdk/macros, state, types). Connectors are excluded from workspace and build separately.
 - Connectors target `wasm32-wasip2` via their `.cargo/config.toml`.
 
 ## Commands
@@ -61,10 +64,10 @@ cd connectors/dest-postgres && cargo build
 
 ## Key Architecture
 
-- Orchestrator (`crates/rapidbyte-core/src/engine/orchestrator.rs`) resolves component binaries and manifests, then runs source/transform/destination in blocking stages connected with `mpsc::sync_channel`.
-- Runtime (`crates/rapidbyte-core/src/runtime/component_runtime.rs`) embeds Wasmtime component model and typed WIT imports/exports.
+- Orchestrator (`crates/rapidbyte-engine/src/orchestrator.rs`) resolves component binaries and manifests, then runs source/transform/destination in blocking stages connected with `mpsc::channel`.
+- Runtime (`crates/rapidbyte-runtime/src/engine.rs`) embeds Wasmtime component model and typed WIT imports/exports.
 - Host imports enforce connector-side ACLs for `connect-tcp` and disable direct WASI socket networking.
-- State backend is SQLite (`rusqlite` bundled), used for run metadata and cursor/checkpoint state.
+- State backend is SQLite or Postgres (`crates/rapidbyte-state/`), used for run metadata and cursor/checkpoint state.
 - Arrow IPC batches flow between stages; optional lz4/zstd channel compression is handled in host imports.
 
 ## Notes
