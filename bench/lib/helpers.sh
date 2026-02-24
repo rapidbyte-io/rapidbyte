@@ -198,5 +198,5 @@ criterion_report() {
     local copy_file="$2"
     local rows="$3"
 
-    python3 "$BENCH_DIR/lib/report.py" "$insert_file" "$copy_file" "$rows"
+    python3 "$BENCH_DIR/lib/report.py" "$insert_file" "$copy_file" "$rows" "${BENCH_PROFILE:-unknown}"
 }

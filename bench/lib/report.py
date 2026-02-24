@@ -68,6 +68,7 @@ def main():
     insert_results = load_results(sys.argv[1])
     copy_results = load_results(sys.argv[2])
     rows = int(sys.argv[3])
+    profile = sys.argv[4] if len(sys.argv) > 4 else "unknown"
 
     if not insert_results and not copy_results:
         print("  No results collected")
@@ -76,7 +77,6 @@ def main():
     ref = insert_results[0] if insert_results else copy_results[0]
     bytes_read = ref.get("bytes_read", 0)
     avg_row_bytes = bytes_read // rows if rows > 0 else 0
-    profile = ref.get("profile", "unknown")
 
     # ── Header ────────────────────────────────────────────────────
     print(f"  Profile:     {profile} ({avg_row_bytes} B/row)")
