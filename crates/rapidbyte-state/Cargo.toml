@@ -1,0 +1,17 @@
+[package]
+name = "rapidbyte-state"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rapidbyte-types = { path = "../rapidbyte-types" }
+rusqlite = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }

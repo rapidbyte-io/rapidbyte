@@ -2342,6 +2342,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rapidbyte-state"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "criterion",
+ "rapidbyte-types",
+ "rusqlite",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "rapidbyte-types"
 version = "0.1.0"
 dependencies = [
