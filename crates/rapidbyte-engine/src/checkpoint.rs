@@ -18,9 +18,10 @@ pub(crate) fn correlate_and_persist_cursors(
     let mut cursors_advanced = 0u64;
 
     for src_cp in source_checkpoints {
-        let (cursor_field, cursor_value) = match (&src_cp.cursor_field, &src_cp.cursor_value) {
-            (Some(f), Some(v)) => (f, v),
-            _ => continue,
+        let (Some(cursor_field), Some(cursor_value)) =
+            (&src_cp.cursor_field, &src_cp.cursor_value)
+        else {
+            continue;
         };
 
         let dest_confirmed = dest_checkpoints
@@ -36,14 +37,13 @@ pub(crate) fn correlate_and_persist_cursors(
         }
 
         let value_str = match cursor_value {
-            CursorValue::Utf8 { value } => value.clone(),
-            CursorValue::Int64 { value } => value.to_string(),
-            CursorValue::TimestampMillis { value } => value.to_string(),
-            CursorValue::TimestampMicros { value } => value.to_string(),
-            CursorValue::Decimal { value, .. } => value.clone(),
+            CursorValue::Utf8 { value }
+            | CursorValue::Decimal { value, .. }
+            | CursorValue::Lsn { value } => value.clone(),
+            CursorValue::Int64 { value }
+            | CursorValue::TimestampMillis { value }
+            | CursorValue::TimestampMicros { value } => value.to_string(),
             CursorValue::Json { value } => value.to_string(),
-            CursorValue::Lsn { value } => value.clone(),
-            CursorValue::Null => continue,
             _ => continue,
         };
 

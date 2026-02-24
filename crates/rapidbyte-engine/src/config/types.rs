@@ -112,6 +112,7 @@ pub enum PipelineWriteMode {
 }
 
 impl PipelineWriteMode {
+    #[must_use]
     pub fn to_protocol(self, primary_key: Vec<String>) -> WriteMode {
         match self {
             Self::Append => WriteMode::Append,
@@ -209,6 +210,11 @@ pub enum ParseByteSizeError {
 }
 
 /// Parse a human-readable byte size like "64mb" into bytes.
+///
+/// # Errors
+///
+/// Returns `ParseByteSizeError::Empty` if the input is empty, or
+/// `ParseByteSizeError::InvalidNumber` if the numeric part cannot be parsed.
 pub fn parse_byte_size(raw: &str) -> Result<u64, ParseByteSizeError> {
     let s = raw.trim().to_ascii_lowercase();
     if s.is_empty() {

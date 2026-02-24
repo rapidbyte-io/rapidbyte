@@ -106,6 +106,11 @@ struct AggregatedStreamResults {
 
 /// Run a full pipeline: source -> destination with state tracking.
 /// Retries on retryable connector errors up to `config.resources.max_retries` times.
+///
+/// # Errors
+///
+/// Returns a `PipelineError` if the pipeline fails after exhausting retries
+/// or encounters a non-retryable error.
 pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult, PipelineError> {
     let max_retries = config.resources.max_retries;
     let mut attempt = 0u32;
@@ -122,11 +127,14 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult, Pip
                     let commit_state_str = connector_err
                         .commit_state
                         .as_ref()
-                        .map(|cs| format!("{:?}", cs));
+                        .map(|cs| format!("{cs:?}"));
+                    #[allow(clippy::cast_possible_truncation)]
+                    // Safety: delay.as_millis() is always well under u64::MAX
+                    let delay_ms = delay.as_millis() as u64;
                     tracing::warn!(
                         attempt,
                         max_retries,
-                        delay_ms = delay.as_millis() as u64,
+                        delay_ms,
                         category = %connector_err.category,
                         code = %connector_err.code,
                         commit_state = commit_state_str.as_deref(),
@@ -135,14 +143,13 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult, Pip
                     );
                     tokio::time::sleep(delay).await;
                 }
-                continue;
             }
             Err(err) => {
                 if let Some(connector_err) = err.as_connector_error() {
                     let commit_state_str = connector_err
                         .commit_state
                         .as_ref()
-                        .map(|cs| format!("{:?}", cs));
+                        .map(|cs| format!("{cs:?}"));
                     if err.is_retryable() {
                         tracing::error!(
                             attempt,
@@ -249,33 +256,36 @@ async fn load_modules(
 
     let source_wasm_for_load = connectors.source_wasm.clone();
     let runtime_for_source = runtime.clone();
+    #[allow(clippy::cast_possible_truncation)]
     let source_load_task = tokio::task::spawn_blocking(move || {
         let load_start = Instant::now();
         let module = runtime_for_source
             .load_module(&source_wasm_for_load)
             .map_err(PipelineError::Infrastructure)?;
+        // Safety: module load time is always well under u64::MAX milliseconds
         let load_ms = load_start.elapsed().as_millis() as u64;
         Ok::<_, PipelineError>((module, load_ms))
     });
 
     let dest_wasm_for_load = connectors.dest_wasm.clone();
     let runtime_for_dest = runtime.clone();
+    #[allow(clippy::cast_possible_truncation)]
     let dest_load_task = tokio::task::spawn_blocking(move || {
         let load_start = Instant::now();
         let module = runtime_for_dest
             .load_module(&dest_wasm_for_load)
             .map_err(PipelineError::Infrastructure)?;
+        // Safety: module load time is always well under u64::MAX milliseconds
         let load_ms = load_start.elapsed().as_millis() as u64;
         Ok::<_, PipelineError>((module, load_ms))
     });
 
     let (source_module, source_module_load_ms) = source_load_task.await.map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!("Source module load task panicked: {}", e))
+        PipelineError::Infrastructure(anyhow::anyhow!("Source module load task panicked: {e}"))
     })??;
     let (dest_module, dest_module_load_ms) = dest_load_task.await.map_err(|e| {
         PipelineError::Infrastructure(anyhow::anyhow!(
-            "Destination module load task panicked: {}",
-            e
+            "Destination module load task panicked: {e}"
         ))
     })??;
 
@@ -305,6 +315,8 @@ async fn load_modules(
         let module = runtime
             .load_module(&wasm_path)
             .map_err(PipelineError::Infrastructure)?;
+        #[allow(clippy::cast_possible_truncation)]
+        // Safety: module load time is always well under u64::MAX milliseconds
         let load_ms = load_start.elapsed().as_millis() as u64;
         let (id, ver) = parse_connector_ref(&tc.use_ref);
         transform_modules.push(LoadedTransformModule {
@@ -462,6 +474,7 @@ fn build_sandbox_overrides(
     }
 }
 
+#[allow(clippy::too_many_lines, clippy::similar_names)]
 async fn execute_streams(
     config: &PipelineConfig,
     connectors: &ResolvedConnectors,
@@ -533,7 +546,7 @@ async fn execute_streams(
 
     for stream_ctx in &stream_build.stream_ctxs {
         let permit = semaphore.clone().acquire_owned().await.map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!("Semaphore closed: {}", e))
+            PipelineError::Infrastructure(anyhow::anyhow!("Semaphore closed: {e}"))
         })?;
 
         let source_module = modules.source_module.clone();
@@ -757,7 +770,7 @@ async fn execute_streams(
 
     for handle in stream_join_handles {
         let result = handle.await.map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!("Stream task panicked: {}", e))
+            PipelineError::Infrastructure(anyhow::anyhow!("Stream task panicked: {e}"))
         })?;
 
         match result {
@@ -834,7 +847,7 @@ async fn execute_streams(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn finalize_run(
     config: &PipelineConfig,
     pipeline_id: &PipelineId,
@@ -854,7 +867,7 @@ fn finalize_run(
                     records_read: aggregated.final_stats.records_read,
                     records_written: aggregated.final_stats.records_written,
                     bytes_read: aggregated.final_stats.bytes_read,
-                    error_message: Some(format!("Stream error: {}", err)),
+                    error_message: Some(format!("Stream error: {err}")),
                 },
             )
             .map_err(|e| PipelineError::Infrastructure(e.into()))?;
@@ -866,8 +879,7 @@ fn finalize_run(
         .total_write_summary
         .perf
         .as_ref()
-        .map(|p| p.connect_secs + p.flush_secs + p.commit_secs)
-        .unwrap_or(0.0);
+        .map_or(0.0, |p| p.connect_secs + p.flush_secs + p.commit_secs);
     let wasm_overhead_secs = (aggregated.max_dst_duration
         - aggregated.max_dst_vm_setup_secs
         - aggregated.max_dst_recv_secs
@@ -938,10 +950,10 @@ fn finalize_run(
         source: SourceTiming {
             duration_secs: aggregated.max_src_duration,
             module_load_ms: modules.source_module_load_ms,
-            connect_secs: src_perf.map(|p| p.connect_secs).unwrap_or(0.0),
-            query_secs: src_perf.map(|p| p.query_secs).unwrap_or(0.0),
-            fetch_secs: src_perf.map(|p| p.fetch_secs).unwrap_or(0.0),
-            arrow_encode_secs: src_perf.map(|p| p.arrow_encode_secs).unwrap_or(0.0),
+            connect_secs: src_perf.map_or(0.0, |p| p.connect_secs),
+            query_secs: src_perf.map_or(0.0, |p| p.query_secs),
+            fetch_secs: src_perf.map_or(0.0, |p| p.fetch_secs),
+            arrow_encode_secs: src_perf.map_or(0.0, |p| p.arrow_encode_secs),
             emit_nanos: aggregated.src_timings.emit_batch_nanos,
             compress_nanos: aggregated.src_timings.compress_nanos,
             emit_count: aggregated.src_timings.emit_batch_count,
@@ -949,10 +961,10 @@ fn finalize_run(
         dest: DestTiming {
             duration_secs: aggregated.max_dst_duration,
             module_load_ms: modules.dest_module_load_ms,
-            connect_secs: perf.map(|p| p.connect_secs).unwrap_or(0.0),
-            flush_secs: perf.map(|p| p.flush_secs).unwrap_or(0.0),
-            commit_secs: perf.map(|p| p.commit_secs).unwrap_or(0.0),
-            arrow_decode_secs: perf.map(|p| p.arrow_decode_secs).unwrap_or(0.0),
+            connect_secs: perf.map_or(0.0, |p| p.connect_secs),
+            flush_secs: perf.map_or(0.0, |p| p.flush_secs),
+            commit_secs: perf.map_or(0.0, |p| p.commit_secs),
+            arrow_decode_secs: perf.map_or(0.0, |p| p.arrow_decode_secs),
             vm_setup_secs: aggregated.max_dst_vm_setup_secs,
             recv_secs: aggregated.max_dst_recv_secs,
             recv_nanos: aggregated.dst_timings.next_batch_nanos,
@@ -969,6 +981,11 @@ fn finalize_run(
 }
 
 /// Check a pipeline: validate configuration and connectivity without running.
+///
+/// # Errors
+///
+/// Returns an error if connector resolution, module loading, or validation fails.
+#[allow(clippy::too_many_lines)]
 pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     tracing::info!(
         pipeline = config.pipeline,
@@ -986,7 +1003,7 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     if let Some(ref sm) = connectors.source_manifest {
         match validate_config_against_schema(&config.source.use_ref, &config.source.config, sm) {
             Ok(()) => println!("Source config:      OK"),
-            Err(e) => println!("Source config:      FAILED\n  {}", e),
+            Err(e) => println!("Source config:      FAILED\n  {e}"),
         }
     }
     if let Some(ref dm) = connectors.dest_manifest {
@@ -996,7 +1013,7 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
             dm,
         ) {
             Ok(()) => println!("Dest config:        OK"),
-            Err(e) => println!("Dest config:        FAILED\n  {}", e),
+            Err(e) => println!("Dest config:        FAILED\n  {e}"),
         }
     }
 
@@ -1036,10 +1053,10 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
 
     let source_validation = source_validation_handle
         .await
-        .map_err(|e| anyhow::anyhow!("Source validation task panicked: {}", e))??;
+        .map_err(|e| anyhow::anyhow!("Source validation task panicked: {e}"))??;
     let dest_validation = dest_validation_handle
         .await
-        .map_err(|e| anyhow::anyhow!("Destination validation task panicked: {}", e))??;
+        .map_err(|e| anyhow::anyhow!("Destination validation task panicked: {e}"))??;
 
     let mut transform_tasks = Vec::with_capacity(config.transforms.len());
     for (index, tc) in config.transforms.iter().enumerate() {
@@ -1073,10 +1090,7 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     for (index, connector_ref, handle) in transform_tasks {
         let result = handle.await.map_err(|e| {
             anyhow::anyhow!(
-                "Transform validation task panicked (index {}, {}): {}",
-                index,
-                connector_ref,
-                e
+                "Transform validation task panicked (index {index}, {connector_ref}): {e}"
             )
         })??;
         transform_validations.push(result);
@@ -1091,6 +1105,10 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
 }
 
 /// Discover available streams from a source connector.
+///
+/// # Errors
+///
+/// Returns an error if the connector cannot be loaded, opened, or discovery fails.
 pub async fn discover_connector(
     connector_ref: &str,
     config: &serde_json::Value,
@@ -1111,22 +1129,19 @@ pub async fn discover_connector(
         )
     })
     .await
-    .map_err(|e| anyhow::anyhow!("Discover task panicked: {}", e))?
+    .map_err(|e| anyhow::anyhow!("Discover task panicked: {e}"))?
 }
 
 fn create_state_backend(config: &PipelineConfig) -> Result<Arc<dyn StateBackend>> {
     match config.state.backend {
         StateBackendKind::Sqlite => {
-            let backend = match &config.state.connection {
-                Some(path) => {
-                    SqliteStateBackend::open(Path::new(path)).context("Failed to open state DB")?
-                }
-                None => {
-                    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                    let state_path = PathBuf::from(home).join(".rapidbyte").join("state.db");
-                    SqliteStateBackend::open(&state_path)
-                        .context("Failed to open default state DB")?
-                }
+            let backend = if let Some(path) = &config.state.connection {
+                SqliteStateBackend::open(Path::new(path)).context("Failed to open state DB")?
+            } else {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                let state_path = PathBuf::from(home).join(".rapidbyte").join("state.db");
+                SqliteStateBackend::open(&state_path)
+                    .context("Failed to open default state DB")?
             };
             Ok(Arc::new(backend) as Arc<dyn StateBackend>)
         }
@@ -1166,9 +1181,7 @@ fn load_and_validate_manifest(
     if let Some(ref m) = manifest {
         if !m.supports_role(expected_role) {
             anyhow::bail!(
-                "Connector '{}' does not support {:?} role",
-                connector_ref,
-                expected_role,
+                "Connector '{connector_ref}' does not support {expected_role:?} role"
             );
         }
 
@@ -1201,21 +1214,17 @@ fn validate_config_against_schema(
     config: &serde_json::Value,
     manifest: &ConnectorManifest,
 ) -> Result<()> {
-    let schema_value = match &manifest.config_schema {
-        Some(s) => s,
-        None => return Ok(()),
+    let Some(schema_value) = &manifest.config_schema else {
+        return Ok(());
     };
 
     let validator = jsonschema::validator_for(schema_value).with_context(|| {
-        format!(
-            "Invalid JSON Schema in manifest for connector '{}'",
-            connector_ref,
-        )
+        format!("Invalid JSON Schema in manifest for connector '{connector_ref}'")
     })?;
 
     let errors: Vec<String> = validator
         .iter_errors(config)
-        .map(|e| format!("  - {}", e))
+        .map(|e| format!("  - {e}"))
         .collect();
 
     if !errors.is_empty() {

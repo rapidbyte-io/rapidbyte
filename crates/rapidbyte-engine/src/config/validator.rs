@@ -7,25 +7,23 @@ use crate::config::types::{
     parse_byte_size, PipelineConfig, PipelineLimits, PipelinePermissions, PipelineWriteMode,
 };
 
-/// Validate host patterns in allowed_hosts lists.
+/// Validate host patterns in `allowed_hosts` lists.
 /// Only `*.domain` single-level wildcards are supported.
 fn validate_host_patterns(hosts: &[String], context: &str, errors: &mut Vec<String>) {
     for host in hosts {
         let trimmed = host.trim();
         if trimmed.is_empty() {
-            errors.push(format!("{}: empty host pattern", context));
+            errors.push(format!("{context}: empty host pattern"));
             continue;
         }
         if trimmed.contains('*') && !trimmed.starts_with("*.") {
             errors.push(format!(
-                "{}: Invalid host pattern '{}' \u{2014} only '*.domain' wildcards supported",
-                context, host
+                "{context}: Invalid host pattern '{host}' \u{2014} only '*.domain' wildcards supported"
             ));
         }
         if trimmed.starts_with("*.") && trimmed[2..].contains('*') {
             errors.push(format!(
-                "{}: Invalid host pattern '{}' \u{2014} nested wildcards not supported",
-                context, host
+                "{context}: Invalid host pattern '{host}' \u{2014} nested wildcards not supported"
             ));
         }
     }
@@ -46,19 +44,23 @@ fn validate_connector_overrides(
     if let Some(lim) = limits {
         if let Some(ref mem) = lim.max_memory {
             if parse_byte_size(mem).is_err() {
-                errors.push(format!("{}: invalid max_memory '{}'", context, mem));
+                errors.push(format!("{context}: invalid max_memory '{mem}'"));
             }
         }
         if let Some(timeout) = lim.timeout_seconds {
             if timeout == 0 {
-                errors.push(format!("{}: timeout_seconds must be > 0", context));
+                errors.push(format!("{context}: timeout_seconds must be > 0"));
             }
         }
     }
 }
 
 /// Validate a parsed pipeline configuration.
-/// Returns Ok(()) if valid, Err with all validation errors if not.
+/// Returns `Ok(())` if valid, Err with all validation errors if not.
+///
+/// # Errors
+///
+/// Returns an error listing all validation failures found in the pipeline config.
 pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
     let mut errors = Vec::new();
 
@@ -83,7 +85,7 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
 
     for (i, stream) in config.source.streams.iter().enumerate() {
         if stream.name.trim().is_empty() {
-            errors.push(format!("Stream {} has an empty name", i));
+            errors.push(format!("Stream {i} has an empty name"));
         }
         if stream.sync_mode == SyncMode::Incremental && stream.cursor_field.is_none() {
             errors.push(format!(
@@ -126,7 +128,7 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
         validate_connector_overrides(
             transform.permissions.as_ref(),
             transform.limits.as_ref(),
-            &format!("transforms[{}]", i),
+            &format!("transforms[{i}]"),
             &mut errors,
         );
     }

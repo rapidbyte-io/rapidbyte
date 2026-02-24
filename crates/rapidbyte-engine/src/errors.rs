@@ -32,8 +32,8 @@ pub enum PipelineError {
 impl std::fmt::Display for PipelineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Connector(e) => write!(f, "{}", e),
-            Self::Infrastructure(e) => write!(f, "{}", e),
+            Self::Connector(e) => write!(f, "{e}"),
+            Self::Infrastructure(e) => write!(f, "{e}"),
         }
     }
 }
@@ -49,6 +49,7 @@ impl From<anyhow::Error> for PipelineError {
 impl PipelineError {
     /// Returns `true` if this is a typed connector error that the connector
     /// has marked as retryable.
+    #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Connector(e) => e.retryable,
@@ -57,6 +58,7 @@ impl PipelineError {
     }
 
     /// Returns the typed connector error if this is a `Connector` variant.
+    #[must_use]
     pub fn as_connector_error(&self) -> Option<&ConnectorError> {
         match self {
             Self::Connector(e) => Some(e),

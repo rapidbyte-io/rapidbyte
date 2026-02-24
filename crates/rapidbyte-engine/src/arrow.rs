@@ -15,7 +15,11 @@ fn estimate_ipc_capacity(batch: &RecordBatch) -> usize {
         .saturating_add(IPC_STREAM_OVERHEAD_BYTES)
 }
 
-/// Serialize a RecordBatch to Arrow IPC stream format bytes.
+/// Serialize a `RecordBatch` to Arrow IPC stream format bytes.
+///
+/// # Errors
+///
+/// Returns an error if the IPC stream writer fails to create, write, or finish.
 pub fn record_batch_to_ipc(batch: &RecordBatch) -> Result<Vec<u8>> {
     let mut buf = Vec::with_capacity(estimate_ipc_capacity(batch));
     let mut writer = StreamWriter::try_new(&mut buf, batch.schema().as_ref())
@@ -28,6 +32,10 @@ pub fn record_batch_to_ipc(batch: &RecordBatch) -> Result<Vec<u8>> {
 }
 
 /// Decode Arrow IPC and call `f` once per batch without building an intermediate `Vec`.
+///
+/// # Errors
+///
+/// Returns an error if the IPC stream reader fails or if the callback returns an error.
 pub fn for_each_ipc_batch<F>(ipc_bytes: &[u8], mut f: F) -> Result<()>
 where
     F: FnMut(RecordBatch) -> Result<()>,
@@ -43,7 +51,11 @@ where
     Ok(())
 }
 
-/// Deserialize Arrow IPC stream format bytes into a Vec of RecordBatches.
+/// Deserialize Arrow IPC stream format bytes into a Vec of `RecordBatch` values.
+///
+/// # Errors
+///
+/// Returns an error if the IPC bytes are invalid or decoding fails.
 pub fn ipc_to_record_batches(ipc_bytes: &[u8]) -> Result<Vec<RecordBatch>> {
     let mut batches: Vec<RecordBatch> = Vec::new();
     for_each_ipc_batch(ipc_bytes, |batch| {
@@ -54,6 +66,10 @@ pub fn ipc_to_record_batches(ipc_bytes: &[u8]) -> Result<Vec<RecordBatch>> {
 }
 
 /// Count rows in an Arrow IPC stream without materializing all batches at once.
+///
+/// # Errors
+///
+/// Returns an error if the IPC bytes are invalid or decoding fails.
 pub fn count_ipc_rows(ipc_bytes: &[u8]) -> Result<u64> {
     let mut total_rows = 0u64;
     for_each_ipc_batch(ipc_bytes, |batch| {

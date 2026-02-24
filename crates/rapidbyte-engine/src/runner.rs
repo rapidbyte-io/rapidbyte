@@ -134,7 +134,7 @@ fn handle_close_result<E, F>(
 }
 
 /// Run a source connector for a single stream.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::needless_pass_by_value)]
 pub(crate) fn run_source_stream(
     module: &LoadedComponent,
     sender: mpsc::Sender<Frame>,
@@ -283,7 +283,7 @@ pub(crate) fn run_source_stream(
 }
 
 /// Run a destination connector for a single stream.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::needless_pass_by_value)]
 pub(crate) fn run_destination_stream(
     module: &LoadedComponent,
     receiver: mpsc::Receiver<Frame>,
@@ -448,7 +448,7 @@ pub(crate) fn run_destination_stream(
 }
 
 /// Run a transform connector for a single stream.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
 pub(crate) fn run_transform_stream(
     module: &LoadedComponent,
     receiver: mpsc::Receiver<Frame>,

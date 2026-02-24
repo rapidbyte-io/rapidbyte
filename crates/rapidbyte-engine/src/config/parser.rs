@@ -12,6 +12,10 @@ static ENV_VAR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").expect("valid env var regex"));
 
 /// Substitute `${VAR_NAME}` patterns with environment variable values.
+///
+/// # Errors
+///
+/// Returns an error if any referenced environment variable is not set.
 pub fn substitute_env_vars(input: &str) -> Result<String> {
     let mut result = input.to_string();
     let mut errors = Vec::new();
@@ -36,6 +40,10 @@ pub fn substitute_env_vars(input: &str) -> Result<String> {
 }
 
 /// Parse a pipeline YAML string (after env var substitution).
+///
+/// # Errors
+///
+/// Returns an error if env var substitution fails or the YAML is invalid.
 pub fn parse_pipeline_str(yaml_str: &str) -> Result<PipelineConfig> {
     let substituted = substitute_env_vars(yaml_str)?;
     let config: PipelineConfig =
@@ -44,6 +52,10 @@ pub fn parse_pipeline_str(yaml_str: &str) -> Result<PipelineConfig> {
 }
 
 /// Parse a pipeline YAML file.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or the YAML is invalid.
 pub fn parse_pipeline(path: &Path) -> Result<PipelineConfig> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read pipeline file: {}", path.display()))?;
