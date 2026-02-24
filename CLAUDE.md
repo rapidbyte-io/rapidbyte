@@ -11,7 +11,7 @@ crates/
   rapidbyte-runtime/ # Wasmtime component runtime, host imports, sandbox
   rapidbyte-sdk/     # Connector SDK (protocol types, component host bindings)
   rapidbyte-state/   # State backend (SQLite, Postgres)
-  rapidbyte-types/   # Shared protocol types
+  rapidbyte-types/   # Shared protocol types (leaf crate, no internal deps)
 connectors/
   source-postgres/   # Source connector (wasm32-wasip2 target)
   dest-postgres/     # Destination connector (wasm32-wasip2 target)
@@ -31,6 +31,19 @@ bench/
 
 - Workspace has 7 crates (cli, engine, runtime, sdk, sdk/macros, state, types). Connectors are excluded from workspace and build separately.
 - Connectors target `wasm32-wasip2` via their `.cargo/config.toml`.
+
+## Crate Dependency Graph
+
+```
+types (leaf — no internal deps)
+  ├── state    → types
+  ├── runtime  → types, state
+  ├── sdk      → types
+  └── engine   → types, runtime, state
+      └── cli  → engine, runtime, types
+```
+
+Pure data types and enums belong in `types`. Host-only config types (YAML parsing) stay in `engine/config/`.
 
 ## Commands
 
@@ -69,6 +82,14 @@ cd connectors/dest-postgres && cargo build
 - Host imports enforce connector-side ACLs for `connect-tcp` and disable direct WASI socket networking.
 - State backend is SQLite or Postgres (`crates/rapidbyte-state/`), used for run metadata and cursor/checkpoint state.
 - Arrow IPC batches flow between stages; optional lz4/zstd channel compression is handled in host imports.
+
+## Crate Conventions
+
+- All host crates use `#![warn(clippy::pedantic)]`.
+- Each crate has a module table in its `lib.rs` doc comment.
+- Top-level re-exports in `lib.rs` for the most common public types.
+- Crate-internal structs use `pub(crate)` visibility.
+- Error types use `thiserror`, public APIs return `anyhow::Result` or typed errors.
 
 ## Notes
 
