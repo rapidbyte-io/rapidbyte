@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 use anyhow::{Context, Result};
 use regex::Regex;
 
-use crate::pipeline::types::PipelineConfig;
+use crate::config::types::PipelineConfig;
 
 static ENV_VAR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").expect("valid env var regex"));

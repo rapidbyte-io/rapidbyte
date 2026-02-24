@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use rapidbyte_types::error::ValidationStatus;
 
 use rapidbyte_engine::orchestrator;
-use rapidbyte_engine::pipeline::parser;
-use rapidbyte_engine::pipeline::validator;
+use rapidbyte_engine::config::parser;
+use rapidbyte_engine::config::validator;
 
 /// Execute the `check` command: validate pipeline config and connector connectivity.
 pub async fn execute(pipeline_path: &Path) -> Result<()> {

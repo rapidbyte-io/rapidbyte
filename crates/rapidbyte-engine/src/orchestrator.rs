@@ -21,7 +21,7 @@ use crate::runner::{
     run_destination_stream, run_discover, run_source_stream, run_transform_stream,
     validate_connector, CheckResult, DestTiming, PipelineCounts, PipelineResult, SourceTiming,
 };
-use crate::pipeline::types::{parse_byte_size, PipelineConfig, StateBackendKind};
+use crate::config::types::{parse_byte_size, PipelineConfig, StateBackendKind};
 use rapidbyte_runtime::{
     parse_connector_ref, resolve_min_limit, Frame, HostTimings, LoadedComponent,
     SandboxOverrides, WasmRuntime,
@@ -429,8 +429,8 @@ fn build_stream_contexts(
 /// Build `SandboxOverrides` from pipeline permissions/limits and manifest resource limits.
 /// Returns `None` if no overrides are specified from either side.
 fn build_sandbox_overrides(
-    pipeline_perms: Option<&crate::pipeline::types::PipelinePermissions>,
-    pipeline_limits: Option<&crate::pipeline::types::PipelineLimits>,
+    pipeline_perms: Option<&crate::config::types::PipelinePermissions>,
+    pipeline_limits: Option<&crate::config::types::PipelineLimits>,
     manifest_limits: &ResourceLimits,
 ) -> Option<SandboxOverrides> {
     let manifest_mem = manifest_limits
@@ -1250,7 +1250,7 @@ mod tests {
         let config = PipelineConfig {
             version: "1.0".to_string(),
             pipeline: "test".to_string(),
-            source: crate::pipeline::types::SourceConfig {
+            source: crate::config::types::SourceConfig {
                 use_ref: "source".to_string(),
                 config: serde_json::json!({}),
                 streams: vec![],
@@ -1258,21 +1258,21 @@ mod tests {
                 limits: None,
             },
             transforms: vec![],
-            destination: crate::pipeline::types::DestinationConfig {
+            destination: crate::config::types::DestinationConfig {
                 use_ref: "dest".to_string(),
                 config: serde_json::json!({}),
-                write_mode: crate::pipeline::types::PipelineWriteMode::Append,
+                write_mode: crate::config::types::PipelineWriteMode::Append,
                 primary_key: vec![],
                 on_data_error: rapidbyte_types::stream::DataErrorPolicy::Fail,
                 schema_evolution: None,
                 permissions: None,
                 limits: None,
             },
-            state: crate::pipeline::types::StateConfig {
+            state: crate::config::types::StateConfig {
                 backend: StateBackendKind::Sqlite,
                 connection: Some(db_path.to_string_lossy().to_string()),
             },
-            resources: crate::pipeline::types::ResourceConfig::default(),
+            resources: crate::config::types::ResourceConfig::default(),
         };
 
         let backend = create_state_backend(&config).unwrap();

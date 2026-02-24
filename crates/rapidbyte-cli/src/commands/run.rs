@@ -3,8 +3,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use rapidbyte_engine::orchestrator;
-use rapidbyte_engine::pipeline::parser;
-use rapidbyte_engine::pipeline::validator;
+use rapidbyte_engine::config::parser;
+use rapidbyte_engine::config::validator;
 
 /// Execute the `run` command: parse, validate, and run a pipeline.
 pub async fn execute(pipeline_path: &Path) -> Result<()> {

@@ -5,7 +5,7 @@ pub mod checkpoint;
 pub(crate) mod dlq;
 pub mod errors;
 pub mod orchestrator;
-pub mod pipeline;
+pub mod config;
 pub mod runner;
 
 // Re-export public API for convenience

@@ -3,7 +3,7 @@
 use anyhow::{bail, Result};
 use rapidbyte_types::wire::SyncMode;
 
-use crate::pipeline::types::{
+use crate::config::types::{
     parse_byte_size, PipelineConfig, PipelineLimits, PipelinePermissions, PipelineWriteMode,
 };
 
@@ -141,7 +141,7 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::parser::parse_pipeline_str;
+    use crate::config::parser::parse_pipeline_str;
 
     fn valid_yaml() -> &'static str {
         r#"

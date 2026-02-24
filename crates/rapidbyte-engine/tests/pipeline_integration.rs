@@ -3,9 +3,9 @@
 //! These tests verify the full pipeline processing path from YAML parsing
 //! through validation, using real fixture files.
 
-use rapidbyte_engine::pipeline::parser;
-use rapidbyte_engine::pipeline::types::{PipelineWriteMode, StateBackendKind};
-use rapidbyte_engine::pipeline::validator;
+use rapidbyte_engine::config::parser;
+use rapidbyte_engine::config::types::{PipelineWriteMode, StateBackendKind};
+use rapidbyte_engine::config::validator;
 use rapidbyte_state::{SqliteStateBackend, StateBackend};
 use rapidbyte_types::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
 
