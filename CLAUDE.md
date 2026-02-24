@@ -77,7 +77,7 @@ cd connectors/dest-postgres && cargo build
 
 ## Key Architecture
 
-- Orchestrator (`crates/rapidbyte-engine/src/orchestrator.rs`) resolves component binaries and manifests, then runs source/transform/destination in blocking stages connected with `mpsc::channel`.
+- Orchestrator (`crates/rapidbyte-engine/src/orchestrator.rs`) runs source/transform/destination in blocking stages connected with `mpsc::channel`. Connector resolution and state backend creation live in `resolve.rs`.
 - Runtime (`crates/rapidbyte-runtime/src/engine.rs`) embeds Wasmtime component model and typed WIT imports/exports.
 - Host imports enforce connector-side ACLs for `connect-tcp` and disable direct WASI socket networking.
 - State backend is SQLite or Postgres (`crates/rapidbyte-state/`), used for run metadata and cursor/checkpoint state.
