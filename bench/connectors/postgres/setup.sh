@@ -8,7 +8,12 @@ source "$(cd "$(dirname "$0")" && pwd)/config.sh"
 
 BENCH_ROWS="${BENCH_ROWS:-$BENCH_DEFAULT_ROWS}"
 
-section "Setting up postgres benchmark ($BENCH_ROWS rows)"
+# Validate seed SQL exists (catches invalid profile names)
+if [ ! -f "$BENCH_SEED_SQL" ]; then
+    fail "Seed SQL not found: $BENCH_SEED_SQL (profile: ${BENCH_PROFILE:-unknown})"
+fi
+
+section "Setting up postgres benchmark ($BENCH_ROWS rows, profile: ${BENCH_PROFILE:-unknown})"
 
 start_postgres
 
