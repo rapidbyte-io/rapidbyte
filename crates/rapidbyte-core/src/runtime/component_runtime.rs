@@ -18,7 +18,8 @@ use wasmtime::component::ResourceTable;
 use wasmtime::{StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-use crate::state::backend::{CursorState, PipelineId, StateBackend, StreamName};
+use rapidbyte_state::backend::{CursorState, PipelineId, StreamName};
+use rapidbyte_state::StateBackend;
 
 use super::host_socket::{
     resolve_socket_addrs, SocketEntry, SocketReadResultInternal, SocketWriteResultInternal,
@@ -293,9 +294,9 @@ impl ComponentHostState {
     ) -> Result<Self> {
         Self::from_parts(
             ConnectorIdentity {
-                pipeline: PipelineId(pipeline_name),
+                pipeline: PipelineId::new(pipeline_name),
                 connector_id,
-                stream: StreamName(stream_name),
+                stream: StreamName::new(stream_name),
                 state_backend,
             },
             BatchRouter {
@@ -333,9 +334,9 @@ impl ComponentHostState {
     ) -> Result<Self> {
         Self::from_parts(
             ConnectorIdentity {
-                pipeline: PipelineId(pipeline_name),
+                pipeline: PipelineId::new(pipeline_name),
                 connector_id,
-                stream: StreamName(stream_name),
+                stream: StreamName::new(stream_name),
                 state_backend,
             },
             BatchRouter {
@@ -374,9 +375,9 @@ impl ComponentHostState {
     ) -> Result<Self> {
         Self::from_parts(
             ConnectorIdentity {
-                pipeline: PipelineId(pipeline_name),
+                pipeline: PipelineId::new(pipeline_name),
                 connector_id,
-                stream: StreamName(stream_name),
+                stream: StreamName::new(stream_name),
                 state_backend,
             },
             BatchRouter {
@@ -408,9 +409,9 @@ impl ComponentHostState {
     ) -> Result<Self> {
         Self::from_parts(
             ConnectorIdentity {
-                pipeline: PipelineId(pipeline_name),
+                pipeline: PipelineId::new(pipeline_name),
                 connector_id,
-                stream: StreamName(stream_name),
+                stream: StreamName::new(stream_name),
                 state_backend,
             },
             BatchRouter {
@@ -550,7 +551,7 @@ impl ComponentHostState {
         let scoped_key = self.scoped_state_key(scope, &key);
         self.identity
             .state_backend
-            .get_cursor(&self.identity.pipeline, &StreamName(scoped_key))
+            .get_cursor(&self.identity.pipeline, &StreamName::new(scoped_key))
             .map_err(|e| ConnectorError::internal("STATE_BACKEND", e.to_string()))
             .map(|opt| opt.and_then(|cursor| cursor.cursor_value))
     }
@@ -589,7 +590,7 @@ impl ComponentHostState {
 
         self.identity
             .state_backend
-            .set_cursor(&self.identity.pipeline, &StreamName(scoped_key), &cursor)
+            .set_cursor(&self.identity.pipeline, &StreamName::new(scoped_key), &cursor)
             .map_err(|e| ConnectorError::internal("STATE_BACKEND", e.to_string()))
     }
 
@@ -624,7 +625,7 @@ impl ComponentHostState {
             .state_backend
             .compare_and_set(
                 &self.identity.pipeline,
-                &StreamName(scoped_key),
+                &StreamName::new(scoped_key),
                 expected.as_deref(),
                 &new_value,
             )
@@ -944,7 +945,7 @@ impl WasiView for ComponentHostState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::sqlite::SqliteStateBackend;
+    use rapidbyte_state::SqliteStateBackend;
 
     #[test]
     fn test_parse_error_category() {

@@ -2,7 +2,8 @@
 
 use rapidbyte_types::envelope::DlqRecord;
 
-use crate::state::backend::{PipelineId, StateBackend};
+use rapidbyte_state::backend::PipelineId;
+use rapidbyte_state::StateBackend;
 
 /// Maximum number of DLQ records to keep in memory per run.
 /// Prevents unbounded memory growth if a connector emits millions of failures.

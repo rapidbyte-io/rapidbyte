@@ -26,8 +26,8 @@ use crate::runtime::component_runtime::{
     self, parse_connector_ref, resolve_min_limit, Frame, HostTimings, LoadedComponent,
     SandboxOverrides, WasmRuntime,
 };
-use crate::state::backend::{PipelineId, RunStats, RunStatus, StateBackend, StreamName};
-use crate::state::sqlite::SqliteStateBackend;
+use rapidbyte_state::backend::{PipelineId, RunStats, RunStatus, StreamName};
+use rapidbyte_state::{SqliteStateBackend, StateBackend};
 
 struct StreamResult {
     read_summary: ReadSummary,
@@ -175,14 +175,14 @@ async fn execute_pipeline_once(
     attempt: u32,
 ) -> Result<PipelineResult, PipelineError> {
     let start = Instant::now();
-    let pipeline_id = PipelineId(config.pipeline.clone());
+    let pipeline_id = PipelineId::new(config.pipeline.clone());
     tracing::info!(pipeline = config.pipeline, "Starting pipeline run");
 
     let connectors = resolve_connectors(config)?;
     let state = Arc::new(create_state_backend(config).map_err(PipelineError::Infrastructure)?);
     let run_id = state
-        .start_run(&pipeline_id, &StreamName("all".to_string()))
-        .map_err(PipelineError::Infrastructure)?;
+        .start_run(&pipeline_id, &StreamName::new("all"))
+        .map_err(|e| PipelineError::Infrastructure(e.into()))?;
 
     let modules = load_modules(config, &connectors).await?;
     let stream_build = build_stream_contexts(config, state.as_ref())?;
@@ -360,7 +360,7 @@ fn build_stream_contexts(
         ..StreamLimits::default()
     };
 
-    let pipeline_id = PipelineId(config.pipeline.clone());
+    let pipeline_id = PipelineId::new(config.pipeline.clone());
     let stream_ctxs = config
         .source
         .streams
@@ -370,8 +370,8 @@ fn build_stream_contexts(
                 SyncMode::Incremental => {
                     if let Some(cursor_field) = &s.cursor_field {
                         let last_value = state
-                            .get_cursor(&pipeline_id, &StreamName(s.name.clone()))
-                            .map_err(PipelineError::Infrastructure)?
+                            .get_cursor(&pipeline_id, &StreamName::new(s.name.clone()))
+                            .map_err(|e| PipelineError::Infrastructure(e.into()))?
                             .and_then(|cs| cs.cursor_value)
                             .map(|v| CursorValue::Utf8 { value: v });
                         Some(CursorInfo {
@@ -385,8 +385,8 @@ fn build_stream_contexts(
                 }
                 SyncMode::Cdc => {
                     let last_value = state
-                        .get_cursor(&pipeline_id, &StreamName(s.name.clone()))
-                        .map_err(PipelineError::Infrastructure)?
+                        .get_cursor(&pipeline_id, &StreamName::new(s.name.clone()))
+                        .map_err(|e| PipelineError::Infrastructure(e.into()))?
                         .and_then(|cs| cs.cursor_value)
                         .map(|v| CursorValue::Lsn { value: v });
                     Some(CursorInfo {
@@ -865,7 +865,7 @@ fn finalize_run(
                     error_message: Some(format!("Stream error: {}", err)),
                 },
             )
-            .map_err(PipelineError::Infrastructure)?;
+            .map_err(|e| PipelineError::Infrastructure(e.into()))?;
         super::dlq::persist_dlq_records(state, pipeline_id, run_id, &aggregated.dlq_records);
         return Err(err);
     }
@@ -893,7 +893,7 @@ fn finalize_run(
                 error_message: None,
             },
         )
-        .map_err(PipelineError::Infrastructure)?;
+        .map_err(|e| PipelineError::Infrastructure(e.into()))?;
 
     tracing::debug!(
         pipeline = config.pipeline,
@@ -1126,12 +1126,12 @@ fn create_state_backend(config: &PipelineConfig) -> Result<SqliteStateBackend> {
     match config.state.backend {
         StateBackendKind::Sqlite => match &config.state.connection {
             Some(path) => {
-                SqliteStateBackend::new(Path::new(path)).context("Failed to open state DB")
+                SqliteStateBackend::open(Path::new(path)).context("Failed to open state DB")
             }
             None => {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
                 let state_path = PathBuf::from(home).join(".rapidbyte").join("state.db");
-                SqliteStateBackend::new(&state_path).context("Failed to open default state DB")
+                SqliteStateBackend::open(&state_path).context("Failed to open default state DB")
             }
         },
     }
@@ -1264,8 +1264,8 @@ mod tests {
         let backend = create_state_backend(&config).unwrap();
         let run_id = backend
             .start_run(
-                &PipelineId("test".to_string()),
-                &StreamName("all".to_string()),
+                &PipelineId::new("test"),
+                &StreamName::new("all"),
             )
             .unwrap();
         assert!(run_id > 0);

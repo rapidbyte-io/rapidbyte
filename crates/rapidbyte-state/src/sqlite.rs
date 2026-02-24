@@ -226,6 +226,45 @@ impl StateBackend for SqliteStateBackend {
         Ok(())
     }
 
+    #[allow(clippy::similar_names)]
+    fn compare_and_set(
+        &self,
+        pipeline: &PipelineId,
+        stream: &StreamName,
+        expected: Option<&str>,
+        new_value: &str,
+    ) -> error::Result<bool> {
+        let conn = self.lock_conn()?;
+        let now = chrono::Utc::now().format(SQLITE_DATETIME_FMT).to_string();
+
+        let rows_affected = match expected {
+            Some(expected_val) => {
+                // Update only if current value matches expected
+                conn.execute(
+                    "UPDATE sync_cursors SET cursor_value = ?1, updated_at = ?2 \
+                     WHERE pipeline = ?3 AND stream = ?4 AND cursor_value = ?5",
+                    rusqlite::params![
+                        new_value,
+                        now,
+                        pipeline.as_str(),
+                        stream.as_str(),
+                        expected_val
+                    ],
+                )?
+            }
+            None => {
+                // Insert only if key doesn't exist (INSERT OR IGNORE)
+                conn.execute(
+                    "INSERT OR IGNORE INTO sync_cursors (pipeline, stream, cursor_value, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![pipeline.as_str(), stream.as_str(), new_value, now],
+                )?
+            }
+        };
+
+        Ok(rows_affected > 0)
+    }
+
     fn insert_dlq_records(
         &self,
         pipeline: &PipelineId,
@@ -483,5 +522,100 @@ mod tests {
             .insert_dlq_records(&pid("pipe1"), 1, &[])
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn compare_and_set_success() {
+        let backend = SqliteStateBackend::in_memory().unwrap();
+        let cursor = CursorState {
+            cursor_field: Some("id".into()),
+            cursor_value: Some("100".into()),
+            updated_at: Utc::now(),
+        };
+        backend
+            .set_cursor(&pid("pipe"), &stream("stream1"), &cursor)
+            .unwrap();
+
+        // CAS: expect "100", set to "200" -- should succeed
+        let result = backend
+            .compare_and_set(&pid("pipe"), &stream("stream1"), Some("100"), "200")
+            .unwrap();
+        assert!(result, "CAS should succeed when expected matches");
+
+        let got = backend
+            .get_cursor(&pid("pipe"), &stream("stream1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.cursor_value, Some("200".into()));
+    }
+
+    #[test]
+    fn compare_and_set_failure_mismatch() {
+        let backend = SqliteStateBackend::in_memory().unwrap();
+        let cursor = CursorState {
+            cursor_field: Some("id".into()),
+            cursor_value: Some("100".into()),
+            updated_at: Utc::now(),
+        };
+        backend
+            .set_cursor(&pid("pipe"), &stream("stream1"), &cursor)
+            .unwrap();
+
+        // CAS: expect "999", set to "200" -- should fail (current is "100")
+        let result = backend
+            .compare_and_set(&pid("pipe"), &stream("stream1"), Some("999"), "200")
+            .unwrap();
+        assert!(!result, "CAS should fail when expected doesn't match");
+
+        let got = backend
+            .get_cursor(&pid("pipe"), &stream("stream1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.cursor_value, Some("100".into()));
+    }
+
+    #[test]
+    fn compare_and_set_from_none() {
+        let backend = SqliteStateBackend::in_memory().unwrap();
+
+        // CAS on nonexistent key: expect None, set to "50" -- should succeed (insert)
+        let result = backend
+            .compare_and_set(&pid("pipe"), &stream("stream1"), None, "50")
+            .unwrap();
+        assert!(
+            result,
+            "CAS from None should succeed when key doesn't exist"
+        );
+
+        let got = backend
+            .get_cursor(&pid("pipe"), &stream("stream1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.cursor_value, Some("50".into()));
+    }
+
+    #[test]
+    fn compare_and_set_from_none_but_exists() {
+        let backend = SqliteStateBackend::in_memory().unwrap();
+        let cursor = CursorState {
+            cursor_field: Some("id".into()),
+            cursor_value: Some("100".into()),
+            updated_at: Utc::now(),
+        };
+        backend
+            .set_cursor(&pid("pipe"), &stream("stream1"), &cursor)
+            .unwrap();
+
+        // CAS: expect None but key exists -- should fail
+        let result = backend
+            .compare_and_set(&pid("pipe"), &stream("stream1"), None, "200")
+            .unwrap();
+        assert!(!result, "CAS from None should fail when key already exists");
+
+        let got = backend
+            .get_cursor(&pid("pipe"), &stream("stream1"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.cursor_value, Some("100".into()));
     }
 }

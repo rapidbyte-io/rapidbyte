@@ -4,7 +4,8 @@ use anyhow::Result;
 use rapidbyte_types::checkpoint::Checkpoint;
 use rapidbyte_types::cursor::CursorValue;
 
-use crate::state::backend::{CursorState, PipelineId, StateBackend, StreamName};
+use rapidbyte_state::backend::{CursorState, PipelineId, StreamName};
+use rapidbyte_state::StateBackend;
 
 /// Correlate source and destination checkpoints, persisting cursor state only when
 /// both sides confirm the data for a stream. Returns the number of cursors advanced.
@@ -51,7 +52,7 @@ pub(crate) fn correlate_and_persist_cursors(
             cursor_value: Some(value_str.clone()),
             updated_at: chrono::Utc::now(),
         };
-        state_backend.set_cursor(pipeline, &StreamName(src_cp.stream.clone()), &cursor)?;
+        state_backend.set_cursor(pipeline, &StreamName::new(src_cp.stream.clone()), &cursor)?;
         tracing::info!(
             pipeline = pipeline.as_str(),
             stream = src_cp.stream,
@@ -68,7 +69,7 @@ pub(crate) fn correlate_and_persist_cursors(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::sqlite::SqliteStateBackend;
+    use rapidbyte_state::SqliteStateBackend;
     use rapidbyte_types::checkpoint::CheckpointKind;
     use rapidbyte_types::wire::ProtocolVersion;
 
@@ -97,7 +98,7 @@ mod tests {
     }
 
     fn pid() -> PipelineId {
-        PipelineId("test_pipe".to_string())
+        PipelineId::new("test_pipe")
     }
 
     #[test]
@@ -110,7 +111,7 @@ mod tests {
         assert_eq!(advanced, 1);
 
         let cursor = backend
-            .get_cursor(&pid(), &StreamName("users".to_string()))
+            .get_cursor(&pid(), &StreamName::new("users"))
             .unwrap()
             .unwrap();
         assert_eq!(cursor.cursor_value, Some("42".to_string()));
@@ -127,7 +128,7 @@ mod tests {
         assert_eq!(advanced, 0);
 
         let cursor = backend
-            .get_cursor(&pid(), &StreamName("users".to_string()))
+            .get_cursor(&pid(), &StreamName::new("users"))
             .unwrap();
         assert!(cursor.is_none());
     }
@@ -145,13 +146,13 @@ mod tests {
         assert_eq!(advanced, 1);
 
         let users = backend
-            .get_cursor(&pid(), &StreamName("users".to_string()))
+            .get_cursor(&pid(), &StreamName::new("users"))
             .unwrap()
             .unwrap();
         assert_eq!(users.cursor_value, Some("42".to_string()));
 
         let orders = backend
-            .get_cursor(&pid(), &StreamName("orders".to_string()))
+            .get_cursor(&pid(), &StreamName::new("orders"))
             .unwrap();
         assert!(orders.is_none());
     }

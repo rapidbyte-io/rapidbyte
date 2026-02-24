@@ -179,6 +179,22 @@ pub trait StateBackend: Send + Sync {
         stats: &RunStats,
     ) -> error::Result<()>;
 
+    /// Compare-and-set: atomically update `cursor_value` only if it matches `expected`.
+    ///
+    /// Returns `true` if the update was applied, `false` if the current value didn't match.
+    /// When `expected` is `None`, succeeds only if the key does not exist (insert-if-absent).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StateError`](crate::error::StateError) on storage failure.
+    fn compare_and_set(
+        &self,
+        pipeline: &PipelineId,
+        stream: &StreamName,
+        expected: Option<&str>,
+        new_value: &str,
+    ) -> error::Result<bool>;
+
     /// Persist dead-letter queue records. Returns the count inserted.
     ///
     /// # Errors

@@ -6,8 +6,8 @@
 use rapidbyte_core::pipeline::parser;
 use rapidbyte_core::pipeline::types::{PipelineWriteMode, StateBackendKind};
 use rapidbyte_core::pipeline::validator;
-use rapidbyte_core::state::backend::{PipelineId, RunStats, RunStatus, StateBackend, StreamName};
-use rapidbyte_core::state::sqlite::SqliteStateBackend;
+use rapidbyte_state::backend::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
+use rapidbyte_state::{SqliteStateBackend, StateBackend};
 
 /// Test parsing and validating a well-formed pipeline YAML fixture.
 #[test]
@@ -77,22 +77,22 @@ fn test_state_backend_full_lifecycle() {
     // Start a run
     let run_id = state
         .start_run(
-            &PipelineId("my_pipeline".to_string()),
-            &StreamName("all".to_string()),
+            &PipelineId::new("my_pipeline"),
+            &StreamName::new("all"),
         )
         .expect("Failed to start run");
     assert!(run_id > 0);
 
     // Set cursor for a stream
-    let cursor = rapidbyte_core::state::backend::CursorState {
+    let cursor = CursorState {
         cursor_field: Some("updated_at".to_string()),
         cursor_value: Some("2024-01-15T10:30:00Z".to_string()),
         updated_at: chrono::Utc::now(),
     };
     state
         .set_cursor(
-            &PipelineId("my_pipeline".to_string()),
-            &StreamName("users".to_string()),
+            &PipelineId::new("my_pipeline"),
+            &StreamName::new("users"),
             &cursor,
         )
         .expect("Failed to set cursor");
@@ -100,8 +100,8 @@ fn test_state_backend_full_lifecycle() {
     // Read cursor back
     let loaded = state
         .get_cursor(
-            &PipelineId("my_pipeline".to_string()),
-            &StreamName("users".to_string()),
+            &PipelineId::new("my_pipeline"),
+            &StreamName::new("users"),
         )
         .expect("Failed to get cursor")
         .expect("Cursor should exist");
@@ -128,8 +128,8 @@ fn test_state_backend_full_lifecycle() {
     // Start another run and fail it
     let run_id2 = state
         .start_run(
-            &PipelineId("my_pipeline".to_string()),
-            &StreamName("all".to_string()),
+            &PipelineId::new("my_pipeline"),
+            &StreamName::new("all"),
         )
         .expect("Failed to start second run");
 
