@@ -76,9 +76,11 @@ def main():
     ref = insert_results[0] if insert_results else copy_results[0]
     bytes_read = ref.get("bytes_read", 0)
     avg_row_bytes = bytes_read // rows if rows > 0 else 0
+    profile = ref.get("profile", "unknown")
 
     # ── Header ────────────────────────────────────────────────────
-    print(f"  Dataset:     {rows:,} rows, {bytes_read / 1048576:.2f} MB ({avg_row_bytes} B/row)")
+    print(f"  Profile:     {profile} ({avg_row_bytes} B/row)")
+    print(f"  Dataset:     {rows:,} rows, {bytes_read / 1048576:.2f} MB")
     print(f"  Samples:     {len(insert_results)} INSERT, {len(copy_results)} COPY")
     print()
 

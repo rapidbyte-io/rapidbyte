@@ -185,8 +185,9 @@ d['bench_rows'] = int(sys.argv[3])
 d['aot'] = sys.argv[4] == 'true'
 d['git_sha'] = sys.argv[5]
 d['git_branch'] = sys.argv[6]
+d['profile'] = sys.argv[7]
 print(json.dumps(d))
-" "$json_line" "$mode" "$rows" "$aot" "$(git_sha)" "$(git_branch)"
+" "$json_line" "$mode" "$rows" "$aot" "$(git_sha)" "$(git_branch)" "${BENCH_PROFILE:-unknown}"
 }
 
 # ── Statistical output (criterion-style) ────────────────────────
