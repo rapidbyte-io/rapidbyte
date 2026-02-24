@@ -1,0 +1,30 @@
+[package]
+name = "rapidbyte-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rapidbyte-types = { path = "../rapidbyte-types" }
+rapidbyte-state = { path = "../rapidbyte-state", default-features = false }
+
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+wasmtime = "41.0.3"
+wasmtime-wasi = "41.0.3"
+wasmparser = "0.243"
+sha2 = "0.10"
+lz4_flex = "0.11"
+zstd = "0.13"
+
+[dev-dependencies]
+rapidbyte-state = { path = "../rapidbyte-state", features = ["sqlite"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }

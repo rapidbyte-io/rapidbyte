@@ -2458,6 +2458,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rapidbyte-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "lz4_flex",
+ "rapidbyte-state",
+ "rapidbyte-types",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "wasmparser 0.243.0",
+ "wasmtime",
+ "wasmtime-wasi",
+ "zstd",
+]
+
+[[package]]
 name = "rapidbyte-sdk"
 version = "0.1.0"
 dependencies = [
