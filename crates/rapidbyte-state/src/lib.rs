@@ -14,12 +14,16 @@
 
 pub mod backend;
 pub mod error;
+#[cfg(feature = "postgres")]
+pub mod postgres;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 
 // Top-level re-exports for convenience.
 pub use backend::StateBackend;
 pub use error::StateError;
+#[cfg(feature = "postgres")]
+pub use postgres::PostgresStateBackend;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStateBackend;
 
@@ -32,6 +36,8 @@ pub mod prelude {
     pub use rapidbyte_types::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
     pub use crate::backend::StateBackend;
     pub use crate::error::{Result, StateError};
+    #[cfg(feature = "postgres")]
+    pub use crate::postgres::PostgresStateBackend;
     #[cfg(feature = "sqlite")]
     pub use crate::sqlite::SqliteStateBackend;
 }
