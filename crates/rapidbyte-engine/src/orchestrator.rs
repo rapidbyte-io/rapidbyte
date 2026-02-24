@@ -1,33 +1,36 @@
 //! Pipeline orchestrator: resolves connectors, loads modules, executes streams, and finalizes state.
 
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rapidbyte_types::catalog::{Catalog, SchemaHint};
 use rapidbyte_types::cursor::{CursorInfo, CursorType, CursorValue};
 use rapidbyte_types::envelope::DlqRecord;
 use rapidbyte_types::error::ValidationResult;
-use rapidbyte_types::manifest::{ConnectorManifest, Permissions, ResourceLimits};
+use rapidbyte_types::manifest::{Permissions, ResourceLimits};
 use rapidbyte_types::metric::{ReadSummary, WriteSummary};
 use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
-use rapidbyte_types::wire::{ConnectorRole, ProtocolVersion, SyncMode};
+use rapidbyte_types::wire::{ConnectorRole, SyncMode};
 use tokio::sync::mpsc;
 
 use crate::checkpoint::correlate_and_persist_cursors;
+use crate::config::types::{parse_byte_size, PipelineConfig};
 use crate::error::{compute_backoff, PipelineError};
+use crate::resolve::{
+    build_sandbox_overrides, check_state_backend, create_state_backend,
+    load_and_validate_manifest, resolve_connectors, validate_config_against_schema,
+    ResolvedConnectors,
+};
 use crate::result::{CheckResult, DestTiming, PipelineCounts, PipelineResult, SourceTiming};
 use crate::runner::{
     run_destination_stream, run_discover, run_source_stream, run_transform_stream,
     validate_connector,
 };
-use crate::config::types::{parse_byte_size, PipelineConfig, StateBackendKind};
 use rapidbyte_runtime::{
-    parse_connector_ref, resolve_min_limit, Frame, HostTimings, LoadedComponent,
-    SandboxOverrides, WasmRuntime,
+    parse_connector_ref, Frame, HostTimings, LoadedComponent, SandboxOverrides, WasmRuntime,
 };
-use rapidbyte_state::{SqliteStateBackend, StateBackend};
+use rapidbyte_state::StateBackend;
 use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
 
 struct StreamResult {
@@ -52,15 +55,6 @@ impl From<PipelineError> for StreamError {
     fn from(error: PipelineError) -> Self {
         Self { error }
     }
-}
-
-struct ResolvedConnectors {
-    source_wasm: PathBuf,
-    dest_wasm: PathBuf,
-    source_manifest: Option<ConnectorManifest>,
-    dest_manifest: Option<ConnectorManifest>,
-    source_permissions: Option<Permissions>,
-    dest_permissions: Option<Permissions>,
 }
 
 #[derive(Clone)]
@@ -207,41 +201,6 @@ async fn execute_pipeline_once(
         &modules,
         aggregated,
     )
-}
-
-fn resolve_connectors(config: &PipelineConfig) -> Result<ResolvedConnectors, PipelineError> {
-    let source_wasm = rapidbyte_runtime::resolve_connector_path(&config.source.use_ref)
-        .map_err(PipelineError::Infrastructure)?;
-    let dest_wasm = rapidbyte_runtime::resolve_connector_path(&config.destination.use_ref)
-        .map_err(PipelineError::Infrastructure)?;
-
-    let source_manifest =
-        load_and_validate_manifest(&source_wasm, &config.source.use_ref, ConnectorRole::Source)
-            .map_err(PipelineError::Infrastructure)?;
-    let dest_manifest = load_and_validate_manifest(
-        &dest_wasm,
-        &config.destination.use_ref,
-        ConnectorRole::Destination,
-    )
-    .map_err(PipelineError::Infrastructure)?;
-
-    if let Some(ref sm) = source_manifest {
-        validate_config_against_schema(&config.source.use_ref, &config.source.config, sm)
-            .map_err(PipelineError::Infrastructure)?;
-    }
-    if let Some(ref dm) = dest_manifest {
-        validate_config_against_schema(&config.destination.use_ref, &config.destination.config, dm)
-            .map_err(PipelineError::Infrastructure)?;
-    }
-
-    Ok(ResolvedConnectors {
-        source_permissions: source_manifest.as_ref().map(|m| m.permissions.clone()),
-        dest_permissions: dest_manifest.as_ref().map(|m| m.permissions.clone()),
-        source_wasm,
-        dest_wasm,
-        source_manifest,
-        dest_manifest,
-    })
 }
 
 async fn load_modules(
@@ -437,42 +396,6 @@ fn build_stream_contexts(
         compression: config.resources.compression,
         stream_ctxs,
     })
-}
-
-/// Build `SandboxOverrides` from pipeline permissions/limits and manifest resource limits.
-/// Returns `None` if no overrides are specified from either side.
-fn build_sandbox_overrides(
-    pipeline_perms: Option<&crate::config::types::PipelinePermissions>,
-    pipeline_limits: Option<&crate::config::types::PipelineLimits>,
-    manifest_limits: &ResourceLimits,
-) -> Option<SandboxOverrides> {
-    let manifest_mem = manifest_limits
-        .max_memory
-        .as_ref()
-        .and_then(|s| parse_byte_size(s).ok());
-    let pipeline_mem = pipeline_limits
-        .and_then(|l| l.max_memory.as_ref())
-        .and_then(|s| parse_byte_size(s).ok());
-
-    let manifest_timeout = manifest_limits.timeout_seconds;
-    let pipeline_timeout = pipeline_limits.and_then(|l| l.timeout_seconds);
-
-    let has_overrides = pipeline_perms.is_some()
-        || pipeline_limits.is_some()
-        || manifest_limits.max_memory.is_some()
-        || manifest_limits.timeout_seconds.is_some();
-
-    if has_overrides {
-        Some(SandboxOverrides {
-            allowed_hosts: pipeline_perms.and_then(|p| p.network.allowed_hosts.clone()),
-            allowed_vars: pipeline_perms.and_then(|p| p.env.allowed_vars.clone()),
-            allowed_preopens: pipeline_perms.and_then(|p| p.fs.allowed_preopens.clone()),
-            max_memory_bytes: resolve_min_limit(manifest_mem, pipeline_mem),
-            timeout_seconds: resolve_min_limit(manifest_timeout, pipeline_timeout),
-        })
-    } else {
-        None
-    }
 }
 
 #[allow(clippy::too_many_lines, clippy::similar_names)]
@@ -1133,157 +1056,3 @@ pub async fn discover_connector(
     .map_err(|e| anyhow::anyhow!("Discover task panicked: {e}"))?
 }
 
-fn create_state_backend(config: &PipelineConfig) -> Result<Arc<dyn StateBackend>> {
-    match config.state.backend {
-        StateBackendKind::Sqlite => {
-            let backend = if let Some(path) = &config.state.connection {
-                SqliteStateBackend::open(Path::new(path)).context("Failed to open state DB")?
-            } else {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                let state_path = PathBuf::from(home).join(".rapidbyte").join("state.db");
-                SqliteStateBackend::open(&state_path)
-                    .context("Failed to open default state DB")?
-            };
-            Ok(Arc::new(backend) as Arc<dyn StateBackend>)
-        }
-        StateBackendKind::Postgres => {
-            let connstr = config
-                .state
-                .connection
-                .as_deref()
-                .unwrap_or("host=localhost dbname=rapidbyte_state");
-            let backend = rapidbyte_state::PostgresStateBackend::open(connstr)
-                .map_err(|e| anyhow::anyhow!("failed to open Postgres state backend: {e}"))?;
-            Ok(Arc::new(backend) as Arc<dyn StateBackend>)
-        }
-    }
-}
-
-fn check_state_backend(config: &PipelineConfig) -> bool {
-    match create_state_backend(config) {
-        Ok(_) => {
-            tracing::info!("State backend: OK");
-            true
-        }
-        Err(e) => {
-            tracing::error!("State backend: FAILED — {}", e);
-            false
-        }
-    }
-}
-
-fn load_and_validate_manifest(
-    wasm_path: &Path,
-    connector_ref: &str,
-    expected_role: ConnectorRole,
-) -> Result<Option<ConnectorManifest>> {
-    let manifest = rapidbyte_runtime::load_connector_manifest(wasm_path)?;
-
-    if let Some(ref m) = manifest {
-        if !m.supports_role(expected_role) {
-            anyhow::bail!(
-                "Connector '{connector_ref}' does not support {expected_role:?} role"
-            );
-        }
-
-        if m.protocol_version != ProtocolVersion::V2 {
-            tracing::warn!(
-                connector = connector_ref,
-                manifest_protocol = ?m.protocol_version,
-                host_protocol = ?ProtocolVersion::V2,
-                "Protocol version mismatch"
-            );
-        }
-
-        tracing::info!(
-            connector = m.id,
-            version = m.version,
-            "Loaded connector manifest"
-        );
-    } else {
-        tracing::debug!(
-            connector = connector_ref,
-            "No manifest found, skipping pre-flight validation"
-        );
-    }
-
-    Ok(manifest)
-}
-
-fn validate_config_against_schema(
-    connector_ref: &str,
-    config: &serde_json::Value,
-    manifest: &ConnectorManifest,
-) -> Result<()> {
-    let Some(schema_value) = &manifest.config_schema else {
-        return Ok(());
-    };
-
-    let validator = jsonschema::validator_for(schema_value).with_context(|| {
-        format!("Invalid JSON Schema in manifest for connector '{connector_ref}'")
-    })?;
-
-    let errors: Vec<String> = validator
-        .iter_errors(config)
-        .map(|e| format!("  - {e}"))
-        .collect();
-
-    if !errors.is_empty() {
-        anyhow::bail!(
-            "Configuration validation failed for connector '{}':\n{}",
-            connector_ref,
-            errors.join("\n"),
-        );
-    }
-
-    tracing::debug!(connector = connector_ref, "Config schema validation passed");
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::tempdir;
-
-    #[test]
-    fn test_create_state_backend_custom_path() {
-        let dir = tempdir().unwrap();
-        let db_path = dir.path().join("state.db");
-        let config = PipelineConfig {
-            version: "1.0".to_string(),
-            pipeline: "test".to_string(),
-            source: crate::config::types::SourceConfig {
-                use_ref: "source".to_string(),
-                config: serde_json::json!({}),
-                streams: vec![],
-                permissions: None,
-                limits: None,
-            },
-            transforms: vec![],
-            destination: crate::config::types::DestinationConfig {
-                use_ref: "dest".to_string(),
-                config: serde_json::json!({}),
-                write_mode: crate::config::types::PipelineWriteMode::Append,
-                primary_key: vec![],
-                on_data_error: rapidbyte_types::stream::DataErrorPolicy::Fail,
-                schema_evolution: None,
-                permissions: None,
-                limits: None,
-            },
-            state: crate::config::types::StateConfig {
-                backend: StateBackendKind::Sqlite,
-                connection: Some(db_path.to_string_lossy().to_string()),
-            },
-            resources: crate::config::types::ResourceConfig::default(),
-        };
-
-        let backend = create_state_backend(&config).unwrap();
-        let run_id = backend
-            .start_run(
-                &PipelineId::new("test"),
-                &StreamName::new("all"),
-            )
-            .unwrap();
-        assert!(run_id > 0);
-    }
-}

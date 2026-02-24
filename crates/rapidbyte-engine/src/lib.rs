@@ -12,6 +12,7 @@
 //! | `runner`       | Individual connector runners (source, dest, transform) |
 //! | `error`        | Pipeline error types and retry policy |
 //! | `checkpoint`   | Cursor correlation and persistence |
+//! | `resolve`      | Connector resolution, manifest validation, state backend |
 //! | `arrow`        | Arrow IPC encode/decode utilities |
 
 #![warn(clippy::pedantic)]
@@ -22,6 +23,7 @@ pub mod config;
 pub(crate) mod dlq;
 pub mod error;
 pub mod orchestrator;
+pub(crate) mod resolve;
 pub mod result;
 pub mod runner;
 
