@@ -15,9 +15,9 @@ use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
 use rapidbyte_types::wire::{ConnectorRole, ProtocolVersion, SyncMode};
 use tokio::sync::mpsc;
 
-use super::checkpoint::correlate_and_persist_cursors;
-use super::errors::{compute_backoff, PipelineError};
-use super::runner::{
+use crate::checkpoint::correlate_and_persist_cursors;
+use crate::errors::{compute_backoff, PipelineError};
+use crate::runner::{
     run_destination_stream, run_discover, run_source_stream, run_transform_stream,
     validate_connector, CheckResult, DestTiming, PipelineCounts, PipelineResult, SourceTiming,
 };
@@ -866,7 +866,7 @@ fn finalize_run(
                 },
             )
             .map_err(|e| PipelineError::Infrastructure(e.into()))?;
-        super::dlq::persist_dlq_records(state, pipeline_id, run_id, &aggregated.dlq_records);
+        crate::dlq::persist_dlq_records(state, pipeline_id, run_id, &aggregated.dlq_records);
         return Err(err);
     }
 
@@ -917,7 +917,7 @@ fn finalize_run(
         );
     }
 
-    super::dlq::persist_dlq_records(state, pipeline_id, run_id, &aggregated.dlq_records);
+    crate::dlq::persist_dlq_records(state, pipeline_id, run_id, &aggregated.dlq_records);
 
     let duration = start.elapsed();
     let src_perf = aggregated.total_read_summary.perf.as_ref();

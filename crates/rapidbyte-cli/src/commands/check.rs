@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use rapidbyte_types::error::ValidationStatus;
 
-use rapidbyte_engine::engine::orchestrator;
+use rapidbyte_engine::orchestrator;
 use rapidbyte_engine::pipeline::parser;
 use rapidbyte_engine::pipeline::validator;
 

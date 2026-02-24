@@ -277,7 +277,7 @@ async fn test_pg_to_pg_full_pipeline() {
 
     validator::validate_pipeline(&config).expect("Pipeline validation failed");
 
-    let result = rapidbyte_engine::engine::orchestrator::run_pipeline(&config)
+    let result = rapidbyte_engine::orchestrator::run_pipeline(&config)
         .await
         .expect("Pipeline run failed");
 

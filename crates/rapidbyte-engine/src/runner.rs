@@ -15,7 +15,7 @@ use rapidbyte_types::metric::{ReadSummary, TransformSummary, WriteSummary};
 use rapidbyte_types::stream::StreamContext;
 use rapidbyte_types::wire::ConnectorRole;
 
-use super::errors::PipelineError;
+use crate::errors::PipelineError;
 use rapidbyte_runtime::wasmtime_reexport::HasSelf;
 use rapidbyte_runtime::{
     create_component_linker, dest_bindings, dest_error_to_sdk, dest_validation_to_sdk,
