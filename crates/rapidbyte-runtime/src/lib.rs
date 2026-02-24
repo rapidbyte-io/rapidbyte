@@ -5,4 +5,5 @@
 
 #![warn(clippy::pedantic)]
 
+pub mod compression;
 pub mod error;
