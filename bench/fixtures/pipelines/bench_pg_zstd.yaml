@@ -26,6 +26,7 @@ destination:
 
 resources:
   compression: zstd
+  max_batch_bytes: 512mb
 
 state:
   backend: sqlite

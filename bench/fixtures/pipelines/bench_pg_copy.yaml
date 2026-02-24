@@ -25,6 +25,9 @@ destination:
     load_method: copy
   write_mode: append
 
+resources:
+  max_batch_bytes: 512mb
+
 state:
   backend: sqlite
   connection: /tmp/rapidbyte_bench_state.db
