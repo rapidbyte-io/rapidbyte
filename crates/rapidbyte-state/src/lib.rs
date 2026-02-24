@@ -31,7 +31,7 @@ pub use sqlite::SqliteStateBackend;
 /// use rapidbyte_state::prelude::*;
 /// ```
 pub mod prelude {
-    pub use crate::backend::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
+    pub use rapidbyte_types::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
     pub use crate::backend::StateBackend;
     pub use crate::error::{Result, StateError};
     #[cfg(feature = "sqlite")]
