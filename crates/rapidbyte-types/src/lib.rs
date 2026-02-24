@@ -13,6 +13,7 @@ pub mod envelope;
 pub mod error;
 pub mod manifest;
 pub mod metric;
+pub mod state;
 pub mod stream;
 pub mod wire;
 
@@ -33,6 +34,7 @@ pub mod prelude {
     };
     pub use crate::manifest::ConnectorManifest;
     pub use crate::metric::{Metric, MetricValue, ReadSummary, TransformSummary, WriteSummary};
+    pub use crate::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
     pub use crate::stream::{StreamContext, StreamLimits, StreamPolicies};
     pub use crate::wire::{
         ConnectorInfo, ConnectorRole, Feature, ProtocolVersion, SyncMode, WriteMode,
