@@ -2,19 +2,12 @@
 
 use std::io::Cursor;
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+pub use rapidbyte_types::compression::CompressionCodec;
 
 /// Zstd level used for stage-to-stage IPC compression.
 const ZSTD_COMPRESSION_LEVEL: i32 = 1;
-
-/// IPC channel compression codec.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CompressionCodec {
-    Lz4,
-    Zstd,
-}
 
 #[derive(Debug, Error)]
 pub enum CompressionError {
