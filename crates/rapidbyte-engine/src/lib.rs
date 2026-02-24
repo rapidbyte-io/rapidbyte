@@ -7,13 +7,15 @@
 //!
 //! | Module         | Responsibility |
 //! |----------------|----------------|
-//! | `config`       | Pipeline YAML config types, parsing, validation |
-//! | `orchestrator` | Pipeline execution, retry, stream dispatch |
-//! | `runner`       | Individual connector runners (source, dest, transform) |
-//! | `error`        | Pipeline error types and retry policy |
-//! | `checkpoint`   | Cursor correlation and persistence |
-//! | `resolve`      | Connector resolution, manifest validation, state backend |
 //! | `arrow`        | Arrow IPC encode/decode utilities |
+//! | `checkpoint`   | Cursor correlation and persistence |
+//! | `config`       | Pipeline YAML config types, parsing, validation |
+//! | `dlq`          | Dead-letter queue persistence (internal) |
+//! | `error`        | Pipeline error types and retry policy |
+//! | `orchestrator` | Pipeline execution, retry, stream dispatch |
+//! | `resolve`      | Connector resolution, manifest validation, state backend (internal) |
+//! | `result`       | Pipeline execution result types and timing breakdowns |
+//! | `runner`       | Individual connector runners (source, dest, transform) |
 
 #![warn(clippy::pedantic)]
 
