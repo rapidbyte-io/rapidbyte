@@ -138,6 +138,79 @@ transforms, and outputs the resulting Arrow batch as JSON or table format to std
 without writing to the destination. Gives data engineers instant feedback on schema
 evolution and transform configs without touching production.
 
+## Interactive Dev Shell (`rapidbyte dev`)
+
+A terminal-based REPL for exploring, testing, and debugging data pipelines interactively.
+Connects to real sources, streams data into an in-memory Arrow workspace, lets you query
+with SQL, test transforms, profile data quality, diff against destinations, and export
+working pipelines — all without writing YAML first.
+
+### Command Language
+
+Dot-commands for pipeline operations, raw SQL for data queries:
+
+```
+rapidbyte dev
+
+rb> .source postgres --host localhost --port 5432 --user app --database mydb
+Connected to PostgreSQL 16.2
+
+rb> .tables
+ public.users          | 12,847 rows
+ public.orders         | 89,231 rows
+ public.products       |  1,204 rows
+
+rb> .stream public.users --limit 1000
+Streamed 1,000 rows → workspace:users (12 columns, 847 KB)
+
+rb> SELECT id, email, created_at FROM users WHERE created_at > '2026-01-01' LIMIT 10;
+┌────┬──────────────────────┬─────────────────────┐
+│ id │ email                │ created_at          │
+├────┼──────────────────────┼─────────────────────┤
+│ 42 │ alice@example.com    │ 2026-01-15 10:30:00 │
+│ 87 │ bob@example.com      │ 2026-02-01 14:22:00 │
+└────┴──────────────────────┴─────────────────────┘
+
+rb> .check users --rules 'not_null: email, regex: {email: "^.+@.+$"}'
+✓ not_null(email): 1,000/1,000 pass
+✗ regex(email):    997/1,000 pass (3 failures)
+
+rb> .profile users.email
+type: Utf8, nulls: 0, unique: 994, min_len: 8, max_len: 47
+
+rb> .dest postgres --host warehouse --database analytics --schema raw
+Connected to destination
+
+rb> .diff users
++ 142 new rows  ~ 38 changed rows  - 0 deleted rows
+
+rb> .push users --write-mode upsert --primary-key id
+Pushed 1,000 rows (180 upserted)
+
+rb> .export my-pipeline.yaml
+Exported pipeline: source(postgres) → dest(postgres), 1 stream, upsert mode
+```
+
+### Key Capabilities
+
+- **Source exploration** — connect, list tables, describe schemas, stream samples
+- **Arrow workspace** — in-memory scratch pad holding streamed data as Arrow `RecordBatch`es
+- **SQL queries** — DataFusion SQL engine over workspace tables (SELECT, JOIN, aggregate)
+- **Transform testing** — apply and chain transforms interactively, save SQL as named transforms
+- **Data quality** — not-null/regex/range checks, column profiling, histograms
+- **Destination testing** — connect, diff against target, push with write mode preview
+- **Pipeline export** — serialize the current session (source + transforms + dest) as pipeline YAML
+- **Step-through debugger** — load an existing pipeline YAML and step through stages one at a time
+- **Incremental sync testing** — simulate cursor-based reads with `.stream --cursor-field`
+- **Context-aware autocomplete** — table names after `FROM`, columns after alias, transforms after `.apply`
+
+### Architecture
+
+- **REPL:** `reedline` with custom completer and syntax highlighter
+- **SQL engine:** DataFusion over Arrow workspace tables
+- **Connectors:** Reuses existing Wasm connectors via `rapidbyte-runtime`
+- **State:** Ephemeral in-memory workspace, optional persist to disk
+
 ## Pipeline YAML
 
 ```yaml
@@ -488,6 +561,8 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 
 ### Near-term (P1)
 
+- **Interactive dev shell** (`rapidbyte dev`) — REPL for exploring sources, querying with
+  SQL, testing transforms, profiling data, and exporting pipeline YAML
 - Data validation transforms (data contracts, assert rules)
 - Secrets management (AWS Secrets Manager, GCP, Vault, 1Password URIs)
 - TUI progress display during pipeline runs
