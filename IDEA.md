@@ -10,33 +10,37 @@ Arrow IPC batch exchange — no JVM, no Docker, no sidecar processes.
 ## Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────┐
-│                rapidbyte-cli                     │
-│   run · check · discover · connectors · scaffold│
-├─────────────────────────────────────────────────┤
-│                rapidbyte-core                    │
-│  ┌───────────┐  ┌─────────┐  ┌───────────────┐ │
-│  │Orchestrator│─▶│ Runner  │─▶│ComponentRuntime│ │
-│  └───────────┘  └─────────┘  └───────────────┘ │
-│       │              │              │            │
-│  State (SQLite)  Channels     Wasmtime Engine   │
-│       │         (mpsc+compress)     │            │
-│  Checkpoints     Arrow IPC     WIT Imports      │
-├─────────────────────────────────────────────────┤
-│                rapidbyte-sdk                     │
-│  Source · Destination · Transform traits         │
-│  connector_main! macros · HostTcpStream          │
-├─────────────────────────────────────────────────┤
-│              Wasm Connectors                     │
-│  source-postgres  ·  dest-postgres               │
-└─────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│                  rapidbyte-cli                       │
+│     run · check · discover · connectors · scaffold  │
+├─────────────────────────────────────────────────────┤
+│  rapidbyte-engine       │  rapidbyte-runtime        │
+│  ┌─────────────┐        │  ┌───────────────────┐   │
+│  │ Orchestrator │───────▶│  │ Wasmtime Component│   │
+│  │   Runner     │        │  │ Model + WIT Host  │   │
+│  └─────────────┘        │  └───────────────────┘   │
+│       │                  │         │                 │
+│  Config parsing          │  Sandbox, ACLs, Socket   │
+│  Arrow IPC utils         │  AOT cache, Compression  │
+├──────────────────────────┼──────────────────────────┤
+│  rapidbyte-state         │  rapidbyte-types         │
+│  SQLite · Postgres       │  Protocol · Manifest     │
+│  Runs · Cursors · DLQ    │  Arrow · Checkpoint      │
+├─────────────────────────────────────────────────────┤
+│                  rapidbyte-sdk                       │
+│  Source · Destination · Transform traits             │
+│  connector_main! macros · HostTcpStream              │
+├─────────────────────────────────────────────────────┤
+│                Wasm Connectors                       │
+│    source-postgres  ·  dest-postgres                 │
+└─────────────────────────────────────────────────────┘
 ```
 
 - **Runtime:** Wasmtime component model, `wasm32-wasip2` target.
 - **Protocol:** Version 2. Interface contract: `wit/rapidbyte-connector.wit`.
 - **Data format:** Arrow IPC record batches flow between stages via bounded `mpsc` channels.
-- **State:** Pluggable backend (SQLite bundled, S3 and PostgreSQL planned) for run metadata,
-  cursor/checkpoint state, and DLQ records.
+- **State:** Pluggable backend (SQLite bundled, PostgreSQL implemented, S3 planned) for run
+  metadata, cursor/checkpoint state, and DLQ records.
 - **Networking:** Connectors have no direct WASI socket access. All outbound TCP is mediated
   through host imports (`connect-tcp`, `socket-read`, `socket-write`, `socket-close`) with
   manifest-declared network ACLs.
@@ -192,7 +196,7 @@ destination:
     nullability_change: allow                     # allow | fail
 
 state:
-  backend: sqlite                                 # sqlite | s3 | postgres (planned)
+  backend: sqlite                                 # sqlite | postgres | s3 (planned)
   connection: /var/lib/rapidbyte/state.db
   # backend: s3                                   # ephemeral-friendly (planned)
   # connection: s3://my-bucket/rapidbyte/state
@@ -284,7 +288,7 @@ Records that fail during writing are routed to a DLQ instead of failing the pipe
 
 - `DlqRecord`: stream_name, record_json, error_message, error_category, failed_at timestamp.
 - Maximum 10,000 records held in memory per run (prevents unbounded growth).
-- Persisted to the SQLite state backend at the end of each run.
+- Persisted to the state backend at the end of each run.
 
 ## Secrets Management (GitOps Native)
 
@@ -327,7 +331,7 @@ the pipeline continues processing valid records.
 
 ## In-Flight SQL Transforms (DataFusion)
 
-DataFusion embedded into `rapidbyte-core` enables SQL transforms on Arrow batches
+DataFusion embedded as a transform connector enables SQL transforms on Arrow batches
 as they flow through the pipeline:
 
 ```yaml
@@ -355,8 +359,8 @@ backends allow state to survive node termination:
 | Backend | Status | Use case |
 |---------|--------|----------|
 | `sqlite` | Implemented | Local, single-node, dev |
+| `postgres` | Implemented | Teams with existing PG infrastructure |
 | `s3` | Planned (P0) | Ephemeral CI/CD, serverless, K8s Jobs |
-| `postgres` | Planned (P1) | Teams with existing PG infrastructure |
 
 ```yaml
 state:
@@ -417,8 +421,8 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 - **Connector metrics:** records_read/written, bytes_read/written (emitted via `metric` host import).
 - **Host timing breakdown:** connect, query, fetch, encode, decode, flush, commit, vm_setup,
   emit_batch, next_batch, compress, decompress — all tracked per-run.
-- **Run tracking:** Each pipeline run recorded in SQLite with start/end time, status,
-  records read/written, and error messages.
+- **Run tracking:** Each pipeline run recorded in the state backend with start/end time,
+  status, records read/written, and error messages.
 
 ## Connectors
 
@@ -469,8 +473,9 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 - CLI: run, check, discover, connectors, scaffold
 - Host-proxied TCP networking with ACLs
 - Connector metrics and host timing breakdown
-- SQLite state backend for checkpoints and run history
+- SQLite and PostgreSQL state backends for checkpoints and run history
 - Full PG type correctness (timestamp, date, bytea, json, uuid, numeric, etc.)
+- Modular crate architecture (types, state, runtime, engine, sdk, cli)
 - E2E test suite and benchmarking scripts
 
 ### Critical path (P0)
@@ -485,7 +490,6 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 
 - Data validation transforms (data contracts, assert rules)
 - Secrets management (AWS Secrets Manager, GCP, Vault, 1Password URIs)
-- PostgreSQL state backend
 - TUI progress display during pipeline runs
 - OCI registry for connector distribution (`rapidbyte pull`)
 - Additional connectors: MySQL source, S3/Parquet dest, BigQuery dest
