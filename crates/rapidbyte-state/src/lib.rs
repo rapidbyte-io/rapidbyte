@@ -5,3 +5,5 @@
 //! queue storage.
 
 #![warn(clippy::pedantic)]
+
+pub mod error;
