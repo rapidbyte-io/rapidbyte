@@ -12,28 +12,32 @@ BENCH_ROWS=""
 BENCH_ITERS=""
 BUILD_MODE="release"
 BENCH_AOT="true"
-PROFILE="false"
+BENCH_PROFILE=""
+CPU_PROFILE="false"
 
 usage() {
     cat <<EOF
-Usage: bench.sh [CONNECTOR] [ROWS] [OPTIONS]
+Usage: bench.sh [CONNECTOR] [ROWS] --profile PROFILE [OPTIONS]
 
 Arguments:
   CONNECTOR   Connector name (e.g. postgres). Omit to bench all connectors.
-  ROWS        Number of rows to benchmark. Omit for connector default.
+  ROWS        Number of rows to benchmark. Omit for profile default.
+
+Required:
+  --profile PROFILE   Data profile: small (~500 B/row), medium (~4 KB/row), large (~50 KB/row)
 
 Options:
   --iters N         Number of iterations per mode (default: from connector config)
   --debug           Build in debug mode
   --aot / --no-aot  Enable/disable Wasmtime AOT cache (default: enabled)
-  --profile         Run profiling iteration after benchmark
+  --cpu-profile     Run profiling iteration after benchmark (requires samply)
   -h, --help        Show this help
 
 Examples:
-  bench.sh                       # All connectors, default rows
-  bench.sh postgres              # Postgres, default rows
-  bench.sh postgres 50000        # Postgres, 50K rows
-  bench.sh postgres 50000 --iters 5
+  bench.sh postgres --profile medium              # Postgres, medium profile, 50K rows
+  bench.sh postgres 100000 --profile small        # Postgres, small profile, 100K rows
+  bench.sh postgres --profile large --iters 5     # Postgres, large profile, 5 iters
+  bench.sh --profile small                        # All connectors, small profile
 EOF
     exit 0
 }
@@ -44,20 +48,31 @@ CLI_ROWS=""
 CLI_ITERS=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --iters)    CLI_ITERS="$2"; shift 2 ;;
-        --debug)    BUILD_MODE="debug"; shift ;;
-        --aot)      BENCH_AOT="true"; shift ;;
-        --no-aot)   BENCH_AOT="false"; shift ;;
-        --profile)  PROFILE="true"; shift ;;
-        -h|--help)  usage ;;
-        -*)         fail "Unknown option: $1" ;;
-        *)          POSITIONAL+=("$1"); shift ;;
+        --iters)       CLI_ITERS="$2"; shift 2 ;;
+        --debug)       BUILD_MODE="debug"; shift ;;
+        --aot)         BENCH_AOT="true"; shift ;;
+        --no-aot)      BENCH_AOT="false"; shift ;;
+        --profile)     BENCH_PROFILE="$2"; shift 2 ;;
+        --cpu-profile) CPU_PROFILE="true"; shift ;;
+        -h|--help)     usage ;;
+        -*)            fail "Unknown option: $1" ;;
+        *)             POSITIONAL+=("$1"); shift ;;
     esac
 done
 
 # Assign positional args
 [ ${#POSITIONAL[@]} -ge 1 ] && CONNECTOR="${POSITIONAL[0]}"
 [ ${#POSITIONAL[@]} -ge 2 ] && CLI_ROWS="${POSITIONAL[1]}"
+
+# Require --profile
+if [[ -z "$BENCH_PROFILE" ]]; then
+    fail "Missing required --profile flag. Use: --profile small|medium|large"
+fi
+if [[ "$BENCH_PROFILE" != "small" && "$BENCH_PROFILE" != "medium" && "$BENCH_PROFILE" != "large" ]]; then
+    fail "Invalid profile: $BENCH_PROFILE. Must be one of: small, medium, large"
+fi
+
+export BENCH_PROFILE
 
 # ── Discover connectors ──────────────────────────────────────────
 CONNECTORS=()
@@ -82,6 +97,7 @@ echo ""
 cyan "═══════════════════════════════════════════════"
 cyan "  Rapidbyte Benchmark"
 cyan "  Connectors: ${CONNECTORS[*]}"
+cyan "  Profile: $BENCH_PROFILE"
 cyan "  Build: $BUILD_MODE | AOT: $BENCH_AOT"
 cyan "═══════════════════════════════════════════════"
 echo ""
@@ -106,7 +122,7 @@ export BUILD_MODE BENCH_AOT
 for connector in "${CONNECTORS[@]}"; do
     connector_dir="$BENCH_DIR/connectors/$connector"
 
-    # Source connector config to get defaults
+    # Source connector config to get defaults (profile-aware)
     source "$connector_dir/config.sh"
 
     # Use CLI override if given, otherwise connector default
@@ -123,8 +139,8 @@ for connector in "${CONNECTORS[@]}"; do
     bash "$connector_dir/teardown.sh"
 done
 
-# ── Optional profiling ───────────────────────────────────────────
-if [ "$PROFILE" = "true" ]; then
+# ── Optional CPU profiling ──────────────────────────────────────
+if [ "$CPU_PROFILE" = "true" ]; then
     if ! command -v samply &> /dev/null; then
         fail "samply not found. Install with: cargo install samply"
     fi
