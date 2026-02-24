@@ -5,17 +5,26 @@ edition.workspace = true
 
 [dependencies]
 rapidbyte-types = { path = "../rapidbyte-types" }
-rusqlite = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+# Optional backends
+rusqlite = { workspace = true, optional = true }
+postgres = { workspace = true, optional = true }
+
 [dev-dependencies]
 criterion = { workspace = true }
+
+[features]
+default = ["sqlite"]
+sqlite = ["dep:rusqlite"]
+postgres = ["dep:postgres"]
 
 [[bench]]
 name = "state_backend"
 harness = false
+required-features = ["sqlite"]
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

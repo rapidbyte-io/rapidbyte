@@ -3,9 +3,9 @@
 /// Errors produced by [`StateBackend`](crate::StateBackend) operations.
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
-    /// Underlying `SQLite` failure.
-    #[error("sqlite error: {0}")]
-    Sqlite(#[from] rusqlite::Error),
+    /// Underlying storage backend failure (`SQLite`, `Postgres`, etc.).
+    #[error("state backend error: {0}")]
+    Backend(Box<dyn std::error::Error + Send + Sync>),
 
     /// File-system I/O failure (e.g. creating the database directory).
     #[error("i/o error: {0}")]
@@ -16,6 +16,13 @@ pub enum StateError {
     LockPoisoned,
 }
 
+impl StateError {
+    /// Wrap any backend-specific error into a [`StateError::Backend`].
+    pub fn backend(err: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Backend(Box::new(err))
+    }
+}
+
 /// Convenience alias used throughout this crate.
 pub type Result<T> = std::result::Result<T, StateError>;
 
@@ -24,14 +31,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sqlite_error_displays_context() {
-        let inner = rusqlite::Error::SqliteFailure(
-            rusqlite::ffi::Error::new(1),
-            Some("table not found".into()),
-        );
-        let err = StateError::Sqlite(inner);
-        let msg = err.to_string();
-        assert!(msg.contains("sqlite"), "got: {msg}");
+    fn backend_error_displays_inner() {
+        let inner = std::io::Error::new(std::io::ErrorKind::Other, "db broke");
+        let err = StateError::backend(inner);
+        assert!(err.to_string().contains("db broke"));
     }
 
     #[test]
@@ -45,5 +48,12 @@ mod tests {
         let inner = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
         let err = StateError::Io(inner);
         assert!(err.to_string().contains("i/o"));
+    }
+
+    #[test]
+    fn backend_helper_boxes_error() {
+        let inner = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let err = StateError::backend(inner);
+        assert!(matches!(err, StateError::Backend(_)));
     }
 }

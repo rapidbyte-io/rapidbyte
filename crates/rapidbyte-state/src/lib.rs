@@ -1,32 +1,28 @@
 //! Pipeline state persistence for the Rapidbyte engine.
 //!
-//! Provides the [`StateBackend`] trait and a [`SqliteStateBackend`]
-//! implementation for cursor tracking, run history, and dead-letter
-//! queue storage.
+//! Provides the [`StateBackend`] trait and backend implementations
+//! for cursor tracking, run history, and dead-letter queue storage.
 //!
-//! # Quick start
+//! # Feature flags
 //!
-//! ```no_run
-//! use rapidbyte_state::prelude::*;
-//! use std::path::Path;
-//!
-//! let backend = SqliteStateBackend::open(Path::new("/tmp/state.db")).unwrap();
-//! let cursor = backend.get_cursor(
-//!     &PipelineId::new("my-pipeline"),
-//!     &StreamName::new("public.users"),
-//! ).unwrap();
-//! ```
+//! | Feature    | Default | Description |
+//! |------------|---------|-------------|
+//! | `sqlite`   | **yes** | SQLite backend via `rusqlite` |
+//! | `postgres` | no      | PostgreSQL backend via `postgres` |
 
 #![warn(clippy::pedantic)]
 
 pub mod backend;
 pub mod error;
+#[cfg(feature = "sqlite")]
 pub mod schema;
+#[cfg(feature = "sqlite")]
 pub mod sqlite;
 
 // Top-level re-exports for convenience.
 pub use backend::StateBackend;
 pub use error::StateError;
+#[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStateBackend;
 
 /// Common imports for typical usage.
@@ -38,6 +34,7 @@ pub mod prelude {
     pub use crate::backend::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
     pub use crate::backend::StateBackend;
     pub use crate::error::{Result, StateError};
+    #[cfg(feature = "sqlite")]
     pub use crate::sqlite::SqliteStateBackend;
 }
 
@@ -52,6 +49,7 @@ mod tests {
         let _stats = RunStats::default();
     }
 
+    #[cfg(feature = "sqlite")]
     #[test]
     fn top_level_re_exports() {
         use super::{SqliteStateBackend, StateBackend, StateError};
