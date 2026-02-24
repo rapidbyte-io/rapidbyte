@@ -8,5 +8,6 @@
 pub mod acl;
 pub mod compression;
 pub mod connector;
+pub mod engine;
 pub mod error;
 pub mod socket;
