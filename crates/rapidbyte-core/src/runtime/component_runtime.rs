@@ -18,8 +18,8 @@ use wasmtime::component::ResourceTable;
 use wasmtime::{StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-use rapidbyte_state::backend::{CursorState, PipelineId, StreamName};
 use rapidbyte_state::StateBackend;
+use rapidbyte_types::state::{CursorState, PipelineId, StreamName};
 
 use super::host_socket::{
     resolve_socket_addrs, SocketEntry, SocketReadResultInternal, SocketWriteResultInternal,
@@ -585,7 +585,7 @@ impl ComponentHostState {
         let cursor = CursorState {
             cursor_field: Some(key),
             cursor_value: Some(value),
-            updated_at: Utc::now(),
+            updated_at: Utc::now().to_rfc3339(),
         };
 
         self.identity

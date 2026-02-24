@@ -6,8 +6,8 @@
 use rapidbyte_core::pipeline::parser;
 use rapidbyte_core::pipeline::types::{PipelineWriteMode, StateBackendKind};
 use rapidbyte_core::pipeline::validator;
-use rapidbyte_state::backend::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
 use rapidbyte_state::{SqliteStateBackend, StateBackend};
+use rapidbyte_types::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
 
 /// Test parsing and validating a well-formed pipeline YAML fixture.
 #[test]
@@ -87,7 +87,7 @@ fn test_state_backend_full_lifecycle() {
     let cursor = CursorState {
         cursor_field: Some("updated_at".to_string()),
         cursor_value: Some("2024-01-15T10:30:00Z".to_string()),
-        updated_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
     };
     state
         .set_cursor(

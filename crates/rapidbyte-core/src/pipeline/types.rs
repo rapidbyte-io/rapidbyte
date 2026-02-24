@@ -147,6 +147,7 @@ pub struct DestinationConfig {
 #[serde(rename_all = "snake_case")]
 pub enum StateBackendKind {
     Sqlite,
+    Postgres,
 }
 
 impl Default for StateBackendKind {
@@ -645,6 +646,33 @@ destination:
         let src_limits = config.source.limits.as_ref().unwrap();
         assert_eq!(src_limits.max_memory, Some("256mb".to_string()));
         assert_eq!(src_limits.timeout_seconds, Some(120));
+    }
+
+    #[test]
+    fn test_state_backend_postgres_variant() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+state:
+  backend: postgres
+  connection: "host=localhost dbname=test"
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.state.backend, StateBackendKind::Postgres);
+        assert_eq!(
+            config.state.connection,
+            Some("host=localhost dbname=test".to_string())
+        );
     }
 
     #[test]

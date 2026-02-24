@@ -4,8 +4,8 @@ use anyhow::Result;
 use rapidbyte_types::checkpoint::Checkpoint;
 use rapidbyte_types::cursor::CursorValue;
 
-use rapidbyte_state::backend::{CursorState, PipelineId, StreamName};
 use rapidbyte_state::StateBackend;
+use rapidbyte_types::state::{CursorState, PipelineId, StreamName};
 
 /// Correlate source and destination checkpoints, persisting cursor state only when
 /// both sides confirm the data for a stream. Returns the number of cursors advanced.
@@ -50,7 +50,7 @@ pub(crate) fn correlate_and_persist_cursors(
         let cursor = CursorState {
             cursor_field: Some(cursor_field.clone()),
             cursor_value: Some(value_str.clone()),
-            updated_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
         };
         state_backend.set_cursor(pipeline, &StreamName::new(src_cp.stream.clone()), &cursor)?;
         tracing::info!(

@@ -26,8 +26,8 @@ use crate::runtime::component_runtime::{
     self, parse_connector_ref, resolve_min_limit, Frame, HostTimings, LoadedComponent,
     SandboxOverrides, WasmRuntime,
 };
-use rapidbyte_state::backend::{PipelineId, RunStats, RunStatus, StreamName};
 use rapidbyte_state::{SqliteStateBackend, StateBackend};
+use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
 
 struct StreamResult {
     read_summary: ReadSummary,
@@ -179,7 +179,7 @@ async fn execute_pipeline_once(
     tracing::info!(pipeline = config.pipeline, "Starting pipeline run");
 
     let connectors = resolve_connectors(config)?;
-    let state = Arc::new(create_state_backend(config).map_err(PipelineError::Infrastructure)?);
+    let state = create_state_backend(config).map_err(PipelineError::Infrastructure)?;
     let run_id = state
         .start_run(&pipeline_id, &StreamName::new("all"))
         .map_err(|e| PipelineError::Infrastructure(e.into()))?;
@@ -1122,18 +1122,32 @@ pub async fn discover_connector(
     .map_err(|e| anyhow::anyhow!("Discover task panicked: {}", e))?
 }
 
-fn create_state_backend(config: &PipelineConfig) -> Result<SqliteStateBackend> {
+fn create_state_backend(config: &PipelineConfig) -> Result<Arc<dyn StateBackend>> {
     match config.state.backend {
-        StateBackendKind::Sqlite => match &config.state.connection {
-            Some(path) => {
-                SqliteStateBackend::open(Path::new(path)).context("Failed to open state DB")
-            }
-            None => {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-                let state_path = PathBuf::from(home).join(".rapidbyte").join("state.db");
-                SqliteStateBackend::open(&state_path).context("Failed to open default state DB")
-            }
-        },
+        StateBackendKind::Sqlite => {
+            let backend = match &config.state.connection {
+                Some(path) => {
+                    SqliteStateBackend::open(Path::new(path)).context("Failed to open state DB")?
+                }
+                None => {
+                    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+                    let state_path = PathBuf::from(home).join(".rapidbyte").join("state.db");
+                    SqliteStateBackend::open(&state_path)
+                        .context("Failed to open default state DB")?
+                }
+            };
+            Ok(Arc::new(backend) as Arc<dyn StateBackend>)
+        }
+        StateBackendKind::Postgres => {
+            let connstr = config
+                .state
+                .connection
+                .as_deref()
+                .unwrap_or("host=localhost dbname=rapidbyte_state");
+            let backend = rapidbyte_state::PostgresStateBackend::open(connstr)
+                .map_err(|e| anyhow::anyhow!("failed to open Postgres state backend: {e}"))?;
+            Ok(Arc::new(backend) as Arc<dyn StateBackend>)
+        }
     }
 }
 

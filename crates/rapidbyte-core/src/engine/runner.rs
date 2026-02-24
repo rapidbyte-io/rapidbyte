@@ -23,8 +23,8 @@ use crate::runtime::component_runtime::{
     LoadedComponent, SandboxOverrides, WasmRuntime,
 };
 use crate::runtime::wasm_runtime::create_component_linker;
-use rapidbyte_state::backend::RunStats;
 use rapidbyte_state::{SqliteStateBackend, StateBackend};
+use rapidbyte_types::state::RunStats;
 
 #[derive(Debug, Clone, Default)]
 pub struct PipelineCounts {
