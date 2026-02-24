@@ -56,7 +56,7 @@ fn bench_persist_cursor(c: &mut Criterion) {
                         let cursor = CursorState {
                             cursor_field: Some("id".to_string()),
                             cursor_value: Some(counter.to_string()),
-                            updated_at: Utc::now(),
+                            updated_at: Utc::now().to_rfc3339(),
                         };
                         backend.set_cursor(&pipeline, stream, &cursor).unwrap();
                         counter += 1;
@@ -89,7 +89,7 @@ fn bench_get_cursor(c: &mut Criterion) {
                     let cursor = CursorState {
                         cursor_field: Some("id".to_string()),
                         cursor_value: Some(i.to_string()),
-                        updated_at: Utc::now(),
+                        updated_at: Utc::now().to_rfc3339(),
                     };
                     backend.set_cursor(&pipeline, stream, &cursor).unwrap();
                 }
