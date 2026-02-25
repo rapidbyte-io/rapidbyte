@@ -15,6 +15,7 @@
 //! | `socket`      | Host TCP socket helpers |
 //! | `connector`   | Connector path resolution + manifest loading |
 //! | `compression` | IPC channel compression (lz4/zstd) |
+//! | `frame`       | Host-side frame table for V3 zero-copy batch transport |
 //! | `error`       | Runtime error types |
 
 #![warn(clippy::pedantic)]
@@ -23,6 +24,7 @@ pub mod acl;
 pub mod bindings;
 pub mod compression;
 pub mod connector;
+pub mod frame;
 pub mod engine;
 pub mod error;
 pub mod host_state;
@@ -38,6 +40,7 @@ pub use bindings::{
 pub use compression::CompressionCodec;
 pub use connector::{load_connector_manifest, parse_connector_ref, resolve_connector_path};
 pub use engine::{create_component_linker, HasStoreLimits, LoadedComponent, WasmRuntime};
+pub use frame::FrameTable;
 pub use host_state::{ComponentHostState, Frame, HostTimings};
 pub use sandbox::{resolve_min_limit, SandboxOverrides};
 
