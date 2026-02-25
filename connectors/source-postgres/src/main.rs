@@ -1,7 +1,8 @@
 //! Source connector for `PostgreSQL`.
 //!
 //! Implements discovery and read paths (full-refresh, incremental cursor reads,
-//! and CDC logical replication) and streams Arrow IPC batches to the host.
+//! and CDC via `pgoutput` logical replication) and streams Arrow IPC batches to
+//! the host.
 
 mod cdc;
 mod client;

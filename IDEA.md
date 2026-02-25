@@ -304,7 +304,7 @@ resources:
 |------|-------------|
 | `full_refresh` | Read entire table, no cursor tracking |
 | `incremental` | Cursor-based delta reads; resumes from last checkpoint value |
-| `cdc` | PostgreSQL logical replication via `pg_logical_slot_get_changes()` |
+| `cdc` | PostgreSQL logical replication via `pgoutput` protocol |
 
 ## Write Modes
 
@@ -316,21 +316,12 @@ resources:
 
 ## CDC (Change Data Capture)
 
-PostgreSQL logical replication with two plugin tiers:
+PostgreSQL logical replication via the native `pgoutput` protocol.
 
-### Current: `test_decoding`
-
-- Calls `pg_logical_slot_get_changes()` to consume WAL changes.
-- Parses INSERT, UPDATE, DELETE operations from `test_decoding` text output.
-- Adds `_rb_op` metadata column with operation type (`insert`/`update`/`delete`).
-- Tracks WAL LSN as cursor for checkpoint recovery.
-- Batches changes into Arrow record batches (10,000 rows per batch).
-- Destructive slot consumption requires checkpoint safety for exactly-once delivery.
-
-### Planned (P0): `pgoutput`
+### `pgoutput`
 
 `pgoutput` is the native binary logical replication protocol used by standard PostgreSQL
-logical replication. It replaces `test_decoding` as the primary CDC plugin:
+logical replication:
 
 - **Binary protocol** — no text parsing, preserves rich type information.
 - **Native support** — no extension installation required, works with all managed PG
@@ -339,6 +330,10 @@ logical replication. It replaces `test_decoding` as the primary CDC plugin:
   automatic schema discovery from the WAL stream itself.
 - **Streaming transactions** — supports large transactions streamed in chunks rather
   than buffered entirely in memory.
+- Adds `_rb_op` metadata column with operation type (`insert`/`update`/`delete`).
+- Tracks WAL LSN as cursor for checkpoint recovery.
+- Batches changes into Arrow record batches (10,000 rows per batch).
+- Destructive slot consumption requires checkpoint safety for exactly-once delivery.
 
 ### CDC Edge Cases
 
@@ -548,7 +543,7 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 - Source, Destination, Transform connector lifecycle
 - Connector manifests with config schema validation
 - Pipeline YAML configuration
-- Three sync modes: full_refresh, incremental, CDC (`test_decoding`)
+- Three sync modes: full_refresh, incremental, CDC (`pgoutput` logical replication)
 - Three write modes: append, replace, upsert
 - Schema evolution policies (4 dimensions)
 - Dead letter queue with SQLite persistence
@@ -567,8 +562,6 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 
 ### Critical path (P0)
 
-- **`pgoutput` CDC plugin** — binary protocol, no text parsing, native PG support,
-  schema evolution mid-stream, TOAST handling
 - **S3 state backend** — enables ephemeral deployments (CI/CD, Lambda, K8s Jobs)
 - **Dry run mode** (`--dry-run --limit N`) — instant feedback loop for pipeline dev
 - **DataFusion SQL transforms** — in-flight aggregation/filtering before warehouse
