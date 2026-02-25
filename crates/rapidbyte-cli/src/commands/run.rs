@@ -137,17 +137,57 @@ pub async fn execute(pipeline_path: &Path, dry_run: bool, limit: Option<u64>) ->
             println!("@@BENCH_JSON@@{}", json);
         }
         PipelineOutcome::DryRun(result) => {
+            use arrow::util::pretty::pretty_format_batches;
+
             println!(
-                "Dry run complete: {} stream(s), {:.2}s",
+                "Dry run: '{}' ({} stream{})",
+                config.pipeline,
                 result.streams.len(),
-                result.duration_secs,
+                if result.streams.len() == 1 { "" } else { "s" },
             );
+            println!();
+
             for stream in &result.streams {
+                println!("Stream: {}", stream.stream_name);
+
+                if stream.batches.is_empty() {
+                    println!("  (no data)");
+                } else {
+                    // Print schema
+                    let schema = stream.batches[0].schema();
+                    println!("  Columns:");
+                    for field in schema.fields() {
+                        println!(
+                            "    {}: {:?}{}",
+                            field.name(),
+                            field.data_type(),
+                            if field.is_nullable() { " (nullable)" } else { "" }
+                        );
+                    }
+                    println!();
+
+                    // Print table
+                    match pretty_format_batches(&stream.batches) {
+                        Ok(table) => println!("{table}"),
+                        Err(e) => println!("  (display error: {e})"),
+                    }
+                }
+
                 println!(
-                    "  Stream '{}': {} rows, {} batches",
-                    stream.stream_name,
+                    "{} rows ({}, {} batch{})",
                     stream.total_rows,
+                    format_bytes(stream.total_bytes),
                     stream.batches.len(),
+                    if stream.batches.len() == 1 { "" } else { "es" },
+                );
+                println!();
+            }
+
+            println!("Duration: {:.2}s", result.duration_secs);
+            if result.transform_count > 0 {
+                println!(
+                    "Transforms: {} applied ({:.2}s)",
+                    result.transform_count, result.transform_duration_secs,
                 );
             }
         }
