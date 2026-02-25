@@ -6,6 +6,7 @@
 CONNECTOR_BUILDS=(
     "source-postgres:source_postgres"
     "dest-postgres:dest_postgres"
+    "transform-sql:transform_sql"
 )
 
 # Docker Compose file for this connector's infrastructure
