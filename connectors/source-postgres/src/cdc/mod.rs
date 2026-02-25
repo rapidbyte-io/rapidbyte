@@ -5,6 +5,8 @@
 //! and checkpoints by LSN.
 
 mod parser;
+#[allow(dead_code)] // Integration with the CDC reader happens in a later task.
+pub(crate) mod pgoutput;
 
 use std::collections::HashMap;
 use std::sync::Arc;
