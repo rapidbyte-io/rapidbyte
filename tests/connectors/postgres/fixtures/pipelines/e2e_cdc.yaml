@@ -9,6 +9,7 @@ source:
     user: postgres
     password: postgres
     database: rapidbyte_test
+    publication: rapidbyte_users
   streams:
     - name: users
       sync_mode: cdc

@@ -21,3 +21,8 @@ INSERT INTO orders (user_id, amount_cents, status) VALUES
     (1, 5000, 'completed'),
     (2, 12000, 'pending'),
     (1, 3500, 'completed');
+
+-- Publication for CDC (pgoutput requires a publication).
+-- Drop first to make script idempotent on re-runs.
+DROP PUBLICATION IF EXISTS rapidbyte_users;
+CREATE PUBLICATION rapidbyte_users FOR TABLE users;
