@@ -1,0 +1,34 @@
+version: "1.0"
+pipeline: e2e_sql_transform
+
+source:
+  use: source-postgres
+  config:
+    host: localhost
+    port: 5433
+    user: postgres
+    password: postgres
+    database: rapidbyte_test
+  streams:
+    - name: transform_test
+      sync_mode: full_refresh
+
+transforms:
+  - use: transform-sql
+    config:
+      query: "SELECT id, UPPER(name) AS name, age FROM input"
+
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+    port: 5433
+    user: postgres
+    password: postgres
+    database: rapidbyte_test
+    schema: raw_transform
+  write_mode: append
+
+state:
+  backend: sqlite
+  connection: /tmp/rapidbyte_e2e_sql_transform_state.db
