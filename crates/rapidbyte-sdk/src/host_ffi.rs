@@ -41,8 +41,18 @@ pub enum SocketWriteResult {
 /// Host imports abstraction to make host FFI behavior testable on native targets.
 pub trait HostImports: Send + Sync {
     fn log(&self, level: i32, message: &str);
-    fn emit_batch(&self, ipc_bytes: &[u8]) -> Result<(), ConnectorError>;
-    fn next_batch(&self, max_bytes: u64) -> Result<Option<Vec<u8>>, ConnectorError>;
+
+    // V3 frame lifecycle
+    fn frame_new(&self, capacity: u64) -> Result<u64, ConnectorError>;
+    fn frame_write(&self, handle: u64, chunk: &[u8]) -> Result<u64, ConnectorError>;
+    fn frame_seal(&self, handle: u64) -> Result<(), ConnectorError>;
+    fn frame_len(&self, handle: u64) -> Result<u64, ConnectorError>;
+    fn frame_read(&self, handle: u64, offset: u64, len: u64) -> Result<Vec<u8>, ConnectorError>;
+    fn frame_drop(&self, handle: u64);
+
+    // V3 batch transport (handle-based)
+    fn emit_batch(&self, handle: u64) -> Result<(), ConnectorError>;
+    fn next_batch(&self) -> Result<Option<u64>, ConnectorError>;
 
     fn state_get(&self, scope: StateScope, key: &str) -> Result<Option<String>, ConnectorError>;
     fn state_put(&self, scope: StateScope, key: &str, value: &str) -> Result<(), ConnectorError>;
@@ -134,6 +144,7 @@ fn from_component_error(
             ct::ErrorCategory::Data => ErrorCategory::Data,
             ct::ErrorCategory::Schema => ErrorCategory::Schema,
             ct::ErrorCategory::Internal => ErrorCategory::Internal,
+            ct::ErrorCategory::Frame => ErrorCategory::Frame,
         },
         scope: match err.scope {
             ct::ErrorScope::PerStream => ErrorScope::Stream,
@@ -170,21 +181,38 @@ impl HostImports for WasmHostImports {
         bindings::rapidbyte::connector::host::log(level as u32, message);
     }
 
-    fn emit_batch(&self, ipc_bytes: &[u8]) -> Result<(), ConnectorError> {
-        bindings::rapidbyte::connector::host::emit_batch(ipc_bytes).map_err(from_component_error)
+    fn frame_new(&self, capacity: u64) -> Result<u64, ConnectorError> {
+        bindings::rapidbyte::connector::host::frame_new(capacity).map_err(from_component_error)
     }
 
-    fn next_batch(&self, max_bytes: u64) -> Result<Option<Vec<u8>>, ConnectorError> {
-        let next =
-            bindings::rapidbyte::connector::host::next_batch().map_err(from_component_error)?;
-        match next {
-            Some(batch) if batch.len() as u64 > max_bytes => Err(ConnectorError::internal(
-                "BATCH_TOO_LARGE",
-                format!("Batch {} exceeds max {}", batch.len(), max_bytes),
-            )),
-            Some(batch) => Ok(Some(batch)),
-            None => Ok(None),
-        }
+    fn frame_write(&self, handle: u64, chunk: &[u8]) -> Result<u64, ConnectorError> {
+        bindings::rapidbyte::connector::host::frame_write(handle, chunk)
+            .map_err(from_component_error)
+    }
+
+    fn frame_seal(&self, handle: u64) -> Result<(), ConnectorError> {
+        bindings::rapidbyte::connector::host::frame_seal(handle).map_err(from_component_error)
+    }
+
+    fn frame_len(&self, handle: u64) -> Result<u64, ConnectorError> {
+        bindings::rapidbyte::connector::host::frame_len(handle).map_err(from_component_error)
+    }
+
+    fn frame_read(&self, handle: u64, offset: u64, len: u64) -> Result<Vec<u8>, ConnectorError> {
+        bindings::rapidbyte::connector::host::frame_read(handle, offset, len)
+            .map_err(from_component_error)
+    }
+
+    fn frame_drop(&self, handle: u64) {
+        bindings::rapidbyte::connector::host::frame_drop(handle);
+    }
+
+    fn emit_batch(&self, handle: u64) -> Result<(), ConnectorError> {
+        bindings::rapidbyte::connector::host::emit_batch(handle).map_err(from_component_error)
+    }
+
+    fn next_batch(&self) -> Result<Option<u64>, ConnectorError> {
+        bindings::rapidbyte::connector::host::next_batch().map_err(from_component_error)
     }
 
     fn state_get(&self, scope: StateScope, key: &str) -> Result<Option<String>, ConnectorError> {
@@ -315,11 +343,38 @@ pub struct StubHostImports;
 impl HostImports for StubHostImports {
     fn log(&self, _level: i32, _message: &str) {}
 
-    fn emit_batch(&self, _ipc_bytes: &[u8]) -> Result<(), ConnectorError> {
+    fn frame_new(&self, _capacity: u64) -> Result<u64, ConnectorError> {
+        Ok(1)
+    }
+
+    fn frame_write(&self, _handle: u64, _chunk: &[u8]) -> Result<u64, ConnectorError> {
+        Ok(0)
+    }
+
+    fn frame_seal(&self, _handle: u64) -> Result<(), ConnectorError> {
         Ok(())
     }
 
-    fn next_batch(&self, _max_bytes: u64) -> Result<Option<Vec<u8>>, ConnectorError> {
+    fn frame_len(&self, _handle: u64) -> Result<u64, ConnectorError> {
+        Ok(0)
+    }
+
+    fn frame_read(
+        &self,
+        _handle: u64,
+        _offset: u64,
+        _len: u64,
+    ) -> Result<Vec<u8>, ConnectorError> {
+        Ok(vec![])
+    }
+
+    fn frame_drop(&self, _handle: u64) {}
+
+    fn emit_batch(&self, _handle: u64) -> Result<(), ConnectorError> {
+        Ok(())
+    }
+
+    fn next_batch(&self) -> Result<Option<u64>, ConnectorError> {
         Ok(None)
     }
 
@@ -393,12 +448,35 @@ pub fn log(level: i32, message: &str) {
     host_imports().log(level, message)
 }
 
-/// Emit an Arrow RecordBatch to the host pipeline.
+/// Emit an Arrow RecordBatch to the host pipeline via V3 frame transport.
 ///
-/// The batch is serialized to IPC format internally.
+/// Streams IPC encoding directly into a host frame via `FrameWriter`,
+/// eliminating the guest-side `Vec<u8>` IPC buffer allocation.
 pub fn emit_batch(batch: &RecordBatch) -> Result<(), ConnectorError> {
-    let ipc_bytes = crate::arrow::ipc::encode_ipc(batch)?;
-    host_imports().emit_batch(&ipc_bytes)
+    let imports = host_imports();
+
+    let capacity = batch.get_array_memory_size() as u64 + 1024;
+    let handle = imports.frame_new(capacity)?;
+
+    // Stream IPC directly into host frame -- no guest Vec<u8>
+    {
+        let mut writer = crate::frame_writer::FrameWriter::new(handle, imports);
+        let mut ipc_writer =
+            arrow::ipc::writer::StreamWriter::try_new(&mut writer, batch.schema().as_ref())
+                .map_err(|e| {
+                    ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC writer init: {e}"))
+                })?;
+        ipc_writer.write(batch).map_err(|e| {
+            ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC write: {e}"))
+        })?;
+        ipc_writer.finish().map_err(|e| {
+            ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC finish: {e}"))
+        })?;
+    }
+
+    imports.frame_seal(handle)?;
+    imports.emit_batch(handle)?;
+    Ok(())
 }
 
 /// Receive the next Arrow RecordBatch from the host pipeline.
@@ -408,13 +486,27 @@ pub fn emit_batch(batch: &RecordBatch) -> Result<(), ConnectorError> {
 pub fn next_batch(
     max_bytes: u64,
 ) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, ConnectorError> {
-    match host_imports().next_batch(max_bytes)? {
-        Some(ipc_bytes) => {
-            let (schema, batches) = crate::arrow::ipc::decode_ipc(&ipc_bytes)?;
-            Ok(Some((schema, batches)))
-        }
-        None => Ok(None),
+    let imports = host_imports();
+
+    let Some(handle) = imports.next_batch()? else {
+        return Ok(None);
+    };
+
+    let frame_len = imports.frame_len(handle)?;
+    if frame_len > max_bytes {
+        imports.frame_drop(handle);
+        return Err(ConnectorError::internal(
+            "BATCH_TOO_LARGE",
+            format!("Batch {frame_len} exceeds max {max_bytes}"),
+        ));
     }
+
+    // Read entire frame (inherent WIT boundary copy)
+    let ipc_bytes = imports.frame_read(handle, 0, frame_len)?;
+    imports.frame_drop(handle);
+
+    let (schema, batches) = crate::arrow::ipc::decode_ipc(&ipc_bytes)?;
+    Ok(Some((schema, batches)))
 }
 
 pub fn state_get(scope: StateScope, key: &str) -> Result<Option<String>, ConnectorError> {

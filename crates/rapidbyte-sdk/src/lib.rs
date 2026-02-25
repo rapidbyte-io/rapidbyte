@@ -12,6 +12,8 @@ pub mod connector;
 #[cfg(feature = "runtime")]
 pub mod context;
 #[cfg(feature = "runtime")]
+pub mod frame_writer;
+#[cfg(feature = "runtime")]
 pub mod host_ffi;
 #[cfg(feature = "runtime")]
 pub mod host_tcp;

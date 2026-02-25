@@ -15,7 +15,8 @@ use crate::error::ConnectorError;
 
 /// Encode a RecordBatch into Arrow IPC stream bytes.
 pub fn encode_ipc(batch: &RecordBatch) -> Result<Vec<u8>, ConnectorError> {
-    let mut buf = Vec::new();
+    let capacity = batch.get_array_memory_size() + 1024;
+    let mut buf = Vec::with_capacity(capacity);
     let mut writer = StreamWriter::try_new(&mut buf, batch.schema().as_ref()).map_err(|e| {
         ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC writer init: {e}"))
     })?;
