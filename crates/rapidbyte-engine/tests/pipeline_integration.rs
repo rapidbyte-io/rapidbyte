@@ -277,9 +277,17 @@ async fn test_pg_to_pg_full_pipeline() {
 
     validator::validate_pipeline(&config).expect("Pipeline validation failed");
 
-    let result = rapidbyte_engine::orchestrator::run_pipeline(&config)
+    let options = rapidbyte_engine::execution::ExecutionOptions::default();
+    let outcome = rapidbyte_engine::orchestrator::run_pipeline(&config, &options)
         .await
         .expect("Pipeline run failed");
+
+    let result = match outcome {
+        rapidbyte_engine::execution::PipelineOutcome::Run(r) => r,
+        rapidbyte_engine::execution::PipelineOutcome::DryRun(_) => {
+            panic!("Expected Run outcome, got DryRun")
+        }
+    };
 
     // Source has 3 users + 3 orders = 6 records
     assert!(

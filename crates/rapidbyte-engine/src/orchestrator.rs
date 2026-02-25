@@ -14,9 +14,11 @@ use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
 use rapidbyte_types::wire::{ConnectorRole, SyncMode};
 use tokio::sync::mpsc;
 
+use crate::arrow::ipc_to_record_batches;
 use crate::checkpoint::correlate_and_persist_cursors;
 use crate::config::types::{parse_byte_size, PipelineConfig};
 use crate::error::{compute_backoff, PipelineError};
+use crate::execution::{DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineOutcome};
 use crate::resolve::{
     build_sandbox_overrides, check_state_backend, create_state_backend,
     load_and_validate_manifest, resolve_connectors, validate_config_against_schema,
@@ -45,6 +47,7 @@ struct StreamResult {
     vm_setup_secs: f64,
     recv_secs: f64,
     transform_durations: Vec<f64>,
+    dry_run_result: Option<DryRunStreamResult>,
 }
 
 #[derive(Clone)]
@@ -104,6 +107,7 @@ struct AggregatedStreamResults {
     dlq_records: Vec<DlqRecord>,
     final_stats: RunStats,
     first_error: Option<PipelineError>,
+    dry_run_streams: Vec<DryRunStreamResult>,
 }
 
 /// Run a full pipeline: source -> destination with state tracking.
@@ -113,16 +117,19 @@ struct AggregatedStreamResults {
 ///
 /// Returns a `PipelineError` if the pipeline fails after exhausting retries
 /// or encounters a non-retryable error.
-pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult, PipelineError> {
+pub async fn run_pipeline(
+    config: &PipelineConfig,
+    options: &ExecutionOptions,
+) -> Result<PipelineOutcome, PipelineError> {
     let max_retries = config.resources.max_retries;
     let mut attempt = 0u32;
 
     loop {
         attempt += 1;
-        let result = execute_pipeline_once(config, attempt).await;
+        let result = execute_pipeline_once(config, options, attempt).await;
 
         match result {
-            Ok(pipeline_result) => return Ok(pipeline_result),
+            Ok(outcome) => return Ok(outcome),
             Err(ref err) if err.is_retryable() && attempt <= max_retries => {
                 if let Some(connector_err) = err.as_connector_error() {
                     let delay = compute_backoff(connector_err, attempt);
@@ -181,11 +188,16 @@ pub async fn run_pipeline(config: &PipelineConfig) -> Result<PipelineResult, Pip
 
 async fn execute_pipeline_once(
     config: &PipelineConfig,
+    options: &ExecutionOptions,
     attempt: u32,
-) -> Result<PipelineResult, PipelineError> {
+) -> Result<PipelineOutcome, PipelineError> {
     let start = Instant::now();
     let pipeline_id = PipelineId::new(config.pipeline.clone());
-    tracing::info!(pipeline = config.pipeline, "Starting pipeline run");
+    tracing::info!(
+        pipeline = config.pipeline,
+        dry_run = options.dry_run,
+        "Starting pipeline run"
+    );
 
     let connectors = resolve_connectors(config)?;
     let state = create_state_backend(config).map_err(PipelineError::Infrastructure)?;
@@ -194,11 +206,34 @@ async fn execute_pipeline_once(
         .map_err(|e| PipelineError::Infrastructure(e.into()))?;
 
     let modules = load_modules(config, &connectors).await?;
-    let stream_build = build_stream_contexts(config, state.as_ref())?;
+    let stream_build = build_stream_contexts(config, state.as_ref(), options.limit)?;
     let aggregated =
-        execute_streams(config, &connectors, &modules, &stream_build, state.clone()).await?;
+        execute_streams(config, &connectors, &modules, &stream_build, state.clone(), options)
+            .await?;
 
-    finalize_run(
+    if options.dry_run {
+        let duration_secs = start.elapsed().as_secs_f64();
+        let src_perf = aggregated.total_read_summary.perf.as_ref();
+        return Ok(PipelineOutcome::DryRun(DryRunResult {
+            streams: aggregated.dry_run_streams,
+            source: SourceTiming {
+                duration_secs: aggregated.max_src_duration,
+                module_load_ms: modules.source_module_load_ms,
+                connect_secs: src_perf.map_or(0.0, |p| p.connect_secs),
+                query_secs: src_perf.map_or(0.0, |p| p.query_secs),
+                fetch_secs: src_perf.map_or(0.0, |p| p.fetch_secs),
+                arrow_encode_secs: src_perf.map_or(0.0, |p| p.arrow_encode_secs),
+                emit_nanos: aggregated.src_timings.emit_batch_nanos,
+                compress_nanos: aggregated.src_timings.compress_nanos,
+                emit_count: aggregated.src_timings.emit_batch_count,
+            },
+            transform_count: config.transforms.len(),
+            transform_duration_secs: aggregated.transform_durations.iter().sum(),
+            duration_secs,
+        }));
+    }
+
+    let result = finalize_run(
         config,
         &pipeline_id,
         state.as_ref(),
@@ -207,7 +242,8 @@ async fn execute_pipeline_once(
         start,
         &modules,
         aggregated,
-    )
+    )?;
+    Ok(PipelineOutcome::Run(result))
 }
 
 async fn load_modules(
@@ -309,6 +345,7 @@ async fn load_modules(
 fn build_stream_contexts(
     config: &PipelineConfig,
     state: &dyn StateBackend,
+    max_records: Option<u64>,
 ) -> Result<StreamBuild, PipelineError> {
     let max_batch = parse_byte_size(&config.resources.max_batch_bytes).map_err(|e| {
         PipelineError::Infrastructure(anyhow::anyhow!(
@@ -336,6 +373,7 @@ fn build_stream_contexts(
         checkpoint_interval_rows: config.resources.checkpoint_interval_rows,
         checkpoint_interval_seconds: config.resources.checkpoint_interval_seconds,
         max_inflight_batches: config.resources.max_inflight_batches,
+        max_records,
         ..StreamLimits::default()
     };
 
@@ -412,6 +450,7 @@ async fn execute_streams(
     modules: &LoadedModules,
     stream_build: &StreamBuild,
     state: Arc<dyn StateBackend>,
+    options: &ExecutionOptions,
 ) -> Result<AggregatedStreamResults, PipelineError> {
     let (source_connector_id, source_connector_version) =
         parse_connector_ref(&config.source.use_ref);
@@ -499,6 +538,8 @@ async fn execute_streams(
         let stream_ctx = stream_ctx.clone();
         let run_dlq_records = run_dlq_records.clone();
         let transforms = modules.transform_modules.clone();
+        let is_dry_run = options.dry_run;
+        let dry_run_limit = options.limit;
 
         let handle = tokio::spawn(async move {
             let num_t = transforms.len();
@@ -564,100 +605,195 @@ async fn execute_streams(
                 transform_handles.push((i, t_handle));
             }
 
-            let dst_handle = tokio::task::spawn_blocking(move || {
-                run_destination_stream(
-                    &dest_module,
-                    dest_rx,
-                    run_dlq_records,
-                    state_dst,
-                    &params.pipeline_name,
-                    &params.dest_connector_id,
-                    &params.dest_connector_version,
-                    &params.dest_config,
-                    &stream_ctx_for_dst,
-                    stats_dst,
-                    params.dest_permissions.as_ref(),
-                    params.compression,
-                    params.dest_overrides.as_ref(),
-                )
-            });
+            if is_dry_run {
+                // Dry-run: collect frames instead of running destination connector
+                let compression = params.compression;
+                let collector_handle =
+                    tokio::spawn(
+                        collect_dry_run_frames(dest_rx, dry_run_limit, compression),
+                    );
 
-            let src_result = src_handle.await.map_err(|e| {
-                PipelineError::Infrastructure(anyhow::anyhow!(
-                    "Source task panicked for stream '{}': {}",
-                    stream_ctx.stream_name,
-                    e
-                ))
-            })?;
-
-            let mut transform_durations = Vec::new();
-            let mut first_transform_error: Option<PipelineError> = None;
-            for (i, t_handle) in transform_handles {
-                let result = t_handle.await.map_err(|e| {
+                let src_result = src_handle.await.map_err(|e| {
                     PipelineError::Infrastructure(anyhow::anyhow!(
-                        "Transform {} task panicked for stream '{}': {}",
-                        i,
+                        "Source task panicked for stream '{}': {}",
                         stream_ctx.stream_name,
                         e
                     ))
                 })?;
-                match result {
-                    Ok(result) => {
-                        tracing::info!(
-                            transform_index = i,
-                            stream = stream_ctx.stream_name,
-                            duration_secs = result.duration_secs,
-                            records_in = result.summary.records_in,
-                            records_out = result.summary.records_out,
-                            "Transform stage completed for stream"
-                        );
-                        transform_durations.push(result.duration_secs);
-                    }
-                    Err(e) => {
-                        tracing::error!(
-                            transform_index = i,
-                            stream = stream_ctx.stream_name,
-                            "Transform failed: {}",
+
+                let mut transform_durations = Vec::new();
+                let mut first_transform_error: Option<PipelineError> = None;
+                for (i, t_handle) in transform_handles {
+                    let result = t_handle.await.map_err(|e| {
+                        PipelineError::Infrastructure(anyhow::anyhow!(
+                            "Transform {} task panicked for stream '{}': {}",
+                            i,
+                            stream_ctx.stream_name,
                             e
-                        );
-                        if first_transform_error.is_none() {
-                            first_transform_error = Some(e);
+                        ))
+                    })?;
+                    match result {
+                        Ok(result) => {
+                            tracing::info!(
+                                transform_index = i,
+                                stream = stream_ctx.stream_name,
+                                duration_secs = result.duration_secs,
+                                records_in = result.summary.records_in,
+                                records_out = result.summary.records_out,
+                                "Transform stage completed for stream (dry-run)"
+                            );
+                            transform_durations.push(result.duration_secs);
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                transform_index = i,
+                                stream = stream_ctx.stream_name,
+                                "Transform failed: {}",
+                                e
+                            );
+                            if first_transform_error.is_none() {
+                                first_transform_error = Some(e);
+                            }
                         }
                     }
                 }
+
+                let mut collected = collector_handle.await.map_err(|e| {
+                    PipelineError::Infrastructure(anyhow::anyhow!(
+                        "Dry-run collector task panicked for stream '{}': {}",
+                        stream_ctx.stream_name,
+                        e
+                    ))
+                })??;
+
+                drop(permit);
+
+                if let Some(transform_err) = first_transform_error {
+                    return Err(transform_err);
+                }
+
+                let src = src_result?;
+                collected.stream_name.clone_from(&stream_ctx_for_dst.stream_name);
+
+                Ok(StreamResult {
+                    read_summary: src.summary,
+                    write_summary: WriteSummary {
+                        records_written: 0,
+                        bytes_written: 0,
+                        batches_written: 0,
+                        checkpoint_count: 0,
+                        records_failed: 0,
+                        perf: None,
+                    },
+                    source_checkpoints: src.checkpoints,
+                    dest_checkpoints: Vec::new(),
+                    src_host_timings: src.host_timings,
+                    dst_host_timings: HostTimings::default(),
+                    src_duration: src.duration_secs,
+                    dst_duration: 0.0,
+                    vm_setup_secs: 0.0,
+                    recv_secs: 0.0,
+                    transform_durations,
+                    dry_run_result: Some(collected),
+                })
+            } else {
+                // Normal mode: run destination connector
+                let dst_handle = tokio::task::spawn_blocking(move || {
+                    run_destination_stream(
+                        &dest_module,
+                        dest_rx,
+                        run_dlq_records,
+                        state_dst,
+                        &params.pipeline_name,
+                        &params.dest_connector_id,
+                        &params.dest_connector_version,
+                        &params.dest_config,
+                        &stream_ctx_for_dst,
+                        stats_dst,
+                        params.dest_permissions.as_ref(),
+                        params.compression,
+                        params.dest_overrides.as_ref(),
+                    )
+                });
+
+                let src_result = src_handle.await.map_err(|e| {
+                    PipelineError::Infrastructure(anyhow::anyhow!(
+                        "Source task panicked for stream '{}': {}",
+                        stream_ctx.stream_name,
+                        e
+                    ))
+                })?;
+
+                let mut transform_durations = Vec::new();
+                let mut first_transform_error: Option<PipelineError> = None;
+                for (i, t_handle) in transform_handles {
+                    let result = t_handle.await.map_err(|e| {
+                        PipelineError::Infrastructure(anyhow::anyhow!(
+                            "Transform {} task panicked for stream '{}': {}",
+                            i,
+                            stream_ctx.stream_name,
+                            e
+                        ))
+                    })?;
+                    match result {
+                        Ok(result) => {
+                            tracing::info!(
+                                transform_index = i,
+                                stream = stream_ctx.stream_name,
+                                duration_secs = result.duration_secs,
+                                records_in = result.summary.records_in,
+                                records_out = result.summary.records_out,
+                                "Transform stage completed for stream"
+                            );
+                            transform_durations.push(result.duration_secs);
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                transform_index = i,
+                                stream = stream_ctx.stream_name,
+                                "Transform failed: {}",
+                                e
+                            );
+                            if first_transform_error.is_none() {
+                                first_transform_error = Some(e);
+                            }
+                        }
+                    }
+                }
+
+                let dst_result = dst_handle.await.map_err(|e| {
+                    PipelineError::Infrastructure(anyhow::anyhow!(
+                        "Destination task panicked for stream '{}': {}",
+                        stream_ctx.stream_name,
+                        e
+                    ))
+                })?;
+
+                drop(permit);
+
+                if let Some(transform_err) = first_transform_error {
+                    return Err(transform_err);
+                }
+
+                let src = src_result?;
+
+                let dst = dst_result?;
+
+                Ok(StreamResult {
+                    read_summary: src.summary,
+                    write_summary: dst.summary,
+                    source_checkpoints: src.checkpoints,
+                    dest_checkpoints: dst.checkpoints,
+                    src_host_timings: src.host_timings,
+                    dst_host_timings: dst.host_timings,
+                    src_duration: src.duration_secs,
+                    dst_duration: dst.duration_secs,
+                    vm_setup_secs: dst.vm_setup_secs,
+                    recv_secs: dst.recv_secs,
+                    transform_durations,
+                    dry_run_result: None,
+                })
             }
-
-            let dst_result = dst_handle.await.map_err(|e| {
-                PipelineError::Infrastructure(anyhow::anyhow!(
-                    "Destination task panicked for stream '{}': {}",
-                    stream_ctx.stream_name,
-                    e
-                ))
-            })?;
-
-            drop(permit);
-
-            if let Some(transform_err) = first_transform_error {
-                return Err(transform_err);
-            }
-
-            let src = src_result?;
-
-            let dst = dst_result?;
-
-            Ok(StreamResult {
-                read_summary: src.summary,
-                write_summary: dst.summary,
-                source_checkpoints: src.checkpoints,
-                dest_checkpoints: dst.checkpoints,
-                src_host_timings: src.host_timings,
-                dst_host_timings: dst.host_timings,
-                src_duration: src.duration_secs,
-                dst_duration: dst.duration_secs,
-                vm_setup_secs: dst.vm_setup_secs,
-                recv_secs: dst.recv_secs,
-                transform_durations,
-            })
         });
 
         stream_join_handles.push(handle);
@@ -688,6 +824,7 @@ async fn execute_streams(
     let mut max_dst_vm_setup_secs = 0.0;
     let mut max_dst_recv_secs = 0.0;
     let mut transform_durations = Vec::new();
+    let mut dry_run_streams: Vec<DryRunStreamResult> = Vec::new();
     let mut first_error: Option<PipelineError> = None;
 
     for handle in stream_join_handles {
@@ -728,6 +865,10 @@ async fn execute_streams(
                     max_dst_recv_secs = sr.recv_secs;
                 }
                 transform_durations.extend(sr.transform_durations);
+
+                if let Some(dr) = sr.dry_run_result {
+                    dry_run_streams.push(dr);
+                }
             }
             Err(error) => {
                 tracing::error!("Stream failed: {}", error);
@@ -766,6 +907,7 @@ async fn execute_streams(
         dlq_records,
         final_stats,
         first_error,
+        dry_run_streams,
     })
 }
 
@@ -899,6 +1041,73 @@ fn finalize_run(
         duration_secs: duration.as_secs_f64(),
         wasm_overhead_secs,
         retry_count: attempt.saturating_sub(1),
+    })
+}
+
+/// Collect frames from a channel, decode IPC, enforce row limit.
+/// Used in dry-run mode instead of the destination runner.
+async fn collect_dry_run_frames(
+    mut receiver: mpsc::Receiver<Frame>,
+    limit: Option<u64>,
+    compression: Option<rapidbyte_runtime::CompressionCodec>,
+) -> Result<DryRunStreamResult, PipelineError> {
+    let mut batches = Vec::new();
+    let mut total_rows: u64 = 0;
+    let mut total_bytes: u64 = 0;
+
+    while let Some(Frame::Data(data)) = receiver.recv().await {
+        let ipc_bytes = match compression {
+            Some(codec) => {
+                rapidbyte_runtime::compression::decompress(codec, &data).map_err(|e| {
+                    PipelineError::Infrastructure(anyhow::anyhow!(
+                        "Dry-run decompression failed: {e}"
+                    ))
+                })?
+            }
+            None => data.to_vec(),
+        };
+
+        let decoded =
+            ipc_to_record_batches(&ipc_bytes).map_err(PipelineError::Infrastructure)?;
+
+        for batch in decoded {
+            let rows = batch.num_rows() as u64;
+            total_bytes += batch.get_array_memory_size() as u64;
+
+            if let Some(max) = limit {
+                let remaining = max.saturating_sub(total_rows);
+                if remaining == 0 {
+                    return Ok(DryRunStreamResult {
+                        stream_name: String::new(),
+                        batches,
+                        total_rows,
+                        total_bytes,
+                    });
+                }
+                if rows > remaining {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let sliced = batch.slice(0, remaining as usize);
+                    total_rows += remaining;
+                    batches.push(sliced);
+                    return Ok(DryRunStreamResult {
+                        stream_name: String::new(),
+                        batches,
+                        total_rows,
+                        total_bytes,
+                    });
+                }
+            }
+
+            total_rows += rows;
+            batches.push(batch);
+        }
+    }
+
+    Ok(DryRunStreamResult {
+        stream_name: String::new(),
+        batches,
+        total_rows,
+        total_bytes,
     })
 }
 
@@ -1052,5 +1261,82 @@ pub async fn discover_connector(
     })
     .await
     .map_err(|e| anyhow::anyhow!("Discover task panicked: {e}"))?
+}
+
+#[cfg(test)]
+mod dry_run_tests {
+    use super::*;
+    use crate::arrow::record_batch_to_ipc;
+    use arrow::array::{Array, Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    fn make_test_batch(n: usize) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let ids: Vec<i64> = (0..n as i64).collect();
+        let names: Vec<String> = (0..n).map(|i| format!("row_{i}")).collect();
+        RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(Int64Array::from(ids)) as Arc<dyn Array>,
+                Arc::new(StringArray::from(names)) as Arc<dyn Array>,
+            ],
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn collect_dry_run_frames_basic() {
+        let (tx, rx) = mpsc::channel::<Frame>(16);
+        let batch = make_test_batch(5);
+        let ipc = record_batch_to_ipc(&batch).unwrap();
+        tx.send(Frame::Data(bytes::Bytes::from(ipc)))
+            .await
+            .unwrap();
+        tx.send(Frame::EndStream).await.unwrap();
+        drop(tx);
+
+        let result = collect_dry_run_frames(rx, None, None).await.unwrap();
+        assert_eq!(result.total_rows, 5);
+        assert_eq!(result.batches.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn collect_dry_run_frames_with_limit() {
+        let (tx, rx) = mpsc::channel::<Frame>(16);
+        let batch = make_test_batch(100);
+        let ipc = record_batch_to_ipc(&batch).unwrap();
+        tx.send(Frame::Data(bytes::Bytes::from(ipc)))
+            .await
+            .unwrap();
+        tx.send(Frame::EndStream).await.unwrap();
+        drop(tx);
+
+        let result = collect_dry_run_frames(rx, Some(10), None).await.unwrap();
+        assert_eq!(result.total_rows, 10);
+        let total: usize = result.batches.iter().map(RecordBatch::num_rows).sum();
+        assert_eq!(total, 10);
+    }
+
+    #[tokio::test]
+    async fn collect_dry_run_frames_multiple_batches() {
+        let (tx, rx) = mpsc::channel::<Frame>(16);
+        for _ in 0..3 {
+            let batch = make_test_batch(5);
+            let ipc = record_batch_to_ipc(&batch).unwrap();
+            tx.send(Frame::Data(bytes::Bytes::from(ipc)))
+                .await
+                .unwrap();
+        }
+        tx.send(Frame::EndStream).await.unwrap();
+        drop(tx);
+
+        let result = collect_dry_run_frames(rx, Some(12), None).await.unwrap();
+        assert_eq!(result.total_rows, 12);
+    }
 }
 
