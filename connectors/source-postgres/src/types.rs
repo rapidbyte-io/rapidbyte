@@ -172,6 +172,26 @@ pub fn resolve(pg_type: &str) -> TypeInfo {
     }
 }
 
+/// Map a `PostgreSQL` type OID to an Arrow data type.
+///
+/// Common OIDs from `pg_type` system catalog. Unknown OIDs fall back to `Utf8`
+/// since pgoutput text-format values are always valid UTF-8 strings.
+#[must_use]
+pub(crate) fn oid_to_arrow_type(oid: u32) -> ArrowDataType {
+    match oid {
+        16 => ArrowDataType::Boolean,                  // bool
+        20 => ArrowDataType::Int64,                    // int8
+        21 => ArrowDataType::Int16,                    // int2
+        23 => ArrowDataType::Int32,                    // int4
+        700 => ArrowDataType::Float32,                 // float4
+        701 => ArrowDataType::Float64,                 // float8
+        1082 => ArrowDataType::Date32,                 // date
+        1114 | 1184 => ArrowDataType::TimestampMicros, // timestamp / timestamptz
+        // text, varchar, numeric, uuid, jsonb, json, bytea — all Utf8
+        _ => ArrowDataType::Utf8,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,5 +420,16 @@ mod tests {
             );
             assert!(info.needs_cast, "type {pg} should need cast");
         }
+    }
+
+    #[test]
+    fn oid_to_arrow_maps_common_types() {
+        assert_eq!(oid_to_arrow_type(23), ArrowDataType::Int32); // int4
+        assert_eq!(oid_to_arrow_type(20), ArrowDataType::Int64); // int8
+        assert_eq!(oid_to_arrow_type(25), ArrowDataType::Utf8); // text
+        assert_eq!(oid_to_arrow_type(701), ArrowDataType::Float64); // float8
+        assert_eq!(oid_to_arrow_type(16), ArrowDataType::Boolean); // bool
+        assert_eq!(oid_to_arrow_type(1114), ArrowDataType::TimestampMicros); // timestamp
+        assert_eq!(oid_to_arrow_type(99999), ArrowDataType::Utf8); // unknown -> fallback
     }
 }
