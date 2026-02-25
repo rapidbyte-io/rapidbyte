@@ -121,6 +121,10 @@ pub struct StreamLimits {
     /// Checkpoint after this many seconds (0 = disabled).
     #[serde(default)]
     pub checkpoint_interval_seconds: u64,
+    /// Maximum number of records to read (None = unlimited).
+    /// Used by dry-run mode to cap source reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_records: Option<u64>,
 }
 
 impl StreamLimits {
@@ -146,6 +150,7 @@ impl Default for StreamLimits {
             checkpoint_interval_bytes: Self::DEFAULT_CHECKPOINT_INTERVAL_BYTES,
             checkpoint_interval_rows: 0,
             checkpoint_interval_seconds: 0,
+            max_records: None,
         }
     }
 }
@@ -230,5 +235,22 @@ mod tests {
     #[test]
     fn data_error_policy_default_is_fail() {
         assert_eq!(DataErrorPolicy::default(), DataErrorPolicy::Fail);
+    }
+
+    #[test]
+    fn stream_limits_max_records_serde_roundtrip() {
+        let limits = StreamLimits {
+            max_records: Some(500),
+            ..StreamLimits::default()
+        };
+        let json = serde_json::to_string(&limits).unwrap();
+        let back: StreamLimits = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.max_records, Some(500));
+    }
+
+    #[test]
+    fn stream_limits_max_records_default_is_none() {
+        let limits = StreamLimits::default();
+        assert_eq!(limits.max_records, None);
     }
 }
