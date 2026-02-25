@@ -46,8 +46,21 @@ for mode in "${BENCH_MODES[@]}"; do
             continue
         fi
 
-        duration=$(echo "$json_line" | python3 -c "import sys,json; print(f'{json.load(sys.stdin)[\"duration_secs\"]:.3f}')")
-        echo "done (${duration}s)"
+        summary=$(echo "$json_line" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print('|'.join([
+    f'{d[\"duration_secs\"]:.3f}',
+    f'{d.get(\"cpu_cores_mean\", 0.0):.2f}',
+    f'{d.get(\"cpu_cores_max\", 0.0):.2f}',
+    f'{d.get(\"cpu_total_util_pct_mean\", 0.0):.1f}',
+    f'{d.get(\"cpu_total_util_pct_max\", 0.0):.1f}',
+    f'{d.get(\"mem_rss_mb_mean\", 0.0):.1f}',
+    f'{d.get(\"mem_rss_mb_max\", 0.0):.1f}',
+]))
+")
+        IFS='|' read -r duration cpu_cores_mean cpu_cores_max cpu_util_mean cpu_util_max mem_mean_mb mem_max_mb <<< "$summary"
+        echo "done (${duration}s, CPU ${cpu_cores_mean}/${cpu_cores_max} cores avg/max, util ${cpu_util_mean}%/${cpu_util_max}% total, RSS ${mem_mean_mb}/${mem_max_mb} MB avg/max)"
 
         # Collect raw result for mode report
         echo "$json_line" >> "${MODE_RESULTS[$mode]}"

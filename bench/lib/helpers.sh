@@ -136,6 +136,101 @@ git_branch() {
 }
 
 # ── Benchmark execution ─────────────────────────────────────────
+# Detect logical CPU count on Linux/macOS.
+logical_cpu_count() {
+    local cores=""
+
+    if command -v nproc >/dev/null 2>&1; then
+        cores="$(nproc 2>/dev/null || true)"
+    elif command -v getconf >/dev/null 2>&1; then
+        cores="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+    elif command -v sysctl >/dev/null 2>&1; then
+        cores="$(sysctl -n hw.logicalcpu 2>/dev/null || true)"
+    fi
+
+    if [[ ! "$cores" =~ ^[0-9]+$ ]] || [ "$cores" -lt 1 ]; then
+        cores="1"
+    fi
+
+    echo "$cores"
+}
+
+# Sample process %CPU and RSS (KB) until process exits.
+sample_process_resources() {
+    local pid="$1"
+    local sample_file="$2"
+    local interval="${3:-0.20}"
+
+    while kill -0 "$pid" 2>/dev/null; do
+        local sample
+        sample="$(ps -p "$pid" -o %cpu= -o rss= 2>/dev/null | awk 'NF >= 2 {print $1 " " $2; exit}' || true)"
+        if [ -n "$sample" ]; then
+            echo "$sample" >> "$sample_file"
+        fi
+        sleep "$interval"
+    done
+}
+
+# Add sampled resource metrics to a benchmark JSON line.
+append_resource_metrics() {
+    local json_line="$1"
+    local sample_file="$2"
+    local logical_cpus="$3"
+
+    python3 -c "
+import json, sys
+
+d = json.loads(sys.argv[1])
+sample_path = sys.argv[2]
+logical_cpus = max(int(sys.argv[3]), 1)
+
+cpu_samples = []
+rss_samples_kb = []
+
+with open(sample_path) as f:
+    for line in f:
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            cpu_samples.append(float(parts[0]))
+            rss_samples_kb.append(float(parts[1]))
+        except ValueError:
+            continue
+
+def mean(vals):
+    return sum(vals) / len(vals) if vals else 0.0
+
+cpu_mean = mean(cpu_samples)
+cpu_max = max(cpu_samples) if cpu_samples else 0.0
+rss_mean_kb = mean(rss_samples_kb)
+rss_max_kb = max(rss_samples_kb) if rss_samples_kb else 0.0
+
+d['host_logical_cpus'] = logical_cpus
+d['resource_samples'] = len(cpu_samples)
+
+# Raw process CPU from ps (% where 100 ~= one full core)
+d['cpu_process_pct_mean'] = cpu_mean
+d['cpu_process_pct_max'] = cpu_max
+
+# CPU as core-equivalent utilization
+d['cpu_cores_mean'] = cpu_mean / 100.0
+d['cpu_cores_max'] = cpu_max / 100.0
+
+# CPU as percent of total host logical core capacity
+d['cpu_total_util_pct_mean'] = cpu_mean / logical_cpus
+d['cpu_total_util_pct_max'] = cpu_max / logical_cpus
+
+# Resident memory (RSS)
+d['mem_rss_kb_mean'] = rss_mean_kb
+d['mem_rss_kb_max'] = rss_max_kb
+d['mem_rss_mb_mean'] = rss_mean_kb / 1024.0
+d['mem_rss_mb_max'] = rss_max_kb / 1024.0
+
+print(json.dumps(d))
+" "$json_line" "$sample_file" "$logical_cpus"
+}
+
 # Run a single pipeline iteration and return the JSON metrics line.
 # Usage: run_pipeline_bench <pipeline_yaml>
 # Outputs JSON to stdout, status messages to stderr.
@@ -145,14 +240,32 @@ run_pipeline_bench() {
     local target_dir="release"
     [ "$build_mode" != "release" ] && target_dir="debug"
 
-    local output exit_code=0
-    output=$("$PROJECT_ROOT/target/$target_dir/rapidbyte" run \
+    local output_file sample_file output exit_code=0
+    output_file="$(mktemp)"
+    sample_file="$(mktemp)"
+    local logical_cpus
+    logical_cpus="$(logical_cpu_count)"
+
+    "$PROJECT_ROOT/target/$target_dir/rapidbyte" run \
         "$pipeline_yaml" \
-        --log-level warn 2>&1) || exit_code=$?
+        --log-level warn >"$output_file" 2>&1 &
+    local rapidbyte_pid=$!
+
+    sample_process_resources \
+        "$rapidbyte_pid" \
+        "$sample_file" \
+        "${BENCH_RESOURCE_SAMPLE_INTERVAL:-0.20}" &
+    local sampler_pid=$!
+
+    wait "$rapidbyte_pid" || exit_code=$?
+    wait "$sampler_pid" 2>/dev/null || true
+    output="$(cat "$output_file")"
+    rm -f "$output_file"
 
     if [ "$exit_code" -ne 0 ]; then
         echo "Pipeline failed (exit code $exit_code):" >&2
         echo "$output" >&2
+        rm -f "$sample_file"
         return 1
     fi
 
@@ -162,8 +275,12 @@ run_pipeline_bench() {
     if [ -z "$json_line" ]; then
         echo "Pipeline succeeded but no @@BENCH_JSON@@ marker found. Output:" >&2
         echo "$output" >&2
+        rm -f "$sample_file"
         return 1
     fi
+
+    json_line="$(append_resource_metrics "$json_line" "$sample_file" "$logical_cpus")"
+    rm -f "$sample_file"
 
     echo "$json_line"
 }

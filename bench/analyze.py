@@ -79,6 +79,13 @@ def main():
         ("  Recv loop (s)", "dest_recv_secs", "s"),
         ("Source load (ms)", "source_module_load_ms", "ms"),
         ("Dest load (ms)", "dest_module_load_ms", "ms"),
+        ("CPU cores avg", "cpu_cores_mean", "cores"),
+        ("CPU cores peak", "cpu_cores_max", "cores"),
+        ("CPU total util avg (%)", "cpu_total_util_pct_mean", "%"),
+        ("CPU total util peak (%)", "cpu_total_util_pct_max", "%"),
+        ("RSS avg (MB)", "mem_rss_mb_mean", "MB"),
+        ("RSS peak (MB)", "mem_rss_mb_max", "MB"),
+        ("Resource samples", "resource_samples", "count"),
     ]
 
     for mode in ["insert", "copy"]:
@@ -97,7 +104,14 @@ def main():
         for label, key, unit in metrics:
             line = f"  {label:<22s}"
             vals = []
-            fmt = ".1f" if unit == "ms" else ".4f"
+            if unit == "ms":
+                fmt = ".1f"
+            elif unit in {"cores", "%", "MB"}:
+                fmt = ".2f"
+            elif unit == "count":
+                fmt = ".1f"
+            else:
+                fmt = ".4f"
             for sha in shas:
                 matching = [r for r in results if r.get("git_sha") == sha and r.get("mode") == mode]
                 v = avg(matching, key)

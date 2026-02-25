@@ -146,7 +146,17 @@ python3 bench/analyze.py --sha abc1234 def5678
 python3 bench/analyze.py --rows 100000
 ```
 
-Every benchmark run appends enriched JSON results to `target/bench_results/results.jsonl`. Each line includes all `PipelineResult` timing fields plus metadata: `timestamp`, `mode`, `bench_rows`, `aot`, `git_sha`, `git_branch`.
+Every benchmark run appends enriched JSON results to `target/bench_results/results.jsonl`. Each line includes all `PipelineResult` timing fields plus metadata: `timestamp`, `mode`, `bench_rows`, `aot`, `git_sha`, `git_branch`, and resource metrics (`cpu_cores_*`, `cpu_total_util_pct_*`, `mem_rss_mb_*`, `resource_samples`).
+
+### Resource Sampling
+
+`bench.sh` samples host process resources during each `rapidbyte run` iteration:
+
+- CPU: average/peak process CPU, converted to core-equivalent usage and total-host utilization percent
+- Memory: average/peak RSS (resident memory) in MB
+- Sampling cadence: `0.20s` by default, configurable via `BENCH_RESOURCE_SAMPLE_INTERVAL`
+
+These metrics are printed in the per-iteration console output, included in the criterion-style table, and persisted into `results.jsonl`.
 
 ## Understanding the Output
 

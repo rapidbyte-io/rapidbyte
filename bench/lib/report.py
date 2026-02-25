@@ -60,6 +60,18 @@ def fmt_ci(s: dict, unit: str = "s") -> str:
     return f'[{s["ci_lo"]:.4f} {s["mean"]:.4f} {s["ci_hi"]:.4f}] {unit}'
 
 
+def fmt_metric_value(val: float, unit: str) -> str:
+    if unit == "ms":
+        return f"{val:.1f}{unit}"
+    if unit == "%":
+        return f"{val:.2f}{unit}"
+    if unit in {"MB", "cores"}:
+        return f"{val:.2f} {unit}"
+    if unit == "count":
+        return f"{val:.1f}"
+    return f"{val:.4f}{unit}"
+
+
 def main():
     if len(sys.argv) < 4:
         print(f"Usage: {sys.argv[0]} <insert_file> <copy_file> <rows>", file=sys.stderr)
@@ -135,14 +147,21 @@ def main():
         ("  Arrow encode", "source_arrow_encode_secs", "s"),
         ("Source module load", "source_module_load_ms", "ms"),
         ("Dest module load", "dest_module_load_ms", "ms"),
+        ("CPU cores (avg)", "cpu_cores_mean", "cores"),
+        ("CPU cores (peak)", "cpu_cores_max", "cores"),
+        ("CPU total util (avg)", "cpu_total_util_pct_mean", "%"),
+        ("CPU total util (peak)", "cpu_total_util_pct_max", "%"),
+        ("RSS memory (avg)", "mem_rss_mb_mean", "MB"),
+        ("RSS memory (peak)", "mem_rss_mb_max", "MB"),
+        ("Resource samples", "resource_samples", "count"),
     ]
 
     for label, key, unit in metrics:
         i_s = stats([r.get(key, 0) for r in insert_results]) if insert_results else stats([])
         c_s = stats([r.get(key, 0) for r in copy_results]) if copy_results else stats([])
         speedup = f'{i_s["mean"]/c_s["mean"]:.1f}x' if c_s["mean"] > 0.001 else "-"
-        i_val = f'{i_s["mean"]:.4f}{unit}' if i_s["n"] > 0 else "-"
-        c_val = f'{c_s["mean"]:.4f}{unit}' if c_s["n"] > 0 else "-"
+        i_val = fmt_metric_value(i_s["mean"], unit) if i_s["n"] > 0 else "-"
+        c_val = fmt_metric_value(c_s["mean"], unit) if c_s["n"] > 0 else "-"
         print(hdr.format(label, i_val, c_val, speedup))
 
     # ── Throughput summary ────────────────────────────────────────
