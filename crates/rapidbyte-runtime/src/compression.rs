@@ -2,6 +2,7 @@
 
 use std::io::Cursor;
 
+use bytes::Bytes;
 use thiserror::Error;
 
 pub use rapidbyte_types::compression::CompressionCodec;
@@ -45,6 +46,31 @@ pub fn decompress(codec: CompressionCodec, data: &[u8]) -> Result<Vec<u8>, Compr
             zstd::decode_all(Cursor::new(data)).map_err(CompressionError::ZstdDecompress)
         }
     }
+}
+
+/// Compress bytes using the given codec. Returns owned `Bytes`.
+///
+/// # Errors
+///
+/// Returns an error if compression fails.
+pub fn compress_bytes(codec: CompressionCodec, data: &[u8]) -> Result<Bytes, CompressionError> {
+    match codec {
+        CompressionCodec::Lz4 => Ok(Bytes::from(lz4_flex::compress_prepend_size(data))),
+        CompressionCodec::Zstd => Ok(Bytes::from(
+            zstd::bulk::compress(data, ZSTD_COMPRESSION_LEVEL)
+                .map_err(CompressionError::ZstdCompress)?,
+        )),
+    }
+}
+
+/// Decompress bytes using the given codec. Returns `Vec<u8>` because
+/// decompression output cannot share the input buffer.
+///
+/// # Errors
+///
+/// Returns an error if decompression fails.
+pub fn decompress_to_vec(codec: CompressionCodec, data: &[u8]) -> Result<Vec<u8>, CompressionError> {
+    decompress(codec, data)
 }
 
 #[cfg(test)]
@@ -111,5 +137,21 @@ mod tests {
     fn test_invalid_zstd_decompress_returns_error() {
         let bad = vec![1u8, 2, 3, 4];
         assert!(decompress(CompressionCodec::Zstd, &bad).is_err());
+    }
+
+    #[test]
+    fn test_lz4_roundtrip_bytes() {
+        let data = bytes::Bytes::from_static(b"hello world repeated hello world repeated hello world repeated");
+        let compressed = compress_bytes(CompressionCodec::Lz4, &data).unwrap();
+        let decompressed = decompress_to_vec(CompressionCodec::Lz4, &compressed).unwrap();
+        assert_eq!(data.as_ref(), decompressed.as_slice());
+    }
+
+    #[test]
+    fn test_zstd_roundtrip_bytes() {
+        let data = bytes::Bytes::from_static(b"hello world repeated hello world repeated hello world repeated");
+        let compressed = compress_bytes(CompressionCodec::Zstd, &data).unwrap();
+        let decompressed = decompress_to_vec(CompressionCodec::Zstd, &compressed).unwrap();
+        assert_eq!(data.as_ref(), decompressed.as_slice());
     }
 }

@@ -318,9 +318,8 @@ impl ComponentHostState {
 
         let compress_start = Instant::now();
         let batch: bytes::Bytes = if let Some(codec) = self.batch.compression {
-            crate::compression::compress(codec, &batch)
+            crate::compression::compress_bytes(codec, &batch)
                 .map_err(|e| ConnectorError::internal("COMPRESS_FAILED", e.to_string()))?
-                .into()
         } else {
             batch.into()
         };
