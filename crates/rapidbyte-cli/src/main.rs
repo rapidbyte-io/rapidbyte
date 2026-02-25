@@ -26,6 +26,12 @@ enum Commands {
     Run {
         /// Path to pipeline YAML file
         pipeline: PathBuf,
+        /// Preview mode: skip destination, print output to stdout
+        #[arg(long)]
+        dry_run: bool,
+        /// Maximum rows to read per stream (implies --dry-run)
+        #[arg(long)]
+        limit: Option<u64>,
     },
     /// Validate pipeline configuration and connectivity
     Check {
@@ -56,7 +62,9 @@ async fn main() -> anyhow::Result<()> {
     logging::init(&cli.log_level);
 
     match cli.command {
-        Commands::Run { pipeline } => commands::run::execute(&pipeline).await,
+        Commands::Run { pipeline, dry_run, limit } => {
+            commands::run::execute(&pipeline, dry_run, limit).await
+        }
         Commands::Check { pipeline } => commands::check::execute(&pipeline).await,
         Commands::Discover { pipeline } => commands::discover::execute(&pipeline).await,
         Commands::Connectors => commands::connectors::execute().await,

@@ -5,15 +5,20 @@ use anyhow::{Context, Result};
 use rapidbyte_engine::orchestrator;
 use rapidbyte_engine::config::parser;
 use rapidbyte_engine::config::validator;
+use rapidbyte_engine::execution::ExecutionOptions;
 
 /// Execute the `run` command: parse, validate, and run a pipeline.
-pub async fn execute(pipeline_path: &Path) -> Result<()> {
+pub async fn execute(pipeline_path: &Path, dry_run: bool, limit: Option<u64>) -> Result<()> {
     // 1. Parse pipeline YAML
     let config = parser::parse_pipeline(pipeline_path)
         .with_context(|| format!("Failed to parse pipeline: {}", pipeline_path.display()))?;
 
     // 2. Validate
     validator::validate_pipeline(&config)?;
+
+    // Build execution options (--limit implies --dry-run)
+    let dry_run = dry_run || limit.is_some();
+    let _options = ExecutionOptions { dry_run, limit };
 
     tracing::info!(
         pipeline = config.pipeline,
