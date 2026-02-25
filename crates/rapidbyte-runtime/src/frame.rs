@@ -64,6 +64,7 @@ impl FrameTable {
 
     /// Allocate a new writable frame with the given byte capacity.
     /// Returns the opaque handle.
+    #[allow(clippy::cast_possible_truncation)] // host is 64-bit; u64 == usize
     pub fn alloc(&mut self, capacity: u64) -> u64 {
         let handle = self.next_handle;
         self.next_handle += 1;
@@ -73,7 +74,12 @@ impl FrameTable {
     }
 
     /// Append `chunk` to a writable frame. Returns the total byte length
-    /// after appending. Errors if the frame is sealed or the handle is invalid.
+    /// after appending.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameError::InvalidHandle`] if `handle` does not exist, or
+    /// [`FrameError::AlreadySealed`] if the frame is sealed.
     pub fn write(&mut self, handle: u64, chunk: &[u8]) -> Result<u64, FrameError> {
         let state = self
             .frames
@@ -89,29 +95,33 @@ impl FrameTable {
     }
 
     /// Freeze a writable frame into an immutable `Bytes` buffer.
-    /// Errors if already sealed or the handle is invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameError::InvalidHandle`] if `handle` does not exist, or
+    /// [`FrameError::AlreadySealed`] if the frame is already sealed.
     pub fn seal(&mut self, handle: u64) -> Result<(), FrameError> {
         let state = self
             .frames
-            .get_mut(&handle)
+            .remove(&handle)
             .ok_or(FrameError::InvalidHandle(handle))?;
         match state {
-            FrameState::Writable(_) => {
-                // Take the current state out, replace with sealed.
-                let old = self.frames.remove(&handle).expect("just checked");
-                let sealed = match old {
-                    FrameState::Writable(buf) => FrameState::Sealed(buf.freeze()),
-                    FrameState::Sealed(_) => unreachable!(),
-                };
-                self.frames.insert(handle, sealed);
+            FrameState::Writable(buf) => {
+                self.frames.insert(handle, FrameState::Sealed(buf.freeze()));
                 Ok(())
             }
-            FrameState::Sealed(_) => Err(FrameError::AlreadySealed(handle)),
+            sealed @ FrameState::Sealed(_) => {
+                self.frames.insert(handle, sealed);
+                Err(FrameError::AlreadySealed(handle))
+            }
         }
     }
 
     /// Get the byte length of a frame (works for both writable and sealed).
-    /// Errors if the handle is invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameError::InvalidHandle`] if `handle` does not exist.
     pub fn len(&self, handle: u64) -> Result<u64, FrameError> {
         let state = self
             .frames
@@ -125,8 +135,14 @@ impl FrameTable {
     }
 
     /// Read a byte slice from a sealed frame. Returns a `Vec<u8>` copy of
-    /// the requested range. Errors if the frame is not sealed, the handle
-    /// is invalid, or the range is out of bounds.
+    /// the requested range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameError::InvalidHandle`] if `handle` does not exist,
+    /// [`FrameError::NotSealed`] if the frame is still writable, or
+    /// [`FrameError::OutOfBounds`] if `offset + len` exceeds the frame length.
+    #[allow(clippy::cast_possible_truncation)] // host is 64-bit; u64 == usize
     pub fn read(&self, handle: u64, offset: u64, len: u64) -> Result<Vec<u8>, FrameError> {
         let state = self
             .frames
@@ -154,6 +170,11 @@ impl FrameTable {
     ///
     /// If the frame is not sealed, the frame is **put back** and an error
     /// is returned (the handle remains valid).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FrameError::InvalidHandle`] if `handle` does not exist, or
+    /// [`FrameError::NotSealed`] if the frame is still writable.
     pub fn consume(&mut self, handle: u64) -> Result<Bytes, FrameError> {
         let state = self
             .frames
