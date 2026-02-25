@@ -110,7 +110,9 @@ pub async fn read_cdc_changes(
         .await
         .map_err(|e| {
             format!(
-                "pg_logical_slot_get_binary_changes failed for slot {slot_name}: {e}"
+                "pg_logical_slot_get_binary_changes failed for slot '{slot_name}' \
+                 with publication '{publication_name}'. Ensure the publication exists \
+                 (CREATE PUBLICATION {publication_name} FOR TABLE ...): {e}"
             )
         })?;
 
@@ -161,8 +163,12 @@ pub async fn read_cdc_changes(
                 columns,
                 ..
             } => {
-                // Track whether this relation matches the target stream
-                if name == stream.stream_name {
+                // Track whether this relation matches the target stream.
+                // Compare both unqualified name and schema-qualified name to
+                // handle publications that span multiple schemas.
+                if name == stream.stream_name
+                    || format!("{namespace}.{name}") == stream.stream_name
+                {
                     target_oid = Some(oid);
                 }
                 let info = RelationInfo::new(oid, namespace, name, columns);

@@ -87,7 +87,7 @@ pub(crate) struct TupleData {
     pub(crate) columns: Vec<ColumnValue>,
 }
 
-/// CDC operation label (mirrors the existing `CdcOp` but independent of `test_decoding`).
+/// CDC operation label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CdcOp {
     Insert,
