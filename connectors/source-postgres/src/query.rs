@@ -1,5 +1,7 @@
 //! SQL and cursor parameter helpers for source incremental reads.
 
+use std::fmt::Write as _;
+
 use chrono::{DateTime, SecondsFormat, Utc};
 use pg_escape::quote_identifier;
 use rapidbyte_sdk::prelude::*;
@@ -86,7 +88,7 @@ pub(crate) fn build_base_query(
                     "SELECT {col_list} FROM {table_name} ORDER BY {cursor_field}"
                 );
                 if let Some(max) = stream.limits.max_records {
-                    sql.push_str(&format!(" LIMIT {max}"));
+                    let _ = write!(sql, " LIMIT {max}");
                 }
                 return Ok(CursorQuery { sql, bind: None });
             }
@@ -126,7 +128,7 @@ pub(crate) fn build_base_query(
                 "SELECT {col_list} FROM {table_name} WHERE {cursor_field} > $1::{cast} ORDER BY {cursor_field}"
             );
             if let Some(max) = stream.limits.max_records {
-                sql.push_str(&format!(" LIMIT {max}"));
+                let _ = write!(sql, " LIMIT {max}");
             }
             return Ok(CursorQuery {
                 sql,
@@ -145,7 +147,7 @@ pub(crate) fn build_base_query(
             "SELECT {col_list} FROM {table_name} ORDER BY {cursor_field}"
         );
         if let Some(max) = stream.limits.max_records {
-            sql.push_str(&format!(" LIMIT {max}"));
+            let _ = write!(sql, " LIMIT {max}");
         }
         return Ok(CursorQuery { sql, bind: None });
     }
@@ -156,7 +158,7 @@ pub(crate) fn build_base_query(
         quote_identifier(&stream.stream_name)
     );
     if let Some(max) = stream.limits.max_records {
-        sql.push_str(&format!(" LIMIT {max}"));
+        let _ = write!(sql, " LIMIT {max}");
     }
     Ok(CursorQuery { sql, bind: None })
 }
@@ -372,6 +374,75 @@ mod tests {
             "SELECT id, name FROM users WHERE id > $1::bigint ORDER BY id"
         );
         assert!(query.bind.is_some());
+    }
+
+    #[test]
+    fn build_base_query_full_refresh_with_max_records() {
+        let ctx = Context::new("source-postgres", "");
+        let mut stream = base_context();
+        stream.limits.max_records = Some(100);
+        let columns = vec![Column::new("id", "bigint", false)];
+        let query = build_base_query(&ctx, &stream, &columns).expect("query should build");
+        assert!(
+            query.sql.ends_with(" LIMIT 100"),
+            "expected LIMIT clause in: {}",
+            query.sql
+        );
+    }
+
+    #[test]
+    fn build_base_query_incremental_with_max_records() {
+        let ctx = Context::new("source-postgres", "");
+        let mut stream = base_context();
+        stream.sync_mode = SyncMode::Incremental;
+        stream.cursor_info = Some(CursorInfo {
+            cursor_field: "id".to_string(),
+            cursor_type: CursorType::Int64,
+            last_value: Some(CursorValue::Int64 { value: 7 }),
+        });
+        stream.limits.max_records = Some(50);
+        let query =
+            build_base_query(&ctx, &stream, &columns_for_cursor()).expect("query should build");
+        assert!(
+            query.sql.ends_with(" LIMIT 50"),
+            "expected LIMIT clause in: {}",
+            query.sql
+        );
+        assert!(query.bind.is_some());
+    }
+
+    #[test]
+    fn build_base_query_incremental_no_prior_cursor_with_max_records() {
+        let ctx = Context::new("source-postgres", "");
+        let mut stream = base_context();
+        stream.sync_mode = SyncMode::Incremental;
+        stream.cursor_info = Some(CursorInfo {
+            cursor_field: "id".to_string(),
+            cursor_type: CursorType::Int64,
+            last_value: None,
+        });
+        stream.limits.max_records = Some(25);
+        let query =
+            build_base_query(&ctx, &stream, &columns_for_cursor()).expect("query should build");
+        assert!(
+            query.sql.ends_with(" LIMIT 25"),
+            "expected LIMIT clause in: {}",
+            query.sql
+        );
+        assert!(query.bind.is_none());
+    }
+
+    #[test]
+    fn build_base_query_no_limit_when_max_records_none() {
+        let ctx = Context::new("source-postgres", "");
+        let stream = base_context();
+        let columns = vec![Column::new("id", "bigint", false)];
+        let query = build_base_query(&ctx, &stream, &columns).expect("query should build");
+        assert!(
+            !query.sql.contains("LIMIT"),
+            "expected no LIMIT clause in: {}",
+            query.sql
+        );
     }
 
     #[test]

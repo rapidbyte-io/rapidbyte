@@ -201,9 +201,15 @@ async fn execute_pipeline_once(
 
     let connectors = resolve_connectors(config)?;
     let state = create_state_backend(config).map_err(PipelineError::Infrastructure)?;
-    let run_id = state
-        .start_run(&pipeline_id, &StreamName::new("all"))
-        .map_err(|e| PipelineError::Infrastructure(e.into()))?;
+
+    // Skip run tracking in dry-run mode to avoid orphaned run records.
+    let run_id = if options.dry_run {
+        0
+    } else {
+        state
+            .start_run(&pipeline_id, &StreamName::new("all"))
+            .map_err(|e| PipelineError::Infrastructure(e.into()))?
+    };
 
     let modules = load_modules(config, &connectors).await?;
     let stream_build = build_stream_contexts(config, state.as_ref(), options.limit)?;
