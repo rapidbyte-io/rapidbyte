@@ -6,6 +6,8 @@
 
 mod parser;
 #[allow(dead_code)] // Integration with the CDC reader happens in a later task.
+pub(crate) mod encode;
+#[allow(dead_code)] // Integration with the CDC reader happens in a later task.
 pub(crate) mod pgoutput;
 
 use std::collections::HashMap;
