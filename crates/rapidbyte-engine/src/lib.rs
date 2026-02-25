@@ -12,6 +12,7 @@
 //! | `config`       | Pipeline YAML config types, parsing, validation |
 //! | `dlq`          | Dead-letter queue persistence (internal) |
 //! | `error`        | Pipeline error types and retry policy |
+//! | `execution`    | Runtime execution mode types (dry-run, limits) |
 //! | `orchestrator` | Pipeline execution, retry, stream dispatch |
 //! | `resolve`      | Connector resolution, manifest validation, state backend (internal) |
 //! | `result`       | Pipeline execution result types and timing breakdowns |
@@ -24,6 +25,7 @@ pub mod checkpoint;
 pub mod config;
 pub(crate) mod dlq;
 pub mod error;
+pub mod execution;
 pub mod orchestrator;
 pub(crate) mod resolve;
 pub mod result;
@@ -35,4 +37,5 @@ pub use config::types::PipelineConfig;
 pub use config::validator::validate_pipeline;
 pub use error::PipelineError;
 pub use orchestrator::{check_pipeline, discover_connector, run_pipeline};
+pub use execution::{DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineOutcome};
 pub use result::{CheckResult, PipelineResult};
