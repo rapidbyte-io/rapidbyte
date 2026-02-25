@@ -45,7 +45,7 @@ pub const DEFAULT_DLQ_LIMIT: usize = 10_000;
 /// Channel frame type for batch routing between connector stages.
 pub enum Frame {
     /// IPC-encoded Arrow `RecordBatch` (optionally compressed).
-    Data(Vec<u8>),
+    Data(bytes::Bytes),
     /// End-of-stream marker.
     EndStream,
 }
@@ -317,11 +317,12 @@ impl ComponentHostState {
         let fn_start = Instant::now();
 
         let compress_start = Instant::now();
-        let batch = if let Some(codec) = self.batch.compression {
+        let batch: bytes::Bytes = if let Some(codec) = self.batch.compression {
             crate::compression::compress(codec, &batch)
                 .map_err(|e| ConnectorError::internal("COMPRESS_FAILED", e.to_string()))?
+                .into()
         } else {
-            batch
+            batch.into()
         };
         let compress_elapsed_nanos = if self.batch.compression.is_some() {
             compress_start.elapsed().as_nanos() as u64
@@ -370,7 +371,7 @@ impl ComponentHostState {
             crate::compression::decompress(codec, &batch)
                 .map_err(|e| ConnectorError::internal("DECOMPRESS_FAILED", e.to_string()))?
         } else {
-            batch
+            batch.to_vec()
         };
         let decompress_elapsed_nanos = if self.batch.compression.is_some() {
             decompress_start.elapsed().as_nanos() as u64
@@ -935,5 +936,16 @@ mod tests {
     #[test]
     fn parse_error_category_unknown() {
         assert_eq!(parse_error_category("bogus"), ErrorCategory::Internal);
+    }
+
+    #[test]
+    fn frame_data_holds_bytes() {
+        use bytes::Bytes;
+        let payload = Bytes::from_static(b"test-ipc-payload");
+        let frame = Frame::Data(payload.clone());
+        match frame {
+            Frame::Data(b) => assert_eq!(b, payload),
+            Frame::EndStream => panic!("expected Data"),
+        }
     }
 }
