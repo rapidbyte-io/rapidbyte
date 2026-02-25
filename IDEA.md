@@ -29,7 +29,7 @@ Arrow IPC batch exchange — no JVM, no Docker, no sidecar processes.
 ├─────────────────────────────────────────────────────┤
 │                  rapidbyte-sdk                       │
 │  Source · Destination · Transform traits             │
-│  connector_main! macros · HostTcpStream              │
+│  #[connector] macro · FrameWriter · HostTcpStream    │
 ├─────────────────────────────────────────────────────┤
 │                Wasm Connectors                       │
 │    source-postgres  ·  dest-postgres                 │
@@ -37,8 +37,10 @@ Arrow IPC batch exchange — no JVM, no Docker, no sidecar processes.
 ```
 
 - **Runtime:** Wasmtime component model, `wasm32-wasip2` target.
-- **Protocol:** Version 2. Interface contract: `wit/rapidbyte-connector.wit`.
+- **Protocol:** Version 3. Interface contract: `wit/rapidbyte-connector.wit`.
 - **Data format:** Arrow IPC record batches flow between stages via bounded `mpsc` channels.
+  V3 frame transport: batches are streamed into host-managed frames (`frame-new` → `frame-write`
+  → `frame-seal` → `emit-batch`), eliminating guest-side buffer allocation.
 - **State:** Pluggable backend (SQLite bundled, PostgreSQL implemented, S3 planned) for run
   metadata, cursor/checkpoint state, and DLQ records.
 - **Networking:** Connectors have no direct WASI socket access. All outbound TCP is mediated
@@ -53,8 +55,10 @@ Wasmtime component model with WIT-typed imports and exports.
   `dest-connector`, or `transform-connector` interfaces.
 - **WIT interface** (`wit/rapidbyte-connector.wit`): defines types, host imports, and three
   connector worlds (`rapidbyte-source`, `rapidbyte-destination`, `rapidbyte-transform`).
-- **Host imports:** `emit-batch`, `next-batch`, `checkpoint`, `metric`, `emit-dlq-record`,
-  `state-get`, `state-put`, `state-cas`, `log`, plus TCP socket operations.
+- **Host imports:** Frame lifecycle (`frame-new`, `frame-write`, `frame-seal`, `frame-len`,
+  `frame-read`, `frame-drop`), batch transport (`emit-batch`, `next-batch`), pipeline
+  (`checkpoint`, `metric`, `emit-dlq-record`, `log`), state (`state-get`, `state-put`,
+  `state-cas`), plus TCP socket operations.
 - **Network ACL:** Derived from connector manifest permissions. Supports domain allowlists,
   runtime config domain derivation, and TLS requirements (required/optional/forbidden).
 - **AOT compilation cache:** Controlled via `RAPIDBYTE_WASMTIME_AOT` env var. Pre-compiles
@@ -70,22 +74,31 @@ The `rapidbyte-sdk` crate provides everything needed to build a connector:
 - `Destination` — `init`, `validate`, `write`, `close`
 - `Transform` — `init`, `validate`, `transform`, `close`
 
-**Export macros:**
+**Export macro:** Attribute macro generates WIT bindings, component glue, manifest
+embedding, and config schema in one shot:
 ```rust
-connector_main!(source, MySource);
-connector_main!(destination, MyDest);
-connector_main!(transform, MyTransform);
+#[connector(source)]
+struct MySource;
+
+#[connector(destination)]
+struct MyDest;
+
+#[connector(transform)]
+struct MyTransform;
 ```
 
 **Host FFI wrappers** (`host_ffi`): Typed functions for `emit_batch`, `next_batch`,
-`checkpoint`, `metric`, `emit_dlq_record`, and key/value state operations.
+`checkpoint`, `metric`, `emit_dlq_record`, and key/value state operations. `emit_batch`
+uses a `FrameWriter` adapter that streams Arrow IPC encoding directly into host-managed
+frames via `frame-write` calls (zero guest-side allocation).
 
 **HostTcpStream** (`host_tcp`): Adapter implementing `AsyncRead + AsyncWrite` over host TCP
 imports, enabling `tokio-postgres` `connect_raw` from inside the Wasm sandbox.
 
-**Protocol v2 types:** `PayloadEnvelope` (serde flatten), `StreamContext`, `Checkpoint`,
-`ReadSummary`, `WriteSummary`, `TransformSummary`, `ConnectorError` with structured
-error categories, retry semantics, and commit state tracking.
+**Protocol types:** `PayloadEnvelope`, `StreamContext`, `Checkpoint`, `ReadSummary`,
+`WriteSummary`, `TransformSummary`, `ConnectorError` with structured error categories,
+retry semantics, and commit state tracking. V3 adds frame-handle batch transport
+(`FrameWriter`, `frame-new`/`frame-seal`/`emit-batch` lifecycle).
 
 ## Connector Manifest
 
@@ -97,7 +110,7 @@ JSON manifest alongside each `.wasm` binary declaring identity, capabilities, an
   "id": "rapidbyte/source-postgres",
   "name": "PostgreSQL Source",
   "version": "0.1.0",
-  "protocol_version": "2",
+  "protocol_version": "3",
   "artifact": { "entry_point": "source_postgres.wasm" },
   "permissions": {
     "network": { "tls": "optional", "allow_runtime_config_domains": true },
@@ -481,7 +494,7 @@ Arrow IPC batches transferred between pipeline stages can be compressed:
 ## Error Handling & Retries
 
 Connectors return structured `ConnectorError` with:
-- **Category:** config, auth, permission, rate_limit, transient_network, transient_db, data, schema, internal.
+- **Category:** config, auth, permission, rate_limit, transient_network, transient_db, data, schema, frame, internal.
 - **Scope:** per-stream, per-batch, per-record.
 - **Retry semantics:** retryable flag, retry_after_ms hint, backoff_class (fast/normal/slow),
   safe_to_retry flag, commit_state (before_commit/after_commit_unknown/after_commit_confirmed).
@@ -530,7 +543,8 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 
 ### Implemented (current)
 
-- Wasmtime component model runtime with WIT interface
+- Wasmtime component model runtime with WIT interface (V3)
+- V3 frame transport (host-managed frames, streaming FrameWriter, zero guest allocation)
 - Source, Destination, Transform connector lifecycle
 - Connector manifests with config schema validation
 - Pipeline YAML configuration

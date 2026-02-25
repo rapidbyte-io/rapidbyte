@@ -82,7 +82,7 @@ cd connectors/dest-postgres && cargo build
 - Runtime (`crates/rapidbyte-runtime/src/engine.rs`) embeds Wasmtime component model and typed WIT imports/exports.
 - Host imports enforce connector-side ACLs for `connect-tcp` and disable direct WASI socket networking.
 - State backend is SQLite or Postgres (`crates/rapidbyte-state/`), used for run metadata and cursor/checkpoint state.
-- Arrow IPC batches flow between stages; optional lz4/zstd channel compression is handled in host imports.
+- Arrow IPC batches flow between stages via V3 frame transport (host-managed frames with `frame-new`/`frame-write`/`frame-seal`/`emit-batch` lifecycle); optional lz4/zstd compression is handled in host imports.
 
 ## Crate Conventions
 
@@ -94,6 +94,6 @@ cd connectors/dest-postgres && cargo build
 
 ## Notes
 
-- Connectors must use `rapidbyte-sdk` component macros (`source_connector_main!`, `dest_connector_main!`, `transform_connector_main!`).
+- Connectors must use `rapidbyte-sdk` attribute macro (`#[connector(source)]`, `#[connector(destination)]`, `#[connector(transform)]`).
 - Network I/O for connectors should go through `HostTcpStream` (`rapidbyte_sdk::host_tcp`) to preserve host permission checks.
 - Protocol/documentation source of truth is `docs/PROTOCOL.md`.
