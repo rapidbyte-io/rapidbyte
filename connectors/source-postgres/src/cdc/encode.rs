@@ -27,6 +27,7 @@ use crate::types::oid_to_arrow_type;
 /// `Insert`/`Update`/`Delete` referencing the same relation OID.
 #[derive(Debug, Clone)]
 pub(crate) struct RelationInfo {
+    #[allow(dead_code)]
     pub(crate) oid: u32,
     #[allow(dead_code)]
     pub(crate) namespace: String,

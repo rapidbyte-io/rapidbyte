@@ -1,41 +1,37 @@
 //! Change Data Capture via `PostgreSQL` logical replication slots.
 //!
-//! Reads WAL changes through `pg_logical_slot_get_changes` with the
-//! `test_decoding` plugin, parses decoded rows, emits Arrow IPC batches,
+//! Reads WAL changes through `pg_logical_slot_get_binary_changes` with the
+//! `pgoutput` plugin, decodes binary messages, emits typed Arrow IPC batches,
 //! and checkpoints by LSN.
 
-mod parser;
-#[allow(dead_code)] // Integration with the CDC reader happens in a later task.
 pub(crate) mod encode;
-#[allow(dead_code)] // Integration with the CDC reader happens in a later task.
 pub(crate) mod pgoutput;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Instant;
 
-use rapidbyte_sdk::arrow::array::{Array, StringBuilder};
-use rapidbyte_sdk::arrow::datatypes::{DataType, Field, Schema};
-use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::prelude::*;
 
 use crate::config::Config;
 use crate::metrics::emit_read_metrics;
-use crate::types::Column;
 
-use parser::{lsn_gt, parse_change_line, CdcChange};
+use encode::{encode_cdc_batch, CdcRow, RelationInfo};
+use pgoutput::{CdcOp, PgOutputMessage, TupleData};
 
 /// Maximum number of change rows per Arrow `RecordBatch`.
 const BATCH_SIZE: usize = 10_000;
 
 /// Maximum WAL changes consumed per CDC invocation to avoid unbounded memory use.
-/// Type is i32 because `pg_logical_slot_get_changes()` expects int4.
+/// Type is i32 because `pg_logical_slot_get_binary_changes()` expects int4.
 const CDC_MAX_CHANGES: i32 = 100_000;
 
 /// Default replication slot prefix. Full slot names are `rapidbyte_{stream_name}`.
 const SLOT_PREFIX: &str = "rapidbyte_";
+
+/// Default publication prefix. Full publication names are `rapidbyte_{stream_name}`.
+const PUB_PREFIX: &str = "rapidbyte_";
 
 struct CdcEmitState {
     total_records: u64,
@@ -44,22 +40,21 @@ struct CdcEmitState {
     arrow_encode_nanos: u64,
 }
 
-fn emit_cdc_batch(
-    changes: &mut Vec<CdcChange>,
-    table_columns: &[Column],
-    schema: &Arc<Schema>,
+fn emit_batch(
+    rows: &mut Vec<CdcRow>,
+    relation: &RelationInfo,
     ctx: &Context,
     state: &mut CdcEmitState,
 ) -> Result<(), String> {
     let encode_start = Instant::now();
-    let batch = changes_to_batch(changes, table_columns, schema)?;
+    let batch = encode_cdc_batch(rows, relation)?;
     // Safety: encode timing in nanos will not exceed u64::MAX for any realistic duration.
     #[allow(clippy::cast_possible_truncation)]
     {
         state.arrow_encode_nanos += encode_start.elapsed().as_nanos() as u64;
     }
 
-    state.total_records += changes.len() as u64;
+    state.total_records += rows.len() as u64;
     state.total_bytes += batch.get_array_memory_size() as u64;
     state.batches_emitted += 1;
 
@@ -67,11 +62,11 @@ fn emit_cdc_batch(
         .map_err(|e| format!("emit_batch failed: {}", e.message))?;
     emit_read_metrics(ctx, state.total_records, state.total_bytes);
 
-    changes.clear();
+    rows.clear();
     Ok(())
 }
 
-/// Read CDC changes from a logical replication slot using `pg_logical_slot_get_changes()`.
+/// Read CDC changes from a logical replication slot using `pg_logical_slot_get_binary_changes()`.
 #[allow(clippy::too_many_lines)]
 pub async fn read_cdc_changes(
     client: &Client,
@@ -91,27 +86,31 @@ pub async fn read_cdc_changes(
     let slot_name = config
         .replication_slot
         .clone()
-        .unwrap_or_else(|| format!("{}{}", SLOT_PREFIX, stream.stream_name));
+        .unwrap_or_else(|| format!("{SLOT_PREFIX}{}", stream.stream_name));
 
-    // 2. Ensure replication slot exists (idempotent)
+    // 2. Derive publication name
+    let publication_name = config
+        .publication
+        .clone()
+        .unwrap_or_else(|| format!("{PUB_PREFIX}{}", stream.stream_name));
+
+    // 3. Ensure replication slot exists (idempotent)
     ensure_replication_slot(client, ctx, &slot_name).await?;
 
-    // 3. Get table schema for Arrow construction
-    let table_columns =
-        crate::discovery::query_table_columns(client, &stream.stream_name).await?;
-
-    // Build Arrow schema: table columns + _rb_op metadata column
-    let arrow_schema = build_cdc_arrow_schema(&table_columns);
-
-    // 4. Read changes from the slot (this CONSUMES them)
-    // Limit WAL changes per invocation to prevent OOM on large backlogs.
-    let changes_query = "SELECT lsn::text, data FROM pg_logical_slot_get_changes($1, NULL, $2)";
+    // 4. Read binary changes from the slot (this CONSUMES them)
+    // Uses pgoutput plugin with proto_version 1 and the configured publication.
+    let changes_query = "SELECT lsn::text, data \
+                         FROM pg_logical_slot_get_binary_changes(\
+                             $1, NULL, $2, \
+                             'proto_version', '1', \
+                             'publication_names', $3\
+                         )";
     let change_rows = client
-        .query(changes_query, &[&slot_name, &CDC_MAX_CHANGES])
+        .query(changes_query, &[&slot_name, &CDC_MAX_CHANGES, &publication_name])
         .await
         .map_err(|e| {
             format!(
-                "pg_logical_slot_get_changes failed for slot {slot_name}: {e}"
+                "pg_logical_slot_get_binary_changes failed for slot {slot_name}: {e}"
             )
         })?;
 
@@ -124,65 +123,126 @@ pub async fn read_cdc_changes(
         batches_emitted: 0,
         arrow_encode_nanos: 0,
     };
-    let mut max_lsn: Option<String> = None;
+    let mut max_lsn: Option<u64> = None;
 
-    // 5. Parse changes, filter to our table, accumulate into batches
-    let target_table = format!("public.{}", stream.stream_name);
-    let mut accumulated_changes: Vec<CdcChange> = Vec::new();
+    // 5. Decode messages, filter to our table, accumulate into batches
+    let mut relations: HashMap<u32, RelationInfo> = HashMap::new();
+    let mut target_oid: Option<u32> = None;
+    let mut accumulated_rows: Vec<CdcRow> = Vec::new();
 
     for row in &change_rows {
-        let lsn: String = row.get(0);
-        let data: String = row.get(1);
+        let lsn_str: String = row.get(0);
+        let data: &[u8] = row.get(1);
 
-        // Track max LSN
-        if max_lsn.as_ref().is_none_or(|current| lsn_gt(&lsn, current)) {
-            max_lsn = Some(lsn.clone());
-        }
-
-        // Parse change line; skip BEGIN/COMMIT/non-matching tables
-        if let Some(change) = parse_change_line(&data) {
-            if change.table == target_table || change.table == stream.stream_name {
-                accumulated_changes.push(change);
+        // Track max LSN using numeric comparison
+        if let Some(lsn) = pgoutput::parse_lsn(&lsn_str) {
+            if max_lsn.is_none_or(|current| lsn > current) {
+                max_lsn = Some(lsn);
             }
         }
 
+        // Decode binary pgoutput message
+        let msg = match pgoutput::decode(data) {
+            Ok(m) => m,
+            Err(e) => {
+                ctx.log(
+                    LogLevel::Warn,
+                    &format!("pgoutput decode error (skipping): {e}"),
+                );
+                continue;
+            }
+        };
+
+        match msg {
+            PgOutputMessage::Relation {
+                oid,
+                namespace,
+                name,
+                columns,
+                ..
+            } => {
+                // Track whether this relation matches the target stream
+                if name == stream.stream_name {
+                    target_oid = Some(oid);
+                }
+                let info = RelationInfo::new(oid, namespace, name, columns);
+                relations.insert(oid, info);
+            }
+            PgOutputMessage::Insert {
+                relation_oid,
+                new_tuple,
+            } if target_oid == Some(relation_oid) => {
+                accumulated_rows.push(CdcRow {
+                    op: CdcOp::Insert,
+                    tuple: new_tuple,
+                });
+            }
+            PgOutputMessage::Update {
+                relation_oid,
+                new_tuple,
+                ..
+            } if target_oid == Some(relation_oid) => {
+                accumulated_rows.push(CdcRow {
+                    op: CdcOp::Update,
+                    tuple: new_tuple,
+                });
+            }
+            PgOutputMessage::Delete {
+                relation_oid,
+                key_tuple,
+                old_tuple,
+            } if target_oid == Some(relation_oid) => {
+                let tuple = old_tuple
+                    .or(key_tuple)
+                    .unwrap_or_else(|| TupleData { columns: vec![] });
+                accumulated_rows.push(CdcRow {
+                    op: CdcOp::Delete,
+                    tuple,
+                });
+            }
+            // Begin, Commit, Truncate, Origin, Type, Message, and non-matching DML — skip
+            _ => {}
+        }
+
         // Flush batch if accumulated enough
-        if accumulated_changes.len() >= BATCH_SIZE {
-            emit_cdc_batch(
-                &mut accumulated_changes,
-                &table_columns,
-                &arrow_schema,
-                ctx,
-                &mut state,
-            )?;
+        if accumulated_rows.len() >= BATCH_SIZE {
+            let rel = target_oid
+                .and_then(|oid| relations.get(&oid))
+                .ok_or_else(|| {
+                    "CDC batch ready but no Relation message received for target stream".to_string()
+                })?;
+            emit_batch(&mut accumulated_rows, rel, ctx, &mut state)?;
         }
     }
 
-    // Flush remaining changes
-    if !accumulated_changes.is_empty() {
-        emit_cdc_batch(
-            &mut accumulated_changes,
-            &table_columns,
-            &arrow_schema,
-            ctx,
-            &mut state,
-        )?;
+    // Flush remaining rows
+    if !accumulated_rows.is_empty() {
+        let rel = target_oid
+            .and_then(|oid| relations.get(&oid))
+            .ok_or_else(|| {
+                "CDC rows accumulated but no Relation message received for target stream"
+                    .to_string()
+            })?;
+        emit_batch(&mut accumulated_rows, rel, ctx, &mut state)?;
     }
 
     let fetch_secs = fetch_start.elapsed().as_secs_f64();
 
     // 6. Emit checkpoint with max LSN
-    let checkpoint_count = if let Some(ref lsn) = max_lsn {
+    let checkpoint_count = if let Some(lsn) = max_lsn {
+        let lsn_string = pgoutput::lsn_to_string(lsn);
         let cp = Checkpoint {
             id: 1,
             kind: CheckpointKind::Source,
             stream: stream.stream_name.clone(),
             cursor_field: Some("lsn".to_string()),
-            cursor_value: Some(CursorValue::Lsn { value: lsn.clone() }),
+            cursor_value: Some(CursorValue::Lsn {
+                value: lsn_string.clone(),
+            }),
             records_processed: state.total_records,
             bytes_processed: state.total_bytes,
         };
-        // CDC uses get_changes (destructive) so checkpoint MUST succeed to avoid data loss.
+        // CDC uses get_binary_changes (destructive) so checkpoint MUST succeed to avoid data loss.
         ctx.checkpoint(&cp).map_err(|e| {
             format!(
                 "CDC checkpoint failed (WAL already consumed): {}",
@@ -191,7 +251,10 @@ pub async fn read_cdc_changes(
         })?;
         ctx.log(
             LogLevel::Info,
-            &format!("CDC checkpoint: stream={} lsn={}", stream.stream_name, lsn),
+            &format!(
+                "CDC checkpoint: stream={} lsn={}",
+                stream.stream_name, lsn_string
+            ),
         );
         1u64
     } else {
@@ -244,7 +307,7 @@ async fn ensure_replication_slot(
     // Try to create; if it already exists, PG raises duplicate_object (42710).
     let result = client
         .query_one(
-            "SELECT pg_create_logical_replication_slot($1, 'test_decoding')",
+            "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
             &[&slot_name],
         )
         .await;
@@ -253,9 +316,7 @@ async fn ensure_replication_slot(
         Ok(_) => {
             ctx.log(
                 LogLevel::Info,
-                &format!(
-                    "Created replication slot '{slot_name}' with test_decoding"
-                ),
+                &format!("Created replication slot '{slot_name}' with pgoutput"),
             );
         }
         Err(e) => {
@@ -281,111 +342,87 @@ async fn ensure_replication_slot(
     Ok(())
 }
 
-/// Build Arrow schema for CDC batches: table columns (all as Utf8 for simplicity)
-/// plus the `_rb_op` metadata column.
-fn build_cdc_arrow_schema(columns: &[Column]) -> Arc<Schema> {
-    let mut fields: Vec<Field> = columns
-        .iter()
-        .map(|col| Field::new(&col.name, DataType::Utf8, true))
-        .collect();
-
-    // Add the CDC operation column
-    fields.push(Field::new("_rb_op", DataType::Utf8, false));
-
-    Arc::new(Schema::new(fields))
-}
-
-/// Convert accumulated CDC changes into an Arrow `RecordBatch`.
-fn changes_to_batch(
-    changes: &[CdcChange],
-    table_columns: &[Column],
-    schema: &Arc<Schema>,
-) -> Result<RecordBatch, String> {
-    let num_cols = table_columns.len() + 1; // +1 for _rb_op
-    let mut builders: Vec<StringBuilder> = (0..num_cols)
-        .map(|_| StringBuilder::with_capacity(changes.len(), changes.len() * 32))
-        .collect();
-
-    for change in changes {
-        // Build lookup: column_name -> value
-        let values: HashMap<&str, &str> = change
-            .columns
-            .iter()
-            .map(|(name, _type, value)| (name.as_str(), value.as_str()))
-            .collect();
-
-        for (col_idx, col) in table_columns.iter().enumerate() {
-            match values.get(col.name.as_str()) {
-                Some(&"null") | None => builders[col_idx].append_null(),
-                Some(v) => builders[col_idx].append_value(v),
-            }
-        }
-
-        // _rb_op column
-        builders[num_cols - 1].append_value(change.op.as_str());
-    }
-
-    let arrays: Vec<Arc<dyn Array>> = builders
-        .into_iter()
-        .map(|mut b| Arc::new(b.finish()) as Arc<dyn Array>)
-        .collect();
-
-    RecordBatch::try_new(schema.clone(), arrays)
-        .map_err(|e| format!("failed to create CDC RecordBatch: {e}"))
-}
-
 // --- Tests ---
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::parser::CdcOp;
+    use super::encode::RelationInfo;
+    use super::pgoutput::{CdcOp, ColumnDef, ColumnValue, TupleData};
+    use super::encode::CdcRow;
+    use rapidbyte_sdk::arrow::datatypes::DataType;
 
     #[test]
-    fn test_build_cdc_arrow_schema() {
-        let columns = vec![
-            Column::new("id", "integer", false),
-            Column::new("name", "text", true),
-        ];
+    fn relation_info_schema_includes_rb_op() {
+        let rel = RelationInfo::new(
+            16385,
+            "public".to_string(),
+            "users".to_string(),
+            vec![
+                ColumnDef {
+                    flags: 1,
+                    name: "id".to_string(),
+                    type_oid: 23,
+                    type_modifier: -1,
+                },
+                ColumnDef {
+                    flags: 0,
+                    name: "name".to_string(),
+                    type_oid: 25,
+                    type_modifier: -1,
+                },
+            ],
+        );
 
-        let schema = build_cdc_arrow_schema(&columns);
+        let schema = &rel.arrow_schema;
+        // 2 data columns + _rb_op
         assert_eq!(schema.fields().len(), 3);
-        // All columns are Utf8 in CDC mode (values come as text from test_decoding)
-        assert_eq!(*schema.field(0).data_type(), DataType::Utf8);
         assert_eq!(schema.field(0).name(), "id");
-        assert_eq!(*schema.field(1).data_type(), DataType::Utf8);
+        assert_eq!(*schema.field(0).data_type(), DataType::Int32);
         assert_eq!(schema.field(1).name(), "name");
-        assert_eq!(*schema.field(2).data_type(), DataType::Utf8);
+        assert_eq!(*schema.field(1).data_type(), DataType::Utf8);
         assert_eq!(schema.field(2).name(), "_rb_op");
+        assert_eq!(*schema.field(2).data_type(), DataType::Utf8);
         assert!(!schema.field(2).is_nullable());
     }
 
     #[test]
-    fn test_changes_to_batch() {
-        let columns = vec![
-            Column::new("id", "integer", false),
-            Column::new("name", "text", true),
-        ];
-        let schema = build_cdc_arrow_schema(&columns);
-
-        let changes = vec![
-            CdcChange {
-                op: CdcOp::Insert,
-                table: "public.users".to_string(),
+    fn cdc_row_with_insert_op() {
+        let row = CdcRow {
+            op: CdcOp::Insert,
+            tuple: TupleData {
                 columns: vec![
-                    ("id".to_string(), "integer".to_string(), "1".to_string()),
-                    ("name".to_string(), "text".to_string(), "Alice".to_string()),
+                    ColumnValue::Text("42".to_string()),
+                    ColumnValue::Text("Alice".to_string()),
                 ],
             },
-            CdcChange {
-                op: CdcOp::Delete,
-                table: "public.users".to_string(),
-                columns: vec![("id".to_string(), "integer".to_string(), "2".to_string())],
-            },
-        ];
+        };
+        assert_eq!(row.op.as_str(), "insert");
+        assert_eq!(row.tuple.columns.len(), 2);
+    }
 
-        let batch = changes_to_batch(&changes, &columns, &schema).unwrap();
-        assert_eq!(batch.num_rows(), 2);
-        assert_eq!(batch.num_columns(), 3); // id, name, _rb_op
+    #[test]
+    fn delete_row_with_empty_tuple() {
+        // Simulates a DELETE where neither old_tuple nor key_tuple is available.
+        let tuple = TupleData { columns: vec![] };
+        let row = CdcRow {
+            op: CdcOp::Delete,
+            tuple,
+        };
+        assert_eq!(row.op.as_str(), "delete");
+        assert!(row.tuple.columns.is_empty());
+    }
+
+    #[test]
+    fn publication_name_default() {
+        let prefix = super::PUB_PREFIX;
+        let pub_name = format!("{prefix}{}", "users");
+        assert_eq!(pub_name, "rapidbyte_users");
+    }
+
+    #[test]
+    fn slot_name_default() {
+        let prefix = super::SLOT_PREFIX;
+        let slot_name = format!("{prefix}{}", "orders");
+        assert_eq!(slot_name, "rapidbyte_orders");
     }
 }
