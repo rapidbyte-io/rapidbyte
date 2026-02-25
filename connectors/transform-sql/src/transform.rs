@@ -27,6 +27,10 @@ pub async fn run(
     let mut batches_processed: u64 = 0;
 
     while let Some((schema, batches)) = ctx.next_batch(stream.limits.max_batch_bytes)? {
+        if batches.is_empty() || batches.iter().all(|b| b.num_rows() == 0) {
+            continue;
+        }
+
         let batch_rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
         records_in += batch_rows;
 
@@ -36,17 +40,11 @@ pub async fn run(
             .sum();
         bytes_in += batch_bytes;
 
-        if batches.is_empty() {
-            continue;
-        }
-
-        // Register as MemTable named "input".
+        // Register as MemTable named "input" (overwrites previous registration).
         let mem_table = datafusion::datasource::MemTable::try_new(schema, vec![batches]).map_err(
             |e| ConnectorError::internal("SQL_MEMTABLE", format!("Failed to create MemTable: {e}")),
         )?;
 
-        // Deregister previous table (ignore error if it doesn't exist yet).
-        let _ = session.deregister_table("input");
         session
             .register_table("input", Arc::new(mem_table))
             .map_err(|e| {
