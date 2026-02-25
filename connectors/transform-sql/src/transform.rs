@@ -1,0 +1,95 @@
+//! DataFusion-powered SQL transform execution.
+//!
+//! For each incoming Arrow batch:
+//! 1. Register it as a DataFusion MemTable named `input`
+//! 2. Execute the user's SQL query
+//! 3. Forward result batches downstream via `ctx.emit_batch()`
+
+use std::sync::Arc;
+
+use datafusion::prelude::*;
+use rapidbyte_sdk::prelude::*;
+
+use crate::config::Config;
+
+/// Run the SQL transform for a single stream.
+pub async fn run(
+    ctx: &Context,
+    stream: &StreamContext,
+    config: &Config,
+) -> Result<TransformSummary, ConnectorError> {
+    let session = SessionContext::new();
+
+    let mut records_in: u64 = 0;
+    let mut records_out: u64 = 0;
+    let mut bytes_in: u64 = 0;
+    let mut bytes_out: u64 = 0;
+    let mut batches_processed: u64 = 0;
+
+    while let Some((schema, batches)) = ctx.next_batch(stream.limits.max_batch_bytes)? {
+        let batch_rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
+        records_in += batch_rows;
+
+        let batch_bytes: u64 = batches
+            .iter()
+            .map(|b| b.get_array_memory_size() as u64)
+            .sum();
+        bytes_in += batch_bytes;
+
+        if batches.is_empty() {
+            continue;
+        }
+
+        // Register as MemTable named "input".
+        let mem_table = datafusion::datasource::MemTable::try_new(schema, vec![batches]).map_err(
+            |e| ConnectorError::internal("SQL_MEMTABLE", format!("Failed to create MemTable: {e}")),
+        )?;
+
+        // Deregister previous table (ignore error if it doesn't exist yet).
+        let _ = session.deregister_table("input");
+        session
+            .register_table("input", Arc::new(mem_table))
+            .map_err(|e| {
+                ConnectorError::internal(
+                    "SQL_REGISTER",
+                    format!("Failed to register table: {e}"),
+                )
+            })?;
+
+        // Plan and execute.
+        let df = session.sql(&config.query).await.map_err(|e| {
+            ConnectorError::internal("SQL_PLAN", format!("Query planning failed: {e}"))
+        })?;
+
+        let result_batches = df.collect().await.map_err(|e| {
+            ConnectorError::internal("SQL_EXEC", format!("Query execution failed: {e}"))
+        })?;
+
+        // Forward each non-empty result batch downstream.
+        for batch in &result_batches {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            records_out += batch.num_rows() as u64;
+            bytes_out += batch.get_array_memory_size() as u64;
+            ctx.emit_batch(batch)?;
+        }
+
+        batches_processed += 1;
+    }
+
+    ctx.log(
+        LogLevel::Info,
+        &format!(
+            "SQL transform complete: {records_in} rows in, {records_out} rows out, {batches_processed} batches"
+        ),
+    );
+
+    Ok(TransformSummary {
+        records_in,
+        records_out,
+        bytes_in,
+        bytes_out,
+        batches_processed,
+    })
+}

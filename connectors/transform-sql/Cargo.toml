@@ -1,0 +1,32 @@
+[package]
+name = "transform-sql"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "transform_sql"
+path = "src/main.rs"
+
+[dependencies]
+rapidbyte-sdk = { path = "../../crates/rapidbyte-sdk" }
+datafusion = { version = "43", default-features = false, features = ["unicode_expressions", "regex_expressions"] }
+tokio = { version = "=1.36", default-features = false, features = ["rt", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+arrow = { version = "53", features = ["ipc"] }
+wit-bindgen = "0.46"
+
+[build-dependencies]
+rapidbyte-sdk = { path = "../../crates/rapidbyte-sdk", default-features = false, features = ["build"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+
+[workspace]
