@@ -75,10 +75,20 @@ done
 # ── Generate criterion-style report ──────────────────────────────
 section "Benchmark Report"
 
-# For the standard INSERT vs COPY comparison, use report.py
-INSERT_FILE="${MODE_RESULTS[insert]:-/dev/null}"
-COPY_FILE="${MODE_RESULTS[copy]:-/dev/null}"
-criterion_report "$INSERT_FILE" "$COPY_FILE" "$BENCH_ROWS"
+# Build mode:file argument pairs for report.py
+REPORT_ARGS=()
+for mode in "${BENCH_MODES[@]}"; do
+    result_file="${MODE_RESULTS[$mode]}"
+    if [ -s "$result_file" ]; then
+        REPORT_ARGS+=("$mode:$result_file")
+    fi
+done
+
+if [ ${#REPORT_ARGS[@]} -gt 0 ]; then
+    python3 "$BENCH_DIR/lib/report.py" "$BENCH_ROWS" "${BENCH_PROFILE:-unknown}" "${REPORT_ARGS[@]}"
+else
+    echo "  No results collected"
+fi
 
 # Cleanup temp files
 for mode in "${BENCH_MODES[@]}"; do

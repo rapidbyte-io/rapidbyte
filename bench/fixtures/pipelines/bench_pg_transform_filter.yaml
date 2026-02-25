@@ -1,0 +1,43 @@
+version: "1.0"
+pipeline: bench_pg_transform_filter
+
+source:
+  use: source-postgres
+  config:
+    host: localhost
+    port: 5433
+    user: postgres
+    password: postgres
+    database: rapidbyte_test
+  streams:
+    - name: bench_events
+      sync_mode: full_refresh
+
+transforms:
+  - use: transform-sql
+    config:
+      query: >-
+        SELECT id, event_id, event_type, user_id, device_type,
+               country_code, duration_ms, is_converted, created_at,
+               UPPER(event_type) AS event_type_upper,
+               duration_ms * 2 AS duration_double
+        FROM input
+        WHERE is_converted = true
+
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+    port: 5433
+    user: postgres
+    password: postgres
+    database: rapidbyte_test
+    schema: raw
+  write_mode: append
+
+resources:
+  max_batch_bytes: 512mb
+
+state:
+  backend: sqlite
+  connection: /tmp/rapidbyte_bench_state.db

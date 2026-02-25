@@ -56,6 +56,9 @@ build_connectors() {
 
     info "Building dest-postgres connector ($mode)..."
     (cd "$PROJECT_ROOT/connectors/dest-postgres" && cargo build $flag --quiet)
+
+    info "Building transform-sql connector ($mode)..."
+    (cd "$PROJECT_ROOT/connectors/transform-sql" && cargo build $flag --quiet)
 }
 
 stage_connectors() {
@@ -67,6 +70,8 @@ stage_connectors() {
        "$CONNECTOR_DIR/"
     cp "$PROJECT_ROOT/connectors/dest-postgres/target/$wasm_dir/dest_postgres.wasm" \
        "$CONNECTOR_DIR/"
+    cp "$PROJECT_ROOT/connectors/transform-sql/target/$wasm_dir/transform_sql.wasm" \
+       "$CONNECTOR_DIR/"
 
     # Strip custom sections from release builds, re-embed rapidbyte_* sections afterward
     if [ "$mode" = "release" ] && [ -x "$PROJECT_ROOT/scripts/strip-wasm.sh" ]; then
@@ -74,6 +79,8 @@ stage_connectors() {
             "$CONNECTOR_DIR/source_postgres.wasm"
         "$PROJECT_ROOT/scripts/strip-wasm.sh" "$CONNECTOR_DIR/dest_postgres.wasm" \
             "$CONNECTOR_DIR/dest_postgres.wasm"
+        "$PROJECT_ROOT/scripts/strip-wasm.sh" "$CONNECTOR_DIR/transform_sql.wasm" \
+            "$CONNECTOR_DIR/transform_sql.wasm"
     fi
 }
 
@@ -308,12 +315,5 @@ print(json.dumps(d))
 }
 
 # ── Statistical output (criterion-style) ────────────────────────
-# Generate criterion-style statistical report from collected results.
-# Usage: criterion_report <insert_results_file> <copy_results_file> <rows>
-criterion_report() {
-    local insert_file="$1"
-    local copy_file="$2"
-    local rows="$3"
-
-    python3 "$BENCH_DIR/lib/report.py" "$insert_file" "$copy_file" "$rows" "${BENCH_PROFILE:-unknown}"
-}
+# Report is now called directly from run.sh with flexible mode arguments.
+# Usage: python3 report.py <rows> <profile> <mode1:file1> [mode2:file2] ...

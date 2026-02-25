@@ -2,15 +2,17 @@
 """Criterion-style statistical report for benchmark results.
 
 Usage:
-    python3 report.py <insert_results.jsonl> <copy_results.jsonl> <rows>
+    python3 report.py <rows> <profile> <mode1:file1> [mode2:file2] ...
 
+Each mode argument is "mode_name:results_file_path".
 Produces formatted output with mean +/- std dev, confidence intervals,
-throughput in rows/s and MB/s, and speedup ratios.
+throughput in rows/s and MB/s, and speedup ratios vs the baseline (first mode).
 """
 
 import json
 import math
 import sys
+from collections import OrderedDict
 
 
 def load_results(path: str) -> list[dict]:
@@ -74,32 +76,45 @@ def fmt_metric_value(val: float, unit: str) -> str:
 
 def main():
     if len(sys.argv) < 4:
-        print(f"Usage: {sys.argv[0]} <insert_file> <copy_file> <rows>", file=sys.stderr)
+        print(f"Usage: {sys.argv[0]} <rows> <profile> <mode:file> ...", file=sys.stderr)
         sys.exit(1)
 
-    insert_results = load_results(sys.argv[1])
-    copy_results = load_results(sys.argv[2])
-    rows = int(sys.argv[3])
-    profile = sys.argv[4] if len(sys.argv) > 4 else "unknown"
+    rows = int(sys.argv[1])
+    profile = sys.argv[2]
 
-    if not insert_results and not copy_results:
+    # Parse mode:file pairs (preserving order)
+    modes: OrderedDict[str, list[dict]] = OrderedDict()
+    for arg in sys.argv[3:]:
+        mode, path = arg.split(":", 1)
+        modes[mode] = load_results(path)
+
+    # Filter out empty modes
+    modes = OrderedDict((m, r) for m, r in modes.items() if r)
+
+    if not modes:
         print("  No results collected")
         sys.exit(1)
 
-    ref = insert_results[0] if insert_results else copy_results[0]
+    mode_names = list(modes.keys())
+    baseline = mode_names[0]
+
+    # Get bytes_read from first available result
+    first_results = next(iter(modes.values()))
+    ref = first_results[0]
     bytes_read = ref.get("bytes_read", 0)
     avg_row_bytes = bytes_read // rows if rows > 0 else 0
 
     # ── Header ────────────────────────────────────────────────────
+    samples_str = ", ".join(
+        f"{len(r)} {m.upper()}" for m, r in modes.items()
+    )
     print(f"  Profile:     {profile} ({avg_row_bytes} B/row)")
     print(f"  Dataset:     {rows:,} rows, {bytes_read / 1048576:.2f} MB")
-    print(f"  Samples:     {len(insert_results)} INSERT, {len(copy_results)} COPY")
+    print(f"  Samples:     {samples_str}")
     print()
 
     # ── Criterion-style per-mode output ───────────────────────────
-    for label, results in [("INSERT", insert_results), ("COPY", copy_results)]:
-        if not results:
-            continue
+    for label, results in modes.items():
         durations = [r["duration_secs"] for r in results]
         s = stats(durations)
         rps_vals = [rows / d for d in durations if d > 0]
@@ -107,28 +122,33 @@ def main():
         mbps_vals = [bytes_read / d / 1048576 for d in durations if d > 0]
         mbps = stats(mbps_vals)
 
-        print(f"  connector-postgres/{label.lower()}/{rows}")
+        print(f"  connector-postgres/{label}/{rows}")
         print(f"                        time:   {fmt_ci(s)}")
         print(f"                        thrpt:  [{rps['ci_lo']:,.0f} {rps['mean']:,.0f} {rps['ci_hi']:,.0f}] rows/s")
         print(f"                                [{mbps['ci_lo']:.2f} {mbps['mean']:.2f} {mbps['ci_hi']:.2f}] MB/s")
         print()
 
-    # ── Speedup comparison ────────────────────────────────────────
-    if insert_results and copy_results:
-        i_avg = stats([r["duration_secs"] for r in insert_results])["mean"]
-        c_avg = stats([r["duration_secs"] for r in copy_results])["mean"]
-        if c_avg > 0.001 and i_avg > 0.001:
-            ratio = i_avg / c_avg
-            if ratio >= 1.0:
-                print(f"  COPY vs INSERT:  {ratio:.2f}x faster")
-            else:
-                print(f"  COPY vs INSERT:  {1/ratio:.2f}x slower")
-            print()
+    # ── Speedup comparisons vs baseline ──────────────────────────
+    if len(modes) > 1:
+        baseline_avg = stats([r["duration_secs"] for r in modes[baseline]])["mean"]
+        for mode in mode_names[1:]:
+            mode_avg = stats([r["duration_secs"] for r in modes[mode]])["mean"]
+            if mode_avg > 0.001 and baseline_avg > 0.001:
+                ratio = baseline_avg / mode_avg
+                if ratio >= 1.0:
+                    print(f"  {mode.upper()} vs {baseline.upper()}:  {ratio:.2f}x faster")
+                else:
+                    print(f"  {mode.upper()} vs {baseline.upper()}:  {1/ratio:.2f}x slower")
+        print()
 
     # ── Detailed metrics table ────────────────────────────────────
-    hdr = "  {:<22s}  {:>12s}  {:>12s}  {:>8s}"
-    print(hdr.format("Metric (mean)", "INSERT", "COPY", "Speedup"))
-    print(hdr.format("-" * 22, "-" * 12, "-" * 12, "-" * 8))
+    # Dynamic column widths based on mode count
+    col_w = 12
+    hdr_parts = ["  {:<22s}"] + ["{:>" + str(col_w) + "s}"] * len(modes) + ["{:>8s}"]
+    hdr = "  ".join(hdr_parts)
+    headers = ["Metric (mean)"] + [m.upper() for m in mode_names] + ["vs " + baseline.upper()]
+    print(hdr.format(*headers))
+    print(hdr.format("-" * 22, *(["-" * col_w] * len(modes)), "-" * 8))
 
     metrics = [
         ("Total duration", "duration_secs", "s"),
@@ -157,33 +177,39 @@ def main():
     ]
 
     for label, key, unit in metrics:
-        i_s = stats([r.get(key, 0) for r in insert_results]) if insert_results else stats([])
-        c_s = stats([r.get(key, 0) for r in copy_results]) if copy_results else stats([])
-        speedup = f'{i_s["mean"]/c_s["mean"]:.1f}x' if c_s["mean"] > 0.001 else "-"
-        i_val = fmt_metric_value(i_s["mean"], unit) if i_s["n"] > 0 else "-"
-        c_val = fmt_metric_value(c_s["mean"], unit) if c_s["n"] > 0 else "-"
-        print(hdr.format(label, i_val, c_val, speedup))
+        vals = []
+        for mode in mode_names:
+            results = modes[mode]
+            s = stats([r.get(key, 0) for r in results])
+            vals.append((s, fmt_metric_value(s["mean"], unit) if s["n"] > 0 else "-"))
+
+        b_mean = vals[0][0]["mean"]
+        # Speedup column: last mode vs baseline
+        last_mean = vals[-1][0]["mean"]
+        speedup = f'{b_mean/last_mean:.1f}x' if last_mean > 0.001 else "-"
+
+        row = [label] + [v[1] for v in vals] + [speedup]
+        print(hdr.format(*row))
 
     # ── Throughput summary ────────────────────────────────────────
     print()
-    if insert_results:
-        valid_i = [r for r in insert_results if r["duration_secs"] > 0]
-        i_rps = sum(rows / r["duration_secs"] for r in valid_i) / len(valid_i) if valid_i else 0
-        i_mbps = sum(bytes_read / r["duration_secs"] / 1048576 for r in valid_i) / len(valid_i) if valid_i else 0
-    else:
-        i_rps = i_mbps = 0
+    thrpt_vals = []
+    for mode in mode_names:
+        results = modes[mode]
+        valid = [r for r in results if r["duration_secs"] > 0]
+        rps = sum(rows / r["duration_secs"] for r in valid) / len(valid) if valid else 0
+        mbps = sum(bytes_read / r["duration_secs"] / 1048576 for r in valid) / len(valid) if valid else 0
+        thrpt_vals.append((rps, mbps))
 
-    if copy_results:
-        valid_c = [r for r in copy_results if r["duration_secs"] > 0]
-        c_rps = sum(rows / r["duration_secs"] for r in valid_c) / len(valid_c) if valid_c else 0
-        c_mbps = sum(bytes_read / r["duration_secs"] / 1048576 for r in valid_c) / len(valid_c) if valid_c else 0
-    else:
-        c_rps = c_mbps = 0
+    b_rps, b_mbps = thrpt_vals[0]
+    last_rps, last_mbps = thrpt_vals[-1]
+    rps_su = f"{last_rps/b_rps:.1f}x" if b_rps > 0 else "-"
+    mbps_su = f"{last_mbps/b_mbps:.1f}x" if b_mbps > 0 else "-"
 
-    rps_su = f"{c_rps/i_rps:.1f}x" if i_rps > 0 else "-"
-    mbps_su = f"{c_mbps/i_mbps:.1f}x" if i_mbps > 0 else "-"
-    print(hdr.format("Throughput (rows/s)", f"{i_rps:,.0f}", f"{c_rps:,.0f}", rps_su))
-    print(hdr.format("Throughput (MB/s)", f"{i_mbps:.2f}", f"{c_mbps:.2f}", mbps_su))
+    row_rps = ["Throughput (rows/s)"] + [f"{t[0]:,.0f}" for t in thrpt_vals] + [rps_su]
+    row_mbps = ["Throughput (MB/s)"] + [f"{t[1]:.2f}" for t in thrpt_vals] + [mbps_su]
+    print(hdr.format(*row_rps))
+    print(hdr.format(*row_mbps))
 
 
 if __name__ == "__main__":

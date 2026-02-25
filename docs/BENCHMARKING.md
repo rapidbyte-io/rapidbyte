@@ -215,14 +215,16 @@ Note: source and destination run on separate threads. `duration_secs` is wall-cl
 
 ## Pipeline Variants
 
-Four benchmark pipeline YAMLs are provided in `bench/fixtures/pipelines/`:
+Six benchmark pipeline YAMLs are provided in `bench/fixtures/pipelines/`:
 
-| File | Load Method | Compression | Notes |
-|------|-------------|-------------|-------|
-| `bench_pg.yaml` | INSERT (default) | None | Baseline |
-| `bench_pg_copy.yaml` | COPY | None | Faster bulk loading |
-| `bench_pg_lz4.yaml` | INSERT | LZ4 | Fast compression |
-| `bench_pg_zstd.yaml` | INSERT | Zstd | Higher compression ratio |
+| File | Load Method | Transform | Compression | Notes |
+|------|-------------|-----------|-------------|-------|
+| `bench_pg.yaml` | INSERT | None | None | Baseline |
+| `bench_pg_copy.yaml` | COPY | None | None | Faster bulk loading |
+| `bench_pg_lz4.yaml` | INSERT | None | LZ4 | Fast compression |
+| `bench_pg_zstd.yaml` | INSERT | None | Zstd | Higher compression ratio |
+| `bench_pg_transform.yaml` | INSERT | Passthrough + computed column | None | Measures DataFusion overhead |
+| `bench_pg_transform_filter.yaml` | INSERT | Filter + projection + computed | None | Realistic transform workload |
 
 ### INSERT vs COPY
 

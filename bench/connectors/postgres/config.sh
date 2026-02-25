@@ -25,7 +25,7 @@ BENCH_DEFAULT_ROWS="${BENCH_PROFILE_ROWS[$BENCH_PROFILE]:-10000}"
 BENCH_COMPARE_ROWS=10000
 
 # Benchmark modes (pipeline variants to run)
-BENCH_MODES=(insert copy)
+BENCH_MODES=(insert copy transform transform_filter)
 
 # Default iterations per mode
 BENCH_DEFAULT_ITERS=3
@@ -36,3 +36,5 @@ BENCH_PIPELINES[insert]="$BENCH_DIR/fixtures/pipelines/bench_pg.yaml"
 BENCH_PIPELINES[copy]="$BENCH_DIR/fixtures/pipelines/bench_pg_copy.yaml"
 BENCH_PIPELINES[lz4]="$BENCH_DIR/fixtures/pipelines/bench_pg_lz4.yaml"
 BENCH_PIPELINES[zstd]="$BENCH_DIR/fixtures/pipelines/bench_pg_zstd.yaml"
+BENCH_PIPELINES[transform]="$BENCH_DIR/fixtures/pipelines/bench_pg_transform.yaml"
+BENCH_PIPELINES[transform_filter]="$BENCH_DIR/fixtures/pipelines/bench_pg_transform_filter.yaml"
