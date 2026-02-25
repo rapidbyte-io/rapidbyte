@@ -143,6 +143,7 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
                     ErrorCategory::TransientDb => CErrorCategory::TransientDb,
                     ErrorCategory::Data => CErrorCategory::Data,
                     ErrorCategory::Schema => CErrorCategory::Schema,
+                    ErrorCategory::Frame => CErrorCategory::Frame,
                     ErrorCategory::Internal | _ => CErrorCategory::Internal,
                 },
                 scope: match error.scope {

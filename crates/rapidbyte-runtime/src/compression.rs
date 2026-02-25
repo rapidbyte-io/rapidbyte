@@ -63,16 +63,6 @@ pub fn compress_bytes(codec: CompressionCodec, data: &[u8]) -> Result<Bytes, Com
     }
 }
 
-/// Decompress bytes using the given codec. Returns `Vec<u8>` because
-/// decompression output cannot share the input buffer.
-///
-/// # Errors
-///
-/// Returns an error if decompression fails.
-pub fn decompress_to_vec(codec: CompressionCodec, data: &[u8]) -> Result<Vec<u8>, CompressionError> {
-    decompress(codec, data)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,7 +133,7 @@ mod tests {
     fn test_lz4_roundtrip_bytes() {
         let data = bytes::Bytes::from_static(b"hello world repeated hello world repeated hello world repeated");
         let compressed = compress_bytes(CompressionCodec::Lz4, &data).unwrap();
-        let decompressed = decompress_to_vec(CompressionCodec::Lz4, &compressed).unwrap();
+        let decompressed = decompress(CompressionCodec::Lz4, &compressed).unwrap();
         assert_eq!(data.as_ref(), decompressed.as_slice());
     }
 
@@ -151,7 +141,7 @@ mod tests {
     fn test_zstd_roundtrip_bytes() {
         let data = bytes::Bytes::from_static(b"hello world repeated hello world repeated hello world repeated");
         let compressed = compress_bytes(CompressionCodec::Zstd, &data).unwrap();
-        let decompressed = decompress_to_vec(CompressionCodec::Zstd, &compressed).unwrap();
+        let decompressed = decompress(CompressionCodec::Zstd, &compressed).unwrap();
         assert_eq!(data.as_ref(), decompressed.as_slice());
     }
 }
