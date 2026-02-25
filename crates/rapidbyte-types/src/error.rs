@@ -31,6 +31,8 @@ pub enum ErrorCategory {
     Schema,
     /// Internal connector error.
     Internal,
+    /// Frame lifecycle error (alloc/write/seal/read).
+    Frame,
 }
 
 impl fmt::Display for ErrorCategory {
@@ -45,6 +47,7 @@ impl fmt::Display for ErrorCategory {
             Self::Data => "data",
             Self::Schema => "schema",
             Self::Internal => "internal",
+            Self::Frame => "frame",
         };
         f.write_str(s)
     }
@@ -218,6 +221,12 @@ impl ConnectorError {
     #[must_use]
     pub fn internal(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self::new(ErrorCategory::Internal, ErrorScope::Stream, false, BackoffClass::Normal, code, message)
+    }
+
+    /// Frame lifecycle error (not retryable).
+    #[must_use]
+    pub fn frame(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::new(ErrorCategory::Frame, ErrorScope::Batch, false, BackoffClass::Normal, code, message)
     }
 
     /// Attach structured diagnostic details.

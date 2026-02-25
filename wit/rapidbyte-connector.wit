@@ -1,4 +1,4 @@
-package rapidbyte:connector@2.0.0;
+package rapidbyte:connector@3.0.0;
 
 interface types {
     enum validation-status {
@@ -17,6 +17,7 @@ interface types {
         data,
         schema,
         internal,
+        frame,
     }
 
     enum error-scope {
@@ -108,8 +109,8 @@ interface host {
         socket-write-result,
     };
 
-    emit-batch: func(batch: list<u8>) -> result<_, connector-error>;
-    next-batch: func() -> result<option<list<u8>>, connector-error>;
+    emit-batch: func(handle: u64) -> result<_, connector-error>;
+    next-batch: func() -> result<option<u64>, connector-error>;
     log: func(level: u32, msg: string);
     checkpoint: func(kind: u32, payload-json: string) -> result<_, connector-error>;
     metric: func(payload-json: string) -> result<_, connector-error>;
@@ -117,6 +118,13 @@ interface host {
     state-get: func(scope: u32, key: string) -> result<option<string>, connector-error>;
     state-put: func(scope: u32, key: string, val: string) -> result<_, connector-error>;
     state-cas: func(scope: u32, key: string, expected: option<string>, new-val: string) -> result<bool, connector-error>;
+
+    frame-new: func(capacity: u64) -> result<u64, connector-error>;
+    frame-write: func(handle: u64, chunk: list<u8>) -> result<u64, connector-error>;
+    frame-seal: func(handle: u64) -> result<_, connector-error>;
+    frame-len: func(handle: u64) -> result<u64, connector-error>;
+    frame-read: func(handle: u64, offset: u64, len: u64) -> result<list<u8>, connector-error>;
+    frame-drop: func(handle: u64);
 
     connect-tcp: func(host: string, port: u16) -> result<u64, connector-error>;
     socket-read: func(handle: u64, len: u64) -> result<socket-read-result, connector-error>;

@@ -26,6 +26,7 @@ use rapidbyte_types::state::{CursorState, PipelineId, StreamName};
 use crate::acl::{derive_network_acl, NetworkAcl};
 use crate::compression::CompressionCodec;
 use crate::engine::HasStoreLimits;
+use crate::frame::FrameTable;
 use crate::sandbox::{build_store_limits, build_wasi_ctx, SandboxOverrides};
 use crate::socket::{
     resolve_socket_addrs, SocketEntry, SocketReadResult, SocketWriteResult,
@@ -97,6 +98,7 @@ pub struct ComponentHostState {
     pub(crate) batch: BatchRouter,
     pub(crate) checkpoints: CheckpointCollector,
     pub(crate) sockets: SocketManager,
+    pub(crate) frames: FrameTable,
     pub(crate) store_limits: StoreLimits,
     ctx: WasiCtx,
     table: ResourceTable,
@@ -282,6 +284,7 @@ impl HostStateBuilder {
                 sockets: HashMap::new(),
                 next_handle: 1,
             },
+            frames: FrameTable::new(),
             store_limits: build_store_limits(self.overrides.as_ref()),
             ctx: build_wasi_ctx(self.permissions.as_ref(), self.overrides.as_ref())?,
             table: ResourceTable::new(),
@@ -299,29 +302,88 @@ impl ComponentHostState {
         HostStateBuilder::new()
     }
 
+    /// Max frame capacity: 512 MB. Prevents guest-induced OOM.
+    const MAX_FRAME_CAPACITY: u64 = 512 * 1024 * 1024;
+
     fn current_stream(&self) -> &str {
         self.identity.stream.as_str()
+    }
+
+    // ── Frame lifecycle host imports ────────────────────────────────
+
+    pub(crate) fn frame_new_impl(&mut self, capacity: u64) -> u64 {
+        let clamped = capacity.min(Self::MAX_FRAME_CAPACITY);
+        if capacity > Self::MAX_FRAME_CAPACITY {
+            tracing::warn!(
+                requested = capacity,
+                clamped = clamped,
+                "frame-new capacity clamped to MAX_FRAME_CAPACITY"
+            );
+        }
+        self.frames.alloc(clamped)
+    }
+
+    pub(crate) fn frame_write_impl(
+        &mut self,
+        handle: u64,
+        chunk: Vec<u8>,
+    ) -> Result<u64, ConnectorError> {
+        self.frames.write(handle, &chunk).map_err(|e| {
+            ConnectorError::frame("FRAME_WRITE_FAILED", e.to_string())
+        })
+    }
+
+    pub(crate) fn frame_seal_impl(&mut self, handle: u64) -> Result<(), ConnectorError> {
+        self.frames.seal(handle).map_err(|e| {
+            ConnectorError::frame("FRAME_SEAL_FAILED", e.to_string())
+        })
+    }
+
+    pub(crate) fn frame_len_impl(&mut self, handle: u64) -> Result<u64, ConnectorError> {
+        self.frames.len(handle).map_err(|e| {
+            ConnectorError::frame("FRAME_LEN_FAILED", e.to_string())
+        })
+    }
+
+    pub(crate) fn frame_read_impl(
+        &mut self,
+        handle: u64,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, ConnectorError> {
+        self.frames.read(handle, offset, len).map_err(|e| {
+            ConnectorError::frame("FRAME_READ_FAILED", e.to_string())
+        })
+    }
+
+    pub(crate) fn frame_drop_impl(&mut self, handle: u64) {
+        self.frames.drop_frame(handle);
     }
 
     // ── Host import implementations ─────────────────────────────────
 
     #[allow(clippy::cast_possible_truncation)]
-    pub(crate) fn emit_batch_impl(&mut self, batch: Vec<u8>) -> Result<(), ConnectorError> {
-        if batch.is_empty() {
+    pub(crate) fn emit_batch_impl(&mut self, handle: u64) -> Result<(), ConnectorError> {
+        let fn_start = Instant::now();
+
+        // Consume the sealed frame -> Bytes (zero-copy)
+        let payload = self.frames.consume(handle).map_err(|e| {
+            ConnectorError::frame("EMIT_BATCH_FAILED", e.to_string())
+        })?;
+
+        if payload.is_empty() {
             return Err(ConnectorError::internal(
                 "EMPTY_BATCH",
                 "Connector emitted a zero-length batch; this is a protocol violation",
             ));
         }
 
-        let fn_start = Instant::now();
-
         let compress_start = Instant::now();
-        let batch: bytes::Bytes = if let Some(codec) = self.batch.compression {
-            crate::compression::compress_bytes(codec, &batch)
+        let payload: bytes::Bytes = if let Some(codec) = self.batch.compression {
+            crate::compression::compress_bytes(codec, &payload)
                 .map_err(|e| ConnectorError::internal("COMPRESS_FAILED", e.to_string()))?
         } else {
-            batch.into()
+            payload
         };
         let compress_elapsed_nanos = if self.batch.compression.is_some() {
             compress_start.elapsed().as_nanos() as u64
@@ -335,7 +397,7 @@ impl ComponentHostState {
             })?;
 
         sender
-            .blocking_send(Frame::Data(batch))
+            .blocking_send(Frame::Data(payload))
             .map_err(|e| ConnectorError::internal("CHANNEL_SEND", e.to_string()))?;
 
         self.batch.next_batch_id += 1;
@@ -349,7 +411,7 @@ impl ComponentHostState {
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    pub(crate) fn next_batch_impl(&mut self) -> Result<Option<Vec<u8>>, ConnectorError> {
+    pub(crate) fn next_batch_impl(&mut self) -> Result<Option<u64>, ConnectorError> {
         let fn_start = Instant::now();
 
         let receiver = self.batch.receiver.as_mut().ok_or_else(|| {
@@ -360,17 +422,18 @@ impl ComponentHostState {
             return Ok(None);
         };
 
-        let batch = match frame {
-            Frame::Data(batch) => batch,
+        let payload = match frame {
+            Frame::Data(payload) => payload,
             Frame::EndStream => return Ok(None),
         };
 
         let decompress_start = Instant::now();
-        let batch = if let Some(codec) = self.batch.compression {
-            crate::compression::decompress(codec, &batch)
+        let payload: bytes::Bytes = if let Some(codec) = self.batch.compression {
+            crate::compression::decompress(codec, &payload)
                 .map_err(|e| ConnectorError::internal("DECOMPRESS_FAILED", e.to_string()))?
+                .into()
         } else {
-            batch.to_vec()
+            payload // Bytes, zero-copy
         };
         let decompress_elapsed_nanos = if self.batch.compression.is_some() {
             decompress_start.elapsed().as_nanos() as u64
@@ -378,12 +441,15 @@ impl ComponentHostState {
             0
         };
 
+        // Insert as sealed read-only frame
+        let handle = self.frames.insert_sealed(payload);
+
         let mut t = lock_mutex(&self.checkpoints.timings, "timings")?;
         t.next_batch_nanos += fn_start.elapsed().as_nanos() as u64;
         t.next_batch_count += 1;
         t.decompress_nanos += decompress_elapsed_nanos;
 
-        Ok(Some(batch))
+        Ok(Some(handle))
     }
 
     fn scoped_state_key(&self, scope: StateScope, key: &str) -> String {
@@ -851,6 +917,7 @@ fn parse_error_category(raw: &str) -> ErrorCategory {
         "transient_db" => ErrorCategory::TransientDb,
         "data" => ErrorCategory::Data,
         "schema" => ErrorCategory::Schema,
+        "frame" => ErrorCategory::Frame,
         _ => ErrorCategory::Internal,
     }
 }

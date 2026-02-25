@@ -80,6 +80,7 @@ macro_rules! define_error_converters {
                     ErrorCategory::TransientDb => CErrorCategory::TransientDb,
                     ErrorCategory::Data => CErrorCategory::Data,
                     ErrorCategory::Schema => CErrorCategory::Schema,
+                    ErrorCategory::Frame => CErrorCategory::Frame,
                     ErrorCategory::Internal | _ => CErrorCategory::Internal,
                 },
                 scope: match error.scope {
@@ -138,6 +139,9 @@ macro_rules! define_error_converters {
                     $module::rapidbyte::connector::types::ErrorCategory::Internal => {
                         ErrorCategory::Internal
                     }
+                    $module::rapidbyte::connector::types::ErrorCategory::Frame => {
+                        ErrorCategory::Frame
+                    }
                 },
                 scope: match error.scope {
                     $module::rapidbyte::connector::types::ErrorScope::PerStream => {
@@ -184,15 +188,15 @@ macro_rules! impl_host_trait_for_world {
         impl $module::rapidbyte::connector::host::Host for ComponentHostState {
             fn emit_batch(
                 &mut self,
-                batch: Vec<u8>,
+                handle: u64,
             ) -> std::result::Result<(), $module::rapidbyte::connector::types::ConnectorError> {
-                self.emit_batch_impl(batch).map_err($to_world_error)
+                self.emit_batch_impl(handle).map_err($to_world_error)
             }
 
             fn next_batch(
                 &mut self,
             ) -> std::result::Result<
-                Option<Vec<u8>>,
+                Option<u64>,
                 $module::rapidbyte::connector::types::ConnectorError,
             > {
                 self.next_batch_impl().map_err($to_world_error)
@@ -260,6 +264,56 @@ macro_rules! impl_host_trait_for_world {
             {
                 self.state_cas_impl(scope, key, expected, new_val)
                     .map_err($to_world_error)
+            }
+
+            fn frame_new(
+                &mut self,
+                capacity: u64,
+            ) -> std::result::Result<u64, $module::rapidbyte::connector::types::ConnectorError>
+            {
+                Ok(self.frame_new_impl(capacity))
+            }
+
+            fn frame_write(
+                &mut self,
+                handle: u64,
+                chunk: Vec<u8>,
+            ) -> std::result::Result<u64, $module::rapidbyte::connector::types::ConnectorError>
+            {
+                self.frame_write_impl(handle, chunk).map_err($to_world_error)
+            }
+
+            fn frame_seal(
+                &mut self,
+                handle: u64,
+            ) -> std::result::Result<(), $module::rapidbyte::connector::types::ConnectorError>
+            {
+                self.frame_seal_impl(handle).map_err($to_world_error)
+            }
+
+            fn frame_len(
+                &mut self,
+                handle: u64,
+            ) -> std::result::Result<u64, $module::rapidbyte::connector::types::ConnectorError>
+            {
+                self.frame_len_impl(handle).map_err($to_world_error)
+            }
+
+            fn frame_read(
+                &mut self,
+                handle: u64,
+                offset: u64,
+                len: u64,
+            ) -> std::result::Result<
+                Vec<u8>,
+                $module::rapidbyte::connector::types::ConnectorError,
+            > {
+                self.frame_read_impl(handle, offset, len)
+                    .map_err($to_world_error)
+            }
+
+            fn frame_drop(&mut self, handle: u64) {
+                self.frame_drop_impl(handle);
             }
 
             fn connect_tcp(
