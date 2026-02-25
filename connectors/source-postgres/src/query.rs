@@ -82,12 +82,13 @@ pub(crate) fn build_base_query(
                         stream.stream_name, cursor_field
                     ),
                 );
-                return Ok(CursorQuery {
-                    sql: format!(
-                        "SELECT {col_list} FROM {table_name} ORDER BY {cursor_field}"
-                    ),
-                    bind: None,
-                });
+                let mut sql = format!(
+                    "SELECT {col_list} FROM {table_name} ORDER BY {cursor_field}"
+                );
+                if let Some(max) = stream.limits.max_records {
+                    sql.push_str(&format!(" LIMIT {max}"));
+                }
+                return Ok(CursorQuery { sql, bind: None });
             }
 
             let resolved_cursor_type = effective_cursor_type(ci.cursor_type, *cursor_arrow_type);
@@ -121,10 +122,14 @@ pub(crate) fn build_base_query(
                 ),
             );
 
+            let mut sql = format!(
+                "SELECT {col_list} FROM {table_name} WHERE {cursor_field} > $1::{cast} ORDER BY {cursor_field}"
+            );
+            if let Some(max) = stream.limits.max_records {
+                sql.push_str(&format!(" LIMIT {max}"));
+            }
             return Ok(CursorQuery {
-                sql: format!(
-                    "SELECT {col_list} FROM {table_name} WHERE {cursor_field} > $1::{cast} ORDER BY {cursor_field}"
-                ),
+                sql,
                 bind: Some(bind),
             });
         }
@@ -136,22 +141,24 @@ pub(crate) fn build_base_query(
                 stream.stream_name, cursor_field
             ),
         );
-        return Ok(CursorQuery {
-            sql: format!(
-                "SELECT {col_list} FROM {table_name} ORDER BY {cursor_field}"
-            ),
-            bind: None,
-        });
+        let mut sql = format!(
+            "SELECT {col_list} FROM {table_name} ORDER BY {cursor_field}"
+        );
+        if let Some(max) = stream.limits.max_records {
+            sql.push_str(&format!(" LIMIT {max}"));
+        }
+        return Ok(CursorQuery { sql, bind: None });
     }
 
-    Ok(CursorQuery {
-        sql: format!(
-            "SELECT {} FROM {}",
-            col_list,
-            quote_identifier(&stream.stream_name)
-        ),
-        bind: None,
-    })
+    let mut sql = format!(
+        "SELECT {} FROM {}",
+        col_list,
+        quote_identifier(&stream.stream_name)
+    );
+    if let Some(max) = stream.limits.max_records {
+        sql.push_str(&format!(" LIMIT {max}"));
+    }
+    Ok(CursorQuery { sql, bind: None })
 }
 
 pub(crate) fn cursor_bind_param(

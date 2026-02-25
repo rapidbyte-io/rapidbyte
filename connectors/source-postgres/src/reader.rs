@@ -348,6 +348,20 @@ pub async fn read_stream(
         if exhausted {
             break;
         }
+
+        // Stop early if max_records limit reached
+        if let Some(max) = stream.limits.max_records {
+            if state.total_records >= max {
+                ctx.log(
+                    LogLevel::Info,
+                    &format!(
+                        "Reached max_records limit ({}) for stream '{}'",
+                        max, stream.stream_name
+                    ),
+                );
+                break;
+            }
+        }
     }
 
     let fetch_secs = fetch_start.elapsed().as_secs_f64();
