@@ -192,6 +192,30 @@ Connectors can be written in any language with WASI component support:
 
 The connector must implement the same WIT exports and call the same WIT imports regardless of language.
 
+## SQL Transform (`transform-sql`)
+
+Executes a SQL query against each incoming Arrow batch using Apache DataFusion.
+The incoming data is registered as a table named `input`.
+
+**Config:**
+
+```yaml
+transforms:
+  - use: transform-sql
+    config:
+      query: "SELECT id, UPPER(name) AS name, age + 1 AS next_age FROM input WHERE active = true"
+```
+
+**Supported operations:** column selection, filtering (WHERE), computed columns,
+type casting (CAST), string functions (UPPER, LOWER, TRIM, CONCAT), math
+expressions, CASE/WHEN, and all standard SQL scalar functions supported by
+DataFusion.
+
+**Limitations:** Batch-by-batch execution — cross-batch aggregations (GROUP BY,
+DISTINCT, window functions) operate per-batch, not across the full stream.
+
+**Table name:** Always `input`. The query must reference `FROM input`.
+
 ## 11. Migration Notes from v1
 
 Removed in v2:

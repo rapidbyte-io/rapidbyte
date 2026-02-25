@@ -15,6 +15,7 @@ crates/
 connectors/
   source-postgres/   # Source connector (wasm32-wasip2 target)
   dest-postgres/     # Destination connector (wasm32-wasip2 target)
+  transform-sql/   # SQL transform connector (wasm32-wasip2, DataFusion)
 tests/
   e2e.sh             # End-to-end test orchestrator (Docker PG)
   e2e/               # Individual E2E test scenarios
@@ -83,6 +84,7 @@ cd connectors/dest-postgres && cargo build
 - Host imports enforce connector-side ACLs for `connect-tcp` and disable direct WASI socket networking.
 - State backend is SQLite or Postgres (`crates/rapidbyte-state/`), used for run metadata and cursor/checkpoint state.
 - Arrow IPC batches flow between stages via V3 frame transport (host-managed frames with `frame-new`/`frame-write`/`frame-seal`/`emit-batch` lifecycle); optional lz4/zstd compression is handled in host imports.
+- SQL transforms (`transform-sql`) run DataFusion inside WASM sandbox, using the same connector infrastructure as source/destination connectors.
 
 ## Crate Conventions
 
