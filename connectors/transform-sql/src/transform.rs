@@ -40,11 +40,13 @@ pub async fn run(
             .sum();
         bytes_in += batch_bytes;
 
-        // Register as MemTable named "input" (overwrites previous registration).
+        // Register as MemTable named "input".
         let mem_table = datafusion::datasource::MemTable::try_new(schema, vec![batches]).map_err(
             |e| ConnectorError::internal("SQL_MEMTABLE", format!("Failed to create MemTable: {e}")),
         )?;
 
+        // Deregister previous table (no-op on first iteration).
+        let _ = session.deregister_table("input");
         session
             .register_table("input", Arc::new(mem_table))
             .map_err(|e| {
