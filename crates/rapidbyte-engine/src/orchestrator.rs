@@ -580,8 +580,9 @@ async fn execute_streams(
         channel_capacity: usize::max(1, stream_build.limits.max_inflight_batches as usize),
     });
 
-    let mut stream_join_handles: Vec<tokio::task::JoinHandle<Result<StreamResult, PipelineError>>> =
-        Vec::with_capacity(stream_build.stream_ctxs.len());
+    let mut stream_join_handles: Vec<
+        Option<tokio::task::JoinHandle<Result<StreamResult, PipelineError>>>,
+    > = Vec::with_capacity(stream_build.stream_ctxs.len());
     let run_dlq_records: Arc<Mutex<Vec<DlqRecord>>> = Arc::new(Mutex::new(Vec::new()));
 
     if !options.dry_run {
@@ -921,7 +922,7 @@ async fn execute_streams(
             }
         });
 
-        stream_join_handles.push(handle);
+        stream_join_handles.push(Some(handle));
     }
 
     let mut source_checkpoints = Vec::new();
@@ -953,10 +954,23 @@ async fn execute_streams(
     let mut stream_metrics: Vec<StreamShardMetric> = Vec::new();
     let mut first_error: Option<PipelineError> = None;
 
-    for handle in stream_join_handles {
-        let result = handle.await.map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!("Stream task panicked: {e}"))
+    for idx in 0..stream_join_handles.len() {
+        let handle = stream_join_handles[idx].take().ok_or_else(|| {
+            PipelineError::Infrastructure(anyhow::anyhow!("Missing stream handle"))
         })?;
+
+        let result = match handle.await {
+            Ok(result) => result,
+            Err(join_err) if join_err.is_cancelled() && first_error.is_some() => {
+                // Expected when sibling tasks are aborted after first stream failure.
+                continue;
+            }
+            Err(join_err) => {
+                return Err(PipelineError::Infrastructure(anyhow::anyhow!(
+                    "Stream task panicked: {join_err}"
+                )));
+            }
+        };
 
         match result {
             Ok(sr) => {
@@ -1024,6 +1038,11 @@ async fn execute_streams(
                 tracing::error!("Stream failed: {}", error);
                 if first_error.is_none() {
                     first_error = Some(error);
+                    for sibling in stream_join_handles.iter_mut().skip(idx + 1) {
+                        if let Some(handle) = sibling {
+                            handle.abort();
+                        }
+                    }
                 }
             }
         }
