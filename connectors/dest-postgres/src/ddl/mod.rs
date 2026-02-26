@@ -16,6 +16,73 @@ use crate::type_map::arrow_to_pg_type;
 
 pub(crate) use self::staging::{prepare_staging, swap_staging_table};
 
+fn format_pg_error(prefix: &str, error: &tokio_postgres::Error) -> String {
+    if let Some(db_error) = error.as_db_error() {
+        let detail = db_error.detail().unwrap_or("n/a");
+        let hint = db_error.hint().unwrap_or("n/a");
+        format!(
+            "{prefix}: {} (sqlstate={} severity={} detail={} hint={})",
+            db_error.message(),
+            db_error.code().code(),
+            db_error.severity(),
+            detail,
+            hint
+        )
+    } else {
+        format!("{prefix}: {error}")
+    }
+}
+
+fn is_pg_type_typname_race(code: &str, message: &str, detail: &str) -> bool {
+    code == "23505"
+        && (message.contains("pg_type_typname_nsp_index")
+            || detail.contains("pg_type_typname_nsp_index"))
+}
+
+fn is_concurrent_create_table_race(error: &tokio_postgres::Error) -> bool {
+    let Some(db_error) = error.as_db_error() else {
+        return false;
+    };
+
+    is_pg_type_typname_race(
+        db_error.code().code(),
+        db_error.message(),
+        db_error.detail().unwrap_or_default(),
+    )
+}
+
+async fn acquire_ddl_lock(client: &Client, lock_name: &str) -> Result<(), String> {
+    client
+        .query_one(
+            "SELECT pg_advisory_lock(hashtext($1)::bigint)",
+            &[&lock_name],
+        )
+        .await
+        .map_err(|e| {
+            format_pg_error(
+                &format!("Failed to acquire DDL advisory lock '{lock_name}'"),
+                &e,
+            )
+        })?;
+    Ok(())
+}
+
+async fn release_ddl_lock(client: &Client, lock_name: &str) -> Result<(), String> {
+    client
+        .query_one(
+            "SELECT pg_advisory_unlock(hashtext($1)::bigint)",
+            &[&lock_name],
+        )
+        .await
+        .map_err(|e| {
+            format_pg_error(
+                &format!("Failed to release DDL advisory lock '{lock_name}'"),
+                &e,
+            )
+        })?;
+    Ok(())
+}
+
 /// Bundles the mutable schema-tracking sets used during DDL orchestration.
 pub(crate) struct SchemaState {
     pub(crate) created_tables: HashSet<String>,
@@ -76,9 +143,43 @@ async fn create_table(
     );
 
     client
-        .execute(&ddl, &[])
+        .execute("SAVEPOINT rb_create_table", &[])
         .await
-        .map_err(|e| format!("Failed to create table {qualified_table}: {e}"))?;
+        .map_err(|e| format_pg_error("Failed to create DDL savepoint", &e))?;
+
+    match client.execute(&ddl, &[]).await {
+        Ok(_) => {
+            client
+                .execute("RELEASE SAVEPOINT rb_create_table", &[])
+                .await
+                .map_err(|e| format_pg_error("Failed to release DDL savepoint", &e))?;
+        }
+        Err(error) if is_concurrent_create_table_race(&error) => {
+            client
+                .execute("ROLLBACK TO SAVEPOINT rb_create_table", &[])
+                .await
+                .map_err(|e| format_pg_error("Failed to rollback DDL savepoint", &e))?;
+            client
+                .execute("RELEASE SAVEPOINT rb_create_table", &[])
+                .await
+                .map_err(|e| format_pg_error("Failed to release DDL savepoint", &e))?;
+            ctx.log(
+                LogLevel::Warn,
+                &format!(
+                    "dest-postgres: concurrent CREATE TABLE race detected for {} (pg_type_typname_nsp_index); continuing",
+                    qualified_table
+                ),
+            );
+        }
+        Err(error) => {
+            let _ = client.execute("ROLLBACK TO SAVEPOINT rb_create_table", &[]).await;
+            let _ = client.execute("RELEASE SAVEPOINT rb_create_table", &[]).await;
+            return Err(format_pg_error(
+                &format!("Failed to create table {qualified_table}"),
+                &error,
+            ));
+        }
+    }
 
     Ok(())
 }
@@ -102,42 +203,90 @@ impl SchemaState {
             return Ok(());
         }
 
-        let create_schema = format!(
-            "CREATE SCHEMA IF NOT EXISTS {}",
-            quote_identifier(target_schema)
-        );
-        client
-            .execute(&create_schema, &[])
-            .await
-            .map_err(|e| format!("Failed to create schema '{target_schema}': {e}"))?;
+        let lock_name = format!("rb:ddl:schema:{target_schema}");
+        acquire_ddl_lock(client, &lock_name).await?;
 
-        let pk = match write_mode {
-            Some(WriteMode::Upsert { primary_key }) => Some(primary_key.as_slice()),
-            _ => None,
-        };
-        create_table(ctx, client, &qualified_table, arrow_schema, pk).await?;
-        self.created_tables.insert(qualified_table.clone());
+        let result = async {
+            let create_schema = format!(
+                "CREATE SCHEMA IF NOT EXISTS {}",
+                quote_identifier(target_schema)
+            );
+            client
+                .execute(&create_schema, &[])
+                .await
+                .map_err(|e| {
+                    format_pg_error(&format!("Failed to create schema '{target_schema}'"), &e)
+                })?;
 
-        if let Some(policy) = schema_policy {
-            if let Some(drift) =
-                detect_schema_drift(client, target_schema, stream_name, arrow_schema).await?
-            {
-                ctx.log(
-                    LogLevel::Info,
-                    &format!(
-                        "dest-postgres: schema drift detected for {}: {} new, {} removed, {} type changes, {} nullability changes",
-                        qualified_table,
-                        drift.new_columns.len(),
-                        drift.removed_columns.len(),
-                        drift.type_changes.len(),
-                        drift.nullability_changes.len()
-                    ),
-                );
-                self.apply_policy(ctx, client, &qualified_table, &drift, policy)
-                    .await?;
+            let pk = match write_mode {
+                Some(WriteMode::Upsert { primary_key }) => Some(primary_key.as_slice()),
+                _ => None,
+            };
+            create_table(ctx, client, &qualified_table, arrow_schema, pk).await?;
+            self.created_tables.insert(qualified_table.clone());
+
+            if let Some(policy) = schema_policy {
+                if let Some(drift) =
+                    detect_schema_drift(client, target_schema, stream_name, arrow_schema).await?
+                {
+                    ctx.log(
+                        LogLevel::Info,
+                        &format!(
+                            "dest-postgres: schema drift detected for {}: {} new, {} removed, {} type changes, {} nullability changes",
+                            qualified_table,
+                            drift.new_columns.len(),
+                            drift.removed_columns.len(),
+                            drift.type_changes.len(),
+                            drift.nullability_changes.len()
+                        ),
+                    );
+                    self.apply_policy(ctx, client, &qualified_table, &drift, policy)
+                        .await?;
+                }
             }
-        }
 
-        Ok(())
+            Ok(())
+        }
+        .await;
+
+        let unlock_result = release_ddl_lock(client, &lock_name).await;
+        match (result, unlock_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(err), Ok(())) => Err(err),
+            (Ok(()), Err(unlock_err)) => Err(unlock_err),
+            (Err(err), Err(_unlock_err)) => Err(err),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_pg_type_typname_race;
+
+    #[test]
+    fn detects_pg_type_typname_unique_violation_race() {
+        assert!(is_pg_type_typname_race(
+            "23505",
+            "duplicate key value violates unique constraint \"pg_type_typname_nsp_index\"",
+            "Key (typname, typnamespace)=(users, 16425) already exists."
+        ));
+    }
+
+    #[test]
+    fn ignores_other_unique_violations() {
+        assert!(!is_pg_type_typname_race(
+            "23505",
+            "duplicate key value violates unique constraint \"users_pkey\"",
+            "Key (id)=(42) already exists."
+        ));
+    }
+
+    #[test]
+    fn ignores_non_unique_violation_codes() {
+        assert!(!is_pg_type_typname_race(
+            "42P01",
+            "relation \"raw_parallel.users\" does not exist",
+            ""
+        ));
     }
 }

@@ -307,3 +307,11 @@ Document before/after evidence in `PERF_ANALYSIS.md` and benchmark notes.
 git add PERF_ANALYSIS.md docs/benchmarks tests/connectors/postgres/scenarios/10_parallelism.sh
 git commit -m "perf: validate world-class destination ingestion architecture and publish evidence"
 ```
+
+## 2026-02-26 Runtime Corrections (Post-Validation)
+
+- Parallel startup uncovered a real PostgreSQL catalog race (`pg_type_typname_nsp_index`) during concurrent `CREATE TABLE IF NOT EXISTS` across workers.
+- `dest-postgres` now wraps table creation in a savepoint and treats only that specific race as safe-to-continue while preserving failure semantics for all other DDL errors.
+- Parallel full-refresh destination workers no longer share watermark resume/checkpoint state.
+- Watermark resume remains enabled for non-partitioned stream execution; partitioned runs explicitly disable watermark state to avoid cross-worker row skipping.
+- Repeated `e2e_parallel` validation now passes with `retry_count=0` and stable row counts.

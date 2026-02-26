@@ -76,10 +76,7 @@ fn test_state_backend_full_lifecycle() {
 
     // Start a run
     let run_id = state
-        .start_run(
-            &PipelineId::new("my_pipeline"),
-            &StreamName::new("all"),
-        )
+        .start_run(&PipelineId::new("my_pipeline"), &StreamName::new("all"))
         .expect("Failed to start run");
     assert!(run_id > 0);
 
@@ -99,10 +96,7 @@ fn test_state_backend_full_lifecycle() {
 
     // Read cursor back
     let loaded = state
-        .get_cursor(
-            &PipelineId::new("my_pipeline"),
-            &StreamName::new("users"),
-        )
+        .get_cursor(&PipelineId::new("my_pipeline"), &StreamName::new("users"))
         .expect("Failed to get cursor")
         .expect("Cursor should exist");
     assert_eq!(loaded.cursor_field, Some("updated_at".to_string()));
@@ -127,10 +121,7 @@ fn test_state_backend_full_lifecycle() {
 
     // Start another run and fail it
     let run_id2 = state
-        .start_run(
-            &PipelineId::new("my_pipeline"),
-            &StreamName::new("all"),
-        )
+        .start_run(&PipelineId::new("my_pipeline"), &StreamName::new("all"))
         .expect("Failed to start second run");
 
     state
@@ -308,4 +299,56 @@ async fn test_pg_to_pg_full_pipeline() {
     println!("  Records written: {}", result.counts.records_written);
     println!("  Bytes read:      {}", result.counts.bytes_read);
     println!("  Duration:        {:.2}s", result.duration_secs);
+}
+
+/// End-to-end parallel destination regression test.
+///
+/// Run with: `cargo test --test pipeline_integration test_parallel_destination_no_retry_and_stable_counts -- --ignored`
+///
+/// Prerequisites:
+/// - tests/connectors/postgres/setup.sh has been run
+/// - Connector .wasm files are built at RAPIDBYTE_CONNECTOR_DIR (or default plugin dir)
+#[tokio::test]
+#[ignore]
+async fn test_parallel_destination_no_retry_and_stable_counts() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let fixture_path =
+        repo_root.join("tests/connectors/postgres/fixtures/pipelines/e2e_parallel.yaml");
+    let connector_dir = repo_root.join("target/connectors");
+    std::env::set_var("RAPIDBYTE_CONNECTOR_DIR", connector_dir.as_os_str());
+
+    let config =
+        parser::parse_pipeline(&fixture_path).expect("Failed to parse e2e_parallel fixture");
+    validator::validate_pipeline(&config).expect("Parallel fixture validation failed");
+
+    let options = rapidbyte_engine::execution::ExecutionOptions::default();
+    let outcome = rapidbyte_engine::orchestrator::run_pipeline(&config, &options)
+        .await
+        .expect("Parallel pipeline run failed");
+
+    let result = match outcome {
+        rapidbyte_engine::execution::PipelineOutcome::Run(r) => r,
+        rapidbyte_engine::execution::PipelineOutcome::DryRun(_) => {
+            panic!("Expected Run outcome, got DryRun")
+        }
+    };
+
+    assert_eq!(
+        result.retry_count, 0,
+        "Parallel destination run must not require retries"
+    );
+    assert_eq!(
+        result.counts.records_read, 10,
+        "Expected fixture read count"
+    );
+    assert_eq!(
+        result.counts.records_written, 10,
+        "Expected stable fixture write count"
+    );
+
+    std::env::remove_var("RAPIDBYTE_CONNECTOR_DIR");
 }
