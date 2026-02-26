@@ -14,6 +14,7 @@ use rapidbyte_types::metric::{ReadSummary, WriteSummary};
 use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
 use rapidbyte_types::wire::{ConnectorRole, SyncMode, WriteMode};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 use crate::arrow::ipc_to_record_batches;
 use crate::checkpoint::correlate_and_persist_cursors;
@@ -114,6 +115,45 @@ struct AggregatedStreamResults {
     first_error: Option<PipelineError>,
     dry_run_streams: Vec<DryRunStreamResult>,
     stream_metrics: Vec<StreamShardMetric>,
+}
+
+struct StreamTaskCollection {
+    successes: Vec<StreamResult>,
+    first_error: Option<PipelineError>,
+}
+
+async fn collect_stream_task_results(
+    mut stream_join_set: JoinSet<Result<StreamResult, PipelineError>>,
+) -> Result<StreamTaskCollection, PipelineError> {
+    let mut successes = Vec::new();
+    let mut first_error: Option<PipelineError> = None;
+
+    while let Some(joined) = stream_join_set.join_next().await {
+        match joined {
+            Ok(Ok(sr)) if first_error.is_none() => successes.push(sr),
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::error!("Stream failed: {}", error);
+                if first_error.is_none() {
+                    first_error = Some(error);
+                    stream_join_set.abort_all();
+                }
+            }
+            Err(join_err) if join_err.is_cancelled() && first_error.is_some() => {
+                // Expected: sibling tasks cancelled after first stream failure.
+            }
+            Err(join_err) => {
+                return Err(PipelineError::Infrastructure(anyhow::anyhow!(
+                    "Stream task panicked: {join_err}"
+                )));
+            }
+        }
+    }
+
+    Ok(StreamTaskCollection {
+        successes,
+        first_error,
+    })
 }
 
 /// Run a full pipeline: source -> destination with state tracking.
@@ -580,9 +620,7 @@ async fn execute_streams(
         channel_capacity: usize::max(1, stream_build.limits.max_inflight_batches as usize),
     });
 
-    let mut stream_join_handles: Vec<
-        Option<tokio::task::JoinHandle<Result<StreamResult, PipelineError>>>,
-    > = Vec::with_capacity(stream_build.stream_ctxs.len());
+    let mut stream_join_set: JoinSet<Result<StreamResult, PipelineError>> = JoinSet::new();
     let run_dlq_records: Arc<Mutex<Vec<DlqRecord>>> = Arc::new(Mutex::new(Vec::new()));
 
     if !options.dry_run {
@@ -922,7 +960,11 @@ async fn execute_streams(
             }
         });
 
-        stream_join_handles.push(Some(handle));
+        stream_join_set.spawn(async move {
+            handle.await.map_err(|e| {
+                PipelineError::Infrastructure(anyhow::anyhow!("Stream task panicked: {e}"))
+            })?
+        });
     }
 
     let mut source_checkpoints = Vec::new();
@@ -952,101 +994,69 @@ async fn execute_streams(
     let mut transform_durations = Vec::new();
     let mut dry_run_streams: Vec<DryRunStreamResult> = Vec::new();
     let mut stream_metrics: Vec<StreamShardMetric> = Vec::new();
-    let mut first_error: Option<PipelineError> = None;
+    let stream_collection = collect_stream_task_results(stream_join_set).await?;
 
-    for idx in 0..stream_join_handles.len() {
-        let handle = stream_join_handles[idx].take().ok_or_else(|| {
-            PipelineError::Infrastructure(anyhow::anyhow!("Missing stream handle"))
-        })?;
+    for sr in stream_collection.successes {
+        total_read_summary.records_read += sr.read_summary.records_read;
+        total_read_summary.bytes_read += sr.read_summary.bytes_read;
+        total_read_summary.batches_emitted += sr.read_summary.batches_emitted;
+        total_read_summary.checkpoint_count += sr.read_summary.checkpoint_count;
+        total_read_summary.records_skipped += sr.read_summary.records_skipped;
 
-        let result = match handle.await {
-            Ok(result) => result,
-            Err(join_err) if join_err.is_cancelled() && first_error.is_some() => {
-                // Expected when sibling tasks are aborted after first stream failure.
-                continue;
-            }
-            Err(join_err) => {
-                return Err(PipelineError::Infrastructure(anyhow::anyhow!(
-                    "Stream task panicked: {join_err}"
-                )));
-            }
-        };
+        total_write_summary.records_written += sr.write_summary.records_written;
+        total_write_summary.bytes_written += sr.write_summary.bytes_written;
+        total_write_summary.batches_written += sr.write_summary.batches_written;
+        total_write_summary.checkpoint_count += sr.write_summary.checkpoint_count;
+        total_write_summary.records_failed += sr.write_summary.records_failed;
 
-        match result {
-            Ok(sr) => {
-                total_read_summary.records_read += sr.read_summary.records_read;
-                total_read_summary.bytes_read += sr.read_summary.bytes_read;
-                total_read_summary.batches_emitted += sr.read_summary.batches_emitted;
-                total_read_summary.checkpoint_count += sr.read_summary.checkpoint_count;
-                total_read_summary.records_skipped += sr.read_summary.records_skipped;
+        source_checkpoints.extend(sr.source_checkpoints);
+        dest_checkpoints.extend(sr.dest_checkpoints);
 
-                total_write_summary.records_written += sr.write_summary.records_written;
-                total_write_summary.bytes_written += sr.write_summary.bytes_written;
-                total_write_summary.batches_written += sr.write_summary.batches_written;
-                total_write_summary.checkpoint_count += sr.write_summary.checkpoint_count;
-                total_write_summary.records_failed += sr.write_summary.records_failed;
+        src_timings.emit_batch_nanos += sr.src_host_timings.emit_batch_nanos;
+        src_timings.compress_nanos += sr.src_host_timings.compress_nanos;
+        src_timings.emit_batch_count += sr.src_host_timings.emit_batch_count;
+        src_timings.source_connect_secs += sr.src_host_timings.source_connect_secs;
+        src_timings.source_query_secs += sr.src_host_timings.source_query_secs;
+        src_timings.source_fetch_secs += sr.src_host_timings.source_fetch_secs;
+        src_timings.source_arrow_encode_secs += sr.src_host_timings.source_arrow_encode_secs;
+        dst_timings.next_batch_nanos += sr.dst_host_timings.next_batch_nanos;
+        dst_timings.next_batch_wait_nanos += sr.dst_host_timings.next_batch_wait_nanos;
+        dst_timings.next_batch_process_nanos += sr.dst_host_timings.next_batch_process_nanos;
+        dst_timings.decompress_nanos += sr.dst_host_timings.decompress_nanos;
+        dst_timings.next_batch_count += sr.dst_host_timings.next_batch_count;
+        dst_timings.dest_connect_secs += sr.dst_host_timings.dest_connect_secs;
+        dst_timings.dest_flush_secs += sr.dst_host_timings.dest_flush_secs;
+        dst_timings.dest_commit_secs += sr.dst_host_timings.dest_commit_secs;
+        dst_timings.dest_arrow_decode_secs += sr.dst_host_timings.dest_arrow_decode_secs;
 
-                source_checkpoints.extend(sr.source_checkpoints);
-                dest_checkpoints.extend(sr.dest_checkpoints);
+        if sr.src_duration > max_src_duration {
+            max_src_duration = sr.src_duration;
+        }
+        if sr.dst_duration > max_dst_duration {
+            max_dst_duration = sr.dst_duration;
+            max_dst_vm_setup_secs = sr.vm_setup_secs;
+            max_dst_recv_secs = sr.recv_secs;
+        }
+        transform_durations.extend(sr.transform_durations);
 
-                src_timings.emit_batch_nanos += sr.src_host_timings.emit_batch_nanos;
-                src_timings.compress_nanos += sr.src_host_timings.compress_nanos;
-                src_timings.emit_batch_count += sr.src_host_timings.emit_batch_count;
-                src_timings.source_connect_secs += sr.src_host_timings.source_connect_secs;
-                src_timings.source_query_secs += sr.src_host_timings.source_query_secs;
-                src_timings.source_fetch_secs += sr.src_host_timings.source_fetch_secs;
-                src_timings.source_arrow_encode_secs +=
-                    sr.src_host_timings.source_arrow_encode_secs;
-                dst_timings.next_batch_nanos += sr.dst_host_timings.next_batch_nanos;
-                dst_timings.next_batch_wait_nanos += sr.dst_host_timings.next_batch_wait_nanos;
-                dst_timings.next_batch_process_nanos +=
-                    sr.dst_host_timings.next_batch_process_nanos;
-                dst_timings.decompress_nanos += sr.dst_host_timings.decompress_nanos;
-                dst_timings.next_batch_count += sr.dst_host_timings.next_batch_count;
-                dst_timings.dest_connect_secs += sr.dst_host_timings.dest_connect_secs;
-                dst_timings.dest_flush_secs += sr.dst_host_timings.dest_flush_secs;
-                dst_timings.dest_commit_secs += sr.dst_host_timings.dest_commit_secs;
-                dst_timings.dest_arrow_decode_secs += sr.dst_host_timings.dest_arrow_decode_secs;
+        stream_metrics.push(StreamShardMetric {
+            stream_name: sr.stream_name,
+            partition_index: sr.partition_index,
+            partition_count: sr.partition_count,
+            records_read: sr.read_summary.records_read,
+            records_written: sr.write_summary.records_written,
+            bytes_read: sr.read_summary.bytes_read,
+            bytes_written: sr.write_summary.bytes_written,
+            source_duration_secs: sr.src_duration,
+            dest_duration_secs: sr.dst_duration,
+        });
 
-                if sr.src_duration > max_src_duration {
-                    max_src_duration = sr.src_duration;
-                }
-                if sr.dst_duration > max_dst_duration {
-                    max_dst_duration = sr.dst_duration;
-                    max_dst_vm_setup_secs = sr.vm_setup_secs;
-                    max_dst_recv_secs = sr.recv_secs;
-                }
-                transform_durations.extend(sr.transform_durations);
-
-                stream_metrics.push(StreamShardMetric {
-                    stream_name: sr.stream_name,
-                    partition_index: sr.partition_index,
-                    partition_count: sr.partition_count,
-                    records_read: sr.read_summary.records_read,
-                    records_written: sr.write_summary.records_written,
-                    bytes_read: sr.read_summary.bytes_read,
-                    bytes_written: sr.write_summary.bytes_written,
-                    source_duration_secs: sr.src_duration,
-                    dest_duration_secs: sr.dst_duration,
-                });
-
-                if let Some(dr) = sr.dry_run_result {
-                    dry_run_streams.push(dr);
-                }
-            }
-            Err(error) => {
-                tracing::error!("Stream failed: {}", error);
-                if first_error.is_none() {
-                    first_error = Some(error);
-                    for sibling in stream_join_handles.iter_mut().skip(idx + 1) {
-                        if let Some(handle) = sibling {
-                            handle.abort();
-                        }
-                    }
-                }
-            }
+        if let Some(dr) = sr.dry_run_result {
+            dry_run_streams.push(dr);
         }
     }
+
+    let first_error = stream_collection.first_error;
 
     let dlq_records = run_dlq_records
         .lock()
@@ -1440,6 +1450,70 @@ pub async fn discover_connector(
     })
     .await
     .map_err(|e| anyhow::anyhow!("Discover task panicked: {e}"))?
+}
+
+#[cfg(test)]
+mod stream_task_collection_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn success_result(stream_name: &str) -> StreamResult {
+        StreamResult {
+            stream_name: stream_name.to_string(),
+            partition_index: None,
+            partition_count: None,
+            read_summary: ReadSummary {
+                records_read: 0,
+                bytes_read: 0,
+                batches_emitted: 0,
+                checkpoint_count: 0,
+                records_skipped: 0,
+                perf: None,
+            },
+            write_summary: WriteSummary {
+                records_written: 0,
+                bytes_written: 0,
+                batches_written: 0,
+                checkpoint_count: 0,
+                records_failed: 0,
+                perf: None,
+            },
+            source_checkpoints: Vec::new(),
+            dest_checkpoints: Vec::new(),
+            src_host_timings: HostTimings::default(),
+            dst_host_timings: HostTimings::default(),
+            src_duration: 0.0,
+            dst_duration: 0.0,
+            vm_setup_secs: 0.0,
+            recv_secs: 0.0,
+            transform_durations: Vec::new(),
+            dry_run_result: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_stream_tasks_fails_fast_and_cancels_siblings() {
+        let mut join_set: JoinSet<Result<StreamResult, PipelineError>> = JoinSet::new();
+        join_set.spawn(async {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            Ok(success_result("slow_stream"))
+        });
+        join_set.spawn(async {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            Err(PipelineError::Infrastructure(anyhow::anyhow!(
+                "expected failure"
+            )))
+        });
+
+        let start = Instant::now();
+        let collected = collect_stream_task_results(join_set)
+            .await
+            .expect("collector should return first error, not infra panic");
+
+        assert!(collected.first_error.is_some());
+        assert!(collected.successes.is_empty());
+        assert!(start.elapsed() < Duration::from_millis(200));
+    }
 }
 
 #[cfg(test)]
