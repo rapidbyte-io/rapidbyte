@@ -2,10 +2,18 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use rapidbyte_engine::orchestrator;
 use rapidbyte_engine::config::parser;
 use rapidbyte_engine::config::validator;
 use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
+use rapidbyte_engine::orchestrator;
+
+#[derive(Debug, Clone)]
+struct ProcessCpuMetrics {
+    cpu_secs: f64,
+    cpu_pct_one_core: f64,
+    cpu_pct_of_available_cores: f64,
+    available_cores: usize,
+}
 
 /// Execute the `run` command: parse, validate, and run a pipeline.
 pub async fn execute(pipeline_path: &Path, dry_run: bool, limit: Option<u64>) -> Result<()> {
@@ -29,12 +37,15 @@ pub async fn execute(pipeline_path: &Path, dry_run: bool, limit: Option<u64>) ->
     );
 
     // 3. Run
+    let cpu_start = process_cpu_seconds();
     let outcome = orchestrator::run_pipeline(&config, &options).await?;
+    let cpu_end = process_cpu_seconds();
     match outcome {
         PipelineOutcome::Run(result) => {
             let counts = &result.counts;
             let source = &result.source;
             let dest = &result.dest;
+            let cpu_metrics = process_cpu_metrics(cpu_start, cpu_end, result.duration_secs);
 
             println!("Pipeline '{}' completed successfully.", config.pipeline);
             println!("  Records read:    {}", counts.records_read);
@@ -80,6 +91,14 @@ pub async fn execute(pipeline_path: &Path, dry_run: bool, limit: Option<u64>) ->
                 dest.recv_nanos as f64 / 1e9,
                 dest.recv_count
             );
+            println!(
+                "    Wait in recv:  {:.3}s",
+                dest.recv_wait_nanos as f64 / 1e9
+            );
+            println!(
+                "    Work in recv:  {:.3}s",
+                dest.recv_process_nanos as f64 / 1e9
+            );
             if dest.decompress_nanos > 0 {
                 println!(
                     "    Decompression: {:.3}s",
@@ -100,40 +119,17 @@ pub async fn execute(pipeline_path: &Path, dry_run: bool, limit: Option<u64>) ->
             if result.retry_count > 0 {
                 println!("  Retries:         {}", result.retry_count);
             }
+            if let Some(cpu) = &cpu_metrics {
+                println!("  CPU time:        {:.3}s", cpu.cpu_secs);
+                println!("  CPU use (1 core): {:.1}%", cpu.cpu_pct_one_core);
+                println!(
+                    "  CPU use ({0} cores): {1:.1}%",
+                    cpu.available_cores, cpu.cpu_pct_of_available_cores
+                );
+            }
 
             // Machine-readable JSON for benchmarking tools
-            let json = serde_json::json!({
-                "records_read": counts.records_read,
-                "records_written": counts.records_written,
-                "bytes_read": counts.bytes_read,
-                "bytes_written": counts.bytes_written,
-                "duration_secs": result.duration_secs,
-                "source_duration_secs": source.duration_secs,
-                "dest_duration_secs": dest.duration_secs,
-                "dest_connect_secs": dest.connect_secs,
-                "dest_flush_secs": dest.flush_secs,
-                "dest_commit_secs": dest.commit_secs,
-                "dest_vm_setup_secs": dest.vm_setup_secs,
-                "dest_recv_secs": dest.recv_secs,
-                "wasm_overhead_secs": result.wasm_overhead_secs,
-                "source_connect_secs": source.connect_secs,
-                "source_query_secs": source.query_secs,
-                "source_fetch_secs": source.fetch_secs,
-                "source_arrow_encode_secs": source.arrow_encode_secs,
-                "dest_arrow_decode_secs": dest.arrow_decode_secs,
-                "source_module_load_ms": source.module_load_ms,
-                "dest_module_load_ms": dest.module_load_ms,
-                "source_emit_nanos": source.emit_nanos,
-                "source_compress_nanos": source.compress_nanos,
-                "source_emit_count": source.emit_count,
-                "dest_recv_nanos": dest.recv_nanos,
-                "dest_decompress_nanos": dest.decompress_nanos,
-                "dest_recv_count": dest.recv_count,
-                "transform_count": result.transform_count,
-                "transform_duration_secs": result.transform_duration_secs,
-                "transform_module_load_ms": result.transform_module_load_ms,
-                "retry_count": result.retry_count,
-            });
+            let json = bench_json_from_result(&result, cpu_metrics.as_ref());
             println!("@@BENCH_JSON@@{}", json);
         }
         PipelineOutcome::DryRun(result) => {
@@ -161,7 +157,11 @@ pub async fn execute(pipeline_path: &Path, dry_run: bool, limit: Option<u64>) ->
                             "    {}: {:?}{}",
                             field.name(),
                             field.data_type(),
-                            if field.is_nullable() { " (nullable)" } else { "" }
+                            if field.is_nullable() {
+                                " (nullable)"
+                            } else {
+                                ""
+                            }
                         );
                     }
                     println!();
@@ -205,5 +205,352 @@ fn format_bytes(bytes: u64) -> String {
         format!("{:.2} KB", bytes as f64 / 1024.0)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+fn process_cpu_metrics(
+    cpu_start_secs: Option<f64>,
+    cpu_end_secs: Option<f64>,
+    wall_duration_secs: f64,
+) -> Option<ProcessCpuMetrics> {
+    let start = cpu_start_secs?;
+    let end = cpu_end_secs?;
+    if wall_duration_secs <= 0.0 || end < start {
+        return None;
+    }
+
+    let cpu_secs = end - start;
+    let cpu_pct_one_core = (cpu_secs / wall_duration_secs) * 100.0;
+    let available_cores = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let cpu_pct_of_available_cores = cpu_pct_one_core / available_cores as f64;
+
+    Some(ProcessCpuMetrics {
+        cpu_secs,
+        cpu_pct_one_core,
+        cpu_pct_of_available_cores,
+        available_cores,
+    })
+}
+
+fn process_cpu_seconds() -> Option<f64> {
+    #[cfg(unix)]
+    {
+        // Safety: getrusage writes into the provided `rusage` struct.
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        // Safety: pointer is valid for writes and initialized by successful call.
+        let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        if rc != 0 {
+            return None;
+        }
+        // Safety: call succeeded and initialized `usage`.
+        let usage = unsafe { usage.assume_init() };
+        let user_secs = usage.ru_utime.tv_sec as f64 + (usage.ru_utime.tv_usec as f64 / 1e6);
+        let sys_secs = usage.ru_stime.tv_sec as f64 + (usage.ru_stime.tv_usec as f64 / 1e6);
+        Some(user_secs + sys_secs)
+    }
+
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+fn bench_json_from_result(
+    result: &rapidbyte_engine::result::PipelineResult,
+    cpu_metrics: Option<&ProcessCpuMetrics>,
+) -> serde_json::Value {
+    let counts = &result.counts;
+    let source = &result.source;
+    let dest = &result.dest;
+    let stream_metrics = result
+        .stream_metrics
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "stream_name": m.stream_name,
+                "partition_index": m.partition_index,
+                "partition_count": m.partition_count,
+                "records_read": m.records_read,
+                "records_written": m.records_written,
+                "bytes_read": m.bytes_read,
+                "bytes_written": m.bytes_written,
+                "source_duration_secs": m.source_duration_secs,
+                "dest_duration_secs": m.dest_duration_secs,
+                "dest_vm_setup_secs": m.dest_vm_setup_secs,
+                "dest_recv_secs": m.dest_recv_secs,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let partitioned_workers = result
+        .stream_metrics
+        .iter()
+        .filter(|m| m.partition_count.unwrap_or(1) > 1)
+        .collect::<Vec<_>>();
+    let worker_records = partitioned_workers
+        .iter()
+        .map(|m| m.records_written)
+        .collect::<Vec<_>>();
+    let worker_records_min = worker_records.iter().min().copied();
+    let worker_records_max = worker_records.iter().max().copied();
+    let worker_records_skew_ratio = worker_records_min
+        .zip(worker_records_max)
+        .and_then(|(min, max)| (max > 0).then_some(min as f64 / max as f64));
+
+    let worker_dest_total_secs: f64 = partitioned_workers
+        .iter()
+        .map(|m| m.dest_duration_secs)
+        .sum();
+    let worker_dest_recv_secs: f64 = partitioned_workers.iter().map(|m| m.dest_recv_secs).sum();
+    let worker_dest_vm_setup_secs: f64 = partitioned_workers
+        .iter()
+        .map(|m| m.dest_vm_setup_secs)
+        .sum();
+    let worker_dest_active_secs =
+        (worker_dest_total_secs - worker_dest_recv_secs - worker_dest_vm_setup_secs).max(0.0);
+
+    let mut json = serde_json::Map::new();
+    json.insert(
+        "records_read".to_string(),
+        serde_json::json!(counts.records_read),
+    );
+    json.insert(
+        "records_written".to_string(),
+        serde_json::json!(counts.records_written),
+    );
+    json.insert(
+        "bytes_read".to_string(),
+        serde_json::json!(counts.bytes_read),
+    );
+    json.insert(
+        "bytes_written".to_string(),
+        serde_json::json!(counts.bytes_written),
+    );
+    json.insert(
+        "duration_secs".to_string(),
+        serde_json::json!(result.duration_secs),
+    );
+    json.insert(
+        "source_duration_secs".to_string(),
+        serde_json::json!(source.duration_secs),
+    );
+    json.insert(
+        "dest_duration_secs".to_string(),
+        serde_json::json!(dest.duration_secs),
+    );
+    json.insert(
+        "dest_connect_secs".to_string(),
+        serde_json::json!(dest.connect_secs),
+    );
+    json.insert(
+        "dest_flush_secs".to_string(),
+        serde_json::json!(dest.flush_secs),
+    );
+    json.insert(
+        "dest_commit_secs".to_string(),
+        serde_json::json!(dest.commit_secs),
+    );
+    json.insert(
+        "dest_vm_setup_secs".to_string(),
+        serde_json::json!(dest.vm_setup_secs),
+    );
+    json.insert(
+        "dest_recv_secs".to_string(),
+        serde_json::json!(dest.recv_secs),
+    );
+    json.insert(
+        "wasm_overhead_secs".to_string(),
+        serde_json::json!(result.wasm_overhead_secs),
+    );
+    json.insert(
+        "source_connect_secs".to_string(),
+        serde_json::json!(source.connect_secs),
+    );
+    json.insert(
+        "source_query_secs".to_string(),
+        serde_json::json!(source.query_secs),
+    );
+    json.insert(
+        "source_fetch_secs".to_string(),
+        serde_json::json!(source.fetch_secs),
+    );
+    json.insert(
+        "source_arrow_encode_secs".to_string(),
+        serde_json::json!(source.arrow_encode_secs),
+    );
+    json.insert(
+        "dest_arrow_decode_secs".to_string(),
+        serde_json::json!(dest.arrow_decode_secs),
+    );
+    json.insert(
+        "source_module_load_ms".to_string(),
+        serde_json::json!(source.module_load_ms),
+    );
+    json.insert(
+        "dest_module_load_ms".to_string(),
+        serde_json::json!(dest.module_load_ms),
+    );
+    json.insert(
+        "source_emit_nanos".to_string(),
+        serde_json::json!(source.emit_nanos),
+    );
+    json.insert(
+        "source_compress_nanos".to_string(),
+        serde_json::json!(source.compress_nanos),
+    );
+    json.insert(
+        "source_emit_count".to_string(),
+        serde_json::json!(source.emit_count),
+    );
+    json.insert(
+        "dest_recv_nanos".to_string(),
+        serde_json::json!(dest.recv_nanos),
+    );
+    json.insert(
+        "dest_recv_wait_nanos".to_string(),
+        serde_json::json!(dest.recv_wait_nanos),
+    );
+    json.insert(
+        "dest_recv_process_nanos".to_string(),
+        serde_json::json!(dest.recv_process_nanos),
+    );
+    json.insert(
+        "dest_decompress_nanos".to_string(),
+        serde_json::json!(dest.decompress_nanos),
+    );
+    json.insert(
+        "dest_recv_count".to_string(),
+        serde_json::json!(dest.recv_count),
+    );
+    json.insert(
+        "transform_count".to_string(),
+        serde_json::json!(result.transform_count),
+    );
+    json.insert(
+        "transform_duration_secs".to_string(),
+        serde_json::json!(result.transform_duration_secs),
+    );
+    json.insert(
+        "transform_module_load_ms".to_string(),
+        serde_json::json!(result.transform_module_load_ms),
+    );
+    json.insert(
+        "retry_count".to_string(),
+        serde_json::json!(result.retry_count),
+    );
+    json.insert(
+        "parallelism".to_string(),
+        serde_json::json!(result.parallelism),
+    );
+    json.insert(
+        "stream_metrics".to_string(),
+        serde_json::json!(stream_metrics),
+    );
+    json.insert(
+        "worker_records_min".to_string(),
+        serde_json::json!(worker_records_min),
+    );
+    json.insert(
+        "worker_records_max".to_string(),
+        serde_json::json!(worker_records_max),
+    );
+    json.insert(
+        "worker_records_skew_ratio".to_string(),
+        serde_json::json!(worker_records_skew_ratio),
+    );
+    json.insert(
+        "worker_dest_total_secs".to_string(),
+        serde_json::json!(worker_dest_total_secs),
+    );
+    json.insert(
+        "worker_dest_recv_secs".to_string(),
+        serde_json::json!(worker_dest_recv_secs),
+    );
+    json.insert(
+        "worker_dest_vm_setup_secs".to_string(),
+        serde_json::json!(worker_dest_vm_setup_secs),
+    );
+    json.insert(
+        "worker_dest_active_secs".to_string(),
+        serde_json::json!(worker_dest_active_secs),
+    );
+    json.insert(
+        "process_cpu_secs".to_string(),
+        serde_json::json!(cpu_metrics.map(|m| m.cpu_secs)),
+    );
+    json.insert(
+        "process_cpu_pct_one_core".to_string(),
+        serde_json::json!(cpu_metrics.map(|m| m.cpu_pct_one_core)),
+    );
+    json.insert(
+        "process_cpu_pct_available_cores".to_string(),
+        serde_json::json!(cpu_metrics.map(|m| m.cpu_pct_of_available_cores)),
+    );
+    json.insert(
+        "available_cores".to_string(),
+        serde_json::json!(cpu_metrics.map(|m| m.available_cores)),
+    );
+
+    serde_json::Value::Object(json)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rapidbyte_engine::result::{
+        DestTiming, PipelineCounts, PipelineResult, SourceTiming, StreamShardMetric,
+    };
+
+    #[test]
+    fn bench_json_includes_stream_shard_metrics() {
+        let result = PipelineResult {
+            counts: PipelineCounts {
+                records_read: 10,
+                records_written: 10,
+                bytes_read: 100,
+                bytes_written: 100,
+            },
+            source: SourceTiming::default(),
+            dest: DestTiming::default(),
+            transform_count: 0,
+            transform_duration_secs: 0.0,
+            transform_module_load_ms: vec![],
+            duration_secs: 1.0,
+            wasm_overhead_secs: 0.0,
+            retry_count: 0,
+            parallelism: 4,
+            stream_metrics: vec![StreamShardMetric {
+                stream_name: "bench_events".to_string(),
+                partition_index: Some(1),
+                partition_count: Some(4),
+                records_read: 3,
+                records_written: 3,
+                bytes_read: 30,
+                bytes_written: 30,
+                source_duration_secs: 0.4,
+                dest_duration_secs: 0.6,
+                dest_vm_setup_secs: 0.1,
+                dest_recv_secs: 0.2,
+            }],
+        };
+
+        let cpu = ProcessCpuMetrics {
+            cpu_secs: 1.2,
+            cpu_pct_one_core: 120.0,
+            cpu_pct_of_available_cores: 30.0,
+            available_cores: 4,
+        };
+        let json = bench_json_from_result(&result, Some(&cpu));
+        assert!(json["stream_metrics"].is_array());
+        assert_eq!(json["stream_metrics"][0]["partition_index"], 1);
+        assert_eq!(json["stream_metrics"][0]["partition_count"], 4);
+        assert_eq!(json["stream_metrics"][0]["records_read"], 3);
+        assert_eq!(json["stream_metrics"][0]["dest_vm_setup_secs"], 0.1);
+        assert_eq!(json["stream_metrics"][0]["dest_recv_secs"], 0.2);
+        assert_eq!(json["parallelism"], 4);
+        assert_eq!(json["process_cpu_secs"], 1.2);
+        assert_eq!(json["available_cores"], 4);
     }
 }

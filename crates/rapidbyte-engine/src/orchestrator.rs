@@ -1049,6 +1049,8 @@ async fn execute_streams(
             bytes_written: sr.write_summary.bytes_written,
             source_duration_secs: sr.src_duration,
             dest_duration_secs: sr.dst_duration,
+            dest_vm_setup_secs: sr.vm_setup_secs,
+            dest_recv_secs: sr.recv_secs,
         });
 
         if let Some(dr) = sr.dry_run_result {
@@ -1230,6 +1232,7 @@ fn finalize_run(
         duration_secs: duration.as_secs_f64(),
         wasm_overhead_secs,
         retry_count: attempt.saturating_sub(1),
+        parallelism: config.resources.parallelism.max(1),
         stream_metrics: aggregated.stream_metrics,
     })
 }

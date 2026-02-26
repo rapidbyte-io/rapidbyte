@@ -37,6 +37,8 @@ pub struct DestTiming {
     pub vm_setup_secs: f64,
     pub recv_secs: f64,
     pub recv_nanos: u64,
+    pub recv_wait_nanos: u64,
+    pub recv_process_nanos: u64,
     pub decompress_nanos: u64,
     pub recv_count: u64,
 }
@@ -53,6 +55,24 @@ pub struct PipelineResult {
     pub duration_secs: f64,
     pub wasm_overhead_secs: f64,
     pub retry_count: u32,
+    pub parallelism: u32,
+    pub stream_metrics: Vec<StreamShardMetric>,
+}
+
+/// Per-stream/per-shard metrics for skew analysis.
+#[derive(Debug, Clone)]
+pub struct StreamShardMetric {
+    pub stream_name: String,
+    pub partition_index: Option<u32>,
+    pub partition_count: Option<u32>,
+    pub records_read: u64,
+    pub records_written: u64,
+    pub bytes_read: u64,
+    pub bytes_written: u64,
+    pub source_duration_secs: f64,
+    pub dest_duration_secs: f64,
+    pub dest_vm_setup_secs: f64,
+    pub dest_recv_secs: f64,
 }
 
 /// Result of a pipeline check.
