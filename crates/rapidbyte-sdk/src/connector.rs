@@ -2,9 +2,9 @@
 
 use serde::de::DeserializeOwned;
 
+use crate::catalog::Catalog;
 use crate::context::Context;
 use crate::error::{ConnectorError, ValidationResult, ValidationStatus};
-use crate::catalog::Catalog;
 use crate::metric::{ReadSummary, TransformSummary, WriteSummary};
 use crate::stream::StreamContext;
 use crate::wire::ConnectorInfo;
@@ -109,9 +109,9 @@ pub trait Transform: Sized {
 #[allow(dead_code, unused_imports)]
 mod tests {
     use super::*;
+    use crate::catalog::Catalog;
     use crate::context::Context;
     use crate::error::{ConnectorError, ValidationResult, ValidationStatus};
-    use crate::catalog::Catalog;
     use crate::metric::{ReadSummary, TransformSummary, WriteSummary};
     use crate::stream::StreamContext;
     use crate::wire::{ConnectorInfo, ProtocolVersion};

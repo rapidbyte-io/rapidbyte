@@ -25,6 +25,7 @@ destination:
   write_mode: append
 
 resources:
+  parallelism: auto
   max_batch_bytes: 512mb
 
 state:

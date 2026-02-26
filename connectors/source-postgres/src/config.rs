@@ -48,9 +48,7 @@ impl Config {
             if slot.len() > 63 {
                 return Err(ConnectorError::config(
                     "INVALID_CONFIG",
-                    format!(
-                        "replication_slot '{slot}' exceeds PostgreSQL 63-byte limit"
-                    ),
+                    format!("replication_slot '{slot}' exceeds PostgreSQL 63-byte limit"),
                 ));
             }
         }
@@ -64,9 +62,7 @@ impl Config {
             if pub_name.len() > 63 {
                 return Err(ConnectorError::config(
                     "INVALID_CONFIG",
-                    format!(
-                        "publication '{pub_name}' exceeds PostgreSQL 63-byte limit"
-                    ),
+                    format!("publication '{pub_name}' exceeds PostgreSQL 63-byte limit"),
                 ));
             }
         }

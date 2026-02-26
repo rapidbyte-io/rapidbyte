@@ -107,7 +107,24 @@ report_wasm_sizes() {
 # ── Docker helpers ───────────────────────────────────────────────
 start_postgres() {
     info "Starting Docker Compose..."
-    docker compose -f "$COMPOSE_FILE" up -d --wait 2>/dev/null
+    local compose_log
+    compose_log="$(mktemp)"
+    if ! docker compose -f "$COMPOSE_FILE" up -d --wait >"$compose_log" 2>&1; then
+        local compose_output
+        compose_output="$(cat "$compose_log")"
+        warn "Docker Compose failed to start benchmark PostgreSQL."
+        echo "----- docker compose output -----" >&2
+        echo "$compose_output" >&2
+        echo "--------------------------------" >&2
+        rm -f "$compose_log"
+
+        if echo "$compose_output" | grep -Eq "input/output error|io\.containerd\.content\.v1\.content"; then
+            fail "Docker image store appears corrupted (containerd I/O error). Restart Docker Desktop and re-pull postgres:16-alpine, then retry bench."
+        fi
+
+        fail "Docker Compose startup failed. Check Docker Desktop/containerd health and retry."
+    fi
+    rm -f "$compose_log"
 
     info "Waiting for PostgreSQL readiness..."
     local retries=30

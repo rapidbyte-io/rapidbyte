@@ -221,7 +221,8 @@ pub(crate) fn sql_param_value<'a>(col: &'a TypedCol<'a>, row_idx: usize) -> SqlP
                 SqlParamValue::Date(None)
             } else {
                 let days = arr.value(row_idx);
-                let date = UNIX_EPOCH_DATE.checked_add_signed(chrono::Duration::days(i64::from(days)));
+                let date =
+                    UNIX_EPOCH_DATE.checked_add_signed(chrono::Duration::days(i64::from(days)));
                 SqlParamValue::Date(date)
             }
         }

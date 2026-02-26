@@ -85,9 +85,7 @@ pub(crate) async fn query_table_columns(
         .collect();
 
     if columns.is_empty() {
-        return Err(format!(
-            "Table '{table_name}' not found or has no columns"
-        ));
+        return Err(format!("Table '{table_name}' not found or has no columns"));
     }
 
     Ok(columns)

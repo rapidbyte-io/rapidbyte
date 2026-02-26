@@ -169,38 +169,44 @@ pub(crate) enum PgOutputMessage {
 
 fn read_u8(cur: &mut Cursor<&[u8]>) -> Result<u8, DecodeError> {
     let mut buf = [0u8; 1];
-    cur.read_exact(&mut buf).map_err(|_| DecodeError::UnexpectedEof)?;
+    cur.read_exact(&mut buf)
+        .map_err(|_| DecodeError::UnexpectedEof)?;
     Ok(buf[0])
 }
 
 fn read_i16(cur: &mut Cursor<&[u8]>) -> Result<i16, DecodeError> {
     let mut buf = [0u8; 2];
-    cur.read_exact(&mut buf).map_err(|_| DecodeError::UnexpectedEof)?;
+    cur.read_exact(&mut buf)
+        .map_err(|_| DecodeError::UnexpectedEof)?;
     Ok(i16::from_be_bytes(buf))
 }
 
 fn read_u32(cur: &mut Cursor<&[u8]>) -> Result<u32, DecodeError> {
     let mut buf = [0u8; 4];
-    cur.read_exact(&mut buf).map_err(|_| DecodeError::UnexpectedEof)?;
+    cur.read_exact(&mut buf)
+        .map_err(|_| DecodeError::UnexpectedEof)?;
     Ok(u32::from_be_bytes(buf))
 }
 
 fn read_i32(cur: &mut Cursor<&[u8]>) -> Result<i32, DecodeError> {
     let mut buf = [0u8; 4];
-    cur.read_exact(&mut buf).map_err(|_| DecodeError::UnexpectedEof)?;
+    cur.read_exact(&mut buf)
+        .map_err(|_| DecodeError::UnexpectedEof)?;
     Ok(i32::from_be_bytes(buf))
 }
 
 fn read_u64(cur: &mut Cursor<&[u8]>) -> Result<u64, DecodeError> {
     let mut buf = [0u8; 8];
-    cur.read_exact(&mut buf).map_err(|_| DecodeError::UnexpectedEof)?;
+    cur.read_exact(&mut buf)
+        .map_err(|_| DecodeError::UnexpectedEof)?;
     Ok(u64::from_be_bytes(buf))
 }
 
 #[allow(dead_code)]
 fn read_i64(cur: &mut Cursor<&[u8]>) -> Result<i64, DecodeError> {
     let mut buf = [0u8; 8];
-    cur.read_exact(&mut buf).map_err(|_| DecodeError::UnexpectedEof)?;
+    cur.read_exact(&mut buf)
+        .map_err(|_| DecodeError::UnexpectedEof)?;
     Ok(i64::from_be_bytes(buf))
 }
 
@@ -246,7 +252,8 @@ fn read_tuple_data(cur: &mut Cursor<&[u8]>) -> Result<TupleData, DecodeError> {
                 // Safety: pgoutput text lengths are always non-negative.
                 #[allow(clippy::cast_sign_loss)]
                 let mut data = vec![0u8; len as usize];
-                cur.read_exact(&mut data).map_err(|_| DecodeError::UnexpectedEof)?;
+                cur.read_exact(&mut data)
+                    .map_err(|_| DecodeError::UnexpectedEof)?;
                 let text = String::from_utf8(data).map_err(|_| DecodeError::InvalidUtf8)?;
                 ColumnValue::Text(text)
             }
@@ -471,7 +478,8 @@ fn decode_message(cur: &mut Cursor<&[u8]>) -> Result<PgOutputMessage, DecodeErro
     let prefix = read_cstring(cur)?;
     let content_len = read_u32(cur)?;
     let mut content = vec![0u8; content_len as usize];
-    cur.read_exact(&mut content).map_err(|_| DecodeError::UnexpectedEof)?;
+    cur.read_exact(&mut content)
+        .map_err(|_| DecodeError::UnexpectedEof)?;
     Ok(PgOutputMessage::Message {
         flags,
         message_lsn,
@@ -689,7 +697,7 @@ mod tests {
         let mut buf = Vec::new();
         push_u8(&mut buf, b'U');
         push_u32(&mut buf, 16385); // relation_oid
-        // Old tuple
+                                   // Old tuple
         push_u8(&mut buf, b'O');
         push_i16(&mut buf, 1);
         push_text_column(&mut buf, "old_val");

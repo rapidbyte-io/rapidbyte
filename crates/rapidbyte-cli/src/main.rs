@@ -62,9 +62,11 @@ async fn main() -> anyhow::Result<()> {
     logging::init(&cli.log_level);
 
     match cli.command {
-        Commands::Run { pipeline, dry_run, limit } => {
-            commands::run::execute(&pipeline, dry_run, limit).await
-        }
+        Commands::Run {
+            pipeline,
+            dry_run,
+            limit,
+        } => commands::run::execute(&pipeline, dry_run, limit).await,
         Commands::Check { pipeline } => commands::check::execute(&pipeline).await,
         Commands::Discover { pipeline } => commands::discover::execute(&pipeline).await,
         Commands::Connectors => commands::connectors::execute().await,

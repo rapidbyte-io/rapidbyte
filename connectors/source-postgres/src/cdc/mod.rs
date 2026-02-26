@@ -106,7 +106,10 @@ pub async fn read_cdc_changes(
                              'publication_names', $3\
                          )";
     let change_rows = client
-        .query(changes_query, &[&slot_name, &CDC_MAX_CHANGES, &publication_name])
+        .query(
+            changes_query,
+            &[&slot_name, &CDC_MAX_CHANGES, &publication_name],
+        )
         .await
         .map_err(|e| {
             format!(
@@ -166,8 +169,7 @@ pub async fn read_cdc_changes(
                 // Track whether this relation matches the target stream.
                 // Compare both unqualified name and schema-qualified name to
                 // handle publications that span multiple schemas.
-                if name == stream.stream_name
-                    || format!("{namespace}.{name}") == stream.stream_name
+                if name == stream.stream_name || format!("{namespace}.{name}") == stream.stream_name
                 {
                     target_oid = Some(oid);
                 }
@@ -352,9 +354,9 @@ async fn ensure_replication_slot(
 
 #[cfg(test)]
 mod tests {
+    use super::encode::CdcRow;
     use super::encode::RelationInfo;
     use super::pgoutput::{CdcOp, ColumnDef, ColumnValue, TupleData};
-    use super::encode::CdcRow;
     use rapidbyte_sdk::arrow::datatypes::DataType;
 
     #[test]

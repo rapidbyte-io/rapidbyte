@@ -16,7 +16,13 @@ source:
 transforms:
   - use: transform-sql
     config:
-      query: "SELECT *, duration_ms * 2 AS duration_double FROM input"
+      query: >-
+        SELECT
+          id,
+          created_at,
+          CASE WHEN id % 2 = 0 THEN 'even' ELSE 'odd' END AS id_parity,
+          EXTRACT(EPOCH FROM created_at) AS created_at_epoch
+        FROM input
 
 destination:
   use: dest-postgres
@@ -30,6 +36,7 @@ destination:
   write_mode: append
 
 resources:
+  parallelism: auto
   max_batch_bytes: 512mb
 
 state:

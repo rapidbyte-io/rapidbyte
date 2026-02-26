@@ -36,6 +36,6 @@ pub use config::parser::parse_pipeline;
 pub use config::types::PipelineConfig;
 pub use config::validator::validate_pipeline;
 pub use error::PipelineError;
-pub use orchestrator::{check_pipeline, discover_connector, run_pipeline};
 pub use execution::{DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineOutcome};
+pub use orchestrator::{check_pipeline, discover_connector, run_pipeline};
 pub use result::{CheckResult, PipelineResult};

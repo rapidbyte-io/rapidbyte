@@ -2432,6 +2432,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "clap",
+ "libc",
  "rapidbyte-engine",
  "rapidbyte-runtime",
  "rapidbyte-types",

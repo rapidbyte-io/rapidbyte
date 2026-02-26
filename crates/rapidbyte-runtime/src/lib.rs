@@ -24,17 +24,17 @@ pub mod acl;
 pub mod bindings;
 pub mod compression;
 pub mod connector;
-pub mod frame;
 pub mod engine;
 pub mod error;
+pub mod frame;
 pub mod host_state;
 pub mod sandbox;
 pub mod socket;
 
 // Top-level re-exports for convenience.
 pub use bindings::{
-    dest_bindings, dest_error_to_sdk, dest_validation_to_sdk, source_bindings,
-    source_error_to_sdk, source_validation_to_sdk, transform_bindings, transform_error_to_sdk,
+    dest_bindings, dest_error_to_sdk, dest_validation_to_sdk, source_bindings, source_error_to_sdk,
+    source_validation_to_sdk, transform_bindings, transform_error_to_sdk,
     transform_validation_to_sdk,
 };
 pub use compression::CompressionCodec;

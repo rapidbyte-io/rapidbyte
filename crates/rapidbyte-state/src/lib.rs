@@ -33,13 +33,13 @@ pub use sqlite::SqliteStateBackend;
 /// use rapidbyte_state::prelude::*;
 /// ```
 pub mod prelude {
-    pub use rapidbyte_types::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
     pub use crate::backend::StateBackend;
     pub use crate::error::{Result, StateError};
     #[cfg(feature = "postgres")]
     pub use crate::postgres::PostgresStateBackend;
     #[cfg(feature = "sqlite")]
     pub use crate::sqlite::SqliteStateBackend;
+    pub use rapidbyte_types::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
 }
 
 #[cfg(test)]
@@ -49,7 +49,7 @@ mod tests {
         use super::prelude::*;
         let _pid = PipelineId::new("test");
         let _sn = StreamName::new("s");
-        let _status = RunStatus::Completed;
+        let _ = RunStatus::Completed;
         let _stats = RunStats::default();
     }
 

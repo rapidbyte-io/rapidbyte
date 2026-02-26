@@ -17,12 +17,12 @@ transforms:
   - use: transform-sql
     config:
       query: >-
-        SELECT id, event_id, event_type, user_id, device_type,
-               country_code, duration_ms, is_converted, created_at,
-               UPPER(event_type) AS event_type_upper,
-               duration_ms * 2 AS duration_double
+        SELECT
+          id,
+          created_at,
+          EXTRACT(EPOCH FROM created_at) AS created_at_epoch
         FROM input
-        WHERE is_converted = true
+        WHERE id % 5 = 0
 
 destination:
   use: dest-postgres
@@ -36,6 +36,7 @@ destination:
   write_mode: append
 
 resources:
+  parallelism: auto
   max_batch_bytes: 512mb
 
 state:

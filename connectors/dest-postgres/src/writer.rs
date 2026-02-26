@@ -23,25 +23,11 @@ const COPY_FLUSH_1MB: usize = 1024 * 1024;
 const COPY_FLUSH_4MB: usize = 4 * 1024 * 1024;
 const COPY_FLUSH_16MB: usize = 16 * 1024 * 1024;
 
-fn bench_profile_copy_flush_bytes() -> Option<usize> {
-    match std::env::var("BENCH_PROFILE") {
-        Ok(value) if value.eq_ignore_ascii_case("small") => Some(COPY_FLUSH_1MB),
-        Ok(value) if value.eq_ignore_ascii_case("medium") => Some(COPY_FLUSH_4MB),
-        Ok(value) if value.eq_ignore_ascii_case("large") => Some(COPY_FLUSH_16MB),
-        _ => None,
-    }
-}
-
 fn adaptive_copy_flush_bytes(
     configured: Option<usize>,
-    profile_default: Option<usize>,
     avg_row_bytes: Option<usize>,
 ) -> usize {
     if let Some(bytes) = configured {
-        return bytes;
-    }
-
-    if let Some(bytes) = profile_default {
         return bytes;
     }
 
@@ -88,6 +74,14 @@ fn schema_hint_has_shape(schema_hint: &SchemaHint) -> bool {
         SchemaHint::Columns(columns) => !columns.is_empty(),
         SchemaHint::ArrowIpc(ipc_bytes) => !ipc_bytes.is_empty(),
         _ => false,
+    }
+}
+
+fn loop_error_commit_state(checkpoint_count: u64) -> CommitState {
+    if checkpoint_count > 0 {
+        CommitState::AfterCommitConfirmed
+    } else {
+        CommitState::BeforeCommit
     }
 }
 
@@ -153,9 +147,9 @@ pub async fn write_stream(
     }
 
     if let Some(err) = loop_error {
+        let commit_state = loop_error_commit_state(session.stats.checkpoint_count);
         session.rollback().await;
-        return Err(ConnectorError::transient_db("WRITE_FAILED", err)
-            .with_commit_state(CommitState::BeforeCommit));
+        return Err(ConnectorError::transient_db("WRITE_FAILED", err).with_commit_state(commit_state));
     }
 
     let result = session.commit().await.map_err(|e| {
@@ -198,7 +192,6 @@ pub struct WriteContract {
     pub checkpoint: CheckpointConfig,
     pub copy_flush_bytes: Option<usize>,
     pub load_method: LoadMethod,
-    pub profile_copy_flush_bytes: Option<usize>,
     pub is_replace: bool,
     pub watermark_records: u64,
     pub ignored_columns: HashSet<String>,
@@ -240,7 +233,6 @@ fn prepare_stream_once(
         checkpoint,
         copy_flush_bytes,
         load_method,
-        profile_copy_flush_bytes: bench_profile_copy_flush_bytes(),
         is_replace,
         watermark_records: 0,
         ignored_columns: HashSet::new(),
@@ -369,7 +361,6 @@ pub struct WriteSession<'a> {
     use_watermarks: bool,
     checkpoint_config: CheckpointConfig,
     copy_flush_bytes: Option<usize>,
-    profile_copy_flush_bytes: Option<usize>,
 
     // Replace mode
     is_replace: bool,
@@ -422,7 +413,6 @@ impl<'a> WriteSession<'a> {
             use_watermarks: config.use_watermarks,
             checkpoint_config: config.checkpoint,
             copy_flush_bytes: config.copy_flush_bytes,
-            profile_copy_flush_bytes: config.profile_copy_flush_bytes,
             is_replace: config.is_replace,
             watermark_records: config.watermark_records,
             cumulative_records: 0,
@@ -516,16 +506,13 @@ impl<'a> WriteSession<'a> {
         let rows_written = if use_copy {
             if self.copy_flush_bytes.is_none() {
                 let avg_row_bytes = (batch_rows > 0).then(|| n / batch_rows as usize);
-                let chosen =
-                    adaptive_copy_flush_bytes(None, self.profile_copy_flush_bytes, avg_row_bytes);
+                let chosen = adaptive_copy_flush_bytes(None, avg_row_bytes);
                 self.copy_flush_bytes = Some(chosen);
                 self.ctx.log(
                     LogLevel::Debug,
                     &format!(
-                        "dest-postgres: adaptive copy_flush_bytes={} (profile_default={} avg_row_bytes={})",
+                        "dest-postgres: adaptive copy_flush_bytes={} (avg_row_bytes={})",
                         chosen,
-                        self.profile_copy_flush_bytes
-                            .map_or_else(|| "none".to_string(), |v| v.to_string()),
                         avg_row_bytes.unwrap_or_default()
                     ),
                 );
@@ -729,7 +716,6 @@ mod tests {
             },
             copy_flush_bytes: Some(4 * 1024 * 1024),
             load_method: LoadMethod::Copy,
-            profile_copy_flush_bytes: Some(COPY_FLUSH_4MB),
             is_replace: false,
             watermark_records: 0,
             ignored_columns: std::collections::HashSet::new(),
@@ -790,26 +776,25 @@ mod tests {
 
     #[test]
     fn adaptive_flush_uses_user_override_when_set() {
-        let chosen =
-            adaptive_copy_flush_bytes(Some(2 * 1024 * 1024), Some(COPY_FLUSH_4MB), Some(80_000));
+        let chosen = adaptive_copy_flush_bytes(Some(2 * 1024 * 1024), Some(80_000));
         assert_eq!(chosen, 2 * 1024 * 1024);
     }
 
     #[test]
-    fn adaptive_flush_prefers_profile_default_when_set() {
-        let chosen = adaptive_copy_flush_bytes(None, Some(COPY_FLUSH_4MB), Some(400));
+    fn adaptive_flush_chooses_medium_row_bucket() {
+        let chosen = adaptive_copy_flush_bytes(None, Some(10 * 1024));
         assert_eq!(chosen, COPY_FLUSH_4MB);
     }
 
     #[test]
     fn adaptive_flush_chooses_small_bucket() {
-        let chosen = adaptive_copy_flush_bytes(None, None, Some(400));
+        let chosen = adaptive_copy_flush_bytes(None, Some(400));
         assert_eq!(chosen, 1024 * 1024);
     }
 
     #[test]
     fn adaptive_flush_chooses_large_row_bucket() {
-        let chosen = adaptive_copy_flush_bytes(None, None, Some(70 * 1024));
+        let chosen = adaptive_copy_flush_bytes(None, Some(70 * 1024));
         assert_eq!(chosen, 16 * 1024 * 1024);
     }
 
@@ -832,5 +817,21 @@ mod tests {
         assert_eq!(schema.fields().len(), 2);
         assert_eq!(schema.field(0).name(), "id");
         assert_eq!(schema.field(1).name(), "name");
+    }
+
+    #[test]
+    fn loop_error_before_any_checkpoint_is_before_commit() {
+        assert_eq!(
+            loop_error_commit_state(0),
+            CommitState::BeforeCommit,
+        );
+    }
+
+    #[test]
+    fn loop_error_after_checkpoint_is_after_commit_confirmed() {
+        assert_eq!(
+            loop_error_commit_state(1),
+            CommitState::AfterCommitConfirmed,
+        );
     }
 }

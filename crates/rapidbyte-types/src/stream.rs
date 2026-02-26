@@ -165,6 +165,9 @@ impl Default for StreamLimits {
 pub struct StreamContext {
     /// Name of the stream being processed.
     pub stream_name: String,
+    /// Physical source table/view name when execution stream naming differs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_stream_name: Option<String>,
     /// Schema of the stream.
     pub schema: SchemaHint,
     /// How data is read from the source.
@@ -184,6 +187,12 @@ pub struct StreamContext {
     /// Column projection (`None` = all columns).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_columns: Option<Vec<String>>,
+    /// Total number of source partitions for this stream execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_count: Option<u32>,
+    /// Zero-based partition index for this stream execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_index: Option<u32>,
 }
 
 #[cfg(test)]
@@ -215,6 +224,7 @@ mod tests {
     fn stream_context_roundtrip() {
         let ctx = StreamContext {
             stream_name: "public.users".into(),
+            source_stream_name: None,
             schema: SchemaHint::Columns(vec![ColumnSchema {
                 name: "id".into(),
                 data_type: ArrowDataType::Int64,
@@ -226,6 +236,8 @@ mod tests {
             policies: StreamPolicies::default(),
             write_mode: Some(WriteMode::Append),
             selected_columns: None,
+            partition_count: Some(4),
+            partition_index: Some(2),
         };
         let json = serde_json::to_string(&ctx).unwrap();
         let back: StreamContext = serde_json::from_str(&json).unwrap();

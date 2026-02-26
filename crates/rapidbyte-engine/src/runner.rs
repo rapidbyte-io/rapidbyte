@@ -51,7 +51,10 @@ pub(crate) struct TransformRunResult {
 }
 
 fn handle_close_result<E, F>(
-    result: std::result::Result<std::result::Result<(), E>, rapidbyte_runtime::wasmtime_reexport::Error>,
+    result: std::result::Result<
+        std::result::Result<(), E>,
+        rapidbyte_runtime::wasmtime_reexport::Error,
+    >,
     role: &str,
     stream_name: &str,
     convert: F,
@@ -75,7 +78,11 @@ fn handle_close_result<E, F>(
 }
 
 /// Run a source connector for a single stream.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::needless_pass_by_value)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::needless_pass_by_value
+)]
 pub(crate) fn run_source_stream(
     module: &LoadedComponent,
     sender: mpsc::Sender<Frame>,
@@ -116,11 +123,8 @@ pub(crate) fn run_source_stream(
     let timeout = overrides.and_then(|o| o.timeout_seconds);
     let mut store = module.new_store(host_state, timeout);
     let linker = create_component_linker(&module.engine, "source", |linker| {
-        source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(
-            linker,
-            |state| state,
-        )
-        .context("Failed to add rapidbyte source host imports")?;
+        source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(linker, |state| state)
+            .context("Failed to add rapidbyte source host imports")?;
         Ok(())
     })
     .map_err(PipelineError::Infrastructure)?;
@@ -224,7 +228,11 @@ pub(crate) fn run_source_stream(
 }
 
 /// Run a destination connector for a single stream.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines, clippy::needless_pass_by_value)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::needless_pass_by_value
+)]
 pub(crate) fn run_destination_stream(
     module: &LoadedComponent,
     receiver: mpsc::Receiver<Frame>,
@@ -269,11 +277,10 @@ pub(crate) fn run_destination_stream(
     (|| {
         let mut store = module.new_store(host_state, timeout);
         let linker = create_component_linker(&module.engine, "destination", |linker| {
-            dest_bindings::RapidbyteDestination::add_to_linker::<
-                    _,
-                    HasSelf<_>,
-                >(linker, |state| state)
-                .context("Failed to add rapidbyte destination host imports")?;
+            dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(linker, |state| {
+                state
+            })
+            .context("Failed to add rapidbyte destination host imports")?;
             Ok(())
         })
         .map_err(PipelineError::Infrastructure)?;
@@ -433,10 +440,9 @@ pub(crate) fn run_transform_stream(
     let timeout = overrides.and_then(|o| o.timeout_seconds);
     let mut store = module.new_store(host_state, timeout);
     let linker = create_component_linker(&module.engine, "transform", |linker| {
-        transform_bindings::RapidbyteTransform::add_to_linker::<
-            _,
-            HasSelf<_>,
-        >(linker, |state| state)
+        transform_bindings::RapidbyteTransform::add_to_linker::<_, HasSelf<_>>(linker, |state| {
+            state
+        })
         .context("Failed to add rapidbyte transform host imports")?;
         Ok(())
     })
@@ -540,10 +546,10 @@ pub(crate) fn validate_connector(
     match role {
         ConnectorRole::Source => {
             let linker = create_component_linker(&module.engine, "source", |linker| {
-                source_bindings::RapidbyteSource::add_to_linker::<
-                    _,
-                    HasSelf<_>,
-                >(linker, |state| state)?;
+                source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
                 Ok(())
             })?;
             let bindings = source_bindings::RapidbyteSource::instantiate(
@@ -567,10 +573,10 @@ pub(crate) fn validate_connector(
         }
         ConnectorRole::Destination => {
             let linker = create_component_linker(&module.engine, "destination", |linker| {
-                dest_bindings::RapidbyteDestination::add_to_linker::<
-                    _,
-                    HasSelf<_>,
-                >(linker, |state| state)?;
+                dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
                 Ok(())
             })?;
             let bindings = dest_bindings::RapidbyteDestination::instantiate(
@@ -594,10 +600,10 @@ pub(crate) fn validate_connector(
         }
         ConnectorRole::Transform => {
             let linker = create_component_linker(&module.engine, "transform", |linker| {
-                transform_bindings::RapidbyteTransform::add_to_linker::<
-                    _,
-                    HasSelf<_>,
-                >(linker, |state| state)?;
+                transform_bindings::RapidbyteTransform::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
                 Ok(())
             })?;
             let bindings = transform_bindings::RapidbyteTransform::instantiate(
@@ -648,10 +654,7 @@ pub(crate) fn run_discover(
 
     let mut store = module.new_store(host_state, None);
     let linker = create_component_linker(&module.engine, "source", |linker| {
-        source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(
-            linker,
-            |state| state,
-        )?;
+        source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(linker, |state| state)?;
         Ok(())
     })?;
     let bindings =

@@ -15,6 +15,7 @@ use rapidbyte_types::checkpoint::{Checkpoint, StateScope};
 use rapidbyte_types::envelope::{DlqRecord, Timestamp};
 use rapidbyte_types::error::{ConnectorError, ErrorCategory};
 use rapidbyte_types::manifest::Permissions;
+use rapidbyte_types::metric::{Metric, MetricValue};
 use tokio::sync::mpsc;
 use wasmtime::component::ResourceTable;
 use wasmtime::StoreLimits;
@@ -43,6 +44,11 @@ const CHECKPOINT_KIND_TRANSFORM: u32 = 2;
 /// Default maximum DLQ records kept in memory per run.
 pub const DEFAULT_DLQ_LIMIT: usize = 10_000;
 
+#[allow(clippy::cast_precision_loss)]
+fn counter_metric_to_f64(value: u64) -> f64 {
+    value as f64
+}
+
 /// Channel frame type for batch routing between connector stages.
 pub enum Frame {
     /// IPC-encoded Arrow `RecordBatch` (optionally compressed).
@@ -56,10 +62,20 @@ pub enum Frame {
 pub struct HostTimings {
     pub emit_batch_nanos: u64,
     pub next_batch_nanos: u64,
+    pub next_batch_wait_nanos: u64,
+    pub next_batch_process_nanos: u64,
     pub compress_nanos: u64,
     pub decompress_nanos: u64,
     pub emit_batch_count: u64,
     pub next_batch_count: u64,
+    pub source_connect_secs: f64,
+    pub source_query_secs: f64,
+    pub source_fetch_secs: f64,
+    pub source_arrow_encode_secs: f64,
+    pub dest_connect_secs: f64,
+    pub dest_flush_secs: f64,
+    pub dest_commit_secs: f64,
+    pub dest_arrow_decode_secs: f64,
 }
 
 // --- Inner types ---
@@ -328,21 +344,21 @@ impl ComponentHostState {
         handle: u64,
         chunk: Vec<u8>,
     ) -> Result<u64, ConnectorError> {
-        self.frames.write(handle, &chunk).map_err(|e| {
-            ConnectorError::frame("FRAME_WRITE_FAILED", e.to_string())
-        })
+        self.frames
+            .write(handle, &chunk)
+            .map_err(|e| ConnectorError::frame("FRAME_WRITE_FAILED", e.to_string()))
     }
 
     pub(crate) fn frame_seal_impl(&mut self, handle: u64) -> Result<(), ConnectorError> {
-        self.frames.seal(handle).map_err(|e| {
-            ConnectorError::frame("FRAME_SEAL_FAILED", e.to_string())
-        })
+        self.frames
+            .seal(handle)
+            .map_err(|e| ConnectorError::frame("FRAME_SEAL_FAILED", e.to_string()))
     }
 
     pub(crate) fn frame_len_impl(&mut self, handle: u64) -> Result<u64, ConnectorError> {
-        self.frames.len(handle).map_err(|e| {
-            ConnectorError::frame("FRAME_LEN_FAILED", e.to_string())
-        })
+        self.frames
+            .len(handle)
+            .map_err(|e| ConnectorError::frame("FRAME_LEN_FAILED", e.to_string()))
     }
 
     pub(crate) fn frame_read_impl(
@@ -351,9 +367,9 @@ impl ComponentHostState {
         offset: u64,
         len: u64,
     ) -> Result<Vec<u8>, ConnectorError> {
-        self.frames.read(handle, offset, len).map_err(|e| {
-            ConnectorError::frame("FRAME_READ_FAILED", e.to_string())
-        })
+        self.frames
+            .read(handle, offset, len)
+            .map_err(|e| ConnectorError::frame("FRAME_READ_FAILED", e.to_string()))
     }
 
     pub(crate) fn frame_drop_impl(&mut self, handle: u64) {
@@ -367,9 +383,10 @@ impl ComponentHostState {
         let fn_start = Instant::now();
 
         // Consume the sealed frame -> Bytes (zero-copy)
-        let payload = self.frames.consume(handle).map_err(|e| {
-            ConnectorError::frame("EMIT_BATCH_FAILED", e.to_string())
-        })?;
+        let payload = self
+            .frames
+            .consume(handle)
+            .map_err(|e| ConnectorError::frame("EMIT_BATCH_FAILED", e.to_string()))?;
 
         if payload.is_empty() {
             return Err(ConnectorError::internal(
@@ -418,9 +435,11 @@ impl ComponentHostState {
             ConnectorError::internal("NO_RECEIVER", "No batch receiver configured")
         })?;
 
+        let wait_start = Instant::now();
         let Some(frame) = receiver.blocking_recv() else {
             return Ok(None);
         };
+        let wait_elapsed_nanos = wait_start.elapsed().as_nanos() as u64;
 
         let payload = match frame {
             Frame::Data(payload) => payload,
@@ -445,7 +464,10 @@ impl ComponentHostState {
         let handle = self.frames.insert_sealed(payload);
 
         let mut t = lock_mutex(&self.checkpoints.timings, "timings")?;
-        t.next_batch_nanos += fn_start.elapsed().as_nanos() as u64;
+        let total_elapsed_nanos = fn_start.elapsed().as_nanos() as u64;
+        t.next_batch_nanos += total_elapsed_nanos;
+        t.next_batch_wait_nanos += wait_elapsed_nanos;
+        t.next_batch_process_nanos += total_elapsed_nanos.saturating_sub(wait_elapsed_nanos);
         t.next_batch_count += 1;
         t.decompress_nanos += decompress_elapsed_nanos;
 
@@ -618,15 +640,38 @@ impl ComponentHostState {
     }
 
     pub(crate) fn metric_impl(&mut self, payload_json: String) -> Result<(), ConnectorError> {
-        let metric: serde_json::Value = serde_json::from_str(&payload_json)
+        let metric_json: serde_json::Value = serde_json::from_str(&payload_json)
             .map_err(|e| ConnectorError::internal("PARSE_METRIC", e.to_string()))?;
 
         tracing::debug!(
             pipeline = self.identity.pipeline.as_str(),
             stream = %self.current_stream(),
             "Received metric: {}",
-            serde_json::to_string(&metric).unwrap_or_default()
+            serde_json::to_string(&metric_json).unwrap_or_default()
         );
+
+        let payload = metric_json.get("payload").cloned().unwrap_or(metric_json);
+        let metric = serde_json::from_value::<Metric>(payload)
+            .map_err(|e| ConnectorError::internal("PARSE_METRIC", e.to_string()))?;
+
+        let value = match metric.value {
+            MetricValue::Gauge(v) | MetricValue::Histogram(v) => v,
+            MetricValue::Counter(v) => counter_metric_to_f64(v),
+            _ => return Ok(()),
+        };
+
+        let mut timings = lock_mutex(&self.checkpoints.timings, "timings")?;
+        match metric.name.as_str() {
+            "source_connect_secs" => timings.source_connect_secs += value,
+            "source_query_secs" => timings.source_query_secs += value,
+            "source_fetch_secs" => timings.source_fetch_secs += value,
+            "source_arrow_encode_secs" => timings.source_arrow_encode_secs += value,
+            "dest_connect_secs" => timings.dest_connect_secs += value,
+            "dest_flush_secs" => timings.dest_flush_secs += value,
+            "dest_commit_secs" => timings.dest_commit_secs += value,
+            "dest_arrow_decode_secs" => timings.dest_arrow_decode_secs += value,
+            _ => {}
+        }
 
         Ok(())
     }

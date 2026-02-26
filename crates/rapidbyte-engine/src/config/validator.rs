@@ -4,7 +4,8 @@ use anyhow::{bail, Result};
 use rapidbyte_types::wire::SyncMode;
 
 use crate::config::types::{
-    parse_byte_size, PipelineConfig, PipelineLimits, PipelinePermissions, PipelineWriteMode,
+    parse_byte_size, PipelineConfig, PipelineLimits, PipelineParallelism, PipelinePermissions,
+    PipelineWriteMode,
 };
 
 /// Validate host patterns in `allowed_hosts` lists.
@@ -109,6 +110,10 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
 
     if config.resources.max_inflight_batches == 0 {
         errors.push("max_inflight_batches must be at least 1".to_string());
+    }
+
+    if matches!(config.resources.parallelism, PipelineParallelism::Manual(0)) {
+        errors.push("parallelism must be at least 1".to_string());
     }
 
     // Validate connector-level permission/limit overrides
@@ -225,6 +230,51 @@ resources:
         let config = parse_pipeline_str(yaml).unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("max_inflight_batches"));
+    }
+
+    #[test]
+    fn test_parallelism_zero_fails() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test_pipeline
+source:
+  use: source-postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+  write_mode: append
+resources:
+  parallelism: 0
+"#;
+        let config = parse_pipeline_str(yaml).unwrap();
+        let err = validate_pipeline(&config).unwrap_err().to_string();
+        assert!(err.contains("parallelism"));
+    }
+
+    #[test]
+    fn test_parallelism_auto_passes() {
+        let yaml = format!(
+            "{}\nresources:\n  parallelism: auto\n",
+            valid_yaml().trim_end()
+        );
+        let config = parse_pipeline_str(&yaml).unwrap();
+        assert!(validate_pipeline(&config).is_ok());
+    }
+
+    #[test]
+    fn test_parallelism_manual_one_passes() {
+        let yaml = format!(
+            "{}\nresources:\n  parallelism: 1\n",
+            valid_yaml().trim_end()
+        );
+        let config = parse_pipeline_str(&yaml).unwrap();
+        assert!(validate_pipeline(&config).is_ok());
     }
 
     #[test]

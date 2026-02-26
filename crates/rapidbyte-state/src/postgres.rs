@@ -147,11 +147,7 @@ impl StateBackend for PostgresStateBackend {
         Ok(())
     }
 
-    fn start_run(
-        &self,
-        pipeline: &PipelineId,
-        stream: &StreamName,
-    ) -> error::Result<i64> {
+    fn start_run(&self, pipeline: &PipelineId, stream: &StreamName) -> error::Result<i64> {
         let mut client = self.lock_client()?;
         let row = client
             .query_one(
@@ -168,12 +164,7 @@ impl StateBackend for PostgresStateBackend {
     }
 
     #[allow(clippy::cast_possible_wrap, clippy::similar_names)]
-    fn complete_run(
-        &self,
-        run_id: i64,
-        status: RunStatus,
-        stats: &RunStats,
-    ) -> error::Result<()> {
+    fn complete_run(&self, run_id: i64, status: RunStatus, stats: &RunStats) -> error::Result<()> {
         let mut client = self.lock_client()?;
         client
             .execute(
@@ -208,7 +199,13 @@ impl StateBackend for PostgresStateBackend {
                 .execute(
                     "UPDATE sync_cursors SET cursor_value = $1, updated_at = $2 \
                      WHERE pipeline = $3 AND stream = $4 AND cursor_value = $5",
-                    &[&new_value, &now, &pipeline.as_str(), &stream.as_str(), &expected_val],
+                    &[
+                        &new_value,
+                        &now,
+                        &pipeline.as_str(),
+                        &stream.as_str(),
+                        &expected_val,
+                    ],
                 )
                 .map_err(StateError::backend)?,
             None => client
@@ -289,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Requires TEST_POSTGRES_URL
+    #[ignore = "requires TEST_POSTGRES_URL"]
     fn cursor_roundtrip() {
         let backend = PostgresStateBackend::open(&test_connstr()).unwrap();
         clean_tables(&mut backend.lock_client().unwrap());
@@ -317,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires TEST_POSTGRES_URL"]
     fn run_lifecycle() {
         let backend = PostgresStateBackend::open(&test_connstr()).unwrap();
         clean_tables(&mut backend.lock_client().unwrap());
@@ -342,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires TEST_POSTGRES_URL"]
     fn compare_and_set_postgres() {
         let backend = PostgresStateBackend::open(&test_connstr()).unwrap();
         clean_tables(&mut backend.lock_client().unwrap());
@@ -368,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "requires TEST_POSTGRES_URL"]
     fn dlq_records_insert() {
         let backend = PostgresStateBackend::open(&test_connstr()).unwrap();
         clean_tables(&mut backend.lock_client().unwrap());

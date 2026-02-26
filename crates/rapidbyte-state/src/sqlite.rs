@@ -75,7 +75,8 @@ impl SqliteStateBackend {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path).map_err(StateError::backend)?;
-        conn.execute_batch(CREATE_TABLES).map_err(StateError::backend)?;
+        conn.execute_batch(CREATE_TABLES)
+            .map_err(StateError::backend)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -89,7 +90,8 @@ impl SqliteStateBackend {
     /// be initialized.
     pub fn in_memory() -> error::Result<Self> {
         let conn = Connection::open_in_memory().map_err(StateError::backend)?;
-        conn.execute_batch(CREATE_TABLES).map_err(StateError::backend)?;
+        conn.execute_batch(CREATE_TABLES)
+            .map_err(StateError::backend)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -107,20 +109,18 @@ impl SqliteStateBackend {
 
     /// Convert a `SQLite` datetime string to ISO-8601.
     fn sqlite_to_iso8601(raw: &str) -> String {
-        NaiveDateTime::parse_from_str(raw, SQLITE_DATETIME_FMT)
-            .map_or_else(
-                |_| raw.to_string(),
-                |ndt| format!("{}Z", ndt.format("%Y-%m-%dT%H:%M:%S")),
-            )
+        NaiveDateTime::parse_from_str(raw, SQLITE_DATETIME_FMT).map_or_else(
+            |_| raw.to_string(),
+            |ndt| format!("{}Z", ndt.format("%Y-%m-%dT%H:%M:%S")),
+        )
     }
 
     /// Convert an ISO-8601 string to `SQLite` datetime format.
     fn iso8601_to_sqlite(iso: &str) -> String {
-        chrono::DateTime::parse_from_rfc3339(iso)
-            .map_or_else(
-                |_| iso.to_string(),
-                |dt| dt.format(SQLITE_DATETIME_FMT).to_string(),
-            )
+        chrono::DateTime::parse_from_rfc3339(iso).map_or_else(
+            |_| iso.to_string(),
+            |dt| dt.format(SQLITE_DATETIME_FMT).to_string(),
+        )
     }
 
     #[cfg(test)]
@@ -138,11 +138,7 @@ impl SqliteStateBackend {
     }
 
     #[cfg(test)]
-    fn count_dlq_records_for_run(
-        &self,
-        pipeline: &PipelineId,
-        run_id: i64,
-    ) -> error::Result<i64> {
+    fn count_dlq_records_for_run(&self, pipeline: &PipelineId, run_id: i64) -> error::Result<i64> {
         let conn = self.lock_conn()?;
         conn.query_row(
             "SELECT COUNT(*) FROM dlq_records WHERE pipeline = ?1 AND run_id = ?2",
@@ -153,10 +149,7 @@ impl SqliteStateBackend {
     }
 
     #[cfg(test)]
-    fn first_dlq_stream_error(
-        &self,
-        pipeline: &PipelineId,
-    ) -> error::Result<(String, String)> {
+    fn first_dlq_stream_error(&self, pipeline: &PipelineId) -> error::Result<(String, String)> {
         let conn = self.lock_conn()?;
         conn.query_row(
             "SELECT stream_name, error_message FROM dlq_records \
@@ -193,13 +186,11 @@ impl StateBackend for SqliteStateBackend {
         );
 
         match result {
-            Ok((cursor_field, cursor_value, updated_at_str)) => {
-                Ok(Some(CursorState {
-                    cursor_field,
-                    cursor_value,
-                    updated_at: Self::sqlite_to_iso8601(&updated_at_str),
-                }))
-            }
+            Ok((cursor_field, cursor_value, updated_at_str)) => Ok(Some(CursorState {
+                cursor_field,
+                cursor_value,
+                updated_at: Self::sqlite_to_iso8601(&updated_at_str),
+            })),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(StateError::backend(e)),
         }
@@ -230,11 +221,7 @@ impl StateBackend for SqliteStateBackend {
         Ok(())
     }
 
-    fn start_run(
-        &self,
-        pipeline: &PipelineId,
-        stream: &StreamName,
-    ) -> error::Result<i64> {
+    fn start_run(&self, pipeline: &PipelineId, stream: &StreamName) -> error::Result<i64> {
         let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO sync_runs (pipeline, stream, status) VALUES (?1, ?2, ?3)",
@@ -249,12 +236,7 @@ impl StateBackend for SqliteStateBackend {
     }
 
     #[allow(clippy::cast_possible_wrap, clippy::similar_names)]
-    fn complete_run(
-        &self,
-        run_id: i64,
-        status: RunStatus,
-        stats: &RunStats,
-    ) -> error::Result<()> {
+    fn complete_run(&self, run_id: i64, status: RunStatus, stats: &RunStats) -> error::Result<()> {
         let conn = self.lock_conn()?;
         conn.execute(
             "UPDATE sync_runs SET status = ?1, finished_at = datetime('now'), \
@@ -371,7 +353,10 @@ mod tests {
     #[test]
     fn cursor_roundtrip() {
         let backend = SqliteStateBackend::in_memory().unwrap();
-        assert!(backend.get_cursor(&pid("p"), &stream("s")).unwrap().is_none());
+        assert!(backend
+            .get_cursor(&pid("p"), &stream("s"))
+            .unwrap()
+            .is_none());
 
         backend
             .set_cursor(
@@ -385,7 +370,10 @@ mod tests {
             )
             .unwrap();
 
-        let cursor = backend.get_cursor(&pid("p"), &stream("s")).unwrap().unwrap();
+        let cursor = backend
+            .get_cursor(&pid("p"), &stream("s"))
+            .unwrap()
+            .unwrap();
         assert_eq!(cursor.cursor_field, Some("updated_at".into()));
         assert_eq!(cursor.cursor_value, Some("2024-01-15T10:00:00Z".into()));
         assert!(!cursor.updated_at.is_empty());
@@ -396,22 +384,33 @@ mod tests {
         let backend = SqliteStateBackend::in_memory().unwrap();
 
         backend
-            .set_cursor(&pid("p"), &stream("s"), &CursorState {
-                cursor_field: Some("id".into()),
-                cursor_value: Some("100".into()),
-                updated_at: now_iso(),
-            })
+            .set_cursor(
+                &pid("p"),
+                &stream("s"),
+                &CursorState {
+                    cursor_field: Some("id".into()),
+                    cursor_value: Some("100".into()),
+                    updated_at: now_iso(),
+                },
+            )
             .unwrap();
 
         backend
-            .set_cursor(&pid("p"), &stream("s"), &CursorState {
-                cursor_field: Some("id".into()),
-                cursor_value: Some("200".into()),
-                updated_at: now_iso(),
-            })
+            .set_cursor(
+                &pid("p"),
+                &stream("s"),
+                &CursorState {
+                    cursor_field: Some("id".into()),
+                    cursor_value: Some("200".into()),
+                    updated_at: now_iso(),
+                },
+            )
             .unwrap();
 
-        let cursor = backend.get_cursor(&pid("p"), &stream("s")).unwrap().unwrap();
+        let cursor = backend
+            .get_cursor(&pid("p"), &stream("s"))
+            .unwrap()
+            .unwrap();
         assert_eq!(cursor.cursor_value, Some("200".into()));
     }
 
@@ -420,23 +419,37 @@ mod tests {
         let backend = SqliteStateBackend::in_memory().unwrap();
 
         backend
-            .set_cursor(&pid("a"), &stream("s"), &CursorState {
-                cursor_field: None,
-                cursor_value: Some("aaa".into()),
-                updated_at: now_iso(),
-            })
+            .set_cursor(
+                &pid("a"),
+                &stream("s"),
+                &CursorState {
+                    cursor_field: None,
+                    cursor_value: Some("aaa".into()),
+                    updated_at: now_iso(),
+                },
+            )
             .unwrap();
 
         backend
-            .set_cursor(&pid("b"), &stream("s"), &CursorState {
-                cursor_field: None,
-                cursor_value: Some("bbb".into()),
-                updated_at: now_iso(),
-            })
+            .set_cursor(
+                &pid("b"),
+                &stream("s"),
+                &CursorState {
+                    cursor_field: None,
+                    cursor_value: Some("bbb".into()),
+                    updated_at: now_iso(),
+                },
+            )
             .unwrap();
 
-        let a = backend.get_cursor(&pid("a"), &stream("s")).unwrap().unwrap();
-        let b = backend.get_cursor(&pid("b"), &stream("s")).unwrap().unwrap();
+        let a = backend
+            .get_cursor(&pid("a"), &stream("s"))
+            .unwrap()
+            .unwrap();
+        let b = backend
+            .get_cursor(&pid("b"), &stream("s"))
+            .unwrap()
+            .unwrap();
         assert_eq!(a.cursor_value, Some("aaa".into()));
         assert_eq!(b.cursor_value, Some("bbb".into()));
     }
@@ -448,12 +461,16 @@ mod tests {
         assert!(run_id > 0);
 
         backend
-            .complete_run(run_id, RunStatus::Completed, &RunStats {
-                records_read: 1000,
-                records_written: 1000,
-                bytes_read: 50000,
-                error_message: None,
-            })
+            .complete_run(
+                run_id,
+                RunStatus::Completed,
+                &RunStats {
+                    records_read: 1000,
+                    records_written: 1000,
+                    bytes_read: 50000,
+                    error_message: None,
+                },
+            )
             .unwrap();
 
         let (status, records_read, finished, _error) = backend.get_run_row(run_id).unwrap();
@@ -468,12 +485,16 @@ mod tests {
         let run_id = backend.start_run(&pid("p"), &stream("orders")).unwrap();
 
         backend
-            .complete_run(run_id, RunStatus::Failed, &RunStats {
-                records_read: 50,
-                records_written: 0,
-                bytes_read: 2000,
-                error_message: Some("Connection reset".into()),
-            })
+            .complete_run(
+                run_id,
+                RunStatus::Failed,
+                &RunStats {
+                    records_read: 50,
+                    records_written: 0,
+                    bytes_read: 2000,
+                    error_message: Some("Connection reset".into()),
+                },
+            )
             .unwrap();
 
         let (status, _records, _finished, error_msg) = backend.get_run_row(run_id).unwrap();
@@ -512,10 +533,14 @@ mod tests {
             },
         ];
 
-        let count = backend.insert_dlq_records(&pid("p"), run_id, &records).unwrap();
+        let count = backend
+            .insert_dlq_records(&pid("p"), run_id, &records)
+            .unwrap();
         assert_eq!(count, 2);
 
-        let stored = backend.count_dlq_records_for_run(&pid("p"), run_id).unwrap();
+        let stored = backend
+            .count_dlq_records_for_run(&pid("p"), run_id)
+            .unwrap();
         assert_eq!(stored, 2);
 
         let (stream_name, error_msg) = backend.first_dlq_stream_error(&pid("p")).unwrap();
@@ -534,17 +559,26 @@ mod tests {
     fn compare_and_set_success() {
         let backend = SqliteStateBackend::in_memory().unwrap();
         backend
-            .set_cursor(&pid("p"), &stream("s"), &CursorState {
-                cursor_field: Some("id".into()),
-                cursor_value: Some("100".into()),
-                updated_at: now_iso(),
-            })
+            .set_cursor(
+                &pid("p"),
+                &stream("s"),
+                &CursorState {
+                    cursor_field: Some("id".into()),
+                    cursor_value: Some("100".into()),
+                    updated_at: now_iso(),
+                },
+            )
             .unwrap();
 
-        let result = backend.compare_and_set(&pid("p"), &stream("s"), Some("100"), "200").unwrap();
+        let result = backend
+            .compare_and_set(&pid("p"), &stream("s"), Some("100"), "200")
+            .unwrap();
         assert!(result);
 
-        let got = backend.get_cursor(&pid("p"), &stream("s")).unwrap().unwrap();
+        let got = backend
+            .get_cursor(&pid("p"), &stream("s"))
+            .unwrap()
+            .unwrap();
         assert_eq!(got.cursor_value, Some("200".into()));
     }
 
@@ -552,17 +586,26 @@ mod tests {
     fn compare_and_set_failure_mismatch() {
         let backend = SqliteStateBackend::in_memory().unwrap();
         backend
-            .set_cursor(&pid("p"), &stream("s"), &CursorState {
-                cursor_field: Some("id".into()),
-                cursor_value: Some("100".into()),
-                updated_at: now_iso(),
-            })
+            .set_cursor(
+                &pid("p"),
+                &stream("s"),
+                &CursorState {
+                    cursor_field: Some("id".into()),
+                    cursor_value: Some("100".into()),
+                    updated_at: now_iso(),
+                },
+            )
             .unwrap();
 
-        let result = backend.compare_and_set(&pid("p"), &stream("s"), Some("999"), "200").unwrap();
+        let result = backend
+            .compare_and_set(&pid("p"), &stream("s"), Some("999"), "200")
+            .unwrap();
         assert!(!result);
 
-        let got = backend.get_cursor(&pid("p"), &stream("s")).unwrap().unwrap();
+        let got = backend
+            .get_cursor(&pid("p"), &stream("s"))
+            .unwrap()
+            .unwrap();
         assert_eq!(got.cursor_value, Some("100".into()));
     }
 
@@ -570,10 +613,15 @@ mod tests {
     fn compare_and_set_from_none() {
         let backend = SqliteStateBackend::in_memory().unwrap();
 
-        let result = backend.compare_and_set(&pid("p"), &stream("s"), None, "50").unwrap();
+        let result = backend
+            .compare_and_set(&pid("p"), &stream("s"), None, "50")
+            .unwrap();
         assert!(result);
 
-        let got = backend.get_cursor(&pid("p"), &stream("s")).unwrap().unwrap();
+        let got = backend
+            .get_cursor(&pid("p"), &stream("s"))
+            .unwrap()
+            .unwrap();
         assert_eq!(got.cursor_value, Some("50".into()));
     }
 
@@ -581,17 +629,26 @@ mod tests {
     fn compare_and_set_from_none_but_exists() {
         let backend = SqliteStateBackend::in_memory().unwrap();
         backend
-            .set_cursor(&pid("p"), &stream("s"), &CursorState {
-                cursor_field: Some("id".into()),
-                cursor_value: Some("100".into()),
-                updated_at: now_iso(),
-            })
+            .set_cursor(
+                &pid("p"),
+                &stream("s"),
+                &CursorState {
+                    cursor_field: Some("id".into()),
+                    cursor_value: Some("100".into()),
+                    updated_at: now_iso(),
+                },
+            )
             .unwrap();
 
-        let result = backend.compare_and_set(&pid("p"), &stream("s"), None, "200").unwrap();
+        let result = backend
+            .compare_and_set(&pid("p"), &stream("s"), None, "200")
+            .unwrap();
         assert!(!result);
 
-        let got = backend.get_cursor(&pid("p"), &stream("s")).unwrap().unwrap();
+        let got = backend
+            .get_cursor(&pid("p"), &stream("s"))
+            .unwrap()
+            .unwrap();
         assert_eq!(got.cursor_value, Some("100".into()));
     }
 

@@ -2,7 +2,7 @@
 
 use rapidbyte_types::stream::{DataErrorPolicy, SchemaEvolutionPolicy};
 use rapidbyte_types::wire::{SyncMode, WriteMode};
-use serde::{Deserialize, Serialize};
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use rapidbyte_types::compression::CompressionCodec;
@@ -10,7 +10,6 @@ use rapidbyte_types::compression::CompressionCodec;
 const DEFAULT_STATE_BACKEND: StateBackendKind = StateBackendKind::Sqlite;
 const DEFAULT_MAX_MEMORY: &str = "256mb";
 const DEFAULT_MAX_BATCH_BYTES: &str = "64mb";
-const DEFAULT_PARALLELISM: u32 = 1;
 const DEFAULT_CHECKPOINT_INTERVAL_BYTES: &str = "64mb";
 const DEFAULT_MAX_RETRIES: u32 = 3;
 const DEFAULT_MAX_INFLIGHT_BATCHES: u32 = 16;
@@ -164,12 +163,82 @@ pub struct StateConfig {
     pub connection: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PipelineParallelism {
+    #[default]
+    Auto,
+    Manual(u32),
+}
+
+impl Serialize for PipelineParallelism {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Auto => serializer.serialize_str("auto"),
+            Self::Manual(value) => serializer.serialize_u32(*value),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PipelineParallelism {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct ParallelismVisitor;
+
+        impl de::Visitor<'_> for ParallelismVisitor {
+            type Value = PipelineParallelism;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("'auto' or a positive integer")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let manual = u32::try_from(value)
+                    .map_err(|_| E::custom(format!("parallelism value '{value}' exceeds u32")))?;
+                Ok(PipelineParallelism::Manual(manual))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let manual = u32::try_from(value).map_err(|_| {
+                    E::custom(format!("parallelism value '{value}' must be non-negative"))
+                })?;
+                Ok(PipelineParallelism::Manual(manual))
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if value == "auto" {
+                    Ok(PipelineParallelism::Auto)
+                } else {
+                    Err(E::custom(format!(
+                        "invalid parallelism '{value}', expected 'auto' or integer"
+                    )))
+                }
+            }
+        }
+
+        deserializer.deserialize_any(ParallelismVisitor)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ResourceConfig {
     pub max_memory: String,
     pub max_batch_bytes: String,
-    pub parallelism: u32,
+    pub parallelism: PipelineParallelism,
     /// Destination commits after writing this many bytes. "0" disables chunking.
     pub checkpoint_interval_bytes: String,
     /// Destination commits after writing this many rows. 0 = disabled.
@@ -190,7 +259,7 @@ impl Default for ResourceConfig {
         Self {
             max_memory: DEFAULT_MAX_MEMORY.to_string(),
             max_batch_bytes: DEFAULT_MAX_BATCH_BYTES.to_string(),
-            parallelism: DEFAULT_PARALLELISM,
+            parallelism: PipelineParallelism::default(),
             checkpoint_interval_bytes: DEFAULT_CHECKPOINT_INTERVAL_BYTES.to_string(),
             checkpoint_interval_rows: 0,
             checkpoint_interval_seconds: 0,
@@ -300,7 +369,50 @@ resources:
         assert_eq!(config.destination.primary_key, vec!["id"]);
         assert_eq!(config.destination.on_data_error, DataErrorPolicy::Skip);
         assert_eq!(config.state.connection, Some("/tmp/state.db".to_string()));
+        assert_eq!(config.resources.parallelism, PipelineParallelism::Manual(4));
         assert_eq!(config.resources.compression, Some(CompressionCodec::Zstd));
+    }
+
+    #[test]
+    fn test_parallelism_auto_parsed() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+resources:
+  parallelism: auto
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.resources.parallelism, PipelineParallelism::Auto);
+    }
+
+    #[test]
+    fn test_parallelism_defaults_to_auto() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.resources.parallelism, PipelineParallelism::Auto);
     }
 
     #[test]

@@ -18,7 +18,7 @@ use tokio::task::JoinSet;
 
 use crate::arrow::ipc_to_record_batches;
 use crate::checkpoint::correlate_and_persist_cursors;
-use crate::config::types::{parse_byte_size, PipelineConfig};
+use crate::config::types::{parse_byte_size, PipelineConfig, PipelineParallelism};
 use crate::error::{compute_backoff, PipelineError};
 use crate::execution::{DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineOutcome};
 use crate::resolve::{
@@ -105,10 +105,8 @@ struct AggregatedStreamResults {
     dest_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
     src_timings: HostTimings,
     dst_timings: HostTimings,
-    max_src_duration: f64,
-    max_dst_duration: f64,
-    max_dst_vm_setup_secs: f64,
-    max_dst_recv_secs: f64,
+    src_timing_maxima: SourceTimingMaxima,
+    dst_timing_maxima: DestTimingMaxima,
     transform_durations: Vec<f64>,
     dlq_records: Vec<DlqRecord>,
     final_stats: RunStats,
@@ -117,9 +115,127 @@ struct AggregatedStreamResults {
     stream_metrics: Vec<StreamShardMetric>,
 }
 
+#[allow(clippy::struct_field_names)]
+#[derive(Debug, Clone, Copy, Default)]
+struct SourceTimingMaxima {
+    duration_secs: f64,
+    connect_secs: f64,
+    query_secs: f64,
+    fetch_secs: f64,
+    arrow_encode_secs: f64,
+}
+
+fn observe_source_timing(maxima: &mut SourceTimingMaxima, stream: &StreamResult) {
+    maxima.duration_secs = maxima.duration_secs.max(stream.src_duration);
+    maxima.connect_secs = maxima
+        .connect_secs
+        .max(stream.src_host_timings.source_connect_secs);
+    maxima.query_secs = maxima
+        .query_secs
+        .max(stream.src_host_timings.source_query_secs);
+    maxima.fetch_secs = maxima
+        .fetch_secs
+        .max(stream.src_host_timings.source_fetch_secs);
+    maxima.arrow_encode_secs = maxima
+        .arrow_encode_secs
+        .max(stream.src_host_timings.source_arrow_encode_secs);
+}
+
 struct StreamTaskCollection {
     successes: Vec<StreamResult>,
     first_error: Option<PipelineError>,
+}
+
+const MAX_AUTO_PARALLELISM_CAP: u32 = 16;
+const MAX_SHARD_DEPTH: u32 = 6;
+const TRANSFORM_PENALTY_SLOPE: f64 = 0.10;
+const MIN_TRANSFORM_FACTOR: f64 = 0.6;
+
+fn resolve_effective_parallelism(config: &PipelineConfig) -> u32 {
+    match config.resources.parallelism {
+        PipelineParallelism::Manual(value) => value.max(1),
+        PipelineParallelism::Auto => resolve_auto_parallelism(config),
+    }
+}
+
+fn resolve_auto_parallelism(config: &PipelineConfig) -> u32 {
+    let available_cores = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1);
+    let available_cores = u32::try_from(available_cores).unwrap_or(u32::MAX);
+    let cap = available_cores.min(MAX_AUTO_PARALLELISM_CAP);
+
+    let source_connector_id = parse_connector_ref(&config.source.use_ref).0;
+    let eligible_streams = if source_connector_id == "source-postgres" {
+        u32::try_from(
+            config
+                .source
+                .streams
+                .iter()
+                .filter(|stream| stream.sync_mode == SyncMode::FullRefresh)
+                .count(),
+        )
+        .unwrap_or(u32::MAX)
+    } else {
+        0
+    };
+
+    let base_target = if eligible_streams == 0 {
+        1
+    } else {
+        let per_stream_budget = (cap / eligible_streams).max(1);
+        let per_stream_target = per_stream_budget.min(MAX_SHARD_DEPTH);
+        (eligible_streams * per_stream_target).min(cap)
+    };
+
+    #[allow(clippy::cast_precision_loss)]
+    let transform_count = config.transforms.len() as f64;
+    let transform_factor = if transform_count == 0.0 {
+        1.0
+    } else {
+        (1.0 / (1.0 + (TRANSFORM_PENALTY_SLOPE * transform_count))).max(MIN_TRANSFORM_FACTOR)
+    };
+
+    let scaled = (f64::from(base_target) * transform_factor).round();
+    if scaled <= 1.0 {
+        1
+    } else if scaled >= f64::from(cap) {
+        cap
+    } else {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let scaled_u32 = scaled as u32;
+        scaled_u32.clamp(1, cap)
+    }
+}
+
+#[allow(clippy::struct_field_names)]
+#[derive(Debug, Clone, Copy, Default)]
+struct DestTimingMaxima {
+    duration_secs: f64,
+    vm_setup_secs: f64,
+    recv_secs: f64,
+    connect_secs: f64,
+    flush_secs: f64,
+    commit_secs: f64,
+    arrow_decode_secs: f64,
+}
+
+fn observe_dest_timing(maxima: &mut DestTimingMaxima, stream: &StreamResult) {
+    maxima.duration_secs = maxima.duration_secs.max(stream.dst_duration);
+    maxima.vm_setup_secs = maxima.vm_setup_secs.max(stream.vm_setup_secs);
+    maxima.recv_secs = maxima.recv_secs.max(stream.recv_secs);
+    maxima.connect_secs = maxima
+        .connect_secs
+        .max(stream.dst_host_timings.dest_connect_secs);
+    maxima.flush_secs = maxima
+        .flush_secs
+        .max(stream.dst_host_timings.dest_flush_secs);
+    maxima.commit_secs = maxima
+        .commit_secs
+        .max(stream.dst_host_timings.dest_commit_secs);
+    maxima.arrow_decode_secs = maxima
+        .arrow_decode_secs
+        .max(stream.dst_host_timings.dest_arrow_decode_secs);
 }
 
 async fn collect_stream_task_results(
@@ -275,17 +391,17 @@ async fn execute_pipeline_once(
         return Ok(PipelineOutcome::DryRun(DryRunResult {
             streams: aggregated.dry_run_streams,
             source: SourceTiming {
-                duration_secs: aggregated.max_src_duration,
+                duration_secs: aggregated.src_timing_maxima.duration_secs,
                 module_load_ms: modules.source_module_load_ms,
-                connect_secs: src_perf.map_or(aggregated.src_timings.source_connect_secs, |p| {
+                connect_secs: src_perf.map_or(aggregated.src_timing_maxima.connect_secs, |p| {
                     p.connect_secs
                 }),
                 query_secs: src_perf
-                    .map_or(aggregated.src_timings.source_query_secs, |p| p.query_secs),
+                    .map_or(aggregated.src_timing_maxima.query_secs, |p| p.query_secs),
                 fetch_secs: src_perf
-                    .map_or(aggregated.src_timings.source_fetch_secs, |p| p.fetch_secs),
+                    .map_or(aggregated.src_timing_maxima.fetch_secs, |p| p.fetch_secs),
                 arrow_encode_secs: src_perf
-                    .map_or(aggregated.src_timings.source_arrow_encode_secs, |p| {
+                    .map_or(aggregated.src_timing_maxima.arrow_encode_secs, |p| {
                         p.arrow_encode_secs
                     }),
                 emit_nanos: aggregated.src_timings.emit_batch_nanos,
@@ -407,11 +523,13 @@ async fn load_modules(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_stream_contexts(
     config: &PipelineConfig,
     state: &dyn StateBackend,
     max_records: Option<u64>,
 ) -> Result<StreamBuild, PipelineError> {
+    let configured_parallelism = resolve_effective_parallelism(config);
     let max_batch = parse_byte_size(&config.resources.max_batch_bytes).map_err(|e| {
         PipelineError::Infrastructure(anyhow::anyhow!(
             "Invalid max_batch_bytes '{}': {}",
@@ -444,8 +562,7 @@ fn build_stream_contexts(
 
     let pipeline_id = PipelineId::new(config.pipeline.clone());
     let source_connector_id = parse_connector_ref(&config.source.use_ref).0;
-    let should_partition =
-        source_connector_id == "source-postgres" && config.resources.parallelism > 1;
+    let should_partition = source_connector_id == "source-postgres" && configured_parallelism > 1;
     let mut stream_ctxs = Vec::new();
 
     for s in &config.source.streams {
@@ -507,10 +624,10 @@ fn build_stream_contexts(
             && s.sync_mode == SyncMode::FullRefresh
             && !matches!(base_ctx.write_mode, Some(WriteMode::Replace))
         {
-            for shard in 0..config.resources.parallelism {
+            for shard in 0..configured_parallelism {
                 let mut shard_ctx = base_ctx.clone();
                 shard_ctx.source_stream_name = Some(s.name.clone());
-                shard_ctx.partition_count = Some(config.resources.parallelism);
+                shard_ctx.partition_count = Some(configured_parallelism);
                 shard_ctx.partition_index = Some(shard);
                 stream_ctxs.push(shard_ctx);
             }
@@ -559,7 +676,7 @@ async fn execute_streams(
         parse_connector_ref(&config.destination.use_ref);
     let stats = Arc::new(Mutex::new(RunStats::default()));
     let num_transforms = config.transforms.len();
-    let parallelism = config.resources.parallelism.max(1) as usize;
+    let parallelism = resolve_effective_parallelism(config) as usize;
     let semaphore = Arc::new(tokio::sync::Semaphore::new(parallelism));
 
     tracing::info!(
@@ -625,58 +742,90 @@ async fn execute_streams(
 
     if !options.dry_run {
         let preflight_streams = destination_preflight_streams(&stream_build.stream_ctxs);
+        let preflight_parallelism = usize::max(1, usize::min(parallelism, preflight_streams.len()));
         tracing::info!(
             unique_streams = preflight_streams.len(),
+            preflight_parallelism,
             "Running destination DDL preflight before shard workers"
         );
 
+        let mut preflight_join_set: JoinSet<Result<(), PipelineError>> = JoinSet::new();
+        let preflight_semaphore = Arc::new(tokio::sync::Semaphore::new(preflight_parallelism));
+
         for stream_ctx in preflight_streams {
-            let (tx, rx) = mpsc::channel::<Frame>(1);
-            tx.send(Frame::EndStream).await.map_err(|e| {
-                PipelineError::Infrastructure(anyhow::anyhow!(
-                    "Failed to prime destination preflight channel for stream '{}': {}",
-                    stream_ctx.stream_name,
-                    e
-                ))
-            })?;
-            drop(tx);
+            let permit = preflight_semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|e| {
+                    PipelineError::Infrastructure(anyhow::anyhow!(
+                        "Preflight semaphore closed: {e}"
+                    ))
+                })?;
 
             let stream_name = stream_ctx.stream_name.clone();
             let state_dst = state.clone();
             let dest_module = modules.dest_module.clone();
             let params = params.clone();
 
-            let preflight_result = tokio::task::spawn_blocking(move || {
-                run_destination_stream(
-                    &dest_module,
-                    rx,
-                    Arc::new(Mutex::new(Vec::new())),
-                    state_dst,
-                    &params.pipeline_name,
-                    &params.dest_connector_id,
-                    &params.dest_connector_version,
-                    &params.dest_config,
-                    &stream_ctx,
-                    Arc::new(Mutex::new(RunStats::default())),
-                    params.dest_permissions.as_ref(),
-                    params.compression,
-                    params.dest_overrides.as_ref(),
-                )
-            })
-            .await
-            .map_err(|e| {
-                PipelineError::Infrastructure(anyhow::anyhow!(
-                    "Destination preflight task panicked for stream '{}': {}",
-                    stream_name,
-                    e
-                ))
-            })??;
+            preflight_join_set.spawn(async move {
+                let _permit = permit;
+                let (tx, rx) = mpsc::channel::<Frame>(1);
+                tx.send(Frame::EndStream).await.map_err(|e| {
+                    PipelineError::Infrastructure(anyhow::anyhow!(
+                        "Failed to prime destination preflight channel for stream '{stream_name}': {e}",
+                    ))
+                })?;
+                drop(tx);
 
-            tracing::info!(
-                stream = stream_name,
-                duration_secs = preflight_result.duration_secs,
-                "Destination preflight completed"
-            );
+                let preflight_result = tokio::task::spawn_blocking(move || {
+                    run_destination_stream(
+                        &dest_module,
+                        rx,
+                        Arc::new(Mutex::new(Vec::new())),
+                        state_dst,
+                        &params.pipeline_name,
+                        &params.dest_connector_id,
+                        &params.dest_connector_version,
+                        &params.dest_config,
+                        &stream_ctx,
+                        Arc::new(Mutex::new(RunStats::default())),
+                        params.dest_permissions.as_ref(),
+                        params.compression,
+                        params.dest_overrides.as_ref(),
+                    )
+                })
+                .await
+                .map_err(|e| {
+                    PipelineError::Infrastructure(anyhow::anyhow!(
+                        "Destination preflight task panicked for stream '{stream_name}': {e}",
+                    ))
+                })??;
+
+                tracing::info!(
+                    stream = stream_name,
+                    duration_secs = preflight_result.duration_secs,
+                    "Destination preflight completed"
+                );
+
+                Ok(())
+            });
+        }
+
+        while let Some(joined) = preflight_join_set.join_next().await {
+            match joined {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    preflight_join_set.abort_all();
+                    return Err(err);
+                }
+                Err(join_err) => {
+                    preflight_join_set.abort_all();
+                    return Err(PipelineError::Infrastructure(anyhow::anyhow!(
+                        "Destination preflight join error: {join_err}"
+                    )));
+                }
+            }
         }
     }
 
@@ -987,16 +1136,17 @@ async fn execute_streams(
     };
     let mut src_timings = HostTimings::default();
     let mut dst_timings = HostTimings::default();
-    let mut max_src_duration = 0.0;
-    let mut max_dst_duration = 0.0;
-    let mut max_dst_vm_setup_secs = 0.0;
-    let mut max_dst_recv_secs = 0.0;
+    let mut src_timing_maxima = SourceTimingMaxima::default();
+    let mut dst_timing_maxima = DestTimingMaxima::default();
     let mut transform_durations = Vec::new();
     let mut dry_run_streams: Vec<DryRunStreamResult> = Vec::new();
     let mut stream_metrics: Vec<StreamShardMetric> = Vec::new();
     let stream_collection = collect_stream_task_results(stream_join_set).await?;
 
     for sr in stream_collection.successes {
+        observe_source_timing(&mut src_timing_maxima, &sr);
+        observe_dest_timing(&mut dst_timing_maxima, &sr);
+
         total_read_summary.records_read += sr.read_summary.records_read;
         total_read_summary.bytes_read += sr.read_summary.bytes_read;
         total_read_summary.batches_emitted += sr.read_summary.batches_emitted;
@@ -1029,14 +1179,6 @@ async fn execute_streams(
         dst_timings.dest_commit_secs += sr.dst_host_timings.dest_commit_secs;
         dst_timings.dest_arrow_decode_secs += sr.dst_host_timings.dest_arrow_decode_secs;
 
-        if sr.src_duration > max_src_duration {
-            max_src_duration = sr.src_duration;
-        }
-        if sr.dst_duration > max_dst_duration {
-            max_dst_duration = sr.dst_duration;
-            max_dst_vm_setup_secs = sr.vm_setup_secs;
-            max_dst_recv_secs = sr.recv_secs;
-        }
         transform_durations.extend(sr.transform_durations);
 
         stream_metrics.push(StreamShardMetric {
@@ -1080,10 +1222,8 @@ async fn execute_streams(
         dest_checkpoints,
         src_timings,
         dst_timings,
-        max_src_duration,
-        max_dst_duration,
-        max_dst_vm_setup_secs,
-        max_dst_recv_secs,
+        src_timing_maxima,
+        dst_timing_maxima,
         transform_durations,
         dlq_records,
         final_stats,
@@ -1121,14 +1261,12 @@ fn finalize_run(
         return Err(err);
     }
 
-    let connector_internal_secs = aggregated
-        .total_write_summary
-        .perf
-        .as_ref()
-        .map_or(0.0, |p| p.connect_secs + p.flush_secs + p.commit_secs);
-    let wasm_overhead_secs = (aggregated.max_dst_duration
-        - aggregated.max_dst_vm_setup_secs
-        - aggregated.max_dst_recv_secs
+    let connector_internal_secs = aggregated.dst_timing_maxima.connect_secs
+        + aggregated.dst_timing_maxima.flush_secs
+        + aggregated.dst_timing_maxima.commit_secs;
+    let wasm_overhead_secs = (aggregated.dst_timing_maxima.duration_secs
+        - aggregated.dst_timing_maxima.vm_setup_secs
+        - aggregated.dst_timing_maxima.recv_secs
         - connector_internal_secs)
         .max(0.0);
 
@@ -1194,15 +1332,15 @@ fn finalize_run(
             bytes_written: aggregated.total_write_summary.bytes_written,
         },
         source: SourceTiming {
-            duration_secs: aggregated.max_src_duration,
+            duration_secs: aggregated.src_timing_maxima.duration_secs,
             module_load_ms: modules.source_module_load_ms,
-            connect_secs: src_perf.map_or(aggregated.src_timings.source_connect_secs, |p| {
+            connect_secs: src_perf.map_or(aggregated.src_timing_maxima.connect_secs, |p| {
                 p.connect_secs
             }),
-            query_secs: src_perf.map_or(aggregated.src_timings.source_query_secs, |p| p.query_secs),
-            fetch_secs: src_perf.map_or(aggregated.src_timings.source_fetch_secs, |p| p.fetch_secs),
+            query_secs: src_perf.map_or(aggregated.src_timing_maxima.query_secs, |p| p.query_secs),
+            fetch_secs: src_perf.map_or(aggregated.src_timing_maxima.fetch_secs, |p| p.fetch_secs),
             arrow_encode_secs: src_perf
-                .map_or(aggregated.src_timings.source_arrow_encode_secs, |p| {
+                .map_or(aggregated.src_timing_maxima.arrow_encode_secs, |p| {
                     p.arrow_encode_secs
                 }),
             emit_nanos: aggregated.src_timings.emit_batch_nanos,
@@ -1210,16 +1348,18 @@ fn finalize_run(
             emit_count: aggregated.src_timings.emit_batch_count,
         },
         dest: DestTiming {
-            duration_secs: aggregated.max_dst_duration,
+            duration_secs: aggregated.dst_timing_maxima.duration_secs,
             module_load_ms: modules.dest_module_load_ms,
-            connect_secs: perf.map_or(aggregated.dst_timings.dest_connect_secs, |p| p.connect_secs),
-            flush_secs: perf.map_or(aggregated.dst_timings.dest_flush_secs, |p| p.flush_secs),
-            commit_secs: perf.map_or(aggregated.dst_timings.dest_commit_secs, |p| p.commit_secs),
-            arrow_decode_secs: perf.map_or(aggregated.dst_timings.dest_arrow_decode_secs, |p| {
+            connect_secs: perf.map_or(aggregated.dst_timing_maxima.connect_secs, |p| {
+                p.connect_secs
+            }),
+            flush_secs: perf.map_or(aggregated.dst_timing_maxima.flush_secs, |p| p.flush_secs),
+            commit_secs: perf.map_or(aggregated.dst_timing_maxima.commit_secs, |p| p.commit_secs),
+            arrow_decode_secs: perf.map_or(aggregated.dst_timing_maxima.arrow_decode_secs, |p| {
                 p.arrow_decode_secs
             }),
-            vm_setup_secs: aggregated.max_dst_vm_setup_secs,
-            recv_secs: aggregated.max_dst_recv_secs,
+            vm_setup_secs: aggregated.dst_timing_maxima.vm_setup_secs,
+            recv_secs: aggregated.dst_timing_maxima.recv_secs,
             recv_nanos: aggregated.dst_timings.next_batch_nanos,
             recv_wait_nanos: aggregated.dst_timings.next_batch_wait_nanos,
             recv_process_nanos: aggregated.dst_timings.next_batch_process_nanos,
@@ -1232,7 +1372,7 @@ fn finalize_run(
         duration_secs: duration.as_secs_f64(),
         wasm_overhead_secs,
         retry_count: attempt.saturating_sub(1),
-        parallelism: config.resources.parallelism.max(1),
+        parallelism: resolve_effective_parallelism(config),
         stream_metrics: aggregated.stream_metrics,
     })
 }
@@ -1533,7 +1673,8 @@ mod dry_run_tests {
             Field::new("id", DataType::Int64, false),
             Field::new("name", DataType::Utf8, true),
         ]));
-        let ids: Vec<i64> = (0..n as i64).collect();
+        let max = i64::try_from(n).expect("test row count must fit in i64");
+        let ids: Vec<i64> = (0..max).collect();
         let names: Vec<String> = (0..n).map(|i| format!("row_{i}")).collect();
         RecordBatch::try_new(
             schema,
@@ -1591,6 +1732,7 @@ mod dry_run_tests {
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_possible_truncation)]
 mod stream_context_partition_tests {
     use super::*;
     use crate::config::types::PipelineConfig;
@@ -1616,6 +1758,44 @@ source:
     - name: bench_events
       sync_mode: {sync_mode}
 destination:
+  use: dest-postgres
+  config: {{}}
+  write_mode: {write_mode}
+resources:
+  parallelism: {parallelism}
+"#
+        );
+        serde_yaml::from_str(&yaml).expect("valid pipeline yaml")
+    }
+
+    fn config_with_parallelism_expr(
+        parallelism: &str,
+        source_use: &str,
+        sync_mode: &str,
+        write_mode: &str,
+        transform_count: usize,
+    ) -> PipelineConfig {
+        let transforms_yaml = if transform_count == 0 {
+            String::new()
+        } else {
+            let mut transforms = String::from("transforms:\n");
+            for _ in 0..transform_count {
+                transforms.push_str("  - use: transform-sql\n    config: {}\n");
+            }
+            transforms
+        };
+
+        let yaml = format!(
+            r#"
+version: "1.0"
+pipeline: test_partitioning
+source:
+  use: {source_use}
+  config: {{}}
+  streams:
+    - name: bench_events
+      sync_mode: {sync_mode}
+{transforms_yaml}destination:
   use: dest-postgres
   config: {{}}
   write_mode: {write_mode}
@@ -1654,7 +1834,10 @@ resources:
                 Some("bench_events")
             );
             assert_eq!(stream_ctx.partition_count, Some(4));
-            assert_eq!(stream_ctx.partition_index, Some(idx as u32));
+            assert_eq!(
+                stream_ctx.partition_index,
+                Some(u32::try_from(idx).expect("partition index should fit in u32"))
+            );
         }
     }
 
@@ -1687,6 +1870,45 @@ resources:
         assert_eq!(stream_ctx.partition_count, None);
         assert_eq!(stream_ctx.partition_index, None);
         assert_eq!(stream_ctx.write_mode, Some(WriteMode::Replace));
+    }
+
+    #[test]
+    fn auto_parallelism_without_eligible_streams_resolves_to_one() {
+        let config =
+            config_with_parallelism_expr("auto", "source-postgres", "incremental", "append", 0);
+        assert_eq!(resolve_effective_parallelism(&config), 1);
+    }
+
+    #[test]
+    fn auto_parallelism_respects_shard_depth_cap() {
+        let config =
+            config_with_parallelism_expr("auto", "source-postgres", "full_refresh", "append", 0);
+        let cap = std::thread::available_parallelism()
+            .map(std::num::NonZeroUsize::get)
+            .map_or(1, |value| u32::try_from(value).unwrap_or(u32::MAX))
+            .min(MAX_AUTO_PARALLELISM_CAP);
+        let expected = cap.min(MAX_SHARD_DEPTH);
+        assert_eq!(resolve_effective_parallelism(&config), expected);
+    }
+
+    #[test]
+    fn manual_parallelism_override_is_honored() {
+        let config =
+            config_with_parallelism_expr("7", "source-postgres", "full_refresh", "append", 0);
+        assert_eq!(resolve_effective_parallelism(&config), 7);
+    }
+
+    #[test]
+    fn transform_count_reduces_auto_parallelism() {
+        let without_transforms =
+            config_with_parallelism_expr("auto", "source-postgres", "full_refresh", "append", 0);
+        let with_transforms =
+            config_with_parallelism_expr("auto", "source-postgres", "full_refresh", "append", 3);
+
+        assert!(
+            resolve_effective_parallelism(&with_transforms)
+                <= resolve_effective_parallelism(&without_transforms)
+        );
     }
 
     #[test]
@@ -1777,5 +1999,147 @@ resources:
         let preflight = destination_preflight_streams(&stream_ctxs);
         assert_eq!(preflight.len(), 1);
         assert_eq!(preflight[0].stream_name, "orders_append");
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::field_reassign_with_default, clippy::float_cmp)]
+mod dest_timing_maxima_tests {
+    use super::*;
+
+    fn stream_result_with_dest_timing(
+        duration_secs: f64,
+        vm_setup_secs: f64,
+        recv_secs: f64,
+        connect_secs: f64,
+        flush_secs: f64,
+        commit_secs: f64,
+        arrow_decode_secs: f64,
+    ) -> StreamResult {
+        let mut dst_host_timings = HostTimings::default();
+        dst_host_timings.dest_connect_secs = connect_secs;
+        dst_host_timings.dest_flush_secs = flush_secs;
+        dst_host_timings.dest_commit_secs = commit_secs;
+        dst_host_timings.dest_arrow_decode_secs = arrow_decode_secs;
+
+        StreamResult {
+            stream_name: "users".to_string(),
+            partition_index: Some(0),
+            partition_count: Some(2),
+            read_summary: ReadSummary {
+                records_read: 0,
+                bytes_read: 0,
+                batches_emitted: 0,
+                checkpoint_count: 0,
+                records_skipped: 0,
+                perf: None,
+            },
+            write_summary: WriteSummary {
+                records_written: 0,
+                bytes_written: 0,
+                batches_written: 0,
+                checkpoint_count: 0,
+                records_failed: 0,
+                perf: None,
+            },
+            source_checkpoints: Vec::new(),
+            dest_checkpoints: Vec::new(),
+            src_host_timings: HostTimings::default(),
+            dst_host_timings,
+            src_duration: 0.0,
+            dst_duration: duration_secs,
+            vm_setup_secs,
+            recv_secs,
+            transform_durations: Vec::new(),
+            dry_run_result: None,
+        }
+    }
+
+    #[test]
+    fn observe_dest_timing_tracks_independent_maxima() {
+        let mut maxima = DestTimingMaxima::default();
+
+        let stream_a = stream_result_with_dest_timing(10.0, 1.0, 2.0, 0.5, 4.0, 1.0, 0.2);
+        let stream_b = stream_result_with_dest_timing(8.0, 3.0, 5.0, 0.7, 2.0, 1.5, 0.4);
+
+        observe_dest_timing(&mut maxima, &stream_a);
+        observe_dest_timing(&mut maxima, &stream_b);
+
+        assert_eq!(maxima.duration_secs, 10.0);
+        assert_eq!(maxima.vm_setup_secs, 3.0);
+        assert_eq!(maxima.recv_secs, 5.0);
+        assert_eq!(maxima.connect_secs, 0.7);
+        assert_eq!(maxima.flush_secs, 4.0);
+        assert_eq!(maxima.commit_secs, 1.5);
+        assert_eq!(maxima.arrow_decode_secs, 0.4);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::field_reassign_with_default, clippy::float_cmp)]
+mod source_timing_maxima_tests {
+    use super::*;
+
+    fn stream_result_with_source_timing(
+        duration_secs: f64,
+        connect_secs: f64,
+        query_secs: f64,
+        fetch_secs: f64,
+        arrow_encode_secs: f64,
+    ) -> StreamResult {
+        let mut src_host_timings = HostTimings::default();
+        src_host_timings.source_connect_secs = connect_secs;
+        src_host_timings.source_query_secs = query_secs;
+        src_host_timings.source_fetch_secs = fetch_secs;
+        src_host_timings.source_arrow_encode_secs = arrow_encode_secs;
+
+        StreamResult {
+            stream_name: "users".to_string(),
+            partition_index: Some(0),
+            partition_count: Some(2),
+            read_summary: ReadSummary {
+                records_read: 0,
+                bytes_read: 0,
+                batches_emitted: 0,
+                checkpoint_count: 0,
+                records_skipped: 0,
+                perf: None,
+            },
+            write_summary: WriteSummary {
+                records_written: 0,
+                bytes_written: 0,
+                batches_written: 0,
+                checkpoint_count: 0,
+                records_failed: 0,
+                perf: None,
+            },
+            source_checkpoints: Vec::new(),
+            dest_checkpoints: Vec::new(),
+            src_host_timings,
+            dst_host_timings: HostTimings::default(),
+            src_duration: duration_secs,
+            dst_duration: 0.0,
+            vm_setup_secs: 0.0,
+            recv_secs: 0.0,
+            transform_durations: Vec::new(),
+            dry_run_result: None,
+        }
+    }
+
+    #[test]
+    fn observe_source_timing_tracks_independent_maxima() {
+        let mut maxima = SourceTimingMaxima::default();
+
+        let stream_a = stream_result_with_source_timing(10.0, 1.0, 2.0, 5.0, 0.6);
+        let stream_b = stream_result_with_source_timing(8.0, 3.0, 1.0, 4.0, 0.9);
+
+        observe_source_timing(&mut maxima, &stream_a);
+        observe_source_timing(&mut maxima, &stream_b);
+
+        assert_eq!(maxima.duration_secs, 10.0);
+        assert_eq!(maxima.connect_secs, 3.0);
+        assert_eq!(maxima.query_secs, 2.0);
+        assert_eq!(maxima.fetch_secs, 5.0);
+        assert_eq!(maxima.arrow_encode_secs, 0.9);
     }
 }

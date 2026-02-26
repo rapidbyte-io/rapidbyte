@@ -90,7 +90,9 @@ mod tests {
         let info = CursorInfo {
             cursor_field: "updated_at".into(),
             cursor_type: CursorType::TimestampMicros,
-            last_value: Some(CursorValue::TimestampMicros { value: 1_700_000_000_000_000 }),
+            last_value: Some(CursorValue::TimestampMicros {
+                value: 1_700_000_000_000_000,
+            }),
         };
         let json = serde_json::to_string(&info).unwrap();
         let back: CursorInfo = serde_json::from_str(&json).unwrap();

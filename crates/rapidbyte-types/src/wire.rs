@@ -120,7 +120,10 @@ mod tests {
     #[test]
     fn feature_serde_snake_case() {
         let f = Feature::SchemaAutoMigrate;
-        assert_eq!(serde_json::to_string(&f).unwrap(), "\"schema_auto_migrate\"");
+        assert_eq!(
+            serde_json::to_string(&f).unwrap(),
+            "\"schema_auto_migrate\""
+        );
     }
 
     #[test]

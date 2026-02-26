@@ -43,23 +43,14 @@ pub trait StateBackend: Send + Sync {
     /// # Errors
     ///
     /// Returns [`StateError`](crate::error::StateError) on storage failure.
-    fn start_run(
-        &self,
-        pipeline: &PipelineId,
-        stream: &StreamName,
-    ) -> error::Result<i64>;
+    fn start_run(&self, pipeline: &PipelineId, stream: &StreamName) -> error::Result<i64>;
 
     /// Finalize a sync run with status and aggregate stats.
     ///
     /// # Errors
     ///
     /// Returns [`StateError`](crate::error::StateError) on storage failure.
-    fn complete_run(
-        &self,
-        run_id: i64,
-        status: RunStatus,
-        stats: &RunStats,
-    ) -> error::Result<()>;
+    fn complete_run(&self, run_id: i64, status: RunStatus, stats: &RunStats) -> error::Result<()>;
 
     /// Compare-and-set: atomically update `cursor_value` only if it matches `expected`.
     ///

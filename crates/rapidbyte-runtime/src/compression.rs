@@ -131,7 +131,9 @@ mod tests {
 
     #[test]
     fn test_lz4_roundtrip_bytes() {
-        let data = bytes::Bytes::from_static(b"hello world repeated hello world repeated hello world repeated");
+        let data = bytes::Bytes::from_static(
+            b"hello world repeated hello world repeated hello world repeated",
+        );
         let compressed = compress_bytes(CompressionCodec::Lz4, &data).unwrap();
         let decompressed = decompress(CompressionCodec::Lz4, &compressed).unwrap();
         assert_eq!(data.as_ref(), decompressed.as_slice());
@@ -139,7 +141,9 @@ mod tests {
 
     #[test]
     fn test_zstd_roundtrip_bytes() {
-        let data = bytes::Bytes::from_static(b"hello world repeated hello world repeated hello world repeated");
+        let data = bytes::Bytes::from_static(
+            b"hello world repeated hello world repeated hello world repeated",
+        );
         let compressed = compress_bytes(CompressionCodec::Zstd, &data).unwrap();
         let decompressed = decompress(CompressionCodec::Zstd, &compressed).unwrap();
         assert_eq!(data.as_ref(), decompressed.as_slice());

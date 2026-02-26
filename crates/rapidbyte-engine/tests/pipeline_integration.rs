@@ -309,7 +309,7 @@ async fn test_pg_to_pg_full_pipeline() {
 /// - tests/connectors/postgres/setup.sh has been run
 /// - Connector .wasm files are built at RAPIDBYTE_CONNECTOR_DIR (or default plugin dir)
 #[tokio::test]
-#[ignore]
+#[ignore = "requires postgres fixtures and built connector wasm artifacts"]
 async fn test_parallel_destination_no_retry_and_stable_counts() {
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()

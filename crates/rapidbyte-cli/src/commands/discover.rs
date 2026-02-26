@@ -2,9 +2,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use rapidbyte_engine::orchestrator;
 use rapidbyte_engine::config::parser;
 use rapidbyte_engine::config::validator;
+use rapidbyte_engine::orchestrator;
 
 /// Execute the `discover` command: discover available streams from a source connector.
 pub async fn execute(pipeline_path: &Path) -> Result<()> {

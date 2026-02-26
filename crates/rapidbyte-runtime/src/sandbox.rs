@@ -40,8 +40,7 @@ pub fn intersect_env_vars(
     match pipeline_vars {
         None => manifest_vars.to_vec(),
         Some(allowed) => {
-            let allowed_set: HashSet<&str> =
-                allowed.iter().map(String::as_str).collect();
+            let allowed_set: HashSet<&str> = allowed.iter().map(String::as_str).collect();
             manifest_vars
                 .iter()
                 .filter(|v| allowed_set.contains(v.as_str()))
@@ -60,8 +59,7 @@ pub fn intersect_preopens(
     match pipeline_preopens {
         None => manifest_preopens.to_vec(),
         Some(allowed) => {
-            let allowed_set: HashSet<&str> =
-                allowed.iter().map(String::as_str).collect();
+            let allowed_set: HashSet<&str> = allowed.iter().map(String::as_str).collect();
             manifest_preopens
                 .iter()
                 .filter(|p| allowed_set.contains(p.as_str()))

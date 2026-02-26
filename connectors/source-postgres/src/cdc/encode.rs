@@ -39,12 +39,7 @@ pub(crate) struct RelationInfo {
 
 impl RelationInfo {
     /// Create a new `RelationInfo`, building the Arrow schema from column OIDs.
-    pub(crate) fn new(
-        oid: u32,
-        namespace: String,
-        name: String,
-        columns: Vec<ColumnDef>,
-    ) -> Self {
+    pub(crate) fn new(oid: u32, namespace: String, name: String, columns: Vec<ColumnDef>) -> Self {
         let mut fields: Vec<Field> = columns
             .iter()
             .map(|col| {
@@ -278,8 +273,8 @@ fn days_since_epoch(year: i32, month: u32, day: u32) -> Option<i32> {
         (i64::from(year), i64::from(month))
     };
 
-    let jdn = 365 * y + y / 4 - y / 100 + y / 400 + (153 * (m - 3) + 2) / 5 + i64::from(day)
-        + 1_721_119;
+    let jdn =
+        365 * y + y / 4 - y / 100 + y / 400 + (153 * (m - 3) + 2) / 5 + i64::from(day) + 1_721_119;
     // JDN for 1970-01-01 is 2_440_588.
     let epoch_jdn: i64 = 2_440_588;
 
@@ -397,10 +392,7 @@ mod tests {
         let rows = vec![CdcRow {
             op: CdcOp::Update,
             tuple: TupleData {
-                columns: vec![
-                    ColumnValue::Null,
-                    ColumnValue::UnchangedToast,
-                ],
+                columns: vec![ColumnValue::Null, ColumnValue::UnchangedToast],
             },
         }];
 
@@ -553,9 +545,7 @@ mod tests {
         let rows = vec![CdcRow {
             op: CdcOp::Insert,
             tuple: TupleData {
-                columns: vec![ColumnValue::Text(
-                    "2024-06-15 10:30:00.123456".to_string(),
-                )],
+                columns: vec![ColumnValue::Text("2024-06-15 10:30:00.123456".to_string())],
             },
         }];
 

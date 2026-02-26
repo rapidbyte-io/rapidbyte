@@ -17,8 +17,7 @@ async fn drop_staging_table(
     target_schema: &str,
     stream_name: &str,
 ) -> Result<(), String> {
-    let staging_table =
-        crate::decode::qualified_name(target_schema, &staging_name(stream_name));
+    let staging_table = crate::decode::qualified_name(target_schema, &staging_name(stream_name));
     let sql = format!("DROP TABLE IF EXISTS {staging_table} CASCADE");
     client
         .execute(&sql, &[])
@@ -39,8 +38,7 @@ pub(crate) async fn swap_staging_table(
     stream_name: &str,
 ) -> Result<(), String> {
     let target_table = crate::decode::qualified_name(target_schema, stream_name);
-    let staging_table =
-        crate::decode::qualified_name(target_schema, &staging_name(stream_name));
+    let staging_table = crate::decode::qualified_name(target_schema, &staging_name(stream_name));
     let staging_name_only = quote_identifier(stream_name);
 
     client
@@ -54,9 +52,7 @@ pub(crate) async fn swap_staging_table(
         return Err(format!("Swap DROP failed for {target_table}: {e}"));
     }
 
-    let rename_sql = format!(
-        "ALTER TABLE {staging_table} RENAME TO {staging_name_only}"
-    );
+    let rename_sql = format!("ALTER TABLE {staging_table} RENAME TO {staging_name_only}");
     if let Err(e) = client.execute(&rename_sql, &[]).await {
         let _ = client.execute("ROLLBACK", &[]).await;
         return Err(format!("Swap RENAME failed: {e}"));
@@ -69,9 +65,7 @@ pub(crate) async fn swap_staging_table(
 
     ctx.log(
         LogLevel::Info,
-        &format!(
-            "dest-postgres: atomic swap {staging_table} -> {target_table}"
-        ),
+        &format!("dest-postgres: atomic swap {staging_table} -> {target_table}"),
     );
     Ok(())
 }

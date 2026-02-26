@@ -18,8 +18,7 @@ pub(crate) fn correlate_and_persist_cursors(
     let mut cursors_advanced = 0u64;
 
     for src_cp in source_checkpoints {
-        let (Some(cursor_field), Some(cursor_value)) =
-            (&src_cp.cursor_field, &src_cp.cursor_value)
+        let (Some(cursor_field), Some(cursor_value)) = (&src_cp.cursor_field, &src_cp.cursor_value)
         else {
             continue;
         };
@@ -79,7 +78,9 @@ mod tests {
             kind: CheckpointKind::Source,
             stream: stream.to_string(),
             cursor_field: Some(cursor_field.to_string()),
-            cursor_value: Some(CursorValue::Utf8 { value: cursor_value.to_string() }),
+            cursor_value: Some(CursorValue::Utf8 {
+                value: cursor_value.to_string(),
+            }),
             records_processed: 100,
             bytes_processed: 5000,
         }

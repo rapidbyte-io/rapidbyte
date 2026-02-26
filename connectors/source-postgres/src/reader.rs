@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chrono::NaiveDateTime;
+use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::arrow::datatypes::Schema;
@@ -15,7 +16,7 @@ use rapidbyte_sdk::stream::DataErrorPolicy;
 
 use crate::cursor::CursorTracker;
 use crate::encode;
-use crate::metrics::emit_read_metrics;
+use crate::metrics::{emit_read_metrics, emit_read_perf_metrics};
 use crate::query;
 use crate::types::Column;
 
@@ -30,6 +31,53 @@ const CURSOR_NAME: &str = "rb_cursor";
 
 /// Initial fixed overhead estimate for an empty batch payload.
 const BATCH_OVERHEAD_BYTES: usize = 256;
+
+fn partition_mode_from_env() -> &'static str {
+    match std::env::var("RAPIDBYTE_SOURCE_PARTITION_MODE") {
+        Ok(value) if value.eq_ignore_ascii_case("range") => "range",
+        _ => "mod",
+    }
+}
+
+async fn compute_range_bounds(
+    client: &Client,
+    source_table_name: &str,
+    partition_count: u32,
+    partition_index: u32,
+) -> Result<Option<(i64, i64)>, String> {
+    if partition_count == 0 || partition_index >= partition_count {
+        return Ok(None);
+    }
+
+    let sql = format!(
+        "SELECT MIN({id_col})::bigint, MAX({id_col})::bigint FROM {table_name}",
+        id_col = quote_identifier("id"),
+        table_name = quote_identifier(source_table_name),
+    );
+    let row = client
+        .query_one(&sql, &[])
+        .await
+        .map_err(|e| format!("range partition min/max query failed: {e}"))?;
+
+    let min_id: Option<i64> = row.get(0);
+    let max_id: Option<i64> = row.get(1);
+    let (min_id, max_id) = match (min_id, max_id) {
+        (Some(min_id), Some(max_id)) if min_id <= max_id => (min_id, max_id),
+        _ => return Ok(None),
+    };
+
+    let span = i128::from(max_id) - i128::from(min_id) + 1;
+    let chunk = (span + i128::from(partition_count) - 1) / i128::from(partition_count);
+    let start = i128::from(min_id) + i128::from(partition_index) * chunk;
+    let mut end = start + chunk - 1;
+    if partition_index == partition_count - 1 {
+        end = i128::from(max_id);
+    }
+
+    let start_i64 = i64::try_from(start).map_err(|e| format!("range start overflow: {e}"))?;
+    let end_i64 = i64::try_from(end).map_err(|e| format!("range end overflow: {e}"))?;
+    Ok(Some((start_i64, end_i64)))
+}
 
 /// Estimate byte size of a single row for `max_record_bytes` checking.
 pub(crate) fn estimate_row_bytes(columns: &[Column]) -> usize {
@@ -93,6 +141,10 @@ pub async fn read_stream(
     stream: &StreamContext,
     connect_secs: f64,
 ) -> Result<ReadSummary, String> {
+    let source_table_name = stream
+        .source_stream_name
+        .as_deref()
+        .unwrap_or(&stream.stream_name);
     ctx.log(
         LogLevel::Info,
         &format!("Reading stream: {}", stream.stream_name),
@@ -101,7 +153,7 @@ pub async fn read_stream(
     let query_start = Instant::now();
 
     // ── 1. Schema resolution ──────────────────────────────────────────
-    let all_columns = crate::discovery::query_table_columns(client, &stream.stream_name).await?;
+    let all_columns = crate::discovery::query_table_columns(client, source_table_name).await?;
 
     // ── 2. Projection pushdown ────────────────────────────────────────
     let columns: Vec<Column> = match &stream.selected_columns {
@@ -114,7 +166,7 @@ pub async fn read_stream(
             if !unknown.is_empty() {
                 return Err(format!(
                     "Selected columns {:?} not found in table '{}'",
-                    unknown, stream.stream_name
+                    unknown, source_table_name
                 ));
             }
 
@@ -125,7 +177,7 @@ pub async fn read_stream(
             if filtered.is_empty() {
                 return Err(format!(
                     "None of the selected columns {:?} found in table '{}'",
-                    selected, stream.stream_name
+                    selected, source_table_name
                 ));
             }
             if let (SyncMode::Incremental, Some(ci)) = (&stream.sync_mode, &stream.cursor_info) {
@@ -151,7 +203,30 @@ pub async fn read_stream(
         .await
         .map_err(|e| format!("BEGIN failed: {e}"))?;
 
-    let cursor_query = query::build_base_query(ctx, stream, &columns)?;
+    let partition_range_bounds = if partition_mode_from_env() == "range" {
+        match (stream.partition_count, stream.partition_index) {
+            (Some(count), Some(index)) => {
+                match compute_range_bounds(client, source_table_name, count, index).await {
+                    Ok(bounds) => bounds,
+                    Err(e) => {
+                        ctx.log(
+                            LogLevel::Warn,
+                            &format!(
+                                "Range partitioning disabled for stream '{}': {e}; falling back to modulo",
+                                stream.stream_name
+                            ),
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let cursor_query = query::build_base_query(ctx, stream, &columns, partition_range_bounds)?;
 
     let declare = format!(
         "DECLARE {} NO SCROLL CURSOR FOR {}",
@@ -433,18 +508,21 @@ pub async fn read_stream(
     #[allow(clippy::cast_precision_loss)]
     let arrow_encode_secs = state.arrow_encode_nanos as f64 / 1e9;
 
+    let perf = ReadPerf {
+        connect_secs,
+        query_secs,
+        fetch_secs,
+        arrow_encode_secs,
+    };
+    emit_read_perf_metrics(ctx, &perf);
+
     Ok(ReadSummary {
         records_read: state.total_records,
         bytes_read: state.total_bytes,
         batches_emitted: state.batches_emitted,
         checkpoint_count,
         records_skipped,
-        perf: Some(ReadPerf {
-            connect_secs,
-            query_secs,
-            fetch_secs,
-            arrow_encode_secs,
-        }),
+        perf: Some(perf),
     })
 }
 

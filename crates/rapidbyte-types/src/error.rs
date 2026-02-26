@@ -164,19 +164,40 @@ impl ConnectorError {
     /// Configuration error (not retryable).
     #[must_use]
     pub fn config(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(ErrorCategory::Config, ErrorScope::Stream, false, BackoffClass::Normal, code, message)
+        Self::new(
+            ErrorCategory::Config,
+            ErrorScope::Stream,
+            false,
+            BackoffClass::Normal,
+            code,
+            message,
+        )
     }
 
     /// Authentication error (not retryable).
     #[must_use]
     pub fn auth(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(ErrorCategory::Auth, ErrorScope::Stream, false, BackoffClass::Normal, code, message)
+        Self::new(
+            ErrorCategory::Auth,
+            ErrorScope::Stream,
+            false,
+            BackoffClass::Normal,
+            code,
+            message,
+        )
     }
 
     /// Permission error (not retryable).
     #[must_use]
     pub fn permission(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(ErrorCategory::Permission, ErrorScope::Stream, false, BackoffClass::Normal, code, message)
+        Self::new(
+            ErrorCategory::Permission,
+            ErrorScope::Stream,
+            false,
+            BackoffClass::Normal,
+            code,
+            message,
+        )
     }
 
     /// Rate limit error (retryable, slow backoff).
@@ -187,7 +208,12 @@ impl ConnectorError {
         retry_after_ms: Option<u64>,
     ) -> Self {
         let mut err = Self::new(
-            ErrorCategory::RateLimit, ErrorScope::Stream, true, BackoffClass::Slow, code, message,
+            ErrorCategory::RateLimit,
+            ErrorScope::Stream,
+            true,
+            BackoffClass::Slow,
+            code,
+            message,
         );
         err.retry_after_ms = retry_after_ms;
         err
@@ -196,37 +222,79 @@ impl ConnectorError {
     /// Transient network error (retryable, normal backoff).
     #[must_use]
     pub fn transient_network(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(ErrorCategory::TransientNetwork, ErrorScope::Stream, true, BackoffClass::Normal, code, message)
+        Self::new(
+            ErrorCategory::TransientNetwork,
+            ErrorScope::Stream,
+            true,
+            BackoffClass::Normal,
+            code,
+            message,
+        )
     }
 
     /// Transient database error (retryable, normal backoff).
     #[must_use]
     pub fn transient_db(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(ErrorCategory::TransientDb, ErrorScope::Stream, true, BackoffClass::Normal, code, message)
+        Self::new(
+            ErrorCategory::TransientDb,
+            ErrorScope::Stream,
+            true,
+            BackoffClass::Normal,
+            code,
+            message,
+        )
     }
 
     /// Data validation error (not retryable, record scope).
     #[must_use]
     pub fn data(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(ErrorCategory::Data, ErrorScope::Record, false, BackoffClass::Normal, code, message)
+        Self::new(
+            ErrorCategory::Data,
+            ErrorScope::Record,
+            false,
+            BackoffClass::Normal,
+            code,
+            message,
+        )
     }
 
     /// Schema mismatch error (not retryable).
     #[must_use]
     pub fn schema(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(ErrorCategory::Schema, ErrorScope::Stream, false, BackoffClass::Normal, code, message)
+        Self::new(
+            ErrorCategory::Schema,
+            ErrorScope::Stream,
+            false,
+            BackoffClass::Normal,
+            code,
+            message,
+        )
     }
 
     /// Internal connector error (not retryable).
     #[must_use]
     pub fn internal(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(ErrorCategory::Internal, ErrorScope::Stream, false, BackoffClass::Normal, code, message)
+        Self::new(
+            ErrorCategory::Internal,
+            ErrorScope::Stream,
+            false,
+            BackoffClass::Normal,
+            code,
+            message,
+        )
     }
 
     /// Frame lifecycle error (not retryable).
     #[must_use]
     pub fn frame(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(ErrorCategory::Frame, ErrorScope::Batch, false, BackoffClass::Normal, code, message)
+        Self::new(
+            ErrorCategory::Frame,
+            ErrorScope::Batch,
+            false,
+            BackoffClass::Normal,
+            code,
+            message,
+        )
     }
 
     /// Attach structured diagnostic details.
@@ -238,10 +306,13 @@ impl ConnectorError {
 
     /// Record transaction commit state at time of error.
     ///
-    /// Setting [`CommitState::AfterCommitUnknown`] also sets `safe_to_retry = false`.
+    /// Setting any post-commit state also sets `safe_to_retry = false`.
     #[must_use]
     pub fn with_commit_state(mut self, state: CommitState) -> Self {
-        if state == CommitState::AfterCommitUnknown {
+        if matches!(
+            state,
+            CommitState::AfterCommitUnknown | CommitState::AfterCommitConfirmed
+        ) {
             self.safe_to_retry = false;
         }
         self.commit_state = Some(state);
@@ -285,6 +356,14 @@ mod tests {
     fn after_commit_unknown_disables_safe_retry() {
         let err = ConnectorError::transient_db("UNKNOWN", "commit unknown")
             .with_commit_state(CommitState::AfterCommitUnknown);
+        assert!(err.retryable);
+        assert!(!err.safe_to_retry);
+    }
+
+    #[test]
+    fn after_commit_confirmed_disables_safe_retry() {
+        let err = ConnectorError::transient_db("PARTIAL", "partial commit")
+            .with_commit_state(CommitState::AfterCommitConfirmed);
         assert!(err.retryable);
         assert!(!err.safe_to_retry);
     }

@@ -1,4 +1,4 @@
-//! Criterion benchmarks for the SQLite state backend.
+//! Criterion benchmarks for the `SQLite` state backend.
 //!
 //! These measure cursor persistence and run lifecycle operations that occur
 //! on every pipeline execution.

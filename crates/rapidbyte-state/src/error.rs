@@ -32,7 +32,7 @@ mod tests {
 
     #[test]
     fn backend_error_displays_inner() {
-        let inner = std::io::Error::new(std::io::ErrorKind::Other, "db broke");
+        let inner = std::io::Error::other("db broke");
         let err = StateError::backend(inner);
         assert!(err.to_string().contains("db broke"));
     }
@@ -52,7 +52,7 @@ mod tests {
 
     #[test]
     fn backend_helper_boxes_error() {
-        let inner = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let inner = std::io::Error::other("test");
         let err = StateError::backend(inner);
         assert!(matches!(err, StateError::Backend(_)));
     }

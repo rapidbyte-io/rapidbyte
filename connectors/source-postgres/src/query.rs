@@ -4,8 +4,8 @@ use std::fmt::Write as _;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use pg_escape::quote_identifier;
-use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::cursor::CursorType;
+use rapidbyte_sdk::prelude::*;
 use tokio_postgres::types::ToSql;
 
 use crate::types::Column;
@@ -49,11 +49,30 @@ pub(crate) fn effective_cursor_type(
     }
 }
 
+fn is_integer_arrow_type(data_type: ArrowDataType) -> bool {
+    matches!(
+        data_type,
+        ArrowDataType::Int8
+            | ArrowDataType::Int16
+            | ArrowDataType::Int32
+            | ArrowDataType::Int64
+            | ArrowDataType::UInt8
+            | ArrowDataType::UInt16
+            | ArrowDataType::UInt32
+            | ArrowDataType::UInt64
+    )
+}
+
 pub(crate) fn build_base_query(
     ctx: &Context,
     stream: &StreamContext,
     columns: &[Column],
+    partition_range_bounds: Option<(i64, i64)>,
 ) -> Result<CursorQuery, String> {
+    let source_table_name = stream
+        .source_stream_name
+        .as_deref()
+        .unwrap_or(&stream.stream_name);
     let col_list = columns
         .iter()
         .map(|c| {
@@ -68,7 +87,7 @@ pub(crate) fn build_base_query(
         .join(", ");
 
     if let (SyncMode::Incremental, Some(ci)) = (&stream.sync_mode, &stream.cursor_info) {
-        let table_name = quote_identifier(&stream.stream_name);
+        let table_name = quote_identifier(source_table_name);
         let cursor_field = quote_identifier(&ci.cursor_field);
         let cursor_arrow_type = columns
             .iter()
@@ -84,9 +103,8 @@ pub(crate) fn build_base_query(
                         stream.stream_name, cursor_field
                     ),
                 );
-                let mut sql = format!(
-                    "SELECT {col_list} FROM {table_name} ORDER BY {cursor_field}"
-                );
+                let mut sql =
+                    format!("SELECT {col_list} FROM {table_name} ORDER BY {cursor_field}");
                 if let Some(max) = stream.limits.max_records {
                     let _ = write!(sql, " LIMIT {max}");
                 }
@@ -143,20 +161,67 @@ pub(crate) fn build_base_query(
                 stream.stream_name, cursor_field
             ),
         );
-        let mut sql = format!(
-            "SELECT {col_list} FROM {table_name} ORDER BY {cursor_field}"
-        );
+        let mut sql = format!("SELECT {col_list} FROM {table_name} ORDER BY {cursor_field}");
         if let Some(max) = stream.limits.max_records {
             let _ = write!(sql, " LIMIT {max}");
         }
         return Ok(CursorQuery { sql, bind: None });
     }
 
-    let mut sql = format!(
-        "SELECT {} FROM {}",
-        col_list,
-        quote_identifier(&stream.stream_name)
-    );
+    let table_name = quote_identifier(source_table_name);
+    let mut sql = format!("SELECT {col_list} FROM {table_name}");
+
+    if let (Some(partition_count), Some(partition_index)) =
+        (stream.partition_count, stream.partition_index)
+    {
+        if partition_count == 0 || partition_index >= partition_count {
+            ctx.log(
+                LogLevel::Warn,
+                &format!(
+                    "Partitioning disabled for stream '{}': invalid shard metadata index={} count={}",
+                    stream.stream_name, partition_index, partition_count
+                ),
+            );
+        } else if let Some((start, end)) = partition_range_bounds {
+            let _ = write!(
+                sql,
+                " WHERE {} >= {start} AND {} <= {end}",
+                quote_identifier("id"),
+                quote_identifier("id")
+            );
+        } else {
+            let id_col = columns.iter().find(|c| c.name == "id");
+            if let Some(id_col) = id_col {
+                if is_integer_arrow_type(id_col.arrow_type) {
+                    let _ = write!(
+                        sql,
+                        " WHERE mod({}, {partition_count}) = {partition_index}",
+                        quote_identifier("id")
+                    );
+                } else {
+                    ctx.log(
+                        LogLevel::Warn,
+                        &format!(
+                            "Partitioning disabled for stream '{}' shard {}/{}: id column is non-numeric ({:?})",
+                            stream.stream_name,
+                            partition_index,
+                            partition_count,
+                            id_col.arrow_type
+                        ),
+                    );
+                }
+            } else {
+                ctx.log(
+                    LogLevel::Warn,
+                    &format!(
+                        "Partitioning disabled for stream '{}' shard {}/{}: id column not found",
+                        stream.stream_name, partition_index, partition_count
+                    ),
+                );
+            }
+        }
+    }
+
     if let Some(max) = stream.limits.max_records {
         let _ = write!(sql, " LIMIT {max}");
     }
@@ -198,7 +263,9 @@ pub(crate) fn cursor_bind_param(
         }
         CursorType::TimestampMillis => {
             let ts = match value {
-                CursorValue::TimestampMillis { value: v } | CursorValue::Int64 { value: v } => timestamp_millis_to_rfc3339(*v)?,
+                CursorValue::TimestampMillis { value: v } | CursorValue::Int64 { value: v } => {
+                    timestamp_millis_to_rfc3339(*v)?
+                }
                 CursorValue::Utf8 { value: v } => v.clone(),
                 CursorValue::TimestampMicros { value: v } => timestamp_micros_to_rfc3339(*v)?,
                 _ => {
@@ -214,7 +281,9 @@ pub(crate) fn cursor_bind_param(
         }
         CursorType::TimestampMicros => {
             let ts = match value {
-                CursorValue::TimestampMicros { value: v } | CursorValue::Int64 { value: v } => timestamp_micros_to_rfc3339(*v)?,
+                CursorValue::TimestampMicros { value: v } | CursorValue::Int64 { value: v } => {
+                    timestamp_micros_to_rfc3339(*v)?
+                }
                 CursorValue::Utf8 { value: v } => v.clone(),
                 CursorValue::TimestampMillis { value: v } => timestamp_millis_to_rfc3339(*v)?,
                 _ => {
@@ -297,6 +366,7 @@ mod tests {
     fn base_context() -> StreamContext {
         StreamContext {
             stream_name: "users".to_string(),
+            source_stream_name: None,
             schema: SchemaHint::Columns(vec![]),
             sync_mode: SyncMode::FullRefresh,
             cursor_info: None,
@@ -304,6 +374,8 @@ mod tests {
             policies: StreamPolicies::default(),
             write_mode: None,
             selected_columns: None,
+            partition_count: None,
+            partition_index: None,
         }
     }
 
@@ -329,8 +401,9 @@ mod tests {
 
     #[test]
     fn cursor_bind_param_parses_int64_from_utf8() {
-        let (bind, cast) = cursor_bind_param(CursorType::Int64, &CursorValue::Utf8 { value: "42".into() })
-            .expect("bind should parse");
+        let (bind, cast) =
+            cursor_bind_param(CursorType::Int64, &CursorValue::Utf8 { value: "42".into() })
+                .expect("bind should parse");
         match bind {
             CursorBindParam::Int64(v) => assert_eq!(v, 42),
             _ => panic!("expected int64 bind"),
@@ -340,8 +413,13 @@ mod tests {
 
     #[test]
     fn cursor_bind_param_rejects_bad_int64() {
-        let err = cursor_bind_param(CursorType::Int64, &CursorValue::Utf8 { value: "not_an_int".into() })
-            .expect_err("invalid int64 should fail");
+        let err = cursor_bind_param(
+            CursorType::Int64,
+            &CursorValue::Utf8 {
+                value: "not_an_int".into(),
+            },
+        )
+        .expect_err("invalid int64 should fail");
         assert!(err.contains("failed to parse 'not_an_int' as i64"));
     }
 
@@ -351,7 +429,7 @@ mod tests {
         let mut stream = base_context();
         stream.stream_name = "User".to_string();
         let columns = vec![Column::new("select", "text", true)];
-        let query = build_base_query(&ctx, &stream, &columns).expect("query should build");
+        let query = build_base_query(&ctx, &stream, &columns, None).expect("query should build");
         assert_eq!(query.sql, "SELECT \"select\" FROM \"User\"");
         assert!(query.bind.is_none());
     }
@@ -367,8 +445,8 @@ mod tests {
             last_value: Some(CursorValue::Int64 { value: 7 }),
         });
 
-        let query =
-            build_base_query(&ctx, &stream, &columns_for_cursor()).expect("query should build");
+        let query = build_base_query(&ctx, &stream, &columns_for_cursor(), None)
+            .expect("query should build");
         assert_eq!(
             query.sql,
             "SELECT id, name FROM users WHERE id > $1::bigint ORDER BY id"
@@ -382,7 +460,7 @@ mod tests {
         let mut stream = base_context();
         stream.limits.max_records = Some(100);
         let columns = vec![Column::new("id", "bigint", false)];
-        let query = build_base_query(&ctx, &stream, &columns).expect("query should build");
+        let query = build_base_query(&ctx, &stream, &columns, None).expect("query should build");
         assert!(
             query.sql.ends_with(" LIMIT 100"),
             "expected LIMIT clause in: {}",
@@ -401,8 +479,8 @@ mod tests {
             last_value: Some(CursorValue::Int64 { value: 7 }),
         });
         stream.limits.max_records = Some(50);
-        let query =
-            build_base_query(&ctx, &stream, &columns_for_cursor()).expect("query should build");
+        let query = build_base_query(&ctx, &stream, &columns_for_cursor(), None)
+            .expect("query should build");
         assert!(
             query.sql.ends_with(" LIMIT 50"),
             "expected LIMIT clause in: {}",
@@ -422,8 +500,8 @@ mod tests {
             last_value: None,
         });
         stream.limits.max_records = Some(25);
-        let query =
-            build_base_query(&ctx, &stream, &columns_for_cursor()).expect("query should build");
+        let query = build_base_query(&ctx, &stream, &columns_for_cursor(), None)
+            .expect("query should build");
         assert!(
             query.sql.ends_with(" LIMIT 25"),
             "expected LIMIT clause in: {}",
@@ -437,7 +515,7 @@ mod tests {
         let ctx = Context::new("source-postgres", "");
         let stream = base_context();
         let columns = vec![Column::new("id", "bigint", false)];
-        let query = build_base_query(&ctx, &stream, &columns).expect("query should build");
+        let query = build_base_query(&ctx, &stream, &columns, None).expect("query should build");
         assert!(
             !query.sql.contains("LIMIT"),
             "expected no LIMIT clause in: {}",
@@ -453,7 +531,7 @@ mod tests {
             Column::new("id", "bigint", false),
             Column::new("external_id", "uuid", true),
         ];
-        let query = build_base_query(&ctx, &stream, &columns).expect("query should build");
+        let query = build_base_query(&ctx, &stream, &columns, None).expect("query should build");
         // uuid needs ::text cast, bigint does not
         assert!(
             query.sql.contains("external_id::text AS external_id"),
@@ -466,5 +544,49 @@ mod tests {
             "expected id without text cast in: {}",
             query.sql
         );
+    }
+
+    #[test]
+    fn build_base_query_full_refresh_partitioned_by_id() {
+        let ctx = Context::new("source-postgres", "");
+        let mut stream = base_context();
+        stream.stream_name = "users#p1".to_string();
+        stream.source_stream_name = Some("users".to_string());
+        stream.partition_count = Some(4);
+        stream.partition_index = Some(1);
+
+        let query = build_base_query(&ctx, &stream, &columns_for_cursor(), None)
+            .expect("query should build");
+        assert_eq!(query.sql, "SELECT id, name FROM users WHERE mod(id, 4) = 1");
+        assert!(query.bind.is_none());
+    }
+
+    #[test]
+    fn build_base_query_full_refresh_partition_fallback_without_id() {
+        let ctx = Context::new("source-postgres", "");
+        let mut stream = base_context();
+        stream.partition_count = Some(4);
+        stream.partition_index = Some(1);
+
+        let query = build_base_query(&ctx, &stream, &[Column::new("name", "text", true)], None)
+            .expect("query should build");
+        assert_eq!(query.sql, "SELECT name FROM users");
+        assert!(query.bind.is_none());
+    }
+
+    #[test]
+    fn build_base_query_full_refresh_partitioned_by_id_range_bounds() {
+        let ctx = Context::new("source-postgres", "");
+        let mut stream = base_context();
+        stream.partition_count = Some(4);
+        stream.partition_index = Some(1);
+
+        let query = build_base_query(&ctx, &stream, &columns_for_cursor(), Some((10, 19)))
+            .expect("query should build");
+        assert_eq!(
+            query.sql,
+            "SELECT id, name FROM users WHERE id >= 10 AND id <= 19"
+        );
+        assert!(query.bind.is_none());
     }
 }

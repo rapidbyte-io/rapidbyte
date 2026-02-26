@@ -52,7 +52,7 @@ impl PipelineError {
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Connector(e) => e.retryable,
+            Self::Connector(e) => e.retryable && e.safe_to_retry,
             Self::Infrastructure(_) => false,
         }
     }
@@ -137,7 +137,7 @@ mod tests {
             "slow down",
             Some(5000),
         ));
-        let msg = format!("{}", err);
+        let msg = format!("{err}");
         assert!(msg.contains("rate_limit"));
         assert!(msg.contains("TOO_MANY"));
         assert!(msg.contains("slow down"));
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn test_pipeline_error_display_infrastructure() {
         let err = PipelineError::Infrastructure(anyhow::anyhow!("Store::new failed"));
-        let msg = format!("{}", err);
+        let msg = format!("{err}");
         assert!(msg.contains("Store::new failed"));
     }
 
@@ -207,16 +207,27 @@ mod tests {
     }
 
     #[test]
-    fn test_pipeline_error_commit_unknown_is_retryable_but_unsafe() {
+    fn test_pipeline_error_commit_unknown_is_not_retryable_when_unsafe() {
         use rapidbyte_types::error::CommitState;
 
         let err = PipelineError::Connector(
             ConnectorError::transient_db("COMMIT_FAILED", "timeout")
                 .with_commit_state(CommitState::AfterCommitUnknown),
         );
-        assert!(err.is_retryable());
+        assert!(!err.is_retryable());
         let ce = err.as_connector_error().unwrap();
         assert_eq!(ce.commit_state, Some(CommitState::AfterCommitUnknown));
         assert!(!ce.safe_to_retry);
+    }
+
+    #[test]
+    fn test_pipeline_error_unsafe_connector_error_is_not_retryable() {
+        use rapidbyte_types::error::CommitState;
+
+        let err = PipelineError::Connector(
+            ConnectorError::transient_db("WRITE_FAILED", "partial commit")
+                .with_commit_state(CommitState::AfterCommitConfirmed),
+        );
+        assert!(!err.is_retryable());
     }
 }

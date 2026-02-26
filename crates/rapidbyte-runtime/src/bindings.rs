@@ -280,14 +280,14 @@ macro_rules! impl_host_trait_for_world {
                 chunk: Vec<u8>,
             ) -> std::result::Result<u64, $module::rapidbyte::connector::types::ConnectorError>
             {
-                self.frame_write_impl(handle, chunk).map_err($to_world_error)
+                self.frame_write_impl(handle, chunk)
+                    .map_err($to_world_error)
             }
 
             fn frame_seal(
                 &mut self,
                 handle: u64,
-            ) -> std::result::Result<(), $module::rapidbyte::connector::types::ConnectorError>
-            {
+            ) -> std::result::Result<(), $module::rapidbyte::connector::types::ConnectorError> {
                 self.frame_seal_impl(handle).map_err($to_world_error)
             }
 
@@ -304,10 +304,8 @@ macro_rules! impl_host_trait_for_world {
                 handle: u64,
                 offset: u64,
                 len: u64,
-            ) -> std::result::Result<
-                Vec<u8>,
-                $module::rapidbyte::connector::types::ConnectorError,
-            > {
+            ) -> std::result::Result<Vec<u8>, $module::rapidbyte::connector::types::ConnectorError>
+            {
                 self.frame_read_impl(handle, offset, len)
                     .map_err($to_world_error)
             }

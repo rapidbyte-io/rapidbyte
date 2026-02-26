@@ -3,8 +3,8 @@
 //! `CursorTracker` encapsulates the logic for determining which column to
 //! track, what extraction strategy to use, and building the final checkpoint.
 
-use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::cursor::CursorType;
+use rapidbyte_sdk::prelude::*;
 
 use crate::types::Column;
 
@@ -97,7 +97,9 @@ impl CursorTracker {
         bytes_processed: u64,
     ) -> Option<Checkpoint> {
         let cursor_value = match self.strategy {
-            Strategy::Int => self.max_int.map(|v| CursorValue::Utf8 { value: v.to_string() }),
+            Strategy::Int => self.max_int.map(|v| CursorValue::Utf8 {
+                value: v.to_string(),
+            }),
             Strategy::Text => self.max_text.map(|v| CursorValue::Utf8 { value: v }),
         };
 
@@ -165,7 +167,12 @@ mod tests {
         let cp = tracker.into_checkpoint("stream", 100, 2048);
         assert!(cp.is_some());
         let cp = cp.unwrap();
-        assert_eq!(cp.cursor_value, Some(CursorValue::Utf8 { value: "10".to_string() }));
+        assert_eq!(
+            cp.cursor_value,
+            Some(CursorValue::Utf8 {
+                value: "10".to_string()
+            })
+        );
     }
 
     #[test]
@@ -180,7 +187,9 @@ mod tests {
         let cp = cp.unwrap();
         assert_eq!(
             cp.cursor_value,
-            Some(CursorValue::Utf8 { value: "2024-06-15".to_string() })
+            Some(CursorValue::Utf8 {
+                value: "2024-06-15".to_string()
+            })
         );
     }
 

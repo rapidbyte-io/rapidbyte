@@ -3,9 +3,9 @@
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use crate::checkpoint::{Checkpoint, StateScope};
 #[cfg(target_arch = "wasm32")]
 use crate::checkpoint::CheckpointKind;
+use crate::checkpoint::{Checkpoint, StateScope};
 #[cfg(target_arch = "wasm32")]
 use crate::envelope::PayloadEnvelope;
 #[cfg(target_arch = "wasm32")]
@@ -221,8 +221,12 @@ impl HostImports for WasmHostImports {
     }
 
     fn state_put(&self, scope: StateScope, key: &str, value: &str) -> Result<(), ConnectorError> {
-        bindings::rapidbyte::connector::host::state_put(state_scope_to_i32(scope) as u32, key, value)
-            .map_err(from_component_error)
+        bindings::rapidbyte::connector::host::state_put(
+            state_scope_to_i32(scope) as u32,
+            key,
+            value,
+        )
+        .map_err(from_component_error)
     }
 
     fn state_compare_and_set(
@@ -359,12 +363,7 @@ impl HostImports for StubHostImports {
         Ok(0)
     }
 
-    fn frame_read(
-        &self,
-        _handle: u64,
-        _offset: u64,
-        _len: u64,
-    ) -> Result<Vec<u8>, ConnectorError> {
+    fn frame_read(&self, _handle: u64, _offset: u64, _len: u64) -> Result<Vec<u8>, ConnectorError> {
         Ok(vec![])
     }
 
@@ -466,9 +465,9 @@ pub fn emit_batch(batch: &RecordBatch) -> Result<(), ConnectorError> {
                 .map_err(|e| {
                     ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC writer init: {e}"))
                 })?;
-        ipc_writer.write(batch).map_err(|e| {
-            ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC write: {e}"))
-        })?;
+        ipc_writer
+            .write(batch)
+            .map_err(|e| ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC write: {e}")))?;
         ipc_writer.finish().map_err(|e| {
             ConnectorError::internal("ARROW_IPC_ENCODE", format!("IPC finish: {e}"))
         })?;
