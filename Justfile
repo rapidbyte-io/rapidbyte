@@ -51,11 +51,11 @@ e2e *args="":
 
 # Run benchmarks: bench [CONNECTOR] [ROWS] --profile PROFILE [--iters N] [--cpu-profile]
 bench *args="":
-    ./bench/bench.sh {{args}}
+    cargo run --manifest-path tests/bench/Cargo.toml -- run {{args}}
 
 # Compare benchmarks between two git refs
 bench-compare ref1 ref2 *args="":
-    ./bench/compare.sh {{ref1}} {{ref2}} {{args}}
+    cargo run --manifest-path tests/bench/Cargo.toml -- compare {{ref1}} {{ref2}} {{args}}
 
 # Scaffold a new connector project
 scaffold name output=("connectors/" + name):
