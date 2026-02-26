@@ -110,7 +110,7 @@ pub async fn write_stream(
         config.load_method,
     )
     .map_err(|e| ConnectorError::config("INVALID_STREAM_SETUP", e))?;
-    let skip_mutable_setup = stream.partition_count.unwrap_or(1) > 1;
+    let skip_mutable_setup = stream.partition_count.unwrap_or(1) > 1 && !setup.is_replace;
     let setup = if skip_mutable_setup {
         setup
     } else {
