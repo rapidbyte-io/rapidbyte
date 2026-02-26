@@ -67,9 +67,7 @@ pub(crate) fn load_and_validate_manifest(
 
     if let Some(ref m) = manifest {
         if !m.supports_role(expected_role) {
-            anyhow::bail!(
-                "Connector '{connector_ref}' does not support {expected_role:?} role"
-            );
+            anyhow::bail!("Connector '{connector_ref}' does not support {expected_role:?} role");
         }
 
         if m.protocol_version != ProtocolVersion::V2 {
@@ -134,8 +132,7 @@ pub(crate) fn create_state_backend(config: &PipelineConfig) -> Result<Arc<dyn St
             } else {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
                 let state_path = PathBuf::from(home).join(".rapidbyte").join("state.db");
-                SqliteStateBackend::open(&state_path)
-                    .context("Failed to open default state DB")?
+                SqliteStateBackend::open(&state_path).context("Failed to open default state DB")?
             };
             Ok(Arc::new(backend) as Arc<dyn StateBackend>)
         }
@@ -204,7 +201,6 @@ pub(crate) fn build_sandbox_overrides(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapidbyte_state::StateBackend;
     use rapidbyte_types::state::{PipelineId, StreamName};
     use tempfile::tempdir;
 
@@ -242,10 +238,7 @@ mod tests {
 
         let backend = create_state_backend(&config).unwrap();
         let run_id = backend
-            .start_run(
-                &PipelineId::new("test"),
-                &StreamName::new("all"),
-            )
+            .start_run(&PipelineId::new("test"), &StreamName::new("all"))
             .unwrap();
         assert!(run_id > 0);
     }
