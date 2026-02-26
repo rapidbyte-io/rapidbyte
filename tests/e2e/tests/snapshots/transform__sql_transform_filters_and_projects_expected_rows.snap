@@ -1,0 +1,7 @@
+---
+source: tests/transform.rs
+assertion_line: 38
+expression: snapshot
+---
+1|ALICE
+3|CAROL

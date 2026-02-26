@@ -23,6 +23,7 @@ jsonschema = "0.28"
 bytes = "1"
 tempfile = "3"
 criterion = { workspace = true }
+proptest = "1"
 
 [[bench]]
 name = "arrow_codec"

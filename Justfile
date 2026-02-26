@@ -47,11 +47,7 @@ lint:
     cargo clippy --all-targets -- -D warnings
 
 e2e *args="":
-    ./tests/e2e.sh {{args}}
-
-# Run a single E2E scenario (e.g. just e2e-scenario postgres/scenarios/01_full_refresh)
-e2e-scenario path:
-    RAPIDBYTE_CONNECTOR_DIR=target/connectors bash tests/connectors/{{path}}.sh
+    cargo test --manifest-path tests/e2e/Cargo.toml {{args}}
 
 # Run benchmarks: bench [CONNECTOR] [ROWS] --profile PROFILE [--iters N] [--cpu-profile]
 bench *args="":

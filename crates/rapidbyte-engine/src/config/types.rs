@@ -747,9 +747,44 @@ destination:
 
     #[test]
     fn test_fixture_pipeline_with_permissions_parses() {
-        let yaml = include_str!(
-            "../../../../tests/connectors/postgres/fixtures/pipelines/e2e_permissions.yaml"
-        );
+        let yaml = r#"
+version: "1.0"
+pipeline: e2e_permissions
+
+source:
+  use: source-postgres
+  config:
+    host: localhost
+    port: 5432
+    user: postgres
+    password: postgres
+    database: postgres
+  permissions:
+    network:
+      allowed_hosts:
+        - localhost
+        - 127.0.0.1
+    env:
+      allowed_vars:
+        - PGPASSWORD
+  limits:
+    max_memory: 256mb
+    timeout_seconds: 120
+  streams:
+    - name: users
+      sync_mode: full_refresh
+
+destination:
+  use: dest-postgres
+  config:
+    host: localhost
+    port: 5432
+    user: postgres
+    password: postgres
+    database: postgres
+    schema: raw
+  write_mode: append
+"#;
         let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.pipeline, "e2e_permissions");
         let src_perms = config.source.permissions.as_ref().unwrap();
