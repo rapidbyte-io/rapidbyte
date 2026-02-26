@@ -3,11 +3,13 @@
 //! Owns connection/session orchestration around batch writes, checkpoints,
 //! watermark-based resume, and Replace-mode staging swap.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
 use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
+use rapidbyte_sdk::catalog::SchemaHint;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::prelude::*;
@@ -16,6 +18,70 @@ use rapidbyte_sdk::stream::SchemaEvolutionPolicy;
 use crate::config::LoadMethod;
 use crate::ddl::{prepare_staging, swap_staging_table};
 use crate::decode;
+
+const COPY_FLUSH_1MB: usize = 1024 * 1024;
+const COPY_FLUSH_4MB: usize = 4 * 1024 * 1024;
+const COPY_FLUSH_16MB: usize = 16 * 1024 * 1024;
+
+fn bench_profile_copy_flush_bytes() -> Option<usize> {
+    match std::env::var("BENCH_PROFILE") {
+        Ok(value) if value.eq_ignore_ascii_case("small") => Some(COPY_FLUSH_1MB),
+        Ok(value) if value.eq_ignore_ascii_case("medium") => Some(COPY_FLUSH_4MB),
+        Ok(value) if value.eq_ignore_ascii_case("large") => Some(COPY_FLUSH_16MB),
+        _ => None,
+    }
+}
+
+fn adaptive_copy_flush_bytes(
+    configured: Option<usize>,
+    profile_default: Option<usize>,
+    avg_row_bytes: Option<usize>,
+) -> usize {
+    if let Some(bytes) = configured {
+        return bytes;
+    }
+
+    if let Some(bytes) = profile_default {
+        return bytes;
+    }
+
+    match avg_row_bytes {
+        Some(bytes) if bytes >= 64 * 1024 => COPY_FLUSH_16MB,
+        Some(bytes) if bytes >= 8 * 1024 => COPY_FLUSH_4MB,
+        _ => COPY_FLUSH_1MB,
+    }
+}
+
+fn emit_write_perf_metrics(ctx: &Context, perf: &WritePerf) {
+    let gauges = [
+        ("dest_connect_secs", perf.connect_secs),
+        ("dest_flush_secs", perf.flush_secs),
+        ("dest_commit_secs", perf.commit_secs),
+        ("dest_arrow_decode_secs", perf.arrow_decode_secs),
+    ];
+
+    for (name, value) in gauges {
+        let _ = ctx.metric(&Metric {
+            name: name.to_string(),
+            value: MetricValue::Gauge(value),
+            labels: vec![],
+        });
+    }
+}
+
+fn preflight_schema_from_hint(schema_hint: &SchemaHint) -> Option<Arc<Schema>> {
+    match schema_hint {
+        SchemaHint::Columns(columns) => {
+            if columns.is_empty() {
+                None
+            } else {
+                Some(build_arrow_schema(columns))
+            }
+        }
+        SchemaHint::ArrowIpc(ipc_bytes) => decode_ipc(ipc_bytes).ok().map(|(schema, _)| schema),
+        _ => None,
+    }
+}
 
 /// Entry point for writing a single stream.
 pub async fn write_stream(
@@ -29,21 +95,35 @@ pub async fn write_stream(
         .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
     let connect_secs = connect_start.elapsed().as_secs_f64();
 
+    let setup = prepare_stream_once(
+        &config.schema,
+        &stream.stream_name,
+        stream.write_mode.clone(),
+        stream.schema.clone(),
+        stream.policies.schema_evolution,
+        CheckpointConfig {
+            bytes: stream.limits.checkpoint_interval_bytes,
+            rows: stream.limits.checkpoint_interval_rows,
+            seconds: stream.limits.checkpoint_interval_seconds,
+        },
+        config.copy_flush_bytes,
+        None,
+        None,
+    )
+    .map_err(|e| ConnectorError::config("INVALID_STREAM_SETUP", e))?;
+
     let mut session = WriteSession::begin(
         ctx,
         &client,
         &config.schema,
         SessionConfig {
-            stream_name: stream.stream_name.clone(),
-            write_mode: stream.write_mode.clone(),
+            stream_name: setup.stream_name,
+            write_mode: setup.effective_write_mode,
+            schema_hint: stream.schema.clone(),
             load_method: config.load_method,
-            schema_policy: stream.policies.schema_evolution,
-            checkpoint: CheckpointConfig {
-                bytes: stream.limits.checkpoint_interval_bytes,
-                rows: stream.limits.checkpoint_interval_rows,
-                seconds: stream.limits.checkpoint_interval_seconds,
-            },
-            copy_flush_bytes: config.copy_flush_bytes,
+            schema_policy: setup.schema_policy,
+            checkpoint: setup.checkpoint,
+            copy_flush_bytes: setup.copy_flush_bytes,
         },
     )
     .await
@@ -78,18 +158,21 @@ pub async fn write_stream(
             .with_commit_state(CommitState::AfterCommitUnknown)
     })?;
 
+    let perf = WritePerf {
+        connect_secs,
+        flush_secs: result.flush_secs,
+        commit_secs: result.commit_secs,
+        arrow_decode_secs: 0.0,
+    };
+    emit_write_perf_metrics(ctx, &perf);
+
     Ok(WriteSummary {
         records_written: result.total_rows,
         bytes_written: result.total_bytes,
         batches_written: result.batches_written,
         checkpoint_count: result.checkpoint_count,
         records_failed: 0,
-        perf: Some(WritePerf {
-            connect_secs,
-            flush_secs: result.flush_secs,
-            commit_secs: result.commit_secs,
-            arrow_decode_secs: 0.0,
-        }),
+        perf: Some(perf),
     })
 }
 
@@ -97,13 +180,72 @@ pub async fn write_stream(
 pub struct SessionConfig {
     pub stream_name: String,
     pub write_mode: Option<WriteMode>,
+    pub schema_hint: SchemaHint,
     pub load_method: LoadMethod,
     pub schema_policy: SchemaEvolutionPolicy,
     pub checkpoint: CheckpointConfig,
     pub copy_flush_bytes: Option<usize>,
 }
 
+/// Immutable setup output for destination worker execution.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct WriteContract {
+    pub stream_name: String,
+    pub effective_stream: String,
+    pub qualified_table: String,
+    pub effective_write_mode: Option<WriteMode>,
+    pub schema_policy: SchemaEvolutionPolicy,
+    pub checkpoint: CheckpointConfig,
+    pub copy_flush_bytes: Option<usize>,
+    pub profile_copy_flush_bytes: Option<usize>,
+    pub is_replace: bool,
+    pub watermark_records: u64,
+    pub ignored_columns: HashSet<String>,
+    pub type_null_columns: HashSet<String>,
+}
+
+/// Build a destination write contract for a stream.
+fn prepare_stream_once(
+    target_schema: &str,
+    stream_name: &str,
+    write_mode: Option<WriteMode>,
+    _schema_hint: SchemaHint,
+    schema_policy: SchemaEvolutionPolicy,
+    checkpoint: CheckpointConfig,
+    copy_flush_bytes: Option<usize>,
+    ignored_columns: Option<HashSet<String>>,
+    type_null_columns: Option<HashSet<String>>,
+) -> Result<WriteContract, String> {
+    if stream_name.trim().is_empty() {
+        return Err("stream name must not be empty".to_string());
+    }
+
+    let is_replace = matches!(write_mode, Some(WriteMode::Replace));
+    let effective_write_mode = if is_replace {
+        Some(WriteMode::Append)
+    } else {
+        write_mode
+    };
+
+    Ok(WriteContract {
+        stream_name: stream_name.to_string(),
+        effective_stream: stream_name.to_string(),
+        qualified_table: decode::qualified_name(target_schema, stream_name),
+        effective_write_mode,
+        schema_policy,
+        checkpoint,
+        copy_flush_bytes,
+        profile_copy_flush_bytes: bench_profile_copy_flush_bytes(),
+        is_replace,
+        watermark_records: 0,
+        ignored_columns: ignored_columns.unwrap_or_default(),
+        type_null_columns: type_null_columns.unwrap_or_default(),
+    })
+}
+
 /// Checkpoint threshold configuration extracted from `StreamLimits`.
+#[derive(Debug, Clone)]
 pub struct CheckpointConfig {
     pub bytes: u64,
     pub rows: u64,
@@ -146,6 +288,7 @@ pub struct WriteSession<'a> {
     schema_policy: SchemaEvolutionPolicy,
     checkpoint_config: CheckpointConfig,
     copy_flush_bytes: Option<usize>,
+    profile_copy_flush_bytes: Option<usize>,
 
     // Replace mode
     is_replace: bool,
@@ -173,13 +316,12 @@ impl<'a> WriteSession<'a> {
     ) -> Result<WriteSession<'a>, String> {
         let stream_name = &config.stream_name;
         let write_mode = config.write_mode;
+        let mut schema_state = crate::ddl::SchemaState::new();
 
         if let Err(e) = crate::watermark::ensure_table(client, target_schema).await {
             ctx.log(
                 LogLevel::Warn,
-                &format!(
-                    "dest-postgres: watermarks table creation failed (non-fatal): {e}"
-                ),
+                &format!("dest-postgres: watermarks table creation failed (non-fatal): {e}"),
             );
         }
 
@@ -190,14 +332,26 @@ impl<'a> WriteSession<'a> {
                 .map_err(|e| format!("{e:#}"))?;
             ctx.log(
                 LogLevel::Info,
-                &format!(
-                    "dest-postgres: Replace mode — writing to staging table '{staging_name}'"
-                ),
+                &format!("dest-postgres: Replace mode — writing to staging table '{staging_name}'"),
             );
             (staging_name, Some(WriteMode::Append))
         } else {
             (stream_name.to_owned(), write_mode)
         };
+
+        if let Some(schema) = preflight_schema_from_hint(&config.schema_hint) {
+            schema_state
+                .ensure_table(
+                    ctx,
+                    client,
+                    target_schema,
+                    &effective_stream,
+                    effective_write_mode.as_ref(),
+                    Some(&config.schema_policy),
+                    &schema,
+                )
+                .await?;
+        }
 
         let watermark_records = if is_replace {
             0
@@ -217,9 +371,7 @@ impl<'a> WriteSession<'a> {
                 Err(e) => {
                     ctx.log(
                         LogLevel::Warn,
-                        &format!(
-                            "dest-postgres: watermark query failed (starting fresh): {e}"
-                        ),
+                        &format!("dest-postgres: watermark query failed (starting fresh): {e}"),
                     );
                     0
                 }
@@ -246,6 +398,7 @@ impl<'a> WriteSession<'a> {
             schema_policy: config.schema_policy,
             checkpoint_config: config.checkpoint,
             copy_flush_bytes: config.copy_flush_bytes,
+            profile_copy_flush_bytes: bench_profile_copy_flush_bytes(),
             is_replace,
             watermark_records,
             cumulative_records: 0,
@@ -259,7 +412,7 @@ impl<'a> WriteSession<'a> {
                 bytes_since_commit: 0,
                 rows_since_commit: 0,
             },
-            schema_state: crate::ddl::SchemaState::new(),
+            schema_state,
         })
     }
 
@@ -270,6 +423,7 @@ impl<'a> WriteSession<'a> {
         batches: &[RecordBatch],
     ) -> Result<(), String> {
         let n: usize = batches.iter().map(RecordBatch::get_array_memory_size).sum();
+        let batch_rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
 
         // Watermark resume: skip already-committed batches
         if self.watermark_records > 0 && self.cumulative_records < self.watermark_records {
@@ -331,16 +485,45 @@ impl<'a> WriteSession<'a> {
             && !matches!(self.effective_write_mode, Some(WriteMode::Upsert { .. }));
 
         let rows_written = if use_copy {
-            crate::copy::write(self.ctx, self.client, &target, batches, self.copy_flush_bytes)
-                .await?
+            if self.copy_flush_bytes.is_none() {
+                let avg_row_bytes = (batch_rows > 0).then(|| n / batch_rows as usize);
+                let chosen =
+                    adaptive_copy_flush_bytes(None, self.profile_copy_flush_bytes, avg_row_bytes);
+                self.copy_flush_bytes = Some(chosen);
+                self.ctx.log(
+                    LogLevel::Debug,
+                    &format!(
+                        "dest-postgres: adaptive copy_flush_bytes={} (profile_default={} avg_row_bytes={})",
+                        chosen,
+                        self.profile_copy_flush_bytes
+                            .map_or_else(|| "none".to_string(), |v| v.to_string()),
+                        avg_row_bytes.unwrap_or_default()
+                    ),
+                );
+            }
+
+            crate::copy::write(
+                self.ctx,
+                self.client,
+                &target,
+                batches,
+                self.copy_flush_bytes,
+            )
+            .await?
         } else {
             let upsert_clause = decode::build_upsert_clause(
                 self.effective_write_mode.as_ref(),
                 schema,
                 &active_cols,
             );
-            crate::insert::write(self.ctx, self.client, &target, batches, upsert_clause.as_deref())
-                .await?
+            crate::insert::write(
+                self.ctx,
+                self.client,
+                &target,
+                batches,
+                upsert_clause.as_deref(),
+            )
+            .await?
         };
 
         self.stats.total_rows += rows_written;
@@ -381,11 +564,9 @@ impl<'a> WriteSession<'a> {
     /// Commit and reopen transaction when checkpoint thresholds are reached.
     async fn maybe_checkpoint(&mut self) -> Result<(), String> {
         let cfg = &self.checkpoint_config;
-        let should_checkpoint = (cfg.bytes > 0
-            && self.stats.bytes_since_commit >= cfg.bytes)
+        let should_checkpoint = (cfg.bytes > 0 && self.stats.bytes_since_commit >= cfg.bytes)
             || (cfg.rows > 0 && self.stats.rows_since_commit >= cfg.rows)
-            || (cfg.seconds > 0
-                && self.last_checkpoint_time.elapsed().as_secs() >= cfg.seconds);
+            || (cfg.seconds > 0 && self.last_checkpoint_time.elapsed().as_secs() >= cfg.seconds);
 
         if !should_checkpoint {
             return Ok(());
@@ -485,5 +666,109 @@ impl<'a> WriteSession<'a> {
     /// Abort the session with ROLLBACK.
     pub async fn rollback(self) {
         let _ = self.client.execute("ROLLBACK", &[]).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rapidbyte_sdk::catalog::{ColumnSchema, SchemaHint};
+    use rapidbyte_sdk::prelude::ArrowDataType;
+
+    #[test]
+    fn write_contract_clone_preserves_fields() {
+        let contract = WriteContract {
+            stream_name: "users".to_string(),
+            effective_stream: "users".to_string(),
+            qualified_table: "raw.users".to_string(),
+            effective_write_mode: Some(WriteMode::Append),
+            schema_policy: SchemaEvolutionPolicy::default(),
+            checkpoint: CheckpointConfig {
+                bytes: 1024,
+                rows: 100,
+                seconds: 30,
+            },
+            copy_flush_bytes: Some(4 * 1024 * 1024),
+            profile_copy_flush_bytes: Some(COPY_FLUSH_4MB),
+            is_replace: false,
+            watermark_records: 0,
+            ignored_columns: std::collections::HashSet::new(),
+            type_null_columns: std::collections::HashSet::new(),
+        };
+
+        let cloned = contract.clone();
+        assert_eq!(cloned.stream_name, "users");
+        assert_eq!(cloned.qualified_table, "raw.users");
+        assert_eq!(cloned.copy_flush_bytes, Some(4 * 1024 * 1024));
+    }
+
+    #[test]
+    fn prepare_stream_once_requires_non_empty_stream_name() {
+        let result = prepare_stream_once(
+            "raw",
+            "",
+            Some(WriteMode::Append),
+            SchemaHint::Columns(Vec::new()),
+            SchemaEvolutionPolicy::default(),
+            CheckpointConfig {
+                bytes: 0,
+                rows: 0,
+                seconds: 0,
+            },
+            None,
+            None,
+            None,
+        );
+
+        assert!(result.is_err());
+        assert!(result
+            .expect_err("empty stream must fail")
+            .contains("stream name"));
+    }
+
+    #[test]
+    fn adaptive_flush_uses_user_override_when_set() {
+        let chosen =
+            adaptive_copy_flush_bytes(Some(2 * 1024 * 1024), Some(COPY_FLUSH_4MB), Some(80_000));
+        assert_eq!(chosen, 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn adaptive_flush_prefers_profile_default_when_set() {
+        let chosen = adaptive_copy_flush_bytes(None, Some(COPY_FLUSH_4MB), Some(400));
+        assert_eq!(chosen, COPY_FLUSH_4MB);
+    }
+
+    #[test]
+    fn adaptive_flush_chooses_small_bucket() {
+        let chosen = adaptive_copy_flush_bytes(None, None, Some(400));
+        assert_eq!(chosen, 1024 * 1024);
+    }
+
+    #[test]
+    fn adaptive_flush_chooses_large_row_bucket() {
+        let chosen = adaptive_copy_flush_bytes(None, None, Some(70 * 1024));
+        assert_eq!(chosen, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn preflight_schema_from_columns_builds_arrow_schema() {
+        let hint = SchemaHint::Columns(vec![
+            ColumnSchema {
+                name: "id".to_string(),
+                data_type: ArrowDataType::Int64,
+                nullable: false,
+            },
+            ColumnSchema {
+                name: "name".to_string(),
+                data_type: ArrowDataType::Utf8,
+                nullable: true,
+            },
+        ]);
+
+        let schema = preflight_schema_from_hint(&hint).expect("schema should be built");
+        assert_eq!(schema.fields().len(), 2);
+        assert_eq!(schema.field(0).name(), "id");
+        assert_eq!(schema.field(1).name(), "name");
     }
 }
