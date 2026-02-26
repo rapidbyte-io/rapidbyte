@@ -174,7 +174,6 @@ pub async fn write_stream(
 pub type SessionConfig = WriteContract;
 
 /// Immutable setup output for destination worker execution.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct WriteContract {
     pub target_schema: String,

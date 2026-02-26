@@ -463,7 +463,10 @@ fn build_stream_contexts(
             partition_index: None,
         };
 
-        if should_partition && s.sync_mode == SyncMode::FullRefresh {
+        if should_partition
+            && s.sync_mode == SyncMode::FullRefresh
+            && !matches!(base_ctx.write_mode, Some(WriteMode::Replace))
+        {
             for shard in 0..config.resources.parallelism {
                 let mut shard_ctx = base_ctx.clone();
                 shard_ctx.source_stream_name = Some(s.name.clone());
@@ -1498,6 +1501,14 @@ mod stream_context_partition_tests {
     use rapidbyte_state::SqliteStateBackend;
 
     fn config_with_parallelism(parallelism: u32, sync_mode: &str) -> PipelineConfig {
+        config_with_parallelism_and_write_mode(parallelism, sync_mode, "append")
+    }
+
+    fn config_with_parallelism_and_write_mode(
+        parallelism: u32,
+        sync_mode: &str,
+        write_mode: &str,
+    ) -> PipelineConfig {
         let yaml = format!(
             r#"
 version: "1.0"
@@ -1511,7 +1522,7 @@ source:
 destination:
   use: dest-postgres
   config: {{}}
-  write_mode: append
+  write_mode: {write_mode}
 resources:
   parallelism: {parallelism}
 "#
@@ -1564,6 +1575,22 @@ resources:
         assert_eq!(stream_ctx.source_stream_name, None);
         assert_eq!(stream_ctx.partition_count, None);
         assert_eq!(stream_ctx.partition_index, None);
+    }
+
+    #[test]
+    fn replace_mode_streams_remain_unpartitioned() {
+        let config = config_with_parallelism_and_write_mode(4, "full_refresh", "replace");
+        let state = SqliteStateBackend::in_memory().expect("in-memory state backend");
+
+        let build = build_stream_contexts(&config, &state, None).expect("stream contexts built");
+
+        assert_eq!(build.stream_ctxs.len(), 1);
+        let stream_ctx = &build.stream_ctxs[0];
+        assert_eq!(stream_ctx.stream_name, "bench_events");
+        assert_eq!(stream_ctx.source_stream_name, None);
+        assert_eq!(stream_ctx.partition_count, None);
+        assert_eq!(stream_ctx.partition_index, None);
+        assert_eq!(stream_ctx.write_mode, Some(WriteMode::Replace));
     }
 
     #[test]
