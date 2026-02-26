@@ -99,7 +99,7 @@ pub async fn write_stream(
         &config.schema,
         &stream.stream_name,
         stream.write_mode.clone(),
-        stream.schema.clone(),
+        &stream.schema,
         stream.policies.schema_evolution,
         CheckpointConfig {
             bytes: stream.limits.checkpoint_interval_bytes,
@@ -107,27 +107,16 @@ pub async fn write_stream(
             seconds: stream.limits.checkpoint_interval_seconds,
         },
         config.copy_flush_bytes,
-        None,
-        None,
+        config.load_method,
     )
     .map_err(|e| ConnectorError::config("INVALID_STREAM_SETUP", e))?;
+    let setup = async_prepare_stream_once(ctx, &client, &stream.schema, setup)
+        .await
+        .map_err(|e| ConnectorError::config("INVALID_STREAM_SETUP", e))?;
 
-    let mut session = WriteSession::begin(
-        ctx,
-        &client,
-        &config.schema,
-        SessionConfig {
-            stream_name: setup.stream_name,
-            write_mode: setup.effective_write_mode,
-            schema_hint: stream.schema.clone(),
-            load_method: config.load_method,
-            schema_policy: setup.schema_policy,
-            checkpoint: setup.checkpoint,
-            copy_flush_bytes: setup.copy_flush_bytes,
-        },
-    )
-    .await
-    .map_err(|e| ConnectorError::transient_db("SESSION_BEGIN_FAILED", e))?;
+    let mut session = WriteSession::begin(ctx, &client, &config.schema, setup)
+        .await
+        .map_err(|e| ConnectorError::transient_db("SESSION_BEGIN_FAILED", e))?;
 
     let mut loop_error: Option<String> = None;
 
@@ -177,20 +166,13 @@ pub async fn write_stream(
 }
 
 /// Configuration for a write session, bundling stream-level settings.
-pub struct SessionConfig {
-    pub stream_name: String,
-    pub write_mode: Option<WriteMode>,
-    pub schema_hint: SchemaHint,
-    pub load_method: LoadMethod,
-    pub schema_policy: SchemaEvolutionPolicy,
-    pub checkpoint: CheckpointConfig,
-    pub copy_flush_bytes: Option<usize>,
-}
+pub type SessionConfig = WriteContract;
 
 /// Immutable setup output for destination worker execution.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct WriteContract {
+    pub target_schema: String,
     pub stream_name: String,
     pub effective_stream: String,
     pub qualified_table: String,
@@ -198,6 +180,7 @@ pub struct WriteContract {
     pub schema_policy: SchemaEvolutionPolicy,
     pub checkpoint: CheckpointConfig,
     pub copy_flush_bytes: Option<usize>,
+    pub load_method: LoadMethod,
     pub profile_copy_flush_bytes: Option<usize>,
     pub is_replace: bool,
     pub watermark_records: u64,
@@ -210,12 +193,11 @@ fn prepare_stream_once(
     target_schema: &str,
     stream_name: &str,
     write_mode: Option<WriteMode>,
-    _schema_hint: SchemaHint,
+    _schema_hint: &SchemaHint,
     schema_policy: SchemaEvolutionPolicy,
     checkpoint: CheckpointConfig,
     copy_flush_bytes: Option<usize>,
-    ignored_columns: Option<HashSet<String>>,
-    type_null_columns: Option<HashSet<String>>,
+    load_method: LoadMethod,
 ) -> Result<WriteContract, String> {
     if stream_name.trim().is_empty() {
         return Err("stream name must not be empty".to_string());
@@ -229,6 +211,7 @@ fn prepare_stream_once(
     };
 
     Ok(WriteContract {
+        target_schema: target_schema.to_string(),
         stream_name: stream_name.to_string(),
         effective_stream: stream_name.to_string(),
         qualified_table: decode::qualified_name(target_schema, stream_name),
@@ -236,12 +219,88 @@ fn prepare_stream_once(
         schema_policy,
         checkpoint,
         copy_flush_bytes,
+        load_method,
         profile_copy_flush_bytes: bench_profile_copy_flush_bytes(),
         is_replace,
         watermark_records: 0,
-        ignored_columns: ignored_columns.unwrap_or_default(),
-        type_null_columns: type_null_columns.unwrap_or_default(),
+        ignored_columns: HashSet::new(),
+        type_null_columns: HashSet::new(),
     })
+}
+
+async fn async_prepare_stream_once(
+    ctx: &Context,
+    client: &Client,
+    schema_hint: &SchemaHint,
+    mut contract: WriteContract,
+) -> Result<WriteContract, String> {
+    if let Err(e) = crate::watermark::ensure_table(client, &contract.target_schema).await {
+        ctx.log(
+            LogLevel::Warn,
+            &format!("dest-postgres: watermarks table creation failed (non-fatal): {e}"),
+        );
+    }
+
+    if contract.is_replace {
+        let staging_name =
+            prepare_staging(ctx, client, &contract.target_schema, &contract.stream_name)
+                .await
+                .map_err(|e| format!("{e:#}"))?;
+        ctx.log(
+            LogLevel::Info,
+            &format!("dest-postgres: Replace mode — writing to staging table '{staging_name}'"),
+        );
+        contract.effective_stream = staging_name;
+        contract.effective_write_mode = Some(WriteMode::Append);
+    }
+
+    let mut schema_state = crate::ddl::SchemaState::new();
+    if let Some(schema) = preflight_schema_from_hint(schema_hint) {
+        schema_state
+            .ensure_table(
+                ctx,
+                client,
+                &contract.target_schema,
+                &contract.effective_stream,
+                contract.effective_write_mode.as_ref(),
+                Some(&contract.schema_policy),
+                &schema,
+            )
+            .await?;
+    }
+
+    contract.qualified_table =
+        decode::qualified_name(&contract.target_schema, &contract.effective_stream);
+    contract.ignored_columns = schema_state.ignored_columns;
+    contract.type_null_columns = schema_state.type_null_columns;
+
+    contract.watermark_records = if contract.is_replace {
+        0
+    } else {
+        match crate::watermark::get(client, &contract.target_schema, &contract.stream_name).await {
+            Ok(w) => {
+                if w > 0 {
+                    ctx.log(
+                        LogLevel::Info,
+                        &format!(
+                            "dest-postgres: resuming from watermark — {w} records already committed for stream '{}'",
+                            contract.stream_name
+                        ),
+                    );
+                }
+                w
+            }
+            Err(e) => {
+                ctx.log(
+                    LogLevel::Warn,
+                    &format!("dest-postgres: watermark query failed (starting fresh): {e}"),
+                );
+                0
+            }
+        }
+    };
+
+    Ok(contract)
 }
 
 /// Checkpoint threshold configuration extracted from `StreamLimits`.
@@ -279,13 +338,11 @@ pub struct WriteSession<'a> {
 
     // Stream identity
     stream_name: String,
-    effective_stream: String,
     qualified_table: String,
     effective_write_mode: Option<WriteMode>,
 
     // Config
     load_method: LoadMethod,
-    schema_policy: SchemaEvolutionPolicy,
     checkpoint_config: CheckpointConfig,
     copy_flush_bytes: Option<usize>,
     profile_copy_flush_bytes: Option<usize>,
@@ -302,8 +359,9 @@ pub struct WriteSession<'a> {
     last_checkpoint_time: Instant,
     stats: WriteStats,
 
-    // Schema tracking
-    schema_state: crate::ddl::SchemaState,
+    // Schema tracking resolved at setup time
+    ignored_columns: HashSet<String>,
+    type_null_columns: HashSet<String>,
 }
 
 impl<'a> WriteSession<'a> {
@@ -314,72 +372,6 @@ impl<'a> WriteSession<'a> {
         target_schema: &'a str,
         config: SessionConfig,
     ) -> Result<WriteSession<'a>, String> {
-        let stream_name = &config.stream_name;
-        let write_mode = config.write_mode;
-        let mut schema_state = crate::ddl::SchemaState::new();
-
-        if let Err(e) = crate::watermark::ensure_table(client, target_schema).await {
-            ctx.log(
-                LogLevel::Warn,
-                &format!("dest-postgres: watermarks table creation failed (non-fatal): {e}"),
-            );
-        }
-
-        let is_replace = matches!(write_mode, Some(WriteMode::Replace));
-        let (effective_stream, effective_write_mode) = if is_replace {
-            let staging_name = prepare_staging(ctx, client, target_schema, stream_name)
-                .await
-                .map_err(|e| format!("{e:#}"))?;
-            ctx.log(
-                LogLevel::Info,
-                &format!("dest-postgres: Replace mode — writing to staging table '{staging_name}'"),
-            );
-            (staging_name, Some(WriteMode::Append))
-        } else {
-            (stream_name.to_owned(), write_mode)
-        };
-
-        if let Some(schema) = preflight_schema_from_hint(&config.schema_hint) {
-            schema_state
-                .ensure_table(
-                    ctx,
-                    client,
-                    target_schema,
-                    &effective_stream,
-                    effective_write_mode.as_ref(),
-                    Some(&config.schema_policy),
-                    &schema,
-                )
-                .await?;
-        }
-
-        let watermark_records = if is_replace {
-            0
-        } else {
-            match crate::watermark::get(client, target_schema, stream_name).await {
-                Ok(w) => {
-                    if w > 0 {
-                        ctx.log(
-                            LogLevel::Info,
-                            &format!(
-                                "dest-postgres: resuming from watermark — {w} records already committed for stream '{stream_name}'"
-                            ),
-                        );
-                    }
-                    w
-                }
-                Err(e) => {
-                    ctx.log(
-                        LogLevel::Warn,
-                        &format!("dest-postgres: watermark query failed (starting fresh): {e}"),
-                    );
-                    0
-                }
-            }
-        };
-
-        let qualified_table = decode::qualified_name(target_schema, &effective_stream);
-
         client
             .execute("BEGIN", &[])
             .await
@@ -391,16 +383,14 @@ impl<'a> WriteSession<'a> {
             client,
             target_schema,
             stream_name: config.stream_name,
-            effective_stream,
-            qualified_table,
-            effective_write_mode,
+            qualified_table: config.qualified_table,
+            effective_write_mode: config.effective_write_mode,
             load_method: config.load_method,
-            schema_policy: config.schema_policy,
             checkpoint_config: config.checkpoint,
             copy_flush_bytes: config.copy_flush_bytes,
-            profile_copy_flush_bytes: bench_profile_copy_flush_bytes(),
-            is_replace,
-            watermark_records,
+            profile_copy_flush_bytes: config.profile_copy_flush_bytes,
+            is_replace: config.is_replace,
+            watermark_records: config.watermark_records,
             cumulative_records: 0,
             flush_start: now,
             last_checkpoint_time: now,
@@ -412,7 +402,8 @@ impl<'a> WriteSession<'a> {
                 bytes_since_commit: 0,
                 rows_since_commit: 0,
             },
-            schema_state,
+            ignored_columns: config.ignored_columns,
+            type_null_columns: config.type_null_columns,
         })
     }
 
@@ -448,21 +439,8 @@ impl<'a> WriteSession<'a> {
             );
         }
 
-        // Ensure DDL (hoisted from insert/copy paths)
-        self.schema_state
-            .ensure_table(
-                self.ctx,
-                self.client,
-                self.target_schema,
-                &self.effective_stream,
-                self.effective_write_mode.as_ref(),
-                Some(&self.schema_policy),
-                schema,
-            )
-            .await?;
-
         // Pre-compute column info
-        let active_cols = decode::active_column_indices(schema, &self.schema_state.ignored_columns);
+        let active_cols = decode::active_column_indices(schema, &self.ignored_columns);
         if active_cols.is_empty() {
             self.ctx.log(
                 LogLevel::Warn,
@@ -471,7 +449,7 @@ impl<'a> WriteSession<'a> {
             return Ok(());
         }
         let type_null_flags =
-            decode::type_null_flags(&active_cols, schema, &self.schema_state.type_null_columns);
+            decode::type_null_flags(&active_cols, schema, &self.type_null_columns);
 
         let target = decode::WriteTarget {
             table: &self.qualified_table,
@@ -678,6 +656,7 @@ mod tests {
     #[test]
     fn write_contract_clone_preserves_fields() {
         let contract = WriteContract {
+            target_schema: "raw".to_string(),
             stream_name: "users".to_string(),
             effective_stream: "users".to_string(),
             qualified_table: "raw.users".to_string(),
@@ -689,6 +668,7 @@ mod tests {
                 seconds: 30,
             },
             copy_flush_bytes: Some(4 * 1024 * 1024),
+            load_method: LoadMethod::Copy,
             profile_copy_flush_bytes: Some(COPY_FLUSH_4MB),
             is_replace: false,
             watermark_records: 0,
@@ -708,7 +688,7 @@ mod tests {
             "raw",
             "",
             Some(WriteMode::Append),
-            SchemaHint::Columns(Vec::new()),
+            &SchemaHint::Columns(Vec::new()),
             SchemaEvolutionPolicy::default(),
             CheckpointConfig {
                 bytes: 0,
@@ -716,8 +696,7 @@ mod tests {
                 seconds: 0,
             },
             None,
-            None,
-            None,
+            LoadMethod::Copy,
         );
 
         assert!(result.is_err());
