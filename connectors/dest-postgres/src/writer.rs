@@ -110,9 +110,14 @@ pub async fn write_stream(
         config.load_method,
     )
     .map_err(|e| ConnectorError::config("INVALID_STREAM_SETUP", e))?;
-    let setup = async_prepare_stream_once(ctx, &client, &stream.schema, setup)
-        .await
-        .map_err(|e| ConnectorError::config("INVALID_STREAM_SETUP", e))?;
+    let skip_mutable_setup = stream.partition_count.unwrap_or(1) > 1;
+    let setup = if skip_mutable_setup {
+        setup
+    } else {
+        async_prepare_stream_once(ctx, &client, &stream.schema, setup)
+            .await
+            .map_err(|e| ConnectorError::config("INVALID_STREAM_SETUP", e))?
+    };
 
     let mut session = WriteSession::begin(ctx, &client, &config.schema, setup)
         .await

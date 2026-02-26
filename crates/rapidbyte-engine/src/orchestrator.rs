@@ -1,5 +1,6 @@
 //! Pipeline orchestrator: resolves connectors, loads modules, executes streams, and finalizes state.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -11,7 +12,7 @@ use rapidbyte_types::error::ValidationResult;
 use rapidbyte_types::manifest::{Permissions, ResourceLimits};
 use rapidbyte_types::metric::{ReadSummary, WriteSummary};
 use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
-use rapidbyte_types::wire::{ConnectorRole, SyncMode};
+use rapidbyte_types::wire::{ConnectorRole, SyncMode, WriteMode};
 use tokio::sync::mpsc;
 
 use crate::arrow::ipc_to_record_batches;
@@ -20,11 +21,12 @@ use crate::config::types::{parse_byte_size, PipelineConfig};
 use crate::error::{compute_backoff, PipelineError};
 use crate::execution::{DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineOutcome};
 use crate::resolve::{
-    build_sandbox_overrides, check_state_backend, create_state_backend,
-    load_and_validate_manifest, resolve_connectors, validate_config_against_schema,
-    ResolvedConnectors,
+    build_sandbox_overrides, check_state_backend, create_state_backend, load_and_validate_manifest,
+    resolve_connectors, validate_config_against_schema, ResolvedConnectors,
 };
-use crate::result::{CheckResult, DestTiming, PipelineCounts, PipelineResult, SourceTiming};
+use crate::result::{
+    CheckResult, DestTiming, PipelineCounts, PipelineResult, SourceTiming, StreamShardMetric,
+};
 use crate::runner::{
     run_destination_stream, run_discover, run_source_stream, run_transform_stream,
     validate_connector,
@@ -36,6 +38,9 @@ use rapidbyte_state::StateBackend;
 use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
 
 struct StreamResult {
+    stream_name: String,
+    partition_index: Option<u32>,
+    partition_count: Option<u32>,
     read_summary: ReadSummary,
     write_summary: WriteSummary,
     source_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
@@ -108,6 +113,7 @@ struct AggregatedStreamResults {
     final_stats: RunStats,
     first_error: Option<PipelineError>,
     dry_run_streams: Vec<DryRunStreamResult>,
+    stream_metrics: Vec<StreamShardMetric>,
 }
 
 /// Run a full pipeline: source -> destination with state tracking.
@@ -213,9 +219,15 @@ async fn execute_pipeline_once(
 
     let modules = load_modules(config, &connectors).await?;
     let stream_build = build_stream_contexts(config, state.as_ref(), options.limit)?;
-    let aggregated =
-        execute_streams(config, &connectors, &modules, &stream_build, state.clone(), options)
-            .await?;
+    let aggregated = execute_streams(
+        config,
+        &connectors,
+        &modules,
+        &stream_build,
+        state.clone(),
+        options,
+    )
+    .await?;
 
     if options.dry_run {
         let duration_secs = start.elapsed().as_secs_f64();
@@ -225,10 +237,17 @@ async fn execute_pipeline_once(
             source: SourceTiming {
                 duration_secs: aggregated.max_src_duration,
                 module_load_ms: modules.source_module_load_ms,
-                connect_secs: src_perf.map_or(0.0, |p| p.connect_secs),
-                query_secs: src_perf.map_or(0.0, |p| p.query_secs),
-                fetch_secs: src_perf.map_or(0.0, |p| p.fetch_secs),
-                arrow_encode_secs: src_perf.map_or(0.0, |p| p.arrow_encode_secs),
+                connect_secs: src_perf.map_or(aggregated.src_timings.source_connect_secs, |p| {
+                    p.connect_secs
+                }),
+                query_secs: src_perf
+                    .map_or(aggregated.src_timings.source_query_secs, |p| p.query_secs),
+                fetch_secs: src_perf
+                    .map_or(aggregated.src_timings.source_fetch_secs, |p| p.fetch_secs),
+                arrow_encode_secs: src_perf
+                    .map_or(aggregated.src_timings.source_arrow_encode_secs, |p| {
+                        p.arrow_encode_secs
+                    }),
                 emit_nanos: aggregated.src_timings.emit_batch_nanos,
                 compress_nanos: aggregated.src_timings.compress_nanos,
                 emit_count: aggregated.src_timings.emit_batch_count,
@@ -384,69 +403,102 @@ fn build_stream_contexts(
     };
 
     let pipeline_id = PipelineId::new(config.pipeline.clone());
-    let stream_ctxs = config
-        .source
-        .streams
-        .iter()
-        .map(|s| {
-            let cursor_info = match s.sync_mode {
-                SyncMode::Incremental => {
-                    if let Some(cursor_field) = &s.cursor_field {
-                        let last_value = state
-                            .get_cursor(&pipeline_id, &StreamName::new(s.name.clone()))
-                            .map_err(|e| PipelineError::Infrastructure(e.into()))?
-                            .and_then(|cs| cs.cursor_value)
-                            .map(|v| CursorValue::Utf8 { value: v });
-                        Some(CursorInfo {
-                            cursor_field: cursor_field.clone(),
-                            cursor_type: CursorType::Utf8,
-                            last_value,
-                        })
-                    } else {
-                        None
-                    }
-                }
-                SyncMode::Cdc => {
+    let source_connector_id = parse_connector_ref(&config.source.use_ref).0;
+    let should_partition =
+        source_connector_id == "source-postgres" && config.resources.parallelism > 1;
+    let mut stream_ctxs = Vec::new();
+
+    for s in &config.source.streams {
+        let cursor_info = match s.sync_mode {
+            SyncMode::Incremental => {
+                if let Some(cursor_field) = &s.cursor_field {
                     let last_value = state
                         .get_cursor(&pipeline_id, &StreamName::new(s.name.clone()))
                         .map_err(|e| PipelineError::Infrastructure(e.into()))?
                         .and_then(|cs| cs.cursor_value)
-                        .map(|v| CursorValue::Lsn { value: v });
+                        .map(|v| CursorValue::Utf8 { value: v });
                     Some(CursorInfo {
-                        cursor_field: "lsn".to_string(),
-                        cursor_type: CursorType::Lsn,
+                        cursor_field: cursor_field.clone(),
+                        cursor_type: CursorType::Utf8,
                         last_value,
                     })
+                } else {
+                    None
                 }
-                SyncMode::FullRefresh => None,
-            };
+            }
+            SyncMode::Cdc => {
+                let last_value = state
+                    .get_cursor(&pipeline_id, &StreamName::new(s.name.clone()))
+                    .map_err(|e| PipelineError::Infrastructure(e.into()))?
+                    .and_then(|cs| cs.cursor_value)
+                    .map(|v| CursorValue::Lsn { value: v });
+                Some(CursorInfo {
+                    cursor_field: "lsn".to_string(),
+                    cursor_type: CursorType::Lsn,
+                    last_value,
+                })
+            }
+            SyncMode::FullRefresh => None,
+        };
 
-            Ok::<_, PipelineError>(StreamContext {
-                stream_name: s.name.clone(),
-                schema: SchemaHint::Columns(vec![]),
-                sync_mode: s.sync_mode,
-                cursor_info,
-                limits: limits.clone(),
-                policies: StreamPolicies {
-                    on_data_error: config.destination.on_data_error,
-                    schema_evolution: config.destination.schema_evolution.unwrap_or_default(),
-                },
-                write_mode: Some(
-                    config
-                        .destination
-                        .write_mode
-                        .to_protocol(config.destination.primary_key.clone()),
-                ),
-                selected_columns: s.columns.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+        let base_ctx = StreamContext {
+            stream_name: s.name.clone(),
+            source_stream_name: None,
+            schema: SchemaHint::Columns(vec![]),
+            sync_mode: s.sync_mode,
+            cursor_info,
+            limits: limits.clone(),
+            policies: StreamPolicies {
+                on_data_error: config.destination.on_data_error,
+                schema_evolution: config.destination.schema_evolution.unwrap_or_default(),
+            },
+            write_mode: Some(
+                config
+                    .destination
+                    .write_mode
+                    .to_protocol(config.destination.primary_key.clone()),
+            ),
+            selected_columns: s.columns.clone(),
+            partition_count: None,
+            partition_index: None,
+        };
+
+        if should_partition && s.sync_mode == SyncMode::FullRefresh {
+            for shard in 0..config.resources.parallelism {
+                let mut shard_ctx = base_ctx.clone();
+                shard_ctx.source_stream_name = Some(s.name.clone());
+                shard_ctx.partition_count = Some(config.resources.parallelism);
+                shard_ctx.partition_index = Some(shard);
+                stream_ctxs.push(shard_ctx);
+            }
+        } else {
+            stream_ctxs.push(base_ctx);
+        }
+    }
 
     Ok(StreamBuild {
         limits,
         compression: config.resources.compression,
         stream_ctxs,
     })
+}
+
+fn destination_preflight_streams(stream_ctxs: &[StreamContext]) -> Vec<StreamContext> {
+    let mut seen = HashSet::new();
+    let mut preflight = Vec::new();
+    for stream_ctx in stream_ctxs {
+        if matches!(stream_ctx.write_mode, Some(WriteMode::Replace)) {
+            continue;
+        }
+        if seen.insert(stream_ctx.stream_name.clone()) {
+            let mut preflight_ctx = stream_ctx.clone();
+            // Preflight runs once per logical stream and should not carry shard identity.
+            preflight_ctx.partition_count = None;
+            preflight_ctx.partition_index = None;
+            preflight.push(preflight_ctx);
+        }
+    }
+    preflight
 }
 
 #[allow(clippy::too_many_lines, clippy::similar_names)]
@@ -529,10 +581,68 @@ async fn execute_streams(
         Vec::with_capacity(stream_build.stream_ctxs.len());
     let run_dlq_records: Arc<Mutex<Vec<DlqRecord>>> = Arc::new(Mutex::new(Vec::new()));
 
+    if !options.dry_run {
+        let preflight_streams = destination_preflight_streams(&stream_build.stream_ctxs);
+        tracing::info!(
+            unique_streams = preflight_streams.len(),
+            "Running destination DDL preflight before shard workers"
+        );
+
+        for stream_ctx in preflight_streams {
+            let (tx, rx) = mpsc::channel::<Frame>(1);
+            tx.send(Frame::EndStream).await.map_err(|e| {
+                PipelineError::Infrastructure(anyhow::anyhow!(
+                    "Failed to prime destination preflight channel for stream '{}': {}",
+                    stream_ctx.stream_name,
+                    e
+                ))
+            })?;
+            drop(tx);
+
+            let stream_name = stream_ctx.stream_name.clone();
+            let state_dst = state.clone();
+            let dest_module = modules.dest_module.clone();
+            let params = params.clone();
+
+            let preflight_result = tokio::task::spawn_blocking(move || {
+                run_destination_stream(
+                    &dest_module,
+                    rx,
+                    Arc::new(Mutex::new(Vec::new())),
+                    state_dst,
+                    &params.pipeline_name,
+                    &params.dest_connector_id,
+                    &params.dest_connector_version,
+                    &params.dest_config,
+                    &stream_ctx,
+                    Arc::new(Mutex::new(RunStats::default())),
+                    params.dest_permissions.as_ref(),
+                    params.compression,
+                    params.dest_overrides.as_ref(),
+                )
+            })
+            .await
+            .map_err(|e| {
+                PipelineError::Infrastructure(anyhow::anyhow!(
+                    "Destination preflight task panicked for stream '{}': {}",
+                    stream_name,
+                    e
+                ))
+            })??;
+
+            tracing::info!(
+                stream = stream_name,
+                duration_secs = preflight_result.duration_secs,
+                "Destination preflight completed"
+            );
+        }
+    }
+
     for stream_ctx in &stream_build.stream_ctxs {
-        let permit = semaphore.clone().acquire_owned().await.map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!("Semaphore closed: {e}"))
-        })?;
+        let permit =
+            semaphore.clone().acquire_owned().await.map_err(|e| {
+                PipelineError::Infrastructure(anyhow::anyhow!("Semaphore closed: {e}"))
+            })?;
 
         let params = params.clone();
         let source_module = modules.source_module.clone();
@@ -615,9 +725,7 @@ async fn execute_streams(
                 // Dry-run: collect frames instead of running destination connector
                 let compression = params.compression;
                 let collector_handle =
-                    tokio::spawn(
-                        collect_dry_run_frames(dest_rx, dry_run_limit, compression),
-                    );
+                    tokio::spawn(collect_dry_run_frames(dest_rx, dry_run_limit, compression));
 
                 let src_result = src_handle.await.map_err(|e| {
                     PipelineError::Infrastructure(anyhow::anyhow!(
@@ -679,9 +787,14 @@ async fn execute_streams(
                 }
 
                 let src = src_result?;
-                collected.stream_name.clone_from(&stream_ctx_for_dst.stream_name);
+                collected
+                    .stream_name
+                    .clone_from(&stream_ctx_for_dst.stream_name);
 
                 Ok(StreamResult {
+                    stream_name: stream_ctx.stream_name.clone(),
+                    partition_index: stream_ctx.partition_index,
+                    partition_count: stream_ctx.partition_count,
                     read_summary: src.summary,
                     write_summary: WriteSummary {
                         records_written: 0,
@@ -786,6 +899,9 @@ async fn execute_streams(
                 let dst = dst_result?;
 
                 Ok(StreamResult {
+                    stream_name: stream_ctx.stream_name.clone(),
+                    partition_index: stream_ctx.partition_index,
+                    partition_count: stream_ctx.partition_count,
                     read_summary: src.summary,
                     write_summary: dst.summary,
                     source_checkpoints: src.checkpoints,
@@ -831,6 +947,7 @@ async fn execute_streams(
     let mut max_dst_recv_secs = 0.0;
     let mut transform_durations = Vec::new();
     let mut dry_run_streams: Vec<DryRunStreamResult> = Vec::new();
+    let mut stream_metrics: Vec<StreamShardMetric> = Vec::new();
     let mut first_error: Option<PipelineError> = None;
 
     for handle in stream_join_handles {
@@ -858,9 +975,21 @@ async fn execute_streams(
                 src_timings.emit_batch_nanos += sr.src_host_timings.emit_batch_nanos;
                 src_timings.compress_nanos += sr.src_host_timings.compress_nanos;
                 src_timings.emit_batch_count += sr.src_host_timings.emit_batch_count;
+                src_timings.source_connect_secs += sr.src_host_timings.source_connect_secs;
+                src_timings.source_query_secs += sr.src_host_timings.source_query_secs;
+                src_timings.source_fetch_secs += sr.src_host_timings.source_fetch_secs;
+                src_timings.source_arrow_encode_secs +=
+                    sr.src_host_timings.source_arrow_encode_secs;
                 dst_timings.next_batch_nanos += sr.dst_host_timings.next_batch_nanos;
+                dst_timings.next_batch_wait_nanos += sr.dst_host_timings.next_batch_wait_nanos;
+                dst_timings.next_batch_process_nanos +=
+                    sr.dst_host_timings.next_batch_process_nanos;
                 dst_timings.decompress_nanos += sr.dst_host_timings.decompress_nanos;
                 dst_timings.next_batch_count += sr.dst_host_timings.next_batch_count;
+                dst_timings.dest_connect_secs += sr.dst_host_timings.dest_connect_secs;
+                dst_timings.dest_flush_secs += sr.dst_host_timings.dest_flush_secs;
+                dst_timings.dest_commit_secs += sr.dst_host_timings.dest_commit_secs;
+                dst_timings.dest_arrow_decode_secs += sr.dst_host_timings.dest_arrow_decode_secs;
 
                 if sr.src_duration > max_src_duration {
                     max_src_duration = sr.src_duration;
@@ -871,6 +1000,18 @@ async fn execute_streams(
                     max_dst_recv_secs = sr.recv_secs;
                 }
                 transform_durations.extend(sr.transform_durations);
+
+                stream_metrics.push(StreamShardMetric {
+                    stream_name: sr.stream_name,
+                    partition_index: sr.partition_index,
+                    partition_count: sr.partition_count,
+                    records_read: sr.read_summary.records_read,
+                    records_written: sr.write_summary.records_written,
+                    bytes_read: sr.read_summary.bytes_read,
+                    bytes_written: sr.write_summary.bytes_written,
+                    source_duration_secs: sr.src_duration,
+                    dest_duration_secs: sr.dst_duration,
+                });
 
                 if let Some(dr) = sr.dry_run_result {
                     dry_run_streams.push(dr);
@@ -914,6 +1055,7 @@ async fn execute_streams(
         final_stats,
         first_error,
         dry_run_streams,
+        stream_metrics,
     })
 }
 
@@ -1020,10 +1162,15 @@ fn finalize_run(
         source: SourceTiming {
             duration_secs: aggregated.max_src_duration,
             module_load_ms: modules.source_module_load_ms,
-            connect_secs: src_perf.map_or(0.0, |p| p.connect_secs),
-            query_secs: src_perf.map_or(0.0, |p| p.query_secs),
-            fetch_secs: src_perf.map_or(0.0, |p| p.fetch_secs),
-            arrow_encode_secs: src_perf.map_or(0.0, |p| p.arrow_encode_secs),
+            connect_secs: src_perf.map_or(aggregated.src_timings.source_connect_secs, |p| {
+                p.connect_secs
+            }),
+            query_secs: src_perf.map_or(aggregated.src_timings.source_query_secs, |p| p.query_secs),
+            fetch_secs: src_perf.map_or(aggregated.src_timings.source_fetch_secs, |p| p.fetch_secs),
+            arrow_encode_secs: src_perf
+                .map_or(aggregated.src_timings.source_arrow_encode_secs, |p| {
+                    p.arrow_encode_secs
+                }),
             emit_nanos: aggregated.src_timings.emit_batch_nanos,
             compress_nanos: aggregated.src_timings.compress_nanos,
             emit_count: aggregated.src_timings.emit_batch_count,
@@ -1031,13 +1178,17 @@ fn finalize_run(
         dest: DestTiming {
             duration_secs: aggregated.max_dst_duration,
             module_load_ms: modules.dest_module_load_ms,
-            connect_secs: perf.map_or(0.0, |p| p.connect_secs),
-            flush_secs: perf.map_or(0.0, |p| p.flush_secs),
-            commit_secs: perf.map_or(0.0, |p| p.commit_secs),
-            arrow_decode_secs: perf.map_or(0.0, |p| p.arrow_decode_secs),
+            connect_secs: perf.map_or(aggregated.dst_timings.dest_connect_secs, |p| p.connect_secs),
+            flush_secs: perf.map_or(aggregated.dst_timings.dest_flush_secs, |p| p.flush_secs),
+            commit_secs: perf.map_or(aggregated.dst_timings.dest_commit_secs, |p| p.commit_secs),
+            arrow_decode_secs: perf.map_or(aggregated.dst_timings.dest_arrow_decode_secs, |p| {
+                p.arrow_decode_secs
+            }),
             vm_setup_secs: aggregated.max_dst_vm_setup_secs,
             recv_secs: aggregated.max_dst_recv_secs,
             recv_nanos: aggregated.dst_timings.next_batch_nanos,
+            recv_wait_nanos: aggregated.dst_timings.next_batch_wait_nanos,
+            recv_process_nanos: aggregated.dst_timings.next_batch_process_nanos,
             decompress_nanos: aggregated.dst_timings.decompress_nanos,
             recv_count: aggregated.dst_timings.next_batch_count,
         },
@@ -1047,6 +1198,7 @@ fn finalize_run(
         duration_secs: duration.as_secs_f64(),
         wasm_overhead_secs,
         retry_count: attempt.saturating_sub(1),
+        stream_metrics: aggregated.stream_metrics,
     })
 }
 
@@ -1073,8 +1225,7 @@ async fn collect_dry_run_frames(
             None => data.to_vec(),
         };
 
-        let decoded =
-            ipc_to_record_batches(&ipc_bytes).map_err(PipelineError::Infrastructure)?;
+        let decoded = ipc_to_record_batches(&ipc_bytes).map_err(PipelineError::Infrastructure)?;
 
         for batch in decoded {
             let rows = batch.num_rows() as u64;
@@ -1300,9 +1451,7 @@ mod dry_run_tests {
         let (tx, rx) = mpsc::channel::<Frame>(16);
         let batch = make_test_batch(5);
         let ipc = record_batch_to_ipc(&batch).unwrap();
-        tx.send(Frame::Data(bytes::Bytes::from(ipc)))
-            .await
-            .unwrap();
+        tx.send(Frame::Data(bytes::Bytes::from(ipc))).await.unwrap();
         tx.send(Frame::EndStream).await.unwrap();
         drop(tx);
 
@@ -1316,9 +1465,7 @@ mod dry_run_tests {
         let (tx, rx) = mpsc::channel::<Frame>(16);
         let batch = make_test_batch(100);
         let ipc = record_batch_to_ipc(&batch).unwrap();
-        tx.send(Frame::Data(bytes::Bytes::from(ipc)))
-            .await
-            .unwrap();
+        tx.send(Frame::Data(bytes::Bytes::from(ipc))).await.unwrap();
         tx.send(Frame::EndStream).await.unwrap();
         drop(tx);
 
@@ -1334,9 +1481,7 @@ mod dry_run_tests {
         for _ in 0..3 {
             let batch = make_test_batch(5);
             let ipc = record_batch_to_ipc(&batch).unwrap();
-            tx.send(Frame::Data(bytes::Bytes::from(ipc)))
-                .await
-                .unwrap();
+            tx.send(Frame::Data(bytes::Bytes::from(ipc))).await.unwrap();
         }
         tx.send(Frame::EndStream).await.unwrap();
         drop(tx);
@@ -1346,3 +1491,168 @@ mod dry_run_tests {
     }
 }
 
+#[cfg(test)]
+mod stream_context_partition_tests {
+    use super::*;
+    use crate::config::types::PipelineConfig;
+    use rapidbyte_state::SqliteStateBackend;
+
+    fn config_with_parallelism(parallelism: u32, sync_mode: &str) -> PipelineConfig {
+        let yaml = format!(
+            r#"
+version: "1.0"
+pipeline: test_partitioning
+source:
+  use: source-postgres
+  config: {{}}
+  streams:
+    - name: bench_events
+      sync_mode: {sync_mode}
+destination:
+  use: dest-postgres
+  config: {{}}
+  write_mode: append
+resources:
+  parallelism: {parallelism}
+"#
+        );
+        serde_yaml::from_str(&yaml).expect("valid pipeline yaml")
+    }
+
+    #[test]
+    fn full_refresh_with_parallelism_fans_out_stream_contexts() {
+        let config = config_with_parallelism(4, "full_refresh");
+        let state = SqliteStateBackend::in_memory().expect("in-memory state backend");
+
+        let build = build_stream_contexts(&config, &state, None).expect("stream contexts built");
+
+        assert_eq!(build.stream_ctxs.len(), 4);
+        assert_eq!(
+            build
+                .stream_ctxs
+                .iter()
+                .map(|ctx| ctx.stream_name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "bench_events",
+                "bench_events",
+                "bench_events",
+                "bench_events"
+            ]
+        );
+        for (idx, stream_ctx) in build.stream_ctxs.iter().enumerate() {
+            assert_eq!(stream_ctx.sync_mode, SyncMode::FullRefresh);
+            assert_eq!(
+                stream_ctx.source_stream_name.as_deref(),
+                Some("bench_events")
+            );
+            assert_eq!(stream_ctx.partition_count, Some(4));
+            assert_eq!(stream_ctx.partition_index, Some(idx as u32));
+        }
+    }
+
+    #[test]
+    fn incremental_streams_remain_unpartitioned() {
+        let config = config_with_parallelism(4, "incremental");
+        let state = SqliteStateBackend::in_memory().expect("in-memory state backend");
+
+        let build = build_stream_contexts(&config, &state, None).expect("stream contexts built");
+
+        assert_eq!(build.stream_ctxs.len(), 1);
+        let stream_ctx = &build.stream_ctxs[0];
+        assert_eq!(stream_ctx.stream_name, "bench_events");
+        assert_eq!(stream_ctx.source_stream_name, None);
+        assert_eq!(stream_ctx.partition_count, None);
+        assert_eq!(stream_ctx.partition_index, None);
+    }
+
+    #[test]
+    fn destination_preflight_deduplicates_partitioned_streams() {
+        let stream_ctxs = vec![
+            StreamContext {
+                stream_name: "bench_events".to_string(),
+                source_stream_name: Some("bench_events".to_string()),
+                schema: SchemaHint::Columns(vec![]),
+                sync_mode: SyncMode::FullRefresh,
+                cursor_info: None,
+                limits: StreamLimits::default(),
+                policies: StreamPolicies::default(),
+                write_mode: None,
+                selected_columns: None,
+                partition_count: Some(4),
+                partition_index: Some(0),
+            },
+            StreamContext {
+                stream_name: "bench_events".to_string(),
+                source_stream_name: Some("bench_events".to_string()),
+                schema: SchemaHint::Columns(vec![]),
+                sync_mode: SyncMode::FullRefresh,
+                cursor_info: None,
+                limits: StreamLimits::default(),
+                policies: StreamPolicies::default(),
+                write_mode: None,
+                selected_columns: None,
+                partition_count: Some(4),
+                partition_index: Some(3),
+            },
+            StreamContext {
+                stream_name: "users".to_string(),
+                source_stream_name: None,
+                schema: SchemaHint::Columns(vec![]),
+                sync_mode: SyncMode::Incremental,
+                cursor_info: None,
+                limits: StreamLimits::default(),
+                policies: StreamPolicies::default(),
+                write_mode: None,
+                selected_columns: None,
+                partition_count: None,
+                partition_index: None,
+            },
+        ];
+
+        let preflight = destination_preflight_streams(&stream_ctxs);
+        assert_eq!(preflight.len(), 2);
+        assert_eq!(preflight[0].stream_name, "bench_events");
+        assert_eq!(preflight[0].partition_count, None);
+        assert_eq!(preflight[0].partition_index, None);
+        assert_eq!(preflight[1].stream_name, "users");
+        assert_eq!(preflight[1].partition_count, None);
+        assert_eq!(preflight[1].partition_index, None);
+    }
+
+    #[test]
+    fn destination_preflight_skips_replace_mode_streams() {
+        let stream_ctxs = vec![
+            StreamContext {
+                stream_name: "users_replace".to_string(),
+                source_stream_name: None,
+                schema: SchemaHint::Columns(vec![]),
+                sync_mode: SyncMode::FullRefresh,
+                cursor_info: None,
+                limits: StreamLimits::default(),
+                policies: StreamPolicies::default(),
+                write_mode: Some(WriteMode::Replace),
+                selected_columns: None,
+                partition_count: None,
+                partition_index: None,
+            },
+            StreamContext {
+                stream_name: "orders_append".to_string(),
+                source_stream_name: None,
+                schema: SchemaHint::Columns(vec![]),
+                sync_mode: SyncMode::FullRefresh,
+                cursor_info: None,
+                limits: StreamLimits::default(),
+                policies: StreamPolicies::default(),
+                write_mode: Some(WriteMode::Append),
+                selected_columns: None,
+                partition_count: None,
+                partition_index: None,
+            },
+        ];
+
+        let preflight = destination_preflight_streams(&stream_ctxs);
+        assert_eq!(preflight.len(), 1);
+        assert_eq!(preflight[0].stream_name, "orders_append");
+    }
+}
