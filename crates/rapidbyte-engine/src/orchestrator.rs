@@ -146,10 +146,11 @@ struct StreamTaskCollection {
     first_error: Option<PipelineError>,
 }
 
-const MAX_AUTO_PARALLELISM_CAP: u32 = 16;
-const MAX_SHARD_DEPTH: u32 = 6;
-const TRANSFORM_PENALTY_SLOPE: f64 = 0.10;
-const MIN_TRANSFORM_FACTOR: f64 = 0.6;
+const SYSTEM_CORE_RESERVE_DIVISOR: u32 = 8;
+const MIN_PIPELINE_COORDINATION_CORES: u32 = 1;
+const MAX_PIPELINE_COORDINATION_CORES: u32 = 2;
+const TRANSFORM_PENALTY_SLOPE: f64 = 0.05;
+const MIN_TRANSFORM_FACTOR: f64 = 0.75;
 
 fn resolve_effective_parallelism(config: &PipelineConfig) -> u32 {
     match config.resources.parallelism {
@@ -163,7 +164,11 @@ fn resolve_auto_parallelism(config: &PipelineConfig) -> u32 {
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1);
     let available_cores = u32::try_from(available_cores).unwrap_or(u32::MAX);
-    let cap = available_cores.min(MAX_AUTO_PARALLELISM_CAP);
+    resolve_auto_parallelism_for_cores(config, available_cores)
+}
+
+fn resolve_auto_parallelism_for_cores(config: &PipelineConfig, available_cores: u32) -> u32 {
+    let cap = auto_worker_core_budget(available_cores);
 
     let source_connector_id = parse_connector_ref(&config.source.use_ref).0;
     let eligible_streams = if source_connector_id == "source-postgres" {
@@ -184,7 +189,7 @@ fn resolve_auto_parallelism(config: &PipelineConfig) -> u32 {
         1
     } else {
         let per_stream_budget = (cap / eligible_streams).max(1);
-        let per_stream_target = per_stream_budget.min(MAX_SHARD_DEPTH);
+        let per_stream_target = per_stream_budget;
         (eligible_streams * per_stream_target).min(cap)
     };
 
@@ -206,6 +211,25 @@ fn resolve_auto_parallelism(config: &PipelineConfig) -> u32 {
         let scaled_u32 = scaled as u32;
         scaled_u32.clamp(1, cap)
     }
+}
+
+fn auto_worker_core_budget(available_cores: u32) -> u32 {
+    let available_cores = available_cores.max(1);
+
+    let system_reserve = if available_cores <= 2 {
+        0
+    } else {
+        (available_cores / SYSTEM_CORE_RESERVE_DIVISOR).max(1)
+    };
+    let coordination_reserve = (available_cores / 4).clamp(
+        MIN_PIPELINE_COORDINATION_CORES,
+        MAX_PIPELINE_COORDINATION_CORES,
+    );
+
+    available_cores
+        .saturating_sub(system_reserve)
+        .saturating_sub(coordination_reserve)
+        .max(1)
 }
 
 #[allow(clippy::struct_field_names)]
@@ -1943,15 +1967,13 @@ resources:
     }
 
     #[test]
-    fn auto_parallelism_respects_shard_depth_cap() {
+    fn auto_parallelism_uses_adaptive_core_budget() {
         let config =
             config_with_parallelism_expr("auto", "source-postgres", "full_refresh", "append", 0);
-        let cap = std::thread::available_parallelism()
-            .map(std::num::NonZeroUsize::get)
-            .map_or(1, |value| u32::try_from(value).unwrap_or(u32::MAX))
-            .min(MAX_AUTO_PARALLELISM_CAP);
-        let expected = cap.min(MAX_SHARD_DEPTH);
-        assert_eq!(resolve_effective_parallelism(&config), expected);
+
+        assert_eq!(resolve_auto_parallelism_for_cores(&config, 16), 12);
+        assert_eq!(resolve_auto_parallelism_for_cores(&config, 8), 5);
+        assert_eq!(resolve_auto_parallelism_for_cores(&config, 4), 2);
     }
 
     #[test]
@@ -1969,9 +1991,40 @@ resources:
             config_with_parallelism_expr("auto", "source-postgres", "full_refresh", "append", 3);
 
         assert!(
-            resolve_effective_parallelism(&with_transforms)
-                <= resolve_effective_parallelism(&without_transforms)
+            resolve_auto_parallelism_for_cores(&with_transforms, 16)
+                <= resolve_auto_parallelism_for_cores(&without_transforms, 16)
         );
+    }
+
+    #[test]
+    fn auto_parallelism_scales_with_multiple_streams() {
+        let yaml = r#"
+version: "1.0"
+pipeline: bench_pg
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: a
+      sync_mode: full_refresh
+    - name: b
+      sync_mode: full_refresh
+    - name: c
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+resources:
+  parallelism: auto
+state:
+  backend: sqlite
+  connection: ":memory:"
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).expect("valid pipeline yaml");
+
+        // 16 cores => 12 worker cores after reserves; split across 3 streams => 4 shards each.
+        assert_eq!(resolve_auto_parallelism_for_cores(&config, 16), 12);
     }
 
     #[test]
