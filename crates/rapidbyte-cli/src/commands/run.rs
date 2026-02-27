@@ -46,6 +46,7 @@ pub async fn execute(pipeline_path: &Path, dry_run: bool, limit: Option<u64>) ->
             let source = &result.source;
             let dest = &result.dest;
             let cpu_metrics = process_cpu_metrics(cpu_start, cpu_end, result.duration_secs);
+            let peak_rss_mb = process_peak_rss_mb();
 
             println!("Pipeline '{}' completed successfully.", config.pipeline);
             println!("  Records read:    {}", counts.records_read);
@@ -129,7 +130,7 @@ pub async fn execute(pipeline_path: &Path, dry_run: bool, limit: Option<u64>) ->
             }
 
             // Machine-readable JSON for benchmarking tools
-            let json = bench_json_from_result(&result, cpu_metrics.as_ref());
+            let json = bench_json_from_result(&result, cpu_metrics.as_ref(), peak_rss_mb);
             println!("@@BENCH_JSON@@{}", json);
         }
         PipelineOutcome::DryRun(result) => {
@@ -257,9 +258,42 @@ fn process_cpu_seconds() -> Option<f64> {
     }
 }
 
+fn process_peak_rss_mb() -> Option<f64> {
+    #[cfg(unix)]
+    {
+        // Safety: getrusage writes into the provided `rusage` struct.
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+        // Safety: pointer is valid for writes and initialized by successful call.
+        let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        if rc != 0 {
+            return None;
+        }
+
+        // Safety: call succeeded and initialized `usage`.
+        let usage = unsafe { usage.assume_init() };
+        let rss_mb = {
+            #[cfg(target_os = "macos")]
+            {
+                usage.ru_maxrss as f64 / (1024.0 * 1024.0)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                usage.ru_maxrss as f64 / 1024.0
+            }
+        };
+        Some(rss_mb)
+    }
+
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 fn bench_json_from_result(
     result: &rapidbyte_engine::result::PipelineResult,
     cpu_metrics: Option<&ProcessCpuMetrics>,
+    peak_rss_mb: Option<f64>,
 ) -> serde_json::Value {
     let counts = &result.counts;
     let source = &result.source;
@@ -492,6 +526,10 @@ fn bench_json_from_result(
         "available_cores".to_string(),
         serde_json::json!(cpu_metrics.map(|m| m.available_cores)),
     );
+    json.insert(
+        "process_peak_rss_mb".to_string(),
+        serde_json::json!(peak_rss_mb),
+    );
 
     serde_json::Value::Object(json)
 }
@@ -542,7 +580,7 @@ mod tests {
             cpu_pct_of_available_cores: 30.0,
             available_cores: 4,
         };
-        let json = bench_json_from_result(&result, Some(&cpu));
+        let json = bench_json_from_result(&result, Some(&cpu), Some(64.0));
         assert!(json["stream_metrics"].is_array());
         assert_eq!(json["stream_metrics"][0]["partition_index"], 1);
         assert_eq!(json["stream_metrics"][0]["partition_count"], 4);
@@ -552,5 +590,7 @@ mod tests {
         assert_eq!(json["parallelism"], 4);
         assert_eq!(json["process_cpu_secs"], 1.2);
         assert_eq!(json["available_cores"], 4);
+        assert_eq!(json["process_cpu_pct_available_cores"], 30.0);
+        assert_eq!(json["process_peak_rss_mb"], 64.0);
     }
 }

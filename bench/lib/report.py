@@ -74,6 +74,42 @@ def fmt_metric_value(val: float, unit: str) -> str:
     return f"{val:.4f}{unit}"
 
 
+def metric_value(result: dict, key: str) -> float:
+    if key == "cpu_cores_mean":
+        pct = result.get("process_cpu_pct_one_core")
+        return (float(pct) / 100.0) if isinstance(pct, (int, float)) else 0.0
+    if key == "cpu_cores_max":
+        # Single-run process metric; expose as peak proxy.
+        pct = result.get("process_cpu_pct_one_core")
+        return (float(pct) / 100.0) if isinstance(pct, (int, float)) else 0.0
+    if key == "cpu_total_util_pct_mean":
+        pct = result.get("process_cpu_pct_available_cores")
+        return float(pct) if isinstance(pct, (int, float)) else 0.0
+    if key == "cpu_total_util_pct_max":
+        # Single-run process metric; expose as peak proxy.
+        pct = result.get("process_cpu_pct_available_cores")
+        return float(pct) if isinstance(pct, (int, float)) else 0.0
+    if key == "mem_rss_mb_mean":
+        rss_mb = result.get("process_peak_rss_mb")
+        return float(rss_mb) if isinstance(rss_mb, (int, float)) else 0.0
+    if key == "mem_rss_mb_max":
+        rss_mb = result.get("process_peak_rss_mb")
+        return float(rss_mb) if isinstance(rss_mb, (int, float)) else 0.0
+    if key == "resource_samples":
+        return 1.0 if isinstance(result.get("process_cpu_secs"), (int, float)) else 0.0
+
+    val = result.get(key)
+    return float(val) if isinstance(val, (int, float)) else 0.0
+
+
+def metric_aggregate(values: list[float], stat_mode: str) -> float:
+    if not values:
+        return 0.0
+    if stat_mode == "max":
+        return max(values)
+    return sum(values) / len(values)
+
+
 def main():
     if len(sys.argv) < 4:
         print(f"Usage: {sys.argv[0]} <rows> <profile> <mode:file> ...", file=sys.stderr)
@@ -146,47 +182,49 @@ def main():
     col_w = 12
     hdr_parts = ["  {:<22s}"] + ["{:>" + str(col_w) + "s}"] * len(modes) + ["{:>8s}"]
     hdr = "  ".join(hdr_parts)
-    headers = ["Metric (mean)"] + [m.upper() for m in mode_names] + ["vs " + baseline.upper()]
+    headers = ["Metric"] + [m.upper() for m in mode_names] + ["vs " + baseline.upper()]
     print(hdr.format(*headers))
     print(hdr.format("-" * 22, *(["-" * col_w] * len(modes)), "-" * 8))
 
     metrics = [
-        ("Total duration", "duration_secs", "s"),
-        ("Dest duration", "dest_duration_secs", "s"),
-        ("  Connect", "dest_connect_secs", "s"),
-        ("  Flush", "dest_flush_secs", "s"),
-        ("  Arrow decode", "dest_arrow_decode_secs", "s"),
-        ("  Commit", "dest_commit_secs", "s"),
-        ("  VM setup", "dest_vm_setup_secs", "s"),
-        ("  Recv loop", "dest_recv_secs", "s"),
-        ("  WASM overhead", "wasm_overhead_secs", "s"),
-        ("Source duration", "source_duration_secs", "s"),
-        ("  Connect", "source_connect_secs", "s"),
-        ("  Query", "source_query_secs", "s"),
-        ("  Fetch", "source_fetch_secs", "s"),
-        ("  Arrow encode", "source_arrow_encode_secs", "s"),
-        ("Source module load", "source_module_load_ms", "ms"),
-        ("Dest module load", "dest_module_load_ms", "ms"),
-        ("CPU cores (avg)", "cpu_cores_mean", "cores"),
-        ("CPU cores (peak)", "cpu_cores_max", "cores"),
-        ("CPU total util (avg)", "cpu_total_util_pct_mean", "%"),
-        ("CPU total util (peak)", "cpu_total_util_pct_max", "%"),
-        ("RSS memory (avg)", "mem_rss_mb_mean", "MB"),
-        ("RSS memory (peak)", "mem_rss_mb_max", "MB"),
-        ("Resource samples", "resource_samples", "count"),
+        ("Total duration", "duration_secs", "s", "mean"),
+        ("Dest duration", "dest_duration_secs", "s", "mean"),
+        ("  Connect", "dest_connect_secs", "s", "mean"),
+        ("  Flush", "dest_flush_secs", "s", "mean"),
+        ("  Arrow decode", "dest_arrow_decode_secs", "s", "mean"),
+        ("  Commit", "dest_commit_secs", "s", "mean"),
+        ("  VM setup", "dest_vm_setup_secs", "s", "mean"),
+        ("  Recv loop", "dest_recv_secs", "s", "mean"),
+        ("  WASM overhead", "wasm_overhead_secs", "s", "mean"),
+        ("Source duration", "source_duration_secs", "s", "mean"),
+        ("  Connect", "source_connect_secs", "s", "mean"),
+        ("  Query", "source_query_secs", "s", "mean"),
+        ("  Fetch", "source_fetch_secs", "s", "mean"),
+        ("  Arrow encode", "source_arrow_encode_secs", "s", "mean"),
+        ("Source module load", "source_module_load_ms", "ms", "mean"),
+        ("Dest module load", "dest_module_load_ms", "ms", "mean"),
+        ("CPU cores (avg)", "cpu_cores_mean", "cores", "mean"),
+        ("CPU cores (peak)", "cpu_cores_max", "cores", "max"),
+        ("CPU total util (avg)", "cpu_total_util_pct_mean", "%", "mean"),
+        ("CPU total util (peak)", "cpu_total_util_pct_max", "%", "max"),
+        ("RSS memory (avg)", "mem_rss_mb_mean", "MB", "mean"),
+        ("RSS memory (peak)", "mem_rss_mb_max", "MB", "max"),
+        ("Resource samples", "resource_samples", "count", "mean"),
     ]
 
-    for label, key, unit in metrics:
+    for label, key, unit, stat_mode in metrics:
         vals = []
         for mode in mode_names:
             results = modes[mode]
-            s = stats([r.get(key, 0) for r in results])
-            vals.append((s, fmt_metric_value(s["mean"], unit) if s["n"] > 0 else "-"))
+            raw_vals = [metric_value(r, key) for r in results]
+            s = stats(raw_vals)
+            agg = metric_aggregate(raw_vals, stat_mode)
+            vals.append((agg, fmt_metric_value(agg, unit) if s["n"] > 0 else "-"))
 
-        b_mean = vals[0][0]["mean"]
+        baseline_val = vals[0][0]
         # Speedup column: last mode vs baseline
-        last_mean = vals[-1][0]["mean"]
-        speedup = f'{b_mean/last_mean:.1f}x' if last_mean > 0.001 else "-"
+        last_val = vals[-1][0]
+        speedup = f'{baseline_val/last_val:.1f}x' if last_val > 0.001 else "-"
 
         row = [label] + [v[1] for v in vals] + [speedup]
         print(hdr.format(*row))

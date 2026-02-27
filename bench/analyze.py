@@ -34,9 +34,39 @@ def group_by_run(results):
         groups[key].append(r)
     return groups
 
-def avg(results, key):
-    vals = [r.get(key, 0) for r in results]
-    return sum(vals) / len(vals) if vals else 0
+def metric_value(result, key):
+    if key == "cpu_cores_mean":
+        pct = result.get("process_cpu_pct_one_core")
+        return (float(pct) / 100.0) if isinstance(pct, (int, float)) else 0.0
+    if key == "cpu_cores_max":
+        pct = result.get("process_cpu_pct_one_core")
+        return (float(pct) / 100.0) if isinstance(pct, (int, float)) else 0.0
+    if key == "cpu_total_util_pct_mean":
+        pct = result.get("process_cpu_pct_available_cores")
+        return float(pct) if isinstance(pct, (int, float)) else 0.0
+    if key == "cpu_total_util_pct_max":
+        pct = result.get("process_cpu_pct_available_cores")
+        return float(pct) if isinstance(pct, (int, float)) else 0.0
+    if key == "mem_rss_mb_mean":
+        rss_mb = result.get("process_peak_rss_mb")
+        return float(rss_mb) if isinstance(rss_mb, (int, float)) else 0.0
+    if key == "mem_rss_mb_max":
+        rss_mb = result.get("process_peak_rss_mb")
+        return float(rss_mb) if isinstance(rss_mb, (int, float)) else 0.0
+    if key == "resource_samples":
+        return 1.0 if isinstance(result.get("process_cpu_secs"), (int, float)) else 0.0
+
+    val = result.get(key)
+    return float(val) if isinstance(val, (int, float)) else 0.0
+
+
+def aggregate(results, key, stat_mode):
+    vals = [metric_value(r, key) for r in results]
+    if not vals:
+        return 0
+    if stat_mode == "max":
+        return max(vals)
+    return sum(vals) / len(vals)
 
 def main():
     parser = argparse.ArgumentParser(description="Compare benchmark results across runs")
@@ -67,25 +97,25 @@ def main():
     shas = seen[-args.last:] if not args.sha else args.sha
 
     metrics = [
-        ("Duration (s)", "duration_secs", "s"),
-        ("Source (s)", "source_duration_secs", "s"),
-        ("  Arrow encode (s)", "source_arrow_encode_secs", "s"),
-        ("Dest (s)", "dest_duration_secs", "s"),
-        ("  Flush (s)", "dest_flush_secs", "s"),
-        ("  Arrow decode (s)", "dest_arrow_decode_secs", "s"),
-        ("  Commit (s)", "dest_commit_secs", "s"),
-        ("  WASM overhead (s)", "wasm_overhead_secs", "s"),
-        ("  VM setup (s)", "dest_vm_setup_secs", "s"),
-        ("  Recv loop (s)", "dest_recv_secs", "s"),
-        ("Source load (ms)", "source_module_load_ms", "ms"),
-        ("Dest load (ms)", "dest_module_load_ms", "ms"),
-        ("CPU cores avg", "cpu_cores_mean", "cores"),
-        ("CPU cores peak", "cpu_cores_max", "cores"),
-        ("CPU total util avg (%)", "cpu_total_util_pct_mean", "%"),
-        ("CPU total util peak (%)", "cpu_total_util_pct_max", "%"),
-        ("RSS avg (MB)", "mem_rss_mb_mean", "MB"),
-        ("RSS peak (MB)", "mem_rss_mb_max", "MB"),
-        ("Resource samples", "resource_samples", "count"),
+        ("Duration (s)", "duration_secs", "s", "mean"),
+        ("Source (s)", "source_duration_secs", "s", "mean"),
+        ("  Arrow encode (s)", "source_arrow_encode_secs", "s", "mean"),
+        ("Dest (s)", "dest_duration_secs", "s", "mean"),
+        ("  Flush (s)", "dest_flush_secs", "s", "mean"),
+        ("  Arrow decode (s)", "dest_arrow_decode_secs", "s", "mean"),
+        ("  Commit (s)", "dest_commit_secs", "s", "mean"),
+        ("  WASM overhead (s)", "wasm_overhead_secs", "s", "mean"),
+        ("  VM setup (s)", "dest_vm_setup_secs", "s", "mean"),
+        ("  Recv loop (s)", "dest_recv_secs", "s", "mean"),
+        ("Source load (ms)", "source_module_load_ms", "ms", "mean"),
+        ("Dest load (ms)", "dest_module_load_ms", "ms", "mean"),
+        ("CPU cores avg", "cpu_cores_mean", "cores", "mean"),
+        ("CPU cores peak", "cpu_cores_max", "cores", "max"),
+        ("CPU total util avg (%)", "cpu_total_util_pct_mean", "%", "mean"),
+        ("CPU total util peak (%)", "cpu_total_util_pct_max", "%", "max"),
+        ("RSS avg (MB)", "mem_rss_mb_mean", "MB", "mean"),
+        ("RSS peak (MB)", "mem_rss_mb_max", "MB", "max"),
+        ("Resource samples", "resource_samples", "count", "mean"),
     ]
 
     for mode in ["insert", "copy"]:
@@ -101,7 +131,7 @@ def main():
         print(header)
         print(f"  {'-' * 22}" + f"  {'-' * 12}" * len(shas) + ("  " + "-" * 10 if len(shas) == 2 else ""))
 
-        for label, key, unit in metrics:
+        for label, key, unit, stat_mode in metrics:
             line = f"  {label:<22s}"
             vals = []
             if unit == "ms":
@@ -114,7 +144,7 @@ def main():
                 fmt = ".4f"
             for sha in shas:
                 matching = [r for r in results if r.get("git_sha") == sha and r.get("mode") == mode]
-                v = avg(matching, key)
+                v = aggregate(matching, key, stat_mode)
                 vals.append(v)
                 line += f"  {v:>12{fmt}}"
             if len(vals) == 2 and vals[0] > 0.0001:
