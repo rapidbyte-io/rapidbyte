@@ -143,7 +143,10 @@ pub(crate) fn downcast_columns<'a>(
                 }
                 DataType::Date32 => Ok(TypedCol::Date32(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected Date32Array)"))?)),
                 DataType::Binary => Ok(TypedCol::Binary(col.as_any().downcast_ref().ok_or_else(|| format!("downcast failed for column {i} (expected BinaryArray)"))?)),
-                _ => Ok(TypedCol::Null),
+                DataType::Null => Ok(TypedCol::Null),
+                other => Err(format!(
+                    "unsupported Arrow type for column {i}: {other:?}. Cast in a transform before writing to dest-postgres"
+                )),
             }
         })
         .collect()
@@ -437,6 +440,15 @@ mod tests {
         assert!(matches!(cols[0], TypedCol::TimestampMicros(_)));
         assert!(matches!(cols[1], TypedCol::Date32(_)));
         assert!(matches!(cols[2], TypedCol::Binary(_)));
+    }
+
+    #[test]
+    fn downcast_columns_rejects_unsupported_types() {
+        let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::LargeUtf8, true)]));
+        let arr = rapidbyte_sdk::arrow::array::LargeStringArray::from(vec![Some("alice")]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let err = downcast_columns(&batch, &[0]).expect_err("LargeUtf8 should be rejected");
+        assert!(err.contains("unsupported Arrow type"));
     }
 
     #[test]

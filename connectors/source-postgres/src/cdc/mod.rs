@@ -8,6 +8,7 @@ pub(crate) mod encode;
 pub(crate) mod pgoutput;
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use tokio_postgres::Client;
@@ -25,13 +26,25 @@ const BATCH_SIZE: usize = 10_000;
 
 /// Maximum WAL changes consumed per CDC invocation to avoid unbounded memory use.
 /// Type is i32 because `pg_logical_slot_get_binary_changes()` expects int4.
-const CDC_MAX_CHANGES: i32 = 100_000;
+const CDC_MAX_CHANGES_DEFAULT: i32 = 10_000;
 
 /// Default replication slot prefix. Full slot names are `rapidbyte_{stream_name}`.
 const SLOT_PREFIX: &str = "rapidbyte_";
 
 /// Default publication prefix. Full publication names are `rapidbyte_{stream_name}`.
 const PUB_PREFIX: &str = "rapidbyte_";
+
+/// Read max changes per CDC query from env, with sane defaults and validation.
+fn cdc_max_changes() -> i32 {
+    static CACHED: OnceLock<i32> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("RAPIDBYTE_CDC_MAX_CHANGES")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<i32>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(CDC_MAX_CHANGES_DEFAULT)
+    })
+}
 
 struct CdcEmitState {
     total_records: u64,
@@ -105,11 +118,9 @@ pub async fn read_cdc_changes(
                              'proto_version', '1', \
                              'publication_names', $3\
                          )";
+    let max_changes = cdc_max_changes();
     let change_rows = client
-        .query(
-            changes_query,
-            &[&slot_name, &CDC_MAX_CHANGES, &publication_name],
-        )
+        .query(changes_query, &[&slot_name, &max_changes, &publication_name])
         .await
         .map_err(|e| {
             format!(

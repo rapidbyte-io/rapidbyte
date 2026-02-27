@@ -353,15 +353,16 @@ pub async fn read_stream(
                 // tokio-postgres `try_get()` requires exact type matches, so we
                 // must chain i64 -> i32 fallbacks. The host orchestrator currently
                 // hardcodes CursorType::Utf8 for incremental state, so the catch-all
-                // arm is common. Do not remove the i32 fallback or incremental
-                // tracking can silently stop advancing on SERIAL cursor columns.
+                // arm is common. Do not remove the i32/i16 fallbacks or incremental
+                // tracking can silently stop advancing on SERIAL/SMALLSERIAL columns.
                 if let Some(ref mut t) = tracker {
                     let col_idx = t.col_idx();
                     if t.is_int_strategy() {
                         let val = row
                             .try_get::<_, i64>(col_idx)
                             .ok()
-                            .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(i64::from));
+                            .or_else(|| row.try_get::<_, i32>(col_idx).ok().map(i64::from))
+                            .or_else(|| row.try_get::<_, i16>(col_idx).ok().map(i64::from));
                         if let Some(val) = val {
                             t.observe_int(val);
                         }
