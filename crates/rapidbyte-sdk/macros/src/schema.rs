@@ -67,8 +67,9 @@ pub fn expand(input: TokenStream) -> Result<TokenStream> {
         schema.insert("required".into(), serde_json::Value::Array(required));
     }
 
-    let schema_json = serde_json::to_string(&serde_json::Value::Object(schema))
-        .expect("internal: schema serialization cannot fail");
+    let schema_json = serde_json::to_string(&serde_json::Value::Object(schema)).map_err(|err| {
+        syn::Error::new_spanned(name, format!("failed to serialize schema JSON: {err}"))
+    })?;
 
     Ok(quote! {
         impl ::rapidbyte_sdk::ConfigSchema for #name {
@@ -175,7 +176,7 @@ fn parse_schema_attrs(
             } else if meta.path.is_ident("default") {
                 let _eq: syn::Token![=] = meta.input.parse()?;
                 let lit: Lit = meta.input.parse()?;
-                prop.insert("default".into(), lit_to_json(&lit));
+                prop.insert("default".into(), lit_to_json(&lit)?);
             } else if meta.path.is_ident("example") {
                 let _eq: syn::Token![=] = meta.input.parse()?;
                 let lit: Lit = meta.input.parse()?;
@@ -183,7 +184,7 @@ fn parse_schema_attrs(
                     .entry("examples")
                     .or_insert_with(|| serde_json::Value::Array(vec![]));
                 if let serde_json::Value::Array(a) = arr {
-                    a.push(lit_to_json(&lit));
+                    a.push(lit_to_json(&lit)?);
                 }
             } else if meta.path.is_ident("env") {
                 let _eq: syn::Token![=] = meta.input.parse()?;
@@ -193,7 +194,8 @@ fn parse_schema_attrs(
                 let content;
                 syn::parenthesized!(content in meta.input);
                 let vals = content.parse_terminated(Lit::parse, syn::Token![,])?;
-                let enum_vals: Vec<serde_json::Value> = vals.iter().map(lit_to_json).collect();
+                let enum_vals: Vec<serde_json::Value> =
+                    vals.iter().map(lit_to_json).collect::<Result<Vec<_>>>()?;
                 prop.insert("enum".into(), serde_json::Value::Array(enum_vals));
             } else {
                 return Err(meta.error(format!(
@@ -210,16 +212,37 @@ fn parse_schema_attrs(
     Ok(())
 }
 
-fn lit_to_json(lit: &Lit) -> serde_json::Value {
+fn lit_to_json(lit: &Lit) -> Result<serde_json::Value> {
     match lit {
-        Lit::Str(s) => serde_json::Value::String(s.value()),
-        Lit::Int(i) => serde_json::Value::Number(serde_json::Number::from(
-            i.base10_parse::<i64>().expect("integer literal"),
-        )),
-        Lit::Float(f) => {
-            serde_json::json!(f.base10_parse::<f64>().expect("float literal"))
+        Lit::Str(s) => Ok(serde_json::Value::String(s.value())),
+        Lit::Int(i) => {
+            let parsed = i
+                .base10_parse::<i64>()
+                .map_err(|e| syn::Error::new_spanned(i, format!("invalid integer literal: {e}")))?;
+            Ok(serde_json::Value::Number(serde_json::Number::from(parsed)))
         }
-        Lit::Bool(b) => serde_json::Value::Bool(b.value()),
-        _ => serde_json::Value::Null,
+        Lit::Float(f) => {
+            let parsed = f
+                .base10_parse::<f64>()
+                .map_err(|e| syn::Error::new_spanned(f, format!("invalid float literal: {e}")))?;
+            serde_json::Number::from_f64(parsed)
+                .map(serde_json::Value::Number)
+                .ok_or_else(|| syn::Error::new_spanned(f, "float literal must be finite"))
+        }
+        Lit::Bool(b) => Ok(serde_json::Value::Bool(b.value())),
+        _ => Ok(serde_json::Value::Null),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use syn::parse_quote;
+
+    #[test]
+    fn lit_to_json_rejects_out_of_range_integer() {
+        let lit: Lit = parse_quote!(9223372036854775808);
+        let err = lit_to_json(&lit).expect_err("integer overflow should error");
+        assert!(err.to_string().contains("invalid integer literal"));
     }
 }

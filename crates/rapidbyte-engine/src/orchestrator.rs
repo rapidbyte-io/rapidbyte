@@ -368,13 +368,29 @@ async fn execute_pipeline_once(
     let run_id = if options.dry_run {
         0
     } else {
-        state
-            .start_run(&pipeline_id, &StreamName::new("all"))
-            .map_err(|e| PipelineError::Infrastructure(e.into()))?
+        let state_for_run = state.clone();
+        let pipeline_id_for_run = pipeline_id.clone();
+        tokio::task::spawn_blocking(move || {
+            state_for_run.start_run(&pipeline_id_for_run, &StreamName::new("all"))
+        })
+        .await
+        .map_err(|e| {
+            PipelineError::Infrastructure(anyhow::anyhow!("start_run task panicked: {e}"))
+        })?
+        .map_err(|e| PipelineError::Infrastructure(e.into()))?
     };
 
     let modules = load_modules(config, &connectors).await?;
-    let stream_build = build_stream_contexts(config, state.as_ref(), options.limit)?;
+    let config_for_build = config.clone();
+    let state_for_build = state.clone();
+    let max_records = options.limit;
+    let stream_build = tokio::task::spawn_blocking(move || {
+        build_stream_contexts(&config_for_build, state_for_build.as_ref(), max_records)
+    })
+    .await
+    .map_err(|e| {
+        PipelineError::Infrastructure(anyhow::anyhow!("build_stream_contexts task panicked: {e}"))
+    })??;
     let aggregated = execute_streams(
         config,
         &connectors,
@@ -417,13 +433,14 @@ async fn execute_pipeline_once(
     let result = finalize_run(
         config,
         &pipeline_id,
-        state.as_ref(),
+        state.clone(),
         run_id,
         attempt,
         start,
         &modules,
         aggregated,
-    )?;
+    )
+    .await?;
     Ok(PipelineOutcome::Run(result))
 }
 
@@ -1234,10 +1251,10 @@ async fn execute_streams(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn finalize_run(
+async fn finalize_run(
     config: &PipelineConfig,
     pipeline_id: &PipelineId,
-    state: &dyn StateBackend,
+    state: Arc<dyn StateBackend>,
     run_id: i64,
     attempt: u32,
     start: Instant,
@@ -1245,19 +1262,38 @@ fn finalize_run(
     aggregated: AggregatedStreamResults,
 ) -> Result<PipelineResult, PipelineError> {
     if let Some(err) = aggregated.first_error {
-        state
-            .complete_run(
+        let state_for_complete = state.clone();
+        let stats = RunStats {
+            records_read: aggregated.final_stats.records_read,
+            records_written: aggregated.final_stats.records_written,
+            bytes_read: aggregated.final_stats.bytes_read,
+            error_message: Some(format!("Stream error: {err}")),
+        };
+        tokio::task::spawn_blocking(move || {
+            state_for_complete.complete_run(run_id, RunStatus::Failed, &stats)
+        })
+        .await
+        .map_err(|e| {
+            PipelineError::Infrastructure(anyhow::anyhow!("complete_run task panicked: {e}"))
+        })?
+        .map_err(|e| PipelineError::Infrastructure(e.into()))?;
+
+        let state_for_dlq = state.clone();
+        let pipeline_id_for_dlq = pipeline_id.clone();
+        let dlq_records = aggregated.dlq_records.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::dlq::persist_dlq_records(
+                state_for_dlq.as_ref(),
+                &pipeline_id_for_dlq,
                 run_id,
-                RunStatus::Failed,
-                &RunStats {
-                    records_read: aggregated.final_stats.records_read,
-                    records_written: aggregated.final_stats.records_written,
-                    bytes_read: aggregated.final_stats.bytes_read,
-                    error_message: Some(format!("Stream error: {err}")),
-                },
-            )
-            .map_err(|e| PipelineError::Infrastructure(e.into()))?;
-        crate::dlq::persist_dlq_records(state, pipeline_id, run_id, &aggregated.dlq_records);
+                &dlq_records,
+            );
+        })
+        .await
+        .map_err(|e| {
+            PipelineError::Infrastructure(anyhow::anyhow!("persist_dlq_records task panicked: {e}"))
+        })?;
+
         return Err(err);
     }
 
@@ -1270,18 +1306,19 @@ fn finalize_run(
         - connector_internal_secs)
         .max(0.0);
 
-    state
-        .complete_run(
-            run_id,
-            RunStatus::Completed,
-            &RunStats {
-                records_read: aggregated.total_read_summary.records_read,
-                records_written: aggregated.total_write_summary.records_written,
-                bytes_read: aggregated.total_read_summary.bytes_read,
-                error_message: None,
-            },
-        )
-        .map_err(|e| PipelineError::Infrastructure(e.into()))?;
+    let state_for_complete = state.clone();
+    let complete_stats = RunStats {
+        records_read: aggregated.total_read_summary.records_read,
+        records_written: aggregated.total_write_summary.records_written,
+        bytes_read: aggregated.total_read_summary.bytes_read,
+        error_message: None,
+    };
+    tokio::task::spawn_blocking(move || {
+        state_for_complete.complete_run(run_id, RunStatus::Completed, &complete_stats)
+    })
+    .await
+    .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!("complete_run task panicked: {e}")))?
+    .map_err(|e| PipelineError::Infrastructure(e.into()))?;
 
     tracing::debug!(
         pipeline = config.pipeline,
@@ -1290,12 +1327,24 @@ fn finalize_run(
         "About to correlate checkpoints"
     );
 
-    let cursors_advanced = correlate_and_persist_cursors(
-        state,
-        pipeline_id,
-        &aggregated.source_checkpoints,
-        &aggregated.dest_checkpoints,
-    )
+    let state_for_cursor = state.clone();
+    let pipeline_id_for_cursor = pipeline_id.clone();
+    let source_checkpoints = aggregated.source_checkpoints.clone();
+    let dest_checkpoints = aggregated.dest_checkpoints.clone();
+    let cursors_advanced = tokio::task::spawn_blocking(move || {
+        correlate_and_persist_cursors(
+            state_for_cursor.as_ref(),
+            &pipeline_id_for_cursor,
+            &source_checkpoints,
+            &dest_checkpoints,
+        )
+    })
+    .await
+    .map_err(|e| {
+        PipelineError::Infrastructure(anyhow::anyhow!(
+            "correlate_and_persist_cursors task panicked: {e}"
+        ))
+    })?
     .map_err(PipelineError::Infrastructure)?;
     if cursors_advanced > 0 {
         tracing::info!(
@@ -1305,7 +1354,21 @@ fn finalize_run(
         );
     }
 
-    crate::dlq::persist_dlq_records(state, pipeline_id, run_id, &aggregated.dlq_records);
+    let state_for_dlq = state.clone();
+    let pipeline_id_for_dlq = pipeline_id.clone();
+    let dlq_records = aggregated.dlq_records.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::dlq::persist_dlq_records(
+            state_for_dlq.as_ref(),
+            &pipeline_id_for_dlq,
+            run_id,
+            &dlq_records,
+        );
+    })
+    .await
+    .map_err(|e| {
+        PipelineError::Infrastructure(anyhow::anyhow!("persist_dlq_records task panicked: {e}"))
+    })?;
 
     let duration = start.elapsed();
     let src_perf = aggregated.total_read_summary.perf.as_ref();
