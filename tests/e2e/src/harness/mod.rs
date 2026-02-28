@@ -35,6 +35,14 @@ pub struct RunSummary {
     pub records_written: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct AutotuneOptions {
+    pub enabled: Option<bool>,
+    pub pin_parallelism: Option<u32>,
+    pub pin_source_partition_mode: Option<String>,
+    pub pin_copy_flush_bytes: Option<u64>,
+}
+
 pub async fn bootstrap() -> Result<HarnessContext> {
     let postgres_port = container::shared_postgres_port()?;
     let connector_dir = connectors::prepare_connector_dir()?;
@@ -174,6 +182,27 @@ impl HarnessContext {
             .await
     }
 
+    pub async fn run_pipeline_with_autotune(
+        &self,
+        schemas: &SchemaPair,
+        sync_mode: &str,
+        write_mode: &str,
+        state_db_path: &std::path::Path,
+        autotune: Option<&AutotuneOptions>,
+    ) -> Result<RunSummary> {
+        self.run_pipeline_with_policies_and_autotune(
+            schemas,
+            sync_mode,
+            write_mode,
+            state_db_path,
+            None,
+            None,
+            None,
+            autotune,
+        )
+        .await
+    }
+
     pub async fn run_pipeline_with_compression(
         &self,
         schemas: &SchemaPair,
@@ -205,6 +234,31 @@ impl HarnessContext {
         on_data_error: Option<&str>,
         schema_evolution_block: Option<&str>,
     ) -> Result<RunSummary> {
+        self.run_pipeline_with_policies_and_autotune(
+            schemas,
+            sync_mode,
+            write_mode,
+            state_db_path,
+            compression,
+            on_data_error,
+            schema_evolution_block,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_pipeline_with_policies_and_autotune(
+        &self,
+        schemas: &SchemaPair,
+        sync_mode: &str,
+        write_mode: &str,
+        state_db_path: &std::path::Path,
+        compression: Option<&str>,
+        on_data_error: Option<&str>,
+        schema_evolution_block: Option<&str>,
+        autotune: Option<&AutotuneOptions>,
+    ) -> Result<RunSummary> {
         let pipeline_yaml = render_pipeline_yaml(
             self,
             schemas,
@@ -214,6 +268,7 @@ impl HarnessContext {
             compression,
             on_data_error,
             schema_evolution_block,
+            autotune,
         );
 
         let config =
@@ -466,6 +521,7 @@ fn render_pipeline_yaml(
     compression: Option<&str>,
     on_data_error: Option<&str>,
     schema_evolution_block: Option<&str>,
+    autotune: Option<&AutotuneOptions>,
 ) -> String {
     let cursor_field = if sync_mode == "incremental" {
         "\n      cursor_field: id"
@@ -477,9 +533,7 @@ fn render_pipeline_yaml(
     } else {
         ""
     };
-    let resources = compression
-        .map(|codec| format!("\nresources:\n  compression: {codec}\n"))
-        .unwrap_or_default();
+    let resources = render_resources_block(compression, autotune);
     let on_data_error = on_data_error
         .map(|value| format!("\n  on_data_error: {value}"))
         .unwrap_or_default();
@@ -543,6 +597,45 @@ state:
         on_data_error = on_data_error,
         schema_evolution = schema_evolution,
     )
+}
+
+fn render_resources_block(
+    compression: Option<&str>,
+    autotune: Option<&AutotuneOptions>,
+) -> String {
+    let mut lines = Vec::new();
+
+    if let Some(codec) = compression {
+        lines.push(format!("  compression: {codec}"));
+    }
+
+    if let Some(autotune) = autotune {
+        let mut autotune_lines = Vec::new();
+        if let Some(enabled) = autotune.enabled {
+            autotune_lines.push(format!("    enabled: {enabled}"));
+        }
+        if let Some(pin_parallelism) = autotune.pin_parallelism {
+            autotune_lines.push(format!("    pin_parallelism: {pin_parallelism}"));
+        }
+        if let Some(pin_source_partition_mode) = &autotune.pin_source_partition_mode {
+            autotune_lines
+                .push(format!("    pin_source_partition_mode: {pin_source_partition_mode}"));
+        }
+        if let Some(pin_copy_flush_bytes) = autotune.pin_copy_flush_bytes {
+            autotune_lines.push(format!("    pin_copy_flush_bytes: {pin_copy_flush_bytes}"));
+        }
+
+        if !autotune_lines.is_empty() {
+            lines.push("  autotune:".to_string());
+            lines.extend(autotune_lines);
+        }
+    }
+
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("\nresources:\n{}\n", lines.join("\n"))
+    }
 }
 
 fn render_transform_yaml(
