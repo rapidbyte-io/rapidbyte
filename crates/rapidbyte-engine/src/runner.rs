@@ -429,6 +429,7 @@ pub(crate) fn run_transform_stream(
     module: &LoadedComponent,
     receiver: mpsc::Receiver<Frame>,
     sender: mpsc::Sender<Frame>,
+    dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
     connector_id: &str,
@@ -452,6 +453,7 @@ pub(crate) fn run_transform_stream(
         .state_backend(state_backend)
         .sender(sender.clone())
         .receiver(receiver)
+        .dlq_records(dlq_records)
         .source_checkpoints(source_checkpoints)
         .dest_checkpoints(dest_checkpoints)
         .timings(timings)

@@ -2289,6 +2289,7 @@ dependencies = [
  "once_cell",
  "rapidbyte-engine",
  "rstest",
+ "rusqlite",
  "serde",
  "serde_yaml",
  "tempfile",

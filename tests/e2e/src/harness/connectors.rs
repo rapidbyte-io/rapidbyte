@@ -21,6 +21,12 @@ pub fn prepare_connector_dir() -> Result<PathBuf> {
             )?;
             ensure_connector(&repo_root, "dest-postgres", "dest_postgres", &output_dir)?;
             ensure_connector(&repo_root, "transform-sql", "transform_sql", &output_dir)?;
+            ensure_connector(
+                &repo_root,
+                "transform-validate",
+                "transform_validate",
+                &output_dir,
+            )?;
 
             Ok(output_dir)
         })

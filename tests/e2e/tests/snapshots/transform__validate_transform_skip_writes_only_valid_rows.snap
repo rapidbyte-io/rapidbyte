@@ -1,0 +1,7 @@
+---
+source: tests/transform.rs
+assertion_line: 135
+expression: snapshot
+---
+1|Alice|alice@example.com
+3|Carol|carol@example.com

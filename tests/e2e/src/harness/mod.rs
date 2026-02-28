@@ -35,6 +35,14 @@ pub struct RunSummary {
     pub records_written: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct DlqRow {
+    pub stream_name: String,
+    pub record_json: String,
+    pub error_message: String,
+    pub error_category: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AutotuneOptions {
     pub enabled: Option<bool>,
@@ -59,6 +67,34 @@ pub async fn bootstrap() -> Result<HarnessContext> {
 }
 
 impl HarnessContext {
+    pub fn read_dlq_rows(&self, state_db_path: &std::path::Path) -> Result<Vec<DlqRow>> {
+        let conn = rusqlite::Connection::open(state_db_path)
+            .with_context(|| format!("failed to open sqlite state db {}", state_db_path.display()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT stream_name, record_json, error_message, error_category \
+                 FROM dlq_records ORDER BY id ASC",
+            )
+            .context("failed to prepare dlq query")?;
+
+        let mapped = stmt
+            .query_map([], |row| {
+                Ok(DlqRow {
+                    stream_name: row.get(0)?,
+                    record_json: row.get(1)?,
+                    error_message: row.get(2)?,
+                    error_category: row.get(3)?,
+                })
+            })
+            .context("failed to query dlq rows")?;
+
+        let mut rows = Vec::new();
+        for row in mapped {
+            rows.push(row.context("failed to decode dlq row")?);
+        }
+        Ok(rows)
+    }
+
     pub async fn allocate_schema_pair(&self, test_name: &str) -> Result<SchemaPair> {
         let schema_id = NEXT_SCHEMA_ID.fetch_add(1, Ordering::Relaxed);
         let source_users_table = format!("users_{}_{}", sanitize_identifier(test_name), schema_id);
@@ -311,6 +347,25 @@ impl HarnessContext {
         Ok(())
     }
 
+    pub async fn set_source_user_email_null(
+        &self,
+        schemas: &SchemaPair,
+        name: &str,
+    ) -> Result<()> {
+        let client = self.connect().await?;
+        client
+            .execute(
+                &format!(
+                    "UPDATE public.\"{}\" SET email = NULL WHERE name = $1",
+                    schemas.source_users_table
+                ),
+                &[&name],
+            )
+            .await
+            .context("failed to set source user email to null")?;
+        Ok(())
+    }
+
     pub async fn add_source_user_column(
         &self,
         schemas: &SchemaPair,
@@ -337,6 +392,36 @@ impl HarnessContext {
         state_db_path: &std::path::Path,
     ) -> Result<RunSummary> {
         let pipeline_yaml = render_transform_yaml(self, schemas, query, state_db_path);
+
+        let config =
+            parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
+        validator::validate_pipeline(&config).context("failed to validate pipeline")?;
+
+        let outcome =
+            rapidbyte_engine::orchestrator::run_pipeline(&config, &ExecutionOptions::default())
+                .await
+                .context("pipeline execution failed")?;
+
+        let run = match outcome {
+            PipelineOutcome::Run(run) => run,
+            PipelineOutcome::DryRun(_) => anyhow::bail!("expected run outcome for e2e test"),
+        };
+
+        Ok(RunSummary {
+            records_read: run.counts.records_read,
+            records_written: run.counts.records_written,
+        })
+    }
+
+    pub async fn run_validate_transform_pipeline(
+        &self,
+        schemas: &SchemaPair,
+        rules_yaml: &str,
+        on_data_error: &str,
+        state_db_path: &std::path::Path,
+    ) -> Result<RunSummary> {
+        let pipeline_yaml =
+            render_validate_transform_yaml(self, schemas, rules_yaml, on_data_error, state_db_path);
 
         let config =
             parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
@@ -690,6 +775,78 @@ resources:
         query = query,
         state_db_path = state_db_path.display(),
     )
+}
+
+fn render_validate_transform_yaml(
+    context: &HarnessContext,
+    schemas: &SchemaPair,
+    rules_yaml: &str,
+    on_data_error: &str,
+    state_db_path: &std::path::Path,
+) -> String {
+    let rules = indent_block(rules_yaml, 8);
+    format!(
+        r#"version: "1.0"
+pipeline: e2e_validate_transform
+
+source:
+  use: source-postgres
+  config:
+    host: {host}
+    port: {port}
+    user: {user}
+    password: {password}
+    database: {database}
+  streams:
+    - name: {users_table}
+      sync_mode: full_refresh
+
+transforms:
+  - use: transform-validate
+    config:
+      rules:
+{rules}
+
+destination:
+  use: dest-postgres
+  config:
+    host: {host}
+    port: {port}
+    user: {user}
+    password: {password}
+    database: {database}
+    schema: {dest_schema}
+  write_mode: append
+  on_data_error: {on_data_error}
+
+state:
+  backend: sqlite
+  connection: {state_db_path}
+
+resources:
+  parallelism: 1
+"#,
+        host = context.postgres_host,
+        port = context.postgres_port,
+        user = context.postgres_user,
+        password = context.postgres_pass,
+        database = context.postgres_db,
+        users_table = schemas.source_users_table,
+        dest_schema = schemas.destination_schema,
+        on_data_error = on_data_error,
+        state_db_path = state_db_path.display(),
+        rules = rules,
+    )
+}
+
+fn indent_block(block: &str, spaces: usize) -> String {
+    let prefix = " ".repeat(spaces);
+    block
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| format!("{prefix}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn render_cdc_yaml(

@@ -964,6 +964,7 @@ async fn execute_streams(
                 let rx = receivers.remove(0);
                 let tx = senders.remove(0);
                 let state_t = state_dst.clone();
+                let dlq_records_t = run_dlq_records.clone();
                 let stream_ctx_t = stream_ctx.clone();
                 let params_t = params.clone();
                 let t_handle = tokio::task::spawn_blocking(move || {
@@ -971,6 +972,7 @@ async fn execute_streams(
                         &t.module,
                         rx,
                         tx,
+                        dlq_records_t,
                         state_t,
                         &params_t.pipeline_name,
                         &t.connector_id,

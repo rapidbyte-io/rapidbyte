@@ -65,12 +65,16 @@ Defined in `wit/rapidbyte-connector.wit`:
 
 ### 4.1 Batch transport
 
-- `emit-batch(batch: list<u8>) -> result<_, connector-error>`
-  - Source/transform pushes an Arrow IPC frame to the next stage.
-  - Zero-length frames are rejected as protocol violations.
-- `next-batch() -> result<option<list<u8>>, connector-error>`
-  - Destination/transform pulls the next Arrow IPC frame.
+- `emit-batch(handle: u64) -> result<_, connector-error>`
+  - Source/transform publishes a sealed host frame to the next stage.
+- `next-batch() -> result<option<u64>, connector-error>`
+  - Destination/transform pulls the next sealed host frame handle.
   - `none` signals end-of-stream.
+- Frame lifecycle:
+  - `frame-new(capacity)` allocates a writable frame handle.
+  - `frame-write(handle, chunk)` appends bytes into the frame.
+  - `frame-seal(handle)` marks the frame immutable and publishable.
+  - `frame-len`, `frame-read`, and `frame-drop` support receive/decode and cleanup.
 
 ### 4.2 Logging and telemetry
 
@@ -126,7 +130,8 @@ Host preserves connector retry metadata and maps connector failures to `Pipeline
 
 ## 6. Data Exchange
 
-- Batch payloads are Arrow IPC stream fragments (`list<u8>`)
+- Batch payloads are Arrow IPC stream fragments written into host-managed frames
+- Stage handoff uses frame handles (`u64`) via `emit-batch`/`next-batch`
 - Optional host-side channel compression (`lz4`/`zstd`) is transparent to connectors
 - Stream execution is sequential per connector instance (`run-*` called once per stream)
 
