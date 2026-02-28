@@ -132,7 +132,7 @@ pub(crate) fn run_source_stream(
         source_bindings::RapidbyteSource::instantiate(&mut store, &module.component, &linker)
             .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
 
-    let iface = bindings.rapidbyte_connector_source_connector();
+    let iface = bindings.rapidbyte_connector_source();
 
     let source_config_json = serde_json::to_string(source_config)
         .context("Failed to serialize source config")
@@ -144,33 +144,45 @@ pub(crate) fn run_source_stream(
         stream = stream_ctx.stream_name,
         "Opening source connector for stream"
     );
-    let open_result = iface
+    let session = iface
         .call_open(&mut store, &source_config_json)
-        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
-    if let Err(err) = open_result {
-        return Err(PipelineError::Connector(source_error_to_sdk(err)));
-    }
+        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?
+        .map_err(|err| PipelineError::Connector(source_error_to_sdk(err)))?;
 
     let ctx_json = serde_json::to_string(stream_ctx)
         .context("Failed to serialize StreamContext")
         .map_err(PipelineError::Infrastructure)?;
 
     tracing::info!(stream = stream_ctx.stream_name, "Starting source read");
+    let run_request = source_bindings::rapidbyte::connector::types::RunRequest {
+        phase: source_bindings::rapidbyte::connector::types::RunPhase::Read,
+        stream_context_json: ctx_json,
+        dry_run: false,
+        max_records: None,
+    };
     let run_result = iface
-        .call_run_read(&mut store, &ctx_json)
+        .call_run(&mut store, session, &run_request)
         .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
 
     let summary = match run_result {
-        Ok(summary) => ReadSummary {
-            records_read: summary.records_read,
-            bytes_read: summary.bytes_read,
-            batches_emitted: summary.batches_emitted,
-            checkpoint_count: summary.checkpoint_count,
-            records_skipped: summary.records_skipped,
-            perf: None,
-        },
+        Ok(summary) => {
+            let Some(summary) = summary.read else {
+                let _ = iface.call_close(&mut store, session);
+                return Err(PipelineError::Infrastructure(anyhow::anyhow!(
+                    "source run summary missing read section"
+                )));
+            };
+            ReadSummary {
+                records_read: summary.records_read,
+                bytes_read: summary.bytes_read,
+                batches_emitted: summary.batches_emitted,
+                checkpoint_count: summary.checkpoint_count,
+                records_skipped: summary.records_skipped,
+                perf: None,
+            }
+        }
         Err(err) => {
-            let _ = iface.call_close(&mut store);
+            let _ = iface.call_close(&mut store, session);
             return Err(PipelineError::Connector(source_error_to_sdk(err)));
         }
     };
@@ -199,7 +211,7 @@ pub(crate) fn run_source_stream(
         "Closing source connector for stream"
     );
     handle_close_result(
-        iface.call_close(&mut store),
+        iface.call_close(&mut store, session),
         "Source",
         &stream_ctx.stream_name,
         |err| source_error_to_sdk(err).to_string(),
@@ -291,7 +303,7 @@ pub(crate) fn run_destination_stream(
         )
         .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
 
-        let iface = bindings.rapidbyte_connector_dest_connector();
+        let iface = bindings.rapidbyte_connector_destination();
         let vm_setup_secs = vm_setup_start.elapsed().as_secs_f64();
 
         let dest_config_json = serde_json::to_string(dest_config)
@@ -304,12 +316,10 @@ pub(crate) fn run_destination_stream(
             stream = stream_ctx.stream_name,
             "Opening destination connector for stream"
         );
-        let open_result = iface
+        let session = iface
             .call_open(&mut store, &dest_config_json)
-            .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
-        if let Err(err) = open_result {
-            return Err(PipelineError::Connector(dest_error_to_sdk(err)));
-        }
+            .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?
+            .map_err(|err| PipelineError::Connector(dest_error_to_sdk(err)))?;
 
         let recv_start = Instant::now();
         let ctx_json = serde_json::to_string(stream_ctx)
@@ -320,21 +330,35 @@ pub(crate) fn run_destination_stream(
             stream = stream_ctx.stream_name,
             "Starting destination write"
         );
+        let run_request = dest_bindings::rapidbyte::connector::types::RunRequest {
+            phase: dest_bindings::rapidbyte::connector::types::RunPhase::Write,
+            stream_context_json: ctx_json,
+            dry_run: false,
+            max_records: None,
+        };
         let run_result = iface
-            .call_run_write(&mut store, &ctx_json)
+            .call_run(&mut store, session, &run_request)
             .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
 
         let summary = match run_result {
-            Ok(summary) => WriteSummary {
-                records_written: summary.records_written,
-                bytes_written: summary.bytes_written,
-                batches_written: summary.batches_written,
-                checkpoint_count: summary.checkpoint_count,
-                records_failed: summary.records_failed,
-                perf: None,
-            },
+            Ok(summary) => {
+                let Some(summary) = summary.write else {
+                    let _ = iface.call_close(&mut store, session);
+                    return Err(PipelineError::Infrastructure(anyhow::anyhow!(
+                        "destination run summary missing write section"
+                    )));
+                };
+                WriteSummary {
+                    records_written: summary.records_written,
+                    bytes_written: summary.bytes_written,
+                    batches_written: summary.batches_written,
+                    checkpoint_count: summary.checkpoint_count,
+                    records_failed: summary.records_failed,
+                    perf: None,
+                }
+            }
             Err(err) => {
-                let _ = iface.call_close(&mut store);
+                let _ = iface.call_close(&mut store, session);
                 return Err(PipelineError::Connector(dest_error_to_sdk(err)));
             }
         };
@@ -362,7 +386,7 @@ pub(crate) fn run_destination_stream(
             "Closing destination connector for stream"
         );
         handle_close_result(
-            iface.call_close(&mut store),
+            iface.call_close(&mut store, session),
             "Destination",
             &stream_ctx.stream_name,
             |err| dest_error_to_sdk(err).to_string(),
@@ -396,7 +420,11 @@ pub(crate) fn run_destination_stream(
 }
 
 /// Run a transform connector for a single stream.
-#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::needless_pass_by_value,
+    clippy::too_many_lines
+)]
 pub(crate) fn run_transform_stream(
     module: &LoadedComponent,
     receiver: mpsc::Receiver<Frame>,
@@ -451,7 +479,7 @@ pub(crate) fn run_transform_stream(
         transform_bindings::RapidbyteTransform::instantiate(&mut store, &module.component, &linker)
             .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
 
-    let iface = bindings.rapidbyte_connector_transform_connector();
+    let iface = bindings.rapidbyte_connector_transform();
 
     let transform_config_json = serde_json::to_string(transform_config)
         .context("Failed to serialize transform config")
@@ -463,32 +491,44 @@ pub(crate) fn run_transform_stream(
         stream = stream_ctx.stream_name,
         "Opening transform connector for stream"
     );
-    let open_result = iface
+    let session = iface
         .call_open(&mut store, &transform_config_json)
-        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
-    if let Err(err) = open_result {
-        return Err(PipelineError::Connector(transform_error_to_sdk(err)));
-    }
+        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?
+        .map_err(|err| PipelineError::Connector(transform_error_to_sdk(err)))?;
 
     let ctx_json = serde_json::to_string(stream_ctx)
         .context("Failed to serialize StreamContext")
         .map_err(PipelineError::Infrastructure)?;
 
     tracing::info!(stream = stream_ctx.stream_name, "Starting transform");
+    let run_request = transform_bindings::rapidbyte::connector::types::RunRequest {
+        phase: transform_bindings::rapidbyte::connector::types::RunPhase::Transform,
+        stream_context_json: ctx_json,
+        dry_run: false,
+        max_records: None,
+    };
     let run_result = iface
-        .call_run_transform(&mut store, &ctx_json)
+        .call_run(&mut store, session, &run_request)
         .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
 
     let summary = match run_result {
-        Ok(summary) => TransformSummary {
-            records_in: summary.records_in,
-            records_out: summary.records_out,
-            bytes_in: summary.bytes_in,
-            bytes_out: summary.bytes_out,
-            batches_processed: summary.batches_processed,
-        },
+        Ok(summary) => {
+            let Some(summary) = summary.transform else {
+                let _ = iface.call_close(&mut store, session);
+                return Err(PipelineError::Infrastructure(anyhow::anyhow!(
+                    "transform run summary missing transform section"
+                )));
+            };
+            TransformSummary {
+                records_in: summary.records_in,
+                records_out: summary.records_out,
+                bytes_in: summary.bytes_in,
+                bytes_out: summary.bytes_out,
+                batches_processed: summary.batches_processed,
+            }
+        }
         Err(err) => {
-            let _ = iface.call_close(&mut store);
+            let _ = iface.call_close(&mut store, session);
             return Err(PipelineError::Connector(transform_error_to_sdk(err)));
         }
     };
@@ -502,7 +542,7 @@ pub(crate) fn run_transform_stream(
         "Closing transform connector for stream"
     );
     handle_close_result(
-        iface.call_close(&mut store),
+        iface.call_close(&mut store, session),
         "Transform",
         &stream_ctx.stream_name,
         |err| transform_error_to_sdk(err).to_string(),
@@ -557,18 +597,19 @@ pub(crate) fn validate_connector(
                 &module.component,
                 &linker,
             )?;
-            let iface = bindings.rapidbyte_connector_source_connector();
+            let iface = bindings.rapidbyte_connector_source();
 
-            if let Err(err) = iface.call_open(&mut store, &config_json)? {
-                anyhow::bail!("Source open failed: {}", source_error_to_sdk(err));
-            }
+            let session = iface
+                .call_open(&mut store, &config_json)?
+                .map_err(source_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
 
             let result = iface
-                .call_validate(&mut store)?
+                .call_validate(&mut store, session)?
                 .map(source_validation_to_sdk)
                 .map_err(source_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!(e.to_string()));
-            let _ = iface.call_close(&mut store);
+            let _ = iface.call_close(&mut store, session);
             result
         }
         ConnectorRole::Destination => {
@@ -584,18 +625,19 @@ pub(crate) fn validate_connector(
                 &module.component,
                 &linker,
             )?;
-            let iface = bindings.rapidbyte_connector_dest_connector();
+            let iface = bindings.rapidbyte_connector_destination();
 
-            if let Err(err) = iface.call_open(&mut store, &config_json)? {
-                anyhow::bail!("Destination open failed: {}", dest_error_to_sdk(err));
-            }
+            let session = iface
+                .call_open(&mut store, &config_json)?
+                .map_err(dest_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Destination open failed: {e}"))?;
 
             let result = iface
-                .call_validate(&mut store)?
+                .call_validate(&mut store, session)?
                 .map(dest_validation_to_sdk)
                 .map_err(dest_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!(e.to_string()));
-            let _ = iface.call_close(&mut store);
+            let _ = iface.call_close(&mut store, session);
             result
         }
         ConnectorRole::Transform => {
@@ -611,18 +653,19 @@ pub(crate) fn validate_connector(
                 &module.component,
                 &linker,
             )?;
-            let iface = bindings.rapidbyte_connector_transform_connector();
+            let iface = bindings.rapidbyte_connector_transform();
 
-            if let Err(err) = iface.call_open(&mut store, &config_json)? {
-                anyhow::bail!("Transform open failed: {}", transform_error_to_sdk(err));
-            }
+            let session = iface
+                .call_open(&mut store, &config_json)?
+                .map_err(transform_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Transform open failed: {e}"))?;
 
             let result = iface
-                .call_validate(&mut store)?
+                .call_validate(&mut store, session)?
                 .map(transform_validation_to_sdk)
                 .map_err(transform_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!(e.to_string()));
-            let _ = iface.call_close(&mut store);
+            let _ = iface.call_close(&mut store, session);
             result
         }
     }
@@ -659,7 +702,7 @@ pub(crate) fn run_discover(
     })?;
     let bindings =
         source_bindings::RapidbyteSource::instantiate(&mut store, &module.component, &linker)?;
-    let iface = bindings.rapidbyte_connector_source_connector();
+    let iface = bindings.rapidbyte_connector_source();
     let config_json = serde_json::to_string(config)?;
 
     tracing::info!(
@@ -667,15 +710,13 @@ pub(crate) fn run_discover(
         version = connector_version,
         "Opening source connector for discover"
     );
-    if let Err(err) = iface.call_open(&mut store, &config_json)? {
-        anyhow::bail!(
-            "Source open failed for discover: {}",
-            source_error_to_sdk(err)
-        );
-    }
+    let session = iface
+        .call_open(&mut store, &config_json)?
+        .map_err(source_error_to_sdk)
+        .map_err(|e| anyhow::anyhow!("Source open failed for discover: {e}"))?;
 
     let discover_json = iface
-        .call_discover(&mut store)?
+        .call_discover(&mut store, session)?
         .map_err(source_error_to_sdk)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let catalog = serde_json::from_str::<Catalog>(&discover_json)
@@ -686,7 +727,7 @@ pub(crate) fn run_discover(
         version = connector_version,
         "Closing source connector after discover"
     );
-    if let Err(err) = iface.call_close(&mut store)? {
+    if let Err(err) = iface.call_close(&mut store, session)? {
         tracing::warn!(
             "Source close failed after discover: {}",
             source_error_to_sdk(err)

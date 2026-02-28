@@ -1,22 +1,22 @@
-# Rapidbyte Connector Protocol (v2)
+# Rapidbyte Connector Protocol (v4)
 
-This document defines the connector protocol used by Rapidbyte v2 (Wasmtime component runtime).
+This document defines the connector protocol used by Rapidbyte v4 (Wasmtime component runtime).
 
 - Runtime: **Wasmtime component model**
 - Connector target: **`wasm32-wasip2`**
-- WIT package: **`rapidbyte:connector@2.0.0`** (`wit/rapidbyte-connector.wit`)
-- Protocol version string in manifests/ConnectorInfo: **`2`**
+- WIT package: **`rapidbyte:connector@4.0.0`** (`wit/rapidbyte-connector.wit`)
+- Protocol version string in manifests/ConnectorInfo: **`4`**
 
 ## 1. Architecture
 
 Rapidbyte runs connectors as WebAssembly components and connects stages with Arrow IPC batches:
 
-- Source component exports `source-connector`
-- Destination component exports `dest-connector`
-- Transform component exports `transform-connector`
+- Source component exports `source`
+- Destination component exports `destination`
+- Transform component exports `transform`
 - Host imports are provided via WIT `interface host`
 
-There is no pointer/length host ABI (`rb_*`) in v2. All calls are typed through canonical ABI generated from WIT.
+There is no pointer/length host ABI (`rb_*`) in v4. All calls are typed through canonical ABI generated from WIT.
 
 ## 2. WIT Worlds
 
@@ -24,13 +24,13 @@ Defined in `wit/rapidbyte-connector.wit`:
 
 - `world rapidbyte-source`
   - imports: `host`
-  - exports: `source-connector`
+  - exports: `source`
 - `world rapidbyte-destination`
   - imports: `host`
-  - exports: `dest-connector`
+  - exports: `destination`
 - `world rapidbyte-transform`
   - imports: `host`
-  - exports: `transform-connector`
+  - exports: `transform`
 - `world rapidbyte-host`
   - imports: `host` (guest-side SDK bindings)
 
@@ -41,25 +41,25 @@ Defined in `wit/rapidbyte-connector.wit`:
 1. `open(config-json)`
 2. optional `discover()`
 3. optional `validate()`
-4. `run-read(ctx-json)` (one stream at a time)
+4. `run(session, request)` (one stream at a time)
 5. `close()` (always called best-effort)
 
 ### 3.2 Destination
 
 1. `open(config-json)`
 2. optional `validate()`
-3. `run-write(ctx-json)` (one stream at a time)
+3. `run(session, request)` (one stream at a time)
 4. `close()`
 
 ### 3.3 Transform
 
 1. `open(config-json)`
 2. optional `validate()`
-3. `run-transform(ctx-json)` (one stream at a time)
+3. `run(session, request)` (one stream at a time)
 4. `close()`
 
 `config-json` is connector config serialized as JSON.
-`ctx-json` is `StreamContext` JSON serialized by host.
+`request.stream-context-json` is `StreamContext` JSON serialized by host.
 
 ## 4. Host Import API (`interface host`)
 
@@ -175,7 +175,7 @@ Host validates connector manifest role compatibility before run/check/discover:
 - Destination pipelines require `roles.destination`
 - Transform pipelines require `roles.transform`
 
-Host expects `manifest.protocol_version == "2"`; mismatches emit warnings.
+Host expects `manifest.protocol_version == "4"`; mismatches emit warnings.
 
 ## 10. Building Connectors
 
@@ -184,7 +184,7 @@ Host expects `manifest.protocol_version == "2"`; mismatches emit warnings.
 Any language that compiles to `wasm32-wasip2` and implements the WIT interface can be a Rapidbyte connector. The WIT file (`wit/rapidbyte-connector.wit`) is the source of truth — not any particular SDK.
 
 A valid connector is a WASI component that:
-1. Exports one of `source-connector`, `dest-connector`, or `transform-connector`
+1. Exports one of `source`, `destination`, or `transform`
 2. Accepts JSON config via `open(config-json: string)`
 3. Exchanges Arrow IPC batches via host imports (`emit-batch`/`next-batch`)
 4. Returns structured `connector-error` records on failure
@@ -193,9 +193,9 @@ A valid connector is a WASI component that:
 
 The `rapidbyte-sdk` crate provides ergonomic Rust traits and macros:
 
-- `source_connector_main!(Type)` — exports a source component
-- `dest_connector_main!(Type)` — exports a destination component
-- `transform_connector_main!(Type)` — exports a transform component
+- `#[connector(source)]` — exports a source component
+- `#[connector(destination)]` — exports a destination component
+- `#[connector(transform)]` — exports a transform component
 
 The SDK handles WIT binding generation, config JSON deserialization, Tokio runtime management, and error type conversion.
 
@@ -234,9 +234,9 @@ DISTINCT, window functions) operate per-batch, not across the full stream.
 
 **Table name:** Always `input`. The query must reference `FROM input`.
 
-## 11. Migration Notes from v1
+## 11. Migration Notes
 
-Removed in v2:
+Removed in prior protocols:
 - `rb_open`, `rb_run_read`, `rb_run_write`, `rb_close` C-ABI exports
 - `rb_allocate` / `rb_deallocate` memory protocol
 - `rb_host_*` pointer-based host imports

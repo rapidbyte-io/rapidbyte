@@ -203,19 +203,20 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
 
         fn to_component_validation(
             result: ::rapidbyte_sdk::error::ValidationResult,
-        ) -> __rb_bindings::rapidbyte::connector::types::ValidationResult {
+        ) -> __rb_bindings::rapidbyte::connector::types::ValidationReport {
             use __rb_bindings::rapidbyte::connector::types::{
-                ValidationResult as CValidationResult, ValidationStatus as CValidationStatus,
+                ValidationReport as CValidationReport, ValidationStatus as CValidationStatus,
             };
             use ::rapidbyte_sdk::error::ValidationStatus;
 
-            CValidationResult {
+            CValidationReport {
                 status: match result.status {
                     ValidationStatus::Success => CValidationStatus::Success,
                     ValidationStatus::Failed => CValidationStatus::Failed,
                     ValidationStatus::Warning => CValidationStatus::Warning,
                 },
                 message: result.message,
+                warnings: Vec::new(),
             }
         }
     }
@@ -231,15 +232,15 @@ fn gen_guest_impl(
 
     let (guest_trait_path, role_methods) = match role {
         ConnectorRole::Source => (
-            quote! { __rb_bindings::exports::rapidbyte::connector::source_connector::Guest },
+            quote! { __rb_bindings::exports::rapidbyte::connector::source::Guest },
             gen_source_methods(struct_name, trait_path),
         ),
         ConnectorRole::Destination => (
-            quote! { __rb_bindings::exports::rapidbyte::connector::dest_connector::Guest },
+            quote! { __rb_bindings::exports::rapidbyte::connector::destination::Guest },
             gen_dest_methods(struct_name, trait_path),
         ),
         ConnectorRole::Transform => (
-            quote! { __rb_bindings::exports::rapidbyte::connector::transform_connector::Guest },
+            quote! { __rb_bindings::exports::rapidbyte::connector::transform::Guest },
             gen_transform_methods(struct_name, trait_path),
         ),
     };
@@ -259,7 +260,7 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
     quote! {
         fn open(
             config_json: String,
-        ) -> Result<(), __rb_bindings::rapidbyte::connector::types::ConnectorError> {
+        ) -> Result<u64, __rb_bindings::rapidbyte::connector::types::ConnectorError> {
             let _ = CONFIG_JSON.set(config_json.clone());
 
             let config: <#struct_name as #trait_path>::Config =
@@ -275,11 +276,11 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
                 "",
             ));
             *get_state().borrow_mut() = Some(instance);
-            Ok(())
+            Ok(1)
         }
 
-        fn validate() -> Result<
-            __rb_bindings::rapidbyte::connector::types::ValidationResult,
+        fn validate(_session: u64) -> Result<
+            __rb_bindings::rapidbyte::connector::types::ValidationReport,
             __rb_bindings::rapidbyte::connector::types::ConnectorError,
         > {
             let config: <#struct_name as #trait_path>::Config = parse_saved_config()?;
@@ -291,7 +292,7 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
                 .map_err(to_component_error)
         }
 
-        fn close() -> Result<(), __rb_bindings::rapidbyte::connector::types::ConnectorError> {
+        fn close(_session: u64) -> Result<(), __rb_bindings::rapidbyte::connector::types::ConnectorError> {
             let rt = get_runtime();
             let ctx = CONTEXT.get().expect("open must be called before close");
             let state_cell = get_state();
@@ -306,10 +307,11 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
     }
 }
 
-/// Generate source-specific methods: discover, run_read.
+/// Generate source-specific methods: discover, run.
 fn gen_source_methods(struct_name: &Ident, trait_path: &TokenStream) -> TokenStream {
     quote! {
         fn discover(
+            _session: u64,
         ) -> Result<String, __rb_bindings::rapidbyte::connector::types::ConnectorError> {
             let ctx = CONTEXT.get().expect("Connector not opened");
             let rt = get_runtime();
@@ -329,13 +331,14 @@ fn gen_source_methods(struct_name: &Ident, trait_path: &TokenStream) -> TokenStr
             })
         }
 
-        fn run_read(
-            ctx_json: String,
+        fn run(
+            _session: u64,
+            request: __rb_bindings::rapidbyte::connector::types::RunRequest,
         ) -> Result<
-            __rb_bindings::rapidbyte::connector::types::ReadSummary,
+            __rb_bindings::rapidbyte::connector::types::RunSummary,
             __rb_bindings::rapidbyte::connector::types::ConnectorError,
         > {
-            let stream = parse_stream_context(ctx_json)?;
+            let stream = parse_stream_context(request.stream_context_json)?;
             let base_ctx = CONTEXT.get().expect("Connector not opened");
             let ctx = base_ctx.with_stream(&stream.stream_name);
             let rt = get_runtime();
@@ -347,27 +350,33 @@ fn gen_source_methods(struct_name: &Ident, trait_path: &TokenStream) -> TokenStr
                 .block_on(<#struct_name as #trait_path>::read(conn, &ctx, stream))
                 .map_err(to_component_error)?;
 
-            Ok(__rb_bindings::rapidbyte::connector::types::ReadSummary {
-                records_read: summary.records_read,
-                bytes_read: summary.bytes_read,
-                batches_emitted: summary.batches_emitted,
-                checkpoint_count: summary.checkpoint_count,
-                records_skipped: summary.records_skipped,
+            Ok(__rb_bindings::rapidbyte::connector::types::RunSummary {
+                role: __rb_bindings::rapidbyte::connector::types::ConnectorRole::Source,
+                read: Some(__rb_bindings::rapidbyte::connector::types::ReadSummary {
+                    records_read: summary.records_read,
+                    bytes_read: summary.bytes_read,
+                    batches_emitted: summary.batches_emitted,
+                    checkpoint_count: summary.checkpoint_count,
+                    records_skipped: summary.records_skipped,
+                }),
+                write: None,
+                transform: None,
             })
         }
     }
 }
 
-/// Generate destination-specific methods: run_write.
+/// Generate destination-specific methods: run.
 fn gen_dest_methods(struct_name: &Ident, trait_path: &TokenStream) -> TokenStream {
     quote! {
-        fn run_write(
-            ctx_json: String,
+        fn run(
+            _session: u64,
+            request: __rb_bindings::rapidbyte::connector::types::RunRequest,
         ) -> Result<
-            __rb_bindings::rapidbyte::connector::types::WriteSummary,
+            __rb_bindings::rapidbyte::connector::types::RunSummary,
             __rb_bindings::rapidbyte::connector::types::ConnectorError,
         > {
-            let stream = parse_stream_context(ctx_json)?;
+            let stream = parse_stream_context(request.stream_context_json)?;
             let base_ctx = CONTEXT.get().expect("Connector not opened");
             let ctx = base_ctx.with_stream(&stream.stream_name);
             let rt = get_runtime();
@@ -379,27 +388,33 @@ fn gen_dest_methods(struct_name: &Ident, trait_path: &TokenStream) -> TokenStrea
                 .block_on(<#struct_name as #trait_path>::write(conn, &ctx, stream))
                 .map_err(to_component_error)?;
 
-            Ok(__rb_bindings::rapidbyte::connector::types::WriteSummary {
-                records_written: summary.records_written,
-                bytes_written: summary.bytes_written,
-                batches_written: summary.batches_written,
-                checkpoint_count: summary.checkpoint_count,
-                records_failed: summary.records_failed,
+            Ok(__rb_bindings::rapidbyte::connector::types::RunSummary {
+                role: __rb_bindings::rapidbyte::connector::types::ConnectorRole::Destination,
+                read: None,
+                write: Some(__rb_bindings::rapidbyte::connector::types::WriteSummary {
+                    records_written: summary.records_written,
+                    bytes_written: summary.bytes_written,
+                    batches_written: summary.batches_written,
+                    checkpoint_count: summary.checkpoint_count,
+                    records_failed: summary.records_failed,
+                }),
+                transform: None,
             })
         }
     }
 }
 
-/// Generate transform-specific methods: run_transform.
+/// Generate transform-specific methods: run.
 fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> TokenStream {
     quote! {
-        fn run_transform(
-            ctx_json: String,
+        fn run(
+            _session: u64,
+            request: __rb_bindings::rapidbyte::connector::types::RunRequest,
         ) -> Result<
-            __rb_bindings::rapidbyte::connector::types::TransformSummary,
+            __rb_bindings::rapidbyte::connector::types::RunSummary,
             __rb_bindings::rapidbyte::connector::types::ConnectorError,
         > {
-            let stream = parse_stream_context(ctx_json)?;
+            let stream = parse_stream_context(request.stream_context_json)?;
             let base_ctx = CONTEXT.get().expect("Connector not opened");
             let ctx = base_ctx.with_stream(&stream.stream_name);
             let rt = get_runtime();
@@ -411,12 +426,17 @@ fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
                 .block_on(<#struct_name as #trait_path>::transform(conn, &ctx, stream))
                 .map_err(to_component_error)?;
 
-            Ok(__rb_bindings::rapidbyte::connector::types::TransformSummary {
-                records_in: summary.records_in,
-                records_out: summary.records_out,
-                bytes_in: summary.bytes_in,
-                bytes_out: summary.bytes_out,
-                batches_processed: summary.batches_processed,
+            Ok(__rb_bindings::rapidbyte::connector::types::RunSummary {
+                role: __rb_bindings::rapidbyte::connector::types::ConnectorRole::Transform,
+                read: None,
+                write: None,
+                transform: Some(__rb_bindings::rapidbyte::connector::types::TransformSummary {
+                    records_in: summary.records_in,
+                    records_out: summary.records_out,
+                    bytes_in: summary.bytes_in,
+                    bytes_out: summary.bytes_out,
+                    batches_processed: summary.batches_processed,
+                }),
             })
         }
     }

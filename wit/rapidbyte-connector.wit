@@ -1,6 +1,20 @@
-package rapidbyte:connector@3.0.0;
+package rapidbyte:connector@4.0.0;
 
 interface types {
+    type session = u64;
+
+    enum connector-role {
+        source,
+        destination,
+        transform,
+    }
+
+    enum run-phase {
+        read,
+        write,
+        transform,
+    }
+
     enum validation-status {
         success,
         failed,
@@ -36,6 +50,18 @@ interface types {
         before-commit,
         after-commit-unknown,
         after-commit-confirmed,
+    }
+
+    enum state-scope {
+        pipeline,
+        per-stream,
+        connector-instance,
+    }
+
+    enum checkpoint-kind {
+        source,
+        destination,
+        transform,
     }
 
     record connector-error {
@@ -85,9 +111,24 @@ interface types {
         batches-processed: u64,
     }
 
-    record validation-result {
+    record validation-report {
         status: validation-status,
         message: string,
+        warnings: list<string>,
+    }
+
+    record run-request {
+        phase: run-phase,
+        stream-context-json: string,
+        dry-run: bool,
+        max-records: option<u64>,
+    }
+
+    record run-summary {
+        role: connector-role,
+        read: option<read-summary>,
+        write: option<write-summary>,
+        transform: option<transform-summary>,
     }
 
     variant socket-read-result {
@@ -132,32 +173,50 @@ interface host {
     socket-close: func(handle: u64);
 }
 
-interface source-connector {
-    use types.{read-summary, validation-result, connector-error};
+interface source {
+    use types.{
+        connector-error,
+        run-request,
+        run-summary,
+        session,
+        validation-report,
+    };
 
-    open: func(config-json: string) -> result<_, connector-error>;
-    discover: func() -> result<string, connector-error>;
-    validate: func() -> result<validation-result, connector-error>;
-    run-read: func(ctx-json: string) -> result<read-summary, connector-error>;
-    close: func() -> result<_, connector-error>;
+    open: func(config-json: string) -> result<session, connector-error>;
+    discover: func(session: session) -> result<string, connector-error>;
+    validate: func(session: session) -> result<validation-report, connector-error>;
+    run: func(session: session, request: run-request) -> result<run-summary, connector-error>;
+    close: func(session: session) -> result<_, connector-error>;
 }
 
-interface dest-connector {
-    use types.{write-summary, validation-result, connector-error};
+interface destination {
+    use types.{
+        connector-error,
+        run-request,
+        run-summary,
+        session,
+        validation-report,
+    };
 
-    open: func(config-json: string) -> result<_, connector-error>;
-    validate: func() -> result<validation-result, connector-error>;
-    run-write: func(ctx-json: string) -> result<write-summary, connector-error>;
-    close: func() -> result<_, connector-error>;
+    open: func(config-json: string) -> result<session, connector-error>;
+    validate: func(session: session) -> result<validation-report, connector-error>;
+    run: func(session: session, request: run-request) -> result<run-summary, connector-error>;
+    close: func(session: session) -> result<_, connector-error>;
 }
 
-interface transform-connector {
-    use types.{transform-summary, validation-result, connector-error};
+interface transform {
+    use types.{
+        connector-error,
+        run-request,
+        run-summary,
+        session,
+        validation-report,
+    };
 
-    open: func(config-json: string) -> result<_, connector-error>;
-    validate: func() -> result<validation-result, connector-error>;
-    run-transform: func(ctx-json: string) -> result<transform-summary, connector-error>;
-    close: func() -> result<_, connector-error>;
+    open: func(config-json: string) -> result<session, connector-error>;
+    validate: func(session: session) -> result<validation-report, connector-error>;
+    run: func(session: session, request: run-request) -> result<run-summary, connector-error>;
+    close: func(session: session) -> result<_, connector-error>;
 }
 
 world rapidbyte-host {
@@ -166,15 +225,15 @@ world rapidbyte-host {
 
 world rapidbyte-source {
     import host;
-    export source-connector;
+    export source;
 }
 
 world rapidbyte-destination {
     import host;
-    export dest-connector;
+    export destination;
 }
 
 world rapidbyte-transform {
     import host;
-    export transform-connector;
+    export transform;
 }

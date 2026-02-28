@@ -376,7 +376,7 @@ macro_rules! impl_host_trait_for_world {
 macro_rules! define_validation_to_sdk {
     ($fn_name:ident, $module:ident) => {
         pub fn $fn_name(
-            value: $module::rapidbyte::connector::types::ValidationResult,
+            value: $module::rapidbyte::connector::types::ValidationReport,
         ) -> ValidationResult {
             ValidationResult {
                 status: match value.status {
@@ -406,3 +406,18 @@ macro_rules! define_world_glue {
 }
 
 for_each_world!(define_world_glue);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v4_world_bindings_exist() {
+        let _ = std::any::TypeId::of::<source_bindings::RapidbyteSource>();
+        let _ = std::any::TypeId::of::<dest_bindings::RapidbyteDestination>();
+        let _ = std::any::TypeId::of::<transform_bindings::RapidbyteTransform>();
+
+        let _: Option<source_bindings::rapidbyte::connector::types::RunRequest> = None;
+        let _: Option<source_bindings::rapidbyte::connector::types::RunSummary> = None;
+    }
+}
