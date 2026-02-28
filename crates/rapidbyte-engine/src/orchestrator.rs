@@ -659,6 +659,9 @@ fn build_stream_contexts(
             selected_columns: s.columns.clone(),
             partition_count: None,
             partition_index: None,
+            effective_parallelism: Some(configured_parallelism),
+            partition_strategy: None,
+            copy_flush_bytes_override: None,
         };
 
         if should_partition
@@ -670,6 +673,7 @@ fn build_stream_contexts(
                 shard_ctx.source_stream_name = Some(s.name.clone());
                 shard_ctx.partition_count = Some(configured_parallelism);
                 shard_ctx.partition_index = Some(shard);
+                shard_ctx.partition_strategy = Some(rapidbyte_types::stream::PartitionStrategy::Mod);
                 stream_ctxs.push(shard_ctx);
             }
         } else {
@@ -2042,6 +2046,9 @@ state:
                 selected_columns: None,
                 partition_count: Some(4),
                 partition_index: Some(0),
+                effective_parallelism: Some(4),
+                partition_strategy: Some(rapidbyte_types::stream::PartitionStrategy::Mod),
+                copy_flush_bytes_override: None,
             },
             StreamContext {
                 stream_name: "bench_events".to_string(),
@@ -2055,6 +2062,9 @@ state:
                 selected_columns: None,
                 partition_count: Some(4),
                 partition_index: Some(3),
+                effective_parallelism: Some(4),
+                partition_strategy: Some(rapidbyte_types::stream::PartitionStrategy::Mod),
+                copy_flush_bytes_override: None,
             },
             StreamContext {
                 stream_name: "users".to_string(),
@@ -2068,6 +2078,9 @@ state:
                 selected_columns: None,
                 partition_count: None,
                 partition_index: None,
+                effective_parallelism: Some(1),
+                partition_strategy: None,
+                copy_flush_bytes_override: None,
             },
         ];
 
@@ -2096,6 +2109,9 @@ state:
                 selected_columns: None,
                 partition_count: None,
                 partition_index: None,
+                effective_parallelism: Some(1),
+                partition_strategy: None,
+                copy_flush_bytes_override: None,
             },
             StreamContext {
                 stream_name: "orders_append".to_string(),
@@ -2109,6 +2125,9 @@ state:
                 selected_columns: None,
                 partition_count: None,
                 partition_index: None,
+                effective_parallelism: Some(1),
+                partition_strategy: None,
+                copy_flush_bytes_override: None,
             },
         ];
 
