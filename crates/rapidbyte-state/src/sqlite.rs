@@ -302,14 +302,16 @@ impl StateBackend for SqliteStateBackend {
         }
 
         let conn = self.lock_conn()?;
-        let tx = conn.unchecked_transaction().map_err(StateError::backend)?;
+        let tx = conn
+            .unchecked_transaction()
+            .map_err(|e| StateError::backend_context("insert_dlq_records: begin tx", e))?;
         let mut stmt = tx
             .prepare(
                 "INSERT INTO dlq_records \
                  (pipeline, run_id, stream_name, record_json, error_message, error_category, failed_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )
-            .map_err(StateError::backend)?;
+            .map_err(|e| StateError::backend_context("insert_dlq_records: prepare", e))?;
 
         let mut count = 0u64;
         for record in records {
@@ -322,11 +324,12 @@ impl StateBackend for SqliteStateBackend {
                 record.error_category.to_string(),
                 record.failed_at.as_str(),
             ])
-            .map_err(StateError::backend)?;
+            .map_err(|e| StateError::backend_context("insert_dlq_records: execute", e))?;
             count += 1;
         }
         drop(stmt);
-        tx.commit().map_err(StateError::backend)?;
+        tx.commit()
+            .map_err(|e| StateError::backend_context("insert_dlq_records: commit", e))?;
 
         Ok(count)
     }
@@ -553,6 +556,23 @@ mod tests {
         let backend = SqliteStateBackend::in_memory().unwrap();
         let count = backend.insert_dlq_records(&pid("p"), 1, &[]).unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn dlq_records_invalid_run_id_includes_operation_context() {
+        let backend = SqliteStateBackend::in_memory().unwrap();
+        let records = vec![DlqRecord {
+            stream_name: "users".into(),
+            record_json: r#"{"id":1}"#.into(),
+            error_message: "bad row".into(),
+            error_category: ErrorCategory::Data,
+            failed_at: Timestamp::new("2026-02-21T12:00:00+00:00"),
+        }];
+
+        let err = backend
+            .insert_dlq_records(&pid("p"), 999, &records)
+            .expect_err("invalid run id should fail");
+        assert!(err.to_string().contains("insert_dlq_records"));
     }
 
     #[test]

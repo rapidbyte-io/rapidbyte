@@ -25,12 +25,13 @@ pub(crate) fn correlate_and_persist_cursors(
 
         let dest_confirmed = dest_checkpoints
             .iter()
-            .any(|dcp| dcp.stream == src_cp.stream);
+            .any(|dcp| dcp.stream == src_cp.stream && dcp.id >= src_cp.id);
         if !dest_confirmed {
             tracing::warn!(
                 pipeline = pipeline.as_str(),
                 stream = src_cp.stream,
-                "Skipping cursor advancement: no destination checkpoint confirms stream data"
+                source_checkpoint_id = src_cp.id,
+                "Skipping cursor advancement: no destination checkpoint confirms stream data at or beyond source checkpoint"
             );
             continue;
         }
@@ -156,6 +157,24 @@ mod tests {
             .get_cursor(&pid(), &StreamName::new("orders"))
             .unwrap();
         assert!(orders.is_none());
+    }
+
+    #[test]
+    fn test_correlate_stale_dest_checkpoint_does_not_advance() {
+        let backend = SqliteStateBackend::in_memory().unwrap();
+        let src = vec![Checkpoint {
+            id: 2,
+            ..make_source_checkpoint("users", "id", "42")
+        }];
+        let dst = vec![make_dest_checkpoint("users")];
+
+        let advanced = correlate_and_persist_cursors(&backend, &pid(), &src, &dst).unwrap();
+        assert_eq!(advanced, 0);
+
+        let cursor = backend
+            .get_cursor(&pid(), &StreamName::new("users"))
+            .unwrap();
+        assert!(cursor.is_none());
     }
 
     #[test]

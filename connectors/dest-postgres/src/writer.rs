@@ -33,6 +33,9 @@ fn resolve_copy_flush_bytes(
     configured: Option<usize>,
 ) -> Option<usize> {
     if let Some(bytes) = stream_override {
+        if bytes == 0 {
+            return configured.map(clamp_copy_flush_bytes);
+        }
         let override_bytes = usize::try_from(bytes).unwrap_or(usize::MAX);
         return Some(clamp_copy_flush_bytes(override_bytes));
     }
@@ -801,6 +804,12 @@ mod tests {
     fn runtime_override_takes_precedence_over_configured_flush_bytes() {
         let resolved = resolve_copy_flush_bytes(Some(16 * 1024 * 1024), Some(2 * 1024 * 1024));
         assert_eq!(resolved, Some(16 * 1024 * 1024));
+    }
+
+    #[test]
+    fn zero_runtime_override_falls_back_to_configured_flush_bytes() {
+        let resolved = resolve_copy_flush_bytes(Some(0), Some(2 * 1024 * 1024));
+        assert_eq!(resolved, Some(2 * 1024 * 1024));
     }
 
     #[test]

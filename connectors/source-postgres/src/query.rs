@@ -63,6 +63,19 @@ fn is_integer_arrow_type(data_type: ArrowDataType) -> bool {
     )
 }
 
+fn quote_table_name(table: &str) -> String {
+    if table.contains('.') {
+        table
+            .split('.')
+            .filter(|part| !part.is_empty())
+            .map(|part| quote_identifier(part).into_owned())
+            .collect::<Vec<_>>()
+            .join(".")
+    } else {
+        quote_identifier(table).into_owned()
+    }
+}
+
 pub(crate) fn build_base_query(
     ctx: &Context,
     stream: &StreamContext,
@@ -87,7 +100,7 @@ pub(crate) fn build_base_query(
         .join(", ");
 
     if let (SyncMode::Incremental, Some(ci)) = (&stream.sync_mode, &stream.cursor_info) {
-        let table_name = quote_identifier(source_table_name);
+        let table_name = quote_table_name(source_table_name);
         let cursor_field = quote_identifier(&ci.cursor_field);
         let cursor_arrow_type = columns
             .iter()
@@ -168,7 +181,7 @@ pub(crate) fn build_base_query(
         return Ok(CursorQuery { sql, bind: None });
     }
 
-    let table_name = quote_identifier(source_table_name);
+    let table_name = quote_table_name(source_table_name);
     let mut sql = format!("SELECT {col_list} FROM {table_name}");
 
     if let (Some(partition_count), Some(partition_index)) =
@@ -591,5 +604,37 @@ mod tests {
             "SELECT id, name FROM users WHERE id >= 10 AND id <= 19"
         );
         assert!(query.bind.is_none());
+    }
+
+    #[test]
+    fn build_base_query_full_refresh_with_schema_qualified_source_table() {
+        let ctx = Context::new("source-postgres", "");
+        let mut stream = base_context();
+        stream.source_stream_name = Some("public.users".to_string());
+
+        let query = build_base_query(&ctx, &stream, &columns_for_cursor(), None)
+            .expect("query should build");
+        assert_eq!(query.sql, "SELECT id, name FROM public.users");
+    }
+
+    #[test]
+    fn build_base_query_incremental_with_schema_qualified_source_table() {
+        let ctx = Context::new("source-postgres", "");
+        let mut stream = base_context();
+        stream.source_stream_name = Some("public.users".to_string());
+        stream.sync_mode = SyncMode::Incremental;
+        stream.cursor_info = Some(CursorInfo {
+            cursor_field: "id".to_string(),
+            cursor_type: CursorType::Int64,
+            last_value: Some(CursorValue::Int64 { value: 7 }),
+        });
+
+        let query = build_base_query(&ctx, &stream, &columns_for_cursor(), None)
+            .expect("query should build");
+        assert_eq!(
+            query.sql,
+            "SELECT id, name FROM public.users WHERE id > $1::bigint ORDER BY id"
+        );
+        assert!(query.bind.is_some());
     }
 }

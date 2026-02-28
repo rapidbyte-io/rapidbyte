@@ -258,14 +258,19 @@ impl HostStateBuilder {
     ///
     /// Returns an error if the WASI context cannot be constructed (e.g. invalid preopens).
     ///
-    /// # Panics
-    ///
-    /// Panics if `pipeline`, `connector_id`, `stream`, or `state_backend` were not set.
     pub fn build(self) -> Result<ComponentHostState> {
-        let pipeline = self.pipeline.expect("pipeline is required");
-        let connector_id = self.connector_id.expect("connector_id is required");
-        let stream = self.stream.expect("stream is required");
-        let state_backend = self.state_backend.expect("state_backend is required");
+        let pipeline = self
+            .pipeline
+            .ok_or_else(|| anyhow::anyhow!("pipeline is required"))?;
+        let connector_id = self
+            .connector_id
+            .ok_or_else(|| anyhow::anyhow!("connector_id is required"))?;
+        let stream = self
+            .stream
+            .ok_or_else(|| anyhow::anyhow!("stream is required"))?;
+        let state_backend = self
+            .state_backend
+            .ok_or_else(|| anyhow::anyhow!("state_backend is required"))?;
 
         Ok(ComponentHostState {
             identity: ConnectorIdentity {
@@ -1005,6 +1010,18 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(host.checkpoints.dlq_limit, 500);
+    }
+
+    #[test]
+    fn builder_missing_required_field_returns_error() {
+        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let result = ComponentHostState::builder()
+            .connector_id("c")
+            .stream("s")
+            .state_backend(state)
+            .build();
+
+        assert!(result.is_err());
     }
 
     #[test]

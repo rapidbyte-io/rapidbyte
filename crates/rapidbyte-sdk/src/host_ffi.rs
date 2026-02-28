@@ -478,6 +478,18 @@ pub fn emit_batch(batch: &RecordBatch) -> Result<(), ConnectorError> {
     Ok(())
 }
 
+fn decode_next_batch_frame(
+    ipc_bytes: &[u8],
+    frame_len: u64,
+) -> Result<(Arc<Schema>, Vec<RecordBatch>), ConnectorError> {
+    crate::arrow::ipc::decode_ipc(ipc_bytes).map_err(|e| {
+        ConnectorError::internal(
+            "NEXT_BATCH_DECODE",
+            format!("failed to decode next_batch frame (frame_len={frame_len}): {e}"),
+        )
+    })
+}
+
 /// Receive the next Arrow RecordBatch from the host pipeline.
 ///
 /// Returns `None` when there are no more batches.
@@ -504,7 +516,7 @@ pub fn next_batch(
     let ipc_bytes = imports.frame_read(handle, 0, frame_len)?;
     imports.frame_drop(handle);
 
-    let (schema, batches) = crate::arrow::ipc::decode_ipc(&ipc_bytes)?;
+    let (schema, batches) = decode_next_batch_frame(&ipc_bytes, frame_len)?;
     Ok(Some((schema, batches)))
 }
 
@@ -593,5 +605,12 @@ mod tests {
 
         let result = emit_batch(&batch);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_decode_next_batch_frame_invalid_payload_includes_context() {
+        let err = decode_next_batch_frame(&[1, 2, 3], 3).expect_err("invalid ipc should fail");
+        assert_eq!(err.code, "NEXT_BATCH_DECODE");
+        assert!(err.message.contains("frame_len=3"));
     }
 }

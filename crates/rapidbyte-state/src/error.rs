@@ -21,6 +21,14 @@ impl StateError {
     pub fn backend(err: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self::Backend(Box::new(err))
     }
+
+    /// Wrap backend errors with operation context for easier diagnosis.
+    pub fn backend_context(
+        context: &str,
+        err: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::Backend(Box::new(std::io::Error::other(format!("{context}: {err}"))))
+    }
 }
 
 /// Convenience alias used throughout this crate.
@@ -55,5 +63,11 @@ mod tests {
         let inner = std::io::Error::other("test");
         let err = StateError::backend(inner);
         assert!(matches!(err, StateError::Backend(_)));
+    }
+
+    #[test]
+    fn backend_context_includes_operation_name() {
+        let err = StateError::backend_context("insert_dlq_records", std::io::Error::other("boom"));
+        assert!(err.to_string().contains("insert_dlq_records"));
     }
 }

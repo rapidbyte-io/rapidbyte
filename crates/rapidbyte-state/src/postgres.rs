@@ -231,14 +231,16 @@ impl StateBackend for PostgresStateBackend {
         }
 
         let mut client = self.lock_client()?;
-        let mut tx = client.transaction().map_err(StateError::backend)?;
+        let mut tx = client
+            .transaction()
+            .map_err(|e| StateError::backend_context("insert_dlq_records: begin tx", e))?;
         let stmt = tx
             .prepare(
                 "INSERT INTO dlq_records \
                  (pipeline, run_id, stream_name, record_json, error_message, error_category, failed_at) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7)",
             )
-            .map_err(StateError::backend)?;
+            .map_err(|e| StateError::backend_context("insert_dlq_records: prepare", e))?;
 
         let mut count = 0u64;
         for record in records {
@@ -255,10 +257,11 @@ impl StateBackend for PostgresStateBackend {
                     &record.failed_at.as_str(),
                 ],
             )
-            .map_err(StateError::backend)?;
+            .map_err(|e| StateError::backend_context("insert_dlq_records: execute", e))?;
             count += 1;
         }
-        tx.commit().map_err(StateError::backend)?;
+        tx.commit()
+            .map_err(|e| StateError::backend_context("insert_dlq_records: commit", e))?;
 
         Ok(count)
     }
