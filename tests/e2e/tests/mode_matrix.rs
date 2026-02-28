@@ -126,7 +126,7 @@ async fn full_refresh_compression_matrix(#[case] compression: Option<&str>) {
             .run_pipeline_with_compression(
                 &schemas,
                 "full_refresh",
-                "append",
+                "replace",
                 &state_path,
                 compression,
             )
