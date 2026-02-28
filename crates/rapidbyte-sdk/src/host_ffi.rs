@@ -258,7 +258,7 @@ impl HostImports for WasmHostImports {
         };
 
         let envelope = PayloadEnvelope {
-            protocol_version: ProtocolVersion::V2,
+            protocol_version: ProtocolVersion::V4,
             connector_id: connector_id.to_string(),
             stream_name: stream_name.to_string(),
             payload: cp,
@@ -277,7 +277,7 @@ impl HostImports for WasmHostImports {
         m: &Metric,
     ) -> Result<(), ConnectorError> {
         let envelope = PayloadEnvelope {
-            protocol_version: ProtocolVersion::V2,
+            protocol_version: ProtocolVersion::V4,
             connector_id: connector_id.to_string(),
             stream_name: stream_name.to_string(),
             payload: m,

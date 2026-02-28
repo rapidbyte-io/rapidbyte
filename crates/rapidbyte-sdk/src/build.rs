@@ -38,7 +38,7 @@ impl ManifestBuilder {
                 description: String::new(),
                 author: None,
                 license: None,
-                protocol_version: ProtocolVersion::V2,
+                protocol_version: ProtocolVersion::V4,
                 permissions: Permissions::default(),
                 limits: ResourceLimits::default(),
                 roles: Roles {
@@ -64,7 +64,7 @@ impl ManifestBuilder {
                 description: String::new(),
                 author: None,
                 license: None,
-                protocol_version: ProtocolVersion::V2,
+                protocol_version: ProtocolVersion::V4,
                 permissions: Permissions::default(),
                 limits: ResourceLimits::default(),
                 roles: Roles {
@@ -90,7 +90,7 @@ impl ManifestBuilder {
                 description: String::new(),
                 author: None,
                 license: None,
-                protocol_version: ProtocolVersion::V2,
+                protocol_version: ProtocolVersion::V4,
                 permissions: Permissions::default(),
                 limits: ResourceLimits::default(),
                 roles: Roles {

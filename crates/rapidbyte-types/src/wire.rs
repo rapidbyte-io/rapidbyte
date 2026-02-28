@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 /// Determines serialization format and available host imports.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProtocolVersion {
-    /// Version 2 — current stable protocol.
+    /// Version 4 — current stable protocol.
     #[default]
-    #[serde(rename = "2")]
-    V2,
+    #[serde(rename = "4")]
+    V4,
 }
 
 /// How data is read from a source stream.
@@ -111,10 +111,10 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_default_is_v2() {
+    fn protocol_version_default_is_v4() {
         let v = ProtocolVersion::default();
-        assert_eq!(v, ProtocolVersion::V2);
-        assert_eq!(serde_json::to_string(&v).unwrap(), "\"2\"");
+        assert_eq!(v, ProtocolVersion::V4);
+        assert_eq!(serde_json::to_string(&v).unwrap(), "\"4\"");
     }
 
     #[test]
@@ -129,7 +129,7 @@ mod tests {
     #[test]
     fn connector_info_roundtrip() {
         let info = ConnectorInfo {
-            protocol_version: ProtocolVersion::V2,
+            protocol_version: ProtocolVersion::V4,
             features: vec![Feature::Cdc, Feature::Stateful],
             default_max_batch_bytes: 64 * 1024 * 1024,
         };

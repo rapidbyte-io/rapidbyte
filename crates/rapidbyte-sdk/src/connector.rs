@@ -133,7 +133,7 @@ mod tests {
             Ok((
                 Self { config },
                 ConnectorInfo {
-                    protocol_version: ProtocolVersion::V2,
+                    protocol_version: ProtocolVersion::V4,
                     features: vec![],
                     default_max_batch_bytes: 64 * 1024 * 1024,
                 },
@@ -171,7 +171,7 @@ mod tests {
             Ok((
                 Self { config },
                 ConnectorInfo {
-                    protocol_version: ProtocolVersion::V2,
+                    protocol_version: ProtocolVersion::V4,
                     features: vec![],
                     default_max_batch_bytes: 64 * 1024 * 1024,
                 },
@@ -205,7 +205,7 @@ mod tests {
             Ok((
                 Self { config },
                 ConnectorInfo {
-                    protocol_version: ProtocolVersion::V2,
+                    protocol_version: ProtocolVersion::V4,
                     features: vec![],
                     default_max_batch_bytes: 64 * 1024 * 1024,
                 },

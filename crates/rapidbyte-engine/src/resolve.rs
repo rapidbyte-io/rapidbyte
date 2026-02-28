@@ -70,11 +70,11 @@ pub(crate) fn load_and_validate_manifest(
             anyhow::bail!("Connector '{connector_ref}' does not support {expected_role:?} role");
         }
 
-        if m.protocol_version != ProtocolVersion::V2 {
+        if m.protocol_version != ProtocolVersion::V4 {
             tracing::warn!(
                 connector = connector_ref,
                 manifest_protocol = ?m.protocol_version,
-                host_protocol = ?ProtocolVersion::V2,
+                host_protocol = ?ProtocolVersion::V4,
                 "Protocol version mismatch"
             );
         }

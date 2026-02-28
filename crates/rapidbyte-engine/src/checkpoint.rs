@@ -172,7 +172,7 @@ mod tests {
             bytes_processed: 5000,
         };
         let source_env = PayloadEnvelope {
-            protocol_version: ProtocolVersion::V2,
+            protocol_version: ProtocolVersion::V4,
             connector_id: "source-postgres".to_string(),
             stream_name: "users".to_string(),
             payload: source_cp,
@@ -197,7 +197,7 @@ mod tests {
             bytes_processed: 5000,
         };
         let dest_env = PayloadEnvelope {
-            protocol_version: ProtocolVersion::V2,
+            protocol_version: ProtocolVersion::V4,
             connector_id: "dest-postgres".to_string(),
             stream_name: "users".to_string(),
             payload: dest_cp,

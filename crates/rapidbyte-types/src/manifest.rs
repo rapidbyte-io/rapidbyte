@@ -161,7 +161,7 @@ mod tests {
             description: "Reads from PostgreSQL".into(),
             author: None,
             license: Some("MIT".into()),
-            protocol_version: ProtocolVersion::V2,
+            protocol_version: ProtocolVersion::V4,
             permissions: Permissions {
                 network: NetworkPermissions {
                     allowed_domains: None,

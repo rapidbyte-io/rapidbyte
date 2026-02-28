@@ -297,7 +297,7 @@ impl Source for {struct_name} {{
         Ok((
             Self {{ config }},
             ConnectorInfo {{
-                protocol_version: ProtocolVersion::V2,
+                protocol_version: ProtocolVersion::V4,
                 features: vec![],
                 default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
             }},
@@ -345,7 +345,7 @@ impl Destination for {struct_name} {{
         Ok((
             Self {{ config }},
             ConnectorInfo {{
-                protocol_version: ProtocolVersion::V2,
+                protocol_version: ProtocolVersion::V4,
                 features: vec![],
                 default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
             }},

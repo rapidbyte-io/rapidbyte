@@ -17,7 +17,7 @@ impl Transform for TransformSql {
         Ok((
             Self { config },
             ConnectorInfo {
-                protocol_version: ProtocolVersion::V2,
+                protocol_version: ProtocolVersion::V4,
                 features: vec![],
                 default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
             },

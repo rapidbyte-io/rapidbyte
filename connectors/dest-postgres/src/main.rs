@@ -33,7 +33,7 @@ impl Destination for DestPostgres {
         Ok((
             Self { config },
             ConnectorInfo {
-                protocol_version: ProtocolVersion::V2,
+                protocol_version: ProtocolVersion::V4,
                 features,
                 default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
             },
