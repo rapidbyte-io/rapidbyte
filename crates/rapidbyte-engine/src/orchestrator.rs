@@ -724,6 +724,16 @@ fn destination_preflight_streams(stream_ctxs: &[StreamContext]) -> Vec<StreamCon
     preflight
 }
 
+fn execution_parallelism(config: &PipelineConfig, stream_ctxs: &[StreamContext]) -> usize {
+    let resolved = stream_ctxs
+        .iter()
+        .filter_map(|ctx| ctx.effective_parallelism)
+        .max()
+        .unwrap_or_else(|| resolve_effective_parallelism(config));
+
+    usize::try_from(resolved.max(1)).unwrap_or(usize::MAX)
+}
+
 #[allow(clippy::too_many_lines, clippy::similar_names)]
 async fn execute_streams(
     config: &PipelineConfig,
@@ -739,7 +749,7 @@ async fn execute_streams(
         parse_connector_ref(&config.destination.use_ref);
     let stats = Arc::new(Mutex::new(RunStats::default()));
     let num_transforms = config.transforms.len();
-    let parallelism = resolve_effective_parallelism(config) as usize;
+    let parallelism = execution_parallelism(config, &stream_build.stream_ctxs);
     let semaphore = Arc::new(tokio::sync::Semaphore::new(parallelism));
 
     tracing::info!(
@@ -2047,6 +2057,54 @@ state:
 
         // 16 cores => 12 worker cores after reserves; split across 3 streams => 4 shards each.
         assert_eq!(resolve_auto_parallelism_for_cores(&config, 16), 12);
+    }
+
+    #[test]
+    fn execution_parallelism_prefers_stream_context_override() {
+        let config =
+            config_with_parallelism_expr("2", "source-postgres", "full_refresh", "append", 0);
+        let stream_ctxs = vec![StreamContext {
+            stream_name: "users".to_string(),
+            source_stream_name: Some("users".to_string()),
+            schema: SchemaHint::Columns(vec![]),
+            sync_mode: SyncMode::FullRefresh,
+            cursor_info: None,
+            limits: StreamLimits::default(),
+            policies: StreamPolicies::default(),
+            write_mode: Some(WriteMode::Append),
+            selected_columns: None,
+            partition_count: Some(5),
+            partition_index: Some(0),
+            effective_parallelism: Some(5),
+            partition_strategy: Some(rapidbyte_types::stream::PartitionStrategy::Mod),
+            copy_flush_bytes_override: None,
+        }];
+
+        assert_eq!(execution_parallelism(&config, &stream_ctxs), 5);
+    }
+
+    #[test]
+    fn execution_parallelism_falls_back_to_pipeline_setting() {
+        let config =
+            config_with_parallelism_expr("3", "source-postgres", "full_refresh", "append", 0);
+        let stream_ctxs = vec![StreamContext {
+            stream_name: "users".to_string(),
+            source_stream_name: None,
+            schema: SchemaHint::Columns(vec![]),
+            sync_mode: SyncMode::FullRefresh,
+            cursor_info: None,
+            limits: StreamLimits::default(),
+            policies: StreamPolicies::default(),
+            write_mode: Some(WriteMode::Append),
+            selected_columns: None,
+            partition_count: None,
+            partition_index: None,
+            effective_parallelism: None,
+            partition_strategy: None,
+            copy_flush_bytes_override: None,
+        }];
+
+        assert_eq!(execution_parallelism(&config, &stream_ctxs), 3);
     }
 
     #[test]
