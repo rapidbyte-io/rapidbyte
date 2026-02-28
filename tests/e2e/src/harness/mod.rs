@@ -680,6 +680,9 @@ destination:
 state:
   backend: sqlite
   connection: {state_db_path}
+
+resources:
+  parallelism: 1
 "#,
         host = context.postgres_host,
         port = context.postgres_port,
