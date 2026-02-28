@@ -603,7 +603,7 @@ fn render_resources_block(
     compression: Option<&str>,
     autotune: Option<&AutotuneOptions>,
 ) -> String {
-    let mut lines = Vec::new();
+    let mut lines = vec!["  parallelism: 1".to_string()];
 
     if let Some(codec) = compression {
         lines.push(format!("  compression: {codec}"));
@@ -631,11 +631,7 @@ fn render_resources_block(
         }
     }
 
-    if lines.is_empty() {
-        String::new()
-    } else {
-        format!("\nresources:\n{}\n", lines.join("\n"))
-    }
+    format!("\nresources:\n{}\n", lines.join("\n"))
 }
 
 fn render_transform_yaml(
@@ -747,4 +743,35 @@ state:
         dest_schema = schemas.destination_schema,
         state_db_path = state_db_path.display(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render_resources_block, AutotuneOptions};
+
+    #[test]
+    fn render_resources_block_pins_parallelism_by_default() {
+        let rendered = render_resources_block(None, None);
+        assert!(rendered.contains("parallelism: 1"));
+    }
+
+    #[test]
+    fn render_resources_block_includes_compression_and_autotune_pins() {
+        let rendered = render_resources_block(
+            Some("zstd"),
+            Some(&AutotuneOptions {
+                enabled: Some(true),
+                pin_parallelism: Some(4),
+                pin_source_partition_mode: Some("range".to_string()),
+                pin_copy_flush_bytes: Some(8 * 1024 * 1024),
+            }),
+        );
+
+        assert!(rendered.contains("compression: zstd"));
+        assert!(rendered.contains("autotune:"));
+        assert!(rendered.contains("enabled: true"));
+        assert!(rendered.contains("pin_parallelism: 4"));
+        assert!(rendered.contains("pin_source_partition_mode: range"));
+        assert!(rendered.contains("pin_copy_flush_bytes: 8388608"));
+    }
 }
