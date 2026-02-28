@@ -13,6 +13,7 @@ const DEFAULT_MAX_BATCH_BYTES: &str = "64mb";
 const DEFAULT_CHECKPOINT_INTERVAL_BYTES: &str = "64mb";
 const DEFAULT_MAX_RETRIES: u32 = 3;
 const DEFAULT_MAX_INFLIGHT_BATCHES: u32 = 16;
+const DEFAULT_AUTOTUNE_ENABLED: bool = true;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineConfig {
@@ -233,6 +234,33 @@ impl<'de> Deserialize<'de> for PipelineParallelism {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourcePartitionMode {
+    Mod,
+    Range,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutotuneConfig {
+    pub enabled: bool,
+    pub pin_parallelism: Option<u32>,
+    pub pin_source_partition_mode: Option<SourcePartitionMode>,
+    pub pin_copy_flush_bytes: Option<usize>,
+}
+
+impl Default for AutotuneConfig {
+    fn default() -> Self {
+        Self {
+            enabled: DEFAULT_AUTOTUNE_ENABLED,
+            pin_parallelism: None,
+            pin_source_partition_mode: None,
+            pin_copy_flush_bytes: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ResourceConfig {
@@ -252,6 +280,7 @@ pub struct ResourceConfig {
     /// Channel capacity between pipeline stages. Controls backpressure.
     /// Must be >= 1. Default: 16.
     pub max_inflight_batches: u32,
+    pub autotune: AutotuneConfig,
 }
 
 impl Default for ResourceConfig {
@@ -266,6 +295,7 @@ impl Default for ResourceConfig {
             max_retries: DEFAULT_MAX_RETRIES,
             compression: None,
             max_inflight_batches: DEFAULT_MAX_INFLIGHT_BATCHES,
+            autotune: AutotuneConfig::default(),
         }
     }
 }
@@ -413,6 +443,64 @@ destination:
 "#;
         let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.resources.parallelism, PipelineParallelism::Auto);
+    }
+
+    #[test]
+    fn test_autotune_defaults_enabled_with_no_pins() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.resources.autotune.enabled);
+        assert_eq!(config.resources.autotune.pin_parallelism, None);
+        assert_eq!(config.resources.autotune.pin_source_partition_mode, None);
+        assert_eq!(config.resources.autotune.pin_copy_flush_bytes, None);
+    }
+
+    #[test]
+    fn test_autotune_manual_pins_parse() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: source-postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: dest-postgres
+  config: {}
+  write_mode: append
+resources:
+  autotune:
+    enabled: true
+    pin_parallelism: 8
+    pin_source_partition_mode: range
+    pin_copy_flush_bytes: 8388608
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.resources.autotune.enabled);
+        assert_eq!(config.resources.autotune.pin_parallelism, Some(8));
+        assert_eq!(
+            config.resources.autotune.pin_source_partition_mode,
+            Some(SourcePartitionMode::Range)
+        );
+        assert_eq!(
+            config.resources.autotune.pin_copy_flush_bytes,
+            Some(8_388_608)
+        );
     }
 
     #[test]

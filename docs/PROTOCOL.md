@@ -130,6 +130,24 @@ Host preserves connector retry metadata and maps connector failures to `Pipeline
 - Optional host-side channel compression (`lz4`/`zstd`) is transparent to connectors
 - Stream execution is sequential per connector instance (`run-*` called once per stream)
 
+### 6.1 Stream Runtime Overrides
+
+`ctx-json` (`StreamContext`) may include host-resolved runtime override hints that
+connectors can consume without changing data semantics:
+
+- `effective_parallelism` (`u32?`): effective stream worker fan-out selected by host.
+- `partition_strategy` (`mod|range?`): source full-refresh sharding strategy override.
+- `copy_flush_bytes_override` (`u64?`): destination COPY flush threshold override.
+
+Override precedence for each knob is:
+
+1. Explicit user pin
+2. Host autotune decision
+3. Connector/default fallback
+
+Connectors must treat these overrides as performance hints only and must not change
+write semantics, checkpoint semantics, or cursor semantics.
+
 ## 7. Checkpoint Coordination
 
 Host stores source and destination checkpoint envelopes and advances persisted cursors only after correlating source+destination confirmation for a stream.

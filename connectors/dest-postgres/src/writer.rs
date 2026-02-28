@@ -22,13 +22,30 @@ use crate::decode;
 const COPY_FLUSH_1MB: usize = 1024 * 1024;
 const COPY_FLUSH_4MB: usize = 4 * 1024 * 1024;
 const COPY_FLUSH_16MB: usize = 16 * 1024 * 1024;
+const COPY_FLUSH_MAX: usize = 32 * 1024 * 1024;
+
+fn clamp_copy_flush_bytes(bytes: usize) -> usize {
+    bytes.clamp(COPY_FLUSH_1MB, COPY_FLUSH_MAX)
+}
+
+fn resolve_copy_flush_bytes(
+    stream_override: Option<u64>,
+    configured: Option<usize>,
+) -> Option<usize> {
+    if let Some(bytes) = stream_override {
+        let override_bytes = usize::try_from(bytes).unwrap_or(usize::MAX);
+        return Some(clamp_copy_flush_bytes(override_bytes));
+    }
+
+    configured.map(clamp_copy_flush_bytes)
+}
 
 fn adaptive_copy_flush_bytes(
     configured: Option<usize>,
     avg_row_bytes: Option<usize>,
 ) -> usize {
     if let Some(bytes) = configured {
-        return bytes;
+        return clamp_copy_flush_bytes(bytes);
     }
 
     match avg_row_bytes {
@@ -109,7 +126,7 @@ pub async fn write_stream(
             rows: stream.limits.checkpoint_interval_rows,
             seconds: stream.limits.checkpoint_interval_seconds,
         },
-        config.copy_flush_bytes,
+        resolve_copy_flush_bytes(stream.copy_flush_bytes_override, config.copy_flush_bytes),
         config.load_method,
     )
     .map_err(|e| ConnectorError::config("INVALID_STREAM_SETUP", e))?;
@@ -778,6 +795,31 @@ mod tests {
     fn adaptive_flush_uses_user_override_when_set() {
         let chosen = adaptive_copy_flush_bytes(Some(2 * 1024 * 1024), Some(80_000));
         assert_eq!(chosen, 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn runtime_override_takes_precedence_over_configured_flush_bytes() {
+        let resolved = resolve_copy_flush_bytes(Some(16 * 1024 * 1024), Some(2 * 1024 * 1024));
+        assert_eq!(resolved, Some(16 * 1024 * 1024));
+    }
+
+    #[test]
+    fn configured_flush_bytes_used_when_no_runtime_override() {
+        let resolved = resolve_copy_flush_bytes(None, Some(2 * 1024 * 1024));
+        assert_eq!(resolved, Some(2 * 1024 * 1024));
+
+        // When explicitly configured, adaptive sizing must not rewrite the value.
+        let chosen = adaptive_copy_flush_bytes(resolved, Some(80 * 1024));
+        assert_eq!(chosen, 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn resolved_flush_bytes_are_clamped_to_guardrails() {
+        let clamped_override = resolve_copy_flush_bytes(Some(u64::MAX), None);
+        assert_eq!(clamped_override, Some(COPY_FLUSH_MAX));
+
+        let clamped_config = resolve_copy_flush_bytes(None, Some(256 * 1024));
+        assert_eq!(clamped_config, Some(COPY_FLUSH_1MB));
     }
 
     #[test]

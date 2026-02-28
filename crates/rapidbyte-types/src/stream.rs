@@ -61,6 +61,14 @@ pub enum NullabilityPolicy {
     Fail,
 }
 
+/// Partition strategy for full-refresh source fan-out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PartitionStrategy {
+    Mod,
+    Range,
+}
+
 /// Schema evolution behavior when source schema changes between runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SchemaEvolutionPolicy {
@@ -193,6 +201,15 @@ pub struct StreamContext {
     /// Zero-based partition index for this stream execution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition_index: Option<u32>,
+    /// Effective worker parallelism selected for this stream execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_parallelism: Option<u32>,
+    /// Source partition strategy override selected for this stream execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_strategy: Option<PartitionStrategy>,
+    /// Destination COPY flush threshold override in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_flush_bytes_override: Option<u64>,
 }
 
 #[cfg(test)]
@@ -238,6 +255,9 @@ mod tests {
             selected_columns: None,
             partition_count: Some(4),
             partition_index: Some(2),
+            effective_parallelism: Some(4),
+            partition_strategy: Some(PartitionStrategy::Range),
+            copy_flush_bytes_override: Some(8 * 1024 * 1024),
         };
         let json = serde_json::to_string(&ctx).unwrap();
         let back: StreamContext = serde_json::from_str(&json).unwrap();

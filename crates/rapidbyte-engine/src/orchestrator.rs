@@ -11,7 +11,7 @@ use rapidbyte_types::envelope::DlqRecord;
 use rapidbyte_types::error::ValidationResult;
 use rapidbyte_types::manifest::{Permissions, ResourceLimits};
 use rapidbyte_types::metric::{ReadSummary, WriteSummary};
-use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
+use rapidbyte_types::stream::{PartitionStrategy, StreamContext, StreamLimits, StreamPolicies};
 use rapidbyte_types::wire::{ConnectorRole, SyncMode, WriteMode};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -570,7 +570,22 @@ fn build_stream_contexts(
     state: &dyn StateBackend,
     max_records: Option<u64>,
 ) -> Result<StreamBuild, PipelineError> {
-    let configured_parallelism = resolve_effective_parallelism(config);
+    let baseline_parallelism = resolve_effective_parallelism(config);
+    let source_connector_id = parse_connector_ref(&config.source.use_ref).0;
+    let autotune_decision = crate::autotune::resolve_stream_autotune(
+        config,
+        baseline_parallelism,
+        &source_connector_id,
+    );
+    let configured_parallelism = autotune_decision.parallelism;
+    tracing::info!(
+        autotune_enabled = autotune_decision.autotune_enabled,
+        baseline_parallelism,
+        configured_parallelism,
+        partition_strategy = ?autotune_decision.partition_strategy,
+        copy_flush_bytes_override = autotune_decision.copy_flush_bytes_override,
+        "Autotune decision resolved"
+    );
     let max_batch = parse_byte_size(&config.resources.max_batch_bytes).map_err(|e| {
         PipelineError::Infrastructure(anyhow::anyhow!(
             "Invalid max_batch_bytes '{}': {}",
@@ -602,7 +617,6 @@ fn build_stream_contexts(
     };
 
     let pipeline_id = PipelineId::new(config.pipeline.clone());
-    let source_connector_id = parse_connector_ref(&config.source.use_ref).0;
     let should_partition = source_connector_id == "source-postgres" && configured_parallelism > 1;
     let mut stream_ctxs = Vec::new();
 
@@ -659,6 +673,9 @@ fn build_stream_contexts(
             selected_columns: s.columns.clone(),
             partition_count: None,
             partition_index: None,
+            effective_parallelism: Some(configured_parallelism),
+            partition_strategy: None,
+            copy_flush_bytes_override: autotune_decision.copy_flush_bytes_override,
         };
 
         if should_partition
@@ -670,6 +687,11 @@ fn build_stream_contexts(
                 shard_ctx.source_stream_name = Some(s.name.clone());
                 shard_ctx.partition_count = Some(configured_parallelism);
                 shard_ctx.partition_index = Some(shard);
+                shard_ctx.partition_strategy = Some(
+                    autotune_decision
+                        .partition_strategy
+                        .unwrap_or(PartitionStrategy::Mod),
+                );
                 stream_ctxs.push(shard_ctx);
             }
         } else {
@@ -702,6 +724,16 @@ fn destination_preflight_streams(stream_ctxs: &[StreamContext]) -> Vec<StreamCon
     preflight
 }
 
+fn execution_parallelism(config: &PipelineConfig, stream_ctxs: &[StreamContext]) -> usize {
+    let resolved = stream_ctxs
+        .iter()
+        .filter_map(|ctx| ctx.effective_parallelism)
+        .max()
+        .unwrap_or_else(|| resolve_effective_parallelism(config));
+
+    usize::try_from(resolved.max(1)).unwrap_or(usize::MAX)
+}
+
 #[allow(clippy::too_many_lines, clippy::similar_names)]
 async fn execute_streams(
     config: &PipelineConfig,
@@ -717,7 +749,7 @@ async fn execute_streams(
         parse_connector_ref(&config.destination.use_ref);
     let stats = Arc::new(Mutex::new(RunStats::default()));
     let num_transforms = config.transforms.len();
-    let parallelism = resolve_effective_parallelism(config) as usize;
+    let parallelism = execution_parallelism(config, &stream_build.stream_ctxs);
     let semaphore = Arc::new(tokio::sync::Semaphore::new(parallelism));
 
     tracing::info!(
@@ -1287,14 +1319,14 @@ async fn finalize_run(
 ) -> Result<PipelineResult, PipelineError> {
     if let Some(err) = aggregated.first_error {
         let state_for_complete = state.clone();
-        let stats = RunStats {
+        let run_stats = RunStats {
             records_read: aggregated.final_stats.records_read,
             records_written: aggregated.final_stats.records_written,
             bytes_read: aggregated.final_stats.bytes_read,
             error_message: Some(format!("Stream error: {err}")),
         };
         tokio::task::spawn_blocking(move || {
-            state_for_complete.complete_run(run_id, RunStatus::Failed, &stats)
+            state_for_complete.complete_run(run_id, RunStatus::Failed, &run_stats)
         })
         .await
         .map_err(|e| {
@@ -2028,6 +2060,54 @@ state:
     }
 
     #[test]
+    fn execution_parallelism_prefers_stream_context_override() {
+        let config =
+            config_with_parallelism_expr("2", "source-postgres", "full_refresh", "append", 0);
+        let stream_ctxs = vec![StreamContext {
+            stream_name: "users".to_string(),
+            source_stream_name: Some("users".to_string()),
+            schema: SchemaHint::Columns(vec![]),
+            sync_mode: SyncMode::FullRefresh,
+            cursor_info: None,
+            limits: StreamLimits::default(),
+            policies: StreamPolicies::default(),
+            write_mode: Some(WriteMode::Append),
+            selected_columns: None,
+            partition_count: Some(5),
+            partition_index: Some(0),
+            effective_parallelism: Some(5),
+            partition_strategy: Some(rapidbyte_types::stream::PartitionStrategy::Mod),
+            copy_flush_bytes_override: None,
+        }];
+
+        assert_eq!(execution_parallelism(&config, &stream_ctxs), 5);
+    }
+
+    #[test]
+    fn execution_parallelism_falls_back_to_pipeline_setting() {
+        let config =
+            config_with_parallelism_expr("3", "source-postgres", "full_refresh", "append", 0);
+        let stream_ctxs = vec![StreamContext {
+            stream_name: "users".to_string(),
+            source_stream_name: None,
+            schema: SchemaHint::Columns(vec![]),
+            sync_mode: SyncMode::FullRefresh,
+            cursor_info: None,
+            limits: StreamLimits::default(),
+            policies: StreamPolicies::default(),
+            write_mode: Some(WriteMode::Append),
+            selected_columns: None,
+            partition_count: None,
+            partition_index: None,
+            effective_parallelism: None,
+            partition_strategy: None,
+            copy_flush_bytes_override: None,
+        }];
+
+        assert_eq!(execution_parallelism(&config, &stream_ctxs), 3);
+    }
+
+    #[test]
     fn destination_preflight_deduplicates_partitioned_streams() {
         let stream_ctxs = vec![
             StreamContext {
@@ -2042,6 +2122,9 @@ state:
                 selected_columns: None,
                 partition_count: Some(4),
                 partition_index: Some(0),
+                effective_parallelism: Some(4),
+                partition_strategy: Some(rapidbyte_types::stream::PartitionStrategy::Mod),
+                copy_flush_bytes_override: None,
             },
             StreamContext {
                 stream_name: "bench_events".to_string(),
@@ -2055,6 +2138,9 @@ state:
                 selected_columns: None,
                 partition_count: Some(4),
                 partition_index: Some(3),
+                effective_parallelism: Some(4),
+                partition_strategy: Some(rapidbyte_types::stream::PartitionStrategy::Mod),
+                copy_flush_bytes_override: None,
             },
             StreamContext {
                 stream_name: "users".to_string(),
@@ -2068,6 +2154,9 @@ state:
                 selected_columns: None,
                 partition_count: None,
                 partition_index: None,
+                effective_parallelism: Some(1),
+                partition_strategy: None,
+                copy_flush_bytes_override: None,
             },
         ];
 
@@ -2096,6 +2185,9 @@ state:
                 selected_columns: None,
                 partition_count: None,
                 partition_index: None,
+                effective_parallelism: Some(1),
+                partition_strategy: None,
+                copy_flush_bytes_override: None,
             },
             StreamContext {
                 stream_name: "orders_append".to_string(),
@@ -2109,6 +2201,9 @@ state:
                 selected_columns: None,
                 partition_count: None,
                 partition_index: None,
+                effective_parallelism: Some(1),
+                partition_strategy: None,
+                copy_flush_bytes_override: None,
             },
         ];
 
