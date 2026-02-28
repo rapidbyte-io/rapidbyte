@@ -63,7 +63,7 @@ fn is_integer_arrow_type(data_type: ArrowDataType) -> bool {
     )
 }
 
-fn quote_table_name(table: &str) -> String {
+pub(crate) fn quote_table_name(table: &str) -> String {
     if table.contains('.') {
         table
             .split('.')
@@ -82,10 +82,7 @@ pub(crate) fn build_base_query(
     columns: &[Column],
     partition_range_bounds: Option<(i64, i64)>,
 ) -> Result<CursorQuery, String> {
-    let source_table_name = stream
-        .source_stream_name
-        .as_deref()
-        .unwrap_or(&stream.stream_name);
+    let source_table_name = stream.source_stream_or_stream_name();
     let col_list = columns
         .iter()
         .map(|c| {
@@ -184,18 +181,8 @@ pub(crate) fn build_base_query(
     let table_name = quote_table_name(source_table_name);
     let mut sql = format!("SELECT {col_list} FROM {table_name}");
 
-    if let (Some(partition_count), Some(partition_index)) =
-        (stream.partition_count, stream.partition_index)
-    {
-        if partition_count == 0 || partition_index >= partition_count {
-            ctx.log(
-                LogLevel::Warn,
-                &format!(
-                    "Partitioning disabled for stream '{}': invalid shard metadata index={} count={}",
-                    stream.stream_name, partition_index, partition_count
-                ),
-            );
-        } else if let Some((start, end)) = partition_range_bounds {
+    if let Some((partition_count, partition_index)) = stream.partition_coordinates() {
+        if let Some((start, end)) = partition_range_bounds {
             let _ = write!(
                 sql,
                 " WHERE {} >= {start} AND {} <= {end}",
@@ -232,6 +219,18 @@ pub(crate) fn build_base_query(
                     ),
                 );
             }
+        }
+    } else if let (Some(partition_count), Some(partition_index)) =
+        (stream.partition_count, stream.partition_index)
+    {
+        if partition_count == 0 || partition_index >= partition_count {
+            ctx.log(
+                LogLevel::Warn,
+                &format!(
+                    "Partitioning disabled for stream '{}': invalid shard metadata index={} count={}",
+                    stream.stream_name, partition_index, partition_count
+                ),
+            );
         }
     }
 

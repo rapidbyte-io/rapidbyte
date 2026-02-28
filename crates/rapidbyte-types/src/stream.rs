@@ -212,6 +212,35 @@ pub struct StreamContext {
     pub copy_flush_bytes_override: Option<u64>,
 }
 
+impl StreamContext {
+    /// Returns the physical source stream/table name used by source connectors.
+    ///
+    /// Falls back to [`Self::stream_name`] when no explicit source name is set.
+    #[must_use]
+    pub fn source_stream_or_stream_name(&self) -> &str {
+        self.source_stream_name
+            .as_deref()
+            .unwrap_or(&self.stream_name)
+    }
+
+    /// Returns validated partition coordinates when both values are present.
+    ///
+    /// Validation rules:
+    /// - `partition_count > 0`
+    /// - `partition_index < partition_count`
+    #[must_use]
+    pub fn partition_coordinates(&self) -> Option<(u32, u32)> {
+        match (self.partition_count, self.partition_index) {
+            (Some(partition_count), Some(partition_index))
+                if partition_count > 0 && partition_index < partition_count =>
+            {
+                Some((partition_count, partition_index))
+            }
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,5 +313,99 @@ mod tests {
     fn stream_limits_max_records_default_is_none() {
         let limits = StreamLimits::default();
         assert_eq!(limits.max_records, None);
+    }
+
+    #[test]
+    fn source_stream_or_stream_name_uses_source_override_when_present() {
+        let ctx = StreamContext {
+            stream_name: "users_shard_0".into(),
+            source_stream_name: Some("users".into()),
+            schema: SchemaHint::Columns(Vec::new()),
+            sync_mode: SyncMode::FullRefresh,
+            cursor_info: None,
+            limits: StreamLimits::default(),
+            policies: StreamPolicies::default(),
+            write_mode: None,
+            selected_columns: None,
+            partition_count: None,
+            partition_index: None,
+            effective_parallelism: None,
+            partition_strategy: None,
+            copy_flush_bytes_override: None,
+        };
+
+        assert_eq!(ctx.source_stream_or_stream_name(), "users");
+    }
+
+    #[test]
+    fn source_stream_or_stream_name_falls_back_to_stream_name() {
+        let ctx = StreamContext {
+            stream_name: "users".into(),
+            source_stream_name: None,
+            schema: SchemaHint::Columns(Vec::new()),
+            sync_mode: SyncMode::FullRefresh,
+            cursor_info: None,
+            limits: StreamLimits::default(),
+            policies: StreamPolicies::default(),
+            write_mode: None,
+            selected_columns: None,
+            partition_count: None,
+            partition_index: None,
+            effective_parallelism: None,
+            partition_strategy: None,
+            copy_flush_bytes_override: None,
+        };
+
+        assert_eq!(ctx.source_stream_or_stream_name(), "users");
+    }
+
+    #[test]
+    fn partition_coordinates_returns_some_for_valid_values() {
+        let ctx = StreamContext {
+            stream_name: "users".into(),
+            source_stream_name: None,
+            schema: SchemaHint::Columns(Vec::new()),
+            sync_mode: SyncMode::FullRefresh,
+            cursor_info: None,
+            limits: StreamLimits::default(),
+            policies: StreamPolicies::default(),
+            write_mode: None,
+            selected_columns: None,
+            partition_count: Some(4),
+            partition_index: Some(2),
+            effective_parallelism: None,
+            partition_strategy: None,
+            copy_flush_bytes_override: None,
+        };
+
+        assert_eq!(ctx.partition_coordinates(), Some((4, 2)));
+    }
+
+    #[test]
+    fn partition_coordinates_returns_none_for_invalid_values() {
+        let zero_count = StreamContext {
+            stream_name: "users".into(),
+            source_stream_name: None,
+            schema: SchemaHint::Columns(Vec::new()),
+            sync_mode: SyncMode::FullRefresh,
+            cursor_info: None,
+            limits: StreamLimits::default(),
+            policies: StreamPolicies::default(),
+            write_mode: None,
+            selected_columns: None,
+            partition_count: Some(0),
+            partition_index: Some(0),
+            effective_parallelism: None,
+            partition_strategy: None,
+            copy_flush_bytes_override: None,
+        };
+        assert_eq!(zero_count.partition_coordinates(), None);
+
+        let out_of_bounds = StreamContext {
+            partition_count: Some(2),
+            partition_index: Some(2),
+            ..zero_count
+        };
+        assert_eq!(out_of_bounds.partition_coordinates(), None);
     }
 }

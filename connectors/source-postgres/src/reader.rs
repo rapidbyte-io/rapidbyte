@@ -45,6 +45,14 @@ fn effective_partition_strategy(stream: &StreamContext) -> PartitionStrategy {
         .unwrap_or_else(partition_strategy_from_env)
 }
 
+fn build_range_bounds_sql(source_table_name: &str) -> String {
+    format!(
+        "SELECT MIN({id_col})::bigint, MAX({id_col})::bigint FROM {table_name}",
+        id_col = quote_identifier("id"),
+        table_name = query::quote_table_name(source_table_name),
+    )
+}
+
 async fn compute_range_bounds(
     client: &Client,
     source_table_name: &str,
@@ -55,11 +63,7 @@ async fn compute_range_bounds(
         return Ok(None);
     }
 
-    let sql = format!(
-        "SELECT MIN({id_col})::bigint, MAX({id_col})::bigint FROM {table_name}",
-        id_col = quote_identifier("id"),
-        table_name = quote_identifier(source_table_name),
-    );
+    let sql = build_range_bounds_sql(source_table_name);
     let row = client
         .query_one(&sql, &[])
         .await
@@ -147,10 +151,7 @@ pub async fn read_stream(
     stream: &StreamContext,
     connect_secs: f64,
 ) -> Result<ReadSummary, String> {
-    let source_table_name = stream
-        .source_stream_name
-        .as_deref()
-        .unwrap_or(&stream.stream_name);
+    let source_table_name = stream.source_stream_or_stream_name();
     ctx.log(
         LogLevel::Info,
         &format!("Reading stream: {}", stream.stream_name),
@@ -612,5 +613,14 @@ mod tests {
         } else {
             std::env::remove_var("RAPIDBYTE_SOURCE_PARTITION_MODE");
         }
+    }
+
+    #[test]
+    fn build_range_bounds_sql_supports_schema_qualified_table_name() {
+        let sql = build_range_bounds_sql("public.users");
+        assert_eq!(
+            sql,
+            "SELECT MIN(id)::bigint, MAX(id)::bigint FROM public.users"
+        );
     }
 }

@@ -45,3 +45,39 @@ async fn sql_transform_filters_and_projects_expected_rows() {
         .expect("schema cleanup must succeed");
     result
 }
+
+#[tokio::test]
+async fn sql_transform_rejects_query_without_input_source_table() {
+    let context = rapidbyte_e2e::harness::bootstrap()
+        .await
+        .expect("bootstrap must initialize test harness");
+    let schemas = context
+        .allocate_schema_pair("transform_invalid_query")
+        .await
+        .expect("schema allocation must succeed");
+    let temp = tempfile::tempdir().expect("must create tempdir for sqlite state");
+    let state_path = temp.path().join("transform_invalid_query_state.db");
+
+    let result = async {
+        context
+            .seed_basic_source_data(&schemas)
+            .await
+            .expect("source seed should succeed");
+
+        let run = context
+            .run_transform_pipeline(&schemas, r#"SELECT input FROM events"#, &state_path)
+            .await;
+
+        assert!(
+            run.is_err(),
+            "pipeline should fail when query does not reference input as a source table"
+        );
+    }
+    .await;
+
+    context
+        .drop_schema_pair(&schemas)
+        .await
+        .expect("schema cleanup must succeed");
+    result
+}

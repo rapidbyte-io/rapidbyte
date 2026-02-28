@@ -3,7 +3,75 @@
 mod config;
 mod transform;
 
+use datafusion::sql::sqlparser::ast::{Query, SetExpr, Statement, TableFactor, TableWithJoins};
+use datafusion::sql::sqlparser::dialect::GenericDialect;
+use datafusion::sql::sqlparser::parser::Parser;
 use rapidbyte_sdk::prelude::*;
+
+fn query_references_input_table(query: &str) -> Result<bool, String> {
+    let dialect = GenericDialect {};
+    let statements = Parser::parse_sql(&dialect, query)
+        .map_err(|e| format!("failed to parse SQL query: {e}"))?;
+    Ok(statements
+        .into_iter()
+        .any(|stmt| statement_has_input_table(&stmt)))
+}
+
+fn statement_has_input_table(statement: &Statement) -> bool {
+    match statement {
+        Statement::Query(query) => query_has_input_table(query),
+        _ => false,
+    }
+}
+
+fn query_has_input_table(query: &Query) -> bool {
+    query
+        .with
+        .as_ref()
+        .is_some_and(|with| with.cte_tables.iter().any(|cte| query_has_input_table(&cte.query)))
+        || set_expr_has_input_table(&query.body)
+}
+
+fn set_expr_has_input_table(set_expr: &SetExpr) -> bool {
+    match set_expr {
+        SetExpr::Select(select) => select.from.iter().any(table_with_joins_has_input),
+        SetExpr::Query(query) => query_has_input_table(query),
+        SetExpr::SetOperation { left, right, .. } => {
+            set_expr_has_input_table(left) || set_expr_has_input_table(right)
+        }
+        _ => false,
+    }
+}
+
+fn table_with_joins_has_input(table_with_joins: &TableWithJoins) -> bool {
+    table_factor_has_input(&table_with_joins.relation)
+        || table_with_joins
+            .joins
+            .iter()
+            .any(|join| table_factor_has_input(&join.relation))
+}
+
+fn table_factor_has_input(table_factor: &TableFactor) -> bool {
+    match table_factor {
+        TableFactor::Table { name, .. } => name
+            .0
+            .last()
+            .is_some_and(|ident| ident.value.eq_ignore_ascii_case("input")),
+        TableFactor::Derived { subquery, .. } => query_has_input_table(subquery),
+        TableFactor::NestedJoin {
+            table_with_joins, ..
+        } => table_with_joins_has_input(table_with_joins),
+        _ => false,
+    }
+}
+
+fn validate_query_contract(config: &config::Config) -> Result<String, String> {
+    let query = config.normalized_query()?;
+    if !query_references_input_table(&query)? {
+        return Err("SQL query must reference input table 'input'".to_string());
+    }
+    Ok(query)
+}
 
 #[rapidbyte_sdk::connector(transform)]
 pub struct TransformSql {
@@ -14,8 +82,12 @@ impl Transform for TransformSql {
     type Config = config::Config;
 
     async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
+        let query = validate_query_contract(&config)
+            .map_err(|message| ConnectorError::config("SQL_CONFIG", message))?;
         Ok((
-            Self { config },
+            Self {
+                config: config::Config { query },
+            },
             ConnectorInfo {
                 protocol_version: ProtocolVersion::V4,
                 features: vec![],
@@ -29,16 +101,16 @@ impl Transform for TransformSql {
         ctx: &Context,
     ) -> Result<ValidationResult, ConnectorError> {
         let _ = ctx;
-        if config.query.trim().is_empty() {
-            return Ok(ValidationResult {
+        match validate_query_contract(config) {
+            Ok(_) => Ok(ValidationResult {
+                status: ValidationStatus::Success,
+                message: "SQL query configuration is valid".to_string(),
+            }),
+            Err(message) => Ok(ValidationResult {
                 status: ValidationStatus::Failed,
-                message: "SQL query must not be empty".to_string(),
-            });
+                message,
+            }),
         }
-        Ok(ValidationResult {
-            status: ValidationStatus::Success,
-            message: "SQL query configuration is valid".to_string(),
-        })
     }
 
     async fn transform(
@@ -47,5 +119,104 @@ impl Transform for TransformSql {
         stream: StreamContext,
     ) -> Result<TransformSummary, ConnectorError> {
         transform::run(ctx, &stream, &self.config).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn init_rejects_empty_query() {
+        let result = TransformSql::init(config::Config {
+            query: "   ".to_string(),
+        })
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn init_trims_query_before_storing() {
+        let (connector, _info) = TransformSql::init(config::Config {
+            query: "  SELECT * FROM input  ".to_string(),
+        })
+        .await
+        .expect("init should succeed");
+
+        assert_eq!(connector.config.query, "SELECT * FROM input");
+    }
+
+    #[tokio::test]
+    async fn init_rejects_query_without_input_reference() {
+        let result = TransformSql::init(config::Config {
+            query: "SELECT 1".to_string(),
+        })
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn validate_fails_when_query_does_not_reference_input() {
+        let ctx = Context::new("transform-sql", "users");
+        let validation = TransformSql::validate(
+            &config::Config {
+                query: "SELECT 1".to_string(),
+            },
+            &ctx,
+        )
+        .await
+        .expect("validate should not return connector error");
+
+        assert_eq!(validation.status, ValidationStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn init_rejects_query_when_input_is_not_a_from_table() {
+        let result = TransformSql::init(config::Config {
+            query: "SELECT input FROM events".to_string(),
+        })
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn init_accepts_query_with_input_in_cte() {
+        let result = TransformSql::init(config::Config {
+            query: "WITH c AS (SELECT * FROM input) SELECT * FROM c".to_string(),
+        })
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn init_rejects_invalid_sql_with_parse_context() {
+        let result = TransformSql::init(config::Config {
+            query: "SELECT FROM input".to_string(),
+        })
+        .await;
+
+        match result {
+            Ok(_) => panic!("invalid SQL should fail init"),
+            Err(err) => {
+                assert_eq!(err.code, "SQL_CONFIG");
+                assert!(err.message.contains("failed to parse SQL query"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn validate_reports_parse_error_for_invalid_sql() {
+        let ctx = Context::new("transform-sql", "users");
+        let validation = TransformSql::validate(
+            &config::Config {
+                query: "SELECT FROM input".to_string(),
+            },
+            &ctx,
+        )
+        .await
+        .expect("validate should not return connector error");
+
+        assert_eq!(validation.status, ValidationStatus::Failed);
+        assert!(validation.message.contains("failed to parse SQL query"));
     }
 }
