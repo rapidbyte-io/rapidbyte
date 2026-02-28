@@ -8,6 +8,9 @@ use crate::config::types::{
     PipelineWriteMode,
 };
 
+const MIN_COPY_FLUSH_BYTES: usize = 1024 * 1024;
+const MAX_COPY_FLUSH_BYTES: usize = 32 * 1024 * 1024;
+
 /// Validate host patterns in `allowed_hosts` lists.
 /// Only `*.domain` single-level wildcards are supported.
 fn validate_host_patterns(hosts: &[String], context: &str, errors: &mut Vec<String>) {
@@ -114,6 +117,18 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
 
     if matches!(config.resources.parallelism, PipelineParallelism::Manual(0)) {
         errors.push("parallelism must be at least 1".to_string());
+    }
+
+    if matches!(config.resources.autotune.pin_parallelism, Some(0)) {
+        errors.push("autotune.pin_parallelism must be at least 1".to_string());
+    }
+
+    if let Some(copy_flush_bytes) = config.resources.autotune.pin_copy_flush_bytes {
+        if !(MIN_COPY_FLUSH_BYTES..=MAX_COPY_FLUSH_BYTES).contains(&copy_flush_bytes) {
+            errors.push(format!(
+                "autotune.pin_copy_flush_bytes must be between {MIN_COPY_FLUSH_BYTES} and {MAX_COPY_FLUSH_BYTES}"
+            ));
+        }
     }
 
     // Validate connector-level permission/limit overrides
@@ -271,6 +286,38 @@ resources:
     fn test_parallelism_manual_one_passes() {
         let yaml = format!(
             "{}\nresources:\n  parallelism: 1\n",
+            valid_yaml().trim_end()
+        );
+        let config = parse_pipeline_str(&yaml).unwrap();
+        assert!(validate_pipeline(&config).is_ok());
+    }
+
+    #[test]
+    fn test_autotune_pin_parallelism_zero_fails() {
+        let yaml = format!(
+            "{}\nresources:\n  autotune:\n    pin_parallelism: 0\n",
+            valid_yaml().trim_end()
+        );
+        let config = parse_pipeline_str(&yaml).unwrap();
+        let err = validate_pipeline(&config).unwrap_err().to_string();
+        assert!(err.contains("autotune.pin_parallelism"));
+    }
+
+    #[test]
+    fn test_autotune_pin_copy_flush_bytes_below_min_fails() {
+        let yaml = format!(
+            "{}\nresources:\n  autotune:\n    pin_copy_flush_bytes: 1024\n",
+            valid_yaml().trim_end()
+        );
+        let config = parse_pipeline_str(&yaml).unwrap();
+        let err = validate_pipeline(&config).unwrap_err().to_string();
+        assert!(err.contains("autotune.pin_copy_flush_bytes"));
+    }
+
+    #[test]
+    fn test_autotune_pin_copy_flush_bytes_in_range_passes() {
+        let yaml = format!(
+            "{}\nresources:\n  autotune:\n    pin_copy_flush_bytes: 8388608\n",
             valid_yaml().trim_end()
         );
         let config = parse_pipeline_str(&yaml).unwrap();

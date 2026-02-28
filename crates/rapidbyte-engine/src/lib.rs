@@ -21,6 +21,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod arrow;
+pub mod autotune;
 pub mod checkpoint;
 pub mod config;
 pub(crate) mod dlq;

@@ -12,7 +12,7 @@ use tokio_postgres::Client;
 
 use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::prelude::*;
-use rapidbyte_sdk::stream::DataErrorPolicy;
+use rapidbyte_sdk::stream::{DataErrorPolicy, PartitionStrategy};
 
 use crate::cursor::CursorTracker;
 use crate::encode;
@@ -32,11 +32,17 @@ const CURSOR_NAME: &str = "rb_cursor";
 /// Initial fixed overhead estimate for an empty batch payload.
 const BATCH_OVERHEAD_BYTES: usize = 256;
 
-fn partition_mode_from_env() -> &'static str {
+fn partition_strategy_from_env() -> PartitionStrategy {
     match std::env::var("RAPIDBYTE_SOURCE_PARTITION_MODE") {
-        Ok(value) if value.eq_ignore_ascii_case("range") => "range",
-        _ => "mod",
+        Ok(value) if value.eq_ignore_ascii_case("range") => PartitionStrategy::Range,
+        _ => PartitionStrategy::Mod,
     }
+}
+
+fn effective_partition_strategy(stream: &StreamContext) -> PartitionStrategy {
+    stream
+        .partition_strategy
+        .unwrap_or_else(partition_strategy_from_env)
 }
 
 async fn compute_range_bounds(
@@ -203,7 +209,9 @@ pub async fn read_stream(
         .await
         .map_err(|e| format!("BEGIN failed: {e}"))?;
 
-    let partition_range_bounds = if partition_mode_from_env() == "range" {
+    let partition_range_bounds = if effective_partition_strategy(stream)
+        == PartitionStrategy::Range
+    {
         match (stream.partition_count, stream.partition_index) {
             (Some(count), Some(index)) => {
                 match compute_range_bounds(client, source_table_name, count, index).await {
@@ -530,6 +538,8 @@ pub async fn read_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rapidbyte_sdk::catalog::SchemaHint;
+    use rapidbyte_sdk::stream::StreamPolicies;
 
     #[test]
     fn estimate_row_bytes_matches_expected_mix() {
@@ -540,5 +550,67 @@ mod tests {
         ];
         // Int64(8)+Utf8(64)+Boolean(1) plus 1-byte null bitmap overhead per column.
         assert_eq!(estimate_row_bytes(&columns), 8 + 64 + 1 + 3);
+    }
+
+    #[test]
+    fn stream_partition_strategy_override_wins_over_env() {
+        let original = std::env::var("RAPIDBYTE_SOURCE_PARTITION_MODE").ok();
+        std::env::set_var("RAPIDBYTE_SOURCE_PARTITION_MODE", "mod");
+
+        let stream = StreamContext {
+            stream_name: "users".to_string(),
+            source_stream_name: None,
+            schema: SchemaHint::Columns(vec![]),
+            sync_mode: SyncMode::FullRefresh,
+            cursor_info: None,
+            limits: StreamLimits::default(),
+            policies: StreamPolicies::default(),
+            write_mode: None,
+            selected_columns: None,
+            partition_count: None,
+            partition_index: None,
+            effective_parallelism: None,
+            partition_strategy: Some(PartitionStrategy::Range),
+            copy_flush_bytes_override: None,
+        };
+
+        assert_eq!(effective_partition_strategy(&stream), PartitionStrategy::Range);
+
+        if let Some(value) = original {
+            std::env::set_var("RAPIDBYTE_SOURCE_PARTITION_MODE", value);
+        } else {
+            std::env::remove_var("RAPIDBYTE_SOURCE_PARTITION_MODE");
+        }
+    }
+
+    #[test]
+    fn falls_back_to_env_when_stream_strategy_not_set() {
+        let original = std::env::var("RAPIDBYTE_SOURCE_PARTITION_MODE").ok();
+        std::env::set_var("RAPIDBYTE_SOURCE_PARTITION_MODE", "range");
+
+        let stream = StreamContext {
+            stream_name: "users".to_string(),
+            source_stream_name: None,
+            schema: SchemaHint::Columns(vec![]),
+            sync_mode: SyncMode::FullRefresh,
+            cursor_info: None,
+            limits: StreamLimits::default(),
+            policies: StreamPolicies::default(),
+            write_mode: None,
+            selected_columns: None,
+            partition_count: None,
+            partition_index: None,
+            effective_parallelism: None,
+            partition_strategy: None,
+            copy_flush_bytes_override: None,
+        };
+
+        assert_eq!(effective_partition_strategy(&stream), PartitionStrategy::Range);
+
+        if let Some(value) = original {
+            std::env::set_var("RAPIDBYTE_SOURCE_PARTITION_MODE", value);
+        } else {
+            std::env::remove_var("RAPIDBYTE_SOURCE_PARTITION_MODE");
+        }
     }
 }
