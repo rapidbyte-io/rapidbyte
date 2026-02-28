@@ -107,6 +107,7 @@ pub(crate) struct WriteTarget<'a> {
 
 /// Pre-downcast Arrow column reference. Eliminates per-cell `downcast_ref()` calls
 /// by resolving the concrete array type once per column per batch.
+#[derive(Debug)]
 pub(crate) enum TypedCol<'a> {
     Int16(&'a Int16Array),
     Int32(&'a Int32Array),
