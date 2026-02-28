@@ -11,7 +11,7 @@ use rapidbyte_types::envelope::DlqRecord;
 use rapidbyte_types::error::ValidationResult;
 use rapidbyte_types::manifest::{Permissions, ResourceLimits};
 use rapidbyte_types::metric::{ReadSummary, WriteSummary};
-use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
+use rapidbyte_types::stream::{PartitionStrategy, StreamContext, StreamLimits, StreamPolicies};
 use rapidbyte_types::wire::{ConnectorRole, SyncMode, WriteMode};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -570,7 +570,22 @@ fn build_stream_contexts(
     state: &dyn StateBackend,
     max_records: Option<u64>,
 ) -> Result<StreamBuild, PipelineError> {
-    let configured_parallelism = resolve_effective_parallelism(config);
+    let baseline_parallelism = resolve_effective_parallelism(config);
+    let source_connector_id = parse_connector_ref(&config.source.use_ref).0;
+    let autotune_decision = crate::autotune::resolve_stream_autotune(
+        config,
+        baseline_parallelism,
+        &source_connector_id,
+    );
+    let configured_parallelism = autotune_decision.parallelism;
+    tracing::info!(
+        autotune_enabled = autotune_decision.autotune_enabled,
+        baseline_parallelism,
+        configured_parallelism,
+        partition_strategy = ?autotune_decision.partition_strategy,
+        copy_flush_bytes_override = autotune_decision.copy_flush_bytes_override,
+        "Autotune decision resolved"
+    );
     let max_batch = parse_byte_size(&config.resources.max_batch_bytes).map_err(|e| {
         PipelineError::Infrastructure(anyhow::anyhow!(
             "Invalid max_batch_bytes '{}': {}",
@@ -602,7 +617,6 @@ fn build_stream_contexts(
     };
 
     let pipeline_id = PipelineId::new(config.pipeline.clone());
-    let source_connector_id = parse_connector_ref(&config.source.use_ref).0;
     let should_partition = source_connector_id == "source-postgres" && configured_parallelism > 1;
     let mut stream_ctxs = Vec::new();
 
@@ -661,7 +675,7 @@ fn build_stream_contexts(
             partition_index: None,
             effective_parallelism: Some(configured_parallelism),
             partition_strategy: None,
-            copy_flush_bytes_override: None,
+            copy_flush_bytes_override: autotune_decision.copy_flush_bytes_override,
         };
 
         if should_partition
@@ -673,7 +687,11 @@ fn build_stream_contexts(
                 shard_ctx.source_stream_name = Some(s.name.clone());
                 shard_ctx.partition_count = Some(configured_parallelism);
                 shard_ctx.partition_index = Some(shard);
-                shard_ctx.partition_strategy = Some(rapidbyte_types::stream::PartitionStrategy::Mod);
+                shard_ctx.partition_strategy = Some(
+                    autotune_decision
+                        .partition_strategy
+                        .unwrap_or(PartitionStrategy::Mod),
+                );
                 stream_ctxs.push(shard_ctx);
             }
         } else {
