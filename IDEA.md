@@ -37,9 +37,9 @@ Arrow IPC batch exchange — no JVM, no Docker, no sidecar processes.
 ```
 
 - **Runtime:** Wasmtime component model, `wasm32-wasip2` target.
-- **Protocol:** Version 3. Interface contract: `wit/rapidbyte-connector.wit`.
+- **Protocol:** Version 4. Interface contract: `wit/rapidbyte-connector.wit`.
 - **Data format:** Arrow IPC record batches flow between stages via bounded `mpsc` channels.
-  V3 frame transport: batches are streamed into host-managed frames (`frame-new` → `frame-write`
+  V4 frame transport: batches are streamed into host-managed frames (`frame-new` → `frame-write`
   → `frame-seal` → `emit-batch`), eliminating guest-side buffer allocation.
 - **State:** Pluggable backend (SQLite bundled, PostgreSQL implemented, S3 planned) for run
   metadata, cursor/checkpoint state, and DLQ records.
@@ -51,8 +51,8 @@ Arrow IPC batch exchange — no JVM, no Docker, no sidecar processes.
 
 Wasmtime component model with WIT-typed imports and exports.
 
-- **Component model:** Each connector is a Wasm component exporting one of `source-connector`,
-  `dest-connector`, or `transform-connector` interfaces.
+- **Component model:** Each connector is a Wasm component exporting one of `source`,
+  `destination`, or `transform` interfaces.
 - **WIT interface** (`wit/rapidbyte-connector.wit`): defines types, host imports, and three
   connector worlds (`rapidbyte-source`, `rapidbyte-destination`, `rapidbyte-transform`).
 - **Host imports:** Frame lifecycle (`frame-new`, `frame-write`, `frame-seal`, `frame-len`,
@@ -97,7 +97,7 @@ imports, enabling `tokio-postgres` `connect_raw` from inside the Wasm sandbox.
 
 **Protocol types:** `PayloadEnvelope`, `StreamContext`, `Checkpoint`, `ReadSummary`,
 `WriteSummary`, `TransformSummary`, `ConnectorError` with structured error categories,
-retry semantics, and commit state tracking. V3 adds frame-handle batch transport
+retry semantics, and commit state tracking. V4 uses frame-handle batch transport
 (`FrameWriter`, `frame-new`/`frame-seal`/`emit-batch` lifecycle).
 
 ## Connector Manifest
@@ -110,7 +110,7 @@ JSON manifest alongside each `.wasm` binary declaring identity, capabilities, an
   "id": "rapidbyte/source-postgres",
   "name": "PostgreSQL Source",
   "version": "0.1.0",
-  "protocol_version": "3",
+  "protocol_version": "4",
   "artifact": { "entry_point": "source_postgres.wasm" },
   "permissions": {
     "network": { "tls": "optional", "allow_runtime_config_domains": true },
@@ -514,13 +514,13 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 | `source-postgres` | Source | Snapshot, incremental cursor, CDC. `tokio-postgres` over `HostTcpStream`. |
 | `dest-postgres` | Destination | INSERT and COPY modes. Batch commits. DDL auto-creation. Schema evolution. |
 
-### Built-in Transforms (planned)
+### Built-in Transforms
 
-| Transform | Priority | Notes |
-|-----------|----------|-------|
-| `transform-sql` | P0 | DataFusion SQL on Arrow batches in-flight |
-| `transform-validate` | P1 | Data contracts: not-null, regex, range, unique |
-| `transform-mask` | P1 | Field masking / PII redaction |
+| Transform | Status | Notes |
+|-----------|--------|-------|
+| `transform-sql` | Implemented | DataFusion SQL on Arrow batches in-flight |
+| `transform-validate` | Implemented | Data contracts: not-null, regex, range, unique |
+| `transform-mask` | Planned (P1) | Field masking / PII redaction |
 
 ### Connector Roadmap
 
@@ -538,8 +538,8 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 
 ### Implemented (current)
 
-- Wasmtime component model runtime with WIT interface (V3)
-- V3 frame transport (host-managed frames, streaming FrameWriter, zero guest allocation)
+- Wasmtime component model runtime with WIT interface (V4)
+- V4 frame transport (host-managed frames, streaming FrameWriter, zero guest allocation)
 - Source, Destination, Transform connector lifecycle
 - Connector manifests with config schema validation
 - Pipeline YAML configuration
@@ -556,6 +556,9 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 - Host-proxied TCP networking with ACLs
 - Connector metrics and host timing breakdown
 - SQLite and PostgreSQL state backends for checkpoints and run history
+- Dry run mode (`--dry-run --limit N`) for local pipeline preview
+- In-flight SQL transform connector (`transform-sql`) on Arrow batches
+- In-flight validation transform connector (`transform-validate`) with fail/skip/dlq policy handling
 - Full PG type correctness (timestamp, date, bytea, json, uuid, numeric, etc.)
 - Modular crate architecture (types, state, runtime, engine, sdk, cli)
 - E2E test suite and benchmarking scripts
@@ -563,15 +566,11 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 ### Critical path (P0)
 
 - **S3 state backend** — enables ephemeral deployments (CI/CD, Lambda, K8s Jobs)
-- **Dry run mode** (`--dry-run --limit N`) — instant feedback loop for pipeline dev
-- **DataFusion SQL transforms** — in-flight aggregation/filtering before warehouse
+- **Interactive dev shell** (`rapidbyte dev`) — exploratory workflow for fast connector/pipeline iteration
+- **Secrets management** — resolve secret URIs at startup (AWS/GCP/Vault/1Password)
 
 ### Near-term (P1)
 
-- **Interactive dev shell** (`rapidbyte dev`) — REPL for exploring sources, querying with
-  SQL, testing transforms, profiling data, and exporting pipeline YAML
-- Data validation transforms (data contracts, assert rules)
-- Secrets management (AWS Secrets Manager, GCP, Vault, 1Password URIs)
 - TUI progress display during pipeline runs
 - OCI registry for connector distribution (`rapidbyte pull`)
 - Additional connectors: MySQL source, S3/Parquet dest, BigQuery dest
