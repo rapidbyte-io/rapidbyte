@@ -29,12 +29,7 @@ use crate::compression::CompressionCodec;
 use crate::engine::HasStoreLimits;
 use crate::frame::FrameTable;
 use crate::sandbox::{build_store_limits, build_wasi_ctx, SandboxOverrides};
-use crate::socket::{
-    resolve_socket_addrs, SocketEntry, SocketReadResult, SocketWriteResult,
-    SOCKET_POLL_ACTIVATION_THRESHOLD,
-};
-#[cfg(unix)]
-use crate::socket::{socket_poll_timeout_ms, wait_socket_ready, SocketInterest};
+use crate::socket::{resolve_socket_addrs, SocketReadResult, SocketWriteResult};
 
 const MAX_SOCKET_READ_BYTES: u64 = 64 * 1024;
 const CHECKPOINT_KIND_SOURCE: u32 = 0;
@@ -104,7 +99,7 @@ pub(crate) struct CheckpointCollector {
 
 pub(crate) struct SocketManager {
     pub acl: NetworkAcl,
-    pub sockets: HashMap<u64, SocketEntry>,
+    pub sockets: HashMap<u64, TcpStream>,
     pub next_handle: u64,
 }
 
@@ -740,14 +735,7 @@ impl ComponentHostState {
 
         let handle = self.sockets.next_handle;
         self.sockets.next_handle = self.sockets.next_handle.saturating_add(1);
-        self.sockets.sockets.insert(
-            handle,
-            SocketEntry {
-                stream,
-                read_would_block_streak: 0,
-                write_would_block_streak: 0,
-            },
-        );
+        self.sockets.sockets.insert(handle, stream);
 
         Ok(handle)
     }
@@ -758,68 +746,21 @@ impl ComponentHostState {
         handle: u64,
         len: u64,
     ) -> Result<SocketReadResult, ConnectorError> {
-        let entry =
+        let stream =
             self.sockets.sockets.get_mut(&handle).ok_or_else(|| {
                 ConnectorError::internal("INVALID_SOCKET", "Invalid socket handle")
             })?;
 
         let read_len = len.clamp(1, MAX_SOCKET_READ_BYTES) as usize;
         let mut buf = vec![0u8; read_len];
-        match entry.stream.read(&mut buf) {
-            Ok(0) => {
-                entry.read_would_block_streak = 0;
-                Ok(SocketReadResult::Eof)
-            }
+        match stream.read(&mut buf) {
+            Ok(0) => Ok(SocketReadResult::Eof),
             Ok(n) => {
-                entry.read_would_block_streak = 0;
                 buf.truncate(n);
                 Ok(SocketReadResult::Data(buf))
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                entry.read_would_block_streak += 1;
-
-                if entry.read_would_block_streak < SOCKET_POLL_ACTIVATION_THRESHOLD {
-                    return Ok(SocketReadResult::WouldBlock);
-                }
-
-                #[cfg(unix)]
-                let ready = match wait_socket_ready(
-                    &entry.stream,
-                    SocketInterest::Read,
-                    socket_poll_timeout_ms(),
-                ) {
-                    Ok(ready) => ready,
-                    Err(poll_err) => {
-                        tracing::warn!(handle, error = %poll_err, "poll() failed in socket_read");
-                        true
-                    }
-                };
-                #[cfg(not(unix))]
-                let ready = false;
-
-                if ready {
-                    match entry.stream.read(&mut buf) {
-                        Ok(0) => {
-                            entry.read_would_block_streak = 0;
-                            Ok(SocketReadResult::Eof)
-                        }
-                        Ok(n) => {
-                            entry.read_would_block_streak = 0;
-                            buf.truncate(n);
-                            Ok(SocketReadResult::Data(buf))
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            Ok(SocketReadResult::WouldBlock)
-                        }
-                        Err(e) => Err(ConnectorError::transient_network(
-                            "SOCKET_READ_FAILED",
-                            e.to_string(),
-                        )),
-                    }
-                } else {
-                    tracing::trace!(handle, "socket_read: WouldBlock after poll timeout");
-                    Ok(SocketReadResult::WouldBlock)
-                }
+                Ok(SocketReadResult::WouldBlock)
             }
             Err(e) => Err(ConnectorError::transient_network(
                 "SOCKET_READ_FAILED",
@@ -834,56 +775,15 @@ impl ComponentHostState {
         handle: u64,
         data: Vec<u8>,
     ) -> Result<SocketWriteResult, ConnectorError> {
-        let entry =
+        let stream =
             self.sockets.sockets.get_mut(&handle).ok_or_else(|| {
                 ConnectorError::internal("INVALID_SOCKET", "Invalid socket handle")
             })?;
 
-        match entry.stream.write(&data) {
-            Ok(n) => {
-                entry.write_would_block_streak = 0;
-                Ok(SocketWriteResult::Written(n as u64))
-            }
+        match stream.write(&data) {
+            Ok(n) => Ok(SocketWriteResult::Written(n as u64)),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                entry.write_would_block_streak += 1;
-
-                if entry.write_would_block_streak < SOCKET_POLL_ACTIVATION_THRESHOLD {
-                    return Ok(SocketWriteResult::WouldBlock);
-                }
-
-                #[cfg(unix)]
-                let ready = match wait_socket_ready(
-                    &entry.stream,
-                    SocketInterest::Write,
-                    socket_poll_timeout_ms(),
-                ) {
-                    Ok(ready) => ready,
-                    Err(poll_err) => {
-                        tracing::warn!(handle, error = %poll_err, "poll() failed in socket_write");
-                        true
-                    }
-                };
-                #[cfg(not(unix))]
-                let ready = false;
-
-                if ready {
-                    match entry.stream.write(&data) {
-                        Ok(n) => {
-                            entry.write_would_block_streak = 0;
-                            Ok(SocketWriteResult::Written(n as u64))
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            Ok(SocketWriteResult::WouldBlock)
-                        }
-                        Err(e) => Err(ConnectorError::transient_network(
-                            "SOCKET_WRITE_FAILED",
-                            e.to_string(),
-                        )),
-                    }
-                } else {
-                    tracing::trace!(handle, "socket_write: WouldBlock after poll timeout");
-                    Ok(SocketWriteResult::WouldBlock)
-                }
+                Ok(SocketWriteResult::WouldBlock)
             }
             Err(e) => Err(ConnectorError::transient_network(
                 "SOCKET_WRITE_FAILED",
