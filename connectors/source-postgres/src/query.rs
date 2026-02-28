@@ -376,6 +376,9 @@ mod tests {
             selected_columns: None,
             partition_count: None,
             partition_index: None,
+            effective_parallelism: None,
+            partition_strategy: None,
+            copy_flush_bytes_override: None,
         }
     }
 
