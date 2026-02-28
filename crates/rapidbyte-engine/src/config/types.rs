@@ -497,7 +497,10 @@ resources:
             config.resources.autotune.pin_source_partition_mode,
             Some(SourcePartitionMode::Range)
         );
-        assert_eq!(config.resources.autotune.pin_copy_flush_bytes, Some(8_388_608));
+        assert_eq!(
+            config.resources.autotune.pin_copy_flush_bytes,
+            Some(8_388_608)
+        );
     }
 
     #[test]

@@ -1319,14 +1319,14 @@ async fn finalize_run(
 ) -> Result<PipelineResult, PipelineError> {
     if let Some(err) = aggregated.first_error {
         let state_for_complete = state.clone();
-        let stats = RunStats {
+        let run_stats = RunStats {
             records_read: aggregated.final_stats.records_read,
             records_written: aggregated.final_stats.records_written,
             bytes_read: aggregated.final_stats.bytes_read,
             error_message: Some(format!("Stream error: {err}")),
         };
         tokio::task::spawn_blocking(move || {
-            state_for_complete.complete_run(run_id, RunStatus::Failed, &stats)
+            state_for_complete.complete_run(run_id, RunStatus::Failed, &run_stats)
         })
         .await
         .map_err(|e| {

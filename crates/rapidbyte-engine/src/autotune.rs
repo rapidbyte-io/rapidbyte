@@ -22,7 +22,11 @@ pub fn parallelism_candidates(base: u32, cap: u32) -> Vec<u32> {
     let base = base.max(1);
     let cap = cap.max(1);
     let half = (base / 2).max(1);
-    let bump = ((f64::from(base) * 1.5).round() as u32).clamp(1, cap);
+    let bump = {
+        let scaled = u64::from(base).saturating_mul(3).saturating_add(1) / 2;
+        let scaled = u32::try_from(scaled).unwrap_or(u32::MAX);
+        scaled.clamp(1, cap)
+    };
 
     let mut out = vec![half, base.min(cap), bump];
     out.sort_unstable();
@@ -43,10 +47,12 @@ pub fn resolve_stream_autotune(
     let parallelism = pinned_parallelism.unwrap_or_else(|| baseline_parallelism.max(1));
 
     let partition_strategy = if source_connector_id == "source-postgres" {
-        autotune_cfg.pin_source_partition_mode.map(|mode| match mode {
-            SourcePartitionMode::Mod => PartitionStrategy::Mod,
-            SourcePartitionMode::Range => PartitionStrategy::Range,
-        })
+        autotune_cfg
+            .pin_source_partition_mode
+            .map(|mode| match mode {
+                SourcePartitionMode::Mod => PartitionStrategy::Mod,
+                SourcePartitionMode::Range => PartitionStrategy::Range,
+            })
     } else {
         None
     };
@@ -119,7 +125,10 @@ destination:
         let config = parse_pipeline_str(&yaml).unwrap();
 
         let decision = resolve_stream_autotune(&config, 3, "source-postgres");
-        assert_eq!(decision.copy_flush_bytes_override, Some(MAX_COPY_FLUSH_BYTES));
+        assert_eq!(
+            decision.copy_flush_bytes_override,
+            Some(MAX_COPY_FLUSH_BYTES)
+        );
     }
 
     #[test]
