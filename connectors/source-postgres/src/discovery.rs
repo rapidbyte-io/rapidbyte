@@ -9,6 +9,11 @@ use tokio_postgres::Client;
 use crate::types::Column;
 
 /// Discover all base tables and columns in the `public` schema.
+///
+/// # Errors
+///
+/// Returns `Err` if the `information_schema` query fails or result parsing
+/// encounters an unexpected column type.
 pub async fn discover_catalog(client: &Client) -> Result<Vec<Stream>, String> {
     let query = r"
         SELECT
