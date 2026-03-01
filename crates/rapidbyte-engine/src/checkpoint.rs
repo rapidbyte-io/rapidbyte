@@ -1,10 +1,10 @@
 //! Checkpoint correlation and cursor advancement logic.
 
 use anyhow::Result;
-use rapidbyte_types::checkpoint::Checkpoint;
-use rapidbyte_types::cursor::CursorValue;
 
 use rapidbyte_state::StateBackend;
+use rapidbyte_types::checkpoint::Checkpoint;
+use rapidbyte_types::cursor::CursorValue;
 use rapidbyte_types::state::{CursorState, PipelineId, StreamName};
 
 /// Correlate source and destination checkpoints, persisting cursor state only when

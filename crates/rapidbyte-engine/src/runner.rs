@@ -15,7 +15,6 @@ use rapidbyte_types::metric::{ReadSummary, TransformSummary, WriteSummary};
 use rapidbyte_types::stream::StreamContext;
 use rapidbyte_types::wire::ConnectorRole;
 
-use crate::error::PipelineError;
 use rapidbyte_runtime::wasmtime_reexport::HasSelf;
 use rapidbyte_runtime::{
     create_component_linker, dest_bindings, dest_error_to_sdk, dest_validation_to_sdk,
@@ -25,6 +24,8 @@ use rapidbyte_runtime::{
 };
 use rapidbyte_state::{SqliteStateBackend, StateBackend};
 use rapidbyte_types::state::RunStats;
+
+use crate::error::PipelineError;
 
 /// Result of running a source connector for a single stream.
 pub(crate) struct SourceRunResult {

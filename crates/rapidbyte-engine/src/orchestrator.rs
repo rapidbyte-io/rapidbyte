@@ -5,16 +5,22 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Result;
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
+
+use rapidbyte_runtime::{
+    parse_connector_ref, Frame, HostTimings, LoadedComponent, SandboxOverrides, WasmRuntime,
+};
+use rapidbyte_state::StateBackend;
 use rapidbyte_types::catalog::{Catalog, SchemaHint};
 use rapidbyte_types::cursor::{CursorInfo, CursorType, CursorValue};
 use rapidbyte_types::envelope::DlqRecord;
 use rapidbyte_types::error::ValidationResult;
 use rapidbyte_types::manifest::{Permissions, ResourceLimits};
 use rapidbyte_types::metric::{ReadSummary, WriteSummary};
+use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
 use rapidbyte_types::stream::{PartitionStrategy, StreamContext, StreamLimits, StreamPolicies};
 use rapidbyte_types::wire::{ConnectorRole, SyncMode, WriteMode};
-use tokio::sync::mpsc;
-use tokio::task::JoinSet;
 
 use crate::arrow::ipc_to_record_batches;
 use crate::checkpoint::correlate_and_persist_cursors;
@@ -32,11 +38,6 @@ use crate::runner::{
     run_destination_stream, run_discover, run_source_stream, run_transform_stream,
     validate_connector,
 };
-use rapidbyte_runtime::{
-    parse_connector_ref, Frame, HostTimings, LoadedComponent, SandboxOverrides, WasmRuntime,
-};
-use rapidbyte_state::StateBackend;
-use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
 
 struct StreamResult {
     stream_name: String,

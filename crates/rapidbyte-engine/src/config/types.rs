@@ -1,11 +1,11 @@
 //! Pipeline configuration types and config parsing helpers.
 
-use rapidbyte_types::stream::{DataErrorPolicy, SchemaEvolutionPolicy};
-use rapidbyte_types::wire::{SyncMode, WriteMode};
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 use rapidbyte_types::compression::CompressionCodec;
+use rapidbyte_types::stream::{DataErrorPolicy, SchemaEvolutionPolicy};
+use rapidbyte_types::wire::{SyncMode, WriteMode};
 
 const DEFAULT_STATE_BACKEND: StateBackendKind = StateBackendKind::Sqlite;
 const DEFAULT_MAX_MEMORY: &str = "256mb";
