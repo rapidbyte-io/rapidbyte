@@ -8,10 +8,9 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Config, Engine, Store, StoreLimits};
-
-use sha2::{Digest, Sha256};
 
 const RAPIDBYTE_WASMTIME_AOT_ENV: &str = "RAPIDBYTE_WASMTIME_AOT";
 const RAPIDBYTE_WASMTIME_AOT_DIR_ENV: &str = "RAPIDBYTE_WASMTIME_AOT_DIR";

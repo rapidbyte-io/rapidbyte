@@ -11,17 +11,17 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use chrono::Utc;
-use rapidbyte_types::checkpoint::{Checkpoint, StateScope};
-use rapidbyte_types::envelope::{DlqRecord, Timestamp};
-use rapidbyte_types::error::{ConnectorError, ErrorCategory};
-use rapidbyte_types::manifest::Permissions;
-use rapidbyte_types::metric::{Metric, MetricValue};
 use tokio::sync::mpsc;
 use wasmtime::component::ResourceTable;
 use wasmtime::StoreLimits;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use rapidbyte_state::StateBackend;
+use rapidbyte_types::checkpoint::{Checkpoint, StateScope};
+use rapidbyte_types::envelope::{DlqRecord, Timestamp};
+use rapidbyte_types::error::{ConnectorError, ErrorCategory};
+use rapidbyte_types::manifest::Permissions;
+use rapidbyte_types::metric::{Metric, MetricValue};
 use rapidbyte_types::state::{CursorState, PipelineId, StreamName};
 
 use crate::acl::{derive_network_acl, NetworkAcl};
