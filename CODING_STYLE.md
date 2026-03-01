@@ -1,6 +1,6 @@
 # Rapidbyte Coding Style Blueprint
 
-Maintainer-focused standards for writing high-performance, correctness-critical Rust across engine, runtime, state, SDK, and connectors.
+Maintainer-focused standards for writing high-performance, correctness-critical Rust across engine, runtime, state, SDK, and connectors. Concrete patterns are sourced from the actual codebase — see cross-references.
 
 ## 1) Purpose and Non-Goals
 
@@ -9,6 +9,7 @@ Maintainer-focused standards for writing high-performance, correctness-critical 
 - Define merge-quality coding standards for ingestion/runtime paths.
 - Encode DRY, SOLID, and YAGNI in a way that improves throughput and correctness.
 - Provide a consistent refactor rubric to prioritize technical debt reduction.
+- Document concrete crate layout, error handling, serde, and concurrency patterns used across all 7 host crates and 3 connectors — see Sections 4–9 and 12.
 
 ### Non-Goals
 
@@ -55,9 +56,431 @@ Failure mode prevented: indirection-heavy code that obscures correctness and slo
 
 Failure mode prevented: complexity debt and unnecessary runtime overhead.
 
-## 4) Correctness Standards (Ingestion-Critical)
+## 4) Crate Layout and File Organization
 
-### 4.1 Data Semantics
+### 4.1 `lib.rs` Canonical Structure
+
+Every host crate `lib.rs` follows this order:
+
+1. Module-level doc comment (`//!`) with responsibility table
+2. `#![warn(clippy::pedantic)]`
+3. Module declarations (public, `pub(crate)`, private)
+4. Top-level re-exports
+5. Optional `prelude` module
+
+Example from `rapidbyte-engine/src/lib.rs`:
+
+```rust
+//! Pipeline orchestration engine for Rapidbyte.
+//!
+//! # Crate structure
+//!
+//! | Module         | Responsibility |
+//! |----------------|----------------|
+//! | `arrow`        | Arrow IPC encode/decode utilities |
+//! | `orchestrator` | Pipeline execution, retry, stream dispatch |
+
+#![warn(clippy::pedantic)]
+
+pub mod arrow;
+pub mod config;
+pub(crate) mod dlq;
+pub mod orchestrator;
+pub(crate) mod resolve;
+
+// Top-level re-exports for convenience.
+pub use config::parser::parse_pipeline;
+pub use config::types::PipelineConfig;
+pub use error::PipelineError;
+pub use orchestrator::{check_pipeline, run_pipeline};
+```
+
+- `MUST` include `#![warn(clippy::pedantic)]` in every host crate.
+- `MUST` begin with a `//!` module docstring describing the crate's responsibility.
+- `SHOULD` include a responsibility table for crates with 3+ modules.
+
+### 4.2 Module Visibility
+
+| Visibility   | When to use |
+|-------------|-------------|
+| `pub`        | Modules forming the crate's public API (consumed by other crates) |
+| `pub(crate)` | Implementation modules not needed externally (`dlq`, `resolve`) |
+| private      | Submodules within a `pub` module that are implementation details |
+
+- `MUST` default internal modules to `pub(crate)`.
+- `MUST NOT` make a module `pub` unless another crate depends on it.
+
+### 4.3 Feature-Gated Modules
+
+Backend/driver modules `SHOULD` be feature-gated. Feature flags `MUST` be documented in the crate's `//!` docstring with a table:
+
+```rust
+//! # Feature flags
+//!
+//! | Feature    | Default | Description |
+//! |------------|---------|-------------|
+//! | `sqlite`   | **yes** | SQLite backend via `rusqlite` |
+//! | `postgres` | no      | PostgreSQL backend via `postgres` |
+
+#[cfg(feature = "postgres")]
+pub mod postgres;
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
+
+// Re-exports mirror feature gates.
+#[cfg(feature = "postgres")]
+pub use postgres::PostgresStateBackend;
+#[cfg(feature = "sqlite")]
+pub use sqlite::SqliteStateBackend;
+```
+
+### 4.4 Constants
+
+- `MUST` use `SCREAMING_SNAKE_CASE` for module-level constants.
+- `SHOULD` use associated constants on the relevant type when the constant is tightly coupled:
+
+```rust
+impl StreamLimits {
+    pub const DEFAULT_MAX_BATCH_BYTES: u64 = 64 * 1024 * 1024;
+    pub const DEFAULT_MAX_RECORD_BYTES: u64 = 16 * 1024 * 1024;
+}
+```
+
+- `SHOULD` use private module-level constants for internal tuning values:
+
+```rust
+const BACKOFF_FAST_BASE_MS: u64 = 100;
+const BACKOFF_NORMAL_BASE_MS: u64 = 1_000;
+const BACKOFF_MAX_MS: u64 = 60_000;
+```
+
+## 5) Import Ordering
+
+Imports `MUST` follow four groups, separated by blank lines:
+
+1. **`std`** — standard library
+2. **External crates** — third-party dependencies (`anyhow`, `serde`, `tokio`, etc.)
+3. **Workspace crates** — `rapidbyte_types`, `rapidbyte_runtime`, `rapidbyte_state`
+4. **Crate-local** — `crate::` and `super::` imports
+
+Example from `orchestrator.rs`:
+
+```rust
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use anyhow::Result;
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
+
+use rapidbyte_runtime::{LoadedComponent, SandboxOverrides, WasmRuntime};
+use rapidbyte_state::StateBackend;
+use rapidbyte_types::wire::{ConnectorRole, SyncMode, WriteMode};
+
+use crate::config::types::PipelineConfig;
+use crate::error::{compute_backoff, PipelineError};
+use crate::runner::{run_destination_stream, run_source_stream};
+```
+
+- `MUST NOT` use glob imports (`use foo::*`) in production code.
+- `MAY` use `use super::*` in `#[cfg(test)] mod tests` blocks.
+- `SHOULD` alphabetize within each group.
+
+## 6) Error Handling Patterns
+
+### 6.1 Architecture Overview
+
+| Crate | Error Type | Pattern | Scope |
+|-------|-----------|---------|-------|
+| `types` | `ConnectorError` | Factory + builder, `Serialize`/`Deserialize` | Cross-boundary (host ↔ connector) |
+| `state` | `StateError` | `thiserror` enum + `Result<T>` alias | Crate-internal |
+| `runtime` | `RuntimeError` | `thiserror` enum + `Result<T>` alias | Crate-internal |
+| `engine` | `PipelineError` | Two-variant boundary enum (Connector / Infrastructure) | Orchestration boundary |
+
+### 6.2 `ConnectorError` Factory + Builder
+
+`ConnectorError` (in `rapidbyte-types`) uses a private `new` constructor with public category-specific factory methods. Each factory pre-sets defaults for `retryable`, `scope`, and `backoff_class`:
+
+```rust
+impl ConnectorError {
+    // Private — callers use category factories below.
+    fn new(category: ErrorCategory, scope: ErrorScope, retryable: bool, ...) -> Self { ... }
+
+    /// Configuration error (not retryable).
+    #[must_use]
+    pub fn config(code: impl Into<String>, message: impl Into<String>) -> Self { ... }
+
+    /// Transient network error (retryable, normal backoff).
+    #[must_use]
+    pub fn transient_network(code: impl Into<String>, message: impl Into<String>) -> Self { ... }
+}
+```
+
+Builder methods chain optional metadata:
+
+```rust
+ConnectorError::transient_db("COMMIT_FAILED", "timeout")
+    .with_commit_state(CommitState::AfterCommitUnknown)
+    .with_details(serde_json::json!({"table": "users"}))
+```
+
+- `MUST` annotate factory methods with `#[must_use]`.
+- `MUST` annotate builder methods with `#[must_use]`.
+- `MUST NOT` expose `new` publicly — force callers through category factories.
+
+### 6.3 Crate-Level Error Enum + Result Alias
+
+Internal crates define a `thiserror` enum and a `Result<T>` alias:
+
+```rust
+/// Errors from state backend operations.
+#[derive(Debug, thiserror::Error)]
+pub enum StateError {
+    #[error("state backend error: {0}")]
+    Backend(Box<dyn std::error::Error + Send + Sync>),
+    #[error("i/o error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("state backend lock poisoned")]
+    LockPoisoned,
+}
+
+/// Convenience alias used throughout this crate.
+pub type Result<T> = std::result::Result<T, StateError>;
+```
+
+- `MUST` keep variant messages lowercase and descriptive.
+- `SHOULD` provide helper constructors for wrapping dynamic errors (`StateError::backend(err)`).
+
+### 6.4 `PipelineError` Boundary Enum
+
+The engine uses a two-variant enum to separate typed connector errors from opaque infrastructure failures:
+
+```rust
+pub enum PipelineError {
+    /// Typed connector error with retry metadata.
+    Connector(ConnectorError),
+    /// Infrastructure error (WASM load, channel, state backend, etc.)
+    Infrastructure(anyhow::Error),
+}
+```
+
+- `MUST` preserve the Connector/Infrastructure boundary — do not collapse to a single `anyhow::Error`.
+- `MUST` implement `From<anyhow::Error>` for Infrastructure only.
+
+## 7) Serde and Protocol Type Conventions
+
+### 7.1 Enum Attributes
+
+Protocol-boundary enums `MUST` use:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum Feature {
+    Cdc,
+    Stateful,
+    ExactlyOnce,
+}
+```
+
+- `MUST` apply `#[non_exhaustive]` to enums that cross the host/connector boundary and may gain variants.
+- `MUST` use `#[serde(rename_all = "snake_case")]` for consistent JSON keys.
+- `SHOULD` use `#[serde(tag = "mode", rename_all = "snake_case")]` for internally-tagged enums with data:
+
+```rust
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum WriteMode {
+    Append,
+    Replace,
+    Upsert { primary_key: Vec<String> },
+}
+```
+
+- `SHOULD` derive `#[default]` on the canonical default variant:
+
+```rust
+#[derive(Default)]
+pub enum DataErrorPolicy {
+    Skip,
+    #[default]
+    Fail,
+    Dlq,
+}
+```
+
+### 7.2 Optional Fields
+
+- `MUST` use `#[serde(default, skip_serializing_if = "Option::is_none")]` for optional fields:
+
+```rust
+#[serde(default, skip_serializing_if = "Option::is_none")]
+pub retry_after_ms: Option<u64>,
+```
+
+- `SHOULD` use `skip_serializing_if = "Vec::is_empty"` for optional vectors:
+
+```rust
+#[serde(default, skip_serializing_if = "Vec::is_empty")]
+pub features: Vec<Feature>,
+```
+
+### 7.3 Display vs Serde Separation
+
+`Display` implementations `MUST` use explicit `match`, not `#[derive]`:
+
+```rust
+impl fmt::Display for ErrorCategory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::Config => "config",
+            Self::Auth => "auth",
+            Self::TransientNetwork => "transient_network",
+        };
+        f.write_str(s)
+    }
+}
+```
+
+This keeps `Display` output decoupled from serde serialization and ensures exhaustive handling.
+
+### 7.4 IPC Types
+
+Types that cross the host/connector boundary via JSON `MUST` derive both `Serialize` and `Deserialize`. All types in `rapidbyte-types` follow this rule.
+
+## 8) Visibility and API Design
+
+### 8.1 Visibility Rules
+
+| Element | Default | Rationale |
+|---------|---------|-----------|
+| Structs used only within crate | `pub(crate)` | Prevents accidental API surface growth |
+| Fields of crate-internal structs | `pub(crate)` | Allows crate-wide access without external exposure |
+| Fields of cross-boundary types | `pub` | Connectors and external crates need direct access |
+| Helper functions | `pub(crate)` | Exposed only if another crate needs them |
+| Error types | `pub` | Callers must match and handle |
+
+### 8.2 Re-Export Conventions
+
+Each crate `SHOULD` re-export its most-used public types from `lib.rs` with a comment marker:
+
+```rust
+// Top-level re-exports for convenience.
+pub use config::parser::parse_pipeline;
+pub use config::types::PipelineConfig;
+pub use error::PipelineError;
+```
+
+- `MUST NOT` re-export unstable internals.
+- `MAY` re-export upstream crate types when downstream crates need them:
+
+```rust
+/// Re-export Wasmtime types needed by downstream crates.
+pub mod wasmtime_reexport {
+    pub use wasmtime::component::HasSelf;
+    pub use wasmtime::Error;
+}
+```
+
+### 8.3 Prelude Module Pattern
+
+Leaf crates (`types`, `state`) `SHOULD` provide a `prelude` module for ergonomic glob imports:
+
+```rust
+/// Common imports for typical usage.
+///
+/// ```
+/// use rapidbyte_types::prelude::*;
+/// ```
+pub mod prelude {
+    pub use crate::error::{ConnectorError, ErrorCategory, ValidationResult};
+    pub use crate::wire::{ConnectorInfo, ConnectorRole, Feature, SyncMode};
+    // ...
+}
+```
+
+- `MUST NOT` put items in the prelude that are only used by one consumer.
+- `SHOULD` test that prelude re-exports resolve correctly (see Section 13).
+
+## 9) Connector Conventions
+
+### 9.1 Entry Point
+
+Every connector has a single `main.rs` with the `#[connector(role)]` attribute and a trait implementation:
+
+```rust
+use rapidbyte_sdk::prelude::*;
+
+#[rapidbyte_sdk::connector(source)]
+pub struct SourcePostgres {
+    config: config::Config,
+}
+
+impl Source for SourcePostgres {
+    type Config = config::Config;
+
+    async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
+        config.validate()?;
+        Ok((Self { config }, ConnectorInfo { ... }))
+    }
+
+    async fn discover(&mut self, ctx: &Context) -> Result<Catalog, ConnectorError> { ... }
+    async fn read(&mut self, ctx: &Context, stream: StreamContext) -> Result<ReadSummary, ConnectorError> { ... }
+    async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> { ... }
+}
+```
+
+- `MUST` call `config.validate()` in `init` before any I/O.
+- `MUST` use `rapidbyte_sdk::connector` attribute, not manual WIT bindings.
+
+### 9.2 Config Type
+
+Connector config types `MUST` derive `Deserialize` and `ConfigSchema`, and `SHOULD` implement a `validate()` method:
+
+```rust
+#[derive(Debug, Clone, Deserialize, ConfigSchema)]
+pub struct Config {
+    pub host: String,
+    #[serde(default = "default_port")]
+    #[schema(default = 5432)]
+    pub port: u16,
+    #[serde(default)]
+    #[schema(secret)]
+    pub password: String,
+}
+
+impl Config {
+    /// # Errors
+    /// Returns `Err` if required fields are invalid.
+    pub fn validate(&self) -> Result<(), ConnectorError> { ... }
+}
+```
+
+- `MUST` annotate secret fields with `#[schema(secret)]`.
+- `SHOULD` document `# Errors` on `validate()`.
+
+### 9.3 Module Layout
+
+Connectors `SHOULD` follow this module pattern:
+
+| Module | Role |
+|--------|------|
+| `config` | Config struct + `validate()` + defaults |
+| `client` | Connection setup, connection string, `validate()` helper |
+| `encode` | Arrow/IPC encoding/decoding helpers |
+| `query` | SQL query builders |
+| `metrics` | Metric emission helpers |
+| `types` | Connector-specific types |
+
+### 9.4 Network I/O
+
+- `MUST` use `HostTcpStream` (`rapidbyte_sdk::host_tcp`) for all network I/O.
+- `MUST NOT` use raw WASI sockets — the host enforces connector ACLs through `HostTcpStream`.
+
+## 10) Correctness Standards (Ingestion-Critical)
+
+### 10.1 Data Semantics
 
 - `MUST` make row drop behavior explicit and policy-driven (`fail`/`skip`/`dlq`).
 - `MUST` keep batch/stream scope semantics deterministic and documented.
@@ -67,9 +490,9 @@ Failure mode prevented: silent data loss and nondeterministic pipeline outcomes.
 
 Verification: unit tests + e2e policy matrix coverage.
 
-### 4.2 Error Modeling
+### 10.2 Error Modeling
 
-- `MUST` preserve error category boundaries (`config`, `data`, `infrastructure`, etc.).
+- `MUST` preserve error category boundaries (see Section 6).
 - `MUST` include actionable context in public/boundary errors.
 - `MUST NOT` collapse typed errors into opaque strings at boundary interfaces.
 - `MUST NOT` panic in runtime data paths.
@@ -78,7 +501,7 @@ Failure mode prevented: retry misclassification, unrecoverable crashes, opaque i
 
 Verification: typed error assertions in tests, review checklist.
 
-### 4.3 Numeric and Type Safety
+### 10.3 Numeric and Type Safety
 
 - `MUST` define behavior for non-finite floats (`NaN`, `+/-Inf`) in rule evaluation.
 - `MUST` preserve Decimal semantics (scale-aware comparisons).
@@ -88,7 +511,7 @@ Failure mode prevented: acceptance/rejection drift and production data-quality r
 
 Verification: edge-case unit tests for numeric boundaries and decimal variants.
 
-### 4.4 State, Checkpoints, and Idempotency
+### 10.4 State, Checkpoints, and Idempotency
 
 - `MUST` treat checkpoint writes and commit coordination as correctness-critical.
 - `MUST` make idempotency assumptions explicit when retries can replay effects.
@@ -98,9 +521,9 @@ Failure mode prevented: duplicate writes, data gaps, irreversible cursor corrupt
 
 Verification: engine integration tests and checkpoint correlation tests.
 
-## 5) Performance Standards (Hot-Path Rust)
+## 11) Performance Standards (Hot-Path Rust)
 
-### 5.1 Allocation Discipline
+### 11.1 Allocation Discipline
 
 - `MUST` avoid per-row heap allocation in tight loops unless justified.
 - `SHOULD` preallocate with known capacities.
@@ -111,7 +534,7 @@ Failure mode prevented: throughput collapse from allocator pressure.
 
 Verification: benchmark evidence + targeted review.
 
-### 5.2 Throughput and Backpressure
+### 11.2 Throughput and Backpressure
 
 - `MUST` use bounded channels and explicit backpressure semantics.
 - `MUST NOT` introduce unbounded buffering between stages.
@@ -121,9 +544,9 @@ Failure mode prevented: memory blowups and unstable tail latency.
 
 Verification: architecture review + load/e2e behavior checks.
 
-### 5.3 Async/Blocking Boundaries
+### 11.3 Async/Blocking Boundaries
 
-- `MUST` make blocking operations explicit in async contexts.
+- `MUST` make blocking operations explicit in async contexts (see Section 12).
 - `MUST NOT` hide blocking I/O in async hot paths.
 - `SHOULD` keep CPU-heavy transforms off latency-sensitive control paths.
 
@@ -131,7 +554,7 @@ Failure mode prevented: scheduler starvation and unpredictable throughput.
 
 Verification: review + focused perf runs.
 
-### 5.4 Observability in Performance Work
+### 11.4 Observability in Performance Work
 
 - `MUST` emit metrics for critical failure and throughput dimensions.
 - `SHOULD` include stable labels for high-value cardinality dimensions (for example `rule`, `field`).
@@ -141,36 +564,150 @@ Failure mode prevented: invisible regressions and unusable monitoring.
 
 Verification: metrics unit tests + e2e assertions where practical.
 
-## 6) Code Structure and API Conventions
+## 12) Async and Concurrency Patterns
 
-### Visibility and API Surface
+### 12.1 Bounded `mpsc::channel` Between Stages
 
-- `MUST` keep crate-internal types/functions `pub(crate)` unless external use is intentional.
-- `SHOULD` re-export only stable, high-value API types from crate `lib.rs`.
-- `MUST NOT` leak experimental internals through public modules.
+All inter-stage communication uses bounded `tokio::sync::mpsc` channels. The capacity is derived from config or defaults to a small value:
 
-### Function and Module Design
+```rust
+let (tx, rx) = mpsc::channel::<Frame>(params.channel_capacity);
+```
 
-- `SHOULD` keep function responsibilities narrow and directly testable.
-- `MUST` separate parsing/validation/evaluation concerns when behavior differs.
-- `MUST NOT` centralize unrelated concerns in giant utility modules.
+- `MUST` use bounded channels — never `mpsc::unbounded_channel`.
+- `SHOULD` size channel capacity based on `StreamLimits::max_inflight_batches` or a tuned constant.
 
-### Comments and Documentation
+### 12.2 `spawn_blocking` for WASM and State Calls
 
-- `SHOULD` comment invariants and non-obvious constraints, not line-by-line mechanics.
-- `MUST` update protocol/config docs when behavior contracts change.
-- `MUST NOT` leave stale docs after interface changes.
+All WASM component calls and synchronous state backend operations run inside `tokio::task::spawn_blocking`:
 
-## 7) Testing and Verification Standards
+```rust
+let src_handle = tokio::task::spawn_blocking(move || {
+    run_source_stream(&runtime, &component, &config, &stream_ctx)
+});
+```
 
-### Required Coverage by Change Type
+- `MUST` use `spawn_blocking` for any synchronous call that may block (WASM execution, DB queries, file I/O).
+- `MUST NOT` call blocking WASM functions directly from an async context.
 
-- Rule/config behavior changes: unit tests for happy path + invalid shape + edge values.
-- Engine/runtime wiring changes: integration tests and relevant e2e path.
-- Policy behavior changes (`fail`/`skip`/`dlq`): e2e assertions for all affected modes.
-- Perf-sensitive changes: benchmark or targeted throughput evidence.
+### 12.3 `JoinSet` + `Semaphore` for Parallelism
 
-### Minimum Verification Commands
+Parallel stream processing uses `JoinSet` for task collection and `Semaphore` for concurrency limiting:
+
+```rust
+let semaphore = Arc::new(tokio::sync::Semaphore::new(parallelism));
+let mut join_set = JoinSet::new();
+
+for stream in streams {
+    let permit = semaphore.clone().acquire_owned().await?;
+    join_set.spawn(async move {
+        let result = process_stream(stream).await;
+        drop(permit);
+        result
+    });
+}
+
+while let Some(result) = join_set.join_next().await { ... }
+```
+
+- `SHOULD` use `Semaphore` to control concurrency rather than pre-partitioning work.
+- `MUST` drop the permit after the task completes, not before.
+
+## 13) Testing Patterns
+
+### 13.1 Colocated Tests
+
+Tests live in `#[cfg(test)] mod tests` at the bottom of the same file. Every test module uses `use super::*`:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // PipelineError tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn config_error_defaults() {
+        let err = ConnectorError::config("MISSING_HOST", "host is required");
+        assert_eq!(err.category, ErrorCategory::Config);
+        assert!(!err.retryable);
+    }
+}
+```
+
+- `MUST` colocate unit tests in the same file as the code under test.
+- `SHOULD` use `// ---` section separators when a test module covers multiple concerns.
+
+### 13.2 Required Test Categories by Change Type
+
+| Change type | Required tests |
+|------------|---------------|
+| Rule/config behavior | Unit: happy path + invalid shape + edge values |
+| Engine/runtime wiring | Integration + relevant e2e path |
+| Policy behavior (`fail`/`skip`/`dlq`) | E2e assertions for all affected modes |
+| Serde types (new or modified) | Roundtrip test (see 13.4) |
+| Error types | Display format + category assertions |
+| Perf-sensitive changes | Benchmark or targeted throughput evidence |
+
+### 13.3 Test Data Helpers
+
+Config-heavy test modules `SHOULD` define a `base_config()` helper and use struct update syntax:
+
+```rust
+fn base_config() -> Config {
+    Config {
+        host: "localhost".to_string(),
+        port: 5432,
+        user: "postgres".to_string(),
+        password: String::new(),
+        database: "test".to_string(),
+        replication_slot: None,
+        publication: None,
+    }
+}
+
+#[test]
+fn validate_rejects_empty_publication() {
+    let cfg = Config {
+        publication: Some(String::new()),
+        ..base_config()
+    };
+    let err = cfg.validate().unwrap_err();
+    assert!(err.to_string().contains("must not be empty"));
+}
+```
+
+### 13.4 Serde Roundtrip Test Pattern
+
+Every `Serialize + Deserialize` type `SHOULD` have a roundtrip test:
+
+```rust
+#[test]
+fn serde_roundtrip() {
+    let err = ConnectorError::rate_limit("THROTTLED", "slow down", Some(5000))
+        .with_details(serde_json::json!({"endpoint": "/api/data"}));
+    let json = serde_json::to_string(&err).unwrap();
+    let back: ConnectorError = serde_json::from_str(&json).unwrap();
+    assert_eq!(err, back);
+}
+```
+
+For enums, iterate all variants:
+
+```rust
+#[test]
+fn sync_mode_roundtrip() {
+    for mode in [SyncMode::FullRefresh, SyncMode::Incremental, SyncMode::Cdc] {
+        let json = serde_json::to_string(&mode).unwrap();
+        let back: SyncMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(mode, back);
+    }
+}
+```
+
+### 13.5 Verification Commands
 
 - `just fmt`
 - `just lint`
@@ -179,57 +716,42 @@ Verification: metrics unit tests + e2e assertions where practical.
 
 `MUST` include command evidence in PR description for non-trivial behavior/perf changes.
 
-## 8) Enforcement Matrix
+## 14) Documentation Standards
 
-### Merge-Blocking
+### Module Docstrings
 
-- Formatting/lint failures
-- Test regressions in affected scope
-- Missing coverage for changed correctness semantics
-- Undocumented behavior changes to protocol/config contracts
+Every file `SHOULD` start with a `//!` docstring describing the module's responsibility. Crate root `lib.rs` files `MUST` include one.
 
-### Review-Blocking Checklist
+For crates with many modules, include a responsibility table:
 
-- Correctness semantics preserved or intentionally changed and documented
-- Error categories preserved at boundaries
-- No unbounded buffers introduced
-- Hot-path allocation impact considered
-- Metrics/logging implications considered
-
-### Exceptions
-
-- `SHOULD` deviations: allowed with rationale in PR
-- `MUST`/`MUST NOT` deviations: require maintainer sign-off with risk + rollback note
-
-## 9) Refactor Priority Rubric (Blueprint Driver)
-
-Score each crate/module from `0..5` in each dimension:
-
-- Correctness risk
-- Performance impact
-- Blast radius
-- Maintainability debt
-- Observability gap
-
-Priority score:
-
-```text
-Priority = 2*Correctness + 2*Performance + BlastRadius + Maintainability + Observability
+```rust
+//! | Module         | Responsibility |
+//! |----------------|----------------|
+//! | `arrow`        | Arrow IPC encode/decode utilities |
+//! | `orchestrator` | Pipeline execution, retry, stream dispatch |
 ```
 
-Classes:
+For crates with feature flags, include a feature table (see Section 4.3).
 
-- `P0`: high correctness + high performance pressure; refactor first
-- `P1`: meaningful debt reduction with moderate operational risk
-- `P2`: opportunistic cleanup and consistency work
+### Item Documentation
 
-### Suggested Initial Focus Areas
+- `SHOULD` document public functions with `///` docstrings.
+- `MUST` include `# Errors` sections on public functions that return `Result`:
 
-- P0 candidates: orchestrator stage coupling and checkpoint/commit coordination paths
-- P1 candidates: connector validation helpers and shared metric-shape utilities
-- P2 candidates: low-impact module decomposition and naming consistency
+```rust
+/// # Errors
+/// Returns `Err` if `replication_slot` or `publication` is empty or exceeds the
+/// 63-byte PostgreSQL identifier limit.
+pub fn validate(&self) -> Result<(), ConnectorError> { ... }
+```
 
-## 10) Good and Bad Patterns
+### Comments
+
+- `SHOULD` comment invariants and non-obvious constraints, not line-by-line mechanics.
+- `MUST` update protocol/config docs when behavior contracts change.
+- `MUST NOT` leave stale docs after interface changes.
+
+## 15) Good and Bad Patterns
 
 ### Good: hot-loop preallocation
 
@@ -261,17 +783,118 @@ if value < min || value > max {
 }
 ```
 
-## 11) PR Template Snippet
+### Good: typed error factory
+
+```rust
+ConnectorError::transient_db("DEADLOCK", "deadlock detected")
+    .with_commit_state(CommitState::BeforeCommit)
+```
+
+### Bad: stringly-typed error at boundary
+
+```rust
+Err(anyhow!("deadlock detected")) // loses category, retry metadata, scope
+```
+
+### Good: `#[non_exhaustive]` on protocol enum
+
+```rust
+#[derive(Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum Feature {
+    Cdc,
+    Stateful,
+}
+```
+
+### Bad: bare enum crossing host/connector boundary
+
+```rust
+#[derive(Serialize, Deserialize)]
+pub enum Feature { // no #[non_exhaustive], no rename_all
+    CDC,           // inconsistent casing
+    Stateful,
+}
+```
+
+### Good: blocking call on spawn_blocking
+
+```rust
+let result = tokio::task::spawn_blocking(move || {
+    run_source_stream(&runtime, &component, &config, &ctx)
+}).await?;
+```
+
+### Bad: blocking WASM call in async context
+
+```rust
+// Blocks the tokio runtime thread — causes scheduler starvation
+let result = run_source_stream(&runtime, &component, &config, &ctx);
+```
+
+## 16) Enforcement Matrix
+
+### Merge-Blocking
+
+- Formatting/lint failures
+- Test regressions in affected scope
+- Missing coverage for changed correctness semantics
+- Undocumented behavior changes to protocol/config contracts
+
+### Review-Blocking Checklist
+
+- Correctness semantics preserved or intentionally changed and documented
+- Error categories preserved at boundaries (Section 6)
+- No unbounded buffers introduced (Section 12.1)
+- Hot-path allocation impact considered (Section 11.1)
+- Metrics/logging implications considered (Section 11.4)
+
+### Exceptions
+
+- `SHOULD` deviations: allowed with rationale in PR
+- `MUST`/`MUST NOT` deviations: require maintainer sign-off with risk + rollback note
+
+## 17) Refactor Priority Rubric (Blueprint Driver)
+
+Score each crate/module from `0..5` in each dimension:
+
+- Correctness risk
+- Performance impact
+- Blast radius
+- Maintainability debt
+- Observability gap
+
+Priority score:
+
+```text
+Priority = 2*Correctness + 2*Performance + BlastRadius + Maintainability + Observability
+```
+
+Classes:
+
+- `P0`: high correctness + high performance pressure; refactor first
+- `P1`: meaningful debt reduction with moderate operational risk
+- `P2`: opportunistic cleanup and consistency work
+
+### Suggested Initial Focus Areas
+
+- P0 candidates: orchestrator stage coupling and checkpoint/commit coordination paths
+- P1 candidates: connector validation helpers and shared metric-shape utilities
+- P2 candidates: low-impact module decomposition and naming consistency
+
+## 18) PR Template Snippet
 
 Use this in maintainers' PR descriptions for non-trivial changes:
 
 ```markdown
 ## Coding Style Compliance
 - [ ] Correctness semantics unchanged or documented
-- [ ] Error categories preserved
-- [ ] No unbounded buffering introduced
-- [ ] Hot-path allocation impact reviewed
-- [ ] Metrics/logging impact reviewed
+- [ ] Error categories preserved (§6)
+- [ ] No unbounded buffering introduced (§12.1)
+- [ ] Hot-path allocation impact reviewed (§11.1)
+- [ ] Metrics/logging impact reviewed (§11.4)
+- [ ] Serde roundtrip tests for new/changed types (§13.4)
 
 ## Verification
 - [ ] just fmt
