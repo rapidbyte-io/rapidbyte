@@ -18,11 +18,13 @@ pub enum StateError {
 
 impl StateError {
     /// Wrap any backend-specific error into a [`StateError::Backend`].
+    #[must_use]
     pub fn backend(err: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self::Backend(Box::new(err))
     }
 
     /// Wrap backend errors with operation context for easier diagnosis.
+    #[must_use]
     pub fn backend_context(
         context: &str,
         err: impl std::error::Error + Send + Sync + 'static,
