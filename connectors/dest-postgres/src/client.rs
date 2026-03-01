@@ -5,6 +5,10 @@ use tokio_postgres::{Client, Config as PgConfig, NoTls};
 use rapidbyte_sdk::prelude::*;
 
 /// Connect to `PostgreSQL` using the provided config.
+///
+/// # Errors
+///
+/// Returns `Err` if the TCP connection or `PostgreSQL` authentication fails.
 pub(crate) async fn connect(config: &crate::config::Config) -> Result<Client, String> {
     let mut pg = PgConfig::new();
     pg.host(&config.host);
@@ -32,6 +36,10 @@ pub(crate) async fn connect(config: &crate::config::Config) -> Result<Client, St
 }
 
 /// Validate `PostgreSQL` connectivity and target schema.
+///
+/// # Errors
+///
+/// Returns `Err` if the connection fails or the `SELECT 1` health check fails.
 pub(crate) async fn validate(
     config: &crate::config::Config,
 ) -> Result<ValidationResult, ConnectorError> {
