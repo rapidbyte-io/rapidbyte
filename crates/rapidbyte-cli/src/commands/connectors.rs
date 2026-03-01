@@ -1,6 +1,12 @@
+//! Connector listing subcommand (connectors).
+
 use anyhow::Result;
 
 /// Execute the `connectors` command: list available connectors with manifest info.
+///
+/// # Errors
+///
+/// Returns `Err` if directory scanning or manifest parsing fails.
 pub async fn execute() -> Result<()> {
     let dirs = connector_dirs();
 

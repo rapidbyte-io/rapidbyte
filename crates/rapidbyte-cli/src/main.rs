@@ -1,3 +1,5 @@
+//! Rapidbyte CLI binary — parse arguments, dispatch subcommands.
+
 mod commands;
 mod logging;
 

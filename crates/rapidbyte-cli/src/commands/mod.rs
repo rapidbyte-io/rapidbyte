@@ -1,3 +1,5 @@
+//! CLI subcommand implementations.
+
 pub mod check;
 pub mod connectors;
 pub mod discover;

@@ -1,3 +1,5 @@
+//! Structured logging initialization via tracing-subscriber.
+
 use tracing_subscriber::EnvFilter;
 
 /// Initialize structured logging with tracing-subscriber.

@@ -1,3 +1,5 @@
+//! Connector project scaffolding subcommand (scaffold).
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +22,11 @@ impl Role {
 }
 
 /// Run the scaffold command.
+///
+/// # Errors
+///
+/// Returns `Err` if the connector name is invalid, the output directory
+/// cannot be created, or file writing fails.
 pub fn run(name: &str, output: Option<&str>) -> Result<()> {
     // Determine role from name prefix
     let role = if name.starts_with("source-") {

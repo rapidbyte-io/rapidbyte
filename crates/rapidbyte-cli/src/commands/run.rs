@@ -1,3 +1,5 @@
+//! Pipeline execution subcommand (run).
+
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -16,6 +18,10 @@ struct ProcessCpuMetrics {
 }
 
 /// Execute the `run` command: parse, validate, and run a pipeline.
+///
+/// # Errors
+///
+/// Returns `Err` if pipeline parsing, validation, or execution fails.
 pub async fn execute(pipeline_path: &Path, dry_run: bool, limit: Option<u64>) -> Result<()> {
     // 1. Parse pipeline YAML
     let config = parser::parse_pipeline(pipeline_path)

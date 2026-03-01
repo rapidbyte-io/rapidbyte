@@ -1,3 +1,5 @@
+//! Pipeline validation subcommand (check).
+
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -8,6 +10,10 @@ use rapidbyte_engine::config::validator;
 use rapidbyte_engine::orchestrator;
 
 /// Execute the `check` command: validate pipeline config and connector connectivity.
+///
+/// # Errors
+///
+/// Returns `Err` if pipeline parsing, validation, or connectivity check fails.
 pub async fn execute(pipeline_path: &Path) -> Result<()> {
     // 1. Parse pipeline YAML
     let config = parser::parse_pipeline(pipeline_path)
