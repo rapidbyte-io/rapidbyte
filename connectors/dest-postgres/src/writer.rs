@@ -7,11 +7,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
+use tokio_postgres::Client;
+
 use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use rapidbyte_sdk::catalog::SchemaHint;
-use tokio_postgres::Client;
-
 use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::stream::SchemaEvolutionPolicy;
 
