@@ -405,9 +405,63 @@ pub mod prelude {
 
 ## 9) Connector Conventions
 
-### 9.1 Entry Point
+### 9.1 Entry Point and Manifests
 
-Every connector has a single `main.rs` with the `#[connector(role)]` attribute and a trait implementation:
+Every connector has two required parts: a `build.rs` manifest and a `main.rs` entry point.
+
+**Manifest (`build.rs`)** — declares metadata, capabilities, and environment requirements via `ManifestBuilder`:
+
+```rust
+// connectors/dest-postgres/build.rs
+use rapidbyte_sdk::build::ManifestBuilder;
+use rapidbyte_sdk::wire::{Feature, WriteMode};
+
+fn main() {
+    ManifestBuilder::destination("rapidbyte/dest-postgres")
+        .name("PostgreSQL Destination")
+        .description("Writes data to PostgreSQL using INSERT or COPY")
+        .write_modes(&[
+            WriteMode::Append,
+            WriteMode::Replace,
+            WriteMode::Upsert { primary_key: vec![] },
+        ])
+        .dest_features(vec![Feature::BulkLoadCopy])
+        .allow_runtime_network()
+        .env_vars(&["PGSSLROOTCERT"])
+        .emit();
+}
+```
+
+```rust
+// connectors/source-postgres/build.rs
+use rapidbyte_sdk::build::ManifestBuilder;
+use rapidbyte_sdk::wire::SyncMode;
+
+fn main() {
+    ManifestBuilder::source("rapidbyte/source-postgres")
+        .name("PostgreSQL Source")
+        .description("Reads data from PostgreSQL tables using streaming queries")
+        .sync_modes(&[SyncMode::FullRefresh, SyncMode::Incremental])
+        .allow_runtime_network()
+        .env_vars(&["PGSSLROOTCERT"])
+        .emit();
+}
+```
+
+- `MUST` use `ManifestBuilder` to declare name, description, supported modes, and feature flags.
+- `MUST` call `allow_runtime_network()` for connectors that establish TCP connections.
+- `MUST` declare required environment variables (e.g., `PGSSLROOTCERT`) via `env_vars()`.
+- Transform connectors that need no special capabilities `MAY` use a minimal manifest:
+
+```rust
+// connectors/transform-sql/build.rs
+ManifestBuilder::transform("rapidbyte/transform-sql")
+    .name("SQL Transform")
+    .description("Executes SQL queries on Arrow batches using Apache DataFusion")
+    .emit();
+```
+
+**Entry point (`main.rs`)** — the `#[connector(role)]` attribute and trait implementation:
 
 ```rust
 use rapidbyte_sdk::prelude::*;
@@ -473,10 +527,91 @@ Connectors `SHOULD` follow this module pattern:
 | `metrics` | Metric emission helpers |
 | `types` | Connector-specific types |
 
-### 9.4 Network I/O
+### 9.4 Network I/O and Connection Safety
 
-- `MUST` use `HostTcpStream` (`rapidbyte_sdk::host_tcp`) for all network I/O.
+- `MUST` use `HostTcpStream` (`rapidbyte_sdk::host_tcp`) for all TCP connections to ensure host ACL enforcement.
 - `MUST NOT` use raw WASI sockets — the host enforces connector ACLs through `HostTcpStream`.
+- `MUST` wrap raw connection handlers in `tokio::spawn` to manage background tasks without blocking the main connector logic.
+- `MUST` log connection errors using `rapidbyte_sdk::host_ffi::log` for visibility in host logs.
+
+Example from `source-postgres/src/client.rs`:
+
+```rust
+pub(crate) async fn connect(config: &Config) -> Result<Client, String> {
+    let mut pg = PgConfig::new();
+    pg.host(&config.host);
+    pg.port(config.port);
+    pg.user(&config.user);
+    if !config.password.is_empty() {
+        pg.password(&config.password);
+    }
+    pg.dbname(&config.database);
+
+    let stream = rapidbyte_sdk::host_tcp::HostTcpStream::connect(&config.host, config.port)
+        .map_err(|e| format!("Connection failed: {e}"))?;
+    let (client, connection) = pg
+        .connect_raw(stream, NoTls)
+        .await
+        .map_err(|e| format!("Connection failed: {e}"))?;
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            rapidbyte_sdk::host_ffi::log(0, &format!("PostgreSQL connection error: {e}"));
+        }
+    });
+
+    Ok(client)
+}
+```
+
+### 9.5 Validation and Connectivity Tests
+
+- `MUST` implement a `validate` helper that performs a live connectivity test (e.g., `SELECT 1`) before signaling `ValidationStatus::Success`.
+- `SHOULD` provide descriptive success messages that include connection details (host, port, target database/schema).
+
+Example from `dest-postgres/src/client.rs`:
+
+```rust
+pub(crate) async fn validate(config: &Config) -> Result<ValidationResult, ConnectorError> {
+    let client = connect(config)
+        .await
+        .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
+
+    client.query_one("SELECT 1", &[]).await.map_err(|e| {
+        ConnectorError::transient_network(
+            "CONNECTION_TEST_FAILED",
+            format!("Connection test failed: {e}"),
+        )
+    })?;
+
+    let schema_check = client
+        .query_one(
+            "SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1",
+            &[&config.schema],
+        )
+        .await;
+
+    let message = match schema_check {
+        Ok(_) => format!(
+            "Connected to {}:{}/{} (schema: {})",
+            config.host, config.port, config.database, config.schema
+        ),
+        Err(_) => format!(
+            "Connected to {}:{}/{} (schema '{}' does not exist, will be created)",
+            config.host, config.port, config.database, config.schema
+        ),
+    };
+
+    Ok(ValidationResult {
+        status: ValidationStatus::Success,
+        message,
+    })
+}
+```
+
+Failure mode prevented: silent misconfiguration reaching production; users get clear feedback about connectivity issues before pipeline execution.
+
+Verification: e2e `check` tests that exercise `validate` against a live database.
 
 ## 10) Correctness Standards (Ingestion-Critical)
 
@@ -521,6 +656,54 @@ Failure mode prevented: duplicate writes, data gaps, irreversible cursor corrupt
 
 Verification: engine integration tests and checkpoint correlation tests.
 
+### 10.5 Schema Drift and Evolution
+
+- `MUST` implement explicit schema drift detection when writing to structured destinations.
+- `MUST` support configurable `SchemaEvolutionPolicy` for handling new columns, removed columns, type changes, and nullability changes.
+- `MUST` default to `ColumnPolicy::Fail` for unexpected schema changes unless otherwise configured.
+- `SHOULD` use database-specific escaping (e.g., `quote_identifier`) for all DDL operations to prevent SQL injection or syntax errors from special characters.
+
+Example from `dest-postgres/src/ddl/drift.rs`:
+
+```rust
+#[derive(Debug, Default)]
+pub(crate) struct SchemaDrift {
+    pub(crate) new_columns: Vec<(String, String)>,
+    pub(crate) removed_columns: Vec<String>,
+    pub(crate) type_changes: Vec<(String, String, String)>,
+    pub(crate) nullability_changes: Vec<(String, bool, bool)>,
+}
+
+// Policy application:
+for (col_name, pg_type) in &drift.new_columns {
+    match policy.new_column {
+        ColumnPolicy::Fail => {
+            return Err(format!(
+                "Schema evolution: new column '{col_name}' detected but policy is 'fail'"
+            ));
+        }
+        ColumnPolicy::Add => {
+            let sql = format!(
+                "ALTER TABLE {} ADD COLUMN {} {}",
+                qualified_table,
+                quote_identifier(col_name),
+                pg_type
+            );
+            client.execute(&sql, &[]).await.map_err(|e| {
+                format!("ALTER TABLE ADD COLUMN '{col_name}' failed: {e}")
+            })?;
+        }
+        ColumnPolicy::Ignore => {
+            self.ignored_columns.insert(col_name.clone());
+        }
+    }
+}
+```
+
+Failure mode prevented: silent column loss, type coercion bugs, and SQL injection in DDL statements.
+
+Verification: e2e schema evolution tests for each policy combination + DDL escaping unit tests.
+
 ## 11) Performance Standards (Hot-Path Rust)
 
 ### 11.1 Allocation Discipline
@@ -563,6 +746,54 @@ Verification: review + focused perf runs.
 Failure mode prevented: invisible regressions and unusable monitoring.
 
 Verification: metrics unit tests + e2e assertions where practical.
+
+### 11.5 Batch Processing and Buffering
+
+- `MUST` use `Vec::with_capacity` when building binary buffers for batch writes to minimize reallocations.
+- `MUST` implement a configurable flush threshold to bound memory usage during large data transfers.
+- `SHOULD` use `std::mem::take` to efficiently move buffer ownership when sending data to async sinks.
+
+Example from `dest-postgres/src/copy.rs`:
+
+```rust
+const DEFAULT_FLUSH_BYTES: usize = 4 * 1024 * 1024;
+
+let flush_threshold = flush_bytes.unwrap_or(DEFAULT_FLUSH_BYTES).max(1);
+let mut buf = Vec::with_capacity(flush_threshold);
+
+// ... encode rows into buf ...
+
+if buf.len() >= flush_threshold {
+    sink.send(Bytes::from(std::mem::take(&mut buf)))
+        .await
+        .map_err(|e| format!("COPY send failed: {e}"))?;
+    buf = Vec::with_capacity(flush_threshold);
+}
+```
+
+Adaptive flush sizing based on row width from `dest-postgres/src/writer.rs`:
+
+```rust
+const COPY_FLUSH_1MB: usize = 1024 * 1024;
+const COPY_FLUSH_4MB: usize = 4 * 1024 * 1024;
+const COPY_FLUSH_16MB: usize = 16 * 1024 * 1024;
+const COPY_FLUSH_MAX: usize = 32 * 1024 * 1024;
+
+fn adaptive_copy_flush_bytes(configured: Option<usize>, avg_row_bytes: Option<usize>) -> usize {
+    if let Some(bytes) = configured {
+        return bytes.clamp(COPY_FLUSH_1MB, COPY_FLUSH_MAX);
+    }
+    match avg_row_bytes {
+        Some(bytes) if bytes >= 64 * 1024 => COPY_FLUSH_16MB,
+        Some(bytes) if bytes >= 8 * 1024 => COPY_FLUSH_4MB,
+        _ => COPY_FLUSH_1MB,
+    }
+}
+```
+
+Failure mode prevented: OOM from unbounded buffer growth; excessive syscalls from undersized flushes.
+
+Verification: benchmark runs with varying row sizes + memory profiling.
 
 ## 12) Async and Concurrency Patterns
 
@@ -831,6 +1062,45 @@ let result = tokio::task::spawn_blocking(move || {
 ```rust
 // Blocks the tokio runtime thread — causes scheduler starvation
 let result = run_source_stream(&runtime, &component, &config, &ctx);
+```
+
+### Good: pre-computed write targets
+
+```rust
+// Pre-downcast active columns once per batch — eliminates per-cell downcast_ref() calls.
+let typed_cols = downcast_columns(batch, target.active_cols)?;
+
+for row_idx in 0..batch.num_rows() {
+    for typed_col in &typed_cols {
+        write_binary_field(&mut buf, typed_col, row_idx);
+    }
+}
+```
+
+### Bad: repeated schema lookups in hot loops
+
+```rust
+// BAD: querying metadata or downcasting inside a row-processing loop
+for row in 0..batch.num_rows() {
+    let col = batch.column(i).as_any().downcast_ref::<Int64Array>().unwrap();
+    // per-row downcast — O(rows * columns) type checks instead of O(columns)
+}
+```
+
+### Good: documenting safety and limits with `#[allow]`
+
+```rust
+// Safety: PG COPY binary tuple header uses i16 for field count;
+// tables with >32,767 columns are not supported.
+#[allow(clippy::cast_possible_truncation)]
+let num_fields = target.active_cols.len() as i16;
+```
+
+### Bad: suppressing clippy without rationale
+
+```rust
+#[allow(clippy::cast_possible_truncation)]
+let num_fields = target.active_cols.len() as i16; // why is this safe?
 ```
 
 ## 16) Enforcement Matrix
