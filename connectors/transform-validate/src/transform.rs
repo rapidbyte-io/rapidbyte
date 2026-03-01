@@ -10,10 +10,11 @@ use ::arrow::compute::take;
 use ::arrow::datatypes::DataType;
 use ::arrow::util::display::array_value_to_string;
 use arrow_json::LineDelimitedWriter;
+use bigdecimal::{num_bigint::BigInt, BigDecimal};
 use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::stream::DataErrorPolicy;
 
-use crate::config::{CompiledConfig, CompiledRule};
+use crate::config::{CompiledConfig, CompiledRule, NumericBound};
 
 #[derive(Debug, Clone)]
 struct RuleFailure {
@@ -110,6 +111,11 @@ struct BatchEvaluation {
     failure_counts: BTreeMap<(String, String), u64>,
 }
 
+enum NumericCellValue {
+    Float(f64),
+    Decimal(BigDecimal),
+}
+
 fn evaluate_batch(batch: &RecordBatch, config: &CompiledConfig) -> BatchEvaluation {
     let field_to_index = batch
         .schema()
@@ -119,20 +125,7 @@ fn evaluate_batch(batch: &RecordBatch, config: &CompiledConfig) -> BatchEvaluati
         .map(|(idx, field)| (field.name().clone(), idx))
         .collect::<HashMap<_, _>>();
 
-    let mut unique_counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
-    for rule in &config.rules {
-        if let CompiledRule::Unique { field } = rule {
-            let mut counts = HashMap::new();
-            if let Some(index) = field_to_index.get(field) {
-                let column = batch.column(*index);
-                for row in 0..batch.num_rows() {
-                    let key = unique_key(column.as_ref(), row);
-                    *counts.entry(key).or_insert(0) += 1;
-                }
-            }
-            unique_counts.insert(field.clone(), counts);
-        }
-    }
+    let unique_counts = build_unique_counts(batch, config, &field_to_index);
 
     let mut valid_indices = Vec::with_capacity(batch.num_rows());
     let mut invalid_rows = Vec::new();
@@ -142,146 +135,9 @@ fn evaluate_batch(batch: &RecordBatch, config: &CompiledConfig) -> BatchEvaluati
         let mut failures = Vec::with_capacity(config.rules.len());
 
         for rule in &config.rules {
-            match rule {
-                CompiledRule::NotNull { field } => {
-                    if let Some(index) = field_to_index.get(field) {
-                        if batch.column(*index).is_null(row) {
-                            failures.push(RuleFailure {
-                                rule: "not_null",
-                                field: field.clone(),
-                                message: format!("assert_not_null({field}) failed: value is null"),
-                            });
-                        }
-                    } else {
-                        failures.push(RuleFailure {
-                            rule: "not_null",
-                            field: field.clone(),
-                            message: format!("assert_not_null({field}) failed: column missing"),
-                        });
-                    }
-                }
-                CompiledRule::Regex {
-                    field,
-                    pattern,
-                    regex,
-                } => {
-                    if let Some(index) = field_to_index.get(field) {
-                        let column = batch.column(*index);
-                        if column.is_null(row) {
-                            failures.push(RuleFailure {
-                                rule: "regex",
-                                field: field.clone(),
-                                message: format!(
-                                    "assert_regex({field}, {pattern}) failed: value is null"
-                                ),
-                            });
-                        } else if !matches!(column.data_type(), DataType::Utf8 | DataType::LargeUtf8)
-                        {
-                            failures.push(RuleFailure {
-                                rule: "regex",
-                                field: field.clone(),
-                                message: format!(
-                                    "assert_regex({field}, {pattern}) failed: field is not string"
-                                ),
-                            });
-                        } else {
-                            let value = string_value(column.as_ref(), row).unwrap_or_default();
-                            if !regex.is_match(value) {
-                                failures.push(RuleFailure {
-                                    rule: "regex",
-                                    field: field.clone(),
-                                    message: format!(
-                                        "assert_regex({field}, {pattern}) failed: value '{value}' does not match"
-                                    ),
-                                });
-                            }
-                        }
-                    } else {
-                        failures.push(RuleFailure {
-                            rule: "regex",
-                            field: field.clone(),
-                            message: format!("assert_regex({field}, {pattern}) failed: column missing"),
-                        });
-                    }
-                }
-                CompiledRule::Range { field, min, max } => {
-                    if let Some(index) = field_to_index.get(field) {
-                        let column = batch.column(*index);
-                        if column.is_null(row) {
-                            failures.push(RuleFailure {
-                                rule: "range",
-                                field: field.clone(),
-                                message: format!("assert_range({field}) failed: value is null"),
-                            });
-                            continue;
-                        }
-                        match numeric_value(column.as_ref(), row) {
-                            Some(value) => {
-                                if !value.is_finite() {
-                                    failures.push(RuleFailure {
-                                        rule: "range",
-                                        field: field.clone(),
-                                        message: format!(
-                                            "assert_range({field}) failed: value is non-finite number"
-                                        ),
-                                    });
-                                } else if min.is_some_and(|lower| value < lower)
-                                    || max.is_some_and(|upper| value > upper)
-                                {
-                                    failures.push(RuleFailure {
-                                        rule: "range",
-                                        field: field.clone(),
-                                        message: format!(
-                                            "assert_range({field}) failed: value {value} outside bounds [{:?}, {:?}]",
-                                            min, max
-                                        ),
-                                    });
-                                }
-                            }
-                            None => failures.push(RuleFailure {
-                                rule: "range",
-                                field: field.clone(),
-                                message: format!(
-                                    "assert_range({field}) failed: field is not numeric"
-                                ),
-                            }),
-                        }
-                    } else {
-                        failures.push(RuleFailure {
-                            rule: "range",
-                            field: field.clone(),
-                            message: format!("assert_range({field}) failed: column missing"),
-                        });
-                    }
-                }
-                CompiledRule::Unique { field } => {
-                    if let Some(index) = field_to_index.get(field) {
-                        let column = batch.column(*index);
-                        let key = unique_key(column.as_ref(), row);
-                        if unique_counts
-                            .get(field)
-                            .and_then(|counts| counts.get(&key))
-                            .copied()
-                            .unwrap_or_default()
-                            > 1
-                        {
-                            failures.push(RuleFailure {
-                                rule: "unique",
-                                field: field.clone(),
-                                message: format!(
-                                    "assert_unique({field}) failed: duplicate value {}",
-                                    display_value(column.as_ref(), row)
-                                ),
-                            });
-                        }
-                    } else {
-                        failures.push(RuleFailure {
-                            rule: "unique",
-                            field: field.clone(),
-                            message: format!("assert_unique({field}) failed: column missing"),
-                        });
-                    }
-                }
+            if let Some(failure) = evaluate_rule(rule, batch, row, &field_to_index, &unique_counts)
+            {
+                failures.push(failure);
             }
         }
 
@@ -309,6 +165,221 @@ fn evaluate_batch(batch: &RecordBatch, config: &CompiledConfig) -> BatchEvaluati
         invalid_rows,
         failure_counts,
     }
+}
+
+fn build_unique_counts(
+    batch: &RecordBatch,
+    config: &CompiledConfig,
+    field_to_index: &HashMap<String, usize>,
+) -> HashMap<String, HashMap<String, usize>> {
+    let mut unique_counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    for rule in &config.rules {
+        if let CompiledRule::Unique { field } = rule {
+            let mut counts = HashMap::new();
+            if let Some(index) = field_to_index.get(field) {
+                let column = batch.column(*index);
+                for row in 0..batch.num_rows() {
+                    let key = unique_key(column.as_ref(), row);
+                    *counts.entry(key).or_insert(0) += 1;
+                }
+            }
+            unique_counts.insert(field.clone(), counts);
+        }
+    }
+    unique_counts
+}
+
+fn evaluate_rule(
+    rule: &CompiledRule,
+    batch: &RecordBatch,
+    row: usize,
+    field_to_index: &HashMap<String, usize>,
+    unique_counts: &HashMap<String, HashMap<String, usize>>,
+) -> Option<RuleFailure> {
+    match rule {
+        CompiledRule::NotNull { field } => evaluate_not_null_rule(field, batch, row, field_to_index),
+        CompiledRule::Regex {
+            field,
+            pattern,
+            regex,
+        } => evaluate_regex_rule(field, pattern, regex, batch, row, field_to_index),
+        CompiledRule::Range { field, min, max } => {
+            evaluate_range_rule(field, min, max, batch, row, field_to_index)
+        }
+        CompiledRule::Unique { field } => {
+            evaluate_unique_rule(field, batch, row, field_to_index, unique_counts)
+        }
+    }
+}
+
+fn evaluate_not_null_rule(
+    field: &str,
+    batch: &RecordBatch,
+    row: usize,
+    field_to_index: &HashMap<String, usize>,
+) -> Option<RuleFailure> {
+    let Some(index) = field_to_index.get(field) else {
+        return Some(RuleFailure {
+            rule: "not_null",
+            field: field.to_string(),
+            message: format!("assert_not_null({field}) failed: column missing"),
+        });
+    };
+    if batch.column(*index).is_null(row) {
+        return Some(RuleFailure {
+            rule: "not_null",
+            field: field.to_string(),
+            message: format!("assert_not_null({field}) failed: value is null"),
+        });
+    }
+    None
+}
+
+fn evaluate_regex_rule(
+    field: &str,
+    pattern: &str,
+    regex: &regex::Regex,
+    batch: &RecordBatch,
+    row: usize,
+    field_to_index: &HashMap<String, usize>,
+) -> Option<RuleFailure> {
+    let Some(index) = field_to_index.get(field) else {
+        return Some(RuleFailure {
+            rule: "regex",
+            field: field.to_string(),
+            message: format!("assert_regex({field}, {pattern}) failed: column missing"),
+        });
+    };
+    let column = batch.column(*index);
+    if column.is_null(row) {
+        return Some(RuleFailure {
+            rule: "regex",
+            field: field.to_string(),
+            message: format!("assert_regex({field}, {pattern}) failed: value is null"),
+        });
+    }
+    if !matches!(column.data_type(), DataType::Utf8 | DataType::LargeUtf8) {
+        return Some(RuleFailure {
+            rule: "regex",
+            field: field.to_string(),
+            message: format!("assert_regex({field}, {pattern}) failed: field is not string"),
+        });
+    }
+    let value = string_value(column.as_ref(), row).unwrap_or_default();
+    if !regex.is_match(value) {
+        return Some(RuleFailure {
+            rule: "regex",
+            field: field.to_string(),
+            message: format!(
+                "assert_regex({field}, {pattern}) failed: value '{value}' does not match"
+            ),
+        });
+    }
+    None
+}
+
+fn evaluate_range_rule(
+    field: &str,
+    min: &Option<NumericBound>,
+    max: &Option<NumericBound>,
+    batch: &RecordBatch,
+    row: usize,
+    field_to_index: &HashMap<String, usize>,
+) -> Option<RuleFailure> {
+    let Some(index) = field_to_index.get(field) else {
+        return Some(RuleFailure {
+            rule: "range",
+            field: field.to_string(),
+            message: format!("assert_range({field}) failed: column missing"),
+        });
+    };
+    let column = batch.column(*index);
+    if column.is_null(row) {
+        return Some(RuleFailure {
+            rule: "range",
+            field: field.to_string(),
+            message: format!("assert_range({field}) failed: value is null"),
+        });
+    }
+
+    let Some(numeric_value) = numeric_value(column.as_ref(), row) else {
+        return Some(RuleFailure {
+            rule: "range",
+            field: field.to_string(),
+            message: format!("assert_range({field}) failed: field is not numeric"),
+        });
+    };
+    match numeric_value {
+        NumericCellValue::Float(value) => {
+            if !value.is_finite() {
+                return Some(RuleFailure {
+                    rule: "range",
+                    field: field.to_string(),
+                    message: format!("assert_range({field}) failed: value is non-finite number"),
+                });
+            }
+            if value_is_out_of_float_bounds(value, min, max) {
+                return Some(RuleFailure {
+                    rule: "range",
+                    field: field.to_string(),
+                    message: format!(
+                        "assert_range({field}) failed: value {} outside bounds {}",
+                        display_value(column.as_ref(), row),
+                        format_bounds(min, max)
+                    ),
+                });
+            }
+        }
+        NumericCellValue::Decimal(value) => {
+            if value_is_out_of_decimal_bounds(&value, min, max) {
+                return Some(RuleFailure {
+                    rule: "range",
+                    field: field.to_string(),
+                    message: format!(
+                        "assert_range({field}) failed: value {} outside bounds {}",
+                        display_value(column.as_ref(), row),
+                        format_bounds(min, max)
+                    ),
+                });
+            }
+        }
+    }
+    None
+}
+
+fn evaluate_unique_rule(
+    field: &str,
+    batch: &RecordBatch,
+    row: usize,
+    field_to_index: &HashMap<String, usize>,
+    unique_counts: &HashMap<String, HashMap<String, usize>>,
+) -> Option<RuleFailure> {
+    let Some(index) = field_to_index.get(field) else {
+        return Some(RuleFailure {
+            rule: "unique",
+            field: field.to_string(),
+            message: format!("assert_unique({field}) failed: column missing"),
+        });
+    };
+    let column = batch.column(*index);
+    let key = unique_key(column.as_ref(), row);
+    if unique_counts
+        .get(field)
+        .and_then(|counts| counts.get(&key))
+        .copied()
+        .unwrap_or_default()
+        > 1
+    {
+        return Some(RuleFailure {
+            rule: "unique",
+            field: field.to_string(),
+            message: format!(
+                "assert_unique({field}) failed: duplicate value {}",
+                display_value(column.as_ref(), row)
+            ),
+        });
+    }
+    None
 }
 
 fn emit_validation_metrics(ctx: &Context, evaluation: &BatchEvaluation) -> Result<(), ConnectorError> {
@@ -395,66 +466,89 @@ fn string_value<'a>(array: &'a dyn Array, row: usize) -> Option<&'a str> {
     }
 }
 
-fn numeric_value(array: &dyn Array, row: usize) -> Option<f64> {
+fn numeric_value(array: &dyn Array, row: usize) -> Option<NumericCellValue> {
     match array.data_type() {
         DataType::Int8 => array
             .as_any()
             .downcast_ref::<Int8Array>()
-            .map(|arr| f64::from(arr.value(row))),
+            .map(|arr| NumericCellValue::Float(f64::from(arr.value(row)))),
         DataType::Int16 => array
             .as_any()
             .downcast_ref::<Int16Array>()
-            .map(|arr| f64::from(arr.value(row))),
+            .map(|arr| NumericCellValue::Float(f64::from(arr.value(row)))),
         DataType::Int32 => array
             .as_any()
             .downcast_ref::<Int32Array>()
-            .map(|arr| f64::from(arr.value(row))),
+            .map(|arr| NumericCellValue::Float(f64::from(arr.value(row)))),
         DataType::Int64 => array
             .as_any()
             .downcast_ref::<Int64Array>()
-            .map(|arr| arr.value(row) as f64),
+            .map(|arr| NumericCellValue::Float(arr.value(row) as f64)),
         DataType::UInt8 => array
             .as_any()
             .downcast_ref::<UInt8Array>()
-            .map(|arr| f64::from(arr.value(row))),
+            .map(|arr| NumericCellValue::Float(f64::from(arr.value(row)))),
         DataType::UInt16 => array
             .as_any()
             .downcast_ref::<UInt16Array>()
-            .map(|arr| f64::from(arr.value(row))),
+            .map(|arr| NumericCellValue::Float(f64::from(arr.value(row)))),
         DataType::UInt32 => array
             .as_any()
             .downcast_ref::<UInt32Array>()
-            .map(|arr| f64::from(arr.value(row))),
+            .map(|arr| NumericCellValue::Float(f64::from(arr.value(row)))),
         DataType::UInt64 => array
             .as_any()
             .downcast_ref::<UInt64Array>()
-            .map(|arr| arr.value(row) as f64),
+            .map(|arr| NumericCellValue::Float(arr.value(row) as f64)),
         DataType::Float32 => array
             .as_any()
             .downcast_ref::<Float32Array>()
-            .map(|arr| f64::from(arr.value(row))),
+            .map(|arr| NumericCellValue::Float(f64::from(arr.value(row)))),
         DataType::Float64 => array
             .as_any()
             .downcast_ref::<Float64Array>()
-            .map(|arr| arr.value(row)),
-        DataType::Decimal128(_, scale) => array
-            .as_any()
-            .downcast_ref::<Decimal128Array>()
-            .map(|arr| decimal128_to_f64(arr.value(row), *scale)),
+            .map(|arr| NumericCellValue::Float(arr.value(row))),
+        DataType::Decimal128(_, scale) => {
+            let values = array.as_any().downcast_ref::<Decimal128Array>()?;
+            Some(NumericCellValue::Decimal(decimal128_to_decimal(
+                values.value(row),
+                *scale,
+            )))
+        }
         DataType::Decimal256(_, _scale) => {
             let rendered = array_value_to_string(array, row).ok()?;
-            rendered.parse::<f64>().ok()
+            rendered.parse::<BigDecimal>().ok().map(NumericCellValue::Decimal)
         }
         _ => None,
     }
 }
 
-fn decimal128_to_f64(value: i128, scale: i8) -> f64 {
-    if scale >= 0 {
-        value as f64 / 10f64.powi(i32::from(scale))
-    } else {
-        value as f64 * 10f64.powi(-i32::from(scale))
-    }
+fn decimal128_to_decimal(value: i128, scale: i8) -> BigDecimal {
+    BigDecimal::new(BigInt::from(value), i64::from(scale))
+}
+
+fn value_is_out_of_float_bounds(value: f64, min: &Option<NumericBound>, max: &Option<NumericBound>) -> bool {
+    min.as_ref().is_some_and(|bound| value < bound.as_f64)
+        || max.as_ref().is_some_and(|bound| value > bound.as_f64)
+}
+
+fn value_is_out_of_decimal_bounds(
+    value: &BigDecimal,
+    min: &Option<NumericBound>,
+    max: &Option<NumericBound>,
+) -> bool {
+    min.as_ref().is_some_and(|bound| value < &bound.decimal)
+        || max.as_ref().is_some_and(|bound| value > &bound.decimal)
+}
+
+fn format_bounds(min: &Option<NumericBound>, max: &Option<NumericBound>) -> String {
+    let min_bound = min
+        .as_ref()
+        .map_or_else(|| "-inf".to_string(), |bound| bound.literal.clone());
+    let max_bound = max
+        .as_ref()
+        .map_or_else(|| "+inf".to_string(), |bound| bound.literal.clone());
+    format!("[{min_bound}, {max_bound}]")
 }
 
 fn display_value(array: &dyn Array, row: usize) -> String {
@@ -479,6 +573,14 @@ mod tests {
     use ::arrow::array::{Decimal128Array, Decimal256Array, Float64Array, StringArray};
     use ::arrow::datatypes::{Field, Schema};
     use arrow_buffer::i256;
+
+    fn bound(literal: &str) -> NumericBound {
+        NumericBound {
+            literal: literal.to_string(),
+            decimal: literal.parse::<BigDecimal>().expect("bound should parse"),
+            as_f64: literal.parse::<f64>().expect("bound should parse as f64"),
+        }
+    }
 
     #[test]
     fn evaluate_batch_collects_multiple_failures() {
@@ -507,8 +609,8 @@ mod tests {
                 },
                 CompiledRule::Range {
                     field: "age".to_string(),
-                    min: Some(0.0),
-                    max: Some(150.0),
+                    min: Some(bound("0")),
+                    max: Some(bound("150")),
                 },
             ],
         };
@@ -556,8 +658,8 @@ mod tests {
         let compiled = CompiledConfig {
             rules: vec![CompiledRule::Range {
                 field: "amount".to_string(),
-                min: Some(10.0),
-                max: Some(30.0),
+                min: Some(bound("10")),
+                max: Some(bound("30")),
             }],
         };
 
@@ -585,8 +687,8 @@ mod tests {
         let compiled = CompiledConfig {
             rules: vec![CompiledRule::Range {
                 field: "amount".to_string(),
-                min: Some(10.0),
-                max: Some(30.0),
+                min: Some(bound("10")),
+                max: Some(bound("30")),
             }],
         };
 
@@ -612,8 +714,8 @@ mod tests {
         let compiled = CompiledConfig {
             rules: vec![CompiledRule::Range {
                 field: "score".to_string(),
-                min: Some(0.0),
-                max: Some(100.0),
+                min: Some(bound("0")),
+                max: Some(bound("100")),
             }],
         };
 
@@ -641,8 +743,8 @@ mod tests {
         let compiled = CompiledConfig {
             rules: vec![CompiledRule::Range {
                 field: "amount".to_string(),
-                min: Some(10.0),
-                max: Some(30.0),
+                min: Some(bound("10")),
+                max: Some(bound("30")),
             }],
         };
 
@@ -718,5 +820,74 @@ mod tests {
                 ("field".to_string(), "email".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn evaluate_batch_reports_missing_columns_for_all_rules() {
+        let schema = Arc::new(Schema::new(vec![Field::new("email", DataType::Utf8, true)]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(StringArray::from(vec![Some("x")])) as ArrayRef],
+        )
+        .expect("batch should build");
+
+        let compiled = CompiledConfig {
+            rules: vec![
+                CompiledRule::NotNull {
+                    field: "missing_not_null".to_string(),
+                },
+                CompiledRule::Regex {
+                    field: "missing_regex".to_string(),
+                    pattern: "^.+$".to_string(),
+                    regex: regex::Regex::new("^.+$").expect("regex should compile"),
+                },
+                CompiledRule::Range {
+                    field: "missing_range".to_string(),
+                    min: Some(bound("1")),
+                    max: Some(bound("2")),
+                },
+                CompiledRule::Unique {
+                    field: "missing_unique".to_string(),
+                },
+            ],
+        };
+
+        let evaluation = evaluate_batch(&batch, &compiled);
+        assert!(evaluation.valid_indices.is_empty());
+        assert_eq!(evaluation.invalid_rows.len(), 1);
+        let message = &evaluation.invalid_rows[0].message;
+        assert!(message.contains("assert_not_null(missing_not_null) failed: column missing"));
+        assert!(message.contains("assert_regex(missing_regex, ^.+$) failed: column missing"));
+        assert!(message.contains("assert_range(missing_range) failed: column missing"));
+        assert!(message.contains("assert_unique(missing_unique) failed: column missing"));
+    }
+
+    #[test]
+    fn evaluate_decimal_range_uses_exact_decimal_bounds() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "amount",
+            DataType::Decimal128(38, 18),
+            false,
+        )]));
+        let values = Decimal128Array::from(vec![
+            100_000_000_000_000_000_i128,
+            100_000_000_000_000_001_i128,
+            99_999_999_999_999_999_i128,
+        ])
+        .with_data_type(DataType::Decimal128(38, 18));
+        let batch = RecordBatch::try_new(Arc::clone(&schema), vec![Arc::new(values) as ArrayRef])
+            .expect("batch should build");
+
+        let compiled = CompiledConfig {
+            rules: vec![CompiledRule::Range {
+                field: "amount".to_string(),
+                min: Some(bound("0.100000000000000000")),
+                max: Some(bound("0.100000000000000000")),
+            }],
+        };
+
+        let evaluation = evaluate_batch(&batch, &compiled);
+        assert_eq!(evaluation.valid_indices, vec![0]);
+        assert_eq!(evaluation.invalid_rows.len(), 2);
     }
 }

@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
+use bigdecimal::BigDecimal;
 use regex::Regex;
 use serde::Deserialize;
+use serde_json::Number;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -143,10 +145,17 @@ pub enum CompiledRule {
     Regex { field: String, pattern: String, regex: Regex },
     Range {
         field: String,
-        min: Option<f64>,
-        max: Option<f64>,
+        min: Option<NumericBound>,
+        max: Option<NumericBound>,
     },
     Unique { field: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct NumericBound {
+    pub literal: String,
+    pub decimal: BigDecimal,
+    pub as_f64: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -189,8 +198,8 @@ pub enum RangeSelector {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RangeRule {
     pub field: String,
-    pub min: Option<f64>,
-    pub max: Option<f64>,
+    pub min: Option<Number>,
+    pub max: Option<Number>,
 }
 
 impl Config {
@@ -203,66 +212,68 @@ impl Config {
         for rule in &self.rules {
             match rule {
                 RuleSpec::NotNull { assert_not_null } => {
-                    for field in assert_not_null.fields() {
-                        ensure_non_empty_field(field)?;
+                    assert_not_null.try_for_each_field(|field| {
                         compiled.push(CompiledRule::NotNull {
                             field: field.to_string(),
                         });
-                    }
+                        Ok(())
+                    })?;
                 }
                 RuleSpec::Unique { assert_unique } => {
-                    for field in assert_unique.fields() {
-                        ensure_non_empty_field(field)?;
+                    assert_unique.try_for_each_field(|field| {
                         compiled.push(CompiledRule::Unique {
                             field: field.to_string(),
                         });
-                    }
+                        Ok(())
+                    })?;
                 }
                 RuleSpec::Regex { assert_regex } => {
-                    for regex_rule in assert_regex.rules() {
-                        ensure_non_empty_field(&regex_rule.field)?;
-                        if regex_rule.pattern.trim().is_empty() {
+                    assert_regex.try_for_each_rule(|field, pattern| {
+                        if pattern.trim().is_empty() {
                             return Err(format!(
                                 "regex pattern for field '{}' must not be empty",
-                                regex_rule.field
+                                field
                             ));
                         }
-                        let regex = Regex::new(&regex_rule.pattern).map_err(|e| {
-                            format!(
-                                "invalid regex pattern for field '{}': {e}",
-                                regex_rule.field
-                            )
-                        })?;
+                        let regex = Regex::new(pattern)
+                            .map_err(|e| format!("invalid regex pattern for field '{}': {e}", field))?;
                         compiled.push(CompiledRule::Regex {
-                            field: regex_rule.field.clone(),
-                            pattern: regex_rule.pattern.clone(),
+                            field: field.to_string(),
+                            pattern: pattern.to_string(),
                             regex,
                         });
-                    }
+                        Ok(())
+                    })?;
                 }
                 RuleSpec::Range { assert_range } => {
-                    for range_rule in assert_range.rules() {
-                        ensure_non_empty_field(&range_rule.field)?;
-                        if range_rule.min.is_none() && range_rule.max.is_none() {
+                    assert_range.try_for_each_rule(|field, min, max| {
+                        if min.is_none() && max.is_none() {
                             return Err(format!(
                                 "range rule for field '{}' must set min and/or max",
-                                range_rule.field
+                                field
                             ));
                         }
-                        if let (Some(min), Some(max)) = (range_rule.min, range_rule.max) {
-                            if min > max {
+                        let min_bound = min
+                            .map(|bound| NumericBound::from_number(bound, field, "min"))
+                            .transpose()?;
+                        let max_bound = max
+                            .map(|bound| NumericBound::from_number(bound, field, "max"))
+                            .transpose()?;
+                        if let (Some(minimum), Some(maximum)) = (&min_bound, &max_bound) {
+                            if minimum.decimal > maximum.decimal {
                                 return Err(format!(
-                                    "range rule for field '{}' has min > max ({min} > {max})",
-                                    range_rule.field
+                                    "range rule for field '{}' has min > max ({} > {})",
+                                    field, minimum.literal, maximum.literal
                                 ));
                             }
                         }
                         compiled.push(CompiledRule::Range {
-                            field: range_rule.field.clone(),
-                            min: range_rule.min,
-                            max: range_rule.max,
+                            field: field.to_string(),
+                            min: min_bound,
+                            max: max_bound,
                         });
-                    }
+                        Ok(())
+                    })?;
                 }
             }
         }
@@ -284,36 +295,101 @@ fn ensure_non_empty_field(field: &str) -> Result<(), String> {
 }
 
 impl FieldSelector {
-    fn fields(&self) -> Vec<&str> {
+    fn try_for_each_field(
+        &self,
+        mut callback: impl FnMut(&str) -> Result<(), String>,
+    ) -> Result<(), String> {
         match self {
-            Self::One(field) => vec![field],
-            Self::Many(fields) => fields.iter().map(String::as_str).collect(),
+            Self::One(field) => {
+                ensure_non_empty_field(field)?;
+                callback(field)
+            }
+            Self::Many(fields) => {
+                for field in fields {
+                    ensure_non_empty_field(field)?;
+                    callback(field)?;
+                }
+                Ok(())
+            }
         }
     }
 }
 
 impl RegexSelector {
-    fn rules(&self) -> Vec<RegexRule> {
+    fn try_for_each_rule(
+        &self,
+        mut callback: impl FnMut(&str, &str) -> Result<(), String>,
+    ) -> Result<(), String> {
         match self {
-            Self::One(rule) => vec![rule.clone()],
-            Self::Many(rules) => rules.clone(),
-            Self::Map(map) => map
-                .iter()
-                .map(|(field, pattern)| RegexRule {
-                    field: field.clone(),
-                    pattern: pattern.clone(),
-                })
-                .collect(),
+            Self::One(rule) => {
+                ensure_non_empty_field(&rule.field)?;
+                callback(&rule.field, &rule.pattern)
+            }
+            Self::Many(rules) => {
+                for rule in rules {
+                    ensure_non_empty_field(&rule.field)?;
+                    callback(&rule.field, &rule.pattern)?;
+                }
+                Ok(())
+            }
+            Self::Map(map) => {
+                for (field, pattern) in map {
+                    ensure_non_empty_field(field)?;
+                    callback(field, pattern)?;
+                }
+                Ok(())
+            }
         }
     }
 }
 
 impl RangeSelector {
-    fn rules(&self) -> Vec<RangeRule> {
+    fn try_for_each_rule(
+        &self,
+        mut callback: impl FnMut(&str, Option<&Number>, Option<&Number>) -> Result<(), String>,
+    ) -> Result<(), String> {
         match self {
-            Self::One(rule) => vec![rule.clone()],
-            Self::Many(rules) => rules.clone(),
+            Self::One(rule) => {
+                ensure_non_empty_field(&rule.field)?;
+                callback(&rule.field, rule.min.as_ref(), rule.max.as_ref())
+            }
+            Self::Many(rules) => {
+                for rule in rules {
+                    ensure_non_empty_field(&rule.field)?;
+                    callback(&rule.field, rule.min.as_ref(), rule.max.as_ref())?;
+                }
+                Ok(())
+            }
         }
+    }
+}
+
+impl NumericBound {
+    fn from_number(number: &Number, field: &str, bound_name: &str) -> Result<Self, String> {
+        let literal = number.to_string();
+        let decimal = literal.parse::<BigDecimal>().map_err(|error| {
+            format!(
+                "range rule for field '{}' has invalid {} value '{}': {}",
+                field, bound_name, literal, error
+            )
+        })?;
+        let as_f64 = literal.parse::<f64>().map_err(|error| {
+            format!(
+                "range rule for field '{}' has non-numeric {} value '{}': {}",
+                field, bound_name, literal, error
+            )
+        })?;
+        if !as_f64.is_finite() {
+            return Err(format!(
+                "range rule for field '{}' has non-finite {} value '{}': expected finite number",
+                field, bound_name, literal
+            ));
+        }
+        Ok(Self {
+            literal,
+            decimal,
+            as_f64,
+        })
     }
 }
 
@@ -372,5 +448,20 @@ mod tests {
         assert!(bad.is_ok(), "serde shape is valid; compile enforces semantics");
         let config = bad.expect("config should deserialize");
         assert!(config.compile().is_err());
+    }
+
+    #[test]
+    fn compile_rejects_empty_fields_in_repeat_selectors() {
+        let bad_field: Config = serde_json::from_value(serde_json::json!({
+            "rules": [{ "assert_not_null": ["ok", "  "] }]
+        }))
+        .expect("config should deserialize");
+        assert!(bad_field.compile().is_err());
+
+        let bad_regex_map: Config = serde_json::from_value(serde_json::json!({
+            "rules": [{ "assert_regex": { "": "^.+$" } }]
+        }))
+        .expect("config should deserialize");
+        assert!(bad_regex_map.compile().is_err());
     }
 }

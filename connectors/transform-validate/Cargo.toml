@@ -13,6 +13,7 @@ tokio = { version = "=1.36", default-features = false, features = ["rt", "macros
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
+bigdecimal = "0.4"
 arrow = { version = "53", features = ["ipc"] }
 arrow-json = "53"
 arrow-buffer = "53"
