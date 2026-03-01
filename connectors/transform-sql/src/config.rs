@@ -12,6 +12,11 @@ pub struct Config {
 }
 
 impl Config {
+    /// Return the trimmed SQL query.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if the query is empty or whitespace-only.
     pub fn normalized_query(&self) -> Result<String, String> {
         let query = self.query.trim();
         if query.is_empty() {

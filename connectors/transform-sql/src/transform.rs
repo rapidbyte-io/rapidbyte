@@ -13,6 +13,10 @@ use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
 /// Run the SQL transform for a single stream.
+///
+/// # Errors
+///
+/// Returns `Err` if SQL execution fails or batch emission encounters an error.
 pub async fn run(
     ctx: &Context,
     stream: &StreamContext,
