@@ -254,9 +254,10 @@ fn getrusage_self() -> Option<libc::rusage> {
 }
 
 #[cfg(unix)]
+#[allow(clippy::cast_precision_loss)]
 fn cpu_seconds_from_rusage(usage: &libc::rusage) -> f64 {
-    let user_secs = usage.ru_utime.tv_sec as f64 + (f64::from(usage.ru_utime.tv_usec) / 1e6);
-    let sys_secs = usage.ru_stime.tv_sec as f64 + (f64::from(usage.ru_stime.tv_usec) / 1e6);
+    let user_secs = usage.ru_utime.tv_sec as f64 + (usage.ru_utime.tv_usec as f64 / 1e6);
+    let sys_secs = usage.ru_stime.tv_sec as f64 + (usage.ru_stime.tv_usec as f64 / 1e6);
     user_secs + sys_secs
 }
 
