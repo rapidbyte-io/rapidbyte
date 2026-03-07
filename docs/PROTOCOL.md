@@ -1,15 +1,15 @@
-# Rapidbyte Connector Protocol (v4)
+# Rapidbyte Plugin Protocol (v5)
 
-This document defines the connector protocol used by Rapidbyte v4 (Wasmtime component runtime).
+This document defines the plugin protocol used by Rapidbyte v5 (Wasmtime component runtime).
 
 - Runtime: **Wasmtime component model**
-- Connector target: **`wasm32-wasip2`**
-- WIT package: **`rapidbyte:connector@4.0.0`** (`wit/rapidbyte-connector.wit`)
-- Protocol version string in manifests/ConnectorInfo: **`4`**
+- Plugin target: **`wasm32-wasip2`**
+- WIT package: **`rapidbyte:plugin@5.0.0`** (`wit/rapidbyte-plugin.wit`)
+- Protocol version string in manifests/PluginInfo: **`5`**
 
 ## 1. Architecture
 
-Rapidbyte runs connectors as WebAssembly components and connects stages with Arrow IPC batches:
+Rapidbyte runs plugins as WebAssembly components and connects stages with Arrow IPC batches:
 
 - Source component exports `source`
 - Destination component exports `destination`
@@ -20,7 +20,7 @@ There is no pointer/length host ABI (`rb_*`) in v4. All calls are typed through 
 
 ## 2. WIT Worlds
 
-Defined in `wit/rapidbyte-connector.wit`:
+Defined in `wit/rapidbyte-plugin.wit`:
 
 - `world rapidbyte-source`
   - imports: `host`
@@ -34,7 +34,7 @@ Defined in `wit/rapidbyte-connector.wit`:
 - `world rapidbyte-host`
   - imports: `host` (guest-side SDK bindings)
 
-## 3. Connector Lifecycle
+## 3. Plugin Lifecycle
 
 ### 3.1 Source
 
@@ -58,16 +58,16 @@ Defined in `wit/rapidbyte-connector.wit`:
 3. `run(session, request)` (one stream at a time)
 4. `close()`
 
-`config-json` is connector config serialized as JSON.
+`config-json` is plugin config serialized as JSON.
 `request.stream-context-json` is `StreamContext` JSON serialized by host.
 
 ## 4. Host Import API (`interface host`)
 
 ### 4.1 Batch transport
 
-- `emit-batch(handle: u64) -> result<_, connector-error>`
+- `emit-batch(handle: u64) -> result<_, plugin-error>`
   - Source/transform publishes a sealed host frame to the next stage.
-- `next-batch() -> result<option<u64>, connector-error>`
+- `next-batch() -> result<option<u64>, plugin-error>`
   - Destination/transform pulls the next sealed host frame handle.
   - `none` signals end-of-stream.
 - Frame lifecycle:
@@ -79,8 +79,8 @@ Defined in `wit/rapidbyte-connector.wit`:
 ### 4.2 Logging and telemetry
 
 - `log(level: u32, msg: string)`
-- `checkpoint(kind: u32, payload-json: string) -> result<_, connector-error>`
-- `metric(payload-json: string) -> result<_, connector-error>`
+- `checkpoint(kind: u32, payload-json: string) -> result<_, plugin-error>`
+- `metric(payload-json: string) -> result<_, plugin-error>`
 
 `kind` values:
 - `0`: source checkpoint
@@ -89,9 +89,9 @@ Defined in `wit/rapidbyte-connector.wit`:
 
 ### 4.3 State
 
-- `state-get(scope, key) -> result<option<string>, connector-error>`
-- `state-put(scope, key, val) -> result<_, connector-error>`
-- `state-cas(scope, key, expected, new-val) -> result<bool, connector-error>`
+- `state-get(scope, key) -> result<option<string>, plugin-error>`
+- `state-put(scope, key, val) -> result<_, plugin-error>`
+- `state-cas(scope, key, expected, new-val) -> result<bool, plugin-error>`
 
 Scopes:
 - `0` pipeline
@@ -100,9 +100,9 @@ Scopes:
 
 ### 4.4 Host-proxied TCP
 
-- `connect-tcp(host, port) -> result<u64, connector-error>`
-- `socket-read(handle, len) -> result<socket-read-result, connector-error>`
-- `socket-write(handle, data) -> result<socket-write-result, connector-error>`
+- `connect-tcp(host, port) -> result<u64, plugin-error>`
+- `socket-read(handle, len) -> result<socket-read-result, plugin-error>`
+- `socket-write(handle, data) -> result<socket-write-result, plugin-error>`
 - `socket-close(handle)`
 
 `socket-read-result`:
@@ -116,7 +116,7 @@ Scopes:
 
 ## 5. Error Model
 
-All fallible connector lifecycle and host functions use `connector-error` from WIT.
+All fallible plugin lifecycle and host functions use `plugin-error` from WIT.
 
 Fields:
 - category (`config|auth|permission|rate-limit|transient-*|data|schema|internal`)
@@ -126,19 +126,19 @@ Fields:
 - optional commit state (`before-commit|after-commit-unknown|after-commit-confirmed`)
 - optional JSON details
 
-Host preserves connector retry metadata and maps connector failures to `PipelineError::Connector`.
+Host preserves plugin retry metadata and maps plugin failures to `PipelineError::Connector`.
 
 ## 6. Data Exchange
 
 - Batch payloads are Arrow IPC stream fragments written into host-managed frames
 - Stage handoff uses frame handles (`u64`) via `emit-batch`/`next-batch`
-- Optional host-side channel compression (`lz4`/`zstd`) is transparent to connectors
-- Stream execution is sequential per connector instance (`run-*` called once per stream)
+- Optional host-side channel compression (`lz4`/`zstd`) is transparent to plugins
+- Stream execution is sequential per plugin instance (`run-*` called once per stream)
 
 ### 6.1 Stream Runtime Overrides
 
 `ctx-json` (`StreamContext`) may include host-resolved runtime override hints that
-connectors can consume without changing data semantics:
+plugins can consume without changing data semantics:
 
 - `effective_parallelism` (`u32?`): effective stream worker fan-out selected by host.
 - `partition_strategy` (`mod|range?`): source full-refresh sharding strategy override.
@@ -148,9 +148,9 @@ Override precedence for each knob is:
 
 1. Explicit user pin
 2. Host autotune decision
-3. Connector/default fallback
+3. Plugin/default fallback
 
-Connectors must treat these overrides as performance hints only and must not change
+Plugins must treat these overrides as performance hints only and must not change
 write semantics, checkpoint semantics, or cursor semantics.
 
 ## 7. Checkpoint Coordination
@@ -161,7 +161,7 @@ This preserves exactly-once semantics for incremental workflows where destinatio
 
 ## 8. Security and Permissions
 
-Permissions are read from connector manifests (`permissions`):
+Permissions are read from plugin manifests (`permissions`):
 
 - `env.allowed_vars`: only listed env vars are passed into WASI context
 - `fs.preopens`: only declared host directories are preopened
@@ -170,11 +170,11 @@ Permissions are read from connector manifests (`permissions`):
 Current enforcement behavior:
 - Host **enforces ACL** on `connect-tcp`
 - Host uses non-blocking sockets and returns `would-block` variants
-- Direct WASI network usage is disabled in host WASI context; connectors are expected to use host-proxied TCP
+- Direct WASI network usage is disabled in host WASI context; plugins are expected to use host-proxied TCP
 
 ## 9. Manifest Compatibility
 
-Host validates connector manifest role compatibility before run/check/discover:
+Host validates plugin manifest role compatibility before run/check/discover:
 
 - Source pipelines require `roles.source`
 - Destination pipelines require `roles.destination`
@@ -182,25 +182,25 @@ Host validates connector manifest role compatibility before run/check/discover:
 
 Host expects `manifest.protocol_version == "4"`; mismatches emit warnings.
 
-## 10. Building Connectors
+## 10. Building Plugins
 
 ### 10.1 Language-Agnostic Contract
 
-Any language that compiles to `wasm32-wasip2` and implements the WIT interface can be a Rapidbyte connector. The WIT file (`wit/rapidbyte-connector.wit`) is the source of truth — not any particular SDK.
+Any language that compiles to `wasm32-wasip2` and implements the WIT interface can be a Rapidbyte plugin. The WIT file (`wit/rapidbyte-plugin.wit`) is the source of truth — not any particular SDK.
 
-A valid connector is a WASI component that:
+A valid plugin is a WASI component that:
 1. Exports one of `source`, `destination`, or `transform`
 2. Accepts JSON config via `open(config-json: string)`
 3. Exchanges Arrow IPC batches via host imports (`emit-batch`/`next-batch`)
-4. Returns structured `connector-error` records on failure
+4. Returns structured `plugin-error` records on failure
 
-### 10.2 Rust SDK (recommended for Rust connectors)
+### 10.2 Rust SDK (recommended for Rust plugins)
 
 The `rapidbyte-sdk` crate provides ergonomic Rust traits and macros:
 
-- `#[connector(source)]` — exports a source component
-- `#[connector(destination)]` — exports a destination component
-- `#[connector(transform)]` — exports a transform component
+- `#[plugin(source)]` — exports a source component
+- `#[plugin(destination)]` — exports a destination component
+- `#[plugin(transform)]` — exports a transform component
 
 The SDK handles WIT binding generation, config JSON deserialization, Tokio runtime management, and error type conversion.
 
@@ -208,12 +208,12 @@ For TCP clients (e.g. `tokio-postgres`), use `rapidbyte_sdk::host_tcp::HostTcpSt
 
 ### 10.3 Other Languages
 
-Connectors can be written in any language with WASI component support:
+Plugins can be written in any language with WASI component support:
 - **Go:** Use `wit-bindgen-go` to generate bindings from the WIT file
 - **Python:** Use `componentize-py` to compile Python to a WASI component
 - **C/C++:** Use `wit-bindgen-c` for C bindings
 
-The connector must implement the same WIT exports and call the same WIT imports regardless of language.
+The plugin must implement the same WIT exports and call the same WIT imports regardless of language.
 
 ## SQL Transform (`transform-sql`)
 
@@ -253,9 +253,9 @@ Replaced by:
 
 ### Pipeline-Level Permissions & Limits
 
-Pipeline operators can restrict connector sandbox capabilities and resource usage
-beyond what the connector manifest declares. Add `permissions` and/or `limits`
-blocks to any connector in the pipeline:
+Pipeline operators can restrict plugin sandbox capabilities and resource usage
+beyond what the plugin manifest declares. Add `permissions` and/or `limits`
+blocks to any plugin in the pipeline:
 
     source:
       use: source-postgres

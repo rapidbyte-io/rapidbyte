@@ -1,12 +1,12 @@
-# Connector Developer Guide
+# Plugin Developer Guide
 
-This guide walks you through building a Rapidbyte connector from scratch. By the end, you will have a working Wasm component that plugs into the Rapidbyte pipeline engine.
+This guide walks you through building a Rapidbyte plugin from scratch. By the end, you will have a working Wasm component that plugs into the Rapidbyte pipeline engine.
 
 ## 1. Overview
 
-A connector is a **WebAssembly component** compiled to `wasm32-wasip2` and executed inside a Wasmtime sandbox. The host manages networking, state, and data transport -- connectors focus purely on reading or writing data.
+A plugin is a **WebAssembly component** compiled to `wasm32-wasip2` and executed inside a Wasmtime sandbox. The host manages networking, state, and data transport -- plugins focus purely on reading or writing data.
 
-There are three connector roles:
+There are three plugin roles:
 
 | Role | Trait | Purpose |
 |---|---|---|
@@ -14,32 +14,32 @@ There are three connector roles:
 | **Destination** | `Destination` | Receives Arrow IPC batches and writes them to an external system |
 | **Transform** | `Transform` | Receives batches, transforms them (e.g. SQL), and emits new batches |
 
-All connectors depend on `rapidbyte-sdk`, which provides the trait definitions, Arrow re-exports, host FFI bindings, and the `#[connector(...)]` proc macro.
+All plugins depend on `rapidbyte-sdk`, which provides the trait definitions, Arrow re-exports, host FFI bindings, and the `#[plugin(...)]` proc macro.
 
-## 2. Scaffold a New Connector
+## 2. Scaffold a New Plugin
 
 The fastest way to start is with the scaffold command:
 
 ```bash
-# Source connector (name must start with "source-")
+# Source plugin (name must start with "source-")
 just scaffold source-mysql
 
-# Destination connector (name must start with "dest-")
+# Destination plugin (name must start with "dest-")
 just scaffold dest-snowflake
 
 # Custom output path
-just scaffold source-mysql connectors/custom-path
+just scaffold source-mysql plugins/custom-path
 ```
 
 This generates a complete project skeleton:
 
 ```
-connectors/source-mysql/
+plugins/sources/mysql/
   .cargo/config.toml   # Sets wasm32-wasip2 as the default build target
   Cargo.toml           # Package manifest with rapidbyte-sdk dependency
-  build.rs             # ManifestBuilder -- declares connector capabilities
+  build.rs             # ManifestBuilder -- declares plugin capabilities
   src/
-    main.rs            # Entry point with #[connector(source)] and trait impl
+    main.rs            # Entry point with #[plugin(source)] and trait impl
     config.rs          # Config struct with serde + schema derives
     client.rs          # Connection setup and validation stub
     reader.rs          # Stream reading stub (sources) / writer.rs (destinations)
@@ -48,7 +48,7 @@ connectors/source-mysql/
 
 ## 3. Project Structure
 
-A mature connector typically has these modules:
+A mature plugin typically has these modules:
 
 | Module | Role |
 |---|---|
@@ -62,7 +62,7 @@ A mature connector typically has these modules:
 
 ## 4. Manifest (build.rs)
 
-The `build.rs` file declares your connector's capabilities to the host via `ManifestBuilder`. The host reads the generated manifest at load time to enforce permissions and advertise features.
+The `build.rs` file declares your plugin's capabilities to the host via `ManifestBuilder`. The host reads the generated manifest at load time to enforce permissions and advertise features.
 
 ### Source manifest
 
@@ -119,7 +119,7 @@ fn main() {
 
 | Method | Purpose |
 |---|---|
-| `allow_runtime_network()` | **Required** if the connector opens TCP connections via `HostTcpStream` |
+| `allow_runtime_network()` | **Required** if the plugin opens TCP connections via `HostTcpStream` |
 | `env_vars(&[...])` | Allowlist of environment variables visible inside the Wasm sandbox |
 | `sync_modes(&[...])` | Source only: supported sync modes (`FullRefresh`, `Incremental`, `Cdc`) |
 | `write_modes(&[...])` | Destination only: supported write modes (`Append`, `Replace`, `Upsert`) |
@@ -130,7 +130,7 @@ fn main() {
 The config struct is deserialized from the `config:` section of a pipeline YAML. It must derive `Deserialize` and `ConfigSchema`.
 
 ```rust
-use rapidbyte_sdk::error::ConnectorError;
+use rapidbyte_sdk::error::PluginError;
 use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;
 
@@ -165,16 +165,16 @@ fn default_port() -> u16 {
 }
 
 impl Config {
-    pub fn validate(&self) -> Result<(), ConnectorError> {
+    pub fn validate(&self) -> Result<(), PluginError> {
         if let Some(slot) = self.replication_slot.as_ref() {
             if slot.is_empty() {
-                return Err(ConnectorError::config(
+                return Err(PluginError::config(
                     "INVALID_CONFIG",
                     "replication_slot must not be empty".to_string(),
                 ));
             }
             if slot.len() > 63 {
-                return Err(ConnectorError::config(
+                return Err(PluginError::config(
                     "INVALID_CONFIG",
                     format!("replication_slot '{}' exceeds PostgreSQL 63-byte limit", slot),
                 ));
@@ -197,7 +197,7 @@ impl Config {
 
 ## 6. Implementing a Source
 
-A source connector implements the `Source` trait. Here is a walkthrough of each method, based on the real `source-postgres` implementation.
+A source plugin implements the `Source` trait. Here is a walkthrough of each method, based on the real `source-postgres` implementation.
 
 ### Entry point
 
@@ -209,7 +209,7 @@ mod reader;
 
 use rapidbyte_sdk::prelude::*;
 
-#[rapidbyte_sdk::connector(source)]
+#[rapidbyte_sdk::plugin(source)]
 pub struct SourceMydb {
     config: config::Config,
 }
@@ -223,14 +223,14 @@ impl Source for SourceMydb {
 
 ### init
 
-Called once at startup. Validate config and return a `ConnectorInfo` describing the connector's capabilities.
+Called once at startup. Validate config and return a `PluginInfo` describing the plugin's capabilities.
 
 ```rust
-async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
+async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
     config.validate()?;
     Ok((
         Self { config },
-        ConnectorInfo {
+        PluginInfo {
             protocol_version: ProtocolVersion::V4,
             features: vec![],
             default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
@@ -247,13 +247,13 @@ Called during `rapidbyte check`. Test connectivity without reading data.
 async fn validate(
     config: &Self::Config,
     _ctx: &Context,
-) -> Result<ValidationResult, ConnectorError> {
+) -> Result<ValidationResult, PluginError> {
     let client = client::connect(config)
         .await
-        .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
+        .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
 
     client.query_one("SELECT 1", &[]).await.map_err(|e| {
-        ConnectorError::transient_network("CONNECTION_TEST_FAILED",
+        PluginError::transient_network("CONNECTION_TEST_FAILED",
             format!("Connection test failed: {e}"))
     })?;
 
@@ -269,13 +269,13 @@ async fn validate(
 Return a `Catalog` describing available streams and their schemas.
 
 ```rust
-async fn discover(&mut self, _ctx: &Context) -> Result<Catalog, ConnectorError> {
+async fn discover(&mut self, _ctx: &Context) -> Result<Catalog, PluginError> {
     let client = client::connect(&self.config)
         .await
-        .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
+        .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
 
     let streams = discover_streams(&client).await
-        .map_err(|e| ConnectorError::transient_db("DISCOVERY_FAILED", e))?;
+        .map_err(|e| PluginError::transient_db("DISCOVERY_FAILED", e))?;
 
     Ok(Catalog { streams })
 }
@@ -290,21 +290,21 @@ async fn read(
     &mut self,
     ctx: &Context,
     stream: StreamContext,
-) -> Result<ReadSummary, ConnectorError> {
+) -> Result<ReadSummary, PluginError> {
     let client = client::connect(&self.config)
         .await
-        .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
+        .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
 
     // 1. Query the source
     let rows = client.query("SELECT * FROM users", &[]).await
-        .map_err(|e| ConnectorError::transient_db("QUERY_FAILED", format!("{e}")))?;
+        .map_err(|e| PluginError::transient_db("QUERY_FAILED", format!("{e}")))?;
 
     // 2. Encode rows into an Arrow RecordBatch
     let batch = encode::rows_to_record_batch(&rows, &columns, &schema)?;
 
     // 3. Emit the batch to the host
     ctx.emit_batch(&batch)
-        .map_err(|e| ConnectorError::internal("EMIT_FAILED", e.message))?;
+        .map_err(|e| PluginError::internal("EMIT_FAILED", e.message))?;
 
     // 4. Return summary
     Ok(ReadSummary {
@@ -318,14 +318,14 @@ async fn read(
 }
 ```
 
-In production connectors, the read loop typically uses server-side cursors and streams data in chunks, emitting multiple batches and respecting `stream.limits.max_batch_bytes`.
+In production plugins, the read loop typically uses server-side cursors and streams data in chunks, emitting multiple batches and respecting `stream.limits.max_batch_bytes`.
 
 ### close
 
 Called at the end of the pipeline run. Clean up any resources.
 
 ```rust
-async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {
+async fn close(&mut self, ctx: &Context) -> Result<(), PluginError> {
     ctx.log(LogLevel::Info, "source-mydb: close");
     Ok(())
 }
@@ -333,7 +333,7 @@ async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {
 
 ## 7. Implementing a Destination
 
-A destination connector implements the `Destination` trait.
+A destination plugin implements the `Destination` trait.
 
 ### Entry point
 
@@ -344,7 +344,7 @@ mod writer;
 
 use rapidbyte_sdk::prelude::*;
 
-#[rapidbyte_sdk::connector(destination)]
+#[rapidbyte_sdk::plugin(destination)]
 pub struct DestMydb {
     config: config::Config,
 }
@@ -359,10 +359,10 @@ impl Destination for DestMydb {
 ### init
 
 ```rust
-async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
+async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
     Ok((
         Self { config },
-        ConnectorInfo {
+        PluginInfo {
             protocol_version: ProtocolVersion::V4,
             features: vec![Feature::ExactlyOnce],
             default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
@@ -379,7 +379,7 @@ Same pattern as source -- test connectivity and return `ValidationResult`.
 async fn validate(
     config: &Self::Config,
     _ctx: &Context,
-) -> Result<ValidationResult, ConnectorError> {
+) -> Result<ValidationResult, PluginError> {
     client::validate(config).await
 }
 ```
@@ -393,10 +393,10 @@ async fn write(
     &mut self,
     ctx: &Context,
     stream: StreamContext,
-) -> Result<WriteSummary, ConnectorError> {
+) -> Result<WriteSummary, PluginError> {
     let client = client::connect(&self.config)
         .await
-        .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
+        .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
 
     let mut total_rows: u64 = 0;
     let mut total_bytes: u64 = 0;
@@ -416,7 +416,7 @@ async fn write(
                 batches_written += 1;
             }
             Err(e) => {
-                return Err(ConnectorError::transient_db(
+                return Err(PluginError::transient_db(
                     "WRITE_FAILED",
                     format!("next_batch failed: {e}"),
                 ));
@@ -455,7 +455,7 @@ let _ = ctx.checkpoint(&checkpoint);
 ### close
 
 ```rust
-async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {
+async fn close(&mut self, ctx: &Context) -> Result<(), PluginError> {
     ctx.log(LogLevel::Info, "dest-mydb: close");
     Ok(())
 }
@@ -463,7 +463,7 @@ async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {
 
 ## 8. Implementing a Transform
 
-A transform connector implements the `Transform` trait. Transforms receive batches from the upstream source (or previous transform), process them, and emit new batches downstream.
+A transform plugin implements the `Transform` trait. Transforms receive batches from the upstream source (or previous transform), process them, and emit new batches downstream.
 
 ### Entry point
 
@@ -473,7 +473,7 @@ mod transform;
 
 use rapidbyte_sdk::prelude::*;
 
-#[rapidbyte_sdk::connector(transform)]
+#[rapidbyte_sdk::plugin(transform)]
 pub struct TransformCustom {
     config: config::Config,
 }
@@ -488,11 +488,11 @@ impl Transform for TransformCustom {
 ### init
 
 ```rust
-async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
+async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
     // Validate config at init time
     Ok((
         Self { config },
-        ConnectorInfo {
+        PluginInfo {
             protocol_version: ProtocolVersion::V4,
             features: vec![],
             default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
@@ -507,7 +507,7 @@ async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorEr
 async fn validate(
     config: &Self::Config,
     _ctx: &Context,
-) -> Result<ValidationResult, ConnectorError> {
+) -> Result<ValidationResult, PluginError> {
     // Validate config without side effects
     Ok(ValidationResult {
         status: ValidationStatus::Success,
@@ -525,7 +525,7 @@ async fn transform(
     &mut self,
     ctx: &Context,
     stream: StreamContext,
-) -> Result<TransformSummary, ConnectorError> {
+) -> Result<TransformSummary, PluginError> {
     let mut records_in: u64 = 0;
     let mut records_out: u64 = 0;
     let mut bytes_in: u64 = 0;
@@ -565,11 +565,11 @@ async fn transform(
 }
 ```
 
-The built-in `transform-sql` connector uses Apache DataFusion to execute SQL queries on each batch. It registers incoming batches as a MemTable named `input`, runs the user's SQL, and emits the results.
+The built-in `transform-sql` plugin uses Apache DataFusion to execute SQL queries on each batch. It registers incoming batches as a MemTable named `input`, runs the user's SQL, and emits the results.
 
 ## 9. Networking
 
-Connectors run inside a Wasm sandbox with **no direct socket access**. All TCP connections must go through the host-proxied `HostTcpStream`.
+Plugins run inside a Wasm sandbox with **no direct socket access**. All TCP connections must go through the host-proxied `HostTcpStream`.
 
 ### Connecting with HostTcpStream
 
@@ -619,7 +619,7 @@ pub async fn connect(config: &crate::config::Config) -> Result<Client, String> {
 ### Requirements
 
 - Your `build.rs` **must** call `.allow_runtime_network()` on the `ManifestBuilder`, or the host will reject TCP connection attempts.
-- If your connector needs to access environment variables (e.g. for SSL cert paths), declare them with `.env_vars(&["VAR_NAME"])`.
+- If your plugin needs to access environment variables (e.g. for SSL cert paths), declare them with `.env_vars(&["VAR_NAME"])`.
 
 ## 10. Data Flow: Arrow IPC Batches
 
@@ -656,7 +656,7 @@ let batch = RecordBatch::try_new(schema, vec![
 ctx.emit_batch(&batch)?;
 ```
 
-Under the hood, `emit_batch` performs the frame lifecycle: `frame-new` -> `frame-write` (IPC-encoded data) -> `frame-seal` -> `emit-batch`. This is managed by the SDK; connector authors do not need to call these functions directly.
+Under the hood, `emit_batch` performs the frame lifecycle: `frame-new` -> `frame-write` (IPC-encoded data) -> `frame-seal` -> `emit-batch`. This is managed by the SDK; plugin authors do not need to call these functions directly.
 
 ### Destinations: Receive and decode
 
@@ -681,44 +681,44 @@ loop {
                 }
             }
         }
-        Err(e) => return Err(ConnectorError::internal("BATCH_ERROR", e.message)),
+        Err(e) => return Err(PluginError::internal("BATCH_ERROR", e.message)),
     }
 }
 ```
 
 ### Batch compression
 
-The host can optionally compress IPC frames with lz4 or zstd. This is configured at the pipeline level and is transparent to connectors -- the SDK handles compression and decompression in the frame lifecycle.
+The host can optionally compress IPC frames with lz4 or zstd. This is configured at the pipeline level and is transparent to plugins -- the SDK handles compression and decompression in the frame lifecycle.
 
 ## 11. Error Handling
 
-All errors returned from connector methods use `ConnectorError`. Use the factory methods to create errors with the right category and retry semantics.
+All errors returned from plugin methods use `PluginError`. Use the factory methods to create errors with the right category and retry semantics.
 
 ### Factory methods
 
 | Factory | Use when | Retryable |
 |---|---|---|
-| `ConnectorError::config()` | Invalid configuration | No |
-| `ConnectorError::auth()` | Authentication failure | No |
-| `ConnectorError::permission()` | Insufficient permissions | No |
-| `ConnectorError::rate_limit()` | Rate limited by upstream | Yes (slow backoff) |
-| `ConnectorError::transient_network()` | Network timeout, connection refused | Yes |
-| `ConnectorError::transient_db()` | Deadlock, lock timeout | Yes |
-| `ConnectorError::data()` | Bad data, constraint violation | No |
-| `ConnectorError::schema()` | Schema mismatch | No |
-| `ConnectorError::internal()` | Unexpected internal error, bugs | No |
+| `PluginError::config()` | Invalid configuration | No |
+| `PluginError::auth()` | Authentication failure | No |
+| `PluginError::permission()` | Insufficient permissions | No |
+| `PluginError::rate_limit()` | Rate limited by upstream | Yes (slow backoff) |
+| `PluginError::transient_network()` | Network timeout, connection refused | Yes |
+| `PluginError::transient_db()` | Deadlock, lock timeout | Yes |
+| `PluginError::data()` | Bad data, constraint violation | No |
+| `PluginError::schema()` | Schema mismatch | No |
+| `PluginError::internal()` | Unexpected internal error, bugs | No |
 
 ### Usage examples
 
 ```rust
 // Simple error
-return Err(ConnectorError::config(
+return Err(PluginError::config(
     "INVALID_PORT",
     "port must be between 1 and 65535",
 ));
 
 // With structured details
-return Err(ConnectorError::transient_network(
+return Err(PluginError::transient_network(
     "CONNECTION_TIMEOUT",
     format!("Timed out connecting to {}:{}", host, port),
 ).with_details(serde_json::json!({
@@ -728,7 +728,7 @@ return Err(ConnectorError::transient_network(
 })));
 
 // With commit state (destinations)
-return Err(ConnectorError::transient_db(
+return Err(PluginError::transient_db(
     "WRITE_FAILED",
     "INSERT failed mid-transaction",
 ).with_commit_state(CommitState::BeforeCommit));
@@ -750,21 +750,21 @@ return Err(ConnectorError::transient_db(
 | `CommitState::AfterCommitUnknown` | Commit was attempted but outcome is unknown |
 | `CommitState::AfterCommitConfirmed` | Some data was committed before the error |
 
-## 12. Testing Your Connector
+## 12. Testing Your Plugin
 
 ### Build
 
 ```bash
-cd connectors/my-source && cargo build
+cd plugins/sources/my-source && cargo build
 ```
 
 This compiles to `target/wasm32-wasip2/debug/my_source.wasm` and generates `my_source.manifest.json` alongside it (via `build.rs`).
 
-### Copy to connector directory
+### Copy to plugin directory
 
 ```bash
-cp target/wasm32-wasip2/debug/my_source.wasm ../../target/connectors/
-cp target/wasm32-wasip2/debug/my_source.manifest.json ../../target/connectors/
+cp target/wasm32-wasip2/debug/my_source.wasm ../../../target/plugins/
+cp target/wasm32-wasip2/debug/my_source.manifest.json ../../../target/plugins/
 ```
 
 ### Create a test pipeline
@@ -773,7 +773,7 @@ Create a YAML file (e.g. `test-pipeline.yaml`):
 
 ```yaml
 source:
-  connector: my-source
+  use: my-source
   config:
     host: localhost
     port: 5432
@@ -785,7 +785,7 @@ source:
       sync_mode: full_refresh
 
 destination:
-  connector: dest-postgres
+  use: dest-postgres
   config:
     host: localhost
     port: 5432
@@ -808,10 +808,10 @@ just run test-pipeline.yaml --limit 10
 
 ### Unit tests
 
-Standard `cargo test` works for pure logic (config validation, encoding, query building). Since connectors target `wasm32-wasip2`, host-integration tests require the full pipeline runner.
+Standard `cargo test` works for pure logic (config validation, encoding, query building). Since plugins target `wasm32-wasip2`, host-integration tests require the full pipeline runner.
 
 ```bash
-cd connectors/my-source && cargo test --target wasm32-wasip2
+cd plugins/sources/my-source && cargo test --target wasm32-wasip2
 ```
 
 ## 13. Publishing
@@ -819,7 +819,7 @@ cd connectors/my-source && cargo test --target wasm32-wasip2
 ### Release build
 
 ```bash
-cd connectors/my-source && cargo build --release
+cd plugins/sources/my-source && cargo build --release
 ```
 
 The release binary is at `target/wasm32-wasip2/release/my_source.wasm`.
@@ -830,22 +830,22 @@ The release binary is at `target/wasm32-wasip2/release/my_source.wasm`.
 ./scripts/strip-wasm.sh target/wasm32-wasip2/release/my_source.wasm
 ```
 
-### Connector resolution
+### Plugin resolution
 
-At runtime, the host resolves connectors by looking for two files in the connector directory:
+At runtime, the host resolves plugins by looking for two files in the plugin directory:
 
 | File | Purpose |
 |---|---|
 | `<name>.wasm` | The compiled Wasm component |
 | `<name>.manifest.json` | Auto-generated manifest (capabilities, permissions, features) |
 
-The connector directory is determined by `RAPIDBYTE_CONNECTOR_DIR` (defaults to `target/connectors/`).
+The plugin directory is determined by `RAPIDBYTE_PLUGIN_DIR` (defaults to `target/plugins/`).
 
-For example, a connector named `source-mysql` would be resolved as:
+For example, a plugin named `source-mysql` would be resolved as:
 
 ```
-$RAPIDBYTE_CONNECTOR_DIR/source_mysql.wasm
-$RAPIDBYTE_CONNECTOR_DIR/source_mysql.manifest.json
+$RAPIDBYTE_PLUGIN_DIR/source_mysql.wasm
+$RAPIDBYTE_PLUGIN_DIR/source_mysql.manifest.json
 ```
 
 Note that the file names use underscores (Rust crate naming convention), not hyphens.

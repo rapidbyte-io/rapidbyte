@@ -1,10 +1,10 @@
 # Rapidbyte
 
-Single-binary data ingestion engine with Wasm-sandboxed connectors.
+Single-binary data ingestion engine with Wasm-sandboxed plugins.
 
 Rapidbyte replaces heavyweight managed ELT platforms (Fivetran, Airbyte) with a
 single native binary that orchestrates data pipelines through sandboxed WebAssembly
-connectors. Connectors run as Wasm components with host-proxied networking and
+plugins. Plugins run as Wasm components with host-proxied networking and
 Arrow IPC batch exchange — no JVM, no Docker, no sidecar processes.
 
 ## Architecture Overview
@@ -12,7 +12,7 @@ Arrow IPC batch exchange — no JVM, no Docker, no sidecar processes.
 ```
 ┌─────────────────────────────────────────────────────┐
 │                  rapidbyte-cli                       │
-│     run · check · discover · connectors · scaffold  │
+│     run · check · discover · plugins · scaffold      │
 ├─────────────────────────────────────────────────────┤
 │  rapidbyte-engine       │  rapidbyte-runtime        │
 │  ┌─────────────┐        │  ┌───────────────────┐   │
@@ -29,21 +29,21 @@ Arrow IPC batch exchange — no JVM, no Docker, no sidecar processes.
 ├─────────────────────────────────────────────────────┤
 │                  rapidbyte-sdk                       │
 │  Source · Destination · Transform traits             │
-│  #[connector] macro · FrameWriter · HostTcpStream    │
+│  #[plugin] macro · FrameWriter · HostTcpStream       │
 ├─────────────────────────────────────────────────────┤
-│                Wasm Connectors                       │
+│                Wasm Plugins                          │
 │    source-postgres  ·  dest-postgres                 │
 └─────────────────────────────────────────────────────┘
 ```
 
 - **Runtime:** Wasmtime component model, `wasm32-wasip2` target.
-- **Protocol:** Version 4. Interface contract: `wit/rapidbyte-connector.wit`.
+- **Protocol:** Version 4. Interface contract: `wit/rapidbyte-plugin.wit`.
 - **Data format:** Arrow IPC record batches flow between stages via bounded `mpsc` channels.
   V4 frame transport: batches are streamed into host-managed frames (`frame-new` → `frame-write`
   → `frame-seal` → `emit-batch`), eliminating guest-side buffer allocation.
 - **State:** Pluggable backend (SQLite bundled, PostgreSQL implemented, S3 planned) for run
   metadata, cursor/checkpoint state, and DLQ records.
-- **Networking:** Connectors have no direct WASI socket access. All outbound TCP is mediated
+- **Networking:** Plugins have no direct WASI socket access. All outbound TCP is mediated
   through host imports (`connect-tcp`, `socket-read`, `socket-write`, `socket-close`) with
   manifest-declared network ACLs.
 
@@ -51,15 +51,15 @@ Arrow IPC batch exchange — no JVM, no Docker, no sidecar processes.
 
 Wasmtime component model with WIT-typed imports and exports.
 
-- **Component model:** Each connector is a Wasm component exporting one of `source`,
+- **Component model:** Each plugin is a Wasm component exporting one of `source`,
   `destination`, or `transform` interfaces.
-- **WIT interface** (`wit/rapidbyte-connector.wit`): defines types, host imports, and three
-  connector worlds (`rapidbyte-source`, `rapidbyte-destination`, `rapidbyte-transform`).
+- **WIT interface** (`wit/rapidbyte-plugin.wit`): defines types, host imports, and three
+  plugin worlds (`rapidbyte-source`, `rapidbyte-destination`, `rapidbyte-transform`).
 - **Host imports:** Frame lifecycle (`frame-new`, `frame-write`, `frame-seal`, `frame-len`,
   `frame-read`, `frame-drop`), batch transport (`emit-batch`, `next-batch`), pipeline
   (`checkpoint`, `metric`, `emit-dlq-record`, `log`), state (`state-get`, `state-put`,
   `state-cas`), plus TCP socket operations.
-- **Network ACL:** Derived from connector manifest permissions. Supports domain allowlists,
+- **Network ACL:** Derived from plugin manifest permissions. Supports domain allowlists,
   runtime config domain derivation, and TLS requirements (required/optional/forbidden).
 - **AOT compilation cache:** Controlled via `RAPIDBYTE_WASMTIME_AOT` env var. Pre-compiles
   components to native code and caches them on disk for faster subsequent loads.
@@ -67,7 +67,7 @@ Wasmtime component model with WIT-typed imports and exports.
 
 ## SDK & Protocol
 
-The `rapidbyte-sdk` crate provides everything needed to build a connector:
+The `rapidbyte-sdk` crate provides everything needed to build a plugin:
 
 **Traits:**
 - `Source` — `init`, `validate`, `discover`, `read`, `close`
@@ -77,13 +77,13 @@ The `rapidbyte-sdk` crate provides everything needed to build a connector:
 **Export macro:** Attribute macro generates WIT bindings, component glue, manifest
 embedding, and config schema in one shot:
 ```rust
-#[connector(source)]
+#[plugin(source)]
 struct MySource;
 
-#[connector(destination)]
+#[plugin(destination)]
 struct MyDest;
 
-#[connector(transform)]
+#[plugin(transform)]
 struct MyTransform;
 ```
 
@@ -96,11 +96,11 @@ frames via `frame-write` calls (zero guest-side allocation).
 imports, enabling `tokio-postgres` `connect_raw` from inside the Wasm sandbox.
 
 **Protocol types:** `PayloadEnvelope`, `StreamContext`, `Checkpoint`, `ReadSummary`,
-`WriteSummary`, `TransformSummary`, `ConnectorError` with structured error categories,
+`WriteSummary`, `TransformSummary`, `PluginError` with structured error categories,
 retry semantics, and commit state tracking. V4 uses frame-handle batch transport
 (`FrameWriter`, `frame-new`/`frame-seal`/`emit-batch` lifecycle).
 
-## Connector Manifest
+## Plugin Manifest
 
 JSON manifest alongside each `.wasm` binary declaring identity, capabilities, and security:
 
@@ -137,8 +137,8 @@ rapidbyte run <pipeline.yaml> --dry-run --limit 100
                                     Preview mode: pull N records, run transforms, print results
 rapidbyte check <pipeline.yaml>     Validate config, manifests, and connectivity
 rapidbyte discover <pipeline.yaml>  Discover available streams from a source
-rapidbyte connectors                List available connector plugins
-rapidbyte scaffold <name>           Scaffold a new connector project
+rapidbyte plugins                   List available plugins
+rapidbyte scaffold <name>           Scaffold a new plugin project
 ```
 
 Global flags: `--log-level` (error/warn/info/debug/trace), `--dry-run`, `--limit N`.
@@ -221,7 +221,7 @@ Exported pipeline: source(postgres) → dest(postgres), 1 stream, upsert mode
 
 - **REPL:** `reedline` with custom completer and syntax highlighter
 - **SQL engine:** DataFusion over Arrow workspace tables
-- **Connectors:** Reuses existing Wasm connectors via `rapidbyte-runtime`
+- **Plugins:** Reuses existing Wasm plugins via `rapidbyte-runtime`
 - **State:** Ephemeral in-memory workspace, optional persist to disk
 
 ## Pipeline YAML
@@ -359,8 +359,8 @@ Configurable per-pipeline policy with four dimensions:
 | `type_change` | `coerce`, `fail`, `null` | `fail` |
 | `nullability_change` | `allow`, `fail` | `allow` |
 
-Policies are passed to connectors via `StreamPolicies` in `StreamContext`. The destination
-connector applies them during DDL evolution and batch writes.
+Policies are passed to plugins via `StreamPolicies` in `StreamContext`. The destination
+plugin applies them during DDL evolution and batch writes.
 
 ## Dead Letter Queue
 
@@ -387,7 +387,7 @@ direct secret resolution from cloud providers via URIs at runtime.
 | `vault://secret/path#key` | HashiCorp Vault |
 
 This enables committing `pipeline.yaml` to Git with zero secrets in the file.
-Rapidbyte resolves URIs at startup before passing config to connectors.
+Rapidbyte resolves URIs at startup before passing config to plugins.
 
 ## In-Flight Data Validation (Data Contracts)
 
@@ -412,7 +412,7 @@ the pipeline continues processing valid records.
 
 ## In-Flight SQL Transforms (DataFusion)
 
-DataFusion embedded as a transform connector enables SQL transforms on Arrow batches
+DataFusion embedded as a transform plugin enables SQL transforms on Arrow batches
 as they flow through the pipeline:
 
 ```yaml
@@ -464,7 +464,7 @@ streams:
     columns: [id, name, email]
 ```
 
-The source connector receives `selected_columns` in `StreamContext` and constructs queries
+The source plugin receives `selected_columns` in `StreamContext` and constructs queries
 selecting only the specified columns. Column names are validated against PostgreSQL identifier
 rules to prevent SQL injection.
 
@@ -488,7 +488,7 @@ Arrow IPC batches transferred between pipeline stages can be compressed:
 
 ## Error Handling & Retries
 
-Connectors return structured `ConnectorError` with:
+Plugins return structured `PluginError` with:
 - **Category:** config, auth, permission, rate_limit, transient_network, transient_db, data, schema, frame, internal.
 - **Scope:** per-stream, per-batch, per-record.
 - **Retry semantics:** retryable flag, retry_after_ms hint, backoff_class (fast/normal/slow),
@@ -499,18 +499,18 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 ## Observability
 
 - **Structured logging:** `tracing` + `tracing-subscriber` with `--log-level` CLI flag.
-- **Connector metrics:** records_read/written, bytes_read/written (emitted via `metric` host import).
+- **Plugin metrics:** records_read/written, bytes_read/written (emitted via `metric` host import).
 - **Host timing breakdown:** connect, query, fetch, encode, decode, flush, commit, vm_setup,
   emit_batch, next_batch, compress, decompress — all tracked per-run.
 - **Run tracking:** Each pipeline run recorded in the state backend with start/end time,
   status, records read/written, and error messages.
 
-## Connectors
+## Plugins
 
 ### Implemented
 
-| Connector | Roles | Notes |
-|-----------|-------|-------|
+| Plugin | Roles | Notes |
+|--------|-------|-------|
 | `source-postgres` | Source | Snapshot, incremental cursor, CDC. `tokio-postgres` over `HostTcpStream`. |
 | `dest-postgres` | Destination | INSERT and COPY modes. Batch commits. DDL auto-creation. Schema evolution. |
 
@@ -522,10 +522,10 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 | `transform-validate` | Implemented | Data contracts: not-null, regex, range, unique |
 | `transform-mask` | Planned (P1) | Field masking / PII redaction |
 
-### Connector Roadmap
+### Plugin Roadmap
 
-| Connector | Priority | Notes |
-|-----------|----------|-------|
+| Plugin | Priority | Notes |
+|--------|----------|-------|
 | `source-mysql` | P1 | MySQL binlog CDC |
 | `dest-s3-parquet` | P1 | Parquet files on S3 |
 | `dest-bigquery` | P1 | BigQuery Storage Write API |
@@ -540,8 +540,8 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 
 - Wasmtime component model runtime with WIT interface (V4)
 - V4 frame transport (host-managed frames, streaming FrameWriter, zero guest allocation)
-- Source, Destination, Transform connector lifecycle
-- Connector manifests with config schema validation
+- Source, Destination, Transform plugin lifecycle
+- Plugin manifests with config schema validation
 - Pipeline YAML configuration
 - Three sync modes: full_refresh, incremental, CDC (`pgoutput` logical replication)
 - Three write modes: append, replace, upsert
@@ -552,13 +552,13 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 - LZ4 and Zstd channel compression
 - AOT compilation cache
 - Structured error handling with retry semantics
-- CLI: run, check, discover, connectors, scaffold
+- CLI: run, check, discover, plugins, scaffold
 - Host-proxied TCP networking with ACLs
-- Connector metrics and host timing breakdown
+- Plugin metrics and host timing breakdown
 - SQLite and PostgreSQL state backends for checkpoints and run history
 - Dry run mode (`--dry-run --limit N`) for local pipeline preview
-- In-flight SQL transform connector (`transform-sql`) on Arrow batches
-- In-flight validation transform connector (`transform-validate`) with fail/skip/dlq policy handling
+- In-flight SQL transform plugin (`transform-sql`) on Arrow batches
+- In-flight validation transform plugin (`transform-validate`) with fail/skip/dlq policy handling
 - Full PG type correctness (timestamp, date, bytea, json, uuid, numeric, etc.)
 - Modular crate architecture (types, state, runtime, engine, sdk, cli)
 - E2E test suite and benchmarking scripts
@@ -566,14 +566,14 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 ### Critical path (P0)
 
 - **S3 state backend** — enables ephemeral deployments (CI/CD, Lambda, K8s Jobs)
-- **Interactive dev shell** (`rapidbyte dev`) — exploratory workflow for fast connector/pipeline iteration
+- **Interactive dev shell** (`rapidbyte dev`) — exploratory workflow for fast plugin/pipeline iteration
 - **Secrets management** — resolve secret URIs at startup (AWS/GCP/Vault/1Password)
 
 ### Near-term (P1)
 
 - TUI progress display during pipeline runs
-- OCI registry for connector distribution (`rapidbyte pull`)
-- Additional connectors: MySQL source, S3/Parquet dest, BigQuery dest
+- OCI registry for plugin distribution (`rapidbyte pull`)
+- Additional plugins: MySQL source, S3/Parquet dest, BigQuery dest
 - OpenTelemetry metrics and trace export
 - DLQ replay and routing to destination tables
 
@@ -581,7 +581,7 @@ The orchestrator retries transient errors up to `max_retries` times with exponen
 
 - Pipeline hooks / middleware (pre-batch, post-commit callbacks)
 - Managed cloud service with scheduling and monitoring
-- Connector marketplace
+- Plugin marketplace
 - Distributed tracing across pipeline stages
-- Additional connectors: Snowflake, DuckDB, HTTP source, S3 source
+- Additional plugins: Snowflake, DuckDB, HTTP source, S3 source
 - Prometheus metrics endpoint

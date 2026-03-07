@@ -20,5 +20,5 @@
 - [ ] `just fmt`
 - [ ] `just lint`
 - [ ] `just test`
-- [ ] E2E tests (if engine/connector changed): `just e2e`
+- [ ] E2E tests (if engine/plugin changed): `just e2e`
 - [ ] Benchmark evidence (if hot path touched)

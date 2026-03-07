@@ -30,7 +30,7 @@ cargo run --manifest-path tests/bench/Cargo.toml -- run [OPTIONS]
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `CONNECTOR` | (all) | Connector name (e.g. postgres). Omit to bench all. |
+| `PLUGIN` | (all) | Plugin name (e.g. postgres). Omit to bench all. |
 | `ROWS` | 10000 | Number of rows to seed and benchmark |
 | `--iters N` | 3 | Iterations per mode (INSERT and COPY) |
 | `--aot` | on | Enable Wasmtime AOT cache |
@@ -41,7 +41,7 @@ cargo run --manifest-path tests/bench/Cargo.toml -- run [OPTIONS]
 Examples:
 
 ```bash
-# All connectors, default settings
+# All plugins, default settings
 just bench
 
 # Postgres only, 100K rows, 5 iterations
@@ -75,7 +75,7 @@ HTML reports are generated in `target/criterion/`.
 
 | Target | Description |
 |--------|-------------|
-| `just bench` | Run E2E pipeline benchmarks (all connectors, defaults) |
+| `just bench` | Run E2E pipeline benchmarks (all plugins, defaults) |
 | `just bench postgres 50000` | Benchmark postgres with 50K rows |
 | `just bench-compare ref1 ref2` | Compare benchmarks between two git refs |
 
@@ -108,7 +108,7 @@ View with: `samply load <profile.json>` — opens Firefox Profiler in your brows
 just bench-compare main my-feature
 
 # Compare with options
-just bench-compare HEAD~1 HEAD --connector postgres --rows 100000
+just bench-compare HEAD~1 HEAD --plugin postgres --rows 100000
 ```
 
 The script:
@@ -120,7 +120,7 @@ The script:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--connector NAME` | (all) | Benchmark only this connector |
+| `--plugin NAME` | (all) | Benchmark only this plugin |
 | `--rows N` | 10000 | Number of rows to benchmark |
 | `--iters N` | 3 | Iterations per mode |
 | `--aot` | on | Enable Wasmtime AOT cache |
@@ -168,12 +168,12 @@ These metrics are printed in the per-iteration console output, included in the c
   Dataset:     10,000 rows, 1.14 MB (120 B/row)
   Samples:     3 INSERT, 3 COPY
 
-  connector-postgres/insert/10000
+  plugin-postgres/insert/10000
                         time:   [1.1902 1.2340 1.2778] s
                         thrpt:  [7,826 8,104 8,401] rows/s
                                 [0.89 0.93 0.96] MB/s
 
-  connector-postgres/copy/10000
+  plugin-postgres/copy/10000
                         time:   [0.8512 0.8900 0.9288] s
                         thrpt:  [10,766 11,236 11,748] rows/s
                                 [1.23 1.28 1.34] MB/s
@@ -228,7 +228,7 @@ Six benchmark pipeline YAMLs are provided in `tests/bench/fixtures/pipelines/`:
 
 ### INSERT vs COPY
 
-The dest connector supports two PostgreSQL load methods:
+The dest plugin supports two PostgreSQL load methods:
 
 - **INSERT** (default) — standard `INSERT INTO ... VALUES` statements
 - **COPY** — PostgreSQL's `COPY` protocol for bulk loading
@@ -260,9 +260,9 @@ rapidbyte run tests/bench/fixtures/pipelines/bench_pg_lz4.yaml
 rapidbyte run tests/bench/fixtures/pipelines/bench_pg_zstd.yaml
 ```
 
-## Adding a New Connector Benchmark
+## Adding a New Plugin Benchmark
 
-1. Create `tests/bench/connectors/<name>/` with 4 files:
+1. Create `tests/bench/plugins/<name>/` with 4 files:
    - `config.sh` — `BENCH_DEFAULT_ROWS`, `BENCH_MODES`, `BENCH_PIPELINES`
    - `setup.sh` — Start infrastructure, seed data
    - `run.sh` — Iterate modes, collect results, call `criterion_report`
@@ -276,12 +276,12 @@ rapidbyte run tests/bench/fixtures/pipelines/bench_pg_zstd.yaml
 
 **AOT compilation flags** — Bench scripts enable Wasmtime AOT cache by default. Use `--no-aot` to disable it for A/B comparisons.
 
-**Debug build panics** — WASI connectors panic in debug builds on unsupported socket ops (e.g., `set_nodelay`). Always use release builds for benchmarking (the default). Debug mode is available via `--debug` but is only useful for testing the benchmark harness itself.
+**Debug build panics** — WASI plugins panic in debug builds on unsupported socket ops (e.g., `set_nodelay`). Always use release builds for benchmarking (the default). Debug mode is available via `--debug` but is only useful for testing the benchmark harness itself.
 
-**`records_written` shows 0** — Known issue. The dest connector stats tracking doesn't update this counter. Use `records_read` for throughput calculations (the scripts already do this).
+**`records_written` shows 0** — Known issue. The dest plugin stats tracking doesn't update this counter. Use `records_read` for throughput calculations (the scripts already do this).
 
 **Profiling shows no symbols** — If using `cargo flamegraph` on macOS, SIP prevents dtrace from resolving symbols. Use `samply` instead (`cargo install samply`), which resolves symbols from DWARF debug info independently.
 
 **No results for bench-compare** — Results are stored in `target/bench_results/results.jsonl`. This file is created on the first `bench.sh` run. Clean builds (`cargo clean`) do not delete it since it's under `target/bench_results/`, but manually deleting `target/` will.
 
-**Bash 4+ required** — The connector config scripts use associative arrays (`declare -A`) which require bash 4+. macOS ships with bash 3.2; install a modern bash via Homebrew (`brew install bash`).
+**Bash 4+ required** — The plugin config scripts use associative arrays (`declare -A`) which require bash 4+. macOS ships with bash 3.2; install a modern bash via Homebrew (`brew install bash`).

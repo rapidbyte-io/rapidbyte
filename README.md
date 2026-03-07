@@ -1,9 +1,9 @@
 # Rapidbyte
 
-Single-binary data pipeline engine with Wasm-sandboxed connectors.
+Single-binary data pipeline engine with Wasm-sandboxed plugins.
 
 Rapidbyte replaces managed ETL platforms like Fivetran and Airbyte with a single
-native binary. Connectors run as WASI components inside a Wasmtime sandbox with
+native binary. Plugins run as WASI components inside a Wasmtime sandbox with
 host-proxied networking. Data flows between stages as Arrow IPC batches -- no
 JVM, no Docker, no sidecar processes.
 
@@ -17,7 +17,7 @@ JVM, no Docker, no sidecar processes.
 - **Schema evolution** across 4 dimensions (strict, additive, permissive, auto)
 - **LZ4 / Zstd compression** for Arrow IPC batches between stages
 - **Projection pushdown** -- select only the columns you need
-- **Host-proxied networking** with per-connector ACLs (no raw sockets in guest)
+- **Host-proxied networking** with per-plugin ACLs (no raw sockets in guest)
 - **State backends:** SQLite or Postgres for cursor, checkpoint, and run metadata
 - **Dry-run mode** with `--limit` for instant feedback without writing data
 - **Pipeline parallelism** -- stages run concurrently, connected by bounded channels
@@ -26,7 +26,7 @@ JVM, no Docker, no sidecar processes.
 
 **Prerequisites:** Rust 1.75+, [`just`](https://github.com/casey/just), Docker
 
-Start the dev environment (Docker Postgres, build host + connectors, seed data):
+Start the dev environment (Docker Postgres, build host + plugins, seed data):
 
 ```bash
 just dev-up
@@ -63,8 +63,8 @@ just dev-down
 | `rapidbyte run <pipeline.yaml>` | Execute a data pipeline |
 | `rapidbyte check <pipeline.yaml>` | Validate config, manifests, and connectivity |
 | `rapidbyte discover <pipeline.yaml>` | Discover available streams from a source |
-| `rapidbyte connectors` | List available connector plugins |
-| `rapidbyte scaffold <name>` | Scaffold a new connector project |
+| `rapidbyte plugins` | List available plugins |
+| `rapidbyte scaffold <name>` | Scaffold a new plugin project |
 
 ### Verbosity Flags
 
@@ -118,28 +118,28 @@ state:
   backend: sqlite
 ```
 
-See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the full connector protocol specification.
+See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the full plugin protocol specification.
 
-## Connectors
+## Plugins
 
-| Connector | Type | Description |
-|-----------|------|-------------|
+| Plugin | Type | Description |
+|--------|------|-------------|
 | `source-postgres` | Source | Read from PostgreSQL (full refresh, incremental) |
 | `dest-postgres` | Destination | Write to PostgreSQL (append, replace, upsert; INSERT and COPY) |
 | `transform-sql` | Transform | SQL transforms via DataFusion |
 | `transform-validate` | Transform | Row-level data validation with DLQ support |
 
-Connectors are compiled to `wasm32-wasip2` and loaded by the engine at runtime.
-To build your own, see the [Connector Developer Guide](docs/CONNECTOR_DEV.md).
+Plugins are compiled to `wasm32-wasip2` and loaded by the engine at runtime.
+To build your own, see the [Plugin Developer Guide](docs/PLUGIN_DEV.md).
 
 ## Architecture
 
 The engine orchestrates a pipeline as a sequence of stages -- source, zero or
 more transforms, and a destination -- running concurrently and connected by
-bounded `mpsc::channel`s. Each connector is a `wasm32-wasip2` component executed
+bounded `mpsc::channel`s. Each plugin is a `wasm32-wasip2` component executed
 inside a Wasmtime sandbox. Arrow IPC batches flow between stages via host-managed
 frames (`frame-new` / `frame-write` / `frame-seal` / `emit-batch`), with optional
-LZ4/Zstd compression handled transparently by the host. Connectors cannot open
+LZ4/Zstd compression handled transparently by the host. Plugins cannot open
 raw sockets; all network I/O is proxied through `connect-tcp` with host-enforced
 ACLs.
 
@@ -159,7 +159,7 @@ types          (leaf -- no internal deps)
   +-- engine   (types, runtime, state)
   +-- cli      (engine, runtime, types)
 
-sdk            (types -- connectors depend only on this)
+sdk            (types -- plugins depend only on this)
 ```
 
 | Crate | Purpose |
@@ -168,8 +168,8 @@ sdk            (types -- connectors depend only on this)
 | `rapidbyte-state` | State backend (SQLite, Postgres) |
 | `rapidbyte-runtime` | Wasmtime component runtime, host imports, sandbox |
 | `rapidbyte-engine` | Pipeline orchestrator, config parsing, Arrow utilities |
-| `rapidbyte-cli` | CLI binary (`run`, `check`, `discover`, `connectors`, `scaffold`) |
-| `rapidbyte-sdk` | Connector SDK (protocol types, component host bindings) |
+| `rapidbyte-cli` | CLI binary (`run`, `check`, `discover`, `plugins`, `scaffold`) |
+| `rapidbyte-sdk` | Plugin SDK (protocol types, component host bindings) |
 
 ## Development
 

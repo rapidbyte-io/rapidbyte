@@ -1,6 +1,6 @@
 # Rapidbyte Coding Style Blueprint
 
-Maintainer-focused standards for writing high-performance, correctness-critical Rust across engine, runtime, state, SDK, and connectors. Concrete patterns are sourced from the actual codebase — see cross-references.
+Maintainer-focused standards for writing high-performance, correctness-critical Rust across engine, runtime, state, SDK, and plugins. Concrete patterns are sourced from the actual codebase — see cross-references.
 
 ## 1) Purpose and Non-Goals
 
@@ -9,7 +9,7 @@ Maintainer-focused standards for writing high-performance, correctness-critical 
 - Define merge-quality coding standards for ingestion/runtime paths.
 - Encode DRY, SOLID, and YAGNI in a way that improves throughput and correctness.
 - Provide a consistent refactor rubric to prioritize technical debt reduction.
-- Document concrete crate layout, error handling, serde, and concurrency patterns used across all 7 host crates and 3 connectors — see Sections 4–9 and 12.
+- Document concrete crate layout, error handling, serde, and concurrency patterns used across all 7 host crates and 3 plugins — see Sections 4–9 and 12.
 
 ### Non-Goals
 
@@ -27,7 +27,7 @@ Maintainer-focused standards for writing high-performance, correctness-critical 
 Every `MUST`/`MUST NOT` rule includes:
 
 - Failure mode prevented
-- Scope (host, connector, tests, benches)
+- Scope (host, plugin, tests, benches)
 - Verification method
 
 ## 3) Core Principles for Rapidbyte
@@ -38,13 +38,13 @@ Every `MUST`/`MUST NOT` rule includes:
 - `MUST NOT` duplicate protocol mapping logic across crates.
 - `SHOULD` share domain-specific helpers only when at least two concrete call sites exist.
 
-Failure mode prevented: semantic drift across connectors/host boundaries.
+Failure mode prevented: semantic drift across plugins/host boundaries.
 
 ### SOLID (Applied, Not Dogmatic)
 
-- `MUST` keep external boundaries explicit: connector protocol, runtime host imports, state backends.
+- `MUST` keep external boundaries explicit: plugin protocol, runtime host imports, state backends.
 - `SHOULD` introduce traits/interfaces only for real substitution points already needed in code.
-- `MUST NOT` add abstraction layers to satisfy hypothetical future connectors.
+- `MUST NOT` add abstraction layers to satisfy hypothetical future plugins.
 
 Failure mode prevented: indirection-heavy code that obscures correctness and slows hot paths.
 
@@ -176,7 +176,7 @@ use tokio::task::JoinSet;
 
 use rapidbyte_runtime::{LoadedComponent, SandboxOverrides, WasmRuntime};
 use rapidbyte_state::StateBackend;
-use rapidbyte_types::wire::{ConnectorRole, SyncMode, WriteMode};
+use rapidbyte_types::wire::{PluginKind, SyncMode, WriteMode};
 
 use crate::config::types::PipelineConfig;
 use crate::error::{compute_backoff, PipelineError};
@@ -193,17 +193,17 @@ use crate::runner::{run_destination_stream, run_source_stream};
 
 | Crate | Error Type | Pattern | Scope |
 |-------|-----------|---------|-------|
-| `types` | `ConnectorError` | Factory + builder, `Serialize`/`Deserialize` | Cross-boundary (host ↔ connector) |
+| `types` | `PluginError` | Factory + builder, `Serialize`/`Deserialize` | Cross-boundary (host ↔ plugin) |
 | `state` | `StateError` | `thiserror` enum + `Result<T>` alias | Crate-internal |
 | `runtime` | `RuntimeError` | `thiserror` enum + `Result<T>` alias | Crate-internal |
 | `engine` | `PipelineError` | Two-variant boundary enum (Connector / Infrastructure) | Orchestration boundary |
 
-### 6.2 `ConnectorError` Factory + Builder
+### 6.2 `PluginError` Factory + Builder
 
-`ConnectorError` (in `rapidbyte-types`) uses a private `new` constructor with public category-specific factory methods. Each factory pre-sets defaults for `retryable`, `scope`, and `backoff_class`:
+`PluginError` (in `rapidbyte-types`) uses a private `new` constructor with public category-specific factory methods. Each factory pre-sets defaults for `retryable`, `scope`, and `backoff_class`:
 
 ```rust
-impl ConnectorError {
+impl PluginError {
     // Private — callers use category factories below.
     fn new(category: ErrorCategory, scope: ErrorScope, retryable: bool, ...) -> Self { ... }
 
@@ -220,7 +220,7 @@ impl ConnectorError {
 Builder methods chain optional metadata:
 
 ```rust
-ConnectorError::transient_db("COMMIT_FAILED", "timeout")
+PluginError::transient_db("COMMIT_FAILED", "timeout")
     .with_commit_state(CommitState::AfterCommitUnknown)
     .with_details(serde_json::json!({"table": "users"}))
 ```
@@ -259,7 +259,7 @@ The engine uses a two-variant enum to separate typed connector errors from opaqu
 ```rust
 pub enum PipelineError {
     /// Typed connector error with retry metadata.
-    Connector(ConnectorError),
+    Plugin(PluginError),
     /// Infrastructure error (WASM load, channel, state backend, etc.)
     Infrastructure(anyhow::Error),
 }
@@ -285,7 +285,7 @@ pub enum Feature {
 }
 ```
 
-- `MUST` apply `#[non_exhaustive]` to enums that cross the host/connector boundary and may gain variants.
+- `MUST` apply `#[non_exhaustive]` to enums that cross the host/plugin boundary and may gain variants.
 - `MUST` use `#[serde(rename_all = "snake_case")]` for consistent JSON keys.
 - `SHOULD` use `#[serde(tag = "mode", rename_all = "snake_case")]` for internally-tagged enums with data:
 
@@ -347,7 +347,7 @@ This keeps `Display` output decoupled from serde serialization and ensures exhau
 
 ### 7.4 IPC Types
 
-Types that cross the host/connector boundary via JSON `MUST` derive both `Serialize` and `Deserialize`. All types in `rapidbyte-types` follow this rule.
+Types that cross the host/plugin boundary via JSON `MUST` derive both `Serialize` and `Deserialize`. All types in `rapidbyte-types` follow this rule.
 
 ## 8) Visibility and API Design
 
@@ -357,7 +357,7 @@ Types that cross the host/connector boundary via JSON `MUST` derive both `Serial
 |---------|---------|-----------|
 | Structs used only within crate | `pub(crate)` | Prevents accidental API surface growth |
 | Fields of crate-internal structs | `pub(crate)` | Allows crate-wide access without external exposure |
-| Fields of cross-boundary types | `pub` | Connectors and external crates need direct access |
+| Fields of cross-boundary types | `pub` | Plugins and external crates need direct access |
 | Helper functions | `pub(crate)` | Exposed only if another crate needs them |
 | Error types | `pub` | Callers must match and handle |
 
@@ -394,8 +394,8 @@ Leaf crates (`types`, `state`) `SHOULD` provide a `prelude` module for ergonomic
 /// use rapidbyte_types::prelude::*;
 /// ```
 pub mod prelude {
-    pub use crate::error::{ConnectorError, ErrorCategory, ValidationResult};
-    pub use crate::wire::{ConnectorInfo, ConnectorRole, Feature, SyncMode};
+    pub use crate::error::{PluginError, ErrorCategory, ValidationResult};
+    pub use crate::wire::{PluginInfo, PluginKind, Feature, SyncMode};
     // ...
 }
 ```
@@ -403,16 +403,16 @@ pub mod prelude {
 - `MUST NOT` put items in the prelude that are only used by one consumer.
 - `SHOULD` test that prelude re-exports resolve correctly (see Section 13).
 
-## 9) Connector Conventions
+## 9) Plugin Conventions
 
 ### 9.1 Entry Point and Manifests
 
-Every connector has two required parts: a `build.rs` manifest and a `main.rs` entry point.
+Every plugin has two required parts: a `build.rs` manifest and a `main.rs` entry point.
 
 **Manifest (`build.rs`)** — declares metadata, capabilities, and environment requirements via `ManifestBuilder`:
 
 ```rust
-// connectors/dest-postgres/build.rs
+// plugins/destinations/postgres/build.rs
 use rapidbyte_sdk::build::ManifestBuilder;
 use rapidbyte_sdk::wire::{Feature, WriteMode};
 
@@ -433,7 +433,7 @@ fn main() {
 ```
 
 ```rust
-// connectors/source-postgres/build.rs
+// plugins/sources/postgres/build.rs
 use rapidbyte_sdk::build::ManifestBuilder;
 use rapidbyte_sdk::wire::SyncMode;
 
@@ -449,24 +449,24 @@ fn main() {
 ```
 
 - `MUST` use `ManifestBuilder` to declare name, description, supported modes, and feature flags.
-- `MUST` call `allow_runtime_network()` for connectors that establish TCP connections.
+- `MUST` call `allow_runtime_network()` for plugins that establish TCP connections.
 - `MUST` declare required environment variables (e.g., `PGSSLROOTCERT`) via `env_vars()`.
-- Transform connectors that need no special capabilities `MAY` use a minimal manifest:
+- Transform plugins that need no special capabilities `MAY` use a minimal manifest:
 
 ```rust
-// connectors/transform-sql/build.rs
+// plugins/transforms/sql/build.rs
 ManifestBuilder::transform("rapidbyte/transform-sql")
     .name("SQL Transform")
     .description("Executes SQL queries on Arrow batches using Apache DataFusion")
     .emit();
 ```
 
-**Entry point (`main.rs`)** — the `#[connector(role)]` attribute and trait implementation:
+**Entry point (`main.rs`)** — the `#[plugin(role)]` attribute and trait implementation:
 
 ```rust
 use rapidbyte_sdk::prelude::*;
 
-#[rapidbyte_sdk::connector(source)]
+#[rapidbyte_sdk::plugin(source)]
 pub struct SourcePostgres {
     config: config::Config,
 }
@@ -474,23 +474,23 @@ pub struct SourcePostgres {
 impl Source for SourcePostgres {
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
+    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
         config.validate()?;
-        Ok((Self { config }, ConnectorInfo { ... }))
+        Ok((Self { config }, PluginInfo { ... }))
     }
 
-    async fn discover(&mut self, ctx: &Context) -> Result<Catalog, ConnectorError> { ... }
-    async fn read(&mut self, ctx: &Context, stream: StreamContext) -> Result<ReadSummary, ConnectorError> { ... }
-    async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> { ... }
+    async fn discover(&mut self, ctx: &Context) -> Result<Catalog, PluginError> { ... }
+    async fn read(&mut self, ctx: &Context, stream: StreamContext) -> Result<ReadSummary, PluginError> { ... }
+    async fn close(&mut self, ctx: &Context) -> Result<(), PluginError> { ... }
 }
 ```
 
 - `MUST` call `config.validate()` in `init` before any I/O.
-- `MUST` use `rapidbyte_sdk::connector` attribute, not manual WIT bindings.
+- `MUST` use `rapidbyte_sdk::plugin` attribute, not manual WIT bindings.
 
 ### 9.2 Config Type
 
-Connector config types `MUST` derive `Deserialize` and `ConfigSchema`, and `SHOULD` implement a `validate()` method:
+Plugin config types `MUST` derive `Deserialize` and `ConfigSchema`, and `SHOULD` implement a `validate()` method:
 
 ```rust
 #[derive(Debug, Clone, Deserialize, ConfigSchema)]
@@ -507,7 +507,7 @@ pub struct Config {
 impl Config {
     /// # Errors
     /// Returns `Err` if required fields are invalid.
-    pub fn validate(&self) -> Result<(), ConnectorError> { ... }
+    pub fn validate(&self) -> Result<(), PluginError> { ... }
 }
 ```
 
@@ -516,7 +516,7 @@ impl Config {
 
 ### 9.3 Module Layout
 
-Connectors `SHOULD` follow this module pattern:
+Plugins `SHOULD` follow this module pattern:
 
 | Module | Role |
 |--------|------|
@@ -525,13 +525,13 @@ Connectors `SHOULD` follow this module pattern:
 | `encode` | Arrow/IPC encoding/decoding helpers |
 | `query` | SQL query builders |
 | `metrics` | Metric emission helpers |
-| `types` | Connector-specific types |
+| `types` | Plugin-specific types |
 
 ### 9.4 Network I/O and Connection Safety
 
 - `MUST` use `HostTcpStream` (`rapidbyte_sdk::host_tcp`) for all TCP connections to ensure host ACL enforcement.
-- `MUST NOT` use raw WASI sockets — the host enforces connector ACLs through `HostTcpStream`.
-- `MUST` wrap raw connection handlers in `tokio::spawn` to manage background tasks without blocking the main connector logic.
+- `MUST NOT` use raw WASI sockets — the host enforces plugin ACLs through `HostTcpStream`.
+- `MUST` wrap raw connection handlers in `tokio::spawn` to manage background tasks without blocking the main plugin logic.
 - `MUST` log connection errors using `rapidbyte_sdk::host_ffi::log` for visibility in host logs.
 
 Example from `source-postgres/src/client.rs`:
@@ -572,13 +572,13 @@ pub(crate) async fn connect(config: &Config) -> Result<Client, String> {
 Example from `dest-postgres/src/client.rs`:
 
 ```rust
-pub(crate) async fn validate(config: &Config) -> Result<ValidationResult, ConnectorError> {
+pub(crate) async fn validate(config: &Config) -> Result<ValidationResult, PluginError> {
     let client = connect(config)
         .await
-        .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
+        .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
 
     client.query_one("SELECT 1", &[]).await.map_err(|e| {
-        ConnectorError::transient_network(
+        PluginError::transient_network(
             "CONNECTION_TEST_FAILED",
             format!("Connection test failed: {e}"),
         )
@@ -861,7 +861,7 @@ mod tests {
 
     #[test]
     fn config_error_defaults() {
-        let err = ConnectorError::config("MISSING_HOST", "host is required");
+        let err = PluginError::config("MISSING_HOST", "host is required");
         assert_eq!(err.category, ErrorCategory::Config);
         assert!(!err.retryable);
     }
@@ -917,10 +917,10 @@ Every `Serialize + Deserialize` type `SHOULD` have a roundtrip test:
 ```rust
 #[test]
 fn serde_roundtrip() {
-    let err = ConnectorError::rate_limit("THROTTLED", "slow down", Some(5000))
+    let err = PluginError::rate_limit("THROTTLED", "slow down", Some(5000))
         .with_details(serde_json::json!({"endpoint": "/api/data"}));
     let json = serde_json::to_string(&err).unwrap();
-    let back: ConnectorError = serde_json::from_str(&json).unwrap();
+    let back: PluginError = serde_json::from_str(&json).unwrap();
     assert_eq!(err, back);
 }
 ```
@@ -973,7 +973,7 @@ For crates with feature flags, include a feature table (see Section 4.3).
 /// # Errors
 /// Returns `Err` if `replication_slot` or `publication` is empty or exceeds the
 /// 63-byte PostgreSQL identifier limit.
-pub fn validate(&self) -> Result<(), ConnectorError> { ... }
+pub fn validate(&self) -> Result<(), PluginError> { ... }
 ```
 
 ### Comments
@@ -1017,7 +1017,7 @@ if value < min || value > max {
 ### Good: typed error factory
 
 ```rust
-ConnectorError::transient_db("DEADLOCK", "deadlock detected")
+PluginError::transient_db("DEADLOCK", "deadlock detected")
     .with_commit_state(CommitState::BeforeCommit)
 ```
 
@@ -1039,7 +1039,7 @@ pub enum Feature {
 }
 ```
 
-### Bad: bare enum crossing host/connector boundary
+### Bad: bare enum crossing host/plugin boundary
 
 ```rust
 #[derive(Serialize, Deserialize)]
@@ -1150,7 +1150,7 @@ Classes:
 ### Suggested Initial Focus Areas
 
 - P0 candidates: orchestrator stage coupling and checkpoint/commit coordination paths
-- P1 candidates: connector validation helpers and shared metric-shape utilities
+- P1 candidates: plugin validation helpers and shared metric-shape utilities
 - P2 candidates: low-impact module decomposition and naming consistency
 
 ## 18) PR Template Snippet
