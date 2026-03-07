@@ -1,11 +1,11 @@
-//! Connector project scaffolding subcommand (scaffold).
+//! Plugin project scaffolding subcommand (scaffold).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-/// Connector role derived from the name prefix.
+/// Plugin kind derived from the name prefix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
     Source,
@@ -25,7 +25,7 @@ impl Role {
 ///
 /// # Errors
 ///
-/// Returns `Err` if the connector name is invalid, the output directory
+/// Returns `Err` if the plugin name is invalid, the output directory
 /// cannot be created, or file writing fails.
 #[allow(clippy::too_many_lines)] // Scaffolding requires writing many files with sequential steps.
 pub fn run(name: &str, output: Option<&str>) -> Result<()> {
@@ -35,13 +35,19 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
     } else if name.starts_with("dest-") {
         Role::Destination
     } else {
-        bail!("Connector name must start with 'source-' or 'dest-', got '{name}'");
+        bail!("Plugin name must start with 'source-' or 'dest-', got '{name}'");
     };
 
     // Compute output directory
     let base_dir = match output {
         Some(dir) => PathBuf::from(dir).join(name),
-        None => PathBuf::from("connectors").join(name),
+        None => {
+            let kind_dir = match role {
+                Role::Source => "plugins/sources",
+                Role::Destination => "plugins/destinations",
+            };
+            PathBuf::from(kind_dir).join(name)
+        }
     };
 
     if base_dir.exists() {
@@ -144,7 +150,7 @@ pub fn run(name: &str, output: Option<&str>) -> Result<()> {
     }
 
     // Print summary
-    println!("Scaffolded {} connector '{}'", role.as_str(), name);
+    println!("Scaffolded {} plugin '{}'", role.as_str(), name);
     println!();
     println!("Created files:");
     for f in &created_files {
@@ -257,7 +263,7 @@ use rapidbyte_sdk::wire::SyncMode;
 fn main() {{
     ManifestBuilder::source("rapidbyte/{name}")
         .name("{display_name}")
-        .description("Source connector for {service_name}")
+        .description("Source plugin for {service_name}")
         .sync_modes(&[SyncMode::FullRefresh])
         .allow_runtime_network()
         .emit();
@@ -271,7 +277,7 @@ use rapidbyte_sdk::wire::WriteMode;
 fn main() {{
     ManifestBuilder::destination("rapidbyte/{name}")
         .name("{display_name}")
-        .description("Destination connector for {service_name}")
+        .description("Destination plugin for {service_name}")
         .write_modes(&[WriteMode::Append])
         .allow_runtime_network()
         .emit();
@@ -290,7 +296,7 @@ pub mod schema;
 
 use rapidbyte_sdk::prelude::*;
 
-#[rapidbyte_sdk::connector(source)]
+#[rapidbyte_sdk::plugin(source)]
 pub struct {struct_name} {{
     config: config::Config,
 }}
@@ -298,30 +304,30 @@ pub struct {struct_name} {{
 impl Source for {struct_name} {{
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {{
+    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {{
         Ok((
             Self {{ config }},
-            ConnectorInfo {{
-                protocol_version: ProtocolVersion::V4,
+            PluginInfo {{
+                protocol_version: ProtocolVersion::V5,
                 features: vec![],
                 default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
             }},
         ))
     }}
 
-    async fn discover(&mut self, _ctx: &Context) -> Result<Catalog, ConnectorError> {{
+    async fn discover(&mut self, _ctx: &Context) -> Result<Catalog, PluginError> {{
         schema::discover_catalog(&self.config)
     }}
 
-    async fn validate(config: &Self::Config, _ctx: &Context) -> Result<ValidationResult, ConnectorError> {{
+    async fn validate(config: &Self::Config, _ctx: &Context) -> Result<ValidationResult, PluginError> {{
         client::validate(config).await
     }}
 
-    async fn read(&mut self, ctx: &Context, stream: StreamContext) -> Result<ReadSummary, ConnectorError> {{
+    async fn read(&mut self, ctx: &Context, stream: StreamContext) -> Result<ReadSummary, PluginError> {{
         reader::read_stream(&self.config, ctx, &stream).await
     }}
 
-    async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {{
+    async fn close(&mut self, ctx: &Context) -> Result<(), PluginError> {{
         ctx.log(LogLevel::Info, &format!("{{}}: close", env!("CARGO_PKG_NAME")));
         Ok(())
     }}
@@ -338,7 +344,7 @@ mod writer;
 
 use rapidbyte_sdk::prelude::*;
 
-#[rapidbyte_sdk::connector(destination)]
+#[rapidbyte_sdk::plugin(destination)]
 pub struct {struct_name} {{
     config: config::Config,
 }}
@@ -346,26 +352,26 @@ pub struct {struct_name} {{
 impl Destination for {struct_name} {{
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {{
+    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {{
         Ok((
             Self {{ config }},
-            ConnectorInfo {{
-                protocol_version: ProtocolVersion::V4,
+            PluginInfo {{
+                protocol_version: ProtocolVersion::V5,
                 features: vec![],
                 default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
             }},
         ))
     }}
 
-    async fn validate(config: &Self::Config, _ctx: &Context) -> Result<ValidationResult, ConnectorError> {{
+    async fn validate(config: &Self::Config, _ctx: &Context) -> Result<ValidationResult, PluginError> {{
         client::validate(config).await
     }}
 
-    async fn write(&mut self, ctx: &Context, stream: StreamContext) -> Result<WriteSummary, ConnectorError> {{
+    async fn write(&mut self, ctx: &Context, stream: StreamContext) -> Result<WriteSummary, PluginError> {{
         writer::write_stream(&self.config, ctx, &stream).await
     }}
 
-    async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {{
+    async fn close(&mut self, ctx: &Context) -> Result<(), PluginError> {{
         ctx.log(LogLevel::Info, &format!("{{}}: close", env!("CARGO_PKG_NAME")));
         Ok(())
     }}
@@ -416,7 +422,7 @@ fn gen_client_rs() -> &'static str {
     r#"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
-pub async fn validate(config: &Config) -> Result<ValidationResult, ConnectorError> {
+pub async fn validate(config: &Config) -> Result<ValidationResult, PluginError> {
     // TODO: Connect and run a test query
     let _ = config;
     Ok(ValidationResult {
@@ -431,7 +437,7 @@ fn gen_reader_rs() -> &'static str {
     r"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
-pub async fn read_stream(config: &Config, ctx: &Context, stream: &StreamContext) -> Result<ReadSummary, ConnectorError> {
+pub async fn read_stream(config: &Config, ctx: &Context, stream: &StreamContext) -> Result<ReadSummary, PluginError> {
     // TODO: Implement stream reading
     let _ = (config, ctx, stream);
     Ok(ReadSummary {
@@ -450,7 +456,7 @@ fn gen_schema_rs() -> &'static str {
     r"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
-pub fn discover_catalog(config: &Config) -> Result<Catalog, ConnectorError> {
+pub fn discover_catalog(config: &Config) -> Result<Catalog, PluginError> {
     // TODO: Implement schema discovery
     let _ = config;
     Ok(Catalog { streams: vec![] })
@@ -462,7 +468,7 @@ fn gen_writer_rs() -> &'static str {
     r"use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
-pub async fn write_stream(config: &Config, ctx: &Context, stream: &StreamContext) -> Result<WriteSummary, ConnectorError> {
+pub async fn write_stream(config: &Config, ctx: &Context, stream: &StreamContext) -> Result<WriteSummary, PluginError> {
     // TODO: Implement stream writing
     let _ = (config, ctx, stream);
     Ok(WriteSummary {

@@ -17,9 +17,9 @@ use crate::Verbosity;
 pub async fn execute(pipeline_path: &Path, verbosity: Verbosity) -> Result<()> {
     let config = super::load_pipeline(pipeline_path)?;
 
-    // Discover catalog from source connector
+    // Discover catalog from source plugin
     let catalog =
-        orchestrator::discover_connector(&config.source.use_ref, &config.source.config).await?;
+        orchestrator::discover_plugin(&config.source.use_ref, &config.source.config).await?;
 
     // Human-readable output to stderr (skip in quiet mode)
     if verbosity != Verbosity::Quiet {

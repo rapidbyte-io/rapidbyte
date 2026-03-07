@@ -74,18 +74,18 @@ enum Commands {
         /// Path to pipeline YAML file
         pipeline: PathBuf,
     },
-    /// Discover available streams from a source connector
+    /// Discover available streams from a source plugin
     Discover {
         /// Path to pipeline YAML file
         pipeline: PathBuf,
     },
-    /// List available connectors
-    Connectors,
-    /// Scaffold a new connector project
+    /// List available plugins
+    Plugins,
+    /// Scaffold a new plugin project
     Scaffold {
-        /// Connector name (e.g., "source-mysql", "dest-snowflake")
+        /// Plugin name (e.g., "source-mysql", "dest-snowflake")
         name: String,
-        /// Output directory (default: `./connectors/<name>`)
+        /// Output directory (default: `./plugins/<kind>/<name>`)
         #[arg(short, long)]
         output: Option<String>,
     },
@@ -109,7 +109,7 @@ async fn main() -> ExitCode {
         } => commands::run::execute(&pipeline, dry_run, limit, verbosity).await,
         Commands::Check { pipeline } => commands::check::execute(&pipeline, verbosity).await,
         Commands::Discover { pipeline } => commands::discover::execute(&pipeline, verbosity).await,
-        Commands::Connectors => commands::connectors::execute(verbosity),
+        Commands::Plugins => commands::plugins::execute(verbosity),
         Commands::Scaffold { name, output } => {
             commands::scaffold::run(&name, output.as_deref()).map_err(Into::into)
         }

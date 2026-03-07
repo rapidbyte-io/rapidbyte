@@ -18,7 +18,7 @@ use console::style;
 use reedline::{DefaultPrompt, DefaultPromptSegment, Reedline, Signal};
 
 use rapidbyte_runtime::{
-    create_component_linker, load_connector_manifest, resolve_connector_path, source_bindings,
+    create_component_linker, load_plugin_manifest, resolve_plugin_path, source_bindings,
     source_error_to_sdk, ComponentHostState, Frame, LoadedComponent, WasmRuntime,
 };
 use rapidbyte_runtime::wasmtime_reexport::HasSelf;
@@ -26,7 +26,7 @@ use rapidbyte_state::SqliteStateBackend;
 use rapidbyte_types::catalog::{Catalog, SchemaHint};
 use rapidbyte_types::manifest::Permissions;
 use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
-use rapidbyte_types::wire::SyncMode;
+use rapidbyte_types::wire::{PluginKind, SyncMode};
 
 use crate::commands::{self, Command};
 use crate::display;
@@ -182,8 +182,8 @@ async fn connect_source(
     connector_ref: &str,
     config: &serde_json::Value,
 ) -> Result<(Catalog, LoadedComponent, Option<Permissions>)> {
-    let wasm_path = resolve_connector_path(connector_ref)?;
-    let manifest = load_connector_manifest(&wasm_path)?;
+    let wasm_path = resolve_plugin_path(connector_ref, PluginKind::Source)?;
+    let manifest = load_plugin_manifest(&wasm_path)?;
     let permissions = manifest.as_ref().map(|m| m.permissions.clone());
     let permissions_clone = permissions.clone();
 
@@ -223,7 +223,7 @@ async fn connect_source(
             &module.component,
             &linker,
         )?;
-        let iface = bindings.rapidbyte_connector_source();
+        let iface = bindings.rapidbyte_plugin_source();
 
         let config_json = serde_json::to_string(&config)?;
         let session = iface
@@ -376,7 +376,7 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
             &loaded_module.component,
             &linker,
         )?;
-        let iface = bindings.rapidbyte_connector_source();
+        let iface = bindings.rapidbyte_plugin_source();
 
         let config_json = serde_json::to_string(&config)?;
         let session = iface
@@ -385,8 +385,8 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
             .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
 
         let ctx_json = serde_json::to_string(&stream_ctx)?;
-        let run_request = source_bindings::rapidbyte::connector::types::RunRequest {
-            phase: source_bindings::rapidbyte::connector::types::RunPhase::Read,
+        let run_request = source_bindings::rapidbyte::plugin::types::RunRequest {
+            phase: source_bindings::rapidbyte::plugin::types::RunPhase::Read,
             stream_context_json: ctx_json,
             dry_run: false,
             max_records: limit,
