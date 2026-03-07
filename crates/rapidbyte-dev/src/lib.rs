@@ -5,6 +5,8 @@
 
 #![warn(clippy::pedantic)]
 
+pub mod workspace;
+
 /// Entry point for the dev shell.
 ///
 /// # Errors
