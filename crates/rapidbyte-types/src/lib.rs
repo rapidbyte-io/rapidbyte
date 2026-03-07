@@ -11,8 +11,8 @@
 //! | `compression`  | Compression codec enum |
 //! | `cursor`       | Cursor info and value types for incremental sync |
 //! | `envelope`     | DLQ record and payload envelope types |
-//! | `error`        | `ConnectorError`, `ValidationResult`, error categories |
-//! | `manifest`     | Connector manifest and permission types |
+//! | `error`        | `PluginError`, `ValidationResult`, error categories |
+//! | `manifest`     | Plugin manifest and permission types |
 //! | `metric`       | Metric, summary types (read/write/transform) |
 //! | `state`        | Run state, pipeline ID, cursor state types |
 //! | `stream`       | Stream context, limits, policies |
@@ -46,14 +46,14 @@ pub mod prelude {
     pub use crate::cursor::{CursorInfo, CursorType, CursorValue};
     pub use crate::envelope::{DlqRecord, PayloadEnvelope, Timestamp};
     pub use crate::error::{
-        BackoffClass, CommitState, ConnectorError, ErrorCategory, ErrorScope, ValidationResult,
+        BackoffClass, CommitState, ErrorCategory, ErrorScope, PluginError, ValidationResult,
         ValidationStatus,
     };
-    pub use crate::manifest::ConnectorManifest;
+    pub use crate::manifest::PluginManifest;
     pub use crate::metric::{Metric, MetricValue, ReadSummary, TransformSummary, WriteSummary};
     pub use crate::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
     pub use crate::stream::{StreamContext, StreamLimits, StreamPolicies};
     pub use crate::wire::{
-        ConnectorInfo, ConnectorRole, Feature, ProtocolVersion, SyncMode, WriteMode,
+        Feature, PluginInfo, PluginKind, ProtocolVersion, SyncMode, WriteMode,
     };
 }

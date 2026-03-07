@@ -1,19 +1,19 @@
-//! Structured error model for connector operations.
+//! Structured error model for plugin operations.
 //!
-//! [`ConnectorError`] carries classification, retry metadata, and optional
+//! [`PluginError`] carries classification, retry metadata, and optional
 //! diagnostic details. Construct via category-specific factory methods.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Broad classification of a connector error.
+/// Broad classification of a plugin error.
 ///
 /// Determines default retry behavior and operator-facing categorization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCategory {
-    /// Invalid connector configuration.
+    /// Invalid plugin configuration.
     Config,
     /// Authentication failure.
     Auth,
@@ -29,7 +29,7 @@ pub enum ErrorCategory {
     Data,
     /// Schema mismatch or incompatibility.
     Schema,
-    /// Internal connector error.
+    /// Internal plugin error.
     Internal,
     /// Frame lifecycle error (alloc/write/seal/read).
     Frame,
@@ -164,20 +164,20 @@ pub enum ValidationStatus {
     Warning,
 }
 
-/// Result of a connector validation check.
+/// Result of a plugin validation check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationResult {
     pub status: ValidationStatus,
     pub message: String,
 }
 
-/// Structured error from a connector operation.
+/// Structured error from a plugin operation.
 ///
 /// Carries classification, retry metadata, and optional diagnostic details.
-/// Construct via category-specific factory methods (e.g., [`ConnectorError::config`]).
+/// Construct via category-specific factory methods (e.g., [`PluginError::config`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
 #[error("[{category}] {code}: {message}")]
-pub struct ConnectorError {
+pub struct PluginError {
     pub category: ErrorCategory,
     pub scope: ErrorScope,
     pub code: String,
@@ -193,7 +193,7 @@ pub struct ConnectorError {
     pub details: Option<serde_json::Value>,
 }
 
-impl ConnectorError {
+impl PluginError {
     /// Build an error using the category's default scope, retryable, and backoff.
     fn from_category(
         category: ErrorCategory,
@@ -269,7 +269,7 @@ impl ConnectorError {
         Self::from_category(ErrorCategory::Schema, code, message)
     }
 
-    /// Internal connector error (not retryable).
+    /// Internal plugin error (not retryable).
     #[must_use]
     pub fn internal(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self::from_category(ErrorCategory::Internal, code, message)
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn config_error_defaults() {
-        let err = ConnectorError::config("MISSING_HOST", "host is required");
+        let err = PluginError::config("MISSING_HOST", "host is required");
         assert_eq!(err.category, ErrorCategory::Config);
         assert_eq!(err.scope, ErrorScope::Stream);
         assert!(!err.retryable);
@@ -327,18 +327,18 @@ mod tests {
 
     #[test]
     fn transient_errors_are_retryable() {
-        let net = ConnectorError::transient_network("TIMEOUT", "timed out");
+        let net = PluginError::transient_network("TIMEOUT", "timed out");
         assert!(net.retryable);
         assert!(net.safe_to_retry);
 
-        let db = ConnectorError::transient_db("DEADLOCK", "deadlock");
+        let db = PluginError::transient_db("DEADLOCK", "deadlock");
         assert!(db.retryable);
         assert!(db.safe_to_retry);
     }
 
     #[test]
     fn after_commit_unknown_disables_safe_retry() {
-        let err = ConnectorError::transient_db("UNKNOWN", "commit unknown")
+        let err = PluginError::transient_db("UNKNOWN", "commit unknown")
             .with_commit_state(CommitState::AfterCommitUnknown);
         assert!(err.retryable);
         assert!(!err.safe_to_retry);
@@ -346,7 +346,7 @@ mod tests {
 
     #[test]
     fn after_commit_confirmed_disables_safe_retry() {
-        let err = ConnectorError::transient_db("PARTIAL", "partial commit")
+        let err = PluginError::transient_db("PARTIAL", "partial commit")
             .with_commit_state(CommitState::AfterCommitConfirmed);
         assert!(err.retryable);
         assert!(!err.safe_to_retry);
@@ -354,16 +354,16 @@ mod tests {
 
     #[test]
     fn serde_roundtrip() {
-        let err = ConnectorError::rate_limit("THROTTLED", "slow down", Some(5000))
+        let err = PluginError::rate_limit("THROTTLED", "slow down", Some(5000))
             .with_details(serde_json::json!({"endpoint": "/api/data"}));
         let json = serde_json::to_string(&err).unwrap();
-        let back: ConnectorError = serde_json::from_str(&json).unwrap();
+        let back: PluginError = serde_json::from_str(&json).unwrap();
         assert_eq!(err, back);
     }
 
     #[test]
     fn display_format() {
-        let err = ConnectorError::config("BAD_PORT", "port must be positive");
+        let err = PluginError::config("BAD_PORT", "port must be positive");
         assert_eq!(err.to_string(), "[config] BAD_PORT: port must be positive");
     }
 

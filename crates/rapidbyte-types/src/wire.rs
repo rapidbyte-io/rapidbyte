@@ -1,8 +1,8 @@
-//! Core protocol types shared across the host/connector boundary.
+//! Core protocol types shared across the host/plugin boundary.
 //!
-//! Contains the fundamental enums and structs that define how connectors
-//! communicate with the host runtime: sync modes, write modes, connector
-//! roles, feature flags, and connector self-description.
+//! Contains the fundamental enums and structs that define how plugins
+//! communicate with the host runtime: sync modes, write modes, plugin
+//! kinds, feature flags, and plugin self-description.
 
 use serde::{Deserialize, Serialize};
 
@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 /// Determines serialization format and available host imports.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProtocolVersion {
-    /// Version 4 — current stable protocol.
+    /// Version 5 — current stable protocol.
     #[default]
-    #[serde(rename = "4")]
-    V4,
+    #[serde(rename = "5")]
+    V5,
 }
 
 /// How data is read from a source stream.
@@ -44,10 +44,10 @@ pub enum WriteMode {
     },
 }
 
-/// Role a connector fulfills in a pipeline.
+/// Kind of plugin in a pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ConnectorRole {
+pub enum PluginKind {
     /// Reads data from an external system.
     Source,
     /// Writes data to an external system.
@@ -56,9 +56,9 @@ pub enum ConnectorRole {
     Transform,
 }
 
-/// Capability flag declared by a connector.
+/// Capability flag declared by a plugin.
 ///
-/// Used in both runtime [`ConnectorInfo`] and manifest capability declarations.
+/// Used in both runtime [`PluginInfo`] and manifest capability declarations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(rename_all = "snake_case")]
@@ -78,12 +78,12 @@ pub enum Feature {
     PartitionedRead,
 }
 
-/// Connector self-description returned at initialization.
+/// Plugin self-description returned at initialization.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ConnectorInfo {
-    /// Protocol version this connector implements.
+pub struct PluginInfo {
+    /// Protocol version this plugin implements.
     pub protocol_version: ProtocolVersion,
-    /// Feature flags supported by this connector.
+    /// Feature flags supported by this plugin.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<Feature>,
     /// Default maximum batch size in bytes.
@@ -114,10 +114,10 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_default_is_v4() {
+    fn protocol_version_default_is_v5() {
         let v = ProtocolVersion::default();
-        assert_eq!(v, ProtocolVersion::V4);
-        assert_eq!(serde_json::to_string(&v).unwrap(), "\"4\"");
+        assert_eq!(v, ProtocolVersion::V5);
+        assert_eq!(serde_json::to_string(&v).unwrap(), "\"5\"");
     }
 
     #[test]
@@ -154,14 +154,14 @@ mod tests {
     }
 
     #[test]
-    fn connector_info_roundtrip() {
-        let info = ConnectorInfo {
-            protocol_version: ProtocolVersion::V4,
+    fn plugin_info_roundtrip() {
+        let info = PluginInfo {
+            protocol_version: ProtocolVersion::V5,
             features: vec![Feature::Cdc, Feature::Stateful],
             default_max_batch_bytes: 64 * 1024 * 1024,
         };
         let json = serde_json::to_string(&info).unwrap();
-        let back: ConnectorInfo = serde_json::from_str(&json).unwrap();
+        let back: PluginInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(info, back);
     }
 }

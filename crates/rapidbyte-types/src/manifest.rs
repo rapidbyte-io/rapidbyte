@@ -1,10 +1,10 @@
-//! Connector manifest and WASI sandbox configuration.
+//! Plugin manifest and WASI sandbox configuration.
 //!
-//! A [`ConnectorManifest`] is embedded in each connector's WASM binary
+//! A [`PluginManifest`] is embedded in each plugin's WASM binary
 //! as a custom section. The host reads it at load time to discover
 //! capabilities, configure permissions, and enforce resource limits.
 
-use crate::wire::{ConnectorRole, Feature, ProtocolVersion, SyncMode, WriteMode};
+use crate::wire::{Feature, PluginKind, ProtocolVersion, SyncMode, WriteMode};
 use serde::{Deserialize, Serialize};
 
 // ── Permissions ─────────────────────────────────────────────────────
@@ -15,7 +15,7 @@ pub struct NetworkPermissions {
     /// Static list of allowed domains/IPs. Use `["*"]` for unrestricted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_domains: Option<Vec<String>>,
-    /// If true, the host may inspect connector config for dynamic domains.
+    /// If true, the host may inspect plugin config for dynamic domains.
     #[serde(default)]
     pub allow_runtime_config_domains: bool,
 }
@@ -23,7 +23,7 @@ pub struct NetworkPermissions {
 /// Filesystem access permissions for the WASI sandbox.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FsPermissions {
-    /// Directories the connector needs mounted.
+    /// Directories the plugin needs mounted.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preopens: Vec<String>,
 }
@@ -31,7 +31,7 @@ pub struct FsPermissions {
 /// Environment variable access permissions for the WASI sandbox.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EnvPermissions {
-    /// Environment variables the connector is allowed to read.
+    /// Environment variables the plugin is allowed to read.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_vars: Vec<String>,
 }
@@ -63,7 +63,7 @@ pub struct ResourceLimits {
 
 // ── Roles & Capabilities ────────────────────────────────────────────
 
-/// Capabilities declared when a connector supports the Source role.
+/// Capabilities declared when a plugin supports the Source kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceCapabilities {
     /// Sync modes this source supports.
@@ -73,7 +73,7 @@ pub struct SourceCapabilities {
     pub features: Vec<Feature>,
 }
 
-/// Capabilities declared when a connector supports the Destination role.
+/// Capabilities declared when a plugin supports the Destination kind.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DestinationCapabilities {
     /// Write modes this destination supports.
@@ -83,7 +83,7 @@ pub struct DestinationCapabilities {
     pub features: Vec<Feature>,
 }
 
-/// Capabilities declared when a connector supports the Transform role.
+/// Capabilities declared when a plugin supports the Transform kind.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransformCapabilities {}
 
@@ -100,13 +100,13 @@ pub struct Roles {
 
 // ── Manifest ────────────────────────────────────────────────────────
 
-/// Connector metadata embedded in the WASM binary.
+/// Plugin metadata embedded in the WASM binary.
 ///
 /// Read by the host at load time to discover capabilities and configure
 /// the WASI sandbox.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ConnectorManifest {
-    /// Connector identifier (e.g., `"rapidbyte/source-postgres"`).
+pub struct PluginManifest {
+    /// Plugin identifier (e.g., `"rapidbyte/source-postgres"`).
     pub id: String,
     /// Human-readable display name.
     pub name: String,
@@ -121,7 +121,7 @@ pub struct ConnectorManifest {
     /// SPDX license identifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub license: Option<String>,
-    /// Protocol version this connector implements.
+    /// Protocol version this plugin implements.
     pub protocol_version: ProtocolVersion,
     /// WASI sandbox permissions.
     #[serde(default)]
@@ -132,19 +132,19 @@ pub struct ConnectorManifest {
     /// Role-specific capability declarations.
     #[serde(default)]
     pub roles: Roles,
-    /// JSON Schema (Draft 7) for connector config validation.
+    /// JSON Schema (Draft 7) for plugin config validation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<serde_json::Value>,
 }
 
-impl ConnectorManifest {
-    /// Check if this connector supports the given role.
+impl PluginManifest {
+    /// Check if this plugin supports the given kind.
     #[must_use]
-    pub fn supports_role(&self, role: ConnectorRole) -> bool {
-        match role {
-            ConnectorRole::Source => self.roles.source.is_some(),
-            ConnectorRole::Destination => self.roles.destination.is_some(),
-            ConnectorRole::Transform => self.roles.transform.is_some(),
+    pub fn supports_kind(&self, kind: PluginKind) -> bool {
+        match kind {
+            PluginKind::Source => self.roles.source.is_some(),
+            PluginKind::Destination => self.roles.destination.is_some(),
+            PluginKind::Transform => self.roles.transform.is_some(),
         }
     }
 
@@ -162,15 +162,15 @@ impl ConnectorManifest {
 mod tests {
     use super::*;
 
-    fn test_manifest() -> ConnectorManifest {
-        ConnectorManifest {
+    fn test_manifest() -> PluginManifest {
+        PluginManifest {
             id: "rapidbyte/source-postgres".into(),
             name: "PostgreSQL Source".into(),
             version: "0.1.0".into(),
             description: "Reads from PostgreSQL".into(),
             author: None,
             license: Some("MIT".into()),
-            protocol_version: ProtocolVersion::V4,
+            protocol_version: ProtocolVersion::V5,
             permissions: Permissions {
                 network: NetworkPermissions {
                     allowed_domains: None,
@@ -198,16 +198,16 @@ mod tests {
     fn manifest_roundtrip() {
         let m = test_manifest();
         let json = serde_json::to_string(&m).unwrap();
-        let back: ConnectorManifest = serde_json::from_str(&json).unwrap();
+        let back: PluginManifest = serde_json::from_str(&json).unwrap();
         assert_eq!(m, back);
     }
 
     #[test]
-    fn supports_role() {
+    fn supports_kind() {
         let m = test_manifest();
-        assert!(m.supports_role(ConnectorRole::Source));
-        assert!(!m.supports_role(ConnectorRole::Destination));
-        assert!(!m.supports_role(ConnectorRole::Transform));
+        assert!(m.supports_kind(PluginKind::Source));
+        assert!(!m.supports_kind(PluginKind::Destination));
+        assert!(!m.supports_kind(PluginKind::Transform));
     }
 
     #[test]
