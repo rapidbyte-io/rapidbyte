@@ -30,8 +30,8 @@ fn validate_host_patterns(hosts: &[String], context: &str, errors: &mut Vec<Stri
     }
 }
 
-/// Validate connector-level permission and limit overrides.
-fn validate_connector_overrides(
+/// Validate plugin-level permission and limit overrides.
+fn validate_plugin_overrides(
     permissions: Option<&PipelinePermissions>,
     limits: Option<&PipelineLimits>,
     context: &str,
@@ -77,7 +77,7 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
     }
 
     if config.source.use_ref.trim().is_empty() {
-        errors.push("Source connector reference (use) must not be empty".to_string());
+        errors.push("Source plugin reference (use) must not be empty".to_string());
     }
 
     if config.source.streams.is_empty() {
@@ -97,7 +97,7 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
     }
 
     if config.destination.use_ref.trim().is_empty() {
-        errors.push("Destination connector reference (use) must not be empty".to_string());
+        errors.push("Destination plugin reference (use) must not be empty".to_string());
     }
 
     if config.destination.write_mode == PipelineWriteMode::Upsert
@@ -128,21 +128,21 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
         }
     }
 
-    // Validate connector-level permission/limit overrides
-    validate_connector_overrides(
+    // Validate plugin-level permission/limit overrides
+    validate_plugin_overrides(
         config.source.permissions.as_ref(),
         config.source.limits.as_ref(),
         "source",
         &mut errors,
     );
-    validate_connector_overrides(
+    validate_plugin_overrides(
         config.destination.permissions.as_ref(),
         config.destination.limits.as_ref(),
         "destination",
         &mut errors,
     );
     for (i, transform) in config.transforms.iter().enumerate() {
-        validate_connector_overrides(
+        validate_plugin_overrides(
             transform.permissions.as_ref(),
             transform.limits.as_ref(),
             &format!("transforms[{i}]"),
@@ -167,14 +167,14 @@ mod tests {
 version: "1.0"
 pipeline: test_pipeline
 source:
-  use: source-postgres
+  use: postgres
   config:
     host: localhost
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config:
     host: localhost
   write_mode: append
@@ -225,14 +225,14 @@ destination:
 version: "1.0"
 pipeline: test_pipeline
 source:
-  use: source-postgres
+  use: postgres
   config:
     host: localhost
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config:
     host: localhost
   write_mode: append
@@ -250,14 +250,14 @@ resources:
 version: "1.0"
 pipeline: test_pipeline
 source:
-  use: source-postgres
+  use: postgres
   config:
     host: localhost
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config:
     host: localhost
   write_mode: append
@@ -327,14 +327,14 @@ resources:
 version: "1.0"
 pipeline: test_upsert
 source:
-  use: source-postgres
+  use: postgres
   config:
     host: localhost
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config:
     host: localhost
   write_mode: upsert
@@ -350,7 +350,7 @@ destination:
 version: "1.0"
 pipeline: test_incr
 source:
-  use: source-postgres
+  use: postgres
   config:
     host: localhost
   streams:
@@ -358,7 +358,7 @@ source:
       sync_mode: incremental
       cursor_field: id
 destination:
-  use: dest-postgres
+  use: postgres
   config:
     host: localhost
   write_mode: append
@@ -373,14 +373,14 @@ destination:
 version: "1.0"
 pipeline: test_replace
 source:
-  use: source-postgres
+  use: postgres
   config:
     host: localhost
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config:
     host: localhost
   write_mode: replace
@@ -395,7 +395,7 @@ destination:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
@@ -407,7 +407,7 @@ source:
     max_memory: 128mb
     timeout_seconds: 60
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 "#;
@@ -421,7 +421,7 @@ destination:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
@@ -430,7 +430,7 @@ source:
     network:
       allowed_hosts: ["*.*.example.com"]
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 "#;
@@ -445,7 +445,7 @@ destination:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
@@ -453,7 +453,7 @@ source:
   limits:
     max_memory: not-a-size
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 "#;
@@ -468,7 +468,7 @@ destination:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
@@ -476,7 +476,7 @@ source:
   limits:
     timeout_seconds: 0
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 "#;

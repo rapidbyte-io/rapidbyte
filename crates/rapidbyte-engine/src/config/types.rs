@@ -58,7 +58,7 @@ pub struct PipelineFsPermissions {
     pub allowed_preopens: Option<Vec<String>>,
 }
 
-/// Combined pipeline-level permission overrides for a connector.
+/// Combined pipeline-level permission overrides for a plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct PipelinePermissions {
@@ -67,7 +67,7 @@ pub struct PipelinePermissions {
     pub fs: PipelineFsPermissions,
 }
 
-/// Pipeline-level resource limit overrides for a connector.
+/// Pipeline-level resource limit overrides for a plugin.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct PipelineLimits {
@@ -344,13 +344,13 @@ mod tests {
 version: "1.0"
 pipeline: test_pg_to_pg
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 "#;
@@ -369,14 +369,14 @@ destination:
 version: "1.0"
 pipeline: full_test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: incremental
       cursor_field: updated_at
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: upsert
   primary_key: [id]
@@ -407,13 +407,13 @@ resources:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 resources:
@@ -429,13 +429,13 @@ resources:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 "#;
@@ -449,13 +449,13 @@ destination:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 "#;
@@ -472,13 +472,13 @@ destination:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 resources:
@@ -547,13 +547,13 @@ resources:
 version: "1"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
   schema_evolution:
@@ -579,13 +579,13 @@ destination:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
   on_data_error: dlq
@@ -600,13 +600,13 @@ destination:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 resources:
@@ -622,13 +622,13 @@ resources:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 resources:
@@ -644,13 +644,13 @@ resources:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 "#;
@@ -664,14 +664,14 @@ destination:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: full_refresh
       columns: [id, name]
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 "#;
@@ -688,13 +688,13 @@ destination:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 resources:
@@ -709,13 +709,13 @@ resources:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: truncate
 "#;
@@ -728,13 +728,13 @@ destination:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: snapshot
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 "#;
@@ -747,7 +747,7 @@ destination:
 version: "1.0"
 pipeline: test_perms
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
@@ -765,7 +765,7 @@ source:
     max_memory: 128mb
     timeout_seconds: 60
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
   permissions:
@@ -813,13 +813,13 @@ destination:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 "#,
@@ -838,7 +838,7 @@ version: "1.0"
 pipeline: e2e_permissions
 
 source:
-  use: source-postgres
+  use: postgres
   config:
     host: localhost
     port: 5432
@@ -861,7 +861,7 @@ source:
       sync_mode: full_refresh
 
 destination:
-  use: dest-postgres
+  use: postgres
   config:
     host: localhost
     port: 5432
@@ -893,13 +893,13 @@ destination:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 state:
@@ -921,7 +921,7 @@ state:
 version: "1.0"
 pipeline: test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
@@ -929,7 +929,7 @@ source:
   limits:
     timeout_seconds: 30
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 "#,

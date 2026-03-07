@@ -138,45 +138,48 @@ fn test_state_backend_full_lifecycle() {
         .expect("Failed to complete failed run");
 }
 
-/// Test that connector path resolution works with RAPIDBYTE_CONNECTOR_DIR.
+/// Test that plugin path resolution works with RAPIDBYTE_PLUGIN_DIR.
 #[test]
-fn test_connector_path_resolution_with_env() {
-    use rapidbyte_runtime::resolve_connector_path;
+fn test_plugin_path_resolution_with_env() {
+    use rapidbyte_runtime::resolve_plugin_path;
+    use rapidbyte_types::wire::PluginKind;
 
-    // Create a temp directory with a fake .wasm file
-    let tmp = std::env::temp_dir().join("rapidbyte_test_connectors");
-    std::fs::create_dir_all(&tmp).unwrap();
-    let fake_wasm = tmp.join("source_postgres.wasm");
+    // Create a temp directory with a fake .wasm file in sources/ subdir
+    let tmp = std::env::temp_dir().join("rapidbyte_test_plugins");
+    let sources_dir = tmp.join("sources");
+    std::fs::create_dir_all(&sources_dir).unwrap();
+    let fake_wasm = sources_dir.join("postgres.wasm");
     std::fs::write(&fake_wasm, b"fake wasm").unwrap();
 
-    std::env::set_var("RAPIDBYTE_CONNECTOR_DIR", tmp.to_str().unwrap());
+    std::env::set_var("RAPIDBYTE_PLUGIN_DIR", tmp.to_str().unwrap());
 
-    let result = resolve_connector_path("rapidbyte/source-postgres@v0.1.0");
+    let result = resolve_plugin_path("rapidbyte/postgres@v0.1.0", PluginKind::Source);
     assert!(
         result.is_ok(),
-        "Should resolve with RAPIDBYTE_CONNECTOR_DIR set"
+        "Should resolve with RAPIDBYTE_PLUGIN_DIR set"
     );
     assert_eq!(result.unwrap(), fake_wasm);
 
     // Clean up
     std::fs::remove_dir_all(&tmp).unwrap();
-    std::env::remove_var("RAPIDBYTE_CONNECTOR_DIR");
+    std::env::remove_var("RAPIDBYTE_PLUGIN_DIR");
 }
 
-/// Test that connector path resolution fails gracefully for missing connectors.
+/// Test that plugin path resolution fails gracefully for missing plugins.
 #[test]
-fn test_connector_path_resolution_missing() {
-    use rapidbyte_runtime::resolve_connector_path;
+fn test_plugin_path_resolution_missing() {
+    use rapidbyte_runtime::resolve_plugin_path;
+    use rapidbyte_types::wire::PluginKind;
 
-    // Ensure RAPIDBYTE_CONNECTOR_DIR points nowhere useful
-    std::env::set_var("RAPIDBYTE_CONNECTOR_DIR", "/tmp/nonexistent_dir_rapidbyte");
+    // Ensure RAPIDBYTE_PLUGIN_DIR points nowhere useful
+    std::env::set_var("RAPIDBYTE_PLUGIN_DIR", "/tmp/nonexistent_dir_rapidbyte");
 
-    let result = resolve_connector_path("rapidbyte/nonexistent-connector@v0.1.0");
+    let result = resolve_plugin_path("rapidbyte/nonexistent-plugin@v0.1.0", PluginKind::Source);
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("not found"));
 
-    std::env::remove_var("RAPIDBYTE_CONNECTOR_DIR");
+    std::env::remove_var("RAPIDBYTE_PLUGIN_DIR");
 }
 
 /// Test Arrow IPC round-trip with realistic schema (similar to PG users table).

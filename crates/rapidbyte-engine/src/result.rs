@@ -11,7 +11,7 @@ pub struct PipelineCounts {
     pub bytes_written: u64,
 }
 
-/// Source connector timing breakdown.
+/// Source plugin timing breakdown.
 #[derive(Debug, Clone, Default)]
 pub struct SourceTiming {
     pub duration_secs: f64,
@@ -25,7 +25,7 @@ pub struct SourceTiming {
     pub emit_count: u64,
 }
 
-/// Destination connector timing breakdown.
+/// Destination plugin timing breakdown.
 #[derive(Debug, Clone, Default)]
 pub struct DestTiming {
     pub duration_secs: f64,

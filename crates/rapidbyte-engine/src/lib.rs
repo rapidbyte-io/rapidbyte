@@ -1,6 +1,6 @@
 //! Pipeline orchestration engine for Rapidbyte.
 //!
-//! Wires together config parsing, validation, connector runners,
+//! Wires together config parsing, validation, plugin runners,
 //! and the state backend to execute data pipelines.
 //!
 //! # Crate structure
@@ -15,9 +15,9 @@
 //! | `execution`    | Runtime execution mode types (dry-run, limits) |
 //! | `orchestrator` | Pipeline execution, retry, stream dispatch |
 //! | `progress`     | Progress event types for live CLI updates |
-//! | `resolve`      | Connector resolution, manifest validation, state backend (internal) |
+//! | `resolve`      | Plugin resolution, manifest validation, state backend (internal) |
 //! | `result`       | Pipeline execution result types and timing breakdowns |
-//! | `runner`       | Individual connector runners (source, dest, transform) |
+//! | `runner`       | Individual plugin runners (source, dest, transform) |
 
 #![warn(clippy::pedantic)]
 
@@ -40,6 +40,6 @@ pub use config::types::PipelineConfig;
 pub use config::validator::validate_pipeline;
 pub use error::PipelineError;
 pub use execution::{DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineOutcome};
-pub use orchestrator::{check_pipeline, discover_connector, run_pipeline};
+pub use orchestrator::{check_pipeline, discover_plugin, run_pipeline};
 pub use progress::{Phase, ProgressEvent};
 pub use result::{CheckResult, PipelineResult};

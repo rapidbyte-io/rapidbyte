@@ -1,4 +1,4 @@
-//! Pipeline orchestrator: resolves connectors, loads modules, executes streams, and finalizes state.
+//! Pipeline orchestrator: resolves plugins, loads modules, executes streams, and finalizes state.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use rapidbyte_runtime::{
-    parse_connector_ref, Frame, HostTimings, LoadedComponent, SandboxOverrides, WasmRuntime,
+    parse_plugin_ref, Frame, HostTimings, LoadedComponent, SandboxOverrides, WasmRuntime,
 };
 use rapidbyte_state::StateBackend;
 use rapidbyte_types::catalog::{Catalog, SchemaHint};
@@ -21,7 +21,7 @@ use rapidbyte_types::wire::Feature;
 use rapidbyte_types::metric::{ReadSummary, WriteSummary};
 use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
 use rapidbyte_types::stream::{PartitionStrategy, StreamContext, StreamLimits, StreamPolicies};
-use rapidbyte_types::wire::{ConnectorRole, SyncMode, WriteMode};
+use rapidbyte_types::wire::{PluginKind, SyncMode, WriteMode};
 
 use crate::arrow::ipc_to_record_batches;
 use crate::checkpoint::correlate_and_persist_cursors;
@@ -31,14 +31,14 @@ use crate::execution::{DryRunResult, DryRunStreamResult, ExecutionOptions, Pipel
 use crate::progress::{Phase, ProgressEvent};
 use crate::resolve::{
     build_sandbox_overrides, check_state_backend, create_state_backend, load_and_validate_manifest,
-    resolve_connectors, validate_config_against_schema, ResolvedConnectors,
+    resolve_plugins, validate_config_against_schema, ResolvedPlugins,
 };
 use crate::result::{
     CheckResult, DestTiming, PipelineCounts, PipelineResult, SourceTiming, StreamShardMetric,
 };
 use crate::runner::{
     run_destination_stream, run_discover, run_source_stream, run_transform_stream,
-    validate_connector, TransformRunResult,
+    validate_plugin, TransformRunResult,
 };
 
 struct StreamResult {
@@ -62,8 +62,8 @@ struct StreamResult {
 #[derive(Clone)]
 struct LoadedTransformModule {
     module: LoadedComponent,
-    connector_id: String,
-    connector_version: String,
+    plugin_id: String,
+    plugin_version: String,
     config: serde_json::Value,
     load_ms: u64,
     permissions: Option<Permissions>,
@@ -88,10 +88,10 @@ struct StreamParams {
     pipeline_name: String,
     source_config: serde_json::Value,
     dest_config: serde_json::Value,
-    source_connector_id: String,
-    source_connector_version: String,
-    dest_connector_id: String,
-    dest_connector_version: String,
+    source_plugin_id: String,
+    source_plugin_version: String,
+    dest_plugin_id: String,
+    dest_plugin_version: String,
     source_permissions: Option<Permissions>,
     dest_permissions: Option<Permissions>,
     source_overrides: Option<SandboxOverrides>,
@@ -337,7 +337,7 @@ async fn collect_stream_task_results(
 }
 
 /// Run a full pipeline: source -> destination with state tracking.
-/// Retries on retryable connector errors up to `config.resources.max_retries` times.
+/// Retries on retryable plugin errors up to `config.resources.max_retries` times.
 ///
 /// # Errors
 ///
@@ -358,9 +358,9 @@ pub async fn run_pipeline(
         match result {
             Ok(outcome) => return Ok(outcome),
             Err(ref err) if err.is_retryable() && attempt <= max_retries => {
-                if let Some(connector_err) = err.as_connector_error() {
-                    let delay = compute_backoff(connector_err, attempt);
-                    let commit_state_str = connector_err
+                if let Some(plugin_err) = err.as_plugin_error() {
+                    let delay = compute_backoff(plugin_err, attempt);
+                    let commit_state_str = plugin_err
                         .commit_state
                         .as_ref()
                         .map(|cs| format!("{cs:?}"));
@@ -371,10 +371,10 @@ pub async fn run_pipeline(
                         attempt,
                         max_retries,
                         delay_ms,
-                        category = %connector_err.category,
-                        code = %connector_err.code,
+                        category = %plugin_err.category,
+                        code = %plugin_err.code,
                         commit_state = commit_state_str.as_deref(),
-                        safe_to_retry = connector_err.safe_to_retry,
+                        safe_to_retry = plugin_err.safe_to_retry,
                         "Retryable error, will retry"
                     );
                     send_progress(
@@ -384,7 +384,7 @@ pub async fn run_pipeline(
                             max_retries,
                             message: format!(
                                 "[{}] {}: {}",
-                                connector_err.category, connector_err.code, connector_err.message
+                                plugin_err.category, plugin_err.code, plugin_err.message
                             ),
                             delay_secs: delay.as_secs_f64(),
                         },
@@ -393,8 +393,8 @@ pub async fn run_pipeline(
                 }
             }
             Err(err) => {
-                if let Some(connector_err) = err.as_connector_error() {
-                    let commit_state_str = connector_err
+                if let Some(plugin_err) = err.as_plugin_error() {
+                    let commit_state_str = plugin_err
                         .commit_state
                         .as_ref()
                         .map(|cs| format!("{cs:?}"));
@@ -402,18 +402,18 @@ pub async fn run_pipeline(
                         tracing::error!(
                             attempt,
                             max_retries,
-                            category = %connector_err.category,
-                            code = %connector_err.code,
+                            category = %plugin_err.category,
+                            code = %plugin_err.code,
                             commit_state = commit_state_str.as_deref(),
-                            safe_to_retry = connector_err.safe_to_retry,
+                            safe_to_retry = plugin_err.safe_to_retry,
                             "Max retries exhausted, failing pipeline"
                         );
                     } else {
                         tracing::error!(
-                            category = %connector_err.category,
-                            code = %connector_err.code,
+                            category = %plugin_err.category,
+                            code = %plugin_err.code,
                             commit_state = commit_state_str.as_deref(),
-                            "Non-retryable connector error, failing pipeline"
+                            "Non-retryable plugin error, failing pipeline"
                         );
                     }
                 } else {
@@ -445,7 +445,7 @@ async fn execute_pipeline_once(
             phase: Phase::Resolving,
         },
     );
-    let connectors = resolve_connectors(config)?;
+    let plugins = resolve_plugins(config)?;
     let state = create_state_backend(config).map_err(PipelineError::Infrastructure)?;
 
     // Skip run tracking in dry-run mode to avoid orphaned run records.
@@ -470,7 +470,7 @@ async fn execute_pipeline_once(
             phase: Phase::Loading,
         },
     );
-    let modules = load_modules(config, &connectors).await?;
+    let modules = load_modules(config, &plugins).await?;
     let config_for_build = config.clone();
     let state_for_build = state.clone();
     let max_records = options.limit;
@@ -490,7 +490,7 @@ async fn execute_pipeline_once(
     );
     let aggregated = execute_streams(
         config,
-        &connectors,
+        &plugins,
         &modules,
         &stream_build,
         state.clone(),
@@ -539,16 +539,16 @@ async fn execute_pipeline_once(
 
 async fn load_modules(
     config: &PipelineConfig,
-    connectors: &ResolvedConnectors,
+    plugins: &ResolvedPlugins,
 ) -> Result<LoadedModules, PipelineError> {
     let runtime = Arc::new(WasmRuntime::new().map_err(PipelineError::Infrastructure)?);
     tracing::info!(
-        source = %connectors.source_wasm.display(),
-        destination = %connectors.dest_wasm.display(),
-        "Loading connector modules"
+        source = %plugins.source_wasm.display(),
+        destination = %plugins.dest_wasm.display(),
+        "Loading plugin modules"
     );
 
-    let source_wasm_for_load = connectors.source_wasm.clone();
+    let source_wasm_for_load = plugins.source_wasm.clone();
     let runtime_for_source = runtime.clone();
     #[allow(clippy::cast_possible_truncation)]
     let source_load_task = tokio::task::spawn_blocking(move || {
@@ -561,7 +561,7 @@ async fn load_modules(
         Ok::<_, PipelineError>((module, load_ms))
     });
 
-    let dest_wasm_for_load = connectors.dest_wasm.clone();
+    let dest_wasm_for_load = plugins.dest_wasm.clone();
     let runtime_for_dest = runtime.clone();
     #[allow(clippy::cast_possible_truncation)]
     let dest_load_task = tokio::task::spawn_blocking(move || {
@@ -586,15 +586,16 @@ async fn load_modules(
     tracing::info!(
         source_ms = source_module_load_ms,
         dest_ms = dest_module_load_ms,
-        "Connector modules loaded"
+        "Plugin modules loaded"
     );
 
     let mut transform_modules = Vec::with_capacity(config.transforms.len());
     for tc in &config.transforms {
-        let wasm_path = rapidbyte_runtime::resolve_connector_path(&tc.use_ref)
-            .map_err(PipelineError::Infrastructure)?;
+        let wasm_path =
+            rapidbyte_runtime::resolve_plugin_path(&tc.use_ref, PluginKind::Transform)
+                .map_err(PipelineError::Infrastructure)?;
         let manifest =
-            load_and_validate_manifest(&wasm_path, &tc.use_ref, ConnectorRole::Transform)
+            load_and_validate_manifest(&wasm_path, &tc.use_ref, PluginKind::Transform)
                 .map_err(PipelineError::Infrastructure)?;
         if let Some(ref m) = manifest {
             validate_config_against_schema(&tc.use_ref, &tc.config, m)
@@ -612,11 +613,11 @@ async fn load_modules(
         #[allow(clippy::cast_possible_truncation)]
         // Safety: module load time is always well under u64::MAX milliseconds
         let load_ms = load_start.elapsed().as_millis() as u64;
-        let (id, ver) = parse_connector_ref(&tc.use_ref);
+        let (id, ver) = parse_plugin_ref(&tc.use_ref);
         transform_modules.push(LoadedTransformModule {
             module,
-            connector_id: id,
-            connector_version: ver,
+            plugin_id: id,
+            plugin_version: ver,
             config: tc.config.clone(),
             load_ms,
             permissions: transform_perms,
@@ -858,17 +859,17 @@ async fn collect_transform_results(
 #[allow(clippy::too_many_lines, clippy::similar_names)]
 async fn execute_streams(
     config: &PipelineConfig,
-    connectors: &ResolvedConnectors,
+    plugins: &ResolvedPlugins,
     modules: &LoadedModules,
     stream_build: &StreamBuild,
     state: Arc<dyn StateBackend>,
     options: &ExecutionOptions,
     progress_tx: &ProgressTx,
 ) -> Result<AggregatedStreamResults, PipelineError> {
-    let (source_connector_id, source_connector_version) =
-        parse_connector_ref(&config.source.use_ref);
-    let (dest_connector_id, dest_connector_version) =
-        parse_connector_ref(&config.destination.use_ref);
+    let (source_plugin_id, source_plugin_version) =
+        parse_plugin_ref(&config.source.use_ref);
+    let (dest_plugin_id, dest_plugin_version) =
+        parse_plugin_ref(&config.destination.use_ref);
     let stats = Arc::new(Mutex::new(RunStats::default()));
     let num_transforms = config.transforms.len();
     let parallelism = execution_parallelism(config, &stream_build.stream_ctxs);
@@ -882,12 +883,12 @@ async fn execute_streams(
         "Starting per-stream pipeline execution"
     );
 
-    let source_manifest_limits = connectors
+    let source_manifest_limits = plugins
         .source_manifest
         .as_ref()
         .map(|m| m.limits.clone())
         .unwrap_or_default();
-    let dest_manifest_limits = connectors
+    let dest_manifest_limits = plugins
         .dest_manifest
         .as_ref()
         .map(|m| m.limits.clone())
@@ -909,12 +910,12 @@ async fn execute_streams(
         pipeline_name: config.pipeline.clone(),
         source_config: config.source.config.clone(),
         dest_config: config.destination.config.clone(),
-        source_connector_id,
-        source_connector_version,
-        dest_connector_id,
-        dest_connector_version,
-        source_permissions: connectors.source_permissions.clone(),
-        dest_permissions: connectors.dest_permissions.clone(),
+        source_plugin_id,
+        source_plugin_version,
+        dest_plugin_id,
+        dest_plugin_version,
+        source_permissions: plugins.source_permissions.clone(),
+        dest_permissions: plugins.dest_permissions.clone(),
         source_overrides: build_sandbox_overrides(
             config.source.permissions.as_ref(),
             config.source.limits.as_ref(),
@@ -978,8 +979,8 @@ async fn execute_streams(
                         Arc::new(Mutex::new(Vec::new())),
                         state_dst,
                         &params.pipeline_name,
-                        &params.dest_connector_id,
-                        &params.dest_connector_version,
+                        &params.dest_plugin_id,
+                        &params.dest_plugin_version,
                         &params.dest_config,
                         &stream_ctx,
                         Arc::new(Mutex::new(RunStats::default())),
@@ -1078,8 +1079,8 @@ async fn execute_streams(
                     source_tx,
                     state_src,
                     &params_src.pipeline_name,
-                    &params_src.source_connector_id,
-                    &params_src.source_connector_version,
+                    &params_src.source_plugin_id,
+                    &params_src.source_plugin_version,
                     &params_src.source_config,
                     &stream_ctx_for_src,
                     stats_src,
@@ -1106,8 +1107,8 @@ async fn execute_streams(
                         dlq_records_t,
                         state_t,
                         &params_t.pipeline_name,
-                        &t.connector_id,
-                        &t.connector_version,
+                        &t.plugin_id,
+                        &t.plugin_version,
                         &t.config,
                         &stream_ctx_t,
                         t.permissions.as_ref(),
@@ -1119,7 +1120,7 @@ async fn execute_streams(
             }
 
             if is_dry_run {
-                // Dry-run: collect frames instead of running destination connector
+                // Dry-run: collect frames instead of running destination plugin
                 let compression = params.compression;
                 let collector_handle =
                     tokio::spawn(collect_dry_run_frames(dest_rx, dry_run_limit, compression));
@@ -1182,7 +1183,7 @@ async fn execute_streams(
                     dry_run_result: Some(collected),
                 })
             } else {
-                // Normal mode: run destination connector
+                // Normal mode: run destination plugin
                 let dst_handle = tokio::task::spawn_blocking(move || {
                     run_destination_stream(
                         &dest_module,
@@ -1190,8 +1191,8 @@ async fn execute_streams(
                         run_dlq_records,
                         state_dst,
                         &params.pipeline_name,
-                        &params.dest_connector_id,
-                        &params.dest_connector_version,
+                        &params.dest_plugin_id,
+                        &params.dest_plugin_version,
                         &params.dest_config,
                         &stream_ctx_for_dst,
                         stats_dst,
@@ -1453,13 +1454,13 @@ async fn finalize_run(
         return Err(err);
     }
 
-    let connector_internal_secs = aggregated.dst_timing_maxima.connect_secs
+    let plugin_internal_secs = aggregated.dst_timing_maxima.connect_secs
         + aggregated.dst_timing_maxima.flush_secs
         + aggregated.dst_timing_maxima.commit_secs;
     let wasm_overhead_secs = (aggregated.dst_timing_maxima.duration_secs
         - aggregated.dst_timing_maxima.vm_setup_secs
         - aggregated.dst_timing_maxima.recv_secs
-        - connector_internal_secs)
+        - plugin_internal_secs)
         .max(0.0);
 
     let state_for_complete = state.clone();
@@ -1645,7 +1646,7 @@ async fn collect_dry_run_frames(
 ///
 /// # Errors
 ///
-/// Returns an error if connector resolution, module loading, or validation fails.
+/// Returns an error if plugin resolution, module loading, or validation fails.
 #[allow(clippy::too_many_lines)]
 pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     tracing::info!(
@@ -1653,21 +1654,21 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
         "Checking pipeline configuration"
     );
 
-    let connectors = resolve_connectors(config).map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    if connectors.source_manifest.is_some() {
+    let plugins = resolve_plugins(config).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    if plugins.source_manifest.is_some() {
         println!("Source manifest:    OK");
     }
-    if connectors.dest_manifest.is_some() {
+    if plugins.dest_manifest.is_some() {
         println!("Dest manifest:      OK");
     }
 
-    if let Some(ref sm) = connectors.source_manifest {
+    if let Some(ref sm) = plugins.source_manifest {
         match validate_config_against_schema(&config.source.use_ref, &config.source.config, sm) {
             Ok(()) => println!("Source config:      OK"),
             Err(e) => println!("Source config:      FAILED\n  {e}"),
         }
     }
-    if let Some(ref dm) = connectors.dest_manifest {
+    if let Some(ref dm) = plugins.dest_manifest {
         match validate_config_against_schema(
             &config.destination.use_ref,
             &config.destination.config,
@@ -1681,14 +1682,14 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     let state_ok = check_state_backend(config);
 
     let source_config = config.source.config.clone();
-    let source_permissions = connectors.source_permissions.clone();
-    let (src_id, src_ver) = parse_connector_ref(&config.source.use_ref);
-    let source_wasm = connectors.source_wasm.clone();
+    let source_permissions = plugins.source_permissions.clone();
+    let (src_id, src_ver) = parse_plugin_ref(&config.source.use_ref);
+    let source_wasm = plugins.source_wasm.clone();
     let source_validation_handle =
         tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
-            validate_connector(
+            validate_plugin(
                 &source_wasm,
-                ConnectorRole::Source,
+                PluginKind::Source,
                 &src_id,
                 &src_ver,
                 &source_config,
@@ -1697,14 +1698,14 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
         });
 
     let dest_config = config.destination.config.clone();
-    let dest_permissions = connectors.dest_permissions.clone();
-    let (dst_id, dst_ver) = parse_connector_ref(&config.destination.use_ref);
-    let dest_wasm = connectors.dest_wasm.clone();
+    let dest_permissions = plugins.dest_permissions.clone();
+    let (dst_id, dst_ver) = parse_plugin_ref(&config.destination.use_ref);
+    let dest_wasm = plugins.dest_wasm.clone();
     let dest_validation_handle =
         tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
-            validate_connector(
+            validate_plugin(
                 &dest_wasm,
-                ConnectorRole::Destination,
+                PluginKind::Destination,
                 &dst_id,
                 &dst_ver,
                 &dest_config,
@@ -1721,9 +1722,10 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
 
     let mut transform_tasks = Vec::with_capacity(config.transforms.len());
     for (index, tc) in config.transforms.iter().enumerate() {
-        let wasm_path = rapidbyte_runtime::resolve_connector_path(&tc.use_ref)?;
+        let wasm_path =
+            rapidbyte_runtime::resolve_plugin_path(&tc.use_ref, PluginKind::Transform)?;
         let manifest =
-            load_and_validate_manifest(&wasm_path, &tc.use_ref, ConnectorRole::Transform)?;
+            load_and_validate_manifest(&wasm_path, &tc.use_ref, PluginKind::Transform)?;
         if let Some(ref m) = manifest {
             match validate_config_against_schema(&tc.use_ref, &tc.config, m) {
                 Ok(()) => println!("Transform config ({}): OK", tc.use_ref),
@@ -1732,26 +1734,26 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
         }
         let transform_perms = manifest.as_ref().map(|m| m.permissions.clone());
         let config_val = tc.config.clone();
-        let connector_ref = tc.use_ref.clone();
-        let (tc_id, tc_ver) = parse_connector_ref(&tc.use_ref);
+        let plugin_ref = tc.use_ref.clone();
+        let (tc_id, tc_ver) = parse_plugin_ref(&tc.use_ref);
         let handle = tokio::task::spawn_blocking(move || -> Result<ValidationResult> {
-            validate_connector(
+            validate_plugin(
                 &wasm_path,
-                ConnectorRole::Transform,
+                PluginKind::Transform,
                 &tc_id,
                 &tc_ver,
                 &config_val,
                 transform_perms.as_ref(),
             )
         });
-        transform_tasks.push((index, connector_ref, handle));
+        transform_tasks.push((index, plugin_ref, handle));
     }
 
     let mut transform_validations = Vec::with_capacity(transform_tasks.len());
-    for (index, connector_ref, handle) in transform_tasks {
+    for (index, plugin_ref, handle) in transform_tasks {
         let result = handle.await.map_err(|e| {
             anyhow::anyhow!(
-                "Transform validation task panicked (index {index}, {connector_ref}): {e}"
+                "Transform validation task panicked (index {index}, {plugin_ref}): {e}"
             )
         })??;
         transform_validations.push(result);
@@ -1765,26 +1767,26 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
     })
 }
 
-/// Discover available streams from a source connector.
+/// Discover available streams from a source plugin.
 ///
 /// # Errors
 ///
-/// Returns an error if the connector cannot be loaded, opened, or discovery fails.
-pub async fn discover_connector(
-    connector_ref: &str,
+/// Returns an error if the plugin cannot be loaded, opened, or discovery fails.
+pub async fn discover_plugin(
+    plugin_ref: &str,
     config: &serde_json::Value,
 ) -> Result<Catalog> {
-    let wasm_path = rapidbyte_runtime::resolve_connector_path(connector_ref)?;
-    let manifest = load_and_validate_manifest(&wasm_path, connector_ref, ConnectorRole::Source)?;
+    let wasm_path = rapidbyte_runtime::resolve_plugin_path(plugin_ref, PluginKind::Source)?;
+    let manifest = load_and_validate_manifest(&wasm_path, plugin_ref, PluginKind::Source)?;
     let permissions = manifest.as_ref().map(|m| m.permissions.clone());
-    let (connector_id, connector_version) = parse_connector_ref(connector_ref);
+    let (plugin_id, plugin_version) = parse_plugin_ref(plugin_ref);
     let config = config.clone();
 
     tokio::task::spawn_blocking(move || {
         run_discover(
             &wasm_path,
-            &connector_id,
-            &connector_version,
+            &plugin_id,
+            &plugin_version,
             &config,
             permissions.as_ref(),
         )

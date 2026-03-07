@@ -14,7 +14,7 @@ pub enum Phase {
 pub enum ProgressEvent {
     /// Pipeline entered a new execution phase.
     PhaseChange { phase: Phase },
-    /// A batch was emitted by the source connector.
+    /// A batch was emitted by the source plugin.
     BatchEmitted {
         bytes: u64,
     },

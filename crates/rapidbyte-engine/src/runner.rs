@@ -1,4 +1,4 @@
-//! Connector runner utilities for source, destination, transform, validate, and discover flows.
+//! Plugin runner utilities for source, destination, transform, validate, and discover flows.
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -13,7 +13,7 @@ use rapidbyte_types::error::ValidationResult;
 use rapidbyte_types::manifest::Permissions;
 use rapidbyte_types::metric::{ReadSummary, TransformSummary, WriteSummary};
 use rapidbyte_types::stream::StreamContext;
-use rapidbyte_types::wire::ConnectorRole;
+use rapidbyte_types::wire::PluginKind;
 
 use rapidbyte_runtime::wasmtime_reexport::HasSelf;
 use rapidbyte_runtime::{
@@ -27,7 +27,7 @@ use rapidbyte_types::state::RunStats;
 
 use crate::error::PipelineError;
 
-/// Result of running a source connector for a single stream.
+/// Result of running a source plugin for a single stream.
 pub(crate) struct SourceRunResult {
     pub duration_secs: f64,
     pub summary: ReadSummary,
@@ -35,7 +35,7 @@ pub(crate) struct SourceRunResult {
     pub host_timings: HostTimings,
 }
 
-/// Result of running a destination connector for a single stream.
+/// Result of running a destination plugin for a single stream.
 pub(crate) struct DestRunResult {
     pub duration_secs: f64,
     pub summary: WriteSummary,
@@ -45,7 +45,7 @@ pub(crate) struct DestRunResult {
     pub host_timings: HostTimings,
 }
 
-/// Result of running a transform connector for a single stream.
+/// Result of running a transform plugin for a single stream.
 pub(crate) struct TransformRunResult {
     pub duration_secs: f64,
     pub summary: TransformSummary,
@@ -78,7 +78,7 @@ fn handle_close_result<E, F>(
     }
 }
 
-/// Run a source connector for a single stream.
+/// Run a source plugin for a single stream.
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -89,8 +89,8 @@ pub(crate) fn run_source_stream(
     sender: mpsc::Sender<Frame>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
-    connector_id: &str,
-    connector_version: &str,
+    plugin_id: &str,
+    plugin_version: &str,
     source_config: &serde_json::Value,
     stream_ctx: &StreamContext,
     stats: Arc<Mutex<RunStats>>,
@@ -106,7 +106,7 @@ pub(crate) fn run_source_stream(
 
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)
-        .connector_id(connector_id)
+        .connector_id(plugin_id)
         .stream(stream_ctx.stream_name.clone())
         .state_backend(state_backend)
         .sender(sender.clone())
@@ -137,30 +137,30 @@ pub(crate) fn run_source_stream(
         source_bindings::RapidbyteSource::instantiate(&mut store, &module.component, &linker)
             .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
 
-    let iface = bindings.rapidbyte_connector_source();
+    let iface = bindings.rapidbyte_plugin_source();
 
     let source_config_json = serde_json::to_string(source_config)
         .context("Failed to serialize source config")
         .map_err(PipelineError::Infrastructure)?;
 
     tracing::info!(
-        connector = connector_id,
-        version = connector_version,
+        plugin = plugin_id,
+        version = plugin_version,
         stream = stream_ctx.stream_name,
-        "Opening source connector for stream"
+        "Opening source plugin for stream"
     );
     let session = iface
         .call_open(&mut store, &source_config_json)
         .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?
-        .map_err(|err| PipelineError::Connector(source_error_to_sdk(err)))?;
+        .map_err(|err| PipelineError::Plugin(source_error_to_sdk(err)))?;
 
     let ctx_json = serde_json::to_string(stream_ctx)
         .context("Failed to serialize StreamContext")
         .map_err(PipelineError::Infrastructure)?;
 
     tracing::info!(stream = stream_ctx.stream_name, "Starting source read");
-    let run_request = source_bindings::rapidbyte::connector::types::RunRequest {
-        phase: source_bindings::rapidbyte::connector::types::RunPhase::Read,
+    let run_request = source_bindings::rapidbyte::plugin::types::RunRequest {
+        phase: source_bindings::rapidbyte::plugin::types::RunPhase::Read,
         stream_context_json: ctx_json,
         dry_run: false,
         max_records: None,
@@ -188,7 +188,7 @@ pub(crate) fn run_source_stream(
         }
         Err(err) => {
             let _ = iface.call_close(&mut store, session);
-            return Err(PipelineError::Connector(source_error_to_sdk(err)));
+            return Err(PipelineError::Plugin(source_error_to_sdk(err)));
         }
     };
 
@@ -210,10 +210,10 @@ pub(crate) fn run_source_stream(
     let _ = sender.blocking_send(Frame::EndStream);
 
     tracing::info!(
-        connector = connector_id,
-        version = connector_version,
+        plugin = plugin_id,
+        version = plugin_version,
         stream = stream_ctx.stream_name,
-        "Closing source connector for stream"
+        "Closing source plugin for stream"
     );
     handle_close_result(
         iface.call_close(&mut store, session),
@@ -244,7 +244,7 @@ pub(crate) fn run_source_stream(
     })
 }
 
-/// Run a destination connector for a single stream.
+/// Run a destination plugin for a single stream.
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -256,8 +256,8 @@ pub(crate) fn run_destination_stream(
     dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
-    connector_id: &str,
-    connector_version: &str,
+    plugin_id: &str,
+    plugin_version: &str,
     dest_config: &serde_json::Value,
     stream_ctx: &StreamContext,
     stats: Arc<Mutex<RunStats>>,
@@ -273,7 +273,7 @@ pub(crate) fn run_destination_stream(
 
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)
-        .connector_id(connector_id)
+        .connector_id(plugin_id)
         .stream(stream_ctx.stream_name.clone())
         .state_backend(state_backend)
         .receiver(receiver)
@@ -307,7 +307,7 @@ pub(crate) fn run_destination_stream(
     )
     .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
 
-    let iface = bindings.rapidbyte_connector_destination();
+    let iface = bindings.rapidbyte_plugin_destination();
     let vm_setup_secs = vm_setup_start.elapsed().as_secs_f64();
 
     let dest_config_json = serde_json::to_string(dest_config)
@@ -315,15 +315,15 @@ pub(crate) fn run_destination_stream(
         .map_err(PipelineError::Infrastructure)?;
 
     tracing::info!(
-        connector = connector_id,
-        version = connector_version,
+        plugin = plugin_id,
+        version = plugin_version,
         stream = stream_ctx.stream_name,
-        "Opening destination connector for stream"
+        "Opening destination plugin for stream"
     );
     let session = iface
         .call_open(&mut store, &dest_config_json)
         .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?
-        .map_err(|err| PipelineError::Connector(dest_error_to_sdk(err)))?;
+        .map_err(|err| PipelineError::Plugin(dest_error_to_sdk(err)))?;
 
     let recv_start = Instant::now();
     let ctx_json = serde_json::to_string(stream_ctx)
@@ -334,8 +334,8 @@ pub(crate) fn run_destination_stream(
         stream = stream_ctx.stream_name,
         "Starting destination write"
     );
-    let run_request = dest_bindings::rapidbyte::connector::types::RunRequest {
-        phase: dest_bindings::rapidbyte::connector::types::RunPhase::Write,
+    let run_request = dest_bindings::rapidbyte::plugin::types::RunRequest {
+        phase: dest_bindings::rapidbyte::plugin::types::RunPhase::Write,
         stream_context_json: ctx_json,
         dry_run: false,
         max_records: None,
@@ -363,7 +363,7 @@ pub(crate) fn run_destination_stream(
         }
         Err(err) => {
             let _ = iface.call_close(&mut store, session);
-            return Err(PipelineError::Connector(dest_error_to_sdk(err)));
+            return Err(PipelineError::Plugin(dest_error_to_sdk(err)));
         }
     };
 
@@ -384,10 +384,10 @@ pub(crate) fn run_destination_stream(
     let recv_secs = recv_start.elapsed().as_secs_f64();
 
     tracing::info!(
-        connector = connector_id,
-        version = connector_version,
+        plugin = plugin_id,
+        version = plugin_version,
         stream = stream_ctx.stream_name,
-        "Closing destination connector for stream"
+        "Closing destination plugin for stream"
     );
     handle_close_result(
         iface.call_close(&mut store, session),
@@ -422,7 +422,7 @@ pub(crate) fn run_destination_stream(
     })
 }
 
-/// Run a transform connector for a single stream.
+/// Run a transform plugin for a single stream.
 #[allow(
     clippy::too_many_arguments,
     clippy::needless_pass_by_value,
@@ -435,8 +435,8 @@ pub(crate) fn run_transform_stream(
     dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
-    connector_id: &str,
-    connector_version: &str,
+    plugin_id: &str,
+    plugin_version: &str,
     transform_config: &serde_json::Value,
     stream_ctx: &StreamContext,
     permissions: Option<&Permissions>,
@@ -451,7 +451,7 @@ pub(crate) fn run_transform_stream(
 
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)
-        .connector_id(connector_id)
+        .connector_id(plugin_id)
         .stream(stream_ctx.stream_name.clone())
         .state_backend(state_backend)
         .sender(sender.clone())
@@ -484,30 +484,30 @@ pub(crate) fn run_transform_stream(
         transform_bindings::RapidbyteTransform::instantiate(&mut store, &module.component, &linker)
             .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
 
-    let iface = bindings.rapidbyte_connector_transform();
+    let iface = bindings.rapidbyte_plugin_transform();
 
     let transform_config_json = serde_json::to_string(transform_config)
         .context("Failed to serialize transform config")
         .map_err(PipelineError::Infrastructure)?;
 
     tracing::info!(
-        connector = connector_id,
-        version = connector_version,
+        plugin = plugin_id,
+        version = plugin_version,
         stream = stream_ctx.stream_name,
-        "Opening transform connector for stream"
+        "Opening transform plugin for stream"
     );
     let session = iface
         .call_open(&mut store, &transform_config_json)
         .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?
-        .map_err(|err| PipelineError::Connector(transform_error_to_sdk(err)))?;
+        .map_err(|err| PipelineError::Plugin(transform_error_to_sdk(err)))?;
 
     let ctx_json = serde_json::to_string(stream_ctx)
         .context("Failed to serialize StreamContext")
         .map_err(PipelineError::Infrastructure)?;
 
     tracing::info!(stream = stream_ctx.stream_name, "Starting transform");
-    let run_request = transform_bindings::rapidbyte::connector::types::RunRequest {
-        phase: transform_bindings::rapidbyte::connector::types::RunPhase::Transform,
+    let run_request = transform_bindings::rapidbyte::plugin::types::RunRequest {
+        phase: transform_bindings::rapidbyte::plugin::types::RunPhase::Transform,
         stream_context_json: ctx_json,
         dry_run: false,
         max_records: None,
@@ -534,17 +534,17 @@ pub(crate) fn run_transform_stream(
         }
         Err(err) => {
             let _ = iface.call_close(&mut store, session);
-            return Err(PipelineError::Connector(transform_error_to_sdk(err)));
+            return Err(PipelineError::Plugin(transform_error_to_sdk(err)));
         }
     };
 
     let _ = sender.blocking_send(Frame::EndStream);
 
     tracing::info!(
-        connector = connector_id,
-        version = connector_version,
+        plugin = plugin_id,
+        version = plugin_version,
         stream = stream_ctx.stream_name,
-        "Closing transform connector for stream"
+        "Closing transform plugin for stream"
     );
     handle_close_result(
         iface.call_close(&mut store, session),
@@ -559,15 +559,15 @@ pub(crate) fn run_transform_stream(
     })
 }
 
-pub(crate) fn validate_connector(
+pub(crate) fn validate_plugin(
     wasm_path: &std::path::Path,
-    role: ConnectorRole,
-    connector_id: &str,
-    connector_version: &str,
+    kind: PluginKind,
+    plugin_id: &str,
+    plugin_version: &str,
     config: &serde_json::Value,
     permissions: Option<&Permissions>,
 ) -> Result<ValidationResult> {
-    tracing::info!(connector = connector_id, version = connector_version, role = ?role, "Validating connector");
+    tracing::info!(plugin = plugin_id, version = plugin_version, kind = ?kind, "Validating plugin");
 
     let runtime = WasmRuntime::new()?;
     let module = runtime.load_module(wasm_path)?;
@@ -575,7 +575,7 @@ pub(crate) fn validate_connector(
 
     let mut builder = ComponentHostState::builder()
         .pipeline("check")
-        .connector_id(connector_id)
+        .connector_id(plugin_id)
         .stream("check")
         .state_backend(state)
         .config(config)
@@ -588,8 +588,8 @@ pub(crate) fn validate_connector(
     let mut store = module.new_store(host_state, None);
     let config_json = serde_json::to_string(config)?;
 
-    match role {
-        ConnectorRole::Source => {
+    match kind {
+        PluginKind::Source => {
             let linker = create_component_linker(&module.engine, "source", |linker| {
                 source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(
                     linker,
@@ -602,7 +602,7 @@ pub(crate) fn validate_connector(
                 &module.component,
                 &linker,
             )?;
-            let iface = bindings.rapidbyte_connector_source();
+            let iface = bindings.rapidbyte_plugin_source();
 
             let session = iface
                 .call_open(&mut store, &config_json)?
@@ -617,7 +617,7 @@ pub(crate) fn validate_connector(
             let _ = iface.call_close(&mut store, session);
             result
         }
-        ConnectorRole::Destination => {
+        PluginKind::Destination => {
             let linker = create_component_linker(&module.engine, "destination", |linker| {
                 dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(
                     linker,
@@ -630,7 +630,7 @@ pub(crate) fn validate_connector(
                 &module.component,
                 &linker,
             )?;
-            let iface = bindings.rapidbyte_connector_destination();
+            let iface = bindings.rapidbyte_plugin_destination();
 
             let session = iface
                 .call_open(&mut store, &config_json)?
@@ -645,7 +645,7 @@ pub(crate) fn validate_connector(
             let _ = iface.call_close(&mut store, session);
             result
         }
-        ConnectorRole::Transform => {
+        PluginKind::Transform => {
             let linker = create_component_linker(&module.engine, "transform", |linker| {
                 transform_bindings::RapidbyteTransform::add_to_linker::<_, HasSelf<_>>(
                     linker,
@@ -658,7 +658,7 @@ pub(crate) fn validate_connector(
                 &module.component,
                 &linker,
             )?;
-            let iface = bindings.rapidbyte_connector_transform();
+            let iface = bindings.rapidbyte_plugin_transform();
 
             let session = iface
                 .call_open(&mut store, &config_json)?
@@ -676,11 +676,11 @@ pub(crate) fn validate_connector(
     }
 }
 
-/// Discover available streams from a source connector.
+/// Discover available streams from a source plugin.
 pub(crate) fn run_discover(
     wasm_path: &std::path::Path,
-    connector_id: &str,
-    connector_version: &str,
+    plugin_id: &str,
+    plugin_version: &str,
     config: &serde_json::Value,
     permissions: Option<&Permissions>,
 ) -> Result<Catalog> {
@@ -690,7 +690,7 @@ pub(crate) fn run_discover(
     let state = Arc::new(SqliteStateBackend::in_memory()?);
     let mut builder = ComponentHostState::builder()
         .pipeline("discover")
-        .connector_id(connector_id)
+        .connector_id(plugin_id)
         .stream("discover")
         .state_backend(state)
         .config(config)
@@ -707,13 +707,13 @@ pub(crate) fn run_discover(
     })?;
     let bindings =
         source_bindings::RapidbyteSource::instantiate(&mut store, &module.component, &linker)?;
-    let iface = bindings.rapidbyte_connector_source();
+    let iface = bindings.rapidbyte_plugin_source();
     let config_json = serde_json::to_string(config)?;
 
     tracing::info!(
-        connector = connector_id,
-        version = connector_version,
-        "Opening source connector for discover"
+        plugin = plugin_id,
+        version = plugin_version,
+        "Opening source plugin for discover"
     );
     let session = iface
         .call_open(&mut store, &config_json)?
@@ -728,9 +728,9 @@ pub(crate) fn run_discover(
         .context("Failed to parse discover catalog JSON")?;
 
     tracing::info!(
-        connector = connector_id,
-        version = connector_version,
-        "Closing source connector after discover"
+        plugin = plugin_id,
+        version = plugin_version,
+        "Closing source plugin after discover"
     );
     if let Err(err) = iface.call_close(&mut store, session)? {
         tracing::warn!(

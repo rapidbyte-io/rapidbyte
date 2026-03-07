@@ -1,4 +1,4 @@
-//! Connector resolution, manifest validation, and state backend creation.
+//! Plugin resolution, manifest validation, and state backend creation.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -6,36 +6,38 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use rapidbyte_runtime::{resolve_min_limit, SandboxOverrides};
 use rapidbyte_state::{SqliteStateBackend, StateBackend};
-use rapidbyte_types::manifest::{ConnectorManifest, Permissions};
-use rapidbyte_types::wire::{ConnectorRole, ProtocolVersion};
+use rapidbyte_types::manifest::{Permissions, PluginManifest};
+use rapidbyte_types::wire::{PluginKind, ProtocolVersion};
 
 use crate::config::types::{parse_byte_size, PipelineConfig, StateBackendKind};
 use crate::error::PipelineError;
 
-pub(crate) struct ResolvedConnectors {
+pub(crate) struct ResolvedPlugins {
     pub(crate) source_wasm: PathBuf,
     pub(crate) dest_wasm: PathBuf,
-    pub(crate) source_manifest: Option<ConnectorManifest>,
-    pub(crate) dest_manifest: Option<ConnectorManifest>,
+    pub(crate) source_manifest: Option<PluginManifest>,
+    pub(crate) dest_manifest: Option<PluginManifest>,
     pub(crate) source_permissions: Option<Permissions>,
     pub(crate) dest_permissions: Option<Permissions>,
 }
 
-pub(crate) fn resolve_connectors(
+pub(crate) fn resolve_plugins(
     config: &PipelineConfig,
-) -> Result<ResolvedConnectors, PipelineError> {
-    let source_wasm = rapidbyte_runtime::resolve_connector_path(&config.source.use_ref)
-        .map_err(PipelineError::Infrastructure)?;
-    let dest_wasm = rapidbyte_runtime::resolve_connector_path(&config.destination.use_ref)
-        .map_err(PipelineError::Infrastructure)?;
+) -> Result<ResolvedPlugins, PipelineError> {
+    let source_wasm =
+        rapidbyte_runtime::resolve_plugin_path(&config.source.use_ref, PluginKind::Source)
+            .map_err(PipelineError::Infrastructure)?;
+    let dest_wasm =
+        rapidbyte_runtime::resolve_plugin_path(&config.destination.use_ref, PluginKind::Destination)
+            .map_err(PipelineError::Infrastructure)?;
 
     let source_manifest =
-        load_and_validate_manifest(&source_wasm, &config.source.use_ref, ConnectorRole::Source)
+        load_and_validate_manifest(&source_wasm, &config.source.use_ref, PluginKind::Source)
             .map_err(PipelineError::Infrastructure)?;
     let dest_manifest = load_and_validate_manifest(
         &dest_wasm,
         &config.destination.use_ref,
-        ConnectorRole::Destination,
+        PluginKind::Destination,
     )
     .map_err(PipelineError::Infrastructure)?;
 
@@ -48,7 +50,7 @@ pub(crate) fn resolve_connectors(
             .map_err(PipelineError::Infrastructure)?;
     }
 
-    Ok(ResolvedConnectors {
+    Ok(ResolvedPlugins {
         source_permissions: source_manifest.as_ref().map(|m| m.permissions.clone()),
         dest_permissions: dest_manifest.as_ref().map(|m| m.permissions.clone()),
         source_wasm,
@@ -60,33 +62,33 @@ pub(crate) fn resolve_connectors(
 
 pub(crate) fn load_and_validate_manifest(
     wasm_path: &Path,
-    connector_ref: &str,
-    expected_role: ConnectorRole,
-) -> Result<Option<ConnectorManifest>> {
-    let manifest = rapidbyte_runtime::load_connector_manifest(wasm_path)?;
+    plugin_ref: &str,
+    expected_kind: PluginKind,
+) -> Result<Option<PluginManifest>> {
+    let manifest = rapidbyte_runtime::load_plugin_manifest(wasm_path)?;
 
     if let Some(ref m) = manifest {
-        if !m.supports_role(expected_role) {
-            anyhow::bail!("Connector '{connector_ref}' does not support {expected_role:?} role");
+        if !m.supports_kind(expected_kind) {
+            anyhow::bail!("Plugin '{plugin_ref}' does not support {expected_kind:?} kind");
         }
 
-        if m.protocol_version != ProtocolVersion::V4 {
+        if m.protocol_version != ProtocolVersion::V5 {
             tracing::warn!(
-                connector = connector_ref,
+                plugin = plugin_ref,
                 manifest_protocol = ?m.protocol_version,
-                host_protocol = ?ProtocolVersion::V4,
+                host_protocol = ?ProtocolVersion::V5,
                 "Protocol version mismatch"
             );
         }
 
         tracing::info!(
-            connector = m.id,
+            plugin = m.id,
             version = m.version,
-            "Loaded connector manifest"
+            "Loaded plugin manifest"
         );
     } else {
         tracing::debug!(
-            connector = connector_ref,
+            plugin = plugin_ref,
             "No manifest found, skipping pre-flight validation"
         );
     }
@@ -95,16 +97,16 @@ pub(crate) fn load_and_validate_manifest(
 }
 
 pub(crate) fn validate_config_against_schema(
-    connector_ref: &str,
+    plugin_ref: &str,
     config: &serde_json::Value,
-    manifest: &ConnectorManifest,
+    manifest: &PluginManifest,
 ) -> Result<()> {
     let Some(schema_value) = &manifest.config_schema else {
         return Ok(());
     };
 
     let validator = jsonschema::validator_for(schema_value).with_context(|| {
-        format!("Invalid JSON Schema in manifest for connector '{connector_ref}'")
+        format!("Invalid JSON Schema in manifest for plugin '{plugin_ref}'")
     })?;
 
     let errors: Vec<String> = validator
@@ -114,13 +116,13 @@ pub(crate) fn validate_config_against_schema(
 
     if !errors.is_empty() {
         anyhow::bail!(
-            "Configuration validation failed for connector '{}':\n{}",
-            connector_ref,
+            "Configuration validation failed for plugin '{}':\n{}",
+            plugin_ref,
             errors.join("\n"),
         );
     }
 
-    tracing::debug!(connector = connector_ref, "Config schema validation passed");
+    tracing::debug!(plugin = plugin_ref, "Config schema validation passed");
     Ok(())
 }
 
