@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/rapidbyte-cli",
+    "crates/rapidbyte-dev",
     "crates/rapidbyte-engine",
     "crates/rapidbyte-runtime",
     "crates/rapidbyte-sdk",
