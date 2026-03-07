@@ -63,6 +63,21 @@ just fmt                # cargo fmt
 just lint               # cargo clippy
 ```
 
+## CLI Output Flags
+
+```bash
+rapidbyte run pipeline.yaml           # Default: spinner + compact summary
+rapidbyte run pipeline.yaml -v        # Verbose: per-stream table + stage timings
+rapidbyte run pipeline.yaml -vv       # Diagnostic: full timing, WASM overhead, shard skew, CPU/RSS
+rapidbyte run pipeline.yaml -q        # Quiet: exit code only, errors on stderr
+```
+
+- `-v`/`--verbose` can be stacked: `-v` (detailed), `-vv` (diagnostic)
+- `-q`/`--quiet` suppresses all output except errors on stderr
+- `--log-level` controls tracing output (orthogonal to verbosity)
+- Human-readable output goes to stderr; machine-readable (`@@BENCH_JSON@@`) goes to stdout
+- Non-TTY environments (piped output) automatically disable spinner and colors
+
 ## Building
 
 ```bash
