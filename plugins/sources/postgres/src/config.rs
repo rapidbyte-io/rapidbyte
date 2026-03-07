@@ -1,6 +1,6 @@
-//! Source `PostgreSQL` connector configuration.
+//! Source `PostgreSQL` plugin configuration.
 
-use rapidbyte_sdk::error::ConnectorError;
+use rapidbyte_sdk::error::PluginError;
 use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;
 
@@ -37,16 +37,16 @@ impl Config {
     /// # Errors
     /// Returns `Err` if `replication_slot` or `publication` is empty or exceeds the
     /// 63-byte `PostgreSQL` identifier limit.
-    pub fn validate(&self) -> Result<(), ConnectorError> {
+    pub fn validate(&self) -> Result<(), PluginError> {
         if let Some(slot) = self.replication_slot.as_ref() {
             if slot.is_empty() {
-                return Err(ConnectorError::config(
+                return Err(PluginError::config(
                     "INVALID_CONFIG",
                     "replication_slot must not be empty".to_string(),
                 ));
             }
             if slot.len() > 63 {
-                return Err(ConnectorError::config(
+                return Err(PluginError::config(
                     "INVALID_CONFIG",
                     format!("replication_slot '{slot}' exceeds PostgreSQL 63-byte limit"),
                 ));
@@ -54,13 +54,13 @@ impl Config {
         }
         if let Some(pub_name) = self.publication.as_ref() {
             if pub_name.is_empty() {
-                return Err(ConnectorError::config(
+                return Err(PluginError::config(
                     "INVALID_CONFIG",
                     "publication must not be empty".to_string(),
                 ));
             }
             if pub_name.len() > 63 {
-                return Err(ConnectorError::config(
+                return Err(PluginError::config(
                     "INVALID_CONFIG",
                     format!("publication '{pub_name}' exceeds PostgreSQL 63-byte limit"),
                 ));

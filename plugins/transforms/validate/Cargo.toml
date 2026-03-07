@@ -8,7 +8,7 @@ name = "transform_validate"
 path = "src/main.rs"
 
 [dependencies]
-rapidbyte-sdk = { path = "../../crates/rapidbyte-sdk" }
+rapidbyte-sdk = { path = "../../../crates/rapidbyte-sdk" }
 tokio = { version = "=1.36", default-features = false, features = ["rt", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -20,7 +20,7 @@ arrow-buffer = "53"
 wit-bindgen = "0.46"
 
 [build-dependencies]
-rapidbyte-sdk = { path = "../../crates/rapidbyte-sdk", default-features = false, features = ["build"] }
+rapidbyte-sdk = { path = "../../../crates/rapidbyte-sdk", default-features = false, features = ["build"] }
 
 [profile.release]
 opt-level = 3

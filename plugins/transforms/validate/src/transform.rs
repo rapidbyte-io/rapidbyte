@@ -38,7 +38,7 @@ pub async fn run(
     ctx: &Context,
     stream: &StreamContext,
     config: &CompiledConfig,
-) -> Result<TransformSummary, ConnectorError> {
+) -> Result<TransformSummary, PluginError> {
     let mut records_in: u64 = 0;
     let mut records_out: u64 = 0;
     let mut bytes_in: u64 = 0;
@@ -68,7 +68,7 @@ pub async fn run(
                 match stream.policies.on_data_error {
                     DataErrorPolicy::Fail => {
                         let first = &evaluation.invalid_rows[0];
-                        return Err(ConnectorError::data(
+                        return Err(PluginError::data(
                             "VALIDATION_FAILED",
                             format!(
                                 "validation failed for {} row(s); first failure at row {}: {}",
@@ -407,7 +407,7 @@ fn evaluate_unique_rule(
     None
 }
 
-fn emit_validation_metrics(ctx: &Context, evaluation: &BatchEvaluation) -> Result<(), ConnectorError> {
+fn emit_validation_metrics(ctx: &Context, evaluation: &BatchEvaluation) -> Result<(), PluginError> {
     for metric in build_validation_metrics(evaluation) {
         ctx.metric(&metric)?;
     }
@@ -439,38 +439,38 @@ fn build_validation_metrics(evaluation: &BatchEvaluation) -> Vec<Metric> {
     metrics
 }
 
-fn select_rows(batch: &RecordBatch, indices: &[u32]) -> Result<RecordBatch, ConnectorError> {
+fn select_rows(batch: &RecordBatch, indices: &[u32]) -> Result<RecordBatch, PluginError> {
     let idx = UInt32Array::from(indices.to_vec());
     let idx_ref = &idx as &dyn Array;
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(batch.num_columns());
     for column in batch.columns() {
         let filtered = take(column.as_ref(), idx_ref, None).map_err(|e| {
-            ConnectorError::internal("VALIDATE_FILTER", format!("failed to filter rows: {e}"))
+            PluginError::internal("VALIDATE_FILTER", format!("failed to filter rows: {e}"))
         })?;
         arrays.push(filtered);
     }
     RecordBatch::try_new(Arc::clone(&batch.schema()), arrays).map_err(|e| {
-        ConnectorError::internal(
+        PluginError::internal(
             "VALIDATE_BATCH",
             format!("failed to build filtered record batch: {e}"),
         )
     })
 }
 
-fn row_to_json_from_batch(batch: &RecordBatch, row: usize) -> Result<String, ConnectorError> {
+fn row_to_json_from_batch(batch: &RecordBatch, row: usize) -> Result<String, PluginError> {
     let single = select_rows(batch, &[row as u32])?;
     let mut writer = LineDelimitedWriter::new(Vec::new());
     writer.write_batches(&[&single]).map_err(|e| {
-        ConnectorError::internal("VALIDATE_DLQ_JSON", format!("failed to encode DLQ row: {e}"))
+        PluginError::internal("VALIDATE_DLQ_JSON", format!("failed to encode DLQ row: {e}"))
     })?;
     writer.finish().map_err(|e| {
-        ConnectorError::internal(
+        PluginError::internal(
             "VALIDATE_DLQ_JSON",
             format!("failed to finalize DLQ row json: {e}"),
         )
     })?;
     let mut text = String::from_utf8(writer.into_inner()).map_err(|e| {
-        ConnectorError::internal(
+        PluginError::internal(
             "VALIDATE_DLQ_JSON",
             format!("dlq json was not utf8: {e}"),
         )

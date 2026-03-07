@@ -3,7 +3,7 @@
 use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;
 
-/// Configuration for the SQL transform connector.
+/// Configuration for the SQL transform plugin.
 #[derive(Debug, Clone, Deserialize, ConfigSchema)]
 pub struct Config {
     /// SQL query to execute against each incoming batch.

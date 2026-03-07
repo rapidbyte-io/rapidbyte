@@ -1,4 +1,4 @@
-//! Destination `PostgreSQL` connector configuration.
+//! Destination `PostgreSQL` plugin configuration.
 
 use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;

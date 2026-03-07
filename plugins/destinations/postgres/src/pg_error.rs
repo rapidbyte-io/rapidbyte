@@ -1,4 +1,4 @@
-//! Shared `PostgreSQL` error formatting for the destination connector.
+//! Shared `PostgreSQL` error formatting for the destination plugin.
 
 pub(crate) fn format_pg_error(prefix: &str, error: &tokio_postgres::Error) -> String {
     if let Some(db_error) = error.as_db_error() {

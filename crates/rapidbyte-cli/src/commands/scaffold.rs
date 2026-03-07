@@ -236,14 +236,14 @@ name = "{name_underscored}"
 path = "src/main.rs"
 
 [dependencies]
-rapidbyte-sdk = {{ path = "../../crates/rapidbyte-sdk" }}
+rapidbyte-sdk = {{ path = "../../../crates/rapidbyte-sdk" }}
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
 tokio = {{ version = "1.36", features = ["rt", "macros", "io-util"] }}
 arrow = {{ version = "53", features = ["ipc"] }}
 
 [build-dependencies]
-rapidbyte-sdk = {{ path = "../../crates/rapidbyte-sdk", default-features = false, features = ["build"] }}
+rapidbyte-sdk = {{ path = "../../../crates/rapidbyte-sdk", default-features = false, features = ["build"] }}
 "#
     )
 }

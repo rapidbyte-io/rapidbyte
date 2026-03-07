@@ -1,4 +1,4 @@
-//! Validation transform connector for Rapidbyte.
+//! Validation transform plugin for Rapidbyte.
 //!
 //! Applies rule-based data contract assertions (not-null, regex, range, unique)
 //! to in-flight Arrow batches, filtering or failing rows that violate constraints.
@@ -8,7 +8,7 @@ mod transform;
 
 use rapidbyte_sdk::prelude::*;
 
-#[rapidbyte_sdk::connector(transform)]
+#[rapidbyte_sdk::plugin(transform)]
 pub struct TransformValidate {
     config: config::CompiledConfig,
 }
@@ -16,13 +16,13 @@ pub struct TransformValidate {
 impl Transform for TransformValidate {
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
+    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
         let compiled = config.compile().map_err(|message| {
-            ConnectorError::config("VALIDATE_CONFIG", format!("Invalid validation config: {message}"))
+            PluginError::config("VALIDATE_CONFIG", format!("Invalid validation config: {message}"))
         })?;
         Ok((
             Self { config: compiled },
-            ConnectorInfo {
+            PluginInfo {
                 protocol_version: ProtocolVersion::V4,
                 features: vec![],
                 default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
@@ -33,7 +33,7 @@ impl Transform for TransformValidate {
     async fn validate(
         config: &Self::Config,
         _ctx: &Context,
-    ) -> Result<ValidationResult, ConnectorError> {
+    ) -> Result<ValidationResult, PluginError> {
         match config.compile() {
             Ok(_) => Ok(ValidationResult {
                 status: ValidationStatus::Success,
@@ -50,7 +50,7 @@ impl Transform for TransformValidate {
         &mut self,
         ctx: &Context,
         stream: StreamContext,
-    ) -> Result<TransformSummary, ConnectorError> {
+    ) -> Result<TransformSummary, PluginError> {
         transform::run(ctx, &stream, &self.config).await
     }
 }

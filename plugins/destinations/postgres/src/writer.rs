@@ -1,4 +1,4 @@
-//! Stream write session lifecycle for destination `PostgreSQL` connector.
+//! Stream write session lifecycle for destination `PostgreSQL` plugin.
 //!
 //! Owns connection/session orchestration around batch writes, checkpoints,
 //! watermark-based resume, and Replace-mode staging swap.
@@ -110,11 +110,11 @@ pub async fn write_stream(
     config: &crate::config::Config,
     ctx: &Context,
     stream: &StreamContext,
-) -> Result<WriteSummary, ConnectorError> {
+) -> Result<WriteSummary, PluginError> {
     let connect_start = Instant::now();
     let client = crate::client::connect(config)
         .await
-        .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
+        .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
     let connect_secs = connect_start.elapsed().as_secs_f64();
 
     let setup = prepare_stream_once(
@@ -132,7 +132,7 @@ pub async fn write_stream(
         resolve_copy_flush_bytes(stream.copy_flush_bytes_override, config.copy_flush_bytes),
         config.load_method,
     )
-    .map_err(|e| ConnectorError::config("INVALID_STREAM_SETUP", e))?;
+    .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
     let skip_mutable_setup = stream.partition_count.unwrap_or(1) > 1
         && !setup.is_replace
         && schema_hint_has_shape(&stream.schema);
@@ -141,12 +141,12 @@ pub async fn write_stream(
     } else {
         async_prepare_stream_once(ctx, &client, &stream.schema, setup)
             .await
-            .map_err(|e| ConnectorError::config("INVALID_STREAM_SETUP", e))?
+            .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
     };
 
     let mut session = WriteSession::begin(ctx, &client, &config.schema, setup)
         .await
-        .map_err(|e| ConnectorError::transient_db("SESSION_BEGIN_FAILED", e))?;
+        .map_err(|e| PluginError::transient_db("SESSION_BEGIN_FAILED", e))?;
 
     let mut loop_error: Option<String> = None;
 
@@ -169,11 +169,11 @@ pub async fn write_stream(
     if let Some(err) = loop_error {
         let commit_state = loop_error_commit_state(session.stats.checkpoint_count);
         session.rollback().await;
-        return Err(ConnectorError::transient_db("WRITE_FAILED", err).with_commit_state(commit_state));
+        return Err(PluginError::transient_db("WRITE_FAILED", err).with_commit_state(commit_state));
     }
 
     let result = session.commit().await.map_err(|e| {
-        ConnectorError::transient_db("COMMIT_FAILED", e)
+        PluginError::transient_db("COMMIT_FAILED", e)
             .with_commit_state(CommitState::AfterCommitUnknown)
     })?;
 

@@ -34,12 +34,12 @@ pub(crate) async fn connect(config: &crate::config::Config) -> Result<Client, St
 /// Validate `PostgreSQL` connectivity.
 pub(crate) async fn validate(
     config: &crate::config::Config,
-) -> Result<ValidationResult, ConnectorError> {
+) -> Result<ValidationResult, PluginError> {
     let client = connect(config)
         .await
-        .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
+        .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
     client.query_one("SELECT 1", &[]).await.map_err(|e| {
-        ConnectorError::transient_network(
+        PluginError::transient_network(
             "CONNECTION_TEST_FAILED",
             format!("Connection test failed: {e}"),
         )

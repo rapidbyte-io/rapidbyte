@@ -232,7 +232,7 @@ fn parse_date32(s: &str) -> Option<i32> {
     let day: u32 = parts.next()?.parse().ok()?;
 
     // Compute days since 1970-01-01 using a simplified Julian-day formula.
-    // This avoids a `chrono` dependency for the WASI connector.
+    // This avoids a `chrono` dependency for the WASI plugin.
     days_since_epoch(year, month, day)
 }
 

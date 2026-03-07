@@ -1,4 +1,4 @@
-//! SQL transform connector powered by Apache DataFusion.
+//! SQL transform plugin powered by Apache DataFusion.
 
 mod config;
 mod transform;
@@ -73,7 +73,7 @@ fn validate_query_contract(config: &config::Config) -> Result<String, String> {
     Ok(query)
 }
 
-#[rapidbyte_sdk::connector(transform)]
+#[rapidbyte_sdk::plugin(transform)]
 pub struct TransformSql {
     config: config::Config,
 }
@@ -81,14 +81,14 @@ pub struct TransformSql {
 impl Transform for TransformSql {
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
+    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
         let query = validate_query_contract(&config)
-            .map_err(|message| ConnectorError::config("SQL_CONFIG", message))?;
+            .map_err(|message| PluginError::config("SQL_CONFIG", message))?;
         Ok((
             Self {
                 config: config::Config { query },
             },
-            ConnectorInfo {
+            PluginInfo {
                 protocol_version: ProtocolVersion::V4,
                 features: vec![],
                 default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
@@ -99,7 +99,7 @@ impl Transform for TransformSql {
     async fn validate(
         config: &Self::Config,
         ctx: &Context,
-    ) -> Result<ValidationResult, ConnectorError> {
+    ) -> Result<ValidationResult, PluginError> {
         let _ = ctx;
         match validate_query_contract(config) {
             Ok(_) => Ok(ValidationResult {
@@ -117,7 +117,7 @@ impl Transform for TransformSql {
         &mut self,
         ctx: &Context,
         stream: StreamContext,
-    ) -> Result<TransformSummary, ConnectorError> {
+    ) -> Result<TransformSummary, PluginError> {
         transform::run(ctx, &stream, &self.config).await
     }
 }
@@ -137,13 +137,13 @@ mod tests {
 
     #[tokio::test]
     async fn init_trims_query_before_storing() {
-        let (connector, _info) = TransformSql::init(config::Config {
+        let (plugin, _info) = TransformSql::init(config::Config {
             query: "  SELECT * FROM input  ".to_string(),
         })
         .await
         .expect("init should succeed");
 
-        assert_eq!(connector.config.query, "SELECT * FROM input");
+        assert_eq!(plugin.config.query, "SELECT * FROM input");
     }
 
     #[tokio::test]
@@ -165,7 +165,7 @@ mod tests {
             &ctx,
         )
         .await
-        .expect("validate should not return connector error");
+        .expect("validate should not return plugin error");
 
         assert_eq!(validation.status, ValidationStatus::Failed);
     }
@@ -214,7 +214,7 @@ mod tests {
             &ctx,
         )
         .await
-        .expect("validate should not return connector error");
+        .expect("validate should not return plugin error");
 
         assert_eq!(validation.status, ValidationStatus::Failed);
         assert!(validation.message.contains("failed to parse SQL query"));

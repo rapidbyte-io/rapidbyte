@@ -21,7 +21,7 @@ pub async fn run(
     ctx: &Context,
     stream: &StreamContext,
     config: &Config,
-) -> Result<TransformSummary, ConnectorError> {
+) -> Result<TransformSummary, PluginError> {
     let session = SessionContext::new();
 
     let mut records_in: u64 = 0;
@@ -46,7 +46,7 @@ pub async fn run(
 
         // Register as MemTable named "input".
         let mem_table = datafusion::datasource::MemTable::try_new(schema, vec![batches]).map_err(
-            |e| ConnectorError::internal("SQL_MEMTABLE", format!("Failed to create MemTable: {e}")),
+            |e| PluginError::internal("SQL_MEMTABLE", format!("Failed to create MemTable: {e}")),
         )?;
 
         // Deregister previous table (no-op on first iteration).
@@ -54,7 +54,7 @@ pub async fn run(
         session
             .register_table("input", Arc::new(mem_table))
             .map_err(|e| {
-                ConnectorError::internal(
+                PluginError::internal(
                     "SQL_REGISTER",
                     format!("Failed to register table: {e}"),
                 )
@@ -62,11 +62,11 @@ pub async fn run(
 
         // Plan and execute.
         let df = session.sql(&config.query).await.map_err(|e| {
-            ConnectorError::internal("SQL_PLAN", format!("Query planning failed: {e}"))
+            PluginError::internal("SQL_PLAN", format!("Query planning failed: {e}"))
         })?;
 
         let result_batches = df.collect().await.map_err(|e| {
-            ConnectorError::internal("SQL_EXEC", format!("Query execution failed: {e}"))
+            PluginError::internal("SQL_EXEC", format!("Query execution failed: {e}"))
         })?;
 
         // Forward each non-empty result batch downstream.

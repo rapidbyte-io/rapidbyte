@@ -1,4 +1,4 @@
-//! Source connector for `PostgreSQL`.
+//! Source plugin for `PostgreSQL`.
 //!
 //! Implements discovery and read paths (full-refresh, incremental cursor reads,
 //! and CDC via `pgoutput` logical replication) and streams Arrow IPC batches to
@@ -19,7 +19,7 @@ use std::time::Instant;
 
 use rapidbyte_sdk::prelude::*;
 
-#[rapidbyte_sdk::connector(source)]
+#[rapidbyte_sdk::plugin(source)]
 pub struct SourcePostgres {
     config: config::Config,
 }
@@ -27,11 +27,11 @@ pub struct SourcePostgres {
 impl Source for SourcePostgres {
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<(Self, ConnectorInfo), ConnectorError> {
+    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
         config.validate()?;
         Ok((
             Self { config },
-            ConnectorInfo {
+            PluginInfo {
                 protocol_version: ProtocolVersion::V4,
                 features: vec![Feature::Cdc, Feature::PartitionedRead],
                 default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
@@ -39,21 +39,21 @@ impl Source for SourcePostgres {
         ))
     }
 
-    async fn discover(&mut self, ctx: &Context) -> Result<Catalog, ConnectorError> {
+    async fn discover(&mut self, ctx: &Context) -> Result<Catalog, PluginError> {
         let _ = ctx;
         let client = client::connect(&self.config)
             .await
-            .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
+            .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
         discovery::discover_catalog(&client)
             .await
             .map(|streams| Catalog { streams })
-            .map_err(|e| ConnectorError::transient_db("DISCOVERY_FAILED", e))
+            .map_err(|e| PluginError::transient_db("DISCOVERY_FAILED", e))
     }
 
     async fn validate(
         config: &Self::Config,
         ctx: &Context,
-    ) -> Result<ValidationResult, ConnectorError> {
+    ) -> Result<ValidationResult, PluginError> {
         let _ = ctx;
         client::validate(config).await
     }
@@ -62,19 +62,19 @@ impl Source for SourcePostgres {
         &mut self,
         ctx: &Context,
         stream: StreamContext,
-    ) -> Result<ReadSummary, ConnectorError> {
+    ) -> Result<ReadSummary, PluginError> {
         let connect_start = Instant::now();
         let client = client::connect(&self.config)
             .await
-            .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
+            .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
         let connect_secs = connect_start.elapsed().as_secs_f64();
 
         reader::read_stream(&client, ctx, &stream, connect_secs)
             .await
-            .map_err(|e| ConnectorError::internal("READ_FAILED", e))
+            .map_err(|e| PluginError::internal("READ_FAILED", e))
     }
 
-    async fn close(&mut self, ctx: &Context) -> Result<(), ConnectorError> {
+    async fn close(&mut self, ctx: &Context) -> Result<(), PluginError> {
         ctx.log(LogLevel::Info, "source-postgres: close (no-op)");
         Ok(())
     }
@@ -86,16 +86,16 @@ impl PartitionedSource for SourcePostgres {
         ctx: &Context,
         stream: StreamContext,
         _partition: PartitionCoordinates,
-    ) -> Result<ReadSummary, ConnectorError> {
+    ) -> Result<ReadSummary, PluginError> {
         let connect_start = Instant::now();
         let client = client::connect(&self.config)
             .await
-            .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
+            .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
         let connect_secs = connect_start.elapsed().as_secs_f64();
 
         reader::read_stream(&client, ctx, &stream, connect_secs)
             .await
-            .map_err(|e| ConnectorError::internal("READ_FAILED", e))
+            .map_err(|e| PluginError::internal("READ_FAILED", e))
     }
 }
 
@@ -105,15 +105,15 @@ impl CdcSource for SourcePostgres {
         ctx: &Context,
         stream: StreamContext,
         _resume: CdcResumeToken,
-    ) -> Result<ReadSummary, ConnectorError> {
+    ) -> Result<ReadSummary, PluginError> {
         let connect_start = Instant::now();
         let client = client::connect(&self.config)
             .await
-            .map_err(|e| ConnectorError::transient_network("CONNECTION_FAILED", e))?;
+            .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
         let connect_secs = connect_start.elapsed().as_secs_f64();
 
         cdc::read_cdc_changes(&client, ctx, &stream, &self.config, connect_secs)
             .await
-            .map_err(|e| ConnectorError::internal("CDC_READ_FAILED", e))
+            .map_err(|e| PluginError::internal("CDC_READ_FAILED", e))
     }
 }
