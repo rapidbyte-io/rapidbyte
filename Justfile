@@ -66,6 +66,12 @@ bench-compare ref1 ref2 *args="":
 scaffold name output=("connectors/" + name):
     cargo run -- scaffold {{name}} --output {{output}}
 
+docker-up:
+    docker compose up -d --wait
+
+docker-down:
+    docker compose down -v
+
 clean:
     cargo clean
 
