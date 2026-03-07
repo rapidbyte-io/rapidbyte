@@ -2,8 +2,8 @@
 # Seed a local Postgres for manual CLI testing.
 # Expects docker-compose Postgres running on port 5433.
 #
-# Usage: ./scripts/seed-dev.sh
-#        ./scripts/seed-dev.sh --rows 1000   # more rows for testing throughput
+# Usage: ./scripts/seed-dev.sh [ROWS]
+#        ./scripts/seed-dev.sh 1000000
 
 set -euo pipefail
 
@@ -24,48 +24,100 @@ $PSQL -c "SELECT 1 FROM pg_database WHERE datname = 'source_test'" | grep -q 1 \
 $PSQL -c "SELECT 1 FROM pg_database WHERE datname = 'dest_test'" | grep -q 1 \
   || $PSQL -c "CREATE DATABASE dest_test;"
 
-# Seed source tables (matches simple_pg_to_pg.yaml fixture)
+# Seed source tables — matches bench_seed_small profile (~500 B/row, 14 columns)
 $PSQL -d source_test <<SQL
 DROP TABLE IF EXISTS public.users CASCADE;
 CREATE TABLE public.users (
-    id          SERIAL PRIMARY KEY,
-    name        TEXT NOT NULL,
-    email       TEXT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    id              BIGSERIAL PRIMARY KEY,
+    event_id        UUID NOT NULL DEFAULT gen_random_uuid(),
+    event_type      TEXT NOT NULL,
+    user_id         BIGINT NOT NULL,
+    session_id      BIGINT,
+    device_type     TEXT NOT NULL,
+    ip_address      INET NOT NULL,
+    country_code    TEXT NOT NULL,
+    page_url        TEXT NOT NULL,
+    referrer_url    TEXT,
+    utm_source      TEXT,
+    utm_medium      TEXT,
+    duration_ms     INTEGER,
+    is_converted    BOOLEAN NOT NULL DEFAULT false,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-INSERT INTO public.users (name, email, created_at)
+INSERT INTO public.users (
+    event_id, event_type, user_id, session_id, device_type, ip_address,
+    country_code, page_url, referrer_url, utm_source, utm_medium,
+    duration_ms, is_converted, created_at
+)
 SELECT
-    'user_' || i,
-    'user_' || i || '@example.com',
-    now() - make_interval(secs => (i * 37) % 86400)
+    gen_random_uuid(),
+    (ARRAY['click','purchase','view','signup','logout','scroll','hover','submit'])[1 + (i % 8)],
+    (i % 100000) + 1,
+    CASE WHEN i % 10 < 7 THEN (i * 31) % 500000 ELSE NULL END,
+    (ARRAY['mobile','desktop','tablet'])[1 + (i % 3)],
+    ('10.' || (i % 256) || '.' || (i / 256 % 256) || '.' || (i % 253 + 1))::inet,
+    (ARRAY['US','GB','DE','FR','JP','CA','AU','BR','IN','MX',
+           'KR','ES','IT','NL','SE','NO','DK','FI','PL','PT'])[1 + (i % 20)],
+    '/section-' || (i % 12) || '/page-' || (i % 500),
+    CASE WHEN i % 10 < 6 THEN 'https://ref-' || (i % 50) || '.example.com/campaign/' || (i % 200) ELSE NULL END,
+    CASE WHEN i % 10 < 4 THEN (ARRAY['google','facebook','twitter','linkedin'])[1 + (i % 4)] ELSE NULL END,
+    CASE WHEN i % 10 < 4 THEN (ARRAY['cpc','organic','social','email'])[1 + (i % 4)] ELSE NULL END,
+    (i * 7) % 30000,
+    (i % 5 = 0),
+    NOW() - make_interval(secs => (i * 37) % 86400)
 FROM generate_series(1, $ROWS) AS s(i);
 
 DROP TABLE IF EXISTS public.orders CASCADE;
 CREATE TABLE public.orders (
-    id          SERIAL PRIMARY KEY,
-    user_id     INTEGER NOT NULL,
-    amount      NUMERIC(10,2) NOT NULL,
-    status      TEXT NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    id              BIGSERIAL PRIMARY KEY,
+    event_id        UUID NOT NULL DEFAULT gen_random_uuid(),
+    event_type      TEXT NOT NULL,
+    user_id         BIGINT NOT NULL,
+    session_id      BIGINT,
+    device_type     TEXT NOT NULL,
+    ip_address      INET NOT NULL,
+    country_code    TEXT NOT NULL,
+    page_url        TEXT NOT NULL,
+    referrer_url    TEXT,
+    utm_source      TEXT,
+    utm_medium      TEXT,
+    duration_ms     INTEGER,
+    is_converted    BOOLEAN NOT NULL DEFAULT false,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-INSERT INTO public.orders (user_id, amount, status, created_at)
+INSERT INTO public.orders (
+    event_id, event_type, user_id, session_id, device_type, ip_address,
+    country_code, page_url, referrer_url, utm_source, utm_medium,
+    duration_ms, is_converted, created_at
+)
 SELECT
-    (i % $ROWS) + 1,
-    round((random() * 500 + 1)::numeric, 2),
-    (ARRAY['completed','pending','cancelled','refunded'])[1 + (i % 4)],
-    now() - make_interval(secs => (i * 23) % 86400)
+    gen_random_uuid(),
+    (ARRAY['order','refund','cancel','ship','deliver','return','exchange','charge'])[1 + (i % 8)],
+    (i % 100000) + 1,
+    CASE WHEN i % 10 < 7 THEN (i * 31) % 500000 ELSE NULL END,
+    (ARRAY['mobile','desktop','tablet'])[1 + (i % 3)],
+    ('10.' || (i % 256) || '.' || (i / 256 % 256) || '.' || (i % 253 + 1))::inet,
+    (ARRAY['US','GB','DE','FR','JP','CA','AU','BR','IN','MX',
+           'KR','ES','IT','NL','SE','NO','DK','FI','PL','PT'])[1 + (i % 20)],
+    '/checkout/' || (i % 12) || '/order-' || (i % 500),
+    CASE WHEN i % 10 < 6 THEN 'https://ref-' || (i % 50) || '.example.com/campaign/' || (i % 200) ELSE NULL END,
+    CASE WHEN i % 10 < 4 THEN (ARRAY['google','facebook','twitter','linkedin'])[1 + (i % 4)] ELSE NULL END,
+    CASE WHEN i % 10 < 4 THEN (ARRAY['cpc','organic','social','email'])[1 + (i % 4)] ELSE NULL END,
+    (i * 7) % 30000,
+    (i % 5 = 0),
+    NOW() - make_interval(secs => (i * 23) % 86400)
 FROM generate_series(1, $ROWS) AS s(i);
 SQL
 
-# Create destination schema
-$PSQL -d dest_test -c "CREATE SCHEMA IF NOT EXISTS raw;"
+# Clean destination
+$PSQL -d dest_test -c "DROP SCHEMA IF EXISTS raw CASCADE; CREATE SCHEMA raw;"
 
-echo "Done. Source: ${ROWS} users, ${ROWS} orders. Destination: dest_test.raw (empty)."
+echo "Done. Source: ${ROWS} users, ${ROWS} orders (~500 B/row each). Destination: dest_test.raw (clean)."
 echo ""
 echo "Run pipeline:"
 echo "  export TEST_SOURCE_PG_HOST=$PG_HOST TEST_SOURCE_PG_PORT=$PG_PORT"
 echo "  export TEST_DEST_PG_HOST=$PG_HOST TEST_DEST_PG_PORT=$PG_PORT"
 echo "  export RAPIDBYTE_CONNECTOR_DIR=target/connectors"
-echo "  ./target/debug/rapidbyte run tests/fixtures/pipelines/simple_pg_to_pg.yaml"
+echo "  ./target/release/rapidbyte run tests/fixtures/pipelines/simple_pg_to_pg.yaml"
