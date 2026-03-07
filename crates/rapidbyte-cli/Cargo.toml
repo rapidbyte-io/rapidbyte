@@ -8,6 +8,7 @@ name = "rapidbyte"
 path = "src/main.rs"
 
 [dependencies]
+rapidbyte-dev = { path = "../rapidbyte-dev" }
 rapidbyte-engine = { path = "../rapidbyte-engine" }
 rapidbyte-runtime = { path = "../rapidbyte-runtime" }
 rapidbyte-types = { path = "../rapidbyte-types" }

@@ -3315,6 +3315,7 @@ dependencies = [
  "console",
  "indicatif",
  "libc",
+ "rapidbyte-dev",
  "rapidbyte-engine",
  "rapidbyte-runtime",
  "rapidbyte-types",
