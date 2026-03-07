@@ -5,6 +5,7 @@
 
 #![warn(clippy::pedantic)]
 
+pub(crate) mod commands;
 pub(crate) mod display;
 pub mod workspace;
 
