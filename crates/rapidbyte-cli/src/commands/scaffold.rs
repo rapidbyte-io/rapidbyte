@@ -404,7 +404,7 @@ pub struct Config {
 }
 
 fn default_port() -> u16 {
-    3306 // TODO: Change to your connector's default port
+    3306 // TODO: Change to your plugin's default port
 }
 
 impl Config {

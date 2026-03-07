@@ -10,7 +10,7 @@ use rapidbyte_engine::orchestrator;
 
 use crate::Verbosity;
 
-/// Execute the `check` command: validate pipeline config and connector connectivity.
+/// Execute the `check` command: validate pipeline config and plugin connectivity.
 ///
 /// # Errors
 ///

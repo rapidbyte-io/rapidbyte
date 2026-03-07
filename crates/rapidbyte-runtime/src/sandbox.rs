@@ -58,7 +58,7 @@ pub fn intersect_preopens(
     intersect_string_lists(manifest_preopens, pipeline_preopens)
 }
 
-/// Build a WASI context with network disabled; connectors use host `connect-tcp`.
+/// Build a WASI context with network disabled; plugins use host `connect-tcp`.
 ///
 /// # Errors
 ///
@@ -70,7 +70,7 @@ pub fn build_wasi_ctx(
     let mut builder = WasiCtxBuilder::new();
     builder.allow_blocking_current_thread(true);
 
-    // WASI-level network is disabled; connectors must use host `connect-tcp`.
+    // WASI-level network is disabled; plugins must use host `connect-tcp`.
     builder.allow_tcp(false);
     builder.allow_udp(false);
     builder.allow_ip_name_lookup(false);

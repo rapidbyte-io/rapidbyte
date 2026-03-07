@@ -106,7 +106,7 @@ pub(crate) fn run_source_stream(
 
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)
-        .connector_id(plugin_id)
+        .plugin_id(plugin_id)
         .stream(stream_ctx.stream_name.clone())
         .state_backend(state_backend)
         .sender(sender.clone())
@@ -273,7 +273,7 @@ pub(crate) fn run_destination_stream(
 
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)
-        .connector_id(plugin_id)
+        .plugin_id(plugin_id)
         .stream(stream_ctx.stream_name.clone())
         .state_backend(state_backend)
         .receiver(receiver)
@@ -451,7 +451,7 @@ pub(crate) fn run_transform_stream(
 
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)
-        .connector_id(plugin_id)
+        .plugin_id(plugin_id)
         .stream(stream_ctx.stream_name.clone())
         .state_backend(state_backend)
         .sender(sender.clone())
@@ -575,7 +575,7 @@ pub(crate) fn validate_plugin(
 
     let mut builder = ComponentHostState::builder()
         .pipeline("check")
-        .connector_id(plugin_id)
+        .plugin_id(plugin_id)
         .stream("check")
         .state_backend(state)
         .config(config)
@@ -690,7 +690,7 @@ pub(crate) fn run_discover(
     let state = Arc::new(SqliteStateBackend::in_memory()?);
     let mut builder = ComponentHostState::builder()
         .pipeline("discover")
-        .connector_id(plugin_id)
+        .plugin_id(plugin_id)
         .stream("discover")
         .state_backend(state)
         .config(config)

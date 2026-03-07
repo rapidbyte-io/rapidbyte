@@ -29,7 +29,7 @@ pub fn derive_config_schema(input: TokenStream) -> TokenStream {
 
 /// Attribute macro that generates all component glue for a plugin struct.
 ///
-/// Replaces `connector_main!`, `embed_manifest!`, and `embed_config_schema!`
+/// Replaces manual main/manifest/config glue
 /// with a single annotation:
 ///
 /// ```ignore

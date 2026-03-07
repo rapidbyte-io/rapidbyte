@@ -1,6 +1,6 @@
 //! Stream catalog and schema types.
 //!
-//! A [`Catalog`] is the set of [`Stream`]s a source connector exposes.
+//! A [`Catalog`] is the set of [`Stream`]s a source plugin exposes.
 //! Each stream carries a schema of [`ColumnSchema`] entries describing
 //! the Arrow-typed columns available for replication.
 
@@ -19,7 +19,7 @@ pub struct ColumnSchema {
     pub nullable: bool,
 }
 
-/// A discoverable stream exposed by a source connector.
+/// A discoverable stream exposed by a source plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Stream {
     /// Fully-qualified stream name (e.g., `"public.users"`).
@@ -36,7 +36,7 @@ pub struct Stream {
     pub source_defined_primary_key: Option<Vec<String>>,
 }
 
-/// Collection of streams discovered by a source connector.
+/// Collection of streams discovered by a source plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Catalog {
     pub streams: Vec<Stream>,
@@ -44,7 +44,7 @@ pub struct Catalog {
 
 /// Schema representation for stream context.
 ///
-/// Connectors receive schema information in one of these formats
+/// Plugins receive schema information in one of these formats
 /// when starting a read or write operation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]

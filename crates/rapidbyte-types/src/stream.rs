@@ -1,6 +1,6 @@
 //! Stream execution context, limits, and policies.
 //!
-//! [`StreamContext`] is the central type passed to connectors for each
+//! [`StreamContext`] is the central type passed to plugins for each
 //! stream operation. It bundles schema, sync configuration, resource
 //! limits, and error handling policies.
 
@@ -182,9 +182,9 @@ impl Default for StreamLimits {
 
 // ── Stream Context ──────────────────────────────────────────────────
 
-/// Execution context passed to a connector for a single stream operation.
+/// Execution context passed to a plugin for a single stream operation.
 ///
-/// Bundles everything a connector needs: stream identity, schema, sync
+/// Bundles everything a plugin needs: stream identity, schema, sync
 /// configuration, resource limits, and error handling policies.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StreamContext {
@@ -230,7 +230,7 @@ pub struct StreamContext {
 }
 
 impl StreamContext {
-    /// Returns the physical source stream/table name used by source connectors.
+    /// Returns the physical source stream/table name used by source plugins.
     ///
     /// Falls back to [`Self::stream_name`] when no explicit source name is set.
     #[must_use]

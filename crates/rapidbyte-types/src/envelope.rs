@@ -56,7 +56,7 @@ pub struct DlqRecord {
 /// Envelope wrapping a protocol payload with routing metadata.
 ///
 /// Used to frame checkpoints, metrics, and other messages exchanged
-/// between connectors and the host runtime.
+/// between plugins and the host runtime.
 ///
 /// The `payload` field is a distinct JSON key (not flattened) for
 /// unambiguous serialization.
@@ -64,8 +64,8 @@ pub struct DlqRecord {
 pub struct PayloadEnvelope<T> {
     /// Protocol version for this message.
     pub protocol_version: ProtocolVersion,
-    /// Connector that produced this message.
-    pub connector_id: String,
+    /// Plugin that produced this message.
+    pub plugin_id: String,
     /// Stream this message relates to.
     pub stream_name: String,
     /// The wrapped payload.
@@ -89,7 +89,7 @@ mod tests {
     fn payload_envelope_explicit_payload_field() {
         let env = PayloadEnvelope {
             protocol_version: ProtocolVersion::V5,
-            connector_id: "rapidbyte/source-postgres".into(),
+            plugin_id: "rapidbyte/source-postgres".into(),
             stream_name: "public.users".into(),
             payload: serde_json::json!({"id": 1}),
         };

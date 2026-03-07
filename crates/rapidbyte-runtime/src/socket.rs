@@ -1,4 +1,4 @@
-//! Host TCP socket helpers for connector network I/O.
+//! Host TCP socket helpers for plugin network I/O.
 
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 

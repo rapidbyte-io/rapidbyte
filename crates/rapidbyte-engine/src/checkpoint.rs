@@ -192,7 +192,7 @@ mod tests {
         };
         let source_env = PayloadEnvelope {
             protocol_version: ProtocolVersion::V5,
-            connector_id: "source-postgres".to_string(),
+            plugin_id: "source-postgres".to_string(),
             stream_name: "users".to_string(),
             payload: source_cp,
         };
@@ -217,7 +217,7 @@ mod tests {
         };
         let dest_env = PayloadEnvelope {
             protocol_version: ProtocolVersion::V5,
-            connector_id: "dest-postgres".to_string(),
+            plugin_id: "dest-postgres".to_string(),
             stream_name: "users".to_string(),
             payload: dest_cp,
         };

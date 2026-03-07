@@ -1,4 +1,4 @@
-//! Network ACL derivation and host allow/deny matching for connector sockets.
+//! Network ACL derivation and host allow/deny matching for plugin sockets.
 
 use std::collections::HashSet;
 use std::net::IpAddr;
@@ -171,7 +171,7 @@ pub fn derive_network_acl(
     pipeline_allowed_hosts: Option<&[String]>,
 ) -> NetworkAcl {
     let Some(perms) = permissions else {
-        // Backwards compatibility for connectors without manifests.
+        // Backwards compatibility for plugins without manifests.
         return NetworkAcl::allow_all();
     };
 

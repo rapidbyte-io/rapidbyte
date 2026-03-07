@@ -1,4 +1,4 @@
-//! Host-side runtime state and host import implementations for connector components.
+//! Host-side runtime state and host import implementations for plugin components.
 //!
 //! The `*_impl` methods mirror the WIT-generated calling convention (owned `String` / `Vec<u8>`),
 //! and inner types are consumed by the bindings module.
@@ -42,7 +42,7 @@ const MAX_STATE_KEY_LEN: usize = 1024;
 /// Default maximum DLQ records kept in memory per run.
 pub const DEFAULT_DLQ_LIMIT: usize = 10_000;
 
-/// Channel frame type for batch routing between connector stages.
+/// Channel frame type for batch routing between plugin stages.
 pub enum Frame {
     /// IPC-encoded Arrow `RecordBatch` (optionally compressed).
     Data(bytes::Bytes),
@@ -73,9 +73,9 @@ pub struct HostTimings {
 
 // --- Inner types ---
 
-pub(crate) struct ConnectorIdentity {
+pub(crate) struct PluginIdentity {
     pub pipeline: PipelineId,
-    pub connector_id: String,
+    pub plugin_id: String,
     pub stream: StreamName,
     pub state_backend: Arc<dyn StateBackend>,
 }
@@ -105,7 +105,7 @@ pub(crate) struct SocketManager {
 
 /// Shared state passed to Wasmtime component host imports.
 pub struct ComponentHostState {
-    pub(crate) identity: ConnectorIdentity,
+    pub(crate) identity: PluginIdentity,
     pub(crate) batch: BatchRouter,
     pub(crate) checkpoints: CheckpointCollector,
     pub(crate) sockets: SocketManager,
@@ -120,7 +120,7 @@ pub struct ComponentHostState {
 /// Builder for [`ComponentHostState`].
 pub struct HostStateBuilder {
     pipeline: Option<String>,
-    connector_id: Option<String>,
+    plugin_id: Option<String>,
     stream: Option<String>,
     state_backend: Option<Arc<dyn StateBackend>>,
     sender: Option<mpsc::Sender<Frame>>,
@@ -141,7 +141,7 @@ impl HostStateBuilder {
     fn new() -> Self {
         Self {
             pipeline: None,
-            connector_id: None,
+            plugin_id: None,
             stream: None,
             state_backend: None,
             sender: None,
@@ -166,8 +166,8 @@ impl HostStateBuilder {
     }
 
     #[must_use]
-    pub fn connector_id(mut self, id: impl Into<String>) -> Self {
-        self.connector_id = Some(id.into());
+    pub fn plugin_id(mut self, id: impl Into<String>) -> Self {
+        self.plugin_id = Some(id.into());
         self
     }
 
@@ -265,9 +265,9 @@ impl HostStateBuilder {
         let pipeline = self
             .pipeline
             .ok_or_else(|| anyhow::anyhow!("pipeline is required"))?;
-        let connector_id = self
-            .connector_id
-            .ok_or_else(|| anyhow::anyhow!("connector_id is required"))?;
+        let plugin_id = self
+            .plugin_id
+            .ok_or_else(|| anyhow::anyhow!("plugin_id is required"))?;
         let stream = self
             .stream
             .ok_or_else(|| anyhow::anyhow!("stream is required"))?;
@@ -276,9 +276,9 @@ impl HostStateBuilder {
             .ok_or_else(|| anyhow::anyhow!("state_backend is required"))?;
 
         Ok(ComponentHostState {
-            identity: ConnectorIdentity {
+            identity: PluginIdentity {
                 pipeline: PipelineId::new(pipeline),
-                connector_id,
+                plugin_id,
                 stream: StreamName::new(stream),
                 state_backend,
             },
@@ -400,7 +400,7 @@ impl ComponentHostState {
         if payload.is_empty() {
             return Err(PluginError::internal(
                 "EMPTY_BATCH",
-                "Connector emitted a zero-length batch; this is a protocol violation",
+                "Plugin emitted a zero-length batch; this is a protocol violation",
             ));
         }
 
@@ -487,7 +487,7 @@ impl ComponentHostState {
         match scope {
             StateScope::Pipeline => key.to_string(),
             StateScope::Stream => format!("{}:{}", self.current_stream(), key),
-            StateScope::ConnectorInstance => format!("{}:{}", self.identity.connector_id, key),
+            StateScope::PluginInstance => format!("{}:{}", self.identity.plugin_id, key),
         }
     }
 
@@ -651,11 +651,11 @@ impl ComponentHostState {
         let stream = self.current_stream();
 
         match level {
-            0 => tracing::error!(pipeline, stream = %stream, "[connector] {}", msg),
-            1 => tracing::warn!(pipeline, stream = %stream, "[connector] {}", msg),
-            2 => tracing::info!(pipeline, stream = %stream, "[connector] {}", msg),
-            3 => tracing::debug!(pipeline, stream = %stream, "[connector] {}", msg),
-            _ => tracing::trace!(pipeline, stream = %stream, "[connector] {}", msg),
+            0 => tracing::error!(pipeline, stream = %stream, "[plugin] {}", msg),
+            1 => tracing::warn!(pipeline, stream = %stream, "[plugin] {}", msg),
+            2 => tracing::info!(pipeline, stream = %stream, "[plugin] {}", msg),
+            3 => tracing::debug!(pipeline, stream = %stream, "[plugin] {}", msg),
+            _ => tracing::trace!(pipeline, stream = %stream, "[plugin] {}", msg),
         }
     }
 
@@ -668,7 +668,7 @@ impl ComponentHostState {
         if !self.sockets.acl.allows(&host) {
             return Err(PluginError::permission(
                 "NETWORK_DENIED",
-                format!("Host '{host}' is not allowed by connector permissions"),
+                format!("Host '{host}' is not allowed by plugin permissions"),
             ));
         }
 
@@ -934,7 +934,7 @@ fn parse_state_scope(scope: u32) -> Result<StateScope, PluginError> {
     match scope {
         0 => Ok(StateScope::Pipeline),
         1 => Ok(StateScope::Stream),
-        2 => Ok(StateScope::ConnectorInstance),
+        2 => Ok(StateScope::PluginInstance),
         _ => Err(PluginError::config(
             "INVALID_SCOPE",
             format!("Invalid scope: {scope}"),
@@ -951,7 +951,7 @@ mod tests {
         let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
         ComponentHostState::builder()
             .pipeline("test-pipeline")
-            .connector_id("source-postgres")
+            .plugin_id("source-postgres")
             .stream("users")
             .state_backend(state)
             .build()
@@ -962,7 +962,7 @@ mod tests {
     fn builder_creates_valid_state() {
         let host = test_host_state();
         assert_eq!(host.identity.pipeline.as_str(), "test-pipeline");
-        assert_eq!(host.identity.connector_id, "source-postgres");
+        assert_eq!(host.identity.plugin_id, "source-postgres");
         assert_eq!(host.current_stream(), "users");
     }
 
@@ -977,7 +977,7 @@ mod tests {
         let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
         let host = ComponentHostState::builder()
             .pipeline("p")
-            .connector_id("c")
+            .plugin_id("c")
             .stream("s")
             .state_backend(state)
             .dlq_limit(500)
@@ -990,7 +990,7 @@ mod tests {
     fn builder_missing_required_field_returns_error() {
         let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
         let result = ComponentHostState::builder()
-            .connector_id("c")
+            .plugin_id("c")
             .stream("s")
             .state_backend(state)
             .build();
@@ -1017,10 +1017,10 @@ mod tests {
     }
 
     #[test]
-    fn scoped_state_key_connector_scope() {
+    fn scoped_state_key_plugin_scope() {
         let host = test_host_state();
         assert_eq!(
-            host.scoped_state_key(StateScope::ConnectorInstance, "offset"),
+            host.scoped_state_key(StateScope::PluginInstance, "offset"),
             "source-postgres:offset"
         );
     }

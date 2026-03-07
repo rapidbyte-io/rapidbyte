@@ -1,4 +1,4 @@
-//! REPL loop, command dispatch, and source connector operations.
+//! REPL loop, command dispatch, and source plugin operations.
 //!
 //! Implements the interactive dev shell using reedline, with handlers for
 //! all dot-commands and SQL queries.
@@ -40,7 +40,7 @@ pub(crate) struct ReplState {
 }
 
 pub(crate) struct ConnectedSource {
-    pub connector_ref: String,
+    pub plugin_ref: String,
     pub config: serde_json::Value,
     pub catalog: Catalog,
     pub loaded_module: LoadedComponent,
@@ -104,7 +104,7 @@ pub(crate) async fn run() -> Result<()> {
 
 async fn handle_command(state: &mut ReplState, cmd: Command) {
     let result = match cmd {
-        Command::Source { connector, args } => handle_source(state, &connector, &args).await,
+        Command::Source { plugin, args } => handle_source(state, &plugin, &args).await,
         Command::Tables => handle_tables(state),
         Command::Schema { table } => handle_schema(state, &table),
         Command::Stream { table, limit } => handle_stream(state, &table, limit).await,
@@ -129,7 +129,7 @@ async fn handle_command(state: &mut ReplState, cmd: Command) {
 
 async fn handle_source(
     state: &mut ReplState,
-    connector: &str,
+    plugin_name: &str,
     args: &[(String, String)],
 ) -> Result<()> {
     // Build config object from key-value args.
@@ -147,16 +147,11 @@ async fn handle_source(
     }
     let config = serde_json::Value::Object(config_map);
 
-    // Normalize connector name: prepend "source-" if bare name given.
-    let connector_ref = if connector.starts_with("source-") || connector.contains('/') {
-        connector.to_string()
-    } else {
-        format!("source-{connector}")
-    };
+    let plugin_ref = plugin_name.to_string();
 
     let spinner = make_spinner("Connecting...");
 
-    let result = connect_source(&connector_ref, &config).await;
+    let result = connect_source(&plugin_ref, &config).await;
     spinner.finish_and_clear();
     let (catalog, loaded_module, permissions) = result?;
 
@@ -167,7 +162,7 @@ async fn handle_source(
     ));
 
     state.source = Some(ConnectedSource {
-        connector_ref,
+        plugin_ref,
         config,
         catalog,
         loaded_module,
@@ -177,18 +172,18 @@ async fn handle_source(
     Ok(())
 }
 
-/// Resolve, load, and discover a source connector.
+/// Resolve, load, and discover a source plugin.
 async fn connect_source(
-    connector_ref: &str,
+    plugin_ref: &str,
     config: &serde_json::Value,
 ) -> Result<(Catalog, LoadedComponent, Option<Permissions>)> {
-    let wasm_path = resolve_plugin_path(connector_ref, PluginKind::Source)?;
+    let wasm_path = resolve_plugin_path(plugin_ref, PluginKind::Source)?;
     let manifest = load_plugin_manifest(&wasm_path)?;
     let permissions = manifest.as_ref().map(|m| m.permissions.clone());
     let permissions_clone = permissions.clone();
 
     let config = config.clone();
-    let connector_ref = connector_ref.to_string();
+    let plugin_ref = plugin_ref.to_string();
 
     let (catalog, module) = tokio::task::spawn_blocking(move || -> Result<(Catalog, LoadedComponent)> {
         let runtime = WasmRuntime::new()?;
@@ -202,7 +197,7 @@ async fn connect_source(
         let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::channel::<Frame>(1);
         let mut builder = ComponentHostState::builder()
             .pipeline("dev")
-            .connector_id(&connector_ref)
+            .plugin_id(&plugin_ref)
             .stream("discover")
             .state_backend(state_backend as Arc<dyn rapidbyte_state::StateBackend>)
             .sender(dummy_tx)
@@ -246,7 +241,7 @@ async fn connect_source(
         Ok((catalog, module))
     })
     .await
-    .context("Connector task panicked")??;
+    .context("Plugin task panicked")??;
 
     Ok((catalog, module, permissions))
 }
@@ -313,7 +308,7 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
     let source = require_source(state)?;
     let stream = find_stream(&source.catalog, table)?.clone();
 
-    let connector_ref = source.connector_ref.clone();
+    let plugin_ref = source.plugin_ref.clone();
     let config = source.config.clone();
     let loaded_module = source.loaded_module.clone();
     let permissions = source.permissions.clone();
@@ -355,7 +350,7 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
 
         let mut builder = ComponentHostState::builder()
             .pipeline("dev")
-            .connector_id(&connector_ref)
+            .plugin_id(&plugin_ref)
             .stream(&stream_ctx.stream_name)
             .state_backend(state_backend as Arc<dyn rapidbyte_state::StateBackend>)
             .sender(tx)
@@ -525,7 +520,7 @@ async fn handle_sql(state: &ReplState, sql: &str) -> Result<()> {
 
 fn print_help() {
     let commands: &[(&str, &str)] = &[
-        (".source <connector> [--key value ...]", "Connect to a source connector"),
+        (".source <plugin> [--key value ...]", "Connect to a source plugin"),
         (".tables",                               "List discovered streams"),
         (".schema <table>",                       "Show columns for a stream"),
         (".stream <table> [--limit N]",           "Read a stream into the workspace"),

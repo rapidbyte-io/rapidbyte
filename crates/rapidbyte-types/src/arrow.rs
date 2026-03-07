@@ -10,7 +10,7 @@ use std::fmt;
 /// Arrow-compatible logical data type.
 ///
 /// Covers the subset of Arrow types needed for database column mapping.
-/// New variants may be added as connector support expands.
+/// New variants may be added as plugin support expands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ArrowDataType {

@@ -56,7 +56,7 @@ impl LoadedComponent {
     }
 }
 
-/// Manages loading connector components.
+/// Manages loading plugin components.
 ///
 /// Wraps a Wasmtime `Engine` with optional AOT caching and epoch-based timeout.
 pub struct WasmRuntime {
@@ -73,11 +73,11 @@ enum AotLoadKind {
     Compiled,
 }
 
-/// Create a component linker with WASI imports and connector bindings.
+/// Create a component linker with WASI imports and plugin bindings.
 ///
 /// # Errors
 ///
-/// Returns an error if WASI imports or connector bindings fail to register.
+/// Returns an error if WASI imports or plugin bindings fail to register.
 pub fn create_component_linker<T, F>(
     engine: &Engine,
     role: &str,
@@ -112,7 +112,7 @@ impl WasmRuntime {
         let aot_compat_hash = hasher.finish();
 
         // Start a background thread that increments the engine epoch every second.
-        // This is used with `Store::set_epoch_deadline` to enforce connector timeouts.
+        // This is used with `Store::set_epoch_deadline` to enforce plugin timeouts.
         let ticker_engine = engine.clone();
         let epoch_ticker = std::thread::Builder::new()
             .name("rapidbyte-epoch-ticker".to_string())
@@ -190,21 +190,21 @@ impl WasmRuntime {
                 tracing::info!(
                     path = %wasm_path.display(),
                     load_ms,
-                    "Loaded connector module from AOT cache"
+                    "Loaded plugin module from AOT cache"
                 );
             }
             Some(AotLoadKind::Compiled) => {
                 tracing::info!(
                     path = %wasm_path.display(),
                     load_ms,
-                    "Precompiled connector module for AOT cache"
+                    "Precompiled plugin module for AOT cache"
                 );
             }
             None => {
                 tracing::info!(
                     path = %wasm_path.display(),
                     load_ms,
-                    "Loaded connector module without AOT cache"
+                    "Loaded plugin module without AOT cache"
                 );
             }
         }
@@ -241,7 +241,7 @@ impl WasmRuntime {
                     tracing::debug!(
                         path = %wasm_path.display(),
                         artifact = %artifact_path.display(),
-                        "Loaded connector from Wasmtime AOT artifact"
+                        "Loaded plugin from Wasmtime AOT artifact"
                     );
                     return Ok((component, AotLoadKind::CacheHit));
                 }
@@ -282,7 +282,7 @@ impl WasmRuntime {
         tracing::debug!(
             path = %wasm_path.display(),
             artifact = %artifact_path.display(),
-            "Compiled connector into Wasmtime AOT artifact"
+            "Compiled plugin into Wasmtime AOT artifact"
         );
         Ok((component, AotLoadKind::Compiled))
     }

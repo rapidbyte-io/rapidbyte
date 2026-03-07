@@ -59,15 +59,15 @@ pub fn spawn_progress_spinner(
                 ]),
         );
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
-        spinner.set_message("Resolving connectors...");
+        spinner.set_message("Resolving plugins...");
 
         let mut last_update = Instant::now();
 
         while let Some(event) = rx.recv().await {
             match event {
                 ProgressEvent::PhaseChange { phase } => match phase {
-                    Phase::Resolving => spinner.set_message("Resolving connectors..."),
-                    Phase::Loading => spinner.set_message("Loading connectors..."),
+                    Phase::Resolving => spinner.set_message("Resolving plugins..."),
+                    Phase::Loading => spinner.set_message("Loading plugins..."),
                     Phase::Running => {
                         update_running_message(&spinner, &counters);
                         last_update = Instant::now();

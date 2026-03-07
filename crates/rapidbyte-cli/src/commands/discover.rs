@@ -9,7 +9,7 @@ use rapidbyte_types::wire::SyncMode;
 
 use crate::Verbosity;
 
-/// Execute the `discover` command: discover available streams from a source connector.
+/// Execute the `discover` command: discover available streams from a source plugin.
 ///
 /// # Errors
 ///

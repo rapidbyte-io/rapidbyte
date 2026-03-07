@@ -5,7 +5,7 @@ use arrow::datatypes::{DataType, TimeUnit};
 
 /// Convert protocol ArrowDataType to the actual arrow crate DataType.
 ///
-/// This is the single source of truth for type mapping. Connectors should
+/// This is the single source of truth for type mapping. Plugins should
 /// use this function instead of hand-rolling match blocks.
 pub fn arrow_data_type(proto: ArrowDataType) -> DataType {
     match proto {

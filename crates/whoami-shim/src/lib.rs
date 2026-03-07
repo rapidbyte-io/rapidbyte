@@ -1,8 +1,8 @@
-//! Minimal `whoami` shim for connector WASM builds.
+//! Minimal `whoami` shim for plugin WASM builds.
 //!
 //! `tokio-postgres` only needs `whoami::username()`. The upstream `whoami`
 //! crate currently uses unstable WASI APIs on `wasm32-wasip2`, so we provide a
-//! tiny compatible surface for connector builds.
+//! tiny compatible surface for plugin builds.
 
 use std::env;
 use std::io;

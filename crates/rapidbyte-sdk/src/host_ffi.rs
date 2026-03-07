@@ -66,13 +66,13 @@ pub trait HostImports: Send + Sync {
 
     fn checkpoint(
         &self,
-        connector_id: &str,
+        plugin_id: &str,
         stream_name: &str,
         cp: &Checkpoint,
     ) -> Result<(), PluginError>;
     fn metric(
         &self,
-        connector_id: &str,
+        plugin_id: &str,
         stream_name: &str,
         m: &Metric,
     ) -> Result<(), PluginError>;
@@ -98,7 +98,7 @@ const fn state_scope_to_i32(scope: StateScope) -> i32 {
     match scope {
         StateScope::Pipeline => 0,
         StateScope::Stream => 1,
-        StateScope::ConnectorInstance => 2,
+        StateScope::PluginInstance => 2,
     }
 }
 
@@ -251,7 +251,7 @@ impl HostImports for WasmHostImports {
 
     fn checkpoint(
         &self,
-        connector_id: &str,
+        plugin_id: &str,
         stream_name: &str,
         cp: &Checkpoint,
     ) -> Result<(), PluginError> {
@@ -263,7 +263,7 @@ impl HostImports for WasmHostImports {
 
         let envelope = PayloadEnvelope {
             protocol_version: ProtocolVersion::V5,
-            connector_id: connector_id.to_string(),
+            plugin_id: plugin_id.to_string(),
             stream_name: stream_name.to_string(),
             payload: cp,
         };
@@ -276,13 +276,13 @@ impl HostImports for WasmHostImports {
 
     fn metric(
         &self,
-        connector_id: &str,
+        plugin_id: &str,
         stream_name: &str,
         m: &Metric,
     ) -> Result<(), PluginError> {
         let envelope = PayloadEnvelope {
             protocol_version: ProtocolVersion::V5,
-            connector_id: connector_id.to_string(),
+            plugin_id: plugin_id.to_string(),
             stream_name: stream_name.to_string(),
             payload: m,
         };
@@ -406,7 +406,7 @@ impl HostImports for StubHostImports {
 
     fn checkpoint(
         &self,
-        _connector_id: &str,
+        _plugin_id: &str,
         _stream_name: &str,
         _cp: &Checkpoint,
     ) -> Result<(), PluginError> {
@@ -415,7 +415,7 @@ impl HostImports for StubHostImports {
 
     fn metric(
         &self,
-        _connector_id: &str,
+        _plugin_id: &str,
         _stream_name: &str,
         _m: &Metric,
     ) -> Result<(), PluginError> {
@@ -560,11 +560,11 @@ pub fn state_compare_and_set(
 ///
 /// Returns `Err` if the host rejects the checkpoint.
 pub fn checkpoint(
-    connector_id: &str,
+    plugin_id: &str,
     stream_name: &str,
     cp: &Checkpoint,
 ) -> Result<(), PluginError> {
-    host_imports().checkpoint(connector_id, stream_name, cp)
+    host_imports().checkpoint(plugin_id, stream_name, cp)
 }
 
 /// Emit a metric to the host runtime.
@@ -572,8 +572,8 @@ pub fn checkpoint(
 /// # Errors
 ///
 /// Returns `Err` if metric emission fails.
-pub fn metric(connector_id: &str, stream_name: &str, m: &Metric) -> Result<(), PluginError> {
-    host_imports().metric(connector_id, stream_name, m)
+pub fn metric(plugin_id: &str, stream_name: &str, m: &Metric) -> Result<(), PluginError> {
+    host_imports().metric(plugin_id, stream_name, m)
 }
 
 /// Emit a dead-letter queue record to the host runtime.

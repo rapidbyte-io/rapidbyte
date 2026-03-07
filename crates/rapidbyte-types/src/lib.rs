@@ -1,6 +1,6 @@
 //! Shared Rapidbyte protocol, manifest, and error types.
 //!
-//! Dependency-boundary-safe for both host runtime and WASI connector targets.
+//! Dependency-boundary-safe for both host runtime and WASI plugin targets.
 //! All types use serde for serialization across the host/guest boundary.
 //!
 //! | Module         | Responsibility |

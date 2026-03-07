@@ -6,9 +6,9 @@
 /// Parsed REPL input.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Command {
-    /// .source <connector> [--key value ...]
+    /// .source <plugin> [--key value ...]
     Source {
-        connector: String,
+        plugin: String,
         args: Vec<(String, String)>,
     },
     /// .tables
@@ -94,9 +94,9 @@ fn parse_stream(args: &[&str]) -> Result<Command, String> {
 
 fn parse_source(args: &[&str]) -> Result<Command, String> {
     if args.is_empty() {
-        return Err("Usage: .source <connector> [--key value ...]".to_string());
+        return Err("Usage: .source <plugin> [--key value ...]".to_string());
     }
-    let connector = args[0].to_string();
+    let plugin = args[0].to_string();
     let mut kv_args: Vec<(String, String)> = Vec::new();
     let mut i = 1;
     while i < args.len() {
@@ -110,7 +110,7 @@ fn parse_source(args: &[&str]) -> Result<Command, String> {
         i += 1;
     }
     Ok(Command::Source {
-        connector,
+        plugin,
         args: kv_args,
     })
 }
@@ -208,7 +208,7 @@ mod tests {
         assert_eq!(
             cmd,
             Command::Source {
-                connector: "postgres".to_string(),
+                plugin: "postgres".to_string(),
                 args: vec![
                     ("host".to_string(), "localhost".to_string()),
                     ("port".to_string(), "5432".to_string()),
@@ -218,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn test_source_missing_connector() {
+    fn test_source_missing_plugin() {
         assert!(parse(".source").unwrap().is_err());
     }
 

@@ -1,6 +1,6 @@
 //! Interactive dev shell for exploring data pipelines.
 //!
-//! Provides a REPL that connects to source connectors, streams data
+//! Provides a REPL that connects to source plugins, streams data
 //! into an in-memory Arrow workspace, and queries with SQL via DataFusion.
 //!
 //! # Crate structure

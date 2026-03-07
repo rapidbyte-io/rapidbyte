@@ -1,7 +1,7 @@
 //! Plugin execution context.
 //!
 //! `Context` bundles stream metadata with host-FFI operations so plugin
-//! authors no longer need to pass `connector_id` / `stream_name` to every call.
+//! authors no longer need to pass `plugin_id` / `stream_name` to every call.
 
 use std::sync::Arc;
 
@@ -26,7 +26,7 @@ pub enum LogLevel {
 /// Execution context carrying stream metadata and host-FFI delegation.
 ///
 /// Plugin authors receive a `Context` at each lifecycle entry-point.
-/// Methods that require `connector_id` or `stream_name` (checkpoints,
+/// Methods that require `plugin_id` or `stream_name` (checkpoints,
 /// metrics, DLQ records) automatically supply the values stored here.
 ///
 /// ```ignore
@@ -35,22 +35,22 @@ pub enum LogLevel {
 /// ```
 #[derive(Debug, Clone)]
 pub struct Context {
-    connector_id: String,
+    plugin_id: String,
     stream_name: String,
 }
 
 impl Context {
-    /// Create a new context for the given connector and stream.
-    pub fn new(connector_id: impl Into<String>, stream_name: impl Into<String>) -> Self {
+    /// Create a new context for the given plugin and stream.
+    pub fn new(plugin_id: impl Into<String>, stream_name: impl Into<String>) -> Self {
         Self {
-            connector_id: connector_id.into(),
+            plugin_id: plugin_id.into(),
             stream_name: stream_name.into(),
         }
     }
 
-    /// Returns the connector identifier.
-    pub fn connector_id(&self) -> &str {
-        &self.connector_id
+    /// Returns the plugin identifier.
+    pub fn plugin_id(&self) -> &str {
+        &self.plugin_id
     }
 
     /// Returns the current stream name.
@@ -59,10 +59,10 @@ impl Context {
     }
 
     /// Derive a new `Context` that targets a different stream while keeping the
-    /// same connector identity.
+    /// same plugin identity.
     pub fn with_stream(&self, stream_name: impl Into<String>) -> Self {
         Self {
-            connector_id: self.connector_id.clone(),
+            plugin_id: self.plugin_id.clone(),
             stream_name: stream_name.into(),
         }
     }
@@ -111,14 +111,14 @@ impl Context {
         host_ffi::state_put(scope, key, value)
     }
 
-    /// Emit a checkpoint using the context's connector ID and stream name.
+    /// Emit a checkpoint using the context's plugin ID and stream name.
     pub fn checkpoint(&self, cp: &Checkpoint) -> Result<(), PluginError> {
-        host_ffi::checkpoint(&self.connector_id, &self.stream_name, cp)
+        host_ffi::checkpoint(&self.plugin_id, &self.stream_name, cp)
     }
 
-    /// Emit a metric using the context's connector ID and stream name.
+    /// Emit a metric using the context's plugin ID and stream name.
     pub fn metric(&self, m: &Metric) -> Result<(), PluginError> {
-        host_ffi::metric(&self.connector_id, &self.stream_name, m)
+        host_ffi::metric(&self.plugin_id, &self.stream_name, m)
     }
 
     /// Emit a dead-letter-queue record using the context's stream name.
@@ -143,16 +143,16 @@ mod tests {
 
     #[test]
     fn test_new_stores_metadata() {
-        let ctx = Context::new("my-connector", "users");
-        assert_eq!(ctx.connector_id(), "my-connector");
+        let ctx = Context::new("my-plugin", "users");
+        assert_eq!(ctx.plugin_id(), "my-plugin");
         assert_eq!(ctx.stream_name(), "users");
     }
 
     #[test]
     fn test_with_stream_changes_stream() {
-        let ctx = Context::new("my-connector", "users");
+        let ctx = Context::new("my-plugin", "users");
         let ctx2 = ctx.with_stream("orders");
-        assert_eq!(ctx2.connector_id(), "my-connector");
+        assert_eq!(ctx2.plugin_id(), "my-plugin");
         assert_eq!(ctx2.stream_name(), "orders");
         // Original is unchanged.
         assert_eq!(ctx.stream_name(), "users");
@@ -169,7 +169,7 @@ mod tests {
     fn test_clone_is_independent() {
         let ctx = Context::new("c1", "s1");
         let ctx2 = ctx.clone();
-        assert_eq!(ctx.connector_id(), ctx2.connector_id());
+        assert_eq!(ctx.plugin_id(), ctx2.plugin_id());
         assert_eq!(ctx.stream_name(), ctx2.stream_name());
     }
 

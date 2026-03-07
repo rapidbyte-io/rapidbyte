@@ -45,7 +45,7 @@ enum FrameState {
 /// Host-managed table mapping opaque `u64` handles to frame buffers.
 ///
 /// Used by the V3 transport layer to pass Arrow IPC batches between
-/// guest (connector) and host without copying through linear memory.
+/// guest (plugin) and host without copying through linear memory.
 pub struct FrameTable {
     frames: HashMap<u64, FrameState>,
     next_handle: u64,

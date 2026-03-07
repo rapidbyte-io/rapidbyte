@@ -1,6 +1,6 @@
 //! Metrics and execution summaries.
 //!
-//! Connectors emit [`Metric`]s during operation and return role-specific
+//! Plugins emit [`Metric`]s during operation and return role-specific
 //! summaries ([`ReadSummary`], [`WriteSummary`], [`TransformSummary`])
 //! upon completion.
 
@@ -21,7 +21,7 @@ pub enum MetricValue {
     Histogram(f64),
 }
 
-/// A single metric observation emitted by a connector.
+/// A single metric observation emitted by a plugin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Metric {
     /// Metric name (e.g., `"rows_per_second"`).
