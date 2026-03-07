@@ -39,7 +39,7 @@ impl Profile {
             Self::Medium => "bench_seed_medium.sql",
             Self::Large => "bench_seed_large.sql",
         };
-        root.join("bench/fixtures/sql").join(name)
+        root.join("tests/bench/fixtures/sql").join(name)
     }
 
     fn as_str(self) -> &'static str {
@@ -241,14 +241,14 @@ async fn compare_command(args: CompareArgs) -> Result<()> {
     run_command(run_args).await?;
 
     let status = Command::new("python3")
-        .arg(root.join("bench/analyze.py"))
+        .arg(root.join("tests/tests/bench/analyze.py"))
         .arg("--sha")
         .arg(sha1)
         .arg(sha2)
         .status()
-        .context("failed to run bench/analyze.py")?;
+        .context("failed to run tests/bench/analyze.py")?;
     if !status.success() {
-        bail!("bench/analyze.py failed");
+        bail!("tests/bench/analyze.py failed");
     }
 
     Ok(())
@@ -521,7 +521,7 @@ fn run_report(
 
     let mut temp_files = Vec::new();
     let mut cmd = Command::new("python3");
-    cmd.arg(context.root.join("bench/lib/report.py"));
+    cmd.arg(context.root.join("tests/bench/lib/report.py"));
     cmd.arg(rows.to_string());
     cmd.arg(profile.as_str());
 
@@ -646,7 +646,7 @@ fn render_pipeline(context: &BenchContext, mode: &str) -> Result<PathBuf> {
         _ => bail!("unknown benchmark mode {mode}"),
     };
 
-    let template_path = context.root.join("bench/fixtures/pipelines").join(file);
+    let template_path = context.root.join("tests/bench/fixtures/pipelines").join(file);
     let template = fs::read_to_string(&template_path)
         .with_context(|| format!("failed to read {}", template_path.display()))?;
 
@@ -738,7 +738,7 @@ fn run_cpu_profile(root: &Path, rows: u32) -> Result<()> {
             .arg("--")
             .arg(root.join("target/release/rapidbyte"))
             .arg("run")
-            .arg(root.join("bench/fixtures/pipelines/bench_pg.yaml"))
+            .arg(root.join("tests/bench/fixtures/pipelines/bench_pg.yaml"))
             .arg("--log-level")
             .arg("warn")
             .status()

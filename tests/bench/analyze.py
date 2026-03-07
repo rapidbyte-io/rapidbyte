@@ -2,9 +2,9 @@
 """Compare benchmark results across runs.
 
 Usage:
-    python3 bench/analyze.py                    # Compare last 2 runs
-    python3 bench/analyze.py --last 5           # Show last 5 runs
-    python3 bench/analyze.py --sha abc123 def456  # Compare specific commits
+    python3 tests/bench/analyze.py                    # Compare last 2 runs
+    python3 tests/bench/analyze.py --last 5           # Show last 5 runs
+    python3 tests/bench/analyze.py --sha abc123 def456  # Compare specific commits
 """
 import argparse
 import json
@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from collections import defaultdict
 
-RESULTS_FILE = Path(__file__).parent.parent / "target" / "bench_results" / "results.jsonl"
+RESULTS_FILE = Path(__file__).parent.parent.parent / "target" / "bench_results" / "results.jsonl"
 
 def load_results():
     if not RESULTS_FILE.exists():

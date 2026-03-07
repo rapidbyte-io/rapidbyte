@@ -25,7 +25,7 @@ This runs 3 iterations each of INSERT and COPY modes against 10,000 rows, then p
 The main benchmark orchestrator. Builds everything, starts PostgreSQL, seeds data, runs all configured modes, and prints a comparison table.
 
 ```bash
-./bench/bench.sh [CONNECTOR] [ROWS] [OPTIONS]
+cargo run --manifest-path tests/bench/Cargo.toml -- run [OPTIONS]
 ```
 
 | Flag | Default | Description |
@@ -130,20 +130,20 @@ The script:
 
 ### Viewing Past Results
 
-Use `bench/analyze.py` to view and compare results already stored in `results.jsonl`:
+Use `tests/bench/analyze.py` to view and compare results already stored in `results.jsonl`:
 
 ```bash
 # Compare last 2 runs
-python3 bench/analyze.py
+python3 tests/bench/analyze.py
 
 # Show last 5 runs
-python3 bench/analyze.py --last 5
+python3 tests/bench/analyze.py --last 5
 
 # Compare specific commits
-python3 bench/analyze.py --sha abc1234 def5678
+python3 tests/bench/analyze.py --sha abc1234 def5678
 
 # Filter by row count
-python3 bench/analyze.py --rows 100000
+python3 tests/bench/analyze.py --rows 100000
 ```
 
 Every benchmark run appends enriched JSON results to `target/bench_results/results.jsonl`. Each line includes all `PipelineResult` timing fields plus metadata: `timestamp`, `mode`, `bench_rows`, `aot`, `git_sha`, `git_branch`, and resource metrics (`cpu_cores_*`, `cpu_total_util_pct_*`, `mem_rss_mb_*`, `resource_samples`).
@@ -215,7 +215,7 @@ Note: source and destination run on separate threads. `duration_secs` is wall-cl
 
 ## Pipeline Variants
 
-Six benchmark pipeline YAMLs are provided in `bench/fixtures/pipelines/`:
+Six benchmark pipeline YAMLs are provided in `tests/bench/fixtures/pipelines/`:
 
 | File | Load Method | Transform | Compression | Notes |
 |------|-------------|-----------|-------------|-------|
@@ -256,18 +256,18 @@ resources:
 To benchmark with compression, run the pipeline directly:
 
 ```bash
-rapidbyte run bench/fixtures/pipelines/bench_pg_lz4.yaml
-rapidbyte run bench/fixtures/pipelines/bench_pg_zstd.yaml
+rapidbyte run tests/bench/fixtures/pipelines/bench_pg_lz4.yaml
+rapidbyte run tests/bench/fixtures/pipelines/bench_pg_zstd.yaml
 ```
 
 ## Adding a New Connector Benchmark
 
-1. Create `bench/connectors/<name>/` with 4 files:
+1. Create `tests/bench/connectors/<name>/` with 4 files:
    - `config.sh` — `BENCH_DEFAULT_ROWS`, `BENCH_MODES`, `BENCH_PIPELINES`
    - `setup.sh` — Start infrastructure, seed data
    - `run.sh` — Iterate modes, collect results, call `criterion_report`
    - `teardown.sh` — Clean per-run state
-2. Add pipeline YAMLs to `bench/fixtures/pipelines/`
+2. Add pipeline YAMLs to `tests/bench/fixtures/pipelines/`
 3. Run: `just bench <name>`
 
 ## Troubleshooting

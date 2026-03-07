@@ -21,13 +21,10 @@ tests/
   e2e/               # Individual E2E test scenarios
   lib/               # Shared test helpers
   fixtures/          # SQL seeds, pipeline YAMLs
-bench/
-  bench.sh           # Benchmark orchestrator (auto-discovers connectors)
-  compare.sh         # Compare benchmarks between git refs
-  lib/               # Shared helpers, criterion-style report generator
-  connectors/        # Per-connector benchmarks (postgres/)
-  fixtures/          # Bench SQL seeds, pipeline YAMLs
-  analyze.py         # Historical results viewer
+  bench/             # E2E benchmark harness (Rust binary)
+    fixtures/        # Bench SQL seeds, pipeline YAMLs
+    lib/             # Criterion-style report generator (Python)
+    analyze.py       # Historical results viewer
 ```
 
 - Workspace has 7 crates (cli, engine, runtime, sdk, sdk/macros, state, types). Connectors are excluded from workspace and build separately.
