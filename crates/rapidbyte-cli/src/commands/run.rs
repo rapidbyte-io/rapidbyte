@@ -71,10 +71,7 @@ pub async fn execute(
 
     let outcome = match outcome {
         Ok(o) => o,
-        Err(e) => {
-            summary::print_failure(&e, &config.pipeline, verbosity);
-            return Err(e.into());
-        }
+        Err(e) => return Err(e.into()),
     };
 
     match outcome {

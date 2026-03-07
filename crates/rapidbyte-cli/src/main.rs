@@ -8,6 +8,7 @@ mod logging;
 pub(crate) mod output;
 
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
@@ -91,14 +92,14 @@ enum Commands {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let verbosity = Verbosity::from_flags(cli.quiet, cli.verbose);
 
     logging::init(&cli.log_level, verbosity);
 
-    match cli.command {
+    let result = match cli.command {
         Commands::Run {
             pipeline,
             dry_run,
@@ -108,8 +109,20 @@ async fn main() -> anyhow::Result<()> {
         Commands::Discover { pipeline } => commands::discover::execute(&pipeline, verbosity).await,
         Commands::Connectors => commands::connectors::execute(verbosity),
         Commands::Scaffold { name, output } => {
-            commands::scaffold::run(&name, output.as_deref())?;
-            Ok(())
+            commands::scaffold::run(&name, output.as_deref()).map_err(Into::into)
+        }
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            if verbosity != Verbosity::Quiet {
+                eprintln!(
+                    "{} {e:#}",
+                    console::style("\u{2718}").red().bold(),
+                );
+            }
+            ExitCode::FAILURE
         }
     }
 }

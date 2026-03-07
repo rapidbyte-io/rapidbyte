@@ -50,7 +50,8 @@ pub async fn execute(pipeline_path: &Path, verbosity: Verbosity) -> Result<()> {
     if source_ok && dest_ok && transforms_ok && result.state_ok {
         Ok(())
     } else {
-        anyhow::bail!("One or more checks failed")
+        // Validation details already printed above — return a silent error.
+        std::process::exit(1);
     }
 }
 

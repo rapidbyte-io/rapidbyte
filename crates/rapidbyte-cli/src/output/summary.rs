@@ -27,20 +27,6 @@ pub fn print_success(result: &PipelineResult, pipeline_name: &str, verbosity: Ve
     eprintln!();
 }
 
-/// Print a pipeline failure to stderr.
-pub fn print_failure(error: &dyn std::fmt::Display, pipeline_name: &str, verbosity: Verbosity) {
-    if verbosity == Verbosity::Quiet {
-        return;
-    }
-
-    eprintln!(
-        "{} Pipeline '{}' failed: {}",
-        style("\u{2717}").red().bold(),
-        pipeline_name,
-        error
-    );
-}
-
 // ── Default compact block ────────────────────────────────────────────
 
 fn print_compact(result: &PipelineResult, pipeline_name: &str) {
