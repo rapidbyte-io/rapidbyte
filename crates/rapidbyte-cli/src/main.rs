@@ -10,6 +10,27 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Verbosity {
+    Quiet,
+    Default,
+    Verbose,
+    Diagnostic,
+}
+
+impl Verbosity {
+    fn from_flags(quiet: bool, verbose: u8) -> Self {
+        if quiet {
+            return Self::Quiet;
+        }
+        match verbose {
+            0 => Self::Default,
+            1 => Self::Verbose,
+            _ => Self::Diagnostic,
+        }
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "rapidbyte",
@@ -23,6 +44,14 @@ struct Cli {
     /// Log level (error, warn, info, debug, trace)
     #[arg(long, default_value = "info", global = true)]
     log_level: String,
+
+    /// Increase output verbosity (-v for detailed, -vv for diagnostic)
+    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
+    verbose: u8,
+
+    /// Suppress all output (exit code only, errors on stderr)
+    #[arg(short, long, global = true)]
+    quiet: bool,
 }
 
 #[derive(Subcommand)]
@@ -66,12 +95,14 @@ async fn main() -> anyhow::Result<()> {
 
     logging::init(&cli.log_level);
 
+    let verbosity = Verbosity::from_flags(cli.quiet, cli.verbose);
+
     match cli.command {
         Commands::Run {
             pipeline,
             dry_run,
             limit,
-        } => commands::run::execute(&pipeline, dry_run, limit).await,
+        } => commands::run::execute(&pipeline, dry_run, limit, verbosity).await,
         Commands::Check { pipeline } => commands::check::execute(&pipeline).await,
         Commands::Discover { pipeline } => commands::discover::execute(&pipeline).await,
         Commands::Connectors => commands::connectors::execute(),

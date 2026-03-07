@@ -25,7 +25,13 @@ struct ProcessCpuMetrics {
 ///
 /// Returns `Err` if pipeline parsing, validation, or execution fails.
 #[allow(clippy::too_many_lines)] // Output formatting requires many sequential println calls.
-pub async fn execute(pipeline_path: &Path, dry_run: bool, limit: Option<u64>) -> Result<()> {
+pub async fn execute(
+    pipeline_path: &Path,
+    dry_run: bool,
+    limit: Option<u64>,
+    verbosity: crate::Verbosity,
+) -> Result<()> {
+    let _ = verbosity; // Will be used in a future task
     let config = super::load_pipeline(pipeline_path)?;
 
     // Build execution options (--limit implies --dry-run)
