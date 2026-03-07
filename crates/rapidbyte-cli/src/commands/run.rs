@@ -11,6 +11,9 @@ use anyhow::Result;
 use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_engine::orchestrator;
 
+use crate::output::{format::format_bytes, progress, summary};
+use crate::Verbosity;
+
 #[derive(Debug, Clone)]
 struct ProcessCpuMetrics {
     cpu_secs: f64,
@@ -24,14 +27,13 @@ struct ProcessCpuMetrics {
 /// # Errors
 ///
 /// Returns `Err` if pipeline parsing, validation, or execution fails.
-#[allow(clippy::too_many_lines)] // Output formatting requires many sequential println calls.
+#[allow(clippy::too_many_lines)]
 pub async fn execute(
     pipeline_path: &Path,
     dry_run: bool,
     limit: Option<u64>,
-    verbosity: crate::Verbosity,
+    verbosity: Verbosity,
 ) -> Result<()> {
-    let _ = verbosity; // Will be used in a future task
     let config = super::load_pipeline(pipeline_path)?;
 
     // Build execution options (--limit implies --dry-run)
@@ -46,125 +48,81 @@ pub async fn execute(
         "Pipeline validated"
     );
 
-    // 3. Run
+    // Spawn progress spinner (unless quiet or dry-run)
+    let is_tty = console::Term::stderr().is_term();
+    let stream_count = config.source.streams.len() as u64;
+    let show_progress = !matches!(verbosity, Verbosity::Quiet) && !dry_run;
+    let (progress_tx, spinner_handle) = if show_progress {
+        let (tx, handle) = progress::spawn_progress_spinner(stream_count, is_tty);
+        (Some(tx), Some(handle))
+    } else {
+        (None, None)
+    };
+
+    // Run the pipeline
     let cpu_start = process_cpu_seconds();
-    let outcome = orchestrator::run_pipeline(&config, &options, None).await?;
+    let outcome = orchestrator::run_pipeline(&config, &options, progress_tx).await;
     let cpu_end = process_cpu_seconds();
+
+    // Wait for spinner to finish before printing results
+    if let Some(handle) = spinner_handle {
+        let _ = handle.await;
+    }
+
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(e) => {
+            summary::print_failure(&e, &config.pipeline, verbosity);
+            return Err(e.into());
+        }
+    };
+
     match outcome {
         PipelineOutcome::Run(result) => {
-            let counts = &result.counts;
-            let source = &result.source;
-            let dest = &result.dest;
             let cpu_metrics = process_cpu_metrics(cpu_start, cpu_end, result.duration_secs);
             let peak_rss_mb = process_peak_rss_mb();
 
-            println!("Pipeline '{}' completed successfully.", config.pipeline);
-            println!("  Records read:    {}", counts.records_read);
-            println!("  Records written: {}", counts.records_written);
-            println!("  Bytes read:      {}", format_bytes(counts.bytes_read));
-            println!("  Bytes written:   {}", format_bytes(counts.bytes_written));
-            if counts.records_read > 0 {
-                let avg_row_bytes = counts.bytes_read / counts.records_read;
-                println!("  Avg row size:    {avg_row_bytes} B");
-            }
-            println!("  Duration:        {:.2}s", result.duration_secs);
-            println!(
-                "  Throughput:      {:.0} rows/sec, {:.2} MB/s",
-                counts.records_read as f64 / result.duration_secs,
-                counts.bytes_read as f64 / result.duration_secs / 1_048_576.0,
-            );
-            println!("  Source duration:  {:.2}s", source.duration_secs);
-            println!("    Connect:       {:.3}s", source.connect_secs);
-            println!("    Query:         {:.3}s", source.query_secs);
-            println!("    Fetch:         {:.3}s", source.fetch_secs);
-            println!("    Arrow encode:  {:.3}s", source.arrow_encode_secs);
-            println!("  Dest duration:   {:.2}s", dest.duration_secs);
-            println!("    VM setup:      {:.3}s", dest.vm_setup_secs);
-            println!("    Recv loop:     {:.3}s", dest.recv_secs);
-            println!("    Connect:       {:.3}s", dest.connect_secs);
-            println!("    Flush:         {:.3}s", dest.flush_secs);
-            println!("    Arrow decode:  {:.3}s", dest.arrow_decode_secs);
-            println!("    Commit:        {:.3}s", dest.commit_secs);
-            println!("    WASM overhead: {:.3}s", result.wasm_overhead_secs);
-            println!(
-                "  Host emit_batch: {:.3}s ({} calls)",
-                source.emit_nanos as f64 / 1e9,
-                source.emit_count
-            );
-            if source.compress_nanos > 0 {
-                println!(
-                    "    Compression:   {:.3}s",
-                    source.compress_nanos as f64 / 1e9
-                );
-            }
-            println!(
-                "  Host next_batch: {:.3}s ({} calls)",
-                dest.recv_nanos as f64 / 1e9,
-                dest.recv_count
-            );
-            println!(
-                "    Wait in recv:  {:.3}s",
-                dest.recv_wait_nanos as f64 / 1e9
-            );
-            println!(
-                "    Work in recv:  {:.3}s",
-                dest.recv_process_nanos as f64 / 1e9
-            );
-            if dest.decompress_nanos > 0 {
-                println!(
-                    "    Decompression: {:.3}s",
-                    dest.decompress_nanos as f64 / 1e9
-                );
-            }
-            if result.transform_count > 0 {
-                println!(
-                    "  Transforms:      {} stage(s), {:.2}s total",
-                    result.transform_count, result.transform_duration_secs,
-                );
-                for (i, ms) in result.transform_module_load_ms.iter().enumerate() {
-                    println!("    Transform[{i}] load: {ms}ms");
+            // Human-readable summary to stderr
+            summary::print_success(&result, &config.pipeline, verbosity);
+
+            // Process-level diagnostics for -vv
+            if verbosity == Verbosity::Diagnostic {
+                if let Some(cpu) = &cpu_metrics {
+                    eprintln!(
+                        "    {:<20}CPU {:.1}s | RSS {:.0} MB",
+                        "Process",
+                        cpu.cpu_secs,
+                        peak_rss_mb.unwrap_or(0.0),
+                    );
                 }
             }
-            println!("  Source load:     {}ms", source.module_load_ms);
-            println!("  Dest load:       {}ms", dest.module_load_ms);
-            if result.retry_count > 0 {
-                println!("  Retries:         {}", result.retry_count);
-            }
-            if let Some(cpu) = &cpu_metrics {
-                println!("  CPU time:        {:.3}s", cpu.cpu_secs);
-                println!("  CPU use (1 core): {:.1}%", cpu.cpu_pct_one_core);
-                println!(
-                    "  CPU use ({0} cores): {1:.1}%",
-                    cpu.available_cores, cpu.cpu_pct_of_available_cores
-                );
-            }
 
-            // Machine-readable JSON for benchmarking tools
+            // Machine-readable JSON for benchmarking tools (stdout)
             let json = bench_json_from_result(&result, cpu_metrics.as_ref(), peak_rss_mb);
             println!("@@BENCH_JSON@@{json}");
         }
         PipelineOutcome::DryRun(result) => {
             use arrow::util::pretty::pretty_format_batches;
 
-            println!(
+            eprintln!(
                 "Dry run: '{}' ({} stream{})",
                 config.pipeline,
                 result.streams.len(),
                 if result.streams.len() == 1 { "" } else { "s" },
             );
-            println!();
+            eprintln!();
 
             for stream in &result.streams {
-                println!("Stream: {}", stream.stream_name);
+                eprintln!("Stream: {}", stream.stream_name);
 
                 if stream.batches.is_empty() {
-                    println!("  (no data)");
+                    eprintln!("  (no data)");
                 } else {
                     // Print schema
                     let schema = stream.batches[0].schema();
-                    println!("  Columns:");
+                    eprintln!("  Columns:");
                     for field in schema.fields() {
-                        println!(
+                        eprintln!(
                             "    {}: {:?}{}",
                             field.name(),
                             field.data_type(),
@@ -175,28 +133,28 @@ pub async fn execute(
                             }
                         );
                     }
-                    println!();
+                    eprintln!();
 
-                    // Print table
+                    // Print table (pretty_format_batches returns a Display impl)
                     match pretty_format_batches(&stream.batches) {
-                        Ok(table) => println!("{table}"),
-                        Err(e) => println!("  (display error: {e})"),
+                        Ok(table) => eprintln!("{table}"),
+                        Err(e) => eprintln!("  (display error: {e})"),
                     }
                 }
 
-                println!(
+                eprintln!(
                     "{} rows ({}, {} batch{})",
                     stream.total_rows,
                     format_bytes(stream.total_bytes),
                     stream.batches.len(),
                     if stream.batches.len() == 1 { "" } else { "es" },
                 );
-                println!();
+                eprintln!();
             }
 
-            println!("Duration: {:.2}s", result.duration_secs);
+            eprintln!("Duration: {:.2}s", result.duration_secs);
             if result.transform_count > 0 {
-                println!(
+                eprintln!(
                     "Transforms: {} applied ({:.2}s)",
                     result.transform_count, result.transform_duration_secs,
                 );
@@ -205,18 +163,6 @@ pub async fn execute(
     }
 
     Ok(())
-}
-
-fn format_bytes(bytes: u64) -> String {
-    if bytes >= 1_073_741_824 {
-        format!("{:.2} GB", bytes as f64 / 1_073_741_824.0)
-    } else if bytes >= 1_048_576 {
-        format!("{:.2} MB", bytes as f64 / 1_048_576.0)
-    } else if bytes >= 1024 {
-        format!("{:.2} KB", bytes as f64 / 1024.0)
-    } else {
-        format!("{bytes} B")
-    }
 }
 
 fn process_cpu_metrics(
