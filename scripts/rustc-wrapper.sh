@@ -13,6 +13,7 @@ if [[ "${NO_SCCACHE:-0}" == "1" ]]; then
 fi
 
 is_probe_call=0
+is_build_script_probe=0
 is_wasm_wasip2_target=0
 for arg in "$@"; do
   if [[ "$arg" == "--print=file-names" ]]; then
@@ -20,6 +21,11 @@ for arg in "$@"; do
   fi
   if [[ "$arg" == "--target=wasm32-wasip2" ]]; then
     is_wasm_wasip2_target=1
+  fi
+  # Build-script probes (e.g. proc-macro2 feature detection) must run against
+  # the real compiler, not a cached result from a different toolchain.
+  if [[ "$arg" == --cfg=*build_probe* ]]; then
+    is_build_script_probe=1
   fi
 done
 
@@ -98,7 +104,7 @@ if [[ "$is_wasm_wasip2_target" -eq 1 ]]; then
   fi
 fi
 
-if [[ "$is_probe_call" -eq 1 ]]; then
+if [[ "$is_probe_call" -eq 1 ]] || [[ "$is_build_script_probe" -eq 1 ]]; then
   exec "$@"
 fi
 
