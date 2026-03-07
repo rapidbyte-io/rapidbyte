@@ -522,7 +522,7 @@ impl<'a> WriteSession<'a> {
         let use_copy = self.load_method == LoadMethod::Copy
             && !matches!(self.effective_write_mode, Some(WriteMode::Upsert { .. }));
 
-        let rows_written = if use_copy {
+        let (rows_written, bytes_written) = if use_copy {
             if self.copy_flush_bytes.is_none() {
                 let avg_row_bytes = (batch_rows > 0).then(|| n / batch_rows as usize);
                 let chosen = adaptive_copy_flush_bytes(None, avg_row_bytes);
@@ -562,8 +562,8 @@ impl<'a> WriteSession<'a> {
         };
 
         self.stats.total_rows += rows_written;
-        self.stats.total_bytes += n as u64;
-        self.stats.bytes_since_commit += n as u64;
+        self.stats.total_bytes += bytes_written;
+        self.stats.bytes_since_commit += bytes_written;
         self.stats.rows_since_commit += rows_written;
         self.stats.batches_written += 1;
 

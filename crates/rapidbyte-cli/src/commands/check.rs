@@ -3,35 +3,40 @@
 use std::path::Path;
 
 use anyhow::Result;
-use rapidbyte_types::error::ValidationStatus;
+use console::style;
+use rapidbyte_types::error::{ValidationResult, ValidationStatus};
 
 use rapidbyte_engine::orchestrator;
+
+use crate::Verbosity;
 
 /// Execute the `check` command: validate pipeline config and connector connectivity.
 ///
 /// # Errors
 ///
 /// Returns `Err` if pipeline parsing, validation, or connectivity check fails.
-pub async fn execute(pipeline_path: &Path) -> Result<()> {
+pub async fn execute(pipeline_path: &Path, verbosity: Verbosity) -> Result<()> {
     let config = super::load_pipeline(pipeline_path)?;
-    println!("Pipeline structure: OK");
 
-    // 3. Check connectors and state
     let result = orchestrator::check_pipeline(&config).await?;
 
-    // 4. Report results
-    print_validation("Source", &result.source_validation);
-    print_validation("Destination", &result.destination_validation);
+    if verbosity != Verbosity::Quiet {
+        print_validation(&config.source.use_ref, &result.source_validation);
+        print_validation(&config.destination.use_ref, &result.destination_validation);
 
-    for (i, tv) in result.transform_validations.iter().enumerate() {
-        let label = format!("Transform[{i}]");
-        print_validation(&label, tv);
-    }
+        for (i, tv) in result.transform_validations.iter().enumerate() {
+            let label = config
+                .transforms
+                .get(i)
+                .map_or_else(|| format!("transform[{i}]"), |t| t.use_ref.clone());
+            print_validation(&label, tv);
+        }
 
-    if result.state_ok {
-        println!("State backend:     OK");
-    } else {
-        println!("State backend:     FAILED");
+        if result.state_ok {
+            eprintln!("{} {:<20} valid", style("\u{2713}").green().bold(), "state");
+        } else {
+            eprintln!("{} {:<20} failed", style("\u{2717}").red().bold(), "state");
+        }
     }
 
     // Return error if anything failed
@@ -43,21 +48,29 @@ pub async fn execute(pipeline_path: &Path) -> Result<()> {
         .all(|v| v.status == ValidationStatus::Success);
 
     if source_ok && dest_ok && transforms_ok && result.state_ok {
-        println!("\nAll checks passed.");
         Ok(())
     } else {
-        anyhow::bail!("One or more checks failed")
+        // Validation details already printed above — return a silent error.
+        std::process::exit(1);
     }
 }
 
-fn print_validation(label: &str, result: &rapidbyte_types::error::ValidationResult) {
-    let status = match result.status {
-        ValidationStatus::Success => "OK",
-        ValidationStatus::Failed => "FAILED",
-        ValidationStatus::Warning => "WARNING",
-    };
-    println!("{:18} {}", format!("{}:", label), status);
-    if !result.message.is_empty() {
-        println!("  {}", result.message);
+fn print_validation(label: &str, result: &ValidationResult) {
+    match result.status {
+        ValidationStatus::Success => {
+            eprintln!("{} {:<20} valid", style("\u{2713}").green().bold(), label);
+        }
+        ValidationStatus::Failed => {
+            eprintln!("{} {:<20} failed", style("\u{2717}").red().bold(), label);
+            if !result.message.is_empty() {
+                eprintln!("  {}", result.message);
+            }
+        }
+        ValidationStatus::Warning => {
+            eprintln!("{} {:<20} warning", style("!").yellow().bold(), label);
+            if !result.message.is_empty() {
+                eprintln!("  {}", result.message);
+            }
+        }
     }
 }

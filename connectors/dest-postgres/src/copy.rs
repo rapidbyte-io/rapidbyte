@@ -5,7 +5,6 @@
 
 use bytes::Bytes;
 use futures_util::SinkExt;
-use pg_escape::quote_identifier;
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
 
@@ -25,7 +24,7 @@ const PGCOPY_EXT_LEN: [u8; 4] = 0_i32.to_be_bytes();
 /// File trailer: field count = -1 signals end of data.
 const PGCOPY_TRAILER: [u8; 2] = (-1_i16).to_be_bytes();
 
-/// Write batches via COPY FROM STDIN. Returns rows written.
+/// Write batches via COPY FROM STDIN. Returns `(rows_written, bytes_sent)`.
 ///
 /// Parameters are all pre-computed by the session layer:
 /// - `target`: pre-computed column metadata (table, active columns, schema, type-null flags)
@@ -36,17 +35,12 @@ pub(crate) async fn write(
     target: &WriteTarget<'_>,
     batches: &[RecordBatch],
     flush_bytes: Option<usize>,
-) -> Result<u64, String> {
+) -> Result<(u64, u64), String> {
     if batches.is_empty() || target.active_cols.is_empty() {
-        return Ok(0);
+        return Ok((0, 0));
     }
 
-    let col_list = target
-        .active_cols
-        .iter()
-        .map(|&i| quote_identifier(target.schema.field(i).name()))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let col_list = target.quoted_col_list();
     let copy_stmt = format!(
         "COPY {} ({}) FROM STDIN WITH (FORMAT binary)",
         target.table, col_list
@@ -60,6 +54,7 @@ pub(crate) async fn write(
 
     let flush_threshold = flush_bytes.unwrap_or(DEFAULT_FLUSH_BYTES).max(1);
     let mut total_rows: u64 = 0;
+    let mut total_bytes: u64 = 0;
     let mut buf = Vec::with_capacity(flush_threshold);
 
     // Write binary header (19 bytes)
@@ -91,6 +86,7 @@ pub(crate) async fn write(
             total_rows += 1;
 
             if buf.len() >= flush_threshold {
+                total_bytes += buf.len() as u64;
                 sink.send(Bytes::from(std::mem::take(&mut buf)))
                     .await
                     .map_err(|e| format!("COPY send failed: {e}"))?;
@@ -103,6 +99,7 @@ pub(crate) async fn write(
     buf.extend_from_slice(&PGCOPY_TRAILER);
 
     // Send final buffer (always non-empty due to trailer)
+    total_bytes += buf.len() as u64;
     sink.send(Bytes::from(buf))
         .await
         .map_err(|e| format!("COPY send failed: {e}"))?;
@@ -116,10 +113,10 @@ pub(crate) async fn write(
     ctx.log(
         LogLevel::Info,
         &format!(
-            "dest-postgres: COPY wrote {} rows to {}",
-            total_rows, target.table
+            "dest-postgres: COPY wrote {} rows ({} bytes) to {}",
+            total_rows, total_bytes, target.table
         ),
     );
 
-    Ok(total_rows)
+    Ok((total_rows, total_bytes))
 }
