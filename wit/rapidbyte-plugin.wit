@@ -1,9 +1,9 @@
-package rapidbyte:connector@4.0.0;
+package rapidbyte:plugin@5.0.0;
 
 interface types {
     type session = u64;
 
-    enum connector-role {
+    enum plugin-kind {
         source,
         destination,
         transform,
@@ -55,7 +55,7 @@ interface types {
     enum state-scope {
         pipeline,
         per-stream,
-        connector-instance,
+        plugin-instance,
     }
 
     enum checkpoint-kind {
@@ -64,7 +64,7 @@ interface types {
         transform,
     }
 
-    record connector-error {
+    record plugin-error {
         category: error-category,
         scope: error-scope,
         code: string,
@@ -125,7 +125,7 @@ interface types {
     }
 
     record run-summary {
-        role: connector-role,
+        kind: plugin-kind,
         read: option<read-summary>,
         write: option<write-summary>,
         transform: option<transform-summary>,
@@ -145,78 +145,78 @@ interface types {
 
 interface host {
     use types.{
-        connector-error,
+        plugin-error,
         socket-read-result,
         socket-write-result,
     };
 
-    emit-batch: func(handle: u64) -> result<_, connector-error>;
-    next-batch: func() -> result<option<u64>, connector-error>;
+    emit-batch: func(handle: u64) -> result<_, plugin-error>;
+    next-batch: func() -> result<option<u64>, plugin-error>;
     log: func(level: u32, msg: string);
-    checkpoint: func(kind: u32, payload-json: string) -> result<_, connector-error>;
-    metric: func(payload-json: string) -> result<_, connector-error>;
-    emit-dlq-record: func(stream-name: string, record-json: string, error-message: string, error-category: string) -> result<_, connector-error>;
-    state-get: func(scope: u32, key: string) -> result<option<string>, connector-error>;
-    state-put: func(scope: u32, key: string, val: string) -> result<_, connector-error>;
-    state-cas: func(scope: u32, key: string, expected: option<string>, new-val: string) -> result<bool, connector-error>;
+    checkpoint: func(kind: u32, payload-json: string) -> result<_, plugin-error>;
+    metric: func(payload-json: string) -> result<_, plugin-error>;
+    emit-dlq-record: func(stream-name: string, record-json: string, error-message: string, error-category: string) -> result<_, plugin-error>;
+    state-get: func(scope: u32, key: string) -> result<option<string>, plugin-error>;
+    state-put: func(scope: u32, key: string, val: string) -> result<_, plugin-error>;
+    state-cas: func(scope: u32, key: string, expected: option<string>, new-val: string) -> result<bool, plugin-error>;
 
-    frame-new: func(capacity: u64) -> result<u64, connector-error>;
-    frame-write: func(handle: u64, chunk: list<u8>) -> result<u64, connector-error>;
-    frame-seal: func(handle: u64) -> result<_, connector-error>;
-    frame-len: func(handle: u64) -> result<u64, connector-error>;
-    frame-read: func(handle: u64, offset: u64, len: u64) -> result<list<u8>, connector-error>;
+    frame-new: func(capacity: u64) -> result<u64, plugin-error>;
+    frame-write: func(handle: u64, chunk: list<u8>) -> result<u64, plugin-error>;
+    frame-seal: func(handle: u64) -> result<_, plugin-error>;
+    frame-len: func(handle: u64) -> result<u64, plugin-error>;
+    frame-read: func(handle: u64, offset: u64, len: u64) -> result<list<u8>, plugin-error>;
     frame-drop: func(handle: u64);
 
-    connect-tcp: func(host: string, port: u16) -> result<u64, connector-error>;
-    socket-read: func(handle: u64, len: u64) -> result<socket-read-result, connector-error>;
-    socket-write: func(handle: u64, data: list<u8>) -> result<socket-write-result, connector-error>;
+    connect-tcp: func(host: string, port: u16) -> result<u64, plugin-error>;
+    socket-read: func(handle: u64, len: u64) -> result<socket-read-result, plugin-error>;
+    socket-write: func(handle: u64, data: list<u8>) -> result<socket-write-result, plugin-error>;
     socket-close: func(handle: u64);
 }
 
 interface source {
     use types.{
-        connector-error,
+        plugin-error,
         run-request,
         run-summary,
         session,
         validation-report,
     };
 
-    open: func(config-json: string) -> result<session, connector-error>;
-    discover: func(session: session) -> result<string, connector-error>;
-    validate: func(session: session) -> result<validation-report, connector-error>;
-    run: func(session: session, request: run-request) -> result<run-summary, connector-error>;
-    close: func(session: session) -> result<_, connector-error>;
+    open: func(config-json: string) -> result<session, plugin-error>;
+    discover: func(session: session) -> result<string, plugin-error>;
+    validate: func(session: session) -> result<validation-report, plugin-error>;
+    run: func(session: session, request: run-request) -> result<run-summary, plugin-error>;
+    close: func(session: session) -> result<_, plugin-error>;
 }
 
 interface destination {
     use types.{
-        connector-error,
+        plugin-error,
         run-request,
         run-summary,
         session,
         validation-report,
     };
 
-    open: func(config-json: string) -> result<session, connector-error>;
-    validate: func(session: session) -> result<validation-report, connector-error>;
-    run: func(session: session, request: run-request) -> result<run-summary, connector-error>;
-    close: func(session: session) -> result<_, connector-error>;
+    open: func(config-json: string) -> result<session, plugin-error>;
+    validate: func(session: session) -> result<validation-report, plugin-error>;
+    run: func(session: session, request: run-request) -> result<run-summary, plugin-error>;
+    close: func(session: session) -> result<_, plugin-error>;
 }
 
 interface transform {
     use types.{
-        connector-error,
+        plugin-error,
         run-request,
         run-summary,
         session,
         validation-report,
     };
 
-    open: func(config-json: string) -> result<session, connector-error>;
-    validate: func(session: session) -> result<validation-report, connector-error>;
-    run: func(session: session, request: run-request) -> result<run-summary, connector-error>;
-    close: func(session: session) -> result<_, connector-error>;
+    open: func(config-json: string) -> result<session, plugin-error>;
+    validate: func(session: session) -> result<validation-report, plugin-error>;
+    run: func(session: session, request: run-request) -> result<run-summary, plugin-error>;
+    close: func(session: session) -> result<_, plugin-error>;
 }
 
 world rapidbyte-host {
