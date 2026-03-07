@@ -22,6 +22,13 @@ pub enum ProgressEvent {
     },
     /// A stream finished processing.
     StreamCompleted { stream: String },
+    /// A retryable error occurred; pipeline will retry after delay.
+    Retry {
+        attempt: u32,
+        max_retries: u32,
+        message: String,
+        delay_secs: f64,
+    },
     /// A non-fatal error occurred.
     Error { message: String },
 }

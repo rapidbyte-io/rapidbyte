@@ -80,6 +80,17 @@ pub fn spawn_progress_spinner(
                     counters.streams_done.fetch_add(1, Ordering::Relaxed);
                     update_running_message(&spinner, &counters);
                 }
+                ProgressEvent::Retry {
+                    attempt,
+                    max_retries,
+                    message,
+                    delay_secs,
+                } => {
+                    let msg = format!(
+                        "Retry {attempt}/{max_retries} in {delay_secs:.0}s \u{2014} {message}",
+                    );
+                    spinner.set_message(msg);
+                }
                 ProgressEvent::Error { .. } => {}
             }
         }

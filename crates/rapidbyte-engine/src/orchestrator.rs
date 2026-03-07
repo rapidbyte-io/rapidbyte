@@ -385,6 +385,18 @@ pub async fn run_pipeline(
                         safe_to_retry = connector_err.safe_to_retry,
                         "Retryable error, will retry"
                     );
+                    send_progress(
+                        &progress_tx,
+                        ProgressEvent::Retry {
+                            attempt,
+                            max_retries,
+                            message: format!(
+                                "[{}] {}: {}",
+                                connector_err.category, connector_err.code, connector_err.message
+                            ),
+                            delay_secs: delay.as_secs_f64(),
+                        },
+                    );
                     tokio::time::sleep(delay).await;
                 }
             }

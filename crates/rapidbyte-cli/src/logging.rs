@@ -24,8 +24,7 @@ pub fn init(log_level: &str, verbosity: crate::Verbosity) {
     // Default/Verbose: suppress all tracing (the progress spinner and summary
     // handle user-facing output). Diagnostic: use the configured log level.
     let effective_level = match verbosity {
-        crate::Verbosity::Quiet => "error",
-        crate::Verbosity::Default | crate::Verbosity::Verbose => "error",
+        crate::Verbosity::Quiet | crate::Verbosity::Default | crate::Verbosity::Verbose => "off",
         crate::Verbosity::Diagnostic => log_level,
     };
 
