@@ -5,7 +5,6 @@
 
 use bytes::Bytes;
 use futures_util::SinkExt;
-use pg_escape::quote_identifier;
 use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use tokio_postgres::Client;
 
@@ -41,12 +40,7 @@ pub(crate) async fn write(
         return Ok((0, 0));
     }
 
-    let col_list = target
-        .active_cols
-        .iter()
-        .map(|&i| quote_identifier(target.schema.field(i).name()))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let col_list = target.quoted_col_list();
     let copy_stmt = format!(
         "COPY {} ({}) FROM STDIN WITH (FORMAT binary)",
         target.table, col_list

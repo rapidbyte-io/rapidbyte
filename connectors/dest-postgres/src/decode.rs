@@ -107,6 +107,17 @@ pub(crate) struct WriteTarget<'a> {
     pub(crate) type_null_flags: &'a [bool],
 }
 
+impl WriteTarget<'_> {
+    /// Comma-separated, quoted column names for the active columns.
+    pub(crate) fn quoted_col_list(&self) -> String {
+        self.active_cols
+            .iter()
+            .map(|&i| quote_identifier(self.schema.field(i).name()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 // ── TypedCol: pre-downcast Arrow columns ─────────────────────────────
 
 /// Pre-downcast Arrow column reference. Eliminates per-cell `downcast_ref()` calls
