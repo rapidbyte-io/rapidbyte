@@ -104,9 +104,9 @@ async fn main() -> anyhow::Result<()> {
             dry_run,
             limit,
         } => commands::run::execute(&pipeline, dry_run, limit, verbosity).await,
-        Commands::Check { pipeline } => commands::check::execute(&pipeline).await,
+        Commands::Check { pipeline } => commands::check::execute(&pipeline, verbosity).await,
         Commands::Discover { pipeline } => commands::discover::execute(&pipeline).await,
-        Commands::Connectors => commands::connectors::execute(),
+        Commands::Connectors => commands::connectors::execute(verbosity),
         Commands::Scaffold { name, output } => {
             commands::scaffold::run(&name, output.as_deref())?;
             Ok(())
