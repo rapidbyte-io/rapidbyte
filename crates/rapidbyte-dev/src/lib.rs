@@ -5,6 +5,7 @@
 
 #![warn(clippy::pedantic)]
 
+pub(crate) mod display;
 pub mod workspace;
 
 /// Entry point for the dev shell.
