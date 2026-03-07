@@ -6,8 +6,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum LoadMethod {
-    #[default]
     Insert,
+    #[default]
     Copy,
 }
 
@@ -43,7 +43,7 @@ pub struct Config {
     pub schema: String,
     /// Load method for writing data
     #[serde(default)]
-    #[schema(default = "insert", values("insert", "copy"))]
+    #[schema(default = "copy", values("insert", "copy"))]
     pub load_method: LoadMethod,
     /// COPY flush threshold in bytes
     #[serde(default)]

@@ -18,7 +18,7 @@ use crate::pg_error::format_pg_error;
 /// Maximum rows per multi-value INSERT statement (PG parameter limit).
 const CHUNK_SIZE: usize = 1000;
 
-/// Write batches via multi-value INSERT. Returns rows written.
+/// Write batches via multi-value INSERT. Returns `(rows_written, bytes_sent)`.
 ///
 /// Parameters are all pre-computed by the session layer:
 /// - `target`: pre-computed column metadata (table, active columns, schema, type-null flags)
@@ -29,9 +29,9 @@ pub(crate) async fn write(
     target: &WriteTarget<'_>,
     batches: &[RecordBatch],
     upsert_clause: Option<&str>,
-) -> Result<u64, String> {
+) -> Result<(u64, u64), String> {
     if batches.is_empty() || target.active_cols.is_empty() {
-        return Ok(0);
+        return Ok((0, 0));
     }
 
     let col_list = target
@@ -42,6 +42,7 @@ pub(crate) async fn write(
         .join(", ");
 
     let mut total_rows: u64 = 0;
+    let mut total_bytes: u64 = 0;
 
     for batch in batches {
         let num_rows = batch.num_rows();
@@ -85,6 +86,8 @@ pub(crate) async fn write(
             let param_refs: Vec<&(dyn ToSql + Sync)> =
                 params.iter().map(SqlParamValue::as_tosql).collect();
 
+            total_bytes += sql.len() as u64;
+
             client.execute(&sql, &param_refs).await.map_err(|e| {
                 format_pg_error(
                     &format!(
@@ -102,10 +105,10 @@ pub(crate) async fn write(
     ctx.log(
         LogLevel::Info,
         &format!(
-            "dest-postgres: wrote {} rows to {}",
-            total_rows, target.table
+            "dest-postgres: wrote {} rows ({} bytes) to {}",
+            total_rows, total_bytes, target.table
         ),
     );
 
-    Ok(total_rows)
+    Ok((total_rows, total_bytes))
 }
