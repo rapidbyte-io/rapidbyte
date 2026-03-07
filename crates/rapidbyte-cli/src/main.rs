@@ -5,6 +5,7 @@
 
 mod commands;
 mod logging;
+pub(crate) mod output;
 
 use std::path::PathBuf;
 
