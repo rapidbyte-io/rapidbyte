@@ -14,10 +14,8 @@ pub enum Phase {
 pub enum ProgressEvent {
     /// Pipeline entered a new execution phase.
     PhaseChange { phase: Phase },
-    /// A batch completed flowing through the pipeline.
-    BatchCompleted {
-        stream: String,
-        records: u64,
+    /// A batch was emitted by the source connector.
+    BatchEmitted {
         bytes: u64,
     },
     /// A stream finished processing.

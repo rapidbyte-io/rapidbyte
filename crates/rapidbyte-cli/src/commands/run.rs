@@ -86,9 +86,11 @@ pub async fn execute(
             if verbosity == Verbosity::Diagnostic {
                 if let Some(cpu) = &cpu_metrics {
                     eprintln!(
-                        "    {:<20}CPU {:.1}s | RSS {:.0} MB",
+                        "    {:<20}CPU {:.0}% ({:.0}% of {} cores) | RSS {:.0} MB",
                         "Process",
-                        cpu.cpu_secs,
+                        cpu.cpu_pct_one_core,
+                        cpu.cpu_pct_of_available_cores,
+                        cpu.available_cores,
                         peak_rss_mb.unwrap_or(0.0),
                     );
                 }

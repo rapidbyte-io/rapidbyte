@@ -305,14 +305,6 @@ async fn collect_stream_task_results(
             Ok(Ok(sr)) if first_error.is_none() => {
                 send_progress(
                     progress_tx,
-                    ProgressEvent::BatchCompleted {
-                        stream: sr.stream_name.clone(),
-                        records: sr.read_summary.records_read,
-                        bytes: sr.read_summary.bytes_read,
-                    },
-                );
-                send_progress(
-                    progress_tx,
                     ProgressEvent::StreamCompleted {
                         stream: sr.stream_name.clone(),
                     },
@@ -1045,6 +1037,7 @@ async fn execute_streams(
         let transforms = modules.transform_modules.clone();
         let is_dry_run = options.dry_run;
         let dry_run_limit = options.limit;
+        let progress_tx_for_stream = progress_tx.clone();
 
         let handle = tokio::spawn(async move {
             let num_t = transforms.len();
@@ -1066,6 +1059,15 @@ async fn execute_streams(
             let stream_ctx_for_src = stream_ctx.clone();
             let stream_ctx_for_dst = stream_ctx.clone();
 
+            // Build per-batch progress callback for the source runner
+            let on_emit: Option<Arc<dyn Fn(u64) + Send + Sync>> =
+                progress_tx_for_stream.as_ref().map(|tx| {
+                    let tx = tx.clone();
+                    Arc::new(move |bytes: u64| {
+                        let _ = tx.send(ProgressEvent::BatchEmitted { bytes });
+                    }) as Arc<dyn Fn(u64) + Send + Sync>
+                });
+
             let params_src = params.clone();
             let src_handle = tokio::task::spawn_blocking(move || {
                 run_source_stream(
@@ -1081,6 +1083,7 @@ async fn execute_streams(
                     params_src.source_permissions.as_ref(),
                     params_src.compression,
                     params_src.source_overrides.as_ref(),
+                    on_emit,
                 )
             });
 

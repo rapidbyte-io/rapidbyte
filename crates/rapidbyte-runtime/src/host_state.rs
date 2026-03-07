@@ -85,6 +85,8 @@ pub(crate) struct BatchRouter {
     pub receiver: Option<mpsc::Receiver<Frame>>,
     pub next_batch_id: u64,
     pub compression: Option<CompressionCodec>,
+    /// Optional callback invoked after each `emit-batch` with the payload byte size.
+    pub on_emit: Option<Arc<dyn Fn(u64) + Send + Sync>>,
 }
 
 pub(crate) struct CheckpointCollector {
@@ -132,6 +134,7 @@ pub struct HostStateBuilder {
     compression: Option<CompressionCodec>,
     overrides: Option<SandboxOverrides>,
     dlq_limit: usize,
+    on_emit: Option<Arc<dyn Fn(u64) + Send + Sync>>,
 }
 
 impl HostStateBuilder {
@@ -152,6 +155,7 @@ impl HostStateBuilder {
             compression: None,
             overrides: None,
             dlq_limit: DEFAULT_DLQ_LIMIT,
+            on_emit: None,
         }
     }
 
@@ -245,6 +249,12 @@ impl HostStateBuilder {
         self
     }
 
+    #[must_use]
+    pub fn on_emit(mut self, cb: Arc<dyn Fn(u64) + Send + Sync>) -> Self {
+        self.on_emit = Some(cb);
+        self
+    }
+
     /// Build the host state. Fails if required fields are missing or WASI context fails.
     ///
     /// # Errors
@@ -277,6 +287,7 @@ impl HostStateBuilder {
                 receiver: self.receiver,
                 next_batch_id: 1,
                 compression: self.compression,
+                on_emit: self.on_emit,
             },
             checkpoints: CheckpointCollector {
                 source: self.source_checkpoints.unwrap_or_default(),
@@ -408,9 +419,15 @@ impl ComponentHostState {
                 ConnectorError::internal("NO_SENDER", "No batch sender configured")
             })?;
 
+        let payload_len = payload.len() as u64;
+
         sender
             .blocking_send(Frame::Data(payload))
             .map_err(|e| ConnectorError::internal("CHANNEL_SEND", e.to_string()))?;
+
+        if let Some(cb) = &self.batch.on_emit {
+            cb(payload_len);
+        }
 
         self.batch.next_batch_id += 1;
 

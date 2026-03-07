@@ -97,6 +97,7 @@ pub(crate) fn run_source_stream(
     permissions: Option<&Permissions>,
     compression: Option<CompressionCodec>,
     overrides: Option<&SandboxOverrides>,
+    on_emit: Option<Arc<dyn Fn(u64) + Send + Sync>>,
 ) -> Result<SourceRunResult, PipelineError> {
     let phase_start = Instant::now();
 
@@ -118,6 +119,9 @@ pub(crate) fn run_source_stream(
     }
     if let Some(o) = overrides {
         builder = builder.overrides(o);
+    }
+    if let Some(cb) = on_emit {
+        builder = builder.on_emit(cb);
     }
     let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
