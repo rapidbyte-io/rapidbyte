@@ -234,14 +234,14 @@ async fn compare_command(args: CompareArgs) -> Result<()> {
         cpu_profile: false,
     };
 
-    checkout_ref(&root, &args.ref1)?;
+    checkout_ref(&root, &sha1)?;
     run_command(run_args.clone()).await?;
 
-    checkout_ref(&root, &args.ref2)?;
+    checkout_ref(&root, &sha2)?;
     run_command(run_args).await?;
 
     let status = Command::new("python3")
-        .arg(root.join("tests/tests/bench/analyze.py"))
+        .arg(root.join("tests/bench/analyze.py"))
         .arg("--sha")
         .arg(sha1)
         .arg(sha2)

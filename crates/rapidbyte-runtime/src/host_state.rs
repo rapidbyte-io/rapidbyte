@@ -30,11 +30,11 @@ use crate::engine::HasStoreLimits;
 use crate::frame::FrameTable;
 use crate::sandbox::{build_store_limits, build_wasi_ctx, SandboxOverrides};
 use crate::socket::{
-    next_socket_backpressure_action, resolve_socket_addrs, SocketBackpressureAction, SocketEntry,
-    SocketReadResult, SocketWriteResult,
+    resolve_socket_addrs, should_activate_socket_poll, SocketEntry, SocketReadResult,
+    SocketWriteResult,
 };
 #[cfg(unix)]
-use crate::socket::{wait_socket_ready, SocketInterest};
+use crate::socket::{socket_poll_timeout_ms, wait_socket_ready, SocketInterest};
 
 const MAX_SOCKET_READ_BYTES: u64 = 64 * 1024;
 const MAX_STATE_KEY_LEN: usize = 1024;
@@ -780,63 +780,47 @@ impl ComponentHostState {
                 Ok(SocketReadResult::Data(buf))
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                match next_socket_backpressure_action(&mut entry.read_would_block_streak) {
-                    SocketBackpressureAction::ReturnWouldBlock => {
-                        return Ok(SocketReadResult::WouldBlock);
-                    }
-                    SocketBackpressureAction::Yield => {
-                        std::thread::yield_now();
-                        return Ok(SocketReadResult::WouldBlock);
-                    }
-                    SocketBackpressureAction::Poll(timeout_ms) => {
-                        #[cfg(unix)]
-                        let ready = match wait_socket_ready(
-                            &entry.stream,
-                            SocketInterest::Read,
-                            timeout_ms,
-                        ) {
-                            Ok(ready) => ready,
-                            Err(poll_err) => {
-                                tracing::warn!(
-                                    handle,
-                                    error = %poll_err,
-                                    timeout_ms,
-                                    "poll() failed in socket_read"
-                                );
-                                true
-                            }
-                        };
-                        #[cfg(not(unix))]
-                        let ready = false;
+                if !should_activate_socket_poll(&mut entry.read_would_block_streak) {
+                    return Ok(SocketReadResult::WouldBlock);
+                }
 
-                        if ready {
-                            match entry.stream.read(&mut buf) {
-                                Ok(0) => {
-                                    entry.read_would_block_streak = 0;
-                                    Ok(SocketReadResult::Eof)
-                                }
-                                Ok(n) => {
-                                    entry.read_would_block_streak = 0;
-                                    buf.truncate(n);
-                                    Ok(SocketReadResult::Data(buf))
-                                }
-                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                    Ok(SocketReadResult::WouldBlock)
-                                }
-                                Err(e) => Err(PluginError::transient_network(
-                                    "SOCKET_READ_FAILED",
-                                    e.to_string(),
-                                )),
-                            }
-                        } else {
-                            tracing::trace!(
-                                handle,
-                                timeout_ms,
-                                "socket_read: WouldBlock after adaptive poll timeout"
-                            );
+                #[cfg(unix)]
+                let ready = match wait_socket_ready(
+                    &entry.stream,
+                    SocketInterest::Read,
+                    socket_poll_timeout_ms(),
+                ) {
+                    Ok(ready) => ready,
+                    Err(poll_err) => {
+                        tracing::warn!(handle, error = %poll_err, "poll() failed in socket_read");
+                        true
+                    }
+                };
+                #[cfg(not(unix))]
+                let ready = false;
+
+                if ready {
+                    match entry.stream.read(&mut buf) {
+                        Ok(0) => {
+                            entry.read_would_block_streak = 0;
+                            Ok(SocketReadResult::Eof)
+                        }
+                        Ok(n) => {
+                            entry.read_would_block_streak = 0;
+                            buf.truncate(n);
+                            Ok(SocketReadResult::Data(buf))
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             Ok(SocketReadResult::WouldBlock)
                         }
+                        Err(e) => Err(PluginError::transient_network(
+                            "SOCKET_READ_FAILED",
+                            e.to_string(),
+                        )),
                     }
+                } else {
+                    tracing::trace!(handle, "socket_read: WouldBlock after poll timeout");
+                    Ok(SocketReadResult::WouldBlock)
                 }
             }
             Err(e) => Err(PluginError::transient_network(
@@ -864,58 +848,42 @@ impl ComponentHostState {
                 Ok(SocketWriteResult::Written(n as u64))
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                match next_socket_backpressure_action(&mut entry.write_would_block_streak) {
-                    SocketBackpressureAction::ReturnWouldBlock => {
-                        return Ok(SocketWriteResult::WouldBlock);
-                    }
-                    SocketBackpressureAction::Yield => {
-                        std::thread::yield_now();
-                        return Ok(SocketWriteResult::WouldBlock);
-                    }
-                    SocketBackpressureAction::Poll(timeout_ms) => {
-                        #[cfg(unix)]
-                        let ready = match wait_socket_ready(
-                            &entry.stream,
-                            SocketInterest::Write,
-                            timeout_ms,
-                        ) {
-                            Ok(ready) => ready,
-                            Err(poll_err) => {
-                                tracing::warn!(
-                                    handle,
-                                    error = %poll_err,
-                                    timeout_ms,
-                                    "poll() failed in socket_write"
-                                );
-                                true
-                            }
-                        };
-                        #[cfg(not(unix))]
-                        let ready = false;
+                if !should_activate_socket_poll(&mut entry.write_would_block_streak) {
+                    return Ok(SocketWriteResult::WouldBlock);
+                }
 
-                        if ready {
-                            match entry.stream.write(&data) {
-                                Ok(n) => {
-                                    entry.write_would_block_streak = 0;
-                                    Ok(SocketWriteResult::Written(n as u64))
-                                }
-                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                                    Ok(SocketWriteResult::WouldBlock)
-                                }
-                                Err(e) => Err(PluginError::transient_network(
-                                    "SOCKET_WRITE_FAILED",
-                                    e.to_string(),
-                                )),
-                            }
-                        } else {
-                            tracing::trace!(
-                                handle,
-                                timeout_ms,
-                                "socket_write: WouldBlock after adaptive poll timeout"
-                            );
+                #[cfg(unix)]
+                let ready = match wait_socket_ready(
+                    &entry.stream,
+                    SocketInterest::Write,
+                    socket_poll_timeout_ms(),
+                ) {
+                    Ok(ready) => ready,
+                    Err(poll_err) => {
+                        tracing::warn!(handle, error = %poll_err, "poll() failed in socket_write");
+                        true
+                    }
+                };
+                #[cfg(not(unix))]
+                let ready = false;
+
+                if ready {
+                    match entry.stream.write(&data) {
+                        Ok(n) => {
+                            entry.write_would_block_streak = 0;
+                            Ok(SocketWriteResult::Written(n as u64))
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             Ok(SocketWriteResult::WouldBlock)
                         }
+                        Err(e) => Err(PluginError::transient_network(
+                            "SOCKET_WRITE_FAILED",
+                            e.to_string(),
+                        )),
                     }
+                } else {
+                    tracing::trace!(handle, "socket_write: WouldBlock after poll timeout");
+                    Ok(SocketWriteResult::WouldBlock)
                 }
             }
             Err(e) => Err(PluginError::transient_network(
