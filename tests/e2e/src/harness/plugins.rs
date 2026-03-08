@@ -17,6 +17,7 @@ pub fn prepare_plugin_dir() -> Result<PathBuf> {
                 &repo_root,
                 "sources/postgres",
                 "source_postgres",
+                "postgres",
                 &output_dir,
                 "sources",
             )?;
@@ -24,6 +25,7 @@ pub fn prepare_plugin_dir() -> Result<PathBuf> {
                 &repo_root,
                 "destinations/postgres",
                 "dest_postgres",
+                "postgres",
                 &output_dir,
                 "destinations",
             )?;
@@ -31,6 +33,7 @@ pub fn prepare_plugin_dir() -> Result<PathBuf> {
                 &repo_root,
                 "transforms/sql",
                 "transform_sql",
+                "sql",
                 &output_dir,
                 "transforms",
             )?;
@@ -38,6 +41,7 @@ pub fn prepare_plugin_dir() -> Result<PathBuf> {
                 &repo_root,
                 "transforms/validate",
                 "transform_validate",
+                "validate",
                 &output_dir,
                 "transforms",
             )?;
@@ -51,13 +55,14 @@ fn ensure_plugin(
     repo_root: &Path,
     plugin_subpath: &str,
     wasm_file_stem: &str,
+    output_name: &str,
     output_dir: &Path,
     kind_subdir: &str,
 ) -> Result<()> {
     let kind_dir = output_dir.join(kind_subdir);
     std::fs::create_dir_all(&kind_dir)
         .with_context(|| format!("failed to create {}", kind_dir.display()))?;
-    let target_file = kind_dir.join(format!("{wasm_file_stem}.wasm"));
+    let target_file = kind_dir.join(format!("{output_name}.wasm"));
     if target_file.exists() {
         return Ok(());
     }

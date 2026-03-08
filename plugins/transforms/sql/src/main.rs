@@ -89,7 +89,7 @@ impl Transform for TransformSql {
                 config: config::Config { query },
             },
             PluginInfo {
-                protocol_version: ProtocolVersion::V4,
+                protocol_version: ProtocolVersion::V5,
                 features: vec![],
                 default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
             },

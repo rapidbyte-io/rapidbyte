@@ -331,12 +331,12 @@ fn stage_plugins(root: &Path, mode: &str) -> Result<PathBuf> {
 
     let wasm_dir = format!("wasm32-wasip2/{mode}");
     let mappings = [
-        ("sources/postgres", "source_postgres.wasm", "sources"),
-        ("destinations/postgres", "dest_postgres.wasm", "destinations"),
-        ("transforms/sql", "transform_sql.wasm", "transforms"),
+        ("sources/postgres", "source_postgres.wasm", "postgres.wasm", "sources"),
+        ("destinations/postgres", "dest_postgres.wasm", "postgres.wasm", "destinations"),
+        ("transforms/sql", "transform_sql.wasm", "sql.wasm", "transforms"),
     ];
 
-    for (subpath, file_name, kind_subdir) in mappings {
+    for (subpath, file_name, output_name, kind_subdir) in mappings {
         let kind_dir = output_dir.join(kind_subdir);
         fs::create_dir_all(&kind_dir)
             .with_context(|| format!("failed to create {}", kind_dir.display()))?;
@@ -347,7 +347,7 @@ fn stage_plugins(root: &Path, mode: &str) -> Result<PathBuf> {
             .join("target")
             .join(&wasm_dir)
             .join(file_name);
-        let dest = kind_dir.join(file_name);
+        let dest = kind_dir.join(output_name);
         fs::copy(&src, &dest).with_context(|| {
             format!(
                 "failed to stage plugin wasm {} -> {}",

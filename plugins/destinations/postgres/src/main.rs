@@ -34,7 +34,7 @@ impl Destination for DestPostgres {
         Ok((
             Self { config },
             PluginInfo {
-                protocol_version: ProtocolVersion::V4,
+                protocol_version: ProtocolVersion::V5,
                 features,
                 default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
             },

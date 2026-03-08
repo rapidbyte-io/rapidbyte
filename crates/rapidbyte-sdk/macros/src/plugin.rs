@@ -173,7 +173,7 @@ fn gen_wit_bindings(world_name: &str) -> TokenStream {
     quote! {
         mod __rb_bindings {
             ::rapidbyte_sdk::wit_bindgen::generate!({
-                path: "../../wit",
+                path: "../../../wit",
                 world: #world_lit,
             });
         }
