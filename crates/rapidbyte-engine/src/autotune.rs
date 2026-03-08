@@ -72,13 +72,13 @@ mod tests {
 version: "1.0"
 pipeline: autotune_test
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: users
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 "#

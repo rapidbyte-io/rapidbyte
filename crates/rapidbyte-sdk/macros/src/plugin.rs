@@ -395,76 +395,77 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
     }
 }
 
+/// Generate the shared `run` method preamble: parse request, acquire state.
+fn gen_run_preamble() -> TokenStream {
+    quote! {
+        let stream = parse_stream_context(request.stream_context_json)?;
+        let base_ctx = CONTEXT.get().expect("Plugin not opened");
+        let ctx = base_ctx.with_stream(&stream.stream_name);
+        let rt = get_runtime();
+        let state_cell = get_state();
+        let mut state_ref = state_cell.borrow_mut();
+        let conn = state_ref.as_mut().expect("Plugin not opened");
+    }
+}
+
+/// Build the read dispatch body based on declared features.
+///
+/// Conditionally inserts `if` branches for PartitionedRead and Cdc,
+/// falling back to `Source::read` in the else branch.
+fn gen_read_dispatch(
+    struct_name: &Ident,
+    trait_path: &TokenStream,
+    features: Option<&ManifestFeatures>,
+) -> TokenStream {
+    let has_partitioned = features.is_some_and(|f| f.has_partitioned_read);
+    let has_cdc = features.is_some_and(|f| f.has_cdc);
+
+    if !has_partitioned && !has_cdc {
+        return quote! {
+            rt.block_on(<#struct_name as #trait_path>::read(conn, &ctx, stream))
+                .map_err(to_component_error)?
+        };
+    }
+
+    let partition_branch = has_partitioned.then(|| quote! {
+        if let Some(partition) = stream.partition_coordinates_typed() {
+            return <#struct_name as ::rapidbyte_sdk::features::PartitionedSource>::read_partition(
+                conn, &ctx, stream, partition
+            ).await;
+        }
+    });
+
+    let cdc_branch = has_cdc.then(|| quote! {
+        if stream.sync_mode == ::rapidbyte_sdk::wire::SyncMode::Cdc {
+            let resume = stream.cdc_resume_token().unwrap_or(
+                ::rapidbyte_sdk::stream::CdcResumeToken {
+                    value: None,
+                    cursor_type: ::rapidbyte_sdk::cursor::CursorType::Utf8,
+                }
+            );
+            return <#struct_name as ::rapidbyte_sdk::features::CdcSource>::read_changes(
+                conn, &ctx, stream, resume
+            ).await;
+        }
+    });
+
+    quote! {
+        rt.block_on(async {
+            #partition_branch
+            #cdc_branch
+            <#struct_name as #trait_path>::read(conn, &ctx, stream).await
+        }).map_err(to_component_error)?
+    }
+}
+
 /// Generate source-specific methods: discover, run.
 fn gen_source_methods(
     struct_name: &Ident,
     trait_path: &TokenStream,
     features: Option<&ManifestFeatures>,
 ) -> TokenStream {
-    let read_dispatch = match features {
-        Some(f) if f.has_partitioned_read && f.has_cdc => {
-            quote! {
-                rt.block_on(async {
-                    if let Some(partition) = stream.partition_coordinates_typed() {
-                        <#struct_name as ::rapidbyte_sdk::features::PartitionedSource>::read_partition(
-                            conn, &ctx, stream, partition
-                        ).await
-                    } else if stream.sync_mode == ::rapidbyte_sdk::wire::SyncMode::Cdc {
-                        let resume = stream.cdc_resume_token().unwrap_or(
-                            ::rapidbyte_sdk::stream::CdcResumeToken {
-                                value: None,
-                                cursor_type: ::rapidbyte_sdk::cursor::CursorType::Utf8,
-                            }
-                        );
-                        <#struct_name as ::rapidbyte_sdk::features::CdcSource>::read_changes(
-                            conn, &ctx, stream, resume
-                        ).await
-                    } else {
-                        <#struct_name as #trait_path>::read(conn, &ctx, stream).await
-                    }
-                }).map_err(to_component_error)?
-            }
-        }
-        Some(f) if f.has_partitioned_read => {
-            quote! {
-                rt.block_on(async {
-                    if let Some(partition) = stream.partition_coordinates_typed() {
-                        <#struct_name as ::rapidbyte_sdk::features::PartitionedSource>::read_partition(
-                            conn, &ctx, stream, partition
-                        ).await
-                    } else {
-                        <#struct_name as #trait_path>::read(conn, &ctx, stream).await
-                    }
-                }).map_err(to_component_error)?
-            }
-        }
-        Some(f) if f.has_cdc => {
-            quote! {
-                rt.block_on(async {
-                    if stream.sync_mode == ::rapidbyte_sdk::wire::SyncMode::Cdc {
-                        let resume = stream.cdc_resume_token().unwrap_or(
-                            ::rapidbyte_sdk::stream::CdcResumeToken {
-                                value: None,
-                                cursor_type: ::rapidbyte_sdk::cursor::CursorType::Utf8,
-                            }
-                        );
-                        <#struct_name as ::rapidbyte_sdk::features::CdcSource>::read_changes(
-                            conn, &ctx, stream, resume
-                        ).await
-                    } else {
-                        <#struct_name as #trait_path>::read(conn, &ctx, stream).await
-                    }
-                }).map_err(to_component_error)?
-            }
-        }
-        _ => {
-            // No features or no manifest: original behavior
-            quote! {
-                rt.block_on(<#struct_name as #trait_path>::read(conn, &ctx, stream))
-                    .map_err(to_component_error)?
-            }
-        }
-    };
+    let read_dispatch = gen_read_dispatch(struct_name, trait_path, features);
+    let run_preamble = gen_run_preamble();
 
     quote! {
         fn discover(
@@ -495,13 +496,7 @@ fn gen_source_methods(
             __rb_bindings::rapidbyte::plugin::types::RunSummary,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let stream = parse_stream_context(request.stream_context_json)?;
-            let base_ctx = CONTEXT.get().expect("Plugin not opened");
-            let ctx = base_ctx.with_stream(&stream.stream_name);
-            let rt = get_runtime();
-            let state_cell = get_state();
-            let mut state_ref = state_cell.borrow_mut();
-            let conn = state_ref.as_mut().expect("Plugin not opened");
+            #run_preamble
 
             let summary = #read_dispatch;
 
@@ -543,6 +538,8 @@ fn gen_dest_methods(
         }
     };
 
+    let run_preamble = gen_run_preamble();
+
     quote! {
         fn run(
             _session: u64,
@@ -551,13 +548,7 @@ fn gen_dest_methods(
             __rb_bindings::rapidbyte::plugin::types::RunSummary,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let stream = parse_stream_context(request.stream_context_json)?;
-            let base_ctx = CONTEXT.get().expect("Plugin not opened");
-            let ctx = base_ctx.with_stream(&stream.stream_name);
-            let rt = get_runtime();
-            let state_cell = get_state();
-            let mut state_ref = state_cell.borrow_mut();
-            let conn = state_ref.as_mut().expect("Plugin not opened");
+            #run_preamble
 
             let summary = #write_dispatch;
 
@@ -579,6 +570,8 @@ fn gen_dest_methods(
 
 /// Generate transform-specific methods: run.
 fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> TokenStream {
+    let run_preamble = gen_run_preamble();
+
     quote! {
         fn run(
             _session: u64,
@@ -587,13 +580,7 @@ fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
             __rb_bindings::rapidbyte::plugin::types::RunSummary,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let stream = parse_stream_context(request.stream_context_json)?;
-            let base_ctx = CONTEXT.get().expect("Plugin not opened");
-            let ctx = base_ctx.with_stream(&stream.stream_name);
-            let rt = get_runtime();
-            let state_cell = get_state();
-            let mut state_ref = state_cell.borrow_mut();
-            let conn = state_ref.as_mut().expect("Plugin not opened");
+            #run_preamble
 
             let summary = rt
                 .block_on(<#struct_name as #trait_path>::transform(conn, &ctx, stream))

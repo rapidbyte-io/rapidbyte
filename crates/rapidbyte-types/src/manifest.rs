@@ -156,6 +156,15 @@ impl PluginManifest {
             .as_ref()
             .is_some_and(|s| s.features.contains(&feature))
     }
+
+    /// Check whether the destination role declares a given feature.
+    #[must_use]
+    pub fn has_destination_feature(&self, feature: Feature) -> bool {
+        self.roles
+            .destination
+            .as_ref()
+            .is_some_and(|d| d.features.contains(&feature))
+    }
 }
 
 #[cfg(test)]

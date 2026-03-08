@@ -87,15 +87,9 @@ impl PartitionedSource for SourcePostgres {
         stream: StreamContext,
         _partition: PartitionCoordinates,
     ) -> Result<ReadSummary, PluginError> {
-        let connect_start = Instant::now();
-        let client = client::connect(&self.config)
-            .await
-            .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
-        let connect_secs = connect_start.elapsed().as_secs_f64();
-
-        reader::read_stream(&client, ctx, &stream, connect_secs)
-            .await
-            .map_err(|e| PluginError::internal("READ_FAILED", e))
+        // Partition coordinates are already embedded in StreamContext;
+        // reader::read_stream extracts them via stream.partition_coordinates().
+        self.read(ctx, stream).await
     }
 }
 

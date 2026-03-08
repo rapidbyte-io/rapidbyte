@@ -68,6 +68,6 @@ impl BulkLoadDestination for DestPostgres {
         ctx: &Context,
         stream: StreamContext,
     ) -> Result<WriteSummary, PluginError> {
-        writer::write_stream(&self.config, ctx, &stream).await
+        self.write(ctx, stream).await
     }
 }
