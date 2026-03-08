@@ -73,6 +73,8 @@ pub enum Feature {
     SchemaAutoMigrate,
     /// Bulk load via COPY protocol.
     BulkLoadCopy,
+    /// Source supports parallel partitioned reads (mod/range sharding).
+    PartitionedRead,
 }
 
 /// Connector self-description returned at initialization.
@@ -124,6 +126,15 @@ mod tests {
             serde_json::to_string(&f).unwrap(),
             "\"schema_auto_migrate\""
         );
+    }
+
+    #[test]
+    fn feature_partitioned_read_serde_roundtrip() {
+        let feature = Feature::PartitionedRead;
+        let json = serde_json::to_string(&feature).unwrap();
+        assert_eq!(json, "\"partitioned_read\"");
+        let back: Feature = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, Feature::PartitionedRead);
     }
 
     #[test]
