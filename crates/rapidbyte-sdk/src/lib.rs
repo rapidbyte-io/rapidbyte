@@ -18,6 +18,8 @@ pub mod host_ffi;
 #[cfg(feature = "runtime")]
 pub mod host_tcp;
 #[cfg(feature = "runtime")]
+pub mod features;
+#[cfg(feature = "runtime")]
 pub mod prelude;
 
 // Type re-exports — always available (no feature gate)

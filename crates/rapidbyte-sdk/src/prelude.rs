@@ -7,6 +7,10 @@
 // Connector traits
 pub use crate::connector::{Destination, Source, Transform};
 
+// Feature traits
+pub use crate::features::{BulkLoadDestination, CdcSource, PartitionedSource};
+pub use crate::stream::{CdcResumeToken, PartitionCoordinates};
+
 // Context and logging
 pub use crate::context::{Context, LogLevel};
 
