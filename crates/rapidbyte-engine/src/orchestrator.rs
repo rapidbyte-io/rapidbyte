@@ -16,7 +16,8 @@ use rapidbyte_types::catalog::{Catalog, SchemaHint};
 use rapidbyte_types::cursor::{CursorInfo, CursorType, CursorValue};
 use rapidbyte_types::envelope::DlqRecord;
 use rapidbyte_types::error::ValidationResult;
-use rapidbyte_types::manifest::{Permissions, ResourceLimits};
+use rapidbyte_types::manifest::{ConnectorManifest, Permissions, ResourceLimits};
+use rapidbyte_types::wire::Feature;
 use rapidbyte_types::metric::{ReadSummary, WriteSummary};
 use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
 use rapidbyte_types::stream::{PartitionStrategy, StreamContext, StreamLimits, StreamPolicies};
@@ -154,26 +155,25 @@ const MAX_PIPELINE_COORDINATION_CORES: u32 = 2;
 const TRANSFORM_PENALTY_SLOPE: f64 = 0.05;
 const MIN_TRANSFORM_FACTOR: f64 = 0.75;
 
-fn resolve_effective_parallelism(config: &PipelineConfig) -> u32 {
+fn resolve_effective_parallelism(config: &PipelineConfig, supports_partitioned_read: bool) -> u32 {
     match config.resources.parallelism {
         PipelineParallelism::Manual(value) => value.max(1),
-        PipelineParallelism::Auto => resolve_auto_parallelism(config),
+        PipelineParallelism::Auto => resolve_auto_parallelism(config, supports_partitioned_read),
     }
 }
 
-fn resolve_auto_parallelism(config: &PipelineConfig) -> u32 {
+fn resolve_auto_parallelism(config: &PipelineConfig, supports_partitioned_read: bool) -> u32 {
     let available_cores = std::thread::available_parallelism()
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1);
     let available_cores = u32::try_from(available_cores).unwrap_or(u32::MAX);
-    resolve_auto_parallelism_for_cores(config, available_cores)
+    resolve_auto_parallelism_for_cores(config, available_cores, supports_partitioned_read)
 }
 
-fn resolve_auto_parallelism_for_cores(config: &PipelineConfig, available_cores: u32) -> u32 {
+fn resolve_auto_parallelism_for_cores(config: &PipelineConfig, available_cores: u32, supports_partitioned_read: bool) -> u32 {
     let cap = auto_worker_core_budget(available_cores);
 
-    let source_connector_id = parse_connector_ref(&config.source.use_ref).0;
-    let eligible_streams = if source_connector_id == "source-postgres" {
+    let eligible_streams = if supports_partitioned_read {
         u32::try_from(
             config
                 .source
@@ -474,8 +474,9 @@ async fn execute_pipeline_once(
     let config_for_build = config.clone();
     let state_for_build = state.clone();
     let max_records = options.limit;
+    let source_manifest_for_build = connectors.source_manifest.clone();
     let stream_build = tokio::task::spawn_blocking(move || {
-        build_stream_contexts(&config_for_build, state_for_build.as_ref(), max_records)
+        build_stream_contexts(&config_for_build, state_for_build.as_ref(), max_records, source_manifest_for_build.as_ref())
     })
     .await
     .map_err(|e| {
@@ -637,13 +638,15 @@ fn build_stream_contexts(
     config: &PipelineConfig,
     state: &dyn StateBackend,
     max_records: Option<u64>,
+    source_manifest: Option<&ConnectorManifest>,
 ) -> Result<StreamBuild, PipelineError> {
-    let baseline_parallelism = resolve_effective_parallelism(config);
-    let source_connector_id = parse_connector_ref(&config.source.use_ref).0;
+    let supports_partitioned_read = source_manifest
+        .is_some_and(|m| m.has_source_feature(Feature::PartitionedRead));
+    let baseline_parallelism = resolve_effective_parallelism(config, supports_partitioned_read);
     let autotune_decision = crate::autotune::resolve_stream_autotune(
         config,
         baseline_parallelism,
-        source_connector_id == "source-postgres",
+        supports_partitioned_read,
     );
     let configured_parallelism = autotune_decision.parallelism;
     tracing::info!(
@@ -685,7 +688,7 @@ fn build_stream_contexts(
     };
 
     let pipeline_id = PipelineId::new(config.pipeline.clone());
-    let should_partition = source_connector_id == "source-postgres" && configured_parallelism > 1;
+    let should_partition = supports_partitioned_read && configured_parallelism > 1;
     let mut stream_ctxs = Vec::new();
 
     for s in &config.source.streams {
@@ -797,7 +800,7 @@ fn execution_parallelism(config: &PipelineConfig, stream_ctxs: &[StreamContext])
         .iter()
         .filter_map(|ctx| ctx.effective_parallelism)
         .max()
-        .unwrap_or_else(|| resolve_effective_parallelism(config));
+        .unwrap_or_else(|| resolve_effective_parallelism(config, false));
 
     usize::try_from(resolved.max(1)).unwrap_or(usize::MAX)
 }
@@ -1549,7 +1552,7 @@ async fn finalize_run(
         duration_secs: duration.as_secs_f64(),
         wasm_overhead_secs,
         retry_count: attempt.saturating_sub(1),
-        parallelism: resolve_effective_parallelism(config),
+        parallelism: resolve_effective_parallelism(config, false),
         stream_metrics: aggregated.stream_metrics,
     })
 }
@@ -1903,6 +1906,31 @@ mod stream_context_partition_tests {
     use super::*;
     use crate::config::types::PipelineConfig;
     use rapidbyte_state::SqliteStateBackend;
+    use rapidbyte_types::manifest::{Roles, SourceCapabilities};
+    use rapidbyte_types::wire::ProtocolVersion;
+
+    fn test_manifest_with_partitioned_read() -> ConnectorManifest {
+        ConnectorManifest {
+            id: "test/pg".to_string(),
+            name: "Test".to_string(),
+            version: "0.1.0".to_string(),
+            description: String::new(),
+            author: None,
+            license: None,
+            protocol_version: ProtocolVersion::V4,
+            roles: Roles {
+                source: Some(SourceCapabilities {
+                    supported_sync_modes: vec![SyncMode::FullRefresh],
+                    features: vec![Feature::PartitionedRead],
+                }),
+                destination: None,
+                transform: None,
+            },
+            permissions: Permissions::default(),
+            limits: ResourceLimits::default(),
+            config_schema: None,
+        }
+    }
 
     fn config_with_parallelism(parallelism: u32, sync_mode: &str) -> PipelineConfig {
         config_with_parallelism_and_write_mode(parallelism, sync_mode, "append")
@@ -1976,8 +2004,9 @@ resources:
     fn full_refresh_with_parallelism_fans_out_stream_contexts() {
         let config = config_with_parallelism(4, "full_refresh");
         let state = SqliteStateBackend::in_memory().expect("in-memory state backend");
+        let manifest = test_manifest_with_partitioned_read();
 
-        let build = build_stream_contexts(&config, &state, None).expect("stream contexts built");
+        let build = build_stream_contexts(&config, &state, None, Some(&manifest)).expect("stream contexts built");
 
         assert_eq!(build.stream_ctxs.len(), 4);
         assert_eq!(
@@ -2011,8 +2040,9 @@ resources:
     fn incremental_streams_remain_unpartitioned() {
         let config = config_with_parallelism(4, "incremental");
         let state = SqliteStateBackend::in_memory().expect("in-memory state backend");
+        let manifest = test_manifest_with_partitioned_read();
 
-        let build = build_stream_contexts(&config, &state, None).expect("stream contexts built");
+        let build = build_stream_contexts(&config, &state, None, Some(&manifest)).expect("stream contexts built");
 
         assert_eq!(build.stream_ctxs.len(), 1);
         let stream_ctx = &build.stream_ctxs[0];
@@ -2026,8 +2056,9 @@ resources:
     fn replace_mode_streams_remain_unpartitioned() {
         let config = config_with_parallelism_and_write_mode(4, "full_refresh", "replace");
         let state = SqliteStateBackend::in_memory().expect("in-memory state backend");
+        let manifest = test_manifest_with_partitioned_read();
 
-        let build = build_stream_contexts(&config, &state, None).expect("stream contexts built");
+        let build = build_stream_contexts(&config, &state, None, Some(&manifest)).expect("stream contexts built");
 
         assert_eq!(build.stream_ctxs.len(), 1);
         let stream_ctx = &build.stream_ctxs[0];
@@ -2042,7 +2073,7 @@ resources:
     fn auto_parallelism_without_eligible_streams_resolves_to_one() {
         let config =
             config_with_parallelism_expr("auto", "source-postgres", "incremental", "append", 0);
-        assert_eq!(resolve_effective_parallelism(&config), 1);
+        assert_eq!(resolve_effective_parallelism(&config, true), 1);
     }
 
     #[test]
@@ -2050,16 +2081,16 @@ resources:
         let config =
             config_with_parallelism_expr("auto", "source-postgres", "full_refresh", "append", 0);
 
-        assert_eq!(resolve_auto_parallelism_for_cores(&config, 16), 12);
-        assert_eq!(resolve_auto_parallelism_for_cores(&config, 8), 5);
-        assert_eq!(resolve_auto_parallelism_for_cores(&config, 4), 2);
+        assert_eq!(resolve_auto_parallelism_for_cores(&config, 16, true), 12);
+        assert_eq!(resolve_auto_parallelism_for_cores(&config, 8, true), 5);
+        assert_eq!(resolve_auto_parallelism_for_cores(&config, 4, true), 2);
     }
 
     #[test]
     fn manual_parallelism_override_is_honored() {
         let config =
             config_with_parallelism_expr("7", "source-postgres", "full_refresh", "append", 0);
-        assert_eq!(resolve_effective_parallelism(&config), 7);
+        assert_eq!(resolve_effective_parallelism(&config, true), 7);
     }
 
     #[test]
@@ -2070,8 +2101,8 @@ resources:
             config_with_parallelism_expr("auto", "source-postgres", "full_refresh", "append", 3);
 
         assert!(
-            resolve_auto_parallelism_for_cores(&with_transforms, 16)
-                <= resolve_auto_parallelism_for_cores(&without_transforms, 16)
+            resolve_auto_parallelism_for_cores(&with_transforms, 16, true)
+                <= resolve_auto_parallelism_for_cores(&without_transforms, 16, true)
         );
     }
 
@@ -2103,7 +2134,7 @@ state:
         let config: PipelineConfig = serde_yaml::from_str(yaml).expect("valid pipeline yaml");
 
         // 16 cores => 12 worker cores after reserves; split across 3 streams => 4 shards each.
-        assert_eq!(resolve_auto_parallelism_for_cores(&config, 16), 12);
+        assert_eq!(resolve_auto_parallelism_for_cores(&config, 16, true), 12);
     }
 
     #[test]

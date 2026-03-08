@@ -149,6 +149,7 @@ impl ConnectorManifest {
     }
 
     /// Check whether the source role declares a given feature.
+    #[must_use]
     pub fn has_source_feature(&self, feature: Feature) -> bool {
         self.roles
             .source
