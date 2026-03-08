@@ -331,12 +331,30 @@ fn stage_plugins(root: &Path, mode: &str) -> Result<PathBuf> {
 
     let wasm_dir = format!("wasm32-wasip2/{mode}");
     let mappings = [
-        ("sources/postgres", "source_postgres.wasm", "postgres.wasm", "sources"),
-        ("destinations/postgres", "dest_postgres.wasm", "postgres.wasm", "destinations"),
-        ("transforms/sql", "transform_sql.wasm", "sql.wasm", "transforms"),
+        (
+            "sources/postgres",
+            "source_postgres.wasm",
+            "postgres.wasm",
+            "sources",
+            "source_postgres.wasm",
+        ),
+        (
+            "destinations/postgres",
+            "dest_postgres.wasm",
+            "postgres.wasm",
+            "destinations",
+            "dest_postgres.wasm",
+        ),
+        (
+            "transforms/sql",
+            "transform_sql.wasm",
+            "sql.wasm",
+            "transforms",
+            "transform_sql.wasm",
+        ),
     ];
 
-    for (subpath, file_name, output_name, kind_subdir) in mappings {
+    for (subpath, file_name, output_name, kind_subdir, legacy_name) in mappings {
         let kind_dir = output_dir.join(kind_subdir);
         fs::create_dir_all(&kind_dir)
             .with_context(|| format!("failed to create {}", kind_dir.display()))?;
@@ -355,6 +373,14 @@ fn stage_plugins(root: &Path, mode: &str) -> Result<PathBuf> {
                 dest.display()
             )
         })?;
+        let legacy_dest = output_dir.join(legacy_name);
+        fs::copy(&src, &legacy_dest).with_context(|| {
+            format!(
+                "failed to stage legacy connector wasm {} -> {}",
+                src.display(),
+                legacy_dest.display()
+            )
+        })?;
 
         if mode == "release" {
             let strip = root.join("scripts/strip-wasm.sh");
@@ -365,6 +391,14 @@ fn stage_plugins(root: &Path, mode: &str) -> Result<PathBuf> {
                         .arg(&dest)
                         .status()
                         .with_context(|| format!("failed to strip {}", dest.display()))?,
+                    "wasm strip failed",
+                )?;
+                ensure_success(
+                    Command::new(&strip)
+                        .arg(&legacy_dest)
+                        .arg(&legacy_dest)
+                        .status()
+                        .with_context(|| format!("failed to strip {}", legacy_dest.display()))?,
                     "wasm strip failed",
                 )?;
             }
