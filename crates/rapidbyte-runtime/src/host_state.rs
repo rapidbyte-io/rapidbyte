@@ -951,7 +951,7 @@ mod tests {
         let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
         ComponentHostState::builder()
             .pipeline("test-pipeline")
-            .plugin_id("source-postgres")
+            .plugin_id("postgres")
             .stream("users")
             .state_backend(state)
             .build()
@@ -962,7 +962,7 @@ mod tests {
     fn builder_creates_valid_state() {
         let host = test_host_state();
         assert_eq!(host.identity.pipeline.as_str(), "test-pipeline");
-        assert_eq!(host.identity.plugin_id, "source-postgres");
+        assert_eq!(host.identity.plugin_id, "postgres");
         assert_eq!(host.current_stream(), "users");
     }
 
@@ -1021,7 +1021,7 @@ mod tests {
         let host = test_host_state();
         assert_eq!(
             host.scoped_state_key(StateScope::PluginInstance, "offset"),
-            "source-postgres:offset"
+            "postgres:offset"
         );
     }
 

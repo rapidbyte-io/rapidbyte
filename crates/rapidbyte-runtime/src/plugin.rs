@@ -47,9 +47,9 @@ pub fn extract_manifest_from_wasm(wasm_bytes: &[u8]) -> Option<PluginManifest> {
 /// Parse a plugin reference into (`plugin_id`, `plugin_version`).
 ///
 /// Examples:
-/// - "rapidbyte/source-postgres@v0.1.0" -> ("source-postgres", "0.1.0")
-/// - "source-postgres@v0.1.0"           -> ("source-postgres", "0.1.0")
-/// - "source-postgres"                  -> ("source-postgres", "unknown")
+/// - "rapidbyte/postgres@v0.1.0" -> ("postgres", "0.1.0")
+/// - "postgres@v0.1.0"           -> ("postgres", "0.1.0")
+/// - "postgres"                  -> ("postgres", "unknown")
 #[must_use]
 pub fn parse_plugin_ref(plugin_ref: &str) -> (String, String) {
     let after_slash = plugin_ref
@@ -91,11 +91,11 @@ fn kind_subdir(kind: PluginKind) -> &'static str {
     }
 }
 
-/// Resolve a plugin reference (e.g. "rapidbyte/source-postgres@v0.1.0")
+/// Resolve a plugin reference (e.g. "rapidbyte/postgres@v0.1.0")
 /// to a .wasm file path on disk.
 ///
 /// The plugin ref is mapped to a filename by extracting the plugin name
-/// and replacing hyphens with underscores: "source-postgres" -> `source_postgres.wasm`
+/// and replacing hyphens with underscores: "postgres" -> `postgres.wasm`
 ///
 /// The file is searched for in `<search_dir>/<kind_subdir>/<filename>`.
 ///

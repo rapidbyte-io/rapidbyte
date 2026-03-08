@@ -1977,13 +1977,13 @@ mod stream_context_partition_tests {
 version: "1.0"
 pipeline: test_partitioning
 source:
-  use: source-postgres
+  use: postgres
   config: {{}}
   streams:
     - name: bench_events
       sync_mode: {sync_mode}
 destination:
-  use: dest-postgres
+  use: postgres
   config: {{}}
   write_mode: {write_mode}
 resources:
@@ -2005,7 +2005,7 @@ resources:
         } else {
             let mut transforms = String::from("transforms:\n");
             for _ in 0..transform_count {
-                transforms.push_str("  - use: transform-sql\n    config: {}\n");
+                transforms.push_str("  - use: sql\n    config: {}\n");
             }
             transforms
         };
@@ -2021,7 +2021,7 @@ source:
     - name: bench_events
       sync_mode: {sync_mode}
 {transforms_yaml}destination:
-  use: dest-postgres
+  use: postgres
   config: {{}}
   write_mode: {write_mode}
 resources:
@@ -2103,14 +2103,14 @@ resources:
     #[test]
     fn auto_parallelism_without_eligible_streams_resolves_to_one() {
         let config =
-            config_with_parallelism_expr("auto", "source-postgres", "incremental", "append", 0);
+            config_with_parallelism_expr("auto", "postgres", "incremental", "append", 0);
         assert_eq!(resolve_effective_parallelism(&config, true), 1);
     }
 
     #[test]
     fn auto_parallelism_uses_adaptive_core_budget() {
         let config =
-            config_with_parallelism_expr("auto", "source-postgres", "full_refresh", "append", 0);
+            config_with_parallelism_expr("auto", "postgres", "full_refresh", "append", 0);
 
         assert_eq!(resolve_auto_parallelism_for_cores(&config, 16, true), 12);
         assert_eq!(resolve_auto_parallelism_for_cores(&config, 8, true), 5);
@@ -2120,16 +2120,16 @@ resources:
     #[test]
     fn manual_parallelism_override_is_honored() {
         let config =
-            config_with_parallelism_expr("7", "source-postgres", "full_refresh", "append", 0);
+            config_with_parallelism_expr("7", "postgres", "full_refresh", "append", 0);
         assert_eq!(resolve_effective_parallelism(&config, true), 7);
     }
 
     #[test]
     fn transform_count_reduces_auto_parallelism() {
         let without_transforms =
-            config_with_parallelism_expr("auto", "source-postgres", "full_refresh", "append", 0);
+            config_with_parallelism_expr("auto", "postgres", "full_refresh", "append", 0);
         let with_transforms =
-            config_with_parallelism_expr("auto", "source-postgres", "full_refresh", "append", 3);
+            config_with_parallelism_expr("auto", "postgres", "full_refresh", "append", 3);
 
         assert!(
             resolve_auto_parallelism_for_cores(&with_transforms, 16, true)
@@ -2143,7 +2143,7 @@ resources:
 version: "1.0"
 pipeline: bench_pg
 source:
-  use: source-postgres
+  use: postgres
   config: {}
   streams:
     - name: a
@@ -2153,7 +2153,7 @@ source:
     - name: c
       sync_mode: full_refresh
 destination:
-  use: dest-postgres
+  use: postgres
   config: {}
   write_mode: append
 resources:
@@ -2171,7 +2171,7 @@ state:
     #[test]
     fn execution_parallelism_prefers_stream_context_override() {
         let config =
-            config_with_parallelism_expr("2", "source-postgres", "full_refresh", "append", 0);
+            config_with_parallelism_expr("2", "postgres", "full_refresh", "append", 0);
         let stream_ctxs = vec![StreamContext {
             stream_name: "users".to_string(),
             source_stream_name: Some("users".to_string()),
@@ -2195,7 +2195,7 @@ state:
     #[test]
     fn execution_parallelism_falls_back_to_pipeline_setting() {
         let config =
-            config_with_parallelism_expr("3", "source-postgres", "full_refresh", "append", 0);
+            config_with_parallelism_expr("3", "postgres", "full_refresh", "append", 0);
         let stream_ctxs = vec![StreamContext {
             stream_name: "users".to_string(),
             source_stream_name: None,
