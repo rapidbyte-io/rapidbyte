@@ -1,6 +1,7 @@
 mod adapters;
 mod artifact;
 mod cli;
+mod environment;
 mod metrics;
 mod output;
 mod pipeline;
