@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use crate::scenario::ScenarioManifest;
+use crate::scenario::{PostgresBenchmarkEnvironment, ScenarioManifest};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,6 +39,13 @@ pub struct PostgresSeedPlan {
 }
 
 pub fn resolve_workload_plan(scenario: &ScenarioManifest) -> Result<ResolvedWorkloadPlan> {
+    resolve_workload_plan_with_environment(scenario, scenario.environment.postgres.as_ref())
+}
+
+pub fn resolve_workload_plan_with_environment(
+    scenario: &ScenarioManifest,
+    environment: Option<&PostgresBenchmarkEnvironment>,
+) -> Result<ResolvedWorkloadPlan> {
     let target_row_bytes = match scenario.workload.family {
         WorkloadFamily::NarrowAppend => 128,
         WorkloadFamily::WideAppend => 2048,
@@ -50,11 +57,7 @@ pub fn resolve_workload_plan(scenario: &ScenarioManifest) -> Result<ResolvedWork
         WorkloadFamily::CdcBackfill => 1024,
         WorkloadFamily::TransformHeavy => 1536,
     };
-    let seed = scenario
-        .environment
-        .postgres
-        .as_ref()
-        .map(|env| PostgresSeedPlan {
+    let seed = environment.map(|env| PostgresSeedPlan {
             source_schema: env.source.schema.clone(),
             source_table: env.stream_name.clone(),
             destination_schema: env.destination.schema.clone(),

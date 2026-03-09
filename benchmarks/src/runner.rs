@@ -10,10 +10,16 @@ use postgres::{Client, Config as PostgresConfig, NoTls};
 use serde_json::{json, Map, Value as JsonValue};
 
 use crate::artifact::{ArtifactCorrectness, BenchmarkArtifact};
+use crate::environment::resolve_postgres_environment;
 use crate::output::write_artifact_json;
 use crate::pipeline::write_rendered_pipeline;
-use crate::scenario::{filter_scenarios, PostgresConnectionProfile, ScenarioManifest};
-use crate::workload::{resolve_workload_plan, PostgresSeedPlan, ResolvedWorkloadPlan, WorkloadFamily};
+use crate::scenario::{
+    filter_scenarios, PostgresBenchmarkEnvironment, PostgresConnectionProfile, ScenarioManifest,
+};
+use crate::workload::{
+    resolve_workload_plan, resolve_workload_plan_with_environment, PostgresSeedPlan,
+    ResolvedWorkloadPlan, WorkloadFamily,
+};
 
 const BENCH_JSON_MARKER: &str = "@@BENCH_JSON@@";
 const DEFAULT_GIT_SHA: &str = "unknown";
@@ -99,9 +105,11 @@ pub fn materialize_artifact(result: RunResult) -> Result<BenchmarkArtifact> {
 }
 
 pub fn emit_scenario_artifacts(
+    root: &Path,
     scenarios: &[ScenarioManifest],
     suite: Option<&str>,
     scenario_ids: &[String],
+    env_profile: Option<&str>,
     output_path: &Path,
 ) -> Result<usize> {
     let filtered: Vec<&ScenarioManifest> = filter_scenarios(scenarios, suite, &[])
@@ -121,15 +129,20 @@ pub fn emit_scenario_artifacts(
     let mut artifact_count = 0;
 
     for scenario in &filtered {
-        let workload = resolve_workload_plan(scenario)?;
+        let resolved_env = resolve_postgres_environment(root, scenario, env_profile)?;
+        let workload = resolve_workload_plan_with_environment(scenario, resolved_env.as_ref())?;
 
         for _ in 0..scenario.execution.warmups {
-            let _ = execute_scenario_once(scenario, &workload)?;
+            let _ = execute_scenario_once(scenario, &workload, resolved_env.as_ref())?;
         }
 
         let measured_iterations = scenario.execution.iterations.max(1);
         for _ in 0..measured_iterations {
-            let artifact = materialize_artifact(execute_scenario_once(scenario, &workload)?)?;
+            let artifact = materialize_artifact(execute_scenario_once(
+                scenario,
+                &workload,
+                resolved_env.as_ref(),
+            )?)?;
             write_artifact_json(&mut file, &artifact)?;
             artifact_count += 1;
         }
@@ -141,9 +154,10 @@ pub fn emit_scenario_artifacts(
 fn execute_scenario_once(
     scenario: &ScenarioManifest,
     workload: &ResolvedWorkloadPlan,
+    environment: Option<&PostgresBenchmarkEnvironment>,
 ) -> Result<RunResult> {
     if workload.seed.is_some() && !workload.synthetic {
-        return execute_real_postgres_pipeline(scenario, workload);
+        return execute_real_postgres_pipeline(scenario, workload, environment);
     }
 
     Ok(RunResult::success(
@@ -159,10 +173,17 @@ fn execute_scenario_once(
 fn execute_real_postgres_pipeline(
     scenario: &ScenarioManifest,
     workload: &ResolvedWorkloadPlan,
+    environment: Option<&PostgresBenchmarkEnvironment>,
 ) -> Result<RunResult> {
     let temp_root = benchmark_temp_root(&scenario.id)?;
-    prepare_postgres_seed(scenario, workload)?;
-    let rendered = write_rendered_pipeline(scenario, &temp_root)?;
+    let env = environment.with_context(|| {
+        format!(
+            "scenario {} requires a resolved postgres benchmark environment",
+            scenario.id
+        )
+    })?;
+    prepare_postgres_seed(&scenario.workload.family, workload, env)?;
+    let rendered = write_rendered_pipeline(scenario, env, &temp_root)?;
     let bench_json = invoke_rapidbyte_run(&rendered.path)?;
     enforce_row_count_assertions(&scenario.id, workload, &bench_json)?;
     run_result_from_bench_json(scenario, bench_json)
@@ -294,18 +315,14 @@ fn enforce_row_count_assertions(
 }
 
 fn prepare_postgres_seed(
-    scenario: &ScenarioManifest,
+    family: &WorkloadFamily,
     workload: &ResolvedWorkloadPlan,
+    env: &PostgresBenchmarkEnvironment,
 ) -> Result<()> {
-    let env = scenario
-        .environment
-        .postgres
-        .as_ref()
-        .with_context(|| format!("scenario {} is missing postgres environment", scenario.id))?;
     let seed = workload
         .seed
         .as_ref()
-        .with_context(|| format!("scenario {} is missing postgres seed plan", scenario.id))?;
+        .context("missing postgres seed plan")?;
 
     let mut source = connect_postgres(&env.source)?;
     source
@@ -324,7 +341,7 @@ fn prepare_postgres_seed(
         ))
         .context("failed to prepare benchmark source table")?;
 
-    seed_postgres_source(&mut source, &scenario.workload.family, seed)?;
+    seed_postgres_source(&mut source, family, seed)?;
 
     let mut destination = connect_postgres(&env.destination)?;
     destination
@@ -513,9 +530,11 @@ mod tests {
         let copy = synthetic_scenario("synthetic_copy");
 
         let written = emit_scenario_artifacts(
+            std::path::Path::new("."),
             &[insert, copy],
             Some("lab"),
             &["synthetic_copy".to_string()],
+            None,
             &output_path,
         )
         .expect("emit artifacts");
@@ -524,6 +543,32 @@ mod tests {
         let rendered = fs::read_to_string(&output_path).expect("read output");
         assert!(rendered.contains("\"scenario_id\":\"synthetic_copy\""));
         assert!(!rendered.contains("\"scenario_id\":\"synthetic_insert\""));
+    }
+
+    #[test]
+    fn logical_environment_reference_requires_env_profile() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "rapidbyte-benchmark-env-required-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp_root).expect("create temp root");
+        let output_path = temp_root.join("candidate.jsonl");
+
+        let err = emit_scenario_artifacts(
+            std::path::Path::new("."),
+            &[logical_environment_scenario("pg_dest_insert")],
+            Some("lab"),
+            &["pg_dest_insert".to_string()],
+            None,
+            &output_path,
+        )
+        .expect_err("logical environment should require an env profile");
+
+        assert!(err.to_string().contains("requires environment profile"));
     }
 
     fn sample_postgres_scenario(load_method: &str) -> ScenarioManifest {
@@ -669,6 +714,55 @@ mod tests {
             environment: EnvironmentConfig::default(),
             connector_options: ConnectorOptions::default(),
             assertions: ScenarioAssertions::default(),
+        }
+    }
+
+    fn logical_environment_scenario(id: &str) -> ScenarioManifest {
+        ScenarioManifest {
+            id: id.to_string(),
+            name: id.to_string(),
+            suite: "lab".to_string(),
+            kind: BenchmarkKind::Pipeline,
+            tags: vec!["lab".to_string()],
+            connectors: vec![
+                ScenarioConnectorRef {
+                    kind: "source".to_string(),
+                    plugin: "postgres".to_string(),
+                },
+                ScenarioConnectorRef {
+                    kind: "destination".to_string(),
+                    plugin: "postgres".to_string(),
+                },
+            ],
+            requires: vec![],
+            workload: WorkloadProfile {
+                family: WorkloadFamily::NarrowAppend,
+                rows: 100,
+            },
+            execution: ExecutionProfile {
+                iterations: 1,
+                warmups: 0,
+            },
+            environment: EnvironmentConfig {
+                reference: Some("local-dev-postgres".to_string()),
+                stream_name: Some("bench_events".to_string()),
+                postgres: None,
+            },
+            connector_options: ConnectorOptions {
+                source: SourceConnectorOptions {
+                    sync_mode: Some(SyncMode::FullRefresh),
+                    config: Default::default(),
+                },
+                destination: DestinationConnectorOptions {
+                    load_method: Some("insert".to_string()),
+                    write_mode: Some("append".to_string()),
+                    config: Default::default(),
+                },
+            },
+            assertions: ScenarioAssertions {
+                expected_records_read: Some(100),
+                expected_records_written: Some(100),
+            },
         }
     }
 }

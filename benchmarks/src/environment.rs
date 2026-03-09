@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::scenario::{PostgresBenchmarkEnvironment, PostgresConnectionProfile, ScenarioManifest};
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EnvironmentProfile {
     pub id: String,
@@ -95,6 +97,78 @@ pub fn apply_environment_overrides(profile: &mut EnvironmentProfile) -> Result<(
     }
 
     Ok(())
+}
+
+pub fn resolve_postgres_environment(
+    root: &Path,
+    scenario: &ScenarioManifest,
+    env_profile: Option<&str>,
+) -> Result<Option<PostgresBenchmarkEnvironment>> {
+    if let Some(env) = scenario.environment.postgres.clone() {
+        return Ok(Some(env));
+    }
+
+    let Some(reference) = scenario.environment.reference.as_deref() else {
+        return Ok(None);
+    };
+    let profile_id = env_profile.with_context(|| {
+        format!(
+            "scenario {} requires environment profile {}",
+            scenario.id, reference
+        )
+    })?;
+
+    let mut profile = resolve_environment_profile(root, profile_id)?;
+    apply_environment_overrides(&mut profile)?;
+
+    if profile.id != reference {
+        anyhow::bail!(
+            "scenario {} requires environment profile {} but resolved {}",
+            scenario.id,
+            reference,
+            profile.id
+        );
+    }
+
+    let stream_name = scenario
+        .environment
+        .stream_name
+        .clone()
+        .with_context(|| format!("scenario {} is missing environment.stream_name", scenario.id))?;
+    let source = connection_profile_for_binding(&profile, &profile.bindings.source)?;
+    let destination = connection_profile_for_binding(&profile, &profile.bindings.destination)?;
+
+    Ok(Some(PostgresBenchmarkEnvironment {
+        stream_name,
+        source,
+        destination,
+    }))
+}
+
+fn connection_profile_for_binding(
+    profile: &EnvironmentProfile,
+    binding: &EnvironmentBinding,
+) -> Result<PostgresConnectionProfile> {
+    let service = profile
+        .services
+        .get(&binding.service)
+        .with_context(|| format!("unknown environment service {}", binding.service))?;
+    if service.kind != "postgres" {
+        anyhow::bail!(
+            "service {} has unsupported kind {}",
+            binding.service,
+            service.kind
+        );
+    }
+
+    Ok(PostgresConnectionProfile {
+        host: service.host.clone(),
+        port: service.port,
+        user: service.user.clone(),
+        password: service.password.clone(),
+        database: service.database.clone(),
+        schema: binding.schema.clone(),
+    })
 }
 
 fn absolutize(root: &Path, path: &Path) -> PathBuf {

@@ -23,9 +23,11 @@ fn main() -> Result<()> {
             let scenarios = scenario::discover_scenarios(&root.join(&args.scenario_dir))?;
             let output_path = root.join(&args.output);
             let written = runner::emit_scenario_artifacts(
+                &root,
                 &scenarios,
                 args.suite.as_deref(),
                 &args.scenarios,
+                args.env_profile.as_deref(),
                 &output_path,
             )?;
             println!(
