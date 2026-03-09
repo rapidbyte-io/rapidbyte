@@ -19,10 +19,14 @@ fn main() -> Result<()> {
         BenchCommand::Run(args) => {
             let root = std::env::current_dir()?;
             let scenarios = scenario::discover_scenarios(&root.join(&args.scenario_dir))?;
+            let output_path = root.join(&args.output);
+            let written =
+                runner::emit_scenario_artifacts(&scenarios, args.suite.as_deref(), &output_path)?;
             println!(
-                "benchmark runner skeleton: discovered {} scenario(s) in {}",
+                "benchmark runner: wrote {} artifact(s) from {} discovered scenario(s) to {}",
+                written,
                 scenarios.len(),
-                root.join(args.scenario_dir).display()
+                output_path.display()
             );
         }
         BenchCommand::Compare(args) => {

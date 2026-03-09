@@ -1,0 +1,31 @@
+name: Benchmark PR
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  bench-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify benchmark crate
+        run: cargo test -p rapidbyte-benchmarks
+
+      - name: Verify analysis layer
+        run: python3 -m unittest benchmarks.analysis.tests.test_compare
+
+      - name: Run PR benchmark smoke suite
+        run: |
+          cargo run --manifest-path benchmarks/Cargo.toml -- run --suite pr --output target/benchmarks/pr/candidate.jsonl
+          python3 benchmarks/analysis/compare.py benchmarks/baselines/main/pr.jsonl target/benchmarks/pr/candidate.jsonl --min-samples 1
+
+      - name: Upload PR benchmark artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-benchmark-artifacts
+          path: target/benchmarks/pr/candidate.jsonl

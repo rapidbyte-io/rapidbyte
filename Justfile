@@ -104,6 +104,11 @@ bench-compare ref1 ref2 *args="":
 benchmarks *args="":
     cargo run --manifest-path benchmarks/Cargo.toml -- {{args}}
 
+# Run the PR benchmark smoke suite and compare against the checked-in baseline artifact set
+bench-pr:
+    cargo run --manifest-path benchmarks/Cargo.toml -- run --suite pr --output target/benchmarks/pr/candidate.jsonl
+    python3 benchmarks/analysis/compare.py benchmarks/baselines/main/pr.jsonl target/benchmarks/pr/candidate.jsonl --min-samples 1
+
 # ── Utilities ────────────────────────────────────────────────────────
 
 # Scaffold a new plugin project

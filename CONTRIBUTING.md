@@ -61,8 +61,17 @@ Refer to [docs/CODING_STYLE.md](docs/CODING_STYLE.md) for the full style guide. 
 | `just fmt` | Always |
 | `just lint` | Always |
 | `just test` | Always |
+| `just bench-pr` | Connector changes or benchmark-sensitive changes |
 | `just e2e` | Engine, runtime, or plugin changes |
 | `cargo bench` | Hot-path code changes |
+
+## Benchmarks
+
+The next-generation benchmark platform lives under `benchmarks/`.
+
+- `just benchmarks run` discovers scenarios and emits benchmark artifacts
+- `just bench-pr` runs the PR smoke suite and compares it against the checked-in baseline artifact set
+- the checked-in baseline is a local smoke mechanism; CI and future infra should replace it with rolling `main` artifacts
 
 ## PR Process
 

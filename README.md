@@ -1,6 +1,6 @@
 # Rapidbyte
 
-[![CI](https://github.com/rapidbyte-io/rapidbyte/actions/workflows/ci.yml/badge.svg)](https://github.com/rapidbyte-io/rapidbyte/actions/workflows/ci.yml) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE) [![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](rust-toolchain.toml) [![Docs: Contributing](https://img.shields.io/badge/docs-contributing-0A7EA4.svg)](CONTRIBUTING.md)
+[![CI](https://github.com/rapidbyte-io/rapidbyte/actions/workflows/ci.yml/badge.svg)](https://github.com/rapidbyte-io/rapidbyte/actions/workflows/ci.yml) [![Benchmark PR](https://github.com/rapidbyte-io/rapidbyte/actions/workflows/bench-pr.yml/badge.svg)](https://github.com/rapidbyte-io/rapidbyte/actions/workflows/bench-pr.yml) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE) [![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](rust-toolchain.toml) [![Docs: Contributing](https://img.shields.io/badge/docs-contributing-0A7EA4.svg)](CONTRIBUTING.md)
 
 Single-binary data pipeline engine with Wasm-sandboxed plugins.
 

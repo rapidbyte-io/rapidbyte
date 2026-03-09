@@ -1,9 +1,15 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
+use std::fs::{self, File};
+use std::path::Path;
+
 use anyhow::{bail, Result};
 use serde_json::{Map, Value as JsonValue};
 
 use crate::artifact::{ArtifactCorrectness, BenchmarkArtifact};
+use crate::output::write_artifact_json;
+use crate::scenario::{filter_scenarios, ScenarioManifest};
+use crate::workload::resolve_workload_plan;
 
 #[derive(Debug, Clone)]
 pub struct RunResult {
@@ -64,7 +70,12 @@ pub fn materialize_artifact(result: RunResult) -> Result<BenchmarkArtifact> {
         suite_id: result.suite_id,
         scenario_id: result.scenario_id,
         git_sha: "unknown".to_string(),
+        hardware_class: "local-dev".to_string(),
         build_mode: "debug".to_string(),
+        execution_flags: serde_json::json!({
+            "synthetic": true,
+            "aot": false,
+        }),
         canonical_metrics,
         connector_metrics: result.connector_metrics,
         correctness: ArtifactCorrectness {
@@ -72,4 +83,31 @@ pub fn materialize_artifact(result: RunResult) -> Result<BenchmarkArtifact> {
             validator: "row_count".to_string(),
         },
     })
+}
+
+pub fn emit_scenario_artifacts(
+    scenarios: &[ScenarioManifest],
+    suite: Option<&str>,
+    output_path: &Path,
+) -> Result<usize> {
+    let filtered = filter_scenarios(scenarios, suite, &[]);
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut file = File::create(output_path)?;
+    for scenario in &filtered {
+        let workload = resolve_workload_plan(scenario)?;
+        let artifact = materialize_artifact(RunResult::success(
+            scenario.suite.clone(),
+            scenario.id.clone(),
+            serde_json::json!({
+                "workload_family": format!("{:?}", scenario.workload.family),
+            }),
+            workload.rows,
+        ))?;
+        write_artifact_json(&mut file, &artifact)?;
+    }
+
+    Ok(filtered.len())
 }

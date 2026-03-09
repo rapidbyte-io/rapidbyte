@@ -19,6 +19,12 @@ pub enum BenchCommand {
 pub struct RunArgs {
     #[arg(long, default_value = "benchmarks/scenarios")]
     pub scenario_dir: PathBuf,
+
+    #[arg(long)]
+    pub suite: Option<String>,
+
+    #[arg(long, default_value = "target/benchmarks/results.jsonl")]
+    pub output: PathBuf,
 }
 
 #[derive(Debug, clap::Args)]

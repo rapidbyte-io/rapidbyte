@@ -7,7 +7,7 @@ use anyhow::Result;
 use crate::artifact::BenchmarkArtifact;
 
 pub fn write_artifact_json<W: Write>(writer: &mut W, artifact: &BenchmarkArtifact) -> Result<()> {
-    serde_json::to_writer_pretty(&mut *writer, artifact)?;
+    serde_json::to_writer(&mut *writer, artifact)?;
     writer.write_all(b"\n")?;
     Ok(())
 }
@@ -39,7 +39,7 @@ mod tests {
         write_artifact_json(&mut buf, &artifact).expect("write artifact");
         let rendered = String::from_utf8(buf).expect("utf8");
 
-        assert!(rendered.contains("\"scenario_id\": \"pr_smoke_pipeline\""));
+        assert!(rendered.contains("\"scenario_id\":\"pr_smoke_pipeline\""));
         assert!(rendered.ends_with('\n'));
     }
 }
