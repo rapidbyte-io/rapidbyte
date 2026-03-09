@@ -92,13 +92,13 @@ ci:
 e2e *args="":
     cargo test --manifest-path tests/e2e/Cargo.toml {{args}}
 
-# Run benchmarks: bench [PLUGIN] [ROWS] --profile PROFILE [--iters N] [--cpu-profile]
+# Run the connector-agnostic benchmark runner
 bench *args="":
-    cargo run --manifest-path tests/bench/Cargo.toml -- run {{args}}
+    cargo run --manifest-path benchmarks/Cargo.toml -- run {{args}}
 
-# Compare benchmarks between two git refs
-bench-compare ref1 ref2 *args="":
-    cargo run --manifest-path tests/bench/Cargo.toml -- compare {{ref1}} {{ref2}} {{args}}
+# Compare two benchmark artifact sets
+bench-compare baseline candidate *args="":
+    python3 benchmarks/analysis/compare.py {{baseline}} {{candidate}} {{args}}
 
 # Run the next-generation connector-agnostic benchmark runner
 benchmarks *args="":
