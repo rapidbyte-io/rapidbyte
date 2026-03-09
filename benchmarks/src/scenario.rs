@@ -4,8 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use rapidbyte_types::wire::Feature;
+use rapidbyte_types::wire::{Feature, SyncMode};
 use serde::{Deserialize, Serialize};
+use serde_yaml::Value as YamlValue;
 
 use crate::workload::WorkloadFamily;
 
@@ -37,6 +38,59 @@ pub struct ExecutionProfile {
     pub warmups: u32,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EnvironmentConfig {
+    pub postgres: Option<PostgresBenchmarkEnvironment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PostgresBenchmarkEnvironment {
+    pub stream_name: String,
+    pub source: PostgresConnectionProfile,
+    pub destination: PostgresConnectionProfile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PostgresConnectionProfile {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    #[serde(default)]
+    pub password: String,
+    pub database: String,
+    #[serde(default = "default_postgres_schema")]
+    pub schema: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectorOptions {
+    #[serde(default)]
+    pub source: SourceConnectorOptions,
+    #[serde(default)]
+    pub destination: DestinationConnectorOptions,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceConnectorOptions {
+    pub sync_mode: Option<SyncMode>,
+    #[serde(default)]
+    pub config: std::collections::BTreeMap<String, YamlValue>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DestinationConnectorOptions {
+    pub load_method: Option<String>,
+    pub write_mode: Option<String>,
+    #[serde(default)]
+    pub config: std::collections::BTreeMap<String, YamlValue>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScenarioAssertions {
+    pub expected_records_read: Option<u64>,
+    pub expected_records_written: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ScenarioManifest {
     pub id: String,
@@ -51,6 +105,16 @@ pub struct ScenarioManifest {
     pub requires: Vec<Feature>,
     pub workload: WorkloadProfile,
     pub execution: ExecutionProfile,
+    #[serde(default)]
+    pub environment: EnvironmentConfig,
+    #[serde(default)]
+    pub connector_options: ConnectorOptions,
+    #[serde(default)]
+    pub assertions: ScenarioAssertions,
+}
+
+fn default_postgres_schema() -> String {
+    "public".to_string()
 }
 
 impl ScenarioManifest {
@@ -228,5 +292,77 @@ execution:
         let message = err.to_string();
         assert!(message.contains("failed to parse scenario"));
         assert!(message.contains("invalid.yaml"));
+    }
+
+    #[test]
+    fn parses_postgres_environment_connector_options_and_assertions() {
+        let root = temp_dir("real-pipeline");
+        let scenario_path = root.join("pg_dest_insert.yaml");
+        fs::write(
+            &scenario_path,
+            r#"
+id: pg_dest_insert
+name: Postgres destination via insert
+suite: lab
+kind: pipeline
+tags: [lab, postgres]
+connectors:
+  - kind: source
+    plugin: postgres
+  - kind: destination
+    plugin: postgres
+workload:
+  family: narrow_append
+  rows: 1000000
+execution:
+  iterations: 3
+  warmups: 1
+environment:
+  postgres:
+    stream_name: bench_events
+    source:
+      host: localhost
+      port: 5433
+      user: postgres
+      password: postgres
+      database: rapidbyte_test
+      schema: public
+    destination:
+      host: localhost
+      port: 5433
+      user: postgres
+      password: postgres
+      database: rapidbyte_test
+      schema: raw
+connector_options:
+  source:
+    sync_mode: full_refresh
+  destination:
+    load_method: insert
+    write_mode: append
+assertions:
+  expected_records_read: 1000000
+  expected_records_written: 1000000
+"#,
+        )
+        .expect("write scenario");
+
+        let scenario = ScenarioManifest::from_path(&scenario_path).expect("parse scenario");
+        let env = scenario.environment.postgres.expect("postgres environment");
+        assert_eq!(env.stream_name, "bench_events");
+        assert_eq!(env.source.host, "localhost");
+        assert_eq!(env.destination.schema, "raw");
+        assert_eq!(
+            scenario.connector_options.destination.load_method.as_deref(),
+            Some("insert")
+        );
+        assert_eq!(
+            scenario.connector_options.destination.write_mode.as_deref(),
+            Some("append")
+        );
+        assert_eq!(
+            scenario.assertions.expected_records_written,
+            Some(1_000_000)
+        );
     }
 }

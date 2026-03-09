@@ -79,6 +79,9 @@ mod tests {
                 iterations: 3,
                 warmups: 1,
             },
+            environment: Default::default(),
+            connector_options: Default::default(),
+            assertions: Default::default(),
         };
 
         let plan = resolve_workload_plan(&scenario).expect("resolve workload");

@@ -33,6 +33,9 @@ mod tests {
                     iterations: 3,
                     warmups: 1,
                 },
+                environment: Default::default(),
+                connector_options: Default::default(),
+                assertions: Default::default(),
             },
             ScenarioManifest {
                 id: "lab_partitioned_pipeline".to_string(),
@@ -53,6 +56,9 @@ mod tests {
                     iterations: 5,
                     warmups: 1,
                 },
+                environment: Default::default(),
+                connector_options: Default::default(),
+                assertions: Default::default(),
             },
         ]
     }
