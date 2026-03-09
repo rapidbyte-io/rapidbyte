@@ -3306,6 +3306,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rapidbyte-benchmarks"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
 name = "rapidbyte-cli"
 version = "0.1.0"
 dependencies = [

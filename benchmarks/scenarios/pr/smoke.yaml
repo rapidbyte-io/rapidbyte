@@ -1,0 +1,18 @@
+id: pr_smoke_pipeline
+name: PR smoke pipeline
+suite: pr
+kind: pipeline
+tags:
+  - pr
+  - synthetic
+connectors:
+  - kind: source
+    plugin: postgres
+  - kind: destination
+    plugin: postgres
+workload:
+  family: narrow_append
+  rows: 1000
+execution:
+  iterations: 3
+  warmups: 1

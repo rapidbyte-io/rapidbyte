@@ -100,6 +100,10 @@ bench *args="":
 bench-compare ref1 ref2 *args="":
     cargo run --manifest-path tests/bench/Cargo.toml -- compare {{ref1}} {{ref2}} {{args}}
 
+# Run the next-generation connector-agnostic benchmark runner
+benchmarks *args="":
+    cargo run --manifest-path benchmarks/Cargo.toml -- {{args}}
+
 # ── Utilities ────────────────────────────────────────────────────────
 
 # Scaffold a new plugin project
