@@ -3,6 +3,7 @@ mod artifact;
 mod cli;
 mod metrics;
 mod output;
+mod pipeline;
 mod runner;
 mod scenario;
 mod workload;
