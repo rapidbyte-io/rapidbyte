@@ -1,6 +1,9 @@
 mod adapters;
 mod artifact;
 mod cli;
+mod metrics;
+mod output;
+mod runner;
 mod scenario;
 mod workload;
 
