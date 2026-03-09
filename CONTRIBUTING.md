@@ -32,7 +32,7 @@ just run tests/fixtures/pipelines/simple_pg_to_pg.yaml -v
 ### Bug Fixes & Features
 
 1. Fork the repo and create a branch (`fix/short-description` or `feat/short-description`).
-2. Make your changes and run the checks listed in [Testing Expectations](#testing-expectations).
+2. Make your changes and run `just ci` plus any extra checks listed in [Testing Expectations](#testing-expectations).
 3. Open a pull request against `main`.
 
 ### New Plugins
@@ -57,6 +57,7 @@ Refer to [docs/CODING_STYLE.md](docs/CODING_STYLE.md) for the full style guide. 
 
 | Command | When to Run |
 |---|---|
+| `just ci` | Always before opening or updating a PR |
 | `just fmt` | Always |
 | `just lint` | Always |
 | `just test` | Always |

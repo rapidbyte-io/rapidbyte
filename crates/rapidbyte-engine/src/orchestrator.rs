@@ -237,10 +237,7 @@ fn auto_worker_core_budget(available_cores: u32) -> u32 {
         .max(1)
 }
 
-fn decode_incremental_last_value(
-    raw: String,
-    tie_breaker_field: Option<&str>,
-) -> CursorValue {
+fn decode_incremental_last_value(raw: String, tie_breaker_field: Option<&str>) -> CursorValue {
     if tie_breaker_field.is_some() {
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
             if value

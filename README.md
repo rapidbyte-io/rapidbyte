@@ -182,12 +182,19 @@ sdk            (types -- plugins depend only on this)
 | `just e2e` | End-to-end tests (requires Docker) |
 | `just lint` | Clippy with `-D warnings` |
 | `just fmt` | Format all crates |
+| `just ci` | Run the external-readiness baseline (`fmt`, `clippy`, workspace tests, e2e compile) |
 | `just bench` | Run benchmarks (see `just bench --help` for profiles) |
 
 By default, `just` builds in release mode. Set `MODE=debug` for debug builds:
 
 ```bash
 MODE=debug just dev-up
+```
+
+Before opening a pull request, run:
+
+```bash
+just ci
 ```
 
 ## Contributing

@@ -79,7 +79,13 @@ fmt:
     cargo fmt --all
 
 lint:
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets -- -D warnings
+
+ci:
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo test --workspace --all-targets
+    cargo test --manifest-path tests/e2e/Cargo.toml --no-run
 
 # ── E2E & bench ──────────────────────────────────────────────────────
 
