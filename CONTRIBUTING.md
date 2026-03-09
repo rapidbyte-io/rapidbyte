@@ -69,9 +69,21 @@ Refer to [docs/CODING_STYLE.md](docs/CODING_STYLE.md) for the full style guide. 
 
 The next-generation benchmark platform lives under `benchmarks/`.
 
-- `just benchmarks run` discovers scenarios and emits benchmark artifacts
+- `just bench --suite pr --output target/benchmarks/pr/results.jsonl` runs the smoke suite
 - `just bench-pr` runs the PR smoke suite and compares it against the checked-in baseline artifact set
+- `just bench --suite lab --scenario pg_dest_insert --output target/benchmarks/lab/pg-insert.jsonl` runs the native Postgres INSERT benchmark
+- `just bench --suite lab --scenario pg_dest_copy --output target/benchmarks/lab/pg-copy.jsonl` runs the native Postgres COPY benchmark
 - the checked-in baseline is a local smoke mechanism; CI and future infra should replace it with rolling `main` artifacts
+
+Before running the native Postgres lab scenarios:
+
+```bash
+docker compose up -d --wait
+just build-all
+```
+
+Those scenarios assume the repo's default local Postgres from `docker-compose.yml`
+on `127.0.0.1:5433` with database `rapidbyte_test`.
 
 ## PR Process
 

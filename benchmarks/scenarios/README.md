@@ -7,3 +7,15 @@ benchmark runner.
 - `lab/` will contain broader exploratory and release-oriented scenarios.
 
 Scenario files are YAML manifests consumed by `rapidbyte-benchmarks`.
+
+Current notable lab scenarios:
+
+- `lab/pg_dest_insert.yaml` benchmarks PostgreSQL destination writes with `load_method: insert`.
+- `lab/pg_dest_copy.yaml` benchmarks the same workload with `load_method: copy`.
+
+Run a specific scenario with:
+
+```bash
+just bench --suite lab --scenario pg_dest_insert --output target/benchmarks/lab/insert.jsonl
+just bench --suite lab --scenario pg_dest_copy --output target/benchmarks/lab/copy.jsonl
+```

@@ -1,0 +1,46 @@
+id: pg_dest_copy
+name: Postgres destination via copy
+suite: lab
+kind: pipeline
+tags:
+  - lab
+  - postgres
+  - native
+  - copy
+connectors:
+  - kind: source
+    plugin: postgres
+  - kind: destination
+    plugin: postgres
+workload:
+  family: narrow_append
+  rows: 1000000
+execution:
+  iterations: 3
+  warmups: 1
+environment:
+  postgres:
+    stream_name: bench_events
+    source:
+      host: 127.0.0.1
+      port: 5433
+      user: postgres
+      password: postgres
+      database: rapidbyte_test
+      schema: analytics
+    destination:
+      host: 127.0.0.1
+      port: 5433
+      user: postgres
+      password: postgres
+      database: rapidbyte_test
+      schema: raw
+connector_options:
+  source:
+    sync_mode: full_refresh
+  destination:
+    load_method: copy
+    write_mode: append
+assertions:
+  expected_records_read: 1000000
+  expected_records_written: 1000000
