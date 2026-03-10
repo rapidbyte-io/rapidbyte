@@ -213,6 +213,8 @@ The local hooks are intentionally light:
   stops so you can review the diff and re-run `git commit`
 - `pre-push` auto-formats the checked-out repo state, stages newly formatted
   files, then stops so you can review, create a follow-up commit, and push again
+- once formatting is clean, `pre-push` runs `just lint` and blocks the push on
+  clippy failures
 
 They do not replace `just ci`.
 
@@ -226,7 +228,8 @@ just bench-lab pg_dest_copy_release
 
 `pg_dest_copy_regression` is the cheap regression-tracking COPY benchmark.
 `pg_dest_copy_release` is the production-like release benchmark. Benchmark
-throughput and bandwidth are reported as end-to-end wall-clock pipeline rates.
+throughput and bandwidth are reported as end-to-end wall-clock pipeline rates,
+and the rendered bandwidth unit is `MiB/sec`.
 
 For local performance-regression checks against the checked-in PR baseline:
 

@@ -39,3 +39,4 @@ EOF
 fi
 
 cargo fmt --all -- --check
+just lint

@@ -74,7 +74,7 @@ pub fn summarize_artifacts(artifacts: &[BenchmarkArtifact]) -> Result<SummaryRep
 
     let mut groups = Vec::new();
     let mut remaining: Vec<&BenchmarkArtifact> = artifacts.iter().collect();
-    remaining.sort_by(|left, right| identity_key(left).cmp(&identity_key(right)));
+    remaining.sort_by_key(|left| identity_key(left));
 
     let mut current: Vec<&BenchmarkArtifact> = Vec::new();
     let mut current_key: Option<String> = None;
@@ -285,7 +285,7 @@ pub fn render_summary_report(report: &SummaryReport) -> String {
             format_float(group.records_per_sec.max),
         ));
         lines.push(format!(
-            "  bandwidth: {} MB/sec median ({} min, {} max)",
+            "  bandwidth: {} MiB/sec median ({} min, {} max)",
             format_float(group.mb_per_sec.median),
             format_float(group.mb_per_sec.min),
             format_float(group.mb_per_sec.max),
@@ -432,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn render_summary_report_includes_records_and_mb_per_sec() {
+    fn render_summary_report_uses_mib_label() {
         let report = summarize_artifacts(&[
             sample_artifact(400_000.0, 48.0, 2.5, true),
             sample_artifact(450_000.0, 54.0, 2.2, true),
@@ -444,7 +444,8 @@ mod tests {
         assert!(rendered.contains("# Benchmark Summary"));
         assert!(rendered.contains("pg_dest_copy"));
         assert!(rendered.contains("records/sec"));
-        assert!(rendered.contains("MB/sec"));
+        assert!(rendered.contains("MiB/sec"));
+        assert!(!rendered.contains("MB/sec"));
         assert!(rendered.contains("correctness"));
     }
 

@@ -62,7 +62,9 @@ just bench-compare benchmarks/baselines/main/pr.jsonl target/benchmarks/pr/candi
 - Use `just bench-summary <artifact>` when you only have one JSONL artifact set
   and want to inspect latency and throughput without a saved baseline.
 - Summary throughput and bandwidth are end-to-end wall-clock metrics for the
-  whole pipeline run, not isolated inner-loop COPY-only rates.
+  whole pipeline run, not isolated inner-loop COPY-only rates. The rendered
+  bandwidth label uses `MiB/sec` because the value is computed as
+  `bytes / 1024 / 1024`.
 - Native lab scenarios should be run with `--env-profile <id>` or the `just bench-lab` wrapper.
 - The repo-supported local profile is `local-dev-postgres`.
 - `just bench-lab` reuses the shared repo Docker Compose project, so it works
