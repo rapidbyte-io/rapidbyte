@@ -18,6 +18,7 @@ We welcome contributions of all kinds — bug fixes, new plugins, documentation 
 ```bash
 git clone https://github.com/netf/rapidbyte.git
 cd rapidbyte
+just install-hooks
 just dev-up
 ```
 
@@ -34,6 +35,10 @@ just run tests/fixtures/pipelines/simple_pg_to_pg.yaml -v
 1. Fork the repo and create a branch (`fix/short-description` or `feat/short-description`).
 2. Make your changes and run `just ci` plus any extra checks listed in [Testing Expectations](#testing-expectations).
 3. Open a pull request against `main`.
+
+The local Git hook installed by `just install-hooks` is intentionally light: it
+auto-runs formatting before commit and stops if it changed files so you can
+review and recommit. It is a convenience layer, not a substitute for `just ci`.
 
 ### New Plugins
 
@@ -58,6 +63,8 @@ Refer to [docs/CODING_STYLE.md](docs/CODING_STYLE.md) for the full style guide. 
 | Command | When to Run |
 |---|---|
 | `just ci` | Always before opening or updating a PR |
+| `just install-hooks` | Once after clone |
+| `just fix` | Any time you want the same fast formatting path the hook uses |
 | `just fmt` | Always |
 | `just lint` | Always |
 | `just test` | Always |
@@ -93,6 +100,15 @@ Override the committed local profile with:
 
 The core runner does not auto-provision Docker/Testcontainers; `just bench-lab`
 is the local orchestration wrapper for the repo-supported dev environment.
+
+## Local Hooks
+
+- `just install-hooks` sets `git config core.hooksPath .githooks`
+- the repo-managed pre-commit hook runs the fast auto-fix path only
+- today that auto-fix path is `cargo fmt --all`
+- if the hook changes files, it re-stages the originally staged paths it
+  touched and aborts the commit so you can inspect the diff and re-run `git commit`
+- no Python `pre-commit` package is required
 
 ## PR Process
 

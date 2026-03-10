@@ -58,6 +58,12 @@ Tear down the dev environment:
 just dev-down
 ```
 
+Install the lightweight local Git hooks once after clone:
+
+```bash
+just install-hooks
+```
+
 ## CLI
 
 | Command | Description |
@@ -184,6 +190,8 @@ sdk            (types -- plugins depend only on this)
 | `just e2e` | End-to-end tests (requires Docker) |
 | `just lint` | Clippy with `-D warnings` |
 | `just fmt` | Format all crates |
+| `just fix` | Run the fast local auto-fix path (`cargo fmt --all`) |
+| `just install-hooks` | Configure repo-managed Git hooks in `.githooks/` |
 | `just ci` | Run the external-readiness baseline (`fmt`, `clippy`, workspace tests, e2e compile) |
 | `just bench` | Run benchmark scenarios (`--suite pr` or `--suite lab --scenario <id> --env-profile <profile>`) |
 | `just bench-lab <scenario>` | Bring up the local benchmark env and run one lab scenario |
@@ -199,6 +207,10 @@ Before opening a pull request, run:
 ```bash
 just ci
 ```
+
+The local pre-commit hook is auto-fix only: it formats code, re-stages any
+changed staged paths, then asks you to review the diff and re-run `git commit`.
+It does not replace `just ci`.
 
 For the native Postgres destination benchmarks:
 
