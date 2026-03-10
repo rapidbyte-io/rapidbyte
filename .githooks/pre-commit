@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+mapfile -t staged_files < <(git diff --cached --name-only --diff-filter=ACMR)
+
+if [ "${#staged_files[@]}" -eq 0 ]; then
+  exit 0
+fi
+
+should_format=0
+for path in "${staged_files[@]}"; do
+  case "$path" in
+    *.rs|Cargo.toml)
+      should_format=1
+      break
+      ;;
+  esac
+done
+
+if [ "$should_format" -eq 0 ]; then
+  exit 0
+fi
+
+cargo fmt --all
+
+mapfile -t formatted_files < <(git diff --name-only --diff-filter=M)
+
+if [ "${#formatted_files[@]}" -eq 0 ]; then
+  exit 0
+fi
+
+hook_changed=0
+for staged_path in "${staged_files[@]}"; do
+  for formatted_path in "${formatted_files[@]}"; do
+    if [ "$staged_path" = "$formatted_path" ]; then
+      git add -- "$staged_path"
+      hook_changed=1
+      break
+    fi
+  done
+done
+
+if [ "$hook_changed" -eq 1 ]; then
+  cat <<'EOF'
+pre-commit: applied formatting updates.
+review the diff and run git commit again.
+EOF
+  exit 1
+fi
+
+exit 0

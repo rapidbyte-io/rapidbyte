@@ -78,6 +78,9 @@ check-no-sccache:
 fmt:
     cargo fmt --all
 
+fix:
+    cargo fmt --all
+
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
 
@@ -120,6 +123,9 @@ bench-pr:
 # Scaffold a new plugin project
 scaffold name:
     cargo run -- scaffold {{name}}
+
+install-hooks:
+    ./scripts/install-git-hooks.sh
 
 # Seed local Postgres (default 1M rows)
 seed rows="1000000":
