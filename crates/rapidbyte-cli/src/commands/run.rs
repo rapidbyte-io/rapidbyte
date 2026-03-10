@@ -357,7 +357,7 @@ mod tests {
     };
 
     #[test]
-    fn bench_json_includes_stream_shard_metrics() {
+    fn bench_json_uses_effective_parallelism() {
         let result = PipelineResult {
             counts: PipelineCounts {
                 records_read: 10,

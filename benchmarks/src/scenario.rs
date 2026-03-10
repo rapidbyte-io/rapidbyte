@@ -39,6 +39,31 @@ pub struct ExecutionProfile {
     pub warmups: u32,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BenchmarkBuildMode {
+    #[default]
+    Debug,
+    Release,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BenchmarkExecutionProfile {
+    #[serde(default)]
+    pub build_mode: BenchmarkBuildMode,
+    #[serde(default)]
+    pub aot: bool,
+}
+
+impl Default for BenchmarkExecutionProfile {
+    fn default() -> Self {
+        Self {
+            build_mode: BenchmarkBuildMode::Debug,
+            aot: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EnvironmentConfig {
     #[serde(rename = "ref")]
@@ -110,6 +135,8 @@ pub struct ScenarioManifest {
     pub requires: Vec<Feature>,
     pub workload: WorkloadProfile,
     pub execution: ExecutionProfile,
+    #[serde(default)]
+    pub benchmark: BenchmarkExecutionProfile,
     #[serde(default)]
     pub environment: EnvironmentConfig,
     #[serde(default)]
@@ -429,13 +456,85 @@ assertions:
     }
 
     #[test]
-    fn native_lab_scenarios_reference_committed_environment_profile() {
+    fn parses_benchmark_execution_profile() {
+        let root = temp_dir("benchmark-execution");
+        let explicit_path = root.join("explicit.yaml");
+        fs::write(
+            &explicit_path,
+            r#"
+id: pg_dest_copy_release
+name: Postgres destination via copy release
+suite: lab
+kind: pipeline
+tags: [lab, postgres, copy]
+connectors:
+  - kind: source
+    plugin: postgres
+  - kind: destination
+    plugin: postgres
+workload:
+  family: narrow_append
+  rows: 1000000
+execution:
+  iterations: 3
+  warmups: 1
+benchmark:
+  build_mode: release
+  aot: true
+environment:
+  ref: local-dev-postgres
+  stream_name: bench_events
+"#,
+        )
+        .expect("write explicit scenario");
+
+        let default_path = root.join("default.yaml");
+        fs::write(
+            &default_path,
+            r#"
+id: pg_dest_copy_regression
+name: Postgres destination via copy regression
+suite: lab
+kind: pipeline
+tags: [lab, postgres, copy]
+connectors:
+  - kind: source
+    plugin: postgres
+  - kind: destination
+    plugin: postgres
+workload:
+  family: narrow_append
+  rows: 1000000
+execution:
+  iterations: 3
+  warmups: 1
+environment:
+  ref: local-dev-postgres
+  stream_name: bench_events
+"#,
+        )
+        .expect("write default scenario");
+
+        let explicit = ScenarioManifest::from_path(&explicit_path).expect("parse explicit");
+        assert_eq!(explicit.benchmark.build_mode, BenchmarkBuildMode::Release);
+        assert!(explicit.benchmark.aot);
+
+        let defaulted = ScenarioManifest::from_path(&default_path).expect("parse default");
+        assert_eq!(defaulted.benchmark.build_mode, BenchmarkBuildMode::Debug);
+        assert!(!defaulted.benchmark.aot);
+    }
+
+    #[test]
+    fn native_lab_copy_modes_reference_committed_environment_profile() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenarios/lab");
         let insert =
             ScenarioManifest::from_path(&root.join("pg_dest_insert.yaml")).expect("insert");
-        let copy = ScenarioManifest::from_path(&root.join("pg_dest_copy.yaml")).expect("copy");
+        let regression = ScenarioManifest::from_path(&root.join("pg_dest_copy_regression.yaml"))
+            .expect("regression");
+        let release =
+            ScenarioManifest::from_path(&root.join("pg_dest_copy_release.yaml")).expect("release");
 
-        for scenario in [insert, copy] {
+        for scenario in [insert, regression.clone(), release.clone()] {
             assert_eq!(
                 scenario.environment.reference.as_deref(),
                 Some("local-dev-postgres")
@@ -446,6 +545,11 @@ assertions:
             );
             assert!(scenario.environment.postgres.is_none());
         }
+
+        assert_eq!(regression.benchmark.build_mode, BenchmarkBuildMode::Debug);
+        assert!(!regression.benchmark.aot);
+        assert_eq!(release.benchmark.build_mode, BenchmarkBuildMode::Release);
+        assert!(release.benchmark.aot);
     }
 
     #[test]

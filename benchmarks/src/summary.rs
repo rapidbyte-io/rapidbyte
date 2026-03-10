@@ -16,7 +16,13 @@ pub struct SummaryReport {
 pub struct SummaryGroup {
     pub scenario_id: String,
     pub suite_id: String,
+    pub build_mode: String,
+    pub aot: bool,
     pub sample_count: usize,
+    pub parallelism: Option<u64>,
+    pub records_written: Option<u64>,
+    pub bytes_written: Option<u64>,
+    pub bytes_per_row: Option<f64>,
     pub records_per_sec: MetricSummary,
     pub mb_per_sec: MetricSummary,
     pub duration_secs: MetricSummary,
@@ -115,7 +121,41 @@ fn summarize_group(group: &[&BenchmarkArtifact]) -> Result<SummaryGroup> {
     Ok(SummaryGroup {
         scenario_id: first.scenario_id.clone(),
         suite_id: first.suite_id.clone(),
+        build_mode: first.build_mode.clone(),
+        aot: first
+            .execution_flags
+            .get("aot")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
         sample_count: group.len(),
+        parallelism: median_u64(
+            group
+                .iter()
+                .filter_map(|artifact| connector_metric_u64(artifact, "parallelism"))
+                .collect(),
+        ),
+        records_written: median_u64(
+            group
+                .iter()
+                .filter_map(|artifact| stream_metric_sum(artifact, "records_written"))
+                .collect(),
+        ),
+        bytes_written: median_u64(
+            group
+                .iter()
+                .filter_map(|artifact| stream_metric_sum(artifact, "bytes_written"))
+                .collect(),
+        ),
+        bytes_per_row: median_f64(
+            group
+                .iter()
+                .filter_map(|artifact| {
+                    let records = stream_metric_sum(artifact, "records_written")?;
+                    let bytes = stream_metric_sum(artifact, "bytes_written")?;
+                    (records > 0).then_some(bytes as f64 / records as f64)
+                })
+                .collect(),
+        ),
         records_per_sec: summarize_metric(group, "records_per_sec")?,
         mb_per_sec: summarize_metric(group, "mb_per_sec")?,
         duration_secs: summarize_metric(group, "duration_secs")?,
@@ -168,12 +208,75 @@ fn identity_key(artifact: &BenchmarkArtifact) -> String {
     )
 }
 
+fn connector_metric_u64(artifact: &BenchmarkArtifact, key: &str) -> Option<u64> {
+    artifact
+        .connector_metrics
+        .get(key)
+        .and_then(|value| value.as_u64())
+}
+
+fn stream_metric_sum(artifact: &BenchmarkArtifact, key: &str) -> Option<u64> {
+    let metrics = artifact
+        .connector_metrics
+        .get("stream_metrics")?
+        .as_array()?;
+    Some(
+        metrics
+            .iter()
+            .filter_map(|metric| metric.get(key).and_then(|value| value.as_u64()))
+            .sum(),
+    )
+}
+
+fn median_u64(mut values: Vec<u64>) -> Option<u64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    let median = if values.len() % 2 == 1 {
+        values[values.len() / 2]
+    } else {
+        let right = values.len() / 2;
+        (values[right - 1] + values[right]) / 2
+    };
+    Some(median)
+}
+
+fn median_f64(mut values: Vec<f64>) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(|left, right| left.total_cmp(right));
+    let median = if values.len() % 2 == 1 {
+        values[values.len() / 2]
+    } else {
+        let right = values.len() / 2;
+        (values[right - 1] + values[right]) / 2.0
+    };
+    Some(median)
+}
+
 pub fn render_summary_report(report: &SummaryReport) -> String {
     let mut lines = vec!["# Benchmark Summary".to_string(), String::new()];
 
     for group in &report.groups {
         lines.push(format!("- scenario: {}", group.scenario_id));
         lines.push(format!("  suite: {}", group.suite_id));
+        lines.push("  measurement: end-to-end wall-clock".to_string());
+        lines.push(format!("  build mode: {}", group.build_mode));
+        lines.push(format!("  aot: {}", group.aot));
+        if let Some(parallelism) = group.parallelism {
+            lines.push(format!("  parallelism: {}", parallelism));
+        }
+        if let Some(records_written) = group.records_written {
+            lines.push(format!("  records written: {}", records_written));
+        }
+        if let Some(bytes_written) = group.bytes_written {
+            lines.push(format!("  bytes written: {}", bytes_written));
+        }
+        if let Some(bytes_per_row) = group.bytes_per_row {
+            lines.push(format!("  bytes/row: {}", format_float(bytes_per_row)));
+        }
         lines.push(format!("  samples: {}", group.sample_count));
         lines.push(format!(
             "  throughput: {} records/sec median ({} min, {} max)",
@@ -257,6 +360,52 @@ mod tests {
         }
     }
 
+    fn sample_artifact_with_context(
+        build_mode: &str,
+        aot: bool,
+        parallelism: u64,
+        records_written: u64,
+        bytes_written: u64,
+    ) -> BenchmarkArtifact {
+        BenchmarkArtifact {
+            schema_version: 1,
+            suite_id: "lab".to_string(),
+            scenario_id: "pg_dest_copy_release".to_string(),
+            git_sha: "abc1234".to_string(),
+            hardware_class: "local-dev".to_string(),
+            build_mode: build_mode.to_string(),
+            execution_flags: json!({"aot": aot}),
+            canonical_metrics: json!({
+                "records_per_sec": 500_000.0,
+                "mb_per_sec": 64.0,
+                "duration_secs": 2.0,
+            }),
+            connector_metrics: json!({
+                "destination": {
+                    "load_method": "copy"
+                },
+                "parallelism": parallelism,
+                "stream_metrics": [{
+                    "stream_name": "bench_events",
+                    "partition_index": 0,
+                    "partition_count": parallelism,
+                    "records_read": records_written,
+                    "records_written": records_written,
+                    "bytes_read": bytes_written,
+                    "bytes_written": bytes_written,
+                    "source_duration_secs": 1.0,
+                    "dest_duration_secs": 1.5,
+                    "dest_vm_setup_secs": 0.1,
+                    "dest_recv_secs": 1.2
+                }]
+            }),
+            correctness: ArtifactCorrectness {
+                passed: true,
+                validator: "row_count".to_string(),
+            },
+        }
+    }
+
     #[test]
     fn summarize_artifacts_groups_samples_and_computes_stats() {
         let report = summarize_artifacts(&[
@@ -297,6 +446,30 @@ mod tests {
         assert!(rendered.contains("records/sec"));
         assert!(rendered.contains("MB/sec"));
         assert!(rendered.contains("correctness"));
+    }
+
+    #[test]
+    fn render_summary_report_includes_execution_context() {
+        let report = summarize_artifacts(&[
+            sample_artifact_with_context("release", true, 12, 1_000_000, 64_000_000),
+            sample_artifact_with_context("release", true, 12, 1_000_000, 64_000_000),
+            sample_artifact_with_context("release", true, 12, 1_000_000, 64_000_000),
+        ])
+        .expect("summary");
+
+        let rendered = render_summary_report(&report);
+        assert!(rendered.contains("build mode"));
+        assert!(rendered.contains("release"));
+        assert!(rendered.contains("aot"));
+        assert!(rendered.contains("true"));
+        assert!(rendered.contains("parallelism"));
+        assert!(rendered.contains("12"));
+        assert!(rendered.contains("records written"));
+        assert!(rendered.contains("1000000"));
+        assert!(rendered.contains("bytes written"));
+        assert!(rendered.contains("64000000"));
+        assert!(rendered.contains("bytes/row"));
+        assert!(rendered.contains("end-to-end wall-clock"));
     }
 
     #[test]

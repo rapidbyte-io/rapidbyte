@@ -220,8 +220,13 @@ For the native Postgres destination benchmarks:
 
 ```bash
 just bench-lab pg_dest_insert
-just bench-lab pg_dest_copy
+just bench-lab pg_dest_copy_regression
+just bench-lab pg_dest_copy_release
 ```
+
+`pg_dest_copy_regression` is the cheap regression-tracking COPY benchmark.
+`pg_dest_copy_release` is the production-like release benchmark. Benchmark
+throughput and bandwidth are reported as end-to-end wall-clock pipeline rates.
 
 For local performance-regression checks against the checked-in PR baseline:
 

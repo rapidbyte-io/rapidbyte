@@ -21,13 +21,15 @@ Run the explicit native PostgreSQL destination benchmarks:
 
 ```bash
 just bench-lab pg_dest_insert
-just bench-lab pg_dest_copy
+just bench-lab pg_dest_copy_regression
+just bench-lab pg_dest_copy_release
 ```
 
 Print a readable summary for a single artifact set:
 
 ```bash
-just bench-summary target/benchmarks/lab/pg_dest_copy.jsonl
+just bench-summary target/benchmarks/lab/pg_dest_copy_regression.jsonl
+just bench-summary target/benchmarks/lab/pg_dest_copy_release.jsonl
 ```
 
 Compare the two generated artifact sets directly:
@@ -53,9 +55,14 @@ just bench-compare benchmarks/baselines/main/pr.jsonl target/benchmarks/pr/candi
 
 - The checked-in baseline is a local and CI smoke mechanism.
 - The long-term comparison model is rolling artifacts from `main`.
-- Native lab scenarios currently include `pg_dest_insert` and `pg_dest_copy`.
+- Native lab scenarios currently include `pg_dest_insert`,
+  `pg_dest_copy_regression`, and `pg_dest_copy_release`.
+- `pg_dest_copy_regression` is the cheap regression-tracking COPY benchmark.
+- `pg_dest_copy_release` is the release-mode COPY benchmark with AOT enabled.
 - Use `just bench-summary <artifact>` when you only have one JSONL artifact set
   and want to inspect latency and throughput without a saved baseline.
+- Summary throughput and bandwidth are end-to-end wall-clock metrics for the
+  whole pipeline run, not isolated inner-loop COPY-only rates.
 - Native lab scenarios should be run with `--env-profile <id>` or the `just bench-lab` wrapper.
 - The repo-supported local profile is `local-dev-postgres`.
 - `just bench-lab` reuses the shared repo Docker Compose project, so it works

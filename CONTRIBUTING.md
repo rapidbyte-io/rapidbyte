@@ -82,8 +82,12 @@ The next-generation benchmark platform lives under `benchmarks/`.
 - `just bench --suite pr --output target/benchmarks/pr/results.jsonl --env-profile local-dev-postgres` runs the PR smoke suite directly
 - `just bench-pr` is the recommended local perf-regression command; it provisions the local benchmark environment, runs the PR smoke suite, and compares against the checked-in baseline artifact set
 - `just bench-lab pg_dest_insert` runs the native Postgres INSERT benchmark using the committed `local-dev-postgres` environment profile
-- `just bench-lab pg_dest_copy` runs the native Postgres COPY benchmark using the committed `local-dev-postgres` environment profile
+- `just bench-lab pg_dest_copy_regression` runs the debug-mode Postgres COPY regression benchmark with AOT disabled
+- `just bench-lab pg_dest_copy_release` runs the release-mode Postgres COPY benchmark with AOT enabled
 - the checked-in baseline is a local/manual smoke mechanism; the GitHub benchmark workflow is `workflow_dispatch` only until dedicated benchmark runners exist
+
+Benchmark throughput and bandwidth are reported as end-to-end wall-clock
+pipeline metrics, not isolated COPY-only inner-loop numbers.
 
 For direct runner use, provide an environment profile explicitly:
 
