@@ -320,7 +320,7 @@ fn format_float(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, Map, Value};
 
     use crate::artifact::{ArtifactCorrectness, BenchmarkArtifact};
 
@@ -406,6 +406,34 @@ mod tests {
         }
     }
 
+    fn sample_artifact_with_execution_flags(execution_flags: Value) -> BenchmarkArtifact {
+        BenchmarkArtifact {
+            schema_version: 1,
+            suite_id: "lab".to_string(),
+            scenario_id: "pg_dest_copy_release".to_string(),
+            git_sha: "abc1234".to_string(),
+            hardware_class: "local-dev".to_string(),
+            build_mode: "release".to_string(),
+            execution_flags,
+            canonical_metrics: json!({
+                "records_per_sec": 500_000.0,
+                "mb_per_sec": 64.0,
+                "duration_secs": 2.0,
+            }),
+            connector_metrics: json!({
+                "parallelism": 12,
+                "stream_metrics": [{
+                    "records_written": 1_000_000,
+                    "bytes_written": 64_000_000
+                }]
+            }),
+            correctness: ArtifactCorrectness {
+                passed: true,
+                validator: "row_count".to_string(),
+            },
+        }
+    }
+
     #[test]
     fn summarize_artifacts_groups_samples_and_computes_stats() {
         let report = summarize_artifacts(&[
@@ -429,6 +457,26 @@ mod tests {
             group.connector_metric_keys,
             vec!["destination".to_string(), "process".to_string()]
         );
+    }
+
+    #[test]
+    fn summarize_artifacts_groups_equivalent_execution_flags() {
+        let mut first_flags = Map::new();
+        first_flags.insert("synthetic".to_string(), Value::Bool(false));
+        first_flags.insert("aot".to_string(), Value::Bool(true));
+
+        let mut second_flags = Map::new();
+        second_flags.insert("aot".to_string(), Value::Bool(true));
+        second_flags.insert("synthetic".to_string(), Value::Bool(false));
+
+        let report = summarize_artifacts(&[
+            sample_artifact_with_execution_flags(Value::Object(first_flags)),
+            sample_artifact_with_execution_flags(Value::Object(second_flags)),
+        ])
+        .expect("summary");
+
+        assert_eq!(report.groups.len(), 1);
+        assert_eq!(report.groups[0].sample_count, 2);
     }
 
     #[test]
