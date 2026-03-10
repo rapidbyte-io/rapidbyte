@@ -121,6 +121,12 @@ is the local orchestration wrapper for the repo-supported dev environment.
 - Keep PRs focused — one logical change per pull request.
 - Include tests for new behavior or bug fixes.
 - Update documentation if your change affects configuration or the protocol.
+- Same-repo non-draft pull requests also run the advisory `Codex Review`
+  workflow in GitHub Actions.
+- Maintainers must configure the `OPENAI_API_KEY` GitHub Actions secret before
+  that workflow can run successfully.
+- The Codex review is supplemental feedback only and is not a required merge
+  gate in the current rollout.
 
 ## Architecture Quick Reference
 

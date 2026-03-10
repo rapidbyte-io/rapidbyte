@@ -2,6 +2,8 @@
 
 <!-- What does this PR do and why? -->
 
+<!-- Same-repo non-draft PRs receive an advisory Codex review in GitHub Actions. Treat it as supplemental review signal, not a merge gate. -->
+
 ## Changes
 
 -
