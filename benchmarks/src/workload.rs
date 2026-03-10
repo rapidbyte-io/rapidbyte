@@ -127,6 +127,7 @@ mod tests {
                 iterations: 3,
                 warmups: 1,
             },
+            benchmark: Default::default(),
             environment: Default::default(),
             connector_options: Default::default(),
             assertions: Default::default(),
@@ -229,6 +230,7 @@ mod tests {
                 iterations: 3,
                 warmups: 1,
             },
+            benchmark: Default::default(),
             environment: EnvironmentConfig {
                 reference: None,
                 stream_name: None,
@@ -293,6 +295,7 @@ mod tests {
                 iterations: 3,
                 warmups: 1,
             },
+            benchmark: Default::default(),
             environment: EnvironmentConfig {
                 reference: Some("local-dev-postgres".to_string()),
                 stream_name: Some("bench_events".to_string()),

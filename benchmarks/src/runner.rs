@@ -12,18 +12,20 @@ use crate::artifact::{ArtifactCorrectness, BenchmarkArtifact};
 use crate::environment::resolve_postgres_environment;
 use crate::output::write_artifact_json;
 use crate::pipeline::write_rendered_pipeline;
-use crate::scenario::{filter_scenarios, PostgresBenchmarkEnvironment, ScenarioManifest};
+use crate::scenario::{
+    filter_scenarios, BenchmarkBuildMode, PostgresBenchmarkEnvironment, ScenarioManifest,
+};
 use crate::workload::{resolve_workload_plan_with_environment, ResolvedWorkloadPlan};
 
 const BENCH_JSON_MARKER: &str = "@@BENCH_JSON@@";
 const DEFAULT_GIT_SHA: &str = "unknown";
 const DEFAULT_HARDWARE_CLASS: &str = "local-dev";
-const DEFAULT_BUILD_MODE: &str = "debug";
 
 #[derive(Debug, Clone)]
 pub struct RunResult {
     suite_id: String,
     scenario_id: String,
+    build_mode: String,
     connector_metrics: JsonValue,
     canonical_metrics: JsonValue,
     execution_flags: JsonValue,
@@ -34,13 +36,16 @@ impl RunResult {
     pub fn success(
         suite_id: impl Into<String>,
         scenario_id: impl Into<String>,
+        build_mode: impl Into<String>,
         connector_metrics: JsonValue,
         records_written: u64,
+        aot: bool,
     ) -> Self {
         let duration_secs = 1.0;
         Self {
             suite_id: suite_id.into(),
             scenario_id: scenario_id.into(),
+            build_mode: build_mode.into(),
             connector_metrics,
             canonical_metrics: json!({
                 "duration_secs": duration_secs,
@@ -52,7 +57,7 @@ impl RunResult {
             }),
             execution_flags: json!({
                 "synthetic": true,
-                "aot": false,
+                "aot": aot,
             }),
             correctness_assertions_present: true,
         }
@@ -62,6 +67,7 @@ impl RunResult {
         Self {
             suite_id: suite_id.into(),
             scenario_id: scenario_id.into(),
+            build_mode: build_mode_name(BenchmarkBuildMode::Debug).to_string(),
             connector_metrics: JsonValue::Object(Map::new()),
             canonical_metrics: JsonValue::Object(Map::new()),
             execution_flags: json!({
@@ -87,7 +93,7 @@ pub fn materialize_artifact(result: RunResult) -> Result<BenchmarkArtifact> {
         scenario_id: result.scenario_id,
         git_sha: DEFAULT_GIT_SHA.to_string(),
         hardware_class: DEFAULT_HARDWARE_CLASS.to_string(),
-        build_mode: DEFAULT_BUILD_MODE.to_string(),
+        build_mode: result.build_mode,
         execution_flags: result.execution_flags,
         canonical_metrics: result.canonical_metrics,
         connector_metrics: result.connector_metrics,
@@ -156,10 +162,12 @@ fn execute_scenario_once(
             Ok(RunResult::success(
                 scenario.suite.clone(),
                 scenario.id.clone(),
+                build_mode_name(scenario.benchmark.build_mode),
                 json!({
                     "workload_family": format!("{:?}", scenario.workload.family),
                 }),
                 workload.rows,
+                scenario.benchmark.aot,
             ))
         }
         crate::scenario::BenchmarkKind::Source => {
@@ -197,14 +205,14 @@ fn execute_real_postgres_pipeline(
     })?;
     prepare_pipeline_fixtures(scenario, workload, env)?;
     let rendered = write_rendered_pipeline(scenario, env, &temp_root)?;
-    let bench_json = invoke_rapidbyte_run(&rendered.path)?;
+    let bench_json = invoke_rapidbyte_run(scenario, &rendered.path)?;
     enforce_row_count_assertions(&scenario.id, workload, &bench_json)?;
     run_result_from_bench_json(scenario, bench_json)
 }
 
-fn invoke_rapidbyte_run(pipeline_path: &Path) -> Result<JsonValue> {
+fn invoke_rapidbyte_run(scenario: &ScenarioManifest, pipeline_path: &Path) -> Result<JsonValue> {
     let repo_root = std::env::current_dir().context("failed to determine benchmark cwd")?;
-    let output = rapidbyte_run_command(&repo_root, pipeline_path)
+    let output = rapidbyte_run_command(&repo_root, pipeline_path, scenario)
         .output()
         .context("failed to invoke rapidbyte CLI")?;
 
@@ -220,7 +228,11 @@ fn invoke_rapidbyte_run(pipeline_path: &Path) -> Result<JsonValue> {
     parse_bench_json_from_stdout(&String::from_utf8_lossy(&output.stdout))
 }
 
-fn rapidbyte_run_command(repo_root: &Path, pipeline_path: &Path) -> Command {
+fn rapidbyte_run_command(
+    repo_root: &Path,
+    pipeline_path: &Path,
+    scenario: &ScenarioManifest,
+) -> Command {
     let mut command = Command::new("cargo");
     command
         .current_dir(repo_root)
@@ -228,9 +240,17 @@ fn rapidbyte_run_command(repo_root: &Path, pipeline_path: &Path) -> Command {
         .env(
             "RAPIDBYTE_PLUGIN_DIR",
             repo_root.join("target").join("plugins"),
-        )
+        );
+    command.env(
+        "RAPIDBYTE_WASMTIME_AOT",
+        if scenario.benchmark.aot { "1" } else { "0" },
+    );
+    command.arg("run");
+    if matches!(scenario.benchmark.build_mode, BenchmarkBuildMode::Release) {
+        command.arg("--release");
+    }
+    command
         .args([
-            "run",
             "--quiet",
             "--manifest-path",
             "crates/rapidbyte-cli/Cargo.toml",
@@ -299,6 +319,7 @@ fn run_result_from_bench_json(
     Ok(RunResult {
         suite_id: scenario.suite.clone(),
         scenario_id: scenario.id.clone(),
+        build_mode: build_mode_name(scenario.benchmark.build_mode).to_string(),
         connector_metrics,
         canonical_metrics: json!({
             "duration_secs": duration_secs,
@@ -310,10 +331,17 @@ fn run_result_from_bench_json(
         }),
         execution_flags: json!({
             "synthetic": false,
-            "aot": false,
+            "aot": scenario.benchmark.aot,
         }),
         correctness_assertions_present: true,
     })
+}
+
+fn build_mode_name(build_mode: BenchmarkBuildMode) -> &'static str {
+    match build_mode {
+        BenchmarkBuildMode::Debug => "debug",
+        BenchmarkBuildMode::Release => "release",
+    }
 }
 
 fn enforce_row_count_assertions(
@@ -391,10 +419,10 @@ mod tests {
 
     use super::*;
     use crate::scenario::{
-        BenchmarkKind, ConnectorOptions, DestinationConnectorOptions, EnvironmentConfig,
-        ExecutionProfile, PostgresBenchmarkEnvironment, PostgresConnectionProfile,
-        ScenarioAssertions, ScenarioConnectorRef, ScenarioManifest, SourceConnectorOptions,
-        WorkloadProfile,
+        BenchmarkBuildMode, BenchmarkKind, ConnectorOptions, DestinationConnectorOptions,
+        EnvironmentConfig, ExecutionProfile, PostgresBenchmarkEnvironment,
+        PostgresConnectionProfile, ScenarioAssertions, ScenarioConnectorRef, ScenarioManifest,
+        SourceConnectorOptions, WorkloadProfile,
     };
     use crate::workload::{resolve_workload_plan, WorkloadFamily};
 
@@ -506,8 +534,9 @@ mod tests {
     fn rapidbyte_run_command_sets_plugin_dir() {
         let repo_root = std::path::Path::new("/tmp/rapidbyte");
         let pipeline_path = std::path::Path::new("/tmp/rapidbyte/bench.yaml");
+        let scenario = sample_postgres_scenario("insert");
 
-        let command = rapidbyte_run_command(repo_root, pipeline_path);
+        let command = rapidbyte_run_command(repo_root, pipeline_path, &scenario);
         let envs = command.get_envs().collect::<Vec<_>>();
         let plugin_dir = envs
             .iter()
@@ -524,6 +553,53 @@ mod tests {
             plugin_dir,
             std::ffi::OsStr::new("/tmp/rapidbyte/target/plugins")
         );
+    }
+
+    #[test]
+    fn release_scenarios_use_release_runner() {
+        let repo_root = std::path::Path::new("/tmp/rapidbyte");
+        let pipeline_path = std::path::Path::new("/tmp/rapidbyte/bench.yaml");
+        let mut scenario = sample_postgres_scenario("copy");
+        scenario.benchmark.build_mode = BenchmarkBuildMode::Release;
+        scenario.benchmark.aot = true;
+
+        let command = rapidbyte_run_command(repo_root, pipeline_path, &scenario);
+        let args = command.get_args().collect::<Vec<_>>();
+        let envs = command.get_envs().collect::<Vec<_>>();
+
+        assert!(args.contains(&std::ffi::OsStr::new("--release")));
+        let aot = envs
+            .iter()
+            .find_map(|(key, value)| {
+                if *key == std::ffi::OsStr::new("RAPIDBYTE_WASMTIME_AOT") {
+                    value.as_deref()
+                } else {
+                    None
+                }
+            })
+            .expect("aot env");
+        assert_eq!(aot, std::ffi::OsStr::new("1"));
+    }
+
+    #[test]
+    fn artifacts_record_selected_build_mode_and_aot() {
+        let mut scenario = sample_postgres_scenario("copy");
+        scenario.id = "pg_dest_copy_release".to_string();
+        scenario.benchmark.build_mode = BenchmarkBuildMode::Release;
+        scenario.benchmark.aot = true;
+
+        let bench_json = parse_bench_json_from_stdout(&format!(
+            "noise\n{BENCH_JSON_MARKER}{}",
+            sample_bench_json(1_000, 1_000)
+        ))
+        .expect("parse bench json");
+        let artifact = materialize_artifact(
+            run_result_from_bench_json(&scenario, bench_json).expect("run result"),
+        )
+        .expect("artifact");
+
+        assert_eq!(artifact.build_mode, "release");
+        assert_eq!(artifact.execution_flags["aot"], true);
     }
 
     #[test]
@@ -666,6 +742,7 @@ mod tests {
                 iterations: 3,
                 warmups: 1,
             },
+            benchmark: Default::default(),
             environment: EnvironmentConfig {
                 reference: None,
                 stream_name: None,
@@ -780,6 +857,7 @@ mod tests {
                 iterations: 1,
                 warmups: 0,
             },
+            benchmark: Default::default(),
             environment: EnvironmentConfig::default(),
             connector_options: ConnectorOptions::default(),
             assertions: ScenarioAssertions::default(),
@@ -812,6 +890,7 @@ mod tests {
                 iterations: 1,
                 warmups: 0,
             },
+            benchmark: Default::default(),
             environment: EnvironmentConfig {
                 reference: Some("local-dev-postgres".to_string()),
                 stream_name: Some("bench_events".to_string()),

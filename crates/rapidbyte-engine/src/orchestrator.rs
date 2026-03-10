@@ -102,6 +102,7 @@ struct StreamParams {
 }
 
 struct AggregatedStreamResults {
+    execution_parallelism: u32,
     total_read_summary: ReadSummary,
     total_write_summary: WriteSummary,
     source_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
@@ -1417,6 +1418,7 @@ async fn execute_streams(
         .clone();
 
     Ok(AggregatedStreamResults {
+        execution_parallelism: u32::try_from(parallelism).unwrap_or(u32::MAX),
         total_read_summary,
         total_write_summary,
         source_checkpoints,
@@ -1564,9 +1566,17 @@ async fn finalize_run(
         duration_secs: duration.as_secs_f64(),
         wasm_overhead_secs,
         retry_count: attempt.saturating_sub(1),
-        parallelism: resolve_effective_parallelism(config, false),
+        parallelism: reported_parallelism(config, &aggregated),
         stream_metrics: aggregated.stream_metrics,
     })
+}
+
+fn reported_parallelism(config: &PipelineConfig, aggregated: &AggregatedStreamResults) -> u32 {
+    if aggregated.execution_parallelism > 0 {
+        aggregated.execution_parallelism
+    } else {
+        resolve_effective_parallelism(config, false)
+    }
 }
 
 async fn complete_run_status(
@@ -2676,6 +2686,7 @@ mod finalize_run_state_tests {
 
     fn make_aggregated_results() -> AggregatedStreamResults {
         AggregatedStreamResults {
+            execution_parallelism: 1,
             total_read_summary: ReadSummary {
                 records_read: 10,
                 bytes_read: 100,
@@ -2721,6 +2732,31 @@ mod finalize_run_state_tests {
             dry_run_streams: Vec::new(),
             stream_metrics: Vec::new(),
         }
+    }
+
+    #[test]
+    fn reported_parallelism_prefers_aggregated_execution_parallelism() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test_parallelism
+source:
+  use: postgres
+  config: {}
+  streams:
+    - name: bench_events
+      sync_mode: full_refresh
+destination:
+  use: postgres
+  config: {}
+  write_mode: append
+resources:
+  parallelism: auto
+"#;
+        let config: PipelineConfig = serde_yaml::from_str(yaml).expect("valid pipeline yaml");
+        let mut aggregated = make_aggregated_results();
+        aggregated.execution_parallelism = 12;
+
+        assert_eq!(reported_parallelism(&config, &aggregated), 12);
     }
 
     #[tokio::test]

@@ -40,8 +40,9 @@ The local Git hooks installed by `just install-hooks` are intentionally light:
 `pre-commit` auto-runs formatting before commit and stops if it changed staged
 files so you can review and recommit, while `pre-push` auto-runs formatting on
 the checked-out repo state, stages newly formatted files, and stops so you can
-review, commit, and push again. They are convenience layers, not a substitute
-for `just ci`.
+review, commit, and push again. Once formatting is clean, `pre-push` runs
+`just lint` and blocks the push on clippy failures. They are convenience layers,
+not a substitute for `just ci`.
 
 ### New Plugins
 
@@ -82,8 +83,12 @@ The next-generation benchmark platform lives under `benchmarks/`.
 - `just bench --suite pr --output target/benchmarks/pr/results.jsonl --env-profile local-dev-postgres` runs the PR smoke suite directly
 - `just bench-pr` is the recommended local perf-regression command; it provisions the local benchmark environment, runs the PR smoke suite, and compares against the checked-in baseline artifact set
 - `just bench-lab pg_dest_insert` runs the native Postgres INSERT benchmark using the committed `local-dev-postgres` environment profile
-- `just bench-lab pg_dest_copy` runs the native Postgres COPY benchmark using the committed `local-dev-postgres` environment profile
+- `just bench-lab pg_dest_copy_regression` runs the debug-mode Postgres COPY regression benchmark with AOT disabled
+- `just bench-lab pg_dest_copy_release` runs the release-mode Postgres COPY benchmark with AOT enabled
 - the checked-in baseline is a local/manual smoke mechanism; the GitHub benchmark workflow is `workflow_dispatch` only until dedicated benchmark runners exist
+
+Benchmark throughput and bandwidth are reported as end-to-end wall-clock
+pipeline metrics, not isolated COPY-only inner-loop numbers.
 
 For direct runner use, provide an environment profile explicitly:
 
@@ -107,12 +112,15 @@ is the local orchestration wrapper for the repo-supported dev environment.
 ## Local Hooks
 
 - `just install-hooks` sets `git config core.hooksPath .githooks`
-- the repo-managed `pre-commit` and `pre-push` hooks run the fast auto-fix path only
+- the repo-managed `pre-commit` and `pre-push` hooks run the formatting
+  auto-fix path first, and `pre-push` then runs `just lint`
 - today that auto-fix path is `cargo fmt --all`
 - if the hook changes files, it re-stages the originally staged paths it
   touched and aborts the commit so you can inspect the diff and re-run `git commit`
 - if `pre-push` changes files, it stages newly formatted files and aborts the
   push so you can inspect the diff, create a follow-up commit, and push again
+- if formatting is already clean, `pre-push` runs `just lint` and blocks the
+  push on clippy failures
 - no Python `pre-commit` package is required
 
 ## PR Process

@@ -30,8 +30,10 @@ mod tests {
         let artifact = materialize_artifact(RunResult::success(
             "pr",
             "pr_smoke_pipeline",
+            "debug",
             serde_json::json!({}),
             1_000,
+            false,
         ))
         .expect("artifact");
 

@@ -11,8 +11,10 @@ mod tests {
         let artifact = materialize_artifact(RunResult::success(
             "pr",
             "pr_smoke_pipeline",
+            "debug",
             JsonValue::Null,
             1_000,
+            false,
         ))
         .expect("artifact");
 
@@ -36,12 +38,14 @@ mod tests {
         let artifact = materialize_artifact(RunResult::success(
             "pr",
             "pr_smoke_pipeline",
+            "debug",
             serde_json::json!({
                 "destination": {
                     "insert_statement_count": 12
                 }
             }),
             1_000,
+            false,
         ))
         .expect("artifact");
 
