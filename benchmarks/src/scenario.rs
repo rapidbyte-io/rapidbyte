@@ -8,9 +8,10 @@ use rapidbyte_types::wire::{Feature, SyncMode};
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 
+use crate::adapters::validate_scenario_adapters;
 use crate::workload::WorkloadFamily;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum BenchmarkKind {
     Pipeline,
@@ -134,6 +135,8 @@ impl ScenarioManifest {
         if parsed.suite.trim().is_empty() {
             bail!("scenario {} has empty suite", path.display());
         }
+        validate_scenario_adapters(&parsed)
+            .with_context(|| format!("scenario {} failed adapter validation", path.display()))?;
 
         Ok(parsed)
     }
@@ -443,5 +446,21 @@ assertions:
             );
             assert!(scenario.environment.postgres.is_none());
         }
+    }
+
+    #[test]
+    fn pr_smoke_scenario_references_committed_environment_profile() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenarios/pr");
+        let scenario = ScenarioManifest::from_path(&root.join("smoke.yaml")).expect("smoke");
+
+        assert_eq!(
+            scenario.environment.reference.as_deref(),
+            Some("local-dev-postgres")
+        );
+        assert_eq!(
+            scenario.environment.stream_name.as_deref(),
+            Some("bench_events")
+        );
+        assert!(!scenario.tags.iter().any(|tag| tag == "synthetic"));
     }
 }
