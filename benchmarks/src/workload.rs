@@ -58,13 +58,13 @@ pub fn resolve_workload_plan_with_environment(
         WorkloadFamily::TransformHeavy => 1536,
     };
     let seed = environment.map(|env| PostgresSeedPlan {
-            source_schema: env.source.schema.clone(),
-            source_table: env.stream_name.clone(),
-            destination_schema: env.destination.schema.clone(),
-            destination_table: env.stream_name.clone(),
-            rows: scenario.workload.rows,
-            target_row_bytes,
-        });
+        source_schema: env.source.schema.clone(),
+        source_table: env.stream_name.clone(),
+        destination_schema: env.destination.schema.clone(),
+        destination_table: env.stream_name.clone(),
+        rows: scenario.workload.rows,
+        target_row_bytes,
+    });
     let expected_records_read = scenario
         .assertions
         .expected_records_read

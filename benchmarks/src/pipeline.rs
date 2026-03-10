@@ -67,8 +67,12 @@ pub fn write_rendered_pipeline(
     env: &crate::scenario::PostgresBenchmarkEnvironment,
     temp_root: &Path,
 ) -> Result<RenderedPipeline> {
-    fs::create_dir_all(temp_root)
-        .with_context(|| format!("failed to create pipeline temp root {}", temp_root.display()))?;
+    fs::create_dir_all(temp_root).with_context(|| {
+        format!(
+            "failed to create pipeline temp root {}",
+            temp_root.display()
+        )
+    })?;
     let state_path = temp_root.join(format!("{}.state.db", scenario.id));
     let yaml = render_pipeline_yaml_with_environment_and_state(scenario, env, Some(&state_path))?;
     let path = temp_root.join(format!("{}.yaml", scenario.id));
@@ -85,14 +89,14 @@ fn render_source_mapping(
     source.insert(str_key("use"), YamlValue::String("postgres".to_string()));
     source.insert(
         str_key("config"),
-        YamlValue::Mapping(render_source_config(&env.source, &scenario.connector_options.source.config)?),
+        YamlValue::Mapping(render_source_config(
+            &env.source,
+            &scenario.connector_options.source.config,
+        )?),
     );
 
     let mut stream = Mapping::new();
-    stream.insert(
-        str_key("name"),
-        YamlValue::String(env.stream_name.clone()),
-    );
+    stream.insert(str_key("name"), YamlValue::String(env.stream_name.clone()));
     stream.insert(
         str_key("sync_mode"),
         to_yaml_value(
@@ -120,7 +124,11 @@ fn render_destination_mapping(
         str_key("config"),
         YamlValue::Mapping(render_destination_config(
             &env.destination,
-            scenario.connector_options.destination.load_method.as_deref(),
+            scenario
+                .connector_options
+                .destination
+                .load_method
+                .as_deref(),
             &scenario.connector_options.destination.config,
         )?),
     );
@@ -163,7 +171,10 @@ fn render_destination_config(
     Ok(mapping)
 }
 
-fn postgres_connection_mapping(profile: &PostgresConnectionProfile, include_schema: bool) -> Mapping {
+fn postgres_connection_mapping(
+    profile: &PostgresConnectionProfile,
+    include_schema: bool,
+) -> Mapping {
     let mut mapping = Mapping::new();
     mapping.insert(str_key("host"), YamlValue::String(profile.host.clone()));
     mapping.insert(str_key("port"), YamlValue::Number(profile.port.into()));
@@ -177,10 +188,7 @@ fn postgres_connection_mapping(profile: &PostgresConnectionProfile, include_sche
         YamlValue::String(profile.database.clone()),
     );
     if include_schema {
-        mapping.insert(
-            str_key("schema"),
-            YamlValue::String(profile.schema.clone()),
-        );
+        mapping.insert(str_key("schema"), YamlValue::String(profile.schema.clone()));
     }
     mapping
 }
@@ -283,7 +291,8 @@ mod tests {
         let temp_root = temp_dir("pipeline-render");
 
         let env = scenario.environment.postgres.clone().expect("env");
-        let rendered = write_rendered_pipeline(&scenario, &env, &temp_root).expect("write pipeline");
+        let rendered =
+            write_rendered_pipeline(&scenario, &env, &temp_root).expect("write pipeline");
         let yaml = fs::read_to_string(&rendered.path).expect("read rendered pipeline");
         let parsed = parse_pipeline_str(&yaml).expect("rendered yaml must parse");
 
@@ -302,7 +311,8 @@ mod tests {
         let temp_root = temp_dir("pipeline-state");
 
         let env = scenario.environment.postgres.clone().expect("env");
-        let rendered = write_rendered_pipeline(&scenario, &env, &temp_root).expect("write pipeline");
+        let rendered =
+            write_rendered_pipeline(&scenario, &env, &temp_root).expect("write pipeline");
         let yaml = fs::read_to_string(&rendered.path).expect("read rendered pipeline");
         let parsed = parse_pipeline_str(&yaml).expect("rendered yaml must parse");
 

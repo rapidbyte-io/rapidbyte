@@ -357,7 +357,11 @@ assertions:
         assert_eq!(env.source.host, "localhost");
         assert_eq!(env.destination.schema, "raw");
         assert_eq!(
-            scenario.connector_options.destination.load_method.as_deref(),
+            scenario
+                .connector_options
+                .destination
+                .load_method
+                .as_deref(),
             Some("insert")
         );
         assert_eq!(

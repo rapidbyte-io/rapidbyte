@@ -17,8 +17,7 @@ use crate::scenario::{
     filter_scenarios, PostgresBenchmarkEnvironment, PostgresConnectionProfile, ScenarioManifest,
 };
 use crate::workload::{
-    resolve_workload_plan_with_environment, PostgresSeedPlan, ResolvedWorkloadPlan,
-    WorkloadFamily,
+    resolve_workload_plan_with_environment, PostgresSeedPlan, ResolvedWorkloadPlan, WorkloadFamily,
 };
 
 const BENCH_JSON_MARKER: &str = "@@BENCH_JSON@@";
@@ -115,10 +114,7 @@ pub fn emit_scenario_artifacts(
     let filtered: Vec<&ScenarioManifest> = filter_scenarios(scenarios, suite, &[])
         .into_iter()
         .filter(|scenario| {
-            scenario_ids.is_empty()
-                || scenario_ids
-                    .iter()
-                    .any(|selected| selected == &scenario.id)
+            scenario_ids.is_empty() || scenario_ids.iter().any(|selected| selected == &scenario.id)
         })
         .collect();
     if let Some(parent) = output_path.parent() {
@@ -212,7 +208,10 @@ fn rapidbyte_run_command(repo_root: &Path, pipeline_path: &Path) -> Command {
     command
         .current_dir(repo_root)
         .env("RAPIDBYTE_BENCH", "1")
-        .env("RAPIDBYTE_PLUGIN_DIR", repo_root.join("target").join("plugins"))
+        .env(
+            "RAPIDBYTE_PLUGIN_DIR",
+            repo_root.join("target").join("plugins"),
+        )
         .args([
             "run",
             "--quiet",
@@ -233,7 +232,10 @@ fn parse_bench_json_from_stdout(stdout: &str) -> Result<JsonValue> {
     serde_json::from_str(marker_line).context("failed to parse benchmark JSON payload")
 }
 
-fn run_result_from_bench_json(scenario: &ScenarioManifest, bench_json: JsonValue) -> Result<RunResult> {
+fn run_result_from_bench_json(
+    scenario: &ScenarioManifest,
+    bench_json: JsonValue,
+) -> Result<RunResult> {
     let duration_secs = required_f64(&bench_json, "duration_secs")?;
     let records_written = required_u64(&bench_json, "records_written")?;
     let bytes_written = required_u64(&bench_json, "bytes_written")?;
@@ -408,9 +410,12 @@ fn connect_postgres(profile: &PostgresConnectionProfile) -> Result<Client> {
     config.user(&profile.user);
     config.password(&profile.password);
     config.dbname(&profile.database);
-    config
-        .connect(NoTls)
-        .with_context(|| format!("failed to connect to postgres {}:{}", profile.host, profile.port))
+    config.connect(NoTls).with_context(|| {
+        format!(
+            "failed to connect to postgres {}:{}",
+            profile.host, profile.port
+        )
+    })
 }
 
 fn benchmark_temp_root(scenario_id: &str) -> Result<PathBuf> {
@@ -441,7 +446,8 @@ fn quote_identifier(value: &str) -> String {
 }
 
 fn required_u64(json: &JsonValue, key: &str) -> Result<u64> {
-    optional_u64(json, key).with_context(|| format!("benchmark JSON is missing integer field {key}"))
+    optional_u64(json, key)
+        .with_context(|| format!("benchmark JSON is missing integer field {key}"))
 }
 
 fn optional_u64(json: &JsonValue, key: &str) -> Option<u64> {
@@ -449,7 +455,8 @@ fn optional_u64(json: &JsonValue, key: &str) -> Option<u64> {
 }
 
 fn required_f64(json: &JsonValue, key: &str) -> Result<f64> {
-    optional_f64(json, key).with_context(|| format!("benchmark JSON is missing numeric field {key}"))
+    optional_f64(json, key)
+        .with_context(|| format!("benchmark JSON is missing numeric field {key}"))
 }
 
 fn optional_f64(json: &JsonValue, key: &str) -> Option<f64> {
@@ -516,7 +523,10 @@ mod tests {
         .expect("artifact");
 
         assert_eq!(artifact.scenario_id, "pg_dest_copy");
-        assert_eq!(artifact.connector_metrics["destination"]["load_method"], "copy");
+        assert_eq!(
+            artifact.connector_metrics["destination"]["load_method"],
+            "copy"
+        );
         assert_eq!(artifact.connector_metrics["destination"]["flush_secs"], 1.2);
         assert_eq!(artifact.connector_metrics["parallelism"], 4);
     }
@@ -596,7 +606,10 @@ mod tests {
             })
             .expect("plugin dir env");
 
-        assert_eq!(plugin_dir, std::ffi::OsStr::new("/tmp/rapidbyte/target/plugins"));
+        assert_eq!(
+            plugin_dir,
+            std::ffi::OsStr::new("/tmp/rapidbyte/target/plugins")
+        );
     }
 
     fn sample_postgres_scenario(load_method: &str) -> ScenarioManifest {

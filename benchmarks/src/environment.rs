@@ -130,11 +130,12 @@ pub fn resolve_postgres_environment(
         );
     }
 
-    let stream_name = scenario
-        .environment
-        .stream_name
-        .clone()
-        .with_context(|| format!("scenario {} is missing environment.stream_name", scenario.id))?;
+    let stream_name = scenario.environment.stream_name.clone().with_context(|| {
+        format!(
+            "scenario {} is missing environment.stream_name",
+            scenario.id
+        )
+    })?;
     let source = connection_profile_for_binding(&profile, &profile.bindings.source)?;
     let destination = connection_profile_for_binding(&profile, &profile.bindings.destination)?;
 
