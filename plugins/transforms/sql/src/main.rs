@@ -3,69 +3,109 @@
 mod config;
 mod transform;
 
+use std::collections::{BTreeSet, HashSet};
+
 use datafusion::sql::parser::{DFParser, Statement as DfStatement};
 use datafusion::sql::sqlparser::ast::{Query, SetExpr, Statement, TableFactor, TableWithJoins};
 use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::parser::Parser;
 use rapidbyte_sdk::prelude::*;
 
-fn query_references_table_name(query: &str, table_name: &str) -> Result<bool, String> {
+fn query_external_table_references(query: &str) -> Result<BTreeSet<String>, String> {
     let dialect = GenericDialect {};
     let statements = Parser::parse_sql(&dialect, query)
         .map_err(|e| format!("failed to parse SQL query: {e}"))?;
-    Ok(statements
-        .into_iter()
-        .any(|stmt| statement_has_table_name(&stmt, table_name)))
+    let mut references = BTreeSet::new();
+    let ctes = HashSet::new();
+    for statement in statements {
+        statement_external_table_references(&statement, &ctes, &mut references);
+    }
+    Ok(references)
 }
 
-fn statement_has_table_name(statement: &Statement, table_name: &str) -> bool {
+fn statement_external_table_references(
+    statement: &Statement,
+    ctes: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
     match statement {
-        Statement::Query(query) => query_has_table_name(query, table_name),
-        _ => false,
-    }
-}
-
-fn query_has_table_name(query: &Query, table_name: &str) -> bool {
-    query.with.as_ref().is_some_and(|with| {
-        with.cte_tables
-            .iter()
-            .any(|cte| query_has_table_name(&cte.query, table_name))
-    }) || set_expr_has_table_name(&query.body, table_name)
-}
-
-fn set_expr_has_table_name(set_expr: &SetExpr, table_name: &str) -> bool {
-    match set_expr {
-        SetExpr::Select(select) => select
-            .from
-            .iter()
-            .any(|table_with_joins| table_with_joins_has_table_name(table_with_joins, table_name)),
-        SetExpr::Query(query) => query_has_table_name(query, table_name),
-        SetExpr::SetOperation { left, right, .. } => {
-            set_expr_has_table_name(left, table_name) || set_expr_has_table_name(right, table_name)
+        Statement::Query(query) => {
+            query_external_table_references_in_scope(query, ctes, references);
         }
-        _ => false,
+        _ => {}
     }
 }
 
-fn table_with_joins_has_table_name(table_with_joins: &TableWithJoins, table_name: &str) -> bool {
-    table_factor_has_table_name(&table_with_joins.relation, table_name)
-        || table_with_joins
-            .joins
-            .iter()
-            .any(|join| table_factor_has_table_name(&join.relation, table_name))
+fn query_external_table_references_in_scope(
+    query: &Query,
+    parent_ctes: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    let mut ctes = parent_ctes.clone();
+    if let Some(with) = &query.with {
+        for cte in &with.cte_tables {
+            ctes.insert(cte.alias.name.value.to_ascii_lowercase());
+        }
+        for cte in &with.cte_tables {
+            query_external_table_references_in_scope(&cte.query, &ctes, references);
+        }
+    }
+    set_expr_external_table_references(&query.body, &ctes, references);
 }
 
-fn table_factor_has_table_name(table_factor: &TableFactor, table_name: &str) -> bool {
+fn set_expr_external_table_references(
+    set_expr: &SetExpr,
+    ctes: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    match set_expr {
+        SetExpr::Select(select) => {
+            for table_with_joins in &select.from {
+                table_with_joins_external_table_references(table_with_joins, ctes, references);
+            }
+        }
+        SetExpr::Query(query) => query_external_table_references_in_scope(query, ctes, references),
+        SetExpr::SetOperation { left, right, .. } => {
+            set_expr_external_table_references(left, ctes, references);
+            set_expr_external_table_references(right, ctes, references);
+        }
+        _ => {}
+    }
+}
+
+fn table_with_joins_external_table_references(
+    table_with_joins: &TableWithJoins,
+    ctes: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
+    table_factor_external_table_references(&table_with_joins.relation, ctes, references);
+    for join in &table_with_joins.joins {
+        table_factor_external_table_references(&join.relation, ctes, references);
+    }
+}
+
+fn table_factor_external_table_references(
+    table_factor: &TableFactor,
+    ctes: &HashSet<String>,
+    references: &mut BTreeSet<String>,
+) {
     match table_factor {
-        TableFactor::Table { name, .. } => name
-            .0
-            .last()
-            .is_some_and(|ident| ident.value.eq_ignore_ascii_case(table_name)),
-        TableFactor::Derived { subquery, .. } => query_has_table_name(subquery, table_name),
+        TableFactor::Table { name, .. } => {
+            if name.0.len() == 1 {
+                let table_name = &name.0[0].value;
+                if ctes.contains(&table_name.to_ascii_lowercase()) {
+                    return;
+                }
+            }
+            references.insert(name.to_string());
+        }
+        TableFactor::Derived { subquery, .. } => {
+            query_external_table_references_in_scope(subquery, ctes, references);
+        }
         TableFactor::NestedJoin {
             table_with_joins, ..
-        } => table_with_joins_has_table_name(table_with_joins, table_name),
-        _ => false,
+        } => table_with_joins_external_table_references(table_with_joins, ctes, references),
+        _ => {}
     }
 }
 
@@ -76,9 +116,21 @@ fn normalize_and_parse_query(config: &config::Config) -> Result<String, String> 
 }
 
 pub(crate) fn validate_query_for_stream_name(query: &str, stream_name: &str) -> Result<(), String> {
-    if !query_references_table_name(query, stream_name)? {
+    let references = query_external_table_references(query)?;
+    if references.is_empty() || !references.iter().any(|name| name.eq_ignore_ascii_case(stream_name))
+    {
         return Err(format!(
             "SQL query must reference current stream table '{stream_name}'"
+        ));
+    }
+    let invalid_references = references
+        .into_iter()
+        .filter(|name| !name.eq_ignore_ascii_case(stream_name))
+        .collect::<Vec<_>>();
+    if !invalid_references.is_empty() {
+        return Err(format!(
+            "SQL query may only reference current stream table '{stream_name}'; found: {}",
+            invalid_references.join(", ")
         ));
     }
     Ok(())
@@ -208,6 +260,40 @@ mod tests {
         let validation = TransformSql::validate(
             &config::Config {
                 query: "SELECT id FROM users".to_string(),
+            },
+            &ctx,
+        )
+        .await
+        .expect("validate should not return plugin error");
+
+        assert_eq!(validation.status, ValidationStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_queries_that_reference_multiple_external_tables() {
+        let ctx = Context::new("transform-sql", "users");
+        let validation = TransformSql::validate(
+            &config::Config {
+                query: "SELECT users.id FROM users JOIN orders ON users.id = orders.user_id"
+                    .to_string(),
+            },
+            &ctx,
+        )
+        .await
+        .expect("validate should not return plugin error");
+
+        assert_eq!(validation.status, ValidationStatus::Failed);
+        assert!(validation.message.contains("may only reference current stream table"));
+        assert!(validation.message.contains("orders"));
+    }
+
+    #[tokio::test]
+    async fn validate_allows_ctes_derived_from_current_stream() {
+        let ctx = Context::new("transform-sql", "users");
+        let validation = TransformSql::validate(
+            &config::Config {
+                query: "WITH filtered AS (SELECT id FROM users) SELECT id FROM filtered"
+                    .to_string(),
             },
             &ctx,
         )
