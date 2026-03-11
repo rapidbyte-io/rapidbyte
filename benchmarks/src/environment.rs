@@ -566,6 +566,20 @@ bindings:
     }
 
     #[test]
+    fn docker_compose_provider_requires_project_name() {
+        let executor = RecordingCommandExecutor::default();
+        let err = EnvironmentSession::provision(
+            Path::new("/repo"),
+            sample_profile(Some("bench".to_string()), None),
+            &executor,
+        )
+        .expect_err("docker compose provider should require project_name");
+
+        assert!(err.to_string().contains("project_name"));
+        assert!(executor.commands.borrow().is_empty());
+    }
+
+    #[test]
     fn docker_compose_provider_uses_repo_relative_project_dir_for_up_and_down() {
         let executor = RecordingCommandExecutor::default();
         let session = EnvironmentSession::provision(
