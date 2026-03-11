@@ -189,7 +189,7 @@ mod tests {
         )
         .expect("smoke scenario");
         let resolved_env =
-            resolve_postgres_environment(&repo_root, &scenario, Some("local-dev-postgres"))
+            resolve_postgres_environment(&repo_root, &scenario, Some("local-bench-postgres"))
                 .expect("resolve env")
                 .expect("env");
 
@@ -295,7 +295,7 @@ mod tests {
             },
             benchmark: Default::default(),
             environment: EnvironmentConfig {
-                reference: Some("local-dev-postgres".to_string()),
+                reference: Some("local-bench-postgres".to_string()),
                 stream_name: Some("bench_events".to_string()),
                 postgres: None,
             },

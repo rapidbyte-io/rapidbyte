@@ -66,16 +66,17 @@ just bench-compare benchmarks/baselines/main/pr.jsonl target/benchmarks/pr/candi
   bandwidth label uses `MiB/sec` because the value is computed as
   `bytes / 1024 / 1024`.
 - Native lab scenarios should be run with `--env-profile <id>` or the `just bench-lab` wrapper.
-- The repo-supported local profile is `local-dev-postgres`.
-- `just bench-lab` reuses the shared repo Docker Compose project, so it works
-  from linked git worktrees without creating a second Postgres container.
-- `just bench-lab` also normalizes the local `postgres` role password to the
-  repo default before running lab benchmarks, so stale local container state
-  does not break auth after config changes.
+- The benchmark-owned local profile is `local-bench-postgres`.
+- `just bench-lab` and `just bench-pr` default to `local-bench-postgres`, which
+  provisions an isolated Docker Compose project under `benchmarks/` and tears
+  it down afterward.
+- `local-dev-postgres` remains a shared/manual profile for ad hoc runs against
+  an already running stack, but it is not the default benchmark-owned path.
 - Override local profile settings with:
   `RB_BENCH_PG_HOST`, `RB_BENCH_PG_PORT`, `RB_BENCH_PG_USER`,
   `RB_BENCH_PG_PASSWORD`, `RB_BENCH_PG_DATABASE`,
   `RB_BENCH_PG_SOURCE_SCHEMA`, and `RB_BENCH_PG_DEST_SCHEMA`.
-- The core benchmark runner executes against an existing environment; it does not
-  auto-provision Docker/Testcontainers itself.
+- The benchmark runner auto-provisions benchmark-owned Docker environments for
+  profiles like `local-bench-postgres`, while shared/manual profiles like
+  `local-dev-postgres` are treated as existing environments.
 - The retired benchmark harness should not be reintroduced.

@@ -1439,7 +1439,7 @@ mod tests {
             },
             benchmark: Default::default(),
             environment: EnvironmentConfig {
-                reference: Some("local-dev-postgres".to_string()),
+                reference: Some("local-bench-postgres".to_string()),
                 stream_name: Some("bench_events".to_string()),
                 postgres: None,
             },
@@ -1510,10 +1510,11 @@ mod tests {
 
     fn existing_profile() -> EnvironmentProfile {
         EnvironmentProfile {
-            id: "local-dev-postgres".to_string(),
+            id: "local-bench-postgres".to_string(),
             provider: EnvironmentProvider {
                 kind: "existing".to_string(),
                 project_dir: None,
+                project_name: None,
             },
             services: std::collections::BTreeMap::from([(
                 "postgres".to_string(),

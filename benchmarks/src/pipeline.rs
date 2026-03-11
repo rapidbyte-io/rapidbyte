@@ -355,7 +355,7 @@ mod tests {
             },
             benchmark: Default::default(),
             environment: EnvironmentConfig {
-                reference: Some("local-dev-postgres".to_string()),
+                reference: Some("local-bench-postgres".to_string()),
                 stream_name: Some("bench_events".to_string()),
                 postgres: None,
             },

@@ -436,7 +436,7 @@ execution:
   iterations: 3
   warmups: 1
 environment:
-  ref: local-dev-postgres
+  ref: local-bench-postgres
   stream_name: bench_events
 connector_options:
   source:
@@ -454,7 +454,7 @@ assertions:
         let scenario = ScenarioManifest::from_path(&scenario_path).expect("parse scenario");
         assert_eq!(
             scenario.environment.reference.as_deref(),
-            Some("local-dev-postgres")
+            Some("local-bench-postgres")
         );
         assert_eq!(
             scenario.environment.stream_name.as_deref(),
@@ -490,7 +490,7 @@ benchmark:
   build_mode: release
   aot: true
 environment:
-  ref: local-dev-postgres
+  ref: local-bench-postgres
   stream_name: bench_events
 "#,
         )
@@ -517,7 +517,7 @@ execution:
   iterations: 3
   warmups: 1
 environment:
-  ref: local-dev-postgres
+  ref: local-bench-postgres
   stream_name: bench_events
 "#,
         )
@@ -545,7 +545,7 @@ environment:
         for scenario in [insert, regression.clone(), release.clone()] {
             assert_eq!(
                 scenario.environment.reference.as_deref(),
-                Some("local-dev-postgres")
+                Some("local-bench-postgres")
             );
             assert_eq!(
                 scenario.environment.stream_name.as_deref(),
@@ -567,7 +567,7 @@ environment:
 
         assert_eq!(
             scenario.environment.reference.as_deref(),
-            Some("local-dev-postgres")
+            Some("local-bench-postgres")
         );
         assert_eq!(
             scenario.environment.stream_name.as_deref(),

@@ -23,7 +23,7 @@ benchmark:
   build_mode: release
   aot: true
 environment:
-  ref: local-dev-postgres
+  ref: local-bench-postgres
   stream_name: bench_events
 connector_options:
   source:
