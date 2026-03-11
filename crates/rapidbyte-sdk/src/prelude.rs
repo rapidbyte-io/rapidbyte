@@ -8,7 +8,7 @@
 pub use crate::plugin::{Destination, Source, Transform};
 
 // Feature traits
-pub use crate::features::{BulkLoadDestination, CdcSource, PartitionedSource};
+pub use crate::features::{CdcSource, PartitionedSource};
 pub use crate::stream::{CdcResumeToken, PartitionCoordinates};
 
 // Context and logging

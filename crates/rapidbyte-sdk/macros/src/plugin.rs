@@ -13,7 +13,6 @@ use syn::{Ident, ItemStruct, Result};
 struct ManifestFeatures {
     has_partitioned_read: bool,
     has_cdc: bool,
-    has_bulk_load: bool,
 }
 
 fn read_manifest_features(kind: &PluginKind) -> Option<ManifestFeatures> {
@@ -29,7 +28,6 @@ fn read_manifest_features(kind: &PluginKind) -> Option<ManifestFeatures> {
             return Some(ManifestFeatures {
                 has_partitioned_read: false,
                 has_cdc: false,
-                has_bulk_load: false,
             })
         }
     };
@@ -44,9 +42,6 @@ fn read_manifest_features(kind: &PluginKind) -> Option<ManifestFeatures> {
     Some(ManifestFeatures {
         has_partitioned_read: features.iter().any(|f| f == "partitioned_read"),
         has_cdc: features.iter().any(|f| f == "cdc"),
-        has_bulk_load: features
-            .iter()
-            .any(|f| f == "bulk_load" || f == "bulk_load_copy"),
     })
 }
 
@@ -76,16 +71,7 @@ fn gen_feature_assertions(
                 });
             }
         }
-        PluginKind::Destination => {
-            if features.has_bulk_load {
-                assertions.push(quote! {
-                    const _: () = {
-                        fn __assert_bulk_load_dest<T: ::rapidbyte_sdk::features::BulkLoadDestination>() {}
-                        fn __check() { __assert_bulk_load_dest::<#struct_name>(); }
-                    };
-                });
-            }
-        }
+        PluginKind::Destination => {}
         PluginKind::Transform => {}
     }
 
@@ -522,24 +508,8 @@ fn gen_source_methods(
 fn gen_dest_methods(
     struct_name: &Ident,
     trait_path: &TokenStream,
-    features: Option<&ManifestFeatures>,
+    _features: Option<&ManifestFeatures>,
 ) -> TokenStream {
-    let write_dispatch = match features {
-        Some(f) if f.has_bulk_load => {
-            quote! {
-                rt.block_on(
-                    <#struct_name as ::rapidbyte_sdk::features::BulkLoadDestination>::write_bulk(conn, &ctx, stream)
-                ).map_err(to_component_error)?
-            }
-        }
-        _ => {
-            quote! {
-                rt.block_on(<#struct_name as #trait_path>::write(conn, &ctx, stream))
-                    .map_err(to_component_error)?
-            }
-        }
-    };
-
     let run_preamble = gen_run_preamble();
 
     quote! {
@@ -552,7 +522,9 @@ fn gen_dest_methods(
         > {
             #run_preamble
 
-            let summary = #write_dispatch;
+            let summary = rt
+                .block_on(<#struct_name as #trait_path>::write_bulk(conn, &ctx, stream))
+                .map_err(to_component_error)?;
 
             Ok(__rb_bindings::rapidbyte::plugin::types::RunSummary {
                 kind: __rb_bindings::rapidbyte::plugin::types::PluginKind::Destination,
@@ -630,5 +602,23 @@ fn gen_embeds(struct_name: &Ident, trait_path: &TokenStream) -> TokenStream {
             }
             arr
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quote::quote;
+    use syn::parse_quote;
+
+    #[test]
+    fn destination_run_dispatches_through_write_bulk() {
+        let struct_name: Ident = parse_quote!(TestDestination);
+        let trait_path = quote!(::rapidbyte_sdk::plugin::Destination);
+
+        let generated = gen_dest_methods(&struct_name, &trait_path, None).to_string();
+
+        assert!(generated.contains(":: write_bulk"));
+        assert!(!generated.contains(":: write ("));
     }
 }

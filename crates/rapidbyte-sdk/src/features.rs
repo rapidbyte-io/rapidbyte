@@ -6,7 +6,7 @@
 
 use crate::context::Context;
 use crate::error::PluginError;
-use crate::metric::{ReadSummary, WriteSummary};
+use crate::metric::ReadSummary;
 use crate::stream::{CdcResumeToken, PartitionCoordinates, StreamContext};
 
 /// Required when a source declares `Feature::PartitionedRead`.
@@ -37,23 +37,10 @@ pub trait CdcSource {
     ) -> Result<ReadSummary, PluginError>;
 }
 
-/// Required when a destination declares `Feature::BulkLoad`.
-///
-/// The generated WIT glue dispatches to `write_bulk` for streams that
-/// should use bulk loading.
-#[allow(async_fn_in_trait)]
-pub trait BulkLoadDestination {
-    async fn write_bulk(
-        &mut self,
-        ctx: &Context,
-        stream: StreamContext,
-    ) -> Result<WriteSummary, PluginError>;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::{Destination, Source};
+    use crate::plugin::Source;
 
     // Verify trait shapes are compatible — if this compiles, the trait
     // signatures are consistent with Source/Destination.
@@ -61,6 +48,4 @@ mod tests {
     fn assert_partitioned_source<T: Source + PartitionedSource>() {}
     #[allow(dead_code)]
     fn assert_cdc_source<T: Source + CdcSource>() {}
-    #[allow(dead_code)]
-    fn assert_bulk_load_dest<T: Destination + BulkLoadDestination>() {}
 }
