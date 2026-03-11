@@ -117,10 +117,22 @@ impl EnvironmentSession {
                     )
                 })?;
                 let project_dir = absolutize(repo_root, Path::new(project_dir));
-                executor.run(&project_dir, "docker", &["compose", "up", "-d"])?;
+                let teardown = EnvironmentTeardown::DockerCompose {
+                    project_dir: project_dir.clone(),
+                };
+                if let Err(provision_err) =
+                    executor.run(&project_dir, "docker", &["compose", "up", "-d"])
+                {
+                    return match teardown.run(executor) {
+                        Ok(()) => Err(provision_err),
+                        Err(teardown_err) => Err(anyhow::anyhow!(
+                            "failed to provision environment: {provision_err}; cleanup after failed provision also failed: {teardown_err}"
+                        )),
+                    };
+                }
                 Ok(Self {
                     profile,
-                    teardown: Some(EnvironmentTeardown::DockerCompose { project_dir }),
+                    teardown: Some(teardown),
                 })
             }
             "existing" => Ok(Self {
@@ -137,10 +149,18 @@ impl EnvironmentSession {
 
     pub fn finish(mut self, executor: &dyn EnvironmentCommandExecutor) -> Result<()> {
         match self.teardown.take() {
-            Some(EnvironmentTeardown::DockerCompose { project_dir }) => {
-                executor.run(&project_dir, "docker", &["compose", "down", "-v"])
-            }
+            Some(teardown) => teardown.run(executor),
             None => Ok(()),
+        }
+    }
+}
+
+impl EnvironmentTeardown {
+    fn run(&self, executor: &dyn EnvironmentCommandExecutor) -> Result<()> {
+        match self {
+            Self::DockerCompose { project_dir } => {
+                executor.run(project_dir, "docker", &["compose", "down", "-v"])
+            }
         }
     }
 }
@@ -480,6 +500,35 @@ bindings:
         );
     }
 
+    #[test]
+    fn docker_compose_provider_tears_down_after_failed_up() {
+        let executor =
+            RecordingCommandExecutor::with_results(vec![Err(anyhow::anyhow!("up failed")), Ok(())]);
+        let err = EnvironmentSession::provision(
+            Path::new("/repo"),
+            sample_profile(Some("bench".to_string())),
+            &executor,
+        )
+        .expect_err("failed up should fail provisioning");
+
+        assert!(err.to_string().contains("up failed"));
+        assert_eq!(
+            executor.commands.borrow().as_slice(),
+            &[
+                RecordedCommand {
+                    cwd: PathBuf::from("/repo/bench"),
+                    program: "docker".to_string(),
+                    args: vec!["compose".to_string(), "up".to_string(), "-d".to_string()],
+                },
+                RecordedCommand {
+                    cwd: PathBuf::from("/repo/bench"),
+                    program: "docker".to_string(),
+                    args: vec!["compose".to_string(), "down".to_string(), "-v".to_string()],
+                }
+            ]
+        );
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct RecordedCommand {
         cwd: PathBuf,
@@ -490,6 +539,7 @@ bindings:
     #[derive(Default)]
     struct RecordingCommandExecutor {
         commands: RefCell<Vec<RecordedCommand>>,
+        results: RefCell<Vec<Result<()>>>,
     }
 
     impl EnvironmentCommandExecutor for RecordingCommandExecutor {
@@ -499,7 +549,21 @@ bindings:
                 program: program.to_string(),
                 args: args.iter().map(|arg| (*arg).to_string()).collect(),
             });
-            Ok(())
+            let mut results = self.results.borrow_mut();
+            if results.is_empty() {
+                Ok(())
+            } else {
+                results.remove(0)
+            }
+        }
+    }
+
+    impl RecordingCommandExecutor {
+        fn with_results(results: Vec<Result<()>>) -> Self {
+            Self {
+                commands: RefCell::new(Vec::new()),
+                results: RefCell::new(results),
+            }
         }
     }
 

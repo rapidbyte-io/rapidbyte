@@ -179,10 +179,20 @@ pub fn emit_scenario_artifacts(
     scenarios: &[ScenarioManifest],
     options: EmitArtifactsOptions<'_>,
 ) -> Result<usize> {
+    let filtered = select_scenarios(scenarios, options.suite, options.scenario_ids);
+    if filtered.is_empty() {
+        return emit_scenario_artifacts_with_dependencies(
+            root,
+            &filtered,
+            options,
+            Box::new(SessionBackedEnvironmentHandle { session: None }),
+            execute_scenario_once,
+        );
+    }
     let environment = acquire_benchmark_environment(root, options.env_profile)?;
     emit_scenario_artifacts_with_dependencies(
         root,
-        scenarios,
+        &filtered,
         options,
         environment,
         execute_scenario_once,
@@ -191,7 +201,7 @@ pub fn emit_scenario_artifacts(
 
 fn emit_scenario_artifacts_with_dependencies<F>(
     root: &Path,
-    scenarios: &[ScenarioManifest],
+    filtered: &[&ScenarioManifest],
     options: EmitArtifactsOptions<'_>,
     environment: Box<dyn BenchmarkEnvironmentHandle>,
     execute_once: F,
@@ -206,23 +216,13 @@ where
         Option<&Path>,
     ) -> Result<RunResult>,
 {
-    let filtered: Vec<&ScenarioManifest> = filter_scenarios(scenarios, options.suite, &[])
-        .into_iter()
-        .filter(|scenario| {
-            options.scenario_ids.is_empty()
-                || options
-                    .scenario_ids
-                    .iter()
-                    .any(|selected| selected == &scenario.id)
-        })
-        .collect();
     let run_result = (|| {
         if let Some(parent) = options.output_path.parent() {
             fs::create_dir_all(parent)?;
         }
         let mut file = File::create(options.output_path)?;
         let mut artifact_count = 0;
-        for scenario in &filtered {
+        for scenario in filtered {
             let artifact_context = build_artifact_context(root, scenario, options.hardware_class);
             let resolved_env = environment.resolve_for_scenario(scenario)?;
             let workload = resolve_workload_plan_with_environment(scenario, resolved_env.as_ref())?;
@@ -265,6 +265,19 @@ where
             "benchmark execution failed: {run_err}; teardown also failed: {teardown_err}"
         )),
     }
+}
+
+fn select_scenarios<'a>(
+    scenarios: &'a [ScenarioManifest],
+    suite: Option<&str>,
+    scenario_ids: &[String],
+) -> Vec<&'a ScenarioManifest> {
+    filter_scenarios(scenarios, suite, &[])
+        .into_iter()
+        .filter(|scenario| {
+            scenario_ids.is_empty() || scenario_ids.iter().any(|selected| selected == &scenario.id)
+        })
+        .collect()
 }
 
 trait BenchmarkEnvironmentHandle {
@@ -798,10 +811,11 @@ mod tests {
         let events = Rc::new(RefCell::new(vec!["provision".to_string()]));
         let environment = Box::new(RecordingEnvironmentHandle::success(events.clone()));
         let scenario = synthetic_scenario("synthetic_copy");
+        let filtered = vec![&scenario];
 
         let written = emit_scenario_artifacts_with_dependencies(
             std::path::Path::new("."),
-            &[scenario],
+            &filtered,
             EmitArtifactsOptions {
                 suite: Some("lab"),
                 scenario_ids: &["synthetic_copy".to_string()],
@@ -843,10 +857,11 @@ mod tests {
         let events = Rc::new(RefCell::new(vec!["provision".to_string()]));
         let environment = Box::new(RecordingEnvironmentHandle::success(events.clone()));
         let scenario = synthetic_scenario("synthetic_copy");
+        let filtered = vec![&scenario];
 
         let err = emit_scenario_artifacts_with_dependencies(
             std::path::Path::new("."),
-            &[scenario],
+            &filtered,
             EmitArtifactsOptions {
                 suite: Some("lab"),
                 scenario_ids: &["synthetic_copy".to_string()],
@@ -880,10 +895,11 @@ mod tests {
             "teardown failed",
         ));
         let scenario = synthetic_scenario("synthetic_copy");
+        let filtered = vec![&scenario];
 
         let err = emit_scenario_artifacts_with_dependencies(
             std::path::Path::new("."),
-            &[scenario],
+            &filtered,
             EmitArtifactsOptions {
                 suite: Some("lab"),
                 scenario_ids: &["synthetic_copy".to_string()],
@@ -910,15 +926,38 @@ mod tests {
     }
 
     #[test]
+    fn emit_scenario_artifacts_skips_environment_acquisition_when_no_scenarios_match() {
+        let output_path = temp_dir("runner-no-matching-scenarios").join("candidate.jsonl");
+        let written = emit_scenario_artifacts(
+            std::path::Path::new("."),
+            &[synthetic_scenario("synthetic_copy")],
+            EmitArtifactsOptions {
+                suite: Some("lab"),
+                scenario_ids: &["typoed_scenario".to_string()],
+                env_profile: Some("definitely-not-a-real-profile"),
+                hardware_class: Some("local-dev"),
+                rapidbyte_bin: None,
+                output_path: &output_path,
+            },
+        )
+        .expect("empty selection should not acquire environment");
+
+        assert_eq!(written, 0);
+        let rendered = fs::read_to_string(&output_path).expect("read output");
+        assert!(rendered.is_empty());
+    }
+
+    #[test]
     fn emit_scenario_artifacts_tears_down_environment_when_output_creation_fails() {
         let temp_root = temp_dir("runner-output-failure");
         let events = Rc::new(RefCell::new(vec!["provision".to_string()]));
         let environment = Box::new(RecordingEnvironmentHandle::success(events.clone()));
         let scenario = synthetic_scenario("synthetic_copy");
+        let filtered = vec![&scenario];
 
         let err = emit_scenario_artifacts_with_dependencies(
             std::path::Path::new("."),
-            &[scenario],
+            &filtered,
             EmitArtifactsOptions {
                 suite: Some("lab"),
                 scenario_ids: &["synthetic_copy".to_string()],
