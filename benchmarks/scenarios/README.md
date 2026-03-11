@@ -15,6 +15,11 @@ Current notable lab scenarios:
 - `lab/pg_dest_copy_release.yaml` benchmarks the same workload in release mode with AOT enabled for production-like measurements.
 - `../environments/local-dev-postgres.yaml` defines the repo-supported local benchmark environment.
 
+When `--env-profile local-dev-postgres` is used, the benchmark runner treats
+that environment as benchmark-owned infrastructure: it provisions the Docker
+Compose project before running warmups and measured iterations, then tears it
+down afterward on both success and failure.
+
 Run a specific scenario with:
 
 ```bash
