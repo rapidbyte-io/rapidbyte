@@ -584,6 +584,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn validate_succeeds_for_qualified_current_stream_name() {
+        let ctx = Context::new("transform-sql", "public.users");
+        let validation = TransformSql::validate(
+            &config::Config {
+                query: "SELECT id FROM public.users".to_string(),
+            },
+            &ctx,
+        )
+        .await
+        .expect("validate should not return plugin error");
+
+        assert_eq!(validation.status, ValidationStatus::Success);
+    }
+
+    #[tokio::test]
     async fn validate_rejects_queries_that_reference_multiple_external_tables() {
         let ctx = Context::new("transform-sql", "users");
         let validation = TransformSql::validate(

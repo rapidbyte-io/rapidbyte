@@ -106,3 +106,42 @@ pub async fn run(
         batches_processed,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use arrow::array::Int32Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use datafusion::datasource::MemTable;
+    use datafusion::prelude::SessionContext;
+    use datafusion::sql::parser::DFParser;
+
+    #[tokio::test]
+    async fn qualified_stream_names_plan_against_registered_table() {
+        let session = SessionContext::new();
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+        )
+        .expect("record batch should build");
+        let mem_table =
+            MemTable::try_new(schema, vec![vec![batch]]).expect("mem table should build");
+
+        session
+            .register_table("public.users", Arc::new(mem_table))
+            .expect("qualified table should register");
+
+        let statement = DFParser::parse_sql("SELECT id FROM public.users")
+            .expect("query should parse")
+            .pop_front()
+            .expect("one statement");
+        session
+            .state()
+            .statement_to_plan(statement)
+            .await
+            .expect("query should plan against qualified table");
+    }
+}
