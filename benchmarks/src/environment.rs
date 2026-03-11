@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,8 @@ pub struct EnvironmentProvider {
     pub kind: String,
     #[serde(default)]
     pub project_dir: Option<String>,
+    #[serde(default)]
+    pub project_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -45,12 +48,136 @@ pub struct EnvironmentBinding {
     pub schema: String,
 }
 
+pub trait EnvironmentCommandExecutor {
+    fn run(&self, cwd: &Path, program: &str, args: &[&str]) -> Result<()>;
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemEnvironmentCommandExecutor;
+
+impl EnvironmentCommandExecutor for SystemEnvironmentCommandExecutor {
+    fn run(&self, cwd: &Path, program: &str, args: &[&str]) -> Result<()> {
+        let output = Command::new(program)
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to invoke {} {} in {}",
+                    program,
+                    args.join(" "),
+                    cwd.display()
+                )
+            })?;
+        if output.status.success() {
+            return Ok(());
+        }
+
+        anyhow::bail!(
+            "{} {} failed in {}:\nstdout:\n{}\nstderr:\n{}",
+            program,
+            args.join(" "),
+            cwd.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EnvironmentSession {
+    profile: EnvironmentProfile,
+    teardown: Option<EnvironmentTeardown>,
+}
+
+#[derive(Debug, Clone)]
+enum EnvironmentTeardown {
+    DockerCompose {
+        project_dir: PathBuf,
+        project_name: String,
+    },
+}
+
 impl EnvironmentProfile {
     pub fn from_path(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("failed to read environment profile {}", path.display()))?;
         serde_yaml::from_str(&content)
             .with_context(|| format!("failed to parse environment profile {}", path.display()))
+    }
+}
+
+impl EnvironmentSession {
+    pub fn provision(
+        repo_root: &Path,
+        profile: EnvironmentProfile,
+        executor: &dyn EnvironmentCommandExecutor,
+    ) -> Result<Self> {
+        match profile.provider.kind.as_str() {
+            "docker_compose" => {
+                let project_dir = profile.provider.project_dir.as_deref().with_context(|| {
+                    format!(
+                        "environment profile {} requires provider.project_dir",
+                        profile.id
+                    )
+                })?;
+                let project_name = profile.provider.project_name.as_deref().with_context(|| {
+                    format!(
+                        "environment profile {} requires provider.project_name",
+                        profile.id
+                    )
+                })?;
+                let project_dir = absolutize(repo_root, Path::new(project_dir));
+                let teardown = EnvironmentTeardown::DockerCompose {
+                    project_dir: project_dir.clone(),
+                    project_name: project_name.to_string(),
+                };
+                let provision_args = ["compose", "-p", project_name, "up", "-d", "--wait"];
+                if let Err(provision_err) = executor.run(&project_dir, "docker", &provision_args) {
+                    return match teardown.run(executor) {
+                        Ok(()) => Err(provision_err),
+                        Err(teardown_err) => Err(anyhow::anyhow!(
+                            "failed to provision environment: {provision_err}; cleanup after failed provision also failed: {teardown_err}"
+                        )),
+                    };
+                }
+                Ok(Self {
+                    profile,
+                    teardown: Some(teardown),
+                })
+            }
+            "existing" => Ok(Self {
+                profile,
+                teardown: None,
+            }),
+            other => anyhow::bail!("unsupported environment provider kind {}", other),
+        }
+    }
+
+    pub fn profile(&self) -> &EnvironmentProfile {
+        &self.profile
+    }
+
+    pub fn finish(mut self, executor: &dyn EnvironmentCommandExecutor) -> Result<()> {
+        match self.teardown.take() {
+            Some(teardown) => teardown.run(executor),
+            None => Ok(()),
+        }
+    }
+}
+
+impl EnvironmentTeardown {
+    fn run(&self, executor: &dyn EnvironmentCommandExecutor) -> Result<()> {
+        match self {
+            Self::DockerCompose {
+                project_dir,
+                project_name,
+            } => executor.run(
+                project_dir,
+                "docker",
+                &["compose", "-p", project_name.as_str(), "down", "-v"],
+            ),
+        }
     }
 }
 
@@ -97,10 +224,26 @@ pub fn apply_environment_overrides(profile: &mut EnvironmentProfile) -> Result<(
     Ok(())
 }
 
+#[cfg(test)]
 pub fn resolve_postgres_environment(
     root: &Path,
     scenario: &ScenarioManifest,
     env_profile: Option<&str>,
+) -> Result<Option<PostgresBenchmarkEnvironment>> {
+    let profile = match env_profile {
+        Some(profile_id) => {
+            let mut profile = resolve_environment_profile(root, profile_id)?;
+            apply_environment_overrides(&mut profile)?;
+            Some(profile)
+        }
+        None => None,
+    };
+    resolve_postgres_environment_from_profile(scenario, profile.as_ref())
+}
+
+pub fn resolve_postgres_environment_from_profile(
+    scenario: &ScenarioManifest,
+    profile: Option<&EnvironmentProfile>,
 ) -> Result<Option<PostgresBenchmarkEnvironment>> {
     if let Some(env) = scenario.environment.postgres.clone() {
         return Ok(Some(env));
@@ -109,15 +252,12 @@ pub fn resolve_postgres_environment(
     let Some(reference) = scenario.environment.reference.as_deref() else {
         return Ok(None);
     };
-    let profile_id = env_profile.with_context(|| {
+    let profile = profile.with_context(|| {
         format!(
             "scenario {} requires environment profile {}",
             scenario.id, reference
         )
     })?;
-
-    let mut profile = resolve_environment_profile(root, profile_id)?;
-    apply_environment_overrides(&mut profile)?;
 
     if profile.id != reference {
         anyhow::bail!(
@@ -134,8 +274,8 @@ pub fn resolve_postgres_environment(
             scenario.id
         )
     })?;
-    let source = connection_profile_for_binding(&profile, &profile.bindings.source)?;
-    let destination = connection_profile_for_binding(&profile, &profile.bindings.destination)?;
+    let source = connection_profile_for_binding(profile, &profile.bindings.source)?;
+    let destination = connection_profile_for_binding(profile, &profile.bindings.destination)?;
 
     Ok(Some(PostgresBenchmarkEnvironment {
         stream_name,
@@ -180,8 +320,9 @@ fn absolutize(root: &Path, path: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::*;
 
@@ -312,17 +453,419 @@ bindings:
     }
 
     #[test]
-    fn committed_local_dev_profile_parses() {
+    fn committed_local_dev_profile_parses_with_docker_compose_project_dir() {
         let profile_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("environments/local-dev-postgres.yaml");
 
         let profile = EnvironmentProfile::from_path(&profile_path).expect("parse profile");
 
         assert_eq!(profile.id, "local-dev-postgres");
-        assert_eq!(profile.provider.kind, "docker_compose");
+        assert_eq!(profile.provider.kind, "existing");
+        assert!(profile.provider.project_dir.is_none());
+        assert!(profile.provider.project_name.is_none());
         assert_eq!(profile.services["postgres"].port, 5433);
         assert_eq!(profile.bindings.source.schema, "public");
         assert_eq!(profile.bindings.destination.schema, "raw");
+    }
+
+    #[test]
+    fn committed_local_bench_profile_parses_with_isolated_compose_metadata() {
+        let profile_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("environments/local-bench-postgres.yaml");
+
+        let profile = EnvironmentProfile::from_path(&profile_path).expect("parse profile");
+
+        assert_eq!(profile.id, "local-bench-postgres");
+        assert_eq!(profile.provider.kind, "docker_compose");
+        assert_eq!(profile.provider.project_dir.as_deref(), Some("benchmarks"));
+        assert_eq!(
+            profile.provider.project_name.as_deref(),
+            Some("rapidbyte-bench")
+        );
+        assert_eq!(profile.services["postgres"].port, 55433);
+        assert_eq!(profile.bindings.source.schema, "public");
+        assert_eq!(profile.bindings.destination.schema, "raw");
+    }
+
+    #[test]
+    fn committed_local_profiles_distinguish_shared_and_owned_use() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("environments");
+        let dev =
+            EnvironmentProfile::from_path(&root.join("local-dev-postgres.yaml")).expect("dev");
+        let bench =
+            EnvironmentProfile::from_path(&root.join("local-bench-postgres.yaml")).expect("bench");
+
+        assert_eq!(dev.id, "local-dev-postgres");
+        assert_eq!(dev.provider.kind, "existing");
+        assert!(dev.provider.project_dir.is_none());
+        assert!(dev.provider.project_name.is_none());
+
+        assert_eq!(bench.id, "local-bench-postgres");
+        assert_eq!(bench.provider.kind, "docker_compose");
+        assert_eq!(bench.provider.project_dir.as_deref(), Some("benchmarks"));
+        assert_eq!(
+            bench.provider.project_name.as_deref(),
+            Some("rapidbyte-bench")
+        );
+    }
+
+    #[test]
+    fn existing_provider_does_not_run_lifecycle_commands() {
+        let executor = RecordingCommandExecutor::default();
+        let session = EnvironmentSession::provision(
+            Path::new("/repo"),
+            EnvironmentProfile {
+                id: "local-dev-postgres".to_string(),
+                provider: EnvironmentProvider {
+                    kind: "existing".to_string(),
+                    project_dir: None,
+                    project_name: None,
+                },
+                services: BTreeMap::from([(
+                    "postgres".to_string(),
+                    EnvironmentService {
+                        kind: "postgres".to_string(),
+                        host: "127.0.0.1".to_string(),
+                        port: 5433,
+                        user: "postgres".to_string(),
+                        password: "postgres".to_string(),
+                        database: "rapidbyte_test".to_string(),
+                    },
+                )]),
+                bindings: EnvironmentBindings {
+                    source: EnvironmentBinding {
+                        service: "postgres".to_string(),
+                        schema: "public".to_string(),
+                    },
+                    destination: EnvironmentBinding {
+                        service: "postgres".to_string(),
+                        schema: "raw".to_string(),
+                    },
+                },
+            },
+            &executor,
+        )
+        .expect("provision existing session");
+
+        session.finish(&executor).expect("finish existing session");
+        assert!(executor.commands.borrow().is_empty());
+    }
+
+    #[test]
+    fn docker_compose_provider_requires_project_dir() {
+        let executor = RecordingCommandExecutor::default();
+        let err = EnvironmentSession::provision(
+            Path::new("/repo"),
+            sample_profile(None, Some("rapidbyte-bench".to_string())),
+            &executor,
+        )
+        .expect_err("docker compose provider should require project_dir");
+
+        assert!(err.to_string().contains("project_dir"));
+        assert!(executor.commands.borrow().is_empty());
+    }
+
+    #[test]
+    fn docker_compose_provider_requires_project_name() {
+        let executor = RecordingCommandExecutor::default();
+        let err = EnvironmentSession::provision(
+            Path::new("/repo"),
+            sample_profile(Some("bench".to_string()), None),
+            &executor,
+        )
+        .expect_err("docker compose provider should require project_name");
+
+        assert!(err.to_string().contains("project_name"));
+        assert!(executor.commands.borrow().is_empty());
+    }
+
+    #[test]
+    fn docker_compose_provider_uses_repo_relative_project_dir_for_up_and_down() {
+        let executor = RecordingCommandExecutor::default();
+        let session = EnvironmentSession::provision(
+            Path::new("/repo"),
+            sample_profile(
+                Some("bench".to_string()),
+                Some("rapidbyte-bench".to_string()),
+            ),
+            &executor,
+        )
+        .expect("provision session");
+
+        assert_eq!(
+            executor.commands.borrow().as_slice(),
+            &[RecordedCommand {
+                cwd: PathBuf::from("/repo/bench"),
+                program: "docker".to_string(),
+                args: vec![
+                    "compose".to_string(),
+                    "-p".to_string(),
+                    "rapidbyte-bench".to_string(),
+                    "up".to_string(),
+                    "-d".to_string(),
+                    "--wait".to_string(),
+                ],
+            }]
+        );
+
+        session.finish(&executor).expect("teardown session");
+
+        assert_eq!(
+            executor.commands.borrow().as_slice(),
+            &[
+                RecordedCommand {
+                    cwd: PathBuf::from("/repo/bench"),
+                    program: "docker".to_string(),
+                    args: vec![
+                        "compose".to_string(),
+                        "-p".to_string(),
+                        "rapidbyte-bench".to_string(),
+                        "up".to_string(),
+                        "-d".to_string(),
+                        "--wait".to_string(),
+                    ],
+                },
+                RecordedCommand {
+                    cwd: PathBuf::from("/repo/bench"),
+                    program: "docker".to_string(),
+                    args: vec![
+                        "compose".to_string(),
+                        "-p".to_string(),
+                        "rapidbyte-bench".to_string(),
+                        "down".to_string(),
+                        "-v".to_string(),
+                    ],
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn docker_compose_provider_tears_down_after_failed_up() {
+        let executor =
+            RecordingCommandExecutor::with_results(vec![Err(anyhow::anyhow!("up failed")), Ok(())]);
+        let err = EnvironmentSession::provision(
+            Path::new("/repo"),
+            sample_profile(
+                Some("bench".to_string()),
+                Some("rapidbyte-bench".to_string()),
+            ),
+            &executor,
+        )
+        .expect_err("failed up should fail provisioning");
+
+        assert!(err.to_string().contains("up failed"));
+        assert_eq!(
+            executor.commands.borrow().as_slice(),
+            &[
+                RecordedCommand {
+                    cwd: PathBuf::from("/repo/bench"),
+                    program: "docker".to_string(),
+                    args: vec![
+                        "compose".to_string(),
+                        "-p".to_string(),
+                        "rapidbyte-bench".to_string(),
+                        "up".to_string(),
+                        "-d".to_string(),
+                        "--wait".to_string(),
+                    ],
+                },
+                RecordedCommand {
+                    cwd: PathBuf::from("/repo/bench"),
+                    program: "docker".to_string(),
+                    args: vec![
+                        "compose".to_string(),
+                        "-p".to_string(),
+                        "rapidbyte-bench".to_string(),
+                        "down".to_string(),
+                        "-v".to_string(),
+                    ],
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn docker_compose_provider_reports_cleanup_failure_after_failed_up() {
+        let executor = RecordingCommandExecutor::with_results(vec![
+            Err(anyhow::anyhow!("up failed")),
+            Err(anyhow::anyhow!("down failed")),
+        ]);
+        let err = EnvironmentSession::provision(
+            Path::new("/repo"),
+            sample_profile(
+                Some("bench".to_string()),
+                Some("rapidbyte-bench".to_string()),
+            ),
+            &executor,
+        )
+        .expect_err("failed up should fail provisioning");
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("up failed"));
+        assert!(rendered.contains("down failed"));
+        assert_eq!(
+            executor.commands.borrow().as_slice(),
+            &[
+                RecordedCommand {
+                    cwd: PathBuf::from("/repo/bench"),
+                    program: "docker".to_string(),
+                    args: vec![
+                        "compose".to_string(),
+                        "-p".to_string(),
+                        "rapidbyte-bench".to_string(),
+                        "up".to_string(),
+                        "-d".to_string(),
+                        "--wait".to_string(),
+                    ],
+                },
+                RecordedCommand {
+                    cwd: PathBuf::from("/repo/bench"),
+                    program: "docker".to_string(),
+                    args: vec![
+                        "compose".to_string(),
+                        "-p".to_string(),
+                        "rapidbyte-bench".to_string(),
+                        "down".to_string(),
+                        "-v".to_string(),
+                    ],
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn docker_compose_provider_uses_project_name_for_owned_benchmark_stack() {
+        let executor = RecordingCommandExecutor::default();
+        let session = EnvironmentSession::provision(
+            Path::new("/repo"),
+            sample_profile(
+                Some("benchmarks".to_string()),
+                Some("rapidbyte-bench".to_string()),
+            ),
+            &executor,
+        )
+        .expect("provision session");
+
+        assert_eq!(
+            executor.commands.borrow().as_slice(),
+            &[RecordedCommand {
+                cwd: PathBuf::from("/repo/benchmarks"),
+                program: "docker".to_string(),
+                args: vec![
+                    "compose".to_string(),
+                    "-p".to_string(),
+                    "rapidbyte-bench".to_string(),
+                    "up".to_string(),
+                    "-d".to_string(),
+                    "--wait".to_string(),
+                ],
+            }]
+        );
+
+        session.finish(&executor).expect("teardown session");
+
+        assert_eq!(
+            executor.commands.borrow().as_slice(),
+            &[
+                RecordedCommand {
+                    cwd: PathBuf::from("/repo/benchmarks"),
+                    program: "docker".to_string(),
+                    args: vec![
+                        "compose".to_string(),
+                        "-p".to_string(),
+                        "rapidbyte-bench".to_string(),
+                        "up".to_string(),
+                        "-d".to_string(),
+                        "--wait".to_string(),
+                    ],
+                },
+                RecordedCommand {
+                    cwd: PathBuf::from("/repo/benchmarks"),
+                    program: "docker".to_string(),
+                    args: vec![
+                        "compose".to_string(),
+                        "-p".to_string(),
+                        "rapidbyte-bench".to_string(),
+                        "down".to_string(),
+                        "-v".to_string(),
+                    ],
+                }
+            ]
+        );
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RecordedCommand {
+        cwd: PathBuf,
+        program: String,
+        args: Vec<String>,
+    }
+
+    #[derive(Default)]
+    struct RecordingCommandExecutor {
+        commands: RefCell<Vec<RecordedCommand>>,
+        results: RefCell<Vec<Result<()>>>,
+    }
+
+    impl EnvironmentCommandExecutor for RecordingCommandExecutor {
+        fn run(&self, cwd: &Path, program: &str, args: &[&str]) -> Result<()> {
+            self.commands.borrow_mut().push(RecordedCommand {
+                cwd: cwd.to_path_buf(),
+                program: program.to_string(),
+                args: args.iter().map(|arg| (*arg).to_string()).collect(),
+            });
+            let mut results = self.results.borrow_mut();
+            if results.is_empty() {
+                Ok(())
+            } else {
+                results.remove(0)
+            }
+        }
+    }
+
+    impl RecordingCommandExecutor {
+        fn with_results(results: Vec<Result<()>>) -> Self {
+            Self {
+                commands: RefCell::new(Vec::new()),
+                results: RefCell::new(results),
+            }
+        }
+    }
+
+    fn sample_profile(
+        project_dir: Option<String>,
+        project_name: Option<String>,
+    ) -> EnvironmentProfile {
+        EnvironmentProfile {
+            id: "local-dev-postgres".to_string(),
+            provider: EnvironmentProvider {
+                kind: "docker_compose".to_string(),
+                project_dir,
+                project_name,
+            },
+            services: BTreeMap::from([(
+                "postgres".to_string(),
+                EnvironmentService {
+                    kind: "postgres".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    port: 5433,
+                    user: "postgres".to_string(),
+                    password: "postgres".to_string(),
+                    database: "rapidbyte_test".to_string(),
+                },
+            )]),
+            bindings: EnvironmentBindings {
+                source: EnvironmentBinding {
+                    service: "postgres".to_string(),
+                    schema: "public".to_string(),
+                },
+                destination: EnvironmentBinding {
+                    service: "postgres".to_string(),
+                    schema: "raw".to_string(),
+                },
+            },
+        }
     }
 
     fn temp_dir(label: &str) -> PathBuf {

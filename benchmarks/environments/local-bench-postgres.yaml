@@ -1,11 +1,13 @@
-id: local-dev-postgres
+id: local-bench-postgres
 provider:
-  kind: existing
+  kind: docker_compose
+  project_dir: benchmarks
+  project_name: rapidbyte-bench
 services:
   postgres:
     kind: postgres
     host: 127.0.0.1
-    port: 5433
+    port: 55433
     user: postgres
     password: postgres
     database: rapidbyte_test

@@ -19,7 +19,7 @@ execution:
   iterations: 3
   warmups: 1
 environment:
-  ref: local-dev-postgres
+  ref: local-bench-postgres
   stream_name: bench_events
 connector_options:
   source:

@@ -8,7 +8,10 @@ use sha2::{Digest, Sha256};
 
 use crate::adapters::prepare_pipeline_fixtures;
 use crate::artifact::{ArtifactCorrectness, BenchmarkArtifact};
-use crate::environment::resolve_postgres_environment;
+use crate::environment::{
+    resolve_environment_profile, resolve_postgres_environment_from_profile, EnvironmentSession,
+    SystemEnvironmentCommandExecutor,
+};
 use crate::isolation::{
     execute_destination_benchmark, execute_source_benchmark, execute_transform_benchmark,
 };
@@ -176,55 +179,155 @@ pub fn emit_scenario_artifacts(
     scenarios: &[ScenarioManifest],
     options: EmitArtifactsOptions<'_>,
 ) -> Result<usize> {
-    let filtered: Vec<&ScenarioManifest> = filter_scenarios(scenarios, options.suite, &[])
+    let filtered = select_scenarios(scenarios, options.suite, options.scenario_ids);
+    if filtered.is_empty() {
+        return emit_scenario_artifacts_with_dependencies(
+            root,
+            &filtered,
+            options,
+            Box::new(SessionBackedEnvironmentHandle { session: None }),
+            execute_scenario_once,
+        );
+    }
+    let environment = acquire_benchmark_environment(root, options.env_profile)?;
+    emit_scenario_artifacts_with_dependencies(
+        root,
+        &filtered,
+        options,
+        environment,
+        execute_scenario_once,
+    )
+}
+
+fn emit_scenario_artifacts_with_dependencies<F>(
+    root: &Path,
+    filtered: &[&ScenarioManifest],
+    options: EmitArtifactsOptions<'_>,
+    environment: Box<dyn BenchmarkEnvironmentHandle>,
+    execute_once: F,
+) -> Result<usize>
+where
+    F: Fn(
+        &Path,
+        &ScenarioManifest,
+        &ResolvedWorkloadPlan,
+        Option<&PostgresBenchmarkEnvironment>,
+        &ArtifactContext,
+        Option<&Path>,
+    ) -> Result<RunResult>,
+{
+    let run_result = (|| {
+        if let Some(parent) = options.output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut file = File::create(options.output_path)?;
+        let mut artifact_count = 0;
+        for scenario in filtered {
+            let artifact_context = build_artifact_context(root, scenario, options.hardware_class);
+            let resolved_env = environment.resolve_for_scenario(scenario)?;
+            let workload = resolve_workload_plan_with_environment(scenario, resolved_env.as_ref())?;
+
+            for _ in 0..scenario.execution.warmups {
+                let _ = execute_once(
+                    root,
+                    scenario,
+                    &workload,
+                    resolved_env.as_ref(),
+                    &artifact_context,
+                    options.rapidbyte_bin,
+                )?;
+            }
+
+            let measured_iterations = scenario.execution.iterations.max(1);
+            for _ in 0..measured_iterations {
+                let artifact = materialize_artifact(execute_once(
+                    root,
+                    scenario,
+                    &workload,
+                    resolved_env.as_ref(),
+                    &artifact_context,
+                    options.rapidbyte_bin,
+                )?)?;
+                write_artifact_json(&mut file, &artifact)?;
+                artifact_count += 1;
+            }
+        }
+
+        Ok(artifact_count)
+    })();
+
+    let teardown_result = environment.finish();
+    match (run_result, teardown_result) {
+        (Ok(written), Ok(())) => Ok(written),
+        (Ok(_), Err(teardown_err)) => Err(teardown_err),
+        (Err(run_err), Ok(())) => Err(run_err),
+        (Err(run_err), Err(teardown_err)) => Err(anyhow::anyhow!(
+            "benchmark execution failed: {run_err}; teardown also failed: {teardown_err}"
+        )),
+    }
+}
+
+fn select_scenarios<'a>(
+    scenarios: &'a [ScenarioManifest],
+    suite: Option<&str>,
+    scenario_ids: &[String],
+) -> Vec<&'a ScenarioManifest> {
+    filter_scenarios(scenarios, suite, &[])
         .into_iter()
         .filter(|scenario| {
-            options.scenario_ids.is_empty()
-                || options
-                    .scenario_ids
-                    .iter()
-                    .any(|selected| selected == &scenario.id)
+            scenario_ids.is_empty() || scenario_ids.iter().any(|selected| selected == &scenario.id)
         })
-        .collect();
-    if let Some(parent) = options.output_path.parent() {
-        fs::create_dir_all(parent)?;
+        .collect()
+}
+
+trait BenchmarkEnvironmentHandle {
+    fn resolve_for_scenario(
+        &self,
+        scenario: &ScenarioManifest,
+    ) -> Result<Option<PostgresBenchmarkEnvironment>>;
+    fn finish(self: Box<Self>) -> Result<()>;
+}
+
+struct SessionBackedEnvironmentHandle {
+    session: Option<EnvironmentSession>,
+}
+
+impl BenchmarkEnvironmentHandle for SessionBackedEnvironmentHandle {
+    fn resolve_for_scenario(
+        &self,
+        scenario: &ScenarioManifest,
+    ) -> Result<Option<PostgresBenchmarkEnvironment>> {
+        resolve_postgres_environment_from_profile(
+            scenario,
+            self.session.as_ref().map(EnvironmentSession::profile),
+        )
     }
 
-    let mut file = File::create(options.output_path)?;
-    let mut artifact_count = 0;
-
-    for scenario in &filtered {
-        let artifact_context = build_artifact_context(root, scenario, options.hardware_class);
-        let resolved_env = resolve_postgres_environment(root, scenario, options.env_profile)?;
-        let workload = resolve_workload_plan_with_environment(scenario, resolved_env.as_ref())?;
-
-        for _ in 0..scenario.execution.warmups {
-            let _ = execute_scenario_once(
-                root,
-                scenario,
-                &workload,
-                resolved_env.as_ref(),
-                &artifact_context,
-                options.rapidbyte_bin,
-            )?;
-        }
-
-        let measured_iterations = scenario.execution.iterations.max(1);
-        for _ in 0..measured_iterations {
-            let artifact = materialize_artifact(execute_scenario_once(
-                root,
-                scenario,
-                &workload,
-                resolved_env.as_ref(),
-                &artifact_context,
-                options.rapidbyte_bin,
-            )?)?;
-            write_artifact_json(&mut file, &artifact)?;
-            artifact_count += 1;
+    fn finish(self: Box<Self>) -> Result<()> {
+        match self.session {
+            Some(session) => session.finish(&SystemEnvironmentCommandExecutor),
+            None => Ok(()),
         }
     }
+}
 
-    Ok(artifact_count)
+fn acquire_benchmark_environment(
+    root: &Path,
+    env_profile: Option<&str>,
+) -> Result<Box<dyn BenchmarkEnvironmentHandle>> {
+    let session = match env_profile {
+        Some(profile_id) => {
+            let mut profile = resolve_environment_profile(root, profile_id)?;
+            crate::environment::apply_environment_overrides(&mut profile)?;
+            Some(EnvironmentSession::provision(
+                root,
+                profile,
+                &SystemEnvironmentCommandExecutor,
+            )?)
+        }
+        None => None,
+    };
+    Ok(Box::new(SessionBackedEnvironmentHandle { session }))
 }
 
 fn execute_scenario_once(
@@ -548,9 +651,15 @@ fn rate(value: u64, duration_secs: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use rapidbyte_types::wire::SyncMode;
+    use std::cell::RefCell;
     use std::fs;
+    use std::rc::Rc;
 
     use super::*;
+    use crate::environment::{
+        EnvironmentBinding, EnvironmentBindings, EnvironmentCommandExecutor, EnvironmentProfile,
+        EnvironmentProvider, EnvironmentService,
+    };
     use crate::scenario::{
         BenchmarkBuildMode, BenchmarkKind, ConnectorOptions, DestinationConnectorOptions,
         EnvironmentConfig, ExecutionProfile, PostgresBenchmarkEnvironment,
@@ -693,6 +802,251 @@ mod tests {
         .expect_err("logical environment should require an env profile");
 
         assert!(err.to_string().contains("requires environment profile"));
+    }
+
+    #[test]
+    fn emit_scenario_artifacts_tears_down_environment_after_success() {
+        let temp_root = temp_dir("runner-teardown-success");
+        let output_path = temp_root.join("candidate.jsonl");
+        let events = Rc::new(RefCell::new(vec!["provision".to_string()]));
+        let environment = Box::new(RecordingEnvironmentHandle::success(events.clone()));
+        let scenario = synthetic_scenario("synthetic_copy");
+        let filtered = vec![&scenario];
+
+        let written = emit_scenario_artifacts_with_dependencies(
+            std::path::Path::new("."),
+            &filtered,
+            EmitArtifactsOptions {
+                suite: Some("lab"),
+                scenario_ids: &["synthetic_copy".to_string()],
+                env_profile: None,
+                hardware_class: Some("local-dev"),
+                rapidbyte_bin: None,
+                output_path: &output_path,
+            },
+            environment,
+            |_, scenario, _, _, artifact_context, _| {
+                events.borrow_mut().push("execute".to_string());
+                Ok(RunResult::success(
+                    "lab",
+                    scenario.id.clone(),
+                    artifact_context,
+                    SyntheticRunSpec {
+                        benchmark_kind: BenchmarkKind::Pipeline,
+                        build_mode: "debug".to_string(),
+                        connector_metrics: json!({}),
+                        records_written: 100,
+                        aot: false,
+                    },
+                ))
+            },
+        )
+        .expect("emit artifacts");
+
+        assert_eq!(written, 1);
+        assert_eq!(
+            events.borrow().as_slice(),
+            &["provision", "execute", "teardown"]
+        );
+    }
+
+    #[test]
+    fn emit_scenario_artifacts_returns_teardown_error_after_successful_run() {
+        let temp_root = temp_dir("runner-teardown-error-after-success");
+        let output_path = temp_root.join("candidate.jsonl");
+        let events = Rc::new(RefCell::new(vec!["provision".to_string()]));
+        let environment = Box::new(RecordingEnvironmentHandle::with_teardown_error(
+            events.clone(),
+            "teardown failed",
+        ));
+        let scenario = synthetic_scenario("synthetic_copy");
+        let filtered = vec![&scenario];
+
+        let err = emit_scenario_artifacts_with_dependencies(
+            std::path::Path::new("."),
+            &filtered,
+            EmitArtifactsOptions {
+                suite: Some("lab"),
+                scenario_ids: &["synthetic_copy".to_string()],
+                env_profile: None,
+                hardware_class: Some("local-dev"),
+                rapidbyte_bin: None,
+                output_path: &output_path,
+            },
+            environment,
+            |_, scenario, _, _, artifact_context, _| {
+                events.borrow_mut().push("execute".to_string());
+                Ok(RunResult::success(
+                    "lab",
+                    scenario.id.clone(),
+                    artifact_context,
+                    SyntheticRunSpec {
+                        benchmark_kind: BenchmarkKind::Pipeline,
+                        build_mode: "debug".to_string(),
+                        connector_metrics: json!({}),
+                        records_written: 100,
+                        aot: false,
+                    },
+                ))
+            },
+        )
+        .expect_err("teardown failure should bubble up after success");
+
+        assert!(err.to_string().contains("teardown failed"));
+        assert_eq!(
+            events.borrow().as_slice(),
+            &["provision", "execute", "teardown"]
+        );
+    }
+
+    #[test]
+    fn emit_scenario_artifacts_tears_down_environment_after_execution_failure() {
+        let temp_root = temp_dir("runner-teardown-failure");
+        let output_path = temp_root.join("candidate.jsonl");
+        let events = Rc::new(RefCell::new(vec!["provision".to_string()]));
+        let environment = Box::new(RecordingEnvironmentHandle::success(events.clone()));
+        let scenario = synthetic_scenario("synthetic_copy");
+        let filtered = vec![&scenario];
+
+        let err = emit_scenario_artifacts_with_dependencies(
+            std::path::Path::new("."),
+            &filtered,
+            EmitArtifactsOptions {
+                suite: Some("lab"),
+                scenario_ids: &["synthetic_copy".to_string()],
+                env_profile: None,
+                hardware_class: Some("local-dev"),
+                rapidbyte_bin: None,
+                output_path: &output_path,
+            },
+            environment,
+            |_, _, _, _, _, _| {
+                events.borrow_mut().push("execute".to_string());
+                Err(anyhow::anyhow!("benchmark failed"))
+            },
+        )
+        .expect_err("execution failure should bubble up");
+
+        assert!(err.to_string().contains("benchmark failed"));
+        assert_eq!(
+            events.borrow().as_slice(),
+            &["provision", "execute", "teardown"]
+        );
+    }
+
+    #[test]
+    fn emit_scenario_artifacts_reports_execution_failure_with_teardown_context() {
+        let temp_root = temp_dir("runner-teardown-context");
+        let output_path = temp_root.join("candidate.jsonl");
+        let events = Rc::new(RefCell::new(vec!["provision".to_string()]));
+        let environment = Box::new(RecordingEnvironmentHandle::with_teardown_error(
+            events.clone(),
+            "teardown failed",
+        ));
+        let scenario = synthetic_scenario("synthetic_copy");
+        let filtered = vec![&scenario];
+
+        let err = emit_scenario_artifacts_with_dependencies(
+            std::path::Path::new("."),
+            &filtered,
+            EmitArtifactsOptions {
+                suite: Some("lab"),
+                scenario_ids: &["synthetic_copy".to_string()],
+                env_profile: None,
+                hardware_class: Some("local-dev"),
+                rapidbyte_bin: None,
+                output_path: &output_path,
+            },
+            environment,
+            |_, _, _, _, _, _| {
+                events.borrow_mut().push("execute".to_string());
+                Err(anyhow::anyhow!("benchmark failed"))
+            },
+        )
+        .expect_err("execution failure should bubble up");
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("benchmark failed"));
+        assert!(rendered.contains("teardown failed"));
+        assert_eq!(
+            events.borrow().as_slice(),
+            &["provision", "execute", "teardown"]
+        );
+    }
+
+    #[test]
+    fn emit_scenario_artifacts_skips_environment_acquisition_when_no_scenarios_match() {
+        let output_path = temp_dir("runner-no-matching-scenarios").join("candidate.jsonl");
+        let written = emit_scenario_artifacts(
+            std::path::Path::new("."),
+            &[synthetic_scenario("synthetic_copy")],
+            EmitArtifactsOptions {
+                suite: Some("lab"),
+                scenario_ids: &["typoed_scenario".to_string()],
+                env_profile: Some("definitely-not-a-real-profile"),
+                hardware_class: Some("local-dev"),
+                rapidbyte_bin: None,
+                output_path: &output_path,
+            },
+        )
+        .expect("empty selection should not acquire environment");
+
+        assert_eq!(written, 0);
+        let rendered = fs::read_to_string(&output_path).expect("read output");
+        assert!(rendered.is_empty());
+    }
+
+    #[test]
+    fn emit_scenario_artifacts_tears_down_environment_when_output_creation_fails() {
+        let temp_root = temp_dir("runner-output-failure");
+        let events = Rc::new(RefCell::new(vec!["provision".to_string()]));
+        let environment = Box::new(RecordingEnvironmentHandle::success(events.clone()));
+        let scenario = synthetic_scenario("synthetic_copy");
+        let filtered = vec![&scenario];
+
+        let err = emit_scenario_artifacts_with_dependencies(
+            std::path::Path::new("."),
+            &filtered,
+            EmitArtifactsOptions {
+                suite: Some("lab"),
+                scenario_ids: &["synthetic_copy".to_string()],
+                env_profile: None,
+                hardware_class: Some("local-dev"),
+                rapidbyte_bin: None,
+                output_path: &temp_root,
+            },
+            environment,
+            |_, _, _, _, _, _| {
+                events.borrow_mut().push("execute".to_string());
+                Err(anyhow::anyhow!("execute should not run"))
+            },
+        )
+        .expect_err("directory output path should fail");
+
+        assert!(!err.to_string().contains("execute should not run"));
+        assert_eq!(events.borrow().as_slice(), &["provision", "teardown"]);
+    }
+
+    #[test]
+    fn session_backed_environment_handle_resolves_logical_environment_from_session_profile() {
+        let session = EnvironmentSession::provision(
+            std::path::Path::new("/repo"),
+            existing_profile(),
+            &NoopEnvironmentCommandExecutor,
+        )
+        .expect("provision session");
+        let handle = SessionBackedEnvironmentHandle {
+            session: Some(session),
+        };
+
+        let resolved = handle
+            .resolve_for_scenario(&logical_environment_scenario("pg_dest_insert"))
+            .expect("resolve logical environment")
+            .expect("resolved postgres environment");
+
+        assert_eq!(resolved.stream_name, "bench_events");
+        assert_eq!(resolved.source.host, "127.0.0.1");
+        assert_eq!(resolved.destination.schema, "raw");
     }
 
     #[test]
@@ -1085,7 +1439,7 @@ mod tests {
             },
             benchmark: Default::default(),
             environment: EnvironmentConfig {
-                reference: Some("local-dev-postgres".to_string()),
+                reference: Some("local-bench-postgres".to_string()),
                 stream_name: Some("bench_events".to_string()),
                 postgres: None,
             },
@@ -1106,5 +1460,96 @@ mod tests {
                 expected_records_written: Some(100),
             },
         }
+    }
+
+    struct RecordingEnvironmentHandle {
+        events: Rc<RefCell<Vec<String>>>,
+        teardown_error: Option<String>,
+    }
+
+    impl RecordingEnvironmentHandle {
+        fn success(events: Rc<RefCell<Vec<String>>>) -> Self {
+            Self {
+                events,
+                teardown_error: None,
+            }
+        }
+
+        fn with_teardown_error(events: Rc<RefCell<Vec<String>>>, message: &str) -> Self {
+            Self {
+                events,
+                teardown_error: Some(message.to_string()),
+            }
+        }
+    }
+
+    impl BenchmarkEnvironmentHandle for RecordingEnvironmentHandle {
+        fn resolve_for_scenario(
+            &self,
+            _scenario: &ScenarioManifest,
+        ) -> Result<Option<PostgresBenchmarkEnvironment>> {
+            Ok(None)
+        }
+
+        fn finish(self: Box<Self>) -> Result<()> {
+            self.events.borrow_mut().push("teardown".to_string());
+            match self.teardown_error {
+                Some(message) => Err(anyhow::anyhow!(message)),
+                None => Ok(()),
+            }
+        }
+    }
+
+    struct NoopEnvironmentCommandExecutor;
+
+    impl EnvironmentCommandExecutor for NoopEnvironmentCommandExecutor {
+        fn run(&self, _cwd: &Path, _program: &str, _args: &[&str]) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn existing_profile() -> EnvironmentProfile {
+        EnvironmentProfile {
+            id: "local-bench-postgres".to_string(),
+            provider: EnvironmentProvider {
+                kind: "existing".to_string(),
+                project_dir: None,
+                project_name: None,
+            },
+            services: std::collections::BTreeMap::from([(
+                "postgres".to_string(),
+                EnvironmentService {
+                    kind: "postgres".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    port: 5433,
+                    user: "postgres".to_string(),
+                    password: "postgres".to_string(),
+                    database: "rapidbyte_test".to_string(),
+                },
+            )]),
+            bindings: EnvironmentBindings {
+                source: EnvironmentBinding {
+                    service: "postgres".to_string(),
+                    schema: "public".to_string(),
+                },
+                destination: EnvironmentBinding {
+                    service: "postgres".to_string(),
+                    schema: "raw".to_string(),
+                },
+            },
+        }
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "rapidbyte-benchmark-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&path).expect("create temp dir");
+        path
     }
 }

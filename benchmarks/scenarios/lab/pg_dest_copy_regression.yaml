@@ -23,7 +23,7 @@ benchmark:
   build_mode: debug
   aot: false
 environment:
-  ref: local-dev-postgres
+  ref: local-bench-postgres
   stream_name: bench_events
 connector_options:
   source:
