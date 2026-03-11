@@ -4,7 +4,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::artifact::BenchmarkArtifact;
-use crate::summary::{identity_key, load_artifacts};
+use crate::summary::load_artifacts;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComparisonReport {
@@ -103,9 +103,25 @@ pub fn compare_artifact_sets(
 fn group_artifacts(rows: &[BenchmarkArtifact]) -> BTreeMap<String, Vec<&BenchmarkArtifact>> {
     let mut grouped = BTreeMap::<String, Vec<&BenchmarkArtifact>>::new();
     for row in rows {
-        grouped.entry(identity_key(row)).or_default().push(row);
+        grouped
+            .entry(compare_identity_key(row))
+            .or_default()
+            .push(row);
     }
     grouped
+}
+
+fn compare_identity_key(artifact: &BenchmarkArtifact) -> String {
+    format!(
+        "{}|{}|{:?}|{}|{}|{}|{}",
+        artifact.scenario_id,
+        artifact.suite_id,
+        artifact.benchmark_kind,
+        artifact.hardware_class,
+        artifact.build_mode,
+        serde_json::to_string(&artifact.execution_flags).unwrap_or_default(),
+        artifact.scenario_fingerprint,
+    )
 }
 
 fn compare_group(
@@ -252,13 +268,17 @@ mod tests {
     }
 
     #[test]
-    fn compare_groups_by_git_sha() {
+    fn compare_matches_across_git_sha() {
         let baseline = vec![artifact("smoke", "base111", 100.0, 1.0, true)];
-        let candidate = vec![artifact("smoke", "cand222", 100.0, 1.0, true)];
+        let candidate = vec![artifact("smoke", "cand222", 80.0, 1.3, true)];
 
         let report = compare_artifact_sets(&baseline, &candidate, 1, 10.0, 15.0);
 
-        assert_eq!(report.comparisons[0].status, "missing_baseline");
+        assert_eq!(report.comparisons[0].status, "regressed");
+        assert!(report.comparisons[0]
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("throughput dropped")));
     }
 
     #[test]
