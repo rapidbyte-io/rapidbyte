@@ -70,6 +70,14 @@ pub trait Destination: Sized {
         stream: StreamContext,
     ) -> Result<WriteSummary, PluginError>;
 
+    async fn write_bulk(
+        &mut self,
+        ctx: &Context,
+        stream: StreamContext,
+    ) -> Result<WriteSummary, PluginError> {
+        self.write(ctx, stream).await
+    }
+
     async fn close(&mut self, ctx: &Context) -> Result<(), PluginError> {
         default_close(ctx).await
     }
@@ -108,8 +116,10 @@ mod tests {
     use crate::context::Context;
     use crate::error::{PluginError, ValidationResult, ValidationStatus};
     use crate::metric::{ReadSummary, TransformSummary, WriteSummary};
-    use crate::stream::StreamContext;
+    use crate::stream::{StreamContext, StreamLimits, StreamPolicies};
     use crate::wire::{PluginInfo, ProtocolVersion};
+    use rapidbyte_types::catalog::SchemaHint;
+    use rapidbyte_types::wire::SyncMode;
     use serde::Deserialize;
 
     #[derive(Debug, Deserialize)]
@@ -157,6 +167,7 @@ mod tests {
 
     struct TestDest {
         config: TestConfig,
+        write_calls: usize,
     }
 
     impl Destination for TestDest {
@@ -164,7 +175,10 @@ mod tests {
 
         async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
             Ok((
-                Self { config },
+                Self {
+                    config,
+                    write_calls: 0,
+                },
                 PluginInfo {
                     protocol_version: ProtocolVersion::V5,
                     features: vec![],
@@ -178,8 +192,9 @@ mod tests {
             _ctx: &Context,
             _stream: StreamContext,
         ) -> Result<WriteSummary, PluginError> {
+            self.write_calls += 1;
             Ok(WriteSummary {
-                records_written: 0,
+                records_written: 42,
                 bytes_written: 0,
                 batches_written: 0,
                 checkpoint_count: 0,
@@ -246,5 +261,41 @@ mod tests {
         assert_eq!(result.status, ValidationStatus::Warning);
         assert_eq!(result.message, "Validation not implemented");
         assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn destination_write_bulk_defaults_to_write() {
+        let ctx = Context::new("test-plugin", "users");
+        let stream = StreamContext {
+            stream_name: "users".to_string(),
+            source_stream_name: None,
+            schema: SchemaHint::Columns(Vec::new()),
+            sync_mode: SyncMode::FullRefresh,
+            cursor_info: None,
+            limits: StreamLimits::default(),
+            policies: StreamPolicies::default(),
+            write_mode: None,
+            selected_columns: None,
+            partition_key: None,
+            partition_count: None,
+            partition_index: None,
+            effective_parallelism: None,
+            partition_strategy: None,
+            copy_flush_bytes_override: None,
+        };
+        let mut dest = TestDest {
+            config: TestConfig {
+                host: "localhost".to_string(),
+            },
+            write_calls: 0,
+        };
+
+        let summary = futures::executor::block_on(<TestDest as Destination>::write_bulk(
+            &mut dest, &ctx, stream,
+        ))
+        .expect("write_bulk should succeed");
+
+        assert_eq!(dest.write_calls, 1);
+        assert_eq!(summary.records_written, 42);
     }
 }
