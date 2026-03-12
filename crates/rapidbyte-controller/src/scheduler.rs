@@ -149,8 +149,9 @@ impl TaskQueue {
             ));
         }
 
-        if let Some(lease) = &record.lease {
-            if !lease.is_valid(lease_epoch) {
+        match &record.lease {
+            Some(lease) if lease.is_valid(lease_epoch) => {}
+            _ => {
                 return Err(SchedulerError::InvalidState(
                     task_id.to_string(),
                     TaskState::Assigned,
@@ -278,6 +279,18 @@ impl TaskQueue {
             .values()
             .filter(|t| t.run_id == run_id)
             .max_by_key(|t| t.attempt)
+    }
+
+    /// Count assigned/running tasks currently owned by an agent.
+    #[must_use]
+    pub fn active_tasks_for_agent(&self, agent_id: &str) -> usize {
+        self.tasks
+            .values()
+            .filter(|task| {
+                task.assigned_agent_id.as_deref() == Some(agent_id)
+                    && matches!(task.state, TaskState::Assigned | TaskState::Running)
+            })
+            .count()
     }
 }
 
@@ -436,6 +449,35 @@ mod tests {
         // Verify the task still expires
         let expired = q.expire_leases();
         assert_eq!(expired.len(), 1);
+    }
+
+    #[test]
+    fn report_running_rejects_missing_lease() {
+        let (mut q, gen) = make_queue_and_gen();
+        q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
+        let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
+        q.tasks.get_mut(&assignment.task_id).unwrap().lease = None;
+
+        assert!(q
+            .report_running(&assignment.task_id, assignment.lease_epoch)
+            .is_err());
+    }
+
+    #[test]
+    fn active_tasks_for_agent_counts_only_live_assignments() {
+        let (mut q, gen) = make_queue_and_gen();
+        q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
+        q.enqueue("r2".into(), b"yaml".to_vec(), false, None, 1);
+        let first = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
+        let second = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
+
+        assert_eq!(q.active_tasks_for_agent("agent-1"), 2);
+
+        q.complete(&first.task_id, first.lease_epoch, true).unwrap();
+        assert_eq!(q.active_tasks_for_agent("agent-1"), 1);
+
+        q.cancel(&second.task_id).unwrap();
+        assert_eq!(q.active_tasks_for_agent("agent-1"), 0);
     }
 
     #[test]
