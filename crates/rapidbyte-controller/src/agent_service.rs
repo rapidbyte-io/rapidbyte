@@ -90,7 +90,12 @@ impl AgentService for AgentServiceImpl {
         if !req.active_leases.is_empty() {
             let mut tasks = self.state.tasks.write().await;
             for active_lease in &req.active_leases {
-                tasks.renew_lease(&active_lease.task_id, active_lease.lease_epoch, LEASE_TTL);
+                tasks.renew_lease(
+                    &active_lease.task_id,
+                    &req.agent_id,
+                    active_lease.lease_epoch,
+                    LEASE_TTL,
+                );
             }
         }
 
@@ -245,13 +250,23 @@ impl AgentService for AgentServiceImpl {
                     return Err(Status::failed_precondition("Stale lease epoch"));
                 }
             }
+            if task.assigned_agent_id.as_deref() != Some(req.agent_id.as_str()) {
+                return Err(Status::permission_denied(
+                    "Task lease belongs to a different agent",
+                ));
+            }
 
             let run_id = task.run_id.clone();
             let task_state = task.state;
             if task_state == TaskState::Assigned {
                 tasks
-                    .report_running(&req.task_id, req.lease_epoch)
-                    .map_err(|_| Status::failed_precondition("Stale lease epoch"))?;
+                    .report_running(&req.task_id, &req.agent_id, req.lease_epoch)
+                    .map_err(|err| match err {
+                        crate::scheduler::SchedulerError::AgentMismatch(_, _) => {
+                            Status::permission_denied("Task lease belongs to a different agent")
+                        }
+                        _ => Status::failed_precondition("Stale lease epoch"),
+                    })?;
             }
             run_id
         };
@@ -1045,6 +1060,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_heartbeat_does_not_renew_other_agents_lease() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let owner_agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let wrong_agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9092".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: owner_agent_id,
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        let before = {
+            let tasks = state.tasks.read().await;
+            tasks
+                .get(&task.task_id)
+                .unwrap()
+                .lease
+                .as_ref()
+                .unwrap()
+                .expires_at
+        };
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        svc.heartbeat(Request::new(HeartbeatRequest {
+            agent_id: wrong_agent_id,
+            active_leases: vec![ActiveLease {
+                task_id: task.task_id.clone(),
+                lease_epoch: task.lease_epoch,
+            }],
+            active_tasks: 1,
+            cpu_usage: 0.0,
+            memory_used_bytes: 0,
+        }))
+        .await
+        .unwrap();
+
+        let after = {
+            let tasks = state.tasks.read().await;
+            tasks
+                .get(&task.task_id)
+                .unwrap()
+                .lease
+                .as_ref()
+                .unwrap()
+                .expires_at
+        };
+
+        assert_eq!(after, before);
+    }
+
+    #[tokio::test]
     async fn test_report_progress_rejects_missing_lease() {
         let state = test_state();
         let svc = AgentServiceImpl::new(state.clone());
@@ -1096,6 +1198,85 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn test_report_progress_rejects_wrong_agent() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let owner_agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let wrong_agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9092".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: owner_agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        let err = svc
+            .report_progress(Request::new(ReportProgressRequest {
+                agent_id: wrong_agent_id,
+                task_id: task.task_id.clone(),
+                lease_epoch: task.lease_epoch,
+                progress: Some(ProgressUpdate {
+                    stream: "users".into(),
+                    phase: "running".into(),
+                    records: 1,
+                    bytes: 64,
+                }),
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        {
+            let tasks = state.tasks.read().await;
+            let record = tasks.get(&task.task_id).unwrap();
+            assert_eq!(record.state, TaskState::Assigned);
+            assert_eq!(
+                record.assigned_agent_id.as_deref(),
+                Some(owner_agent_id.as_str())
+            );
+        }
+
+        let runs = state.runs.read().await;
+        let run = runs.get_run(&run_id).unwrap();
+        assert_eq!(run.state, InternalRunState::Assigned);
     }
 
     #[tokio::test]

@@ -13,6 +13,8 @@ pub enum SchedulerError {
     UnknownTask(String),
     #[error("task {0} is not in expected state {1:?}")]
     InvalidState(String, TaskState),
+    #[error("task {0} is not owned by agent {1}")]
+    AgentMismatch(String, String),
 }
 
 /// Task lifecycle states within the scheduler.
@@ -132,6 +134,7 @@ impl TaskQueue {
     pub fn report_running(
         &mut self,
         task_id: &str,
+        agent_id: &str,
         lease_epoch: u64,
     ) -> Result<(), SchedulerError> {
         let record = self
@@ -154,6 +157,13 @@ impl TaskQueue {
                     TaskState::Assigned,
                 ));
             }
+        }
+
+        if record.assigned_agent_id.as_deref() != Some(agent_id) {
+            return Err(SchedulerError::AgentMismatch(
+                task_id.to_string(),
+                agent_id.to_string(),
+            ));
         }
 
         record.state = TaskState::Running;
@@ -291,11 +301,20 @@ impl TaskQueue {
     }
 
     /// Renew the lease for a task if the epoch matches. Returns `true` if renewed.
-    pub fn renew_lease(&mut self, task_id: &str, lease_epoch: u64, ttl: Duration) -> bool {
+    pub fn renew_lease(
+        &mut self,
+        task_id: &str,
+        agent_id: &str,
+        lease_epoch: u64,
+        ttl: Duration,
+    ) -> bool {
         let Some(record) = self.tasks.get_mut(task_id) else {
             return false;
         };
         if !matches!(record.state, TaskState::Assigned | TaskState::Running) {
+            return false;
+        }
+        if record.assigned_agent_id.as_deref() != Some(agent_id) {
             return false;
         }
         if let Some(lease) = &mut record.lease {
@@ -446,7 +465,7 @@ mod tests {
         let (mut q, gen) = make_queue_and_gen();
         q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
         let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
-        q.report_running(&assignment.task_id, assignment.lease_epoch)
+        q.report_running(&assignment.task_id, "agent-1", assignment.lease_epoch)
             .unwrap();
 
         q.cancel(&assignment.task_id).unwrap();
@@ -480,6 +499,7 @@ mod tests {
         // Renew with a long TTL
         assert!(q.renew_lease(
             &assignment.task_id,
+            "agent-1",
             assignment.lease_epoch,
             Duration::from_secs(60)
         ));
@@ -497,6 +517,7 @@ mod tests {
 
         assert!(!q.renew_lease(
             &assignment.task_id,
+            "agent-1",
             assignment.lease_epoch + 999,
             Duration::from_secs(60)
         ));
@@ -513,6 +534,7 @@ mod tests {
         // Correct epoch but expired — should refuse
         assert!(!q.renew_lease(
             &assignment.task_id,
+            "agent-1",
             assignment.lease_epoch,
             Duration::from_secs(60)
         ));
@@ -530,8 +552,39 @@ mod tests {
         q.tasks.get_mut(&assignment.task_id).unwrap().lease = None;
 
         assert!(q
-            .report_running(&assignment.task_id, assignment.lease_epoch)
+            .report_running(&assignment.task_id, "agent-1", assignment.lease_epoch)
             .is_err());
+    }
+
+    #[test]
+    fn renew_lease_rejects_wrong_agent() {
+        let (mut q, gen) = make_queue_and_gen();
+        q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
+        let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
+
+        assert!(!q.renew_lease(
+            &assignment.task_id,
+            "agent-2",
+            assignment.lease_epoch,
+            Duration::from_secs(60)
+        ));
+    }
+
+    #[test]
+    fn report_running_rejects_wrong_agent() {
+        let (mut q, gen) = make_queue_and_gen();
+        q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
+        let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
+
+        let err = q
+            .report_running(&assignment.task_id, "agent-2", assignment.lease_epoch)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            SchedulerError::AgentMismatch(task_id, agent_id)
+                if task_id == assignment.task_id && agent_id == "agent-2"
+        ));
     }
 
     #[test]

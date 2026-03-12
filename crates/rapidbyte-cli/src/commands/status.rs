@@ -29,7 +29,7 @@ pub async fn execute(
                 run_id: run_id.to_string(),
             },
             auth_token,
-        ))
+        )?)
         .await?
         .into_inner();
 

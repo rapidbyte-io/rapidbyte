@@ -33,7 +33,7 @@ pub async fn execute(
                 filter_state,
             },
             auth_token,
-        ))
+        )?)
         .await?
         .into_inner();
 

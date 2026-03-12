@@ -52,7 +52,7 @@ pub async fn execute(
                 idempotency_key: uuid::Uuid::new_v4().to_string(),
             },
             auth_token,
-        ))
+        )?)
         .await?;
     let run_id = resp.into_inner().run_id;
 
@@ -67,7 +67,7 @@ pub async fn execute(
                 run_id: run_id.clone(),
             },
             auth_token,
-        ))
+        )?)
         .await?
         .into_inner();
 
@@ -137,7 +137,7 @@ async fn fetch_and_display_preview(
                 run_id: run_id.to_string(),
             },
             auth_token,
-        ))
+        )?)
         .await?
         .into_inner();
 
@@ -351,7 +351,8 @@ mod tests {
                 run_id: "run-1".into(),
             },
             Some("secret"),
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             request.metadata().get("authorization"),
@@ -366,7 +367,8 @@ mod tests {
                 run_id: "run-1".into(),
             },
             None,
-        );
+        )
+        .unwrap();
         assert!(request.metadata().get("authorization").is_none());
     }
 

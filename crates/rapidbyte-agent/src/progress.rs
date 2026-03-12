@@ -44,7 +44,7 @@ pub async fn forward_progress(
         };
 
         if let Some(progress) = progress {
-            let req = request_with_bearer(
+            let Ok(req) = request_with_bearer(
                 ReportProgressRequest {
                     agent_id: agent_id.clone(),
                     task_id: task_id.clone(),
@@ -52,7 +52,10 @@ pub async fn forward_progress(
                     progress: Some(progress),
                 },
                 auth_token.as_deref(),
-            );
+            ) else {
+                warn!("Failed to build authenticated progress request: invalid bearer token");
+                break;
+            };
             if let Err(e) = client.report_progress(req).await {
                 warn!(error = %e, "Failed to report progress to controller");
             }

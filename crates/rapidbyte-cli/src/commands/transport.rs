@@ -42,12 +42,40 @@ pub async fn connect_channel(url: &str, tls: Option<&TlsClientConfig>) -> Result
     Ok(build_endpoint(url, tls)?.connect().await?)
 }
 
-pub fn request_with_bearer<T>(message: T, auth_token: Option<&str>) -> tonic::Request<T> {
+pub fn request_with_bearer<T>(message: T, auth_token: Option<&str>) -> Result<tonic::Request<T>> {
     let mut request = tonic::Request::new(message);
     if let Some(token) = auth_token {
-        request
-            .metadata_mut()
-            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+        let metadata = format!("Bearer {token}")
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid bearer token: {e}"))?;
+        request.metadata_mut().insert("authorization", metadata);
     }
-    request
+    Ok(request)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tonic::metadata::MetadataValue;
+
+    #[test]
+    fn request_with_bearer_adds_authorization_metadata() {
+        let request = request_with_bearer("payload", Some("secret")).unwrap();
+        assert_eq!(
+            request.metadata().get("authorization"),
+            Some(&MetadataValue::from_static("Bearer secret"))
+        );
+    }
+
+    #[test]
+    fn request_with_bearer_is_noop_without_token() {
+        let request = request_with_bearer("payload", None).unwrap();
+        assert!(request.metadata().get("authorization").is_none());
+    }
+
+    #[test]
+    fn request_with_bearer_rejects_invalid_token() {
+        let err = request_with_bearer("payload", Some("bad\nvalue")).unwrap_err();
+        assert!(err.to_string().contains("Invalid bearer token"));
+    }
 }

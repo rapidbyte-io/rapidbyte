@@ -123,16 +123,19 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
 
     // Register with controller
     let resp = client
-        .register_agent(request_with_bearer(
-            RegisterAgentRequest {
-                max_tasks: config.max_tasks,
-                flight_advertise_endpoint: config.flight_advertise.clone(),
-                plugin_bundle_hash: String::new(),
-                available_plugins: vec![],
-                memory_bytes: 0,
-            },
-            config.auth_token.as_deref(),
-        ))
+        .register_agent(
+            request_with_bearer(
+                RegisterAgentRequest {
+                    max_tasks: config.max_tasks,
+                    flight_advertise_endpoint: config.flight_advertise.clone(),
+                    plugin_bundle_hash: String::new(),
+                    available_plugins: vec![],
+                    memory_bytes: 0,
+                },
+                config.auth_token.as_deref(),
+            )
+            .map_err(|_| anyhow::anyhow!("Invalid bearer token"))?,
+        )
         .await?;
     let agent_id = resp.into_inner().agent_id;
     info!(agent_id, "Registered with controller");
@@ -250,13 +253,16 @@ async fn worker_runner_loop(
                 }
 
                 let resp = poll_client
-                    .poll_task(request_with_bearer(
-                        PollTaskRequest {
-                            agent_id,
-                            wait_seconds: poll_wait_seconds,
-                        },
-                        auth_token.as_deref(),
-                    ))
+                    .poll_task(
+                        request_with_bearer(
+                            PollTaskRequest {
+                                agent_id,
+                                wait_seconds: poll_wait_seconds,
+                            },
+                            auth_token.as_deref(),
+                        )
+                        .map_err(|_| anyhow::anyhow!("Invalid bearer token"))?,
+                    )
                     .await?
                     .into_inner();
 
@@ -406,7 +412,10 @@ async fn process_task(
             let auth_token = config.auth_token.clone();
             async move {
                 completion_client
-                    .complete_task(request_with_bearer(req, auth_token.as_deref()))
+                    .complete_task(
+                        request_with_bearer(req, auth_token.as_deref())
+                            .map_err(|_| tonic::Status::invalid_argument("Invalid bearer token"))?,
+                    )
                     .await
                     .map(tonic::Response::into_inner)
             }
@@ -482,18 +491,20 @@ async fn heartbeat_loop(
             })
             .collect();
         let active_count = u32::try_from(leases.len()).unwrap_or(u32::MAX);
-        let resp = client
-            .heartbeat(request_with_bearer(
-                HeartbeatRequest {
-                    agent_id: agent_id.clone(),
-                    active_leases: leases,
-                    active_tasks: active_count,
-                    cpu_usage: 0.0,
-                    memory_used_bytes: 0,
-                },
-                auth_token.as_deref(),
-            ))
-            .await;
+        let Ok(request) = request_with_bearer(
+            HeartbeatRequest {
+                agent_id: agent_id.clone(),
+                active_leases: leases,
+                active_tasks: active_count,
+                cpu_usage: 0.0,
+                memory_used_bytes: 0,
+            },
+            auth_token.as_deref(),
+        ) else {
+            warn!("Failed to build authenticated heartbeat request: invalid bearer token");
+            break;
+        };
+        let resp = client.heartbeat(request).await;
         match resp {
             Ok(resp) => {
                 for directive in resp.into_inner().directives {
@@ -550,6 +561,14 @@ where
                 return resp.acknowledged;
             }
             Err(e) => {
+                if e.code() == tonic::Code::InvalidArgument {
+                    warn!(
+                        task_id = request.task_id,
+                        error = %e,
+                        "Stopping completion retries because authentication config is invalid"
+                    );
+                    return false;
+                }
                 warn!(
                     task_id = request.task_id,
                     error = %e,
