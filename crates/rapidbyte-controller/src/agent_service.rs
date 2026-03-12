@@ -31,7 +31,26 @@ impl AgentService for AgentServiceImpl {
         let req = request.into_inner();
         let agent_id = uuid::Uuid::new_v4().to_string();
 
+        let bundle_hash = req.plugin_bundle_hash.clone();
+
         let mut registry = self.state.registry.write().await;
+
+        // Log bundle hash mismatch warnings before registering
+        if !bundle_hash.is_empty() {
+            for other in registry.list() {
+                if !other.plugin_bundle_hash.is_empty() && other.plugin_bundle_hash != bundle_hash {
+                    tracing::warn!(
+                        new_agent = agent_id,
+                        existing_agent = other.agent_id,
+                        new_hash = bundle_hash,
+                        existing_hash = other.plugin_bundle_hash,
+                        "Bundle hash mismatch across agent pool"
+                    );
+                    break;
+                }
+            }
+        }
+
         registry.register(
             agent_id.clone(),
             req.max_tasks,
