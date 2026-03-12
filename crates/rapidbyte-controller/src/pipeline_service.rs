@@ -86,6 +86,131 @@ impl PipelineServiceImpl {
     pub fn new(state: ControllerState) -> Self {
         Self { state }
     }
+
+    async fn terminal_event_for_existing_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<RunEvent>, Status> {
+        let runs = self.state.runs.read().await;
+        let record = runs
+            .get_run(run_id)
+            .ok_or_else(|| Status::not_found(format!("Run {run_id} not found")))?;
+        Ok(record
+            .state
+            .is_terminal()
+            .then(|| terminal_event_for_run(record)))
+    }
+
+    async fn watch_run_after_subscribe(
+        &self,
+        run_id: &str,
+    ) -> Result<Response<WatchRunStream>, Status> {
+        let rx = {
+            let mut watchers = self.state.watchers.write().await;
+            watchers.subscribe(run_id)
+        };
+
+        if let Some(event) = self.terminal_event_for_existing_run(run_id).await? {
+            self.state.watchers.write().await.remove(run_id);
+            let stream: WatchRunStream = Box::pin(tokio_stream::once(Ok(event)));
+            return Ok(Response::new(stream));
+        }
+
+        let stream: WatchRunStream =
+            Box::pin(BroadcastStream::new(rx).filter_map(|result| match result {
+                Ok(event) => Some(Ok(event)),
+                Err(_) => None, // Lag or closed — skip
+            }));
+
+        Ok(Response::new(stream))
+    }
+
+    async fn cancel_run_for_state(
+        &self,
+        run_id: &str,
+        snapshot_state: InternalRunState,
+    ) -> Result<CancelRunResponse, Status> {
+        match snapshot_state {
+            InternalRunState::Pending => {
+                {
+                    let mut runs = self.state.runs.write().await;
+                    if let Err(err) = runs.transition(run_id, InternalRunState::Cancelled) {
+                        let actual_state = runs
+                            .get_run(run_id)
+                            .ok_or_else(|| Status::not_found(format!("Run {run_id} not found")))?
+                            .state;
+                        drop(runs);
+                        if actual_state != snapshot_state {
+                            return Box::pin(self.cancel_run_for_state(run_id, actual_state)).await;
+                        }
+                        return Err(Status::internal(err.to_string()));
+                    }
+                }
+
+                {
+                    let mut tasks = self.state.tasks.write().await;
+                    if let Some(task) = tasks.find_by_run_id(run_id) {
+                        let task_id = task.task_id.clone();
+                        let _ = tasks.cancel(&task_id);
+                    }
+                }
+
+                self.state.watchers.write().await.publish_terminal(
+                    run_id,
+                    RunEvent {
+                        run_id: run_id.to_string(),
+                        event: Some(run_event::Event::Cancelled(RunCancelled {})),
+                    },
+                );
+
+                Ok(CancelRunResponse {
+                    accepted: true,
+                    message: "Queued run cancelled".into(),
+                })
+            }
+            InternalRunState::Assigned | InternalRunState::Running => {
+                let actual_state = {
+                    let mut runs = self.state.runs.write().await;
+                    match runs.transition(run_id, InternalRunState::Cancelling) {
+                        Ok(()) => None,
+                        Err(_) => Some(
+                            runs.get_run(run_id)
+                                .ok_or_else(|| {
+                                    Status::not_found(format!("Run {run_id} not found"))
+                                })?
+                                .state,
+                        ),
+                    }
+                };
+
+                if let Some(actual_state) = actual_state {
+                    if actual_state != snapshot_state {
+                        return Box::pin(self.cancel_run_for_state(run_id, actual_state)).await;
+                    }
+                    return Err(Status::internal(format!(
+                        "failed to transition run {run_id} from {snapshot_state:?} to Cancelling"
+                    )));
+                }
+
+                Ok(CancelRunResponse {
+                    accepted: true,
+                    message: "Running — cancel will be delivered via heartbeat".into(),
+                })
+            }
+            InternalRunState::Cancelling => Ok(CancelRunResponse {
+                accepted: true,
+                message: "Run is already being cancelled".into(),
+            }),
+            _ if snapshot_state.is_terminal() => Ok(CancelRunResponse {
+                accepted: false,
+                message: format!("Run is already in terminal state: {snapshot_state:?}"),
+            }),
+            _ => Ok(CancelRunResponse {
+                accepted: false,
+                message: format!("Cannot cancel run in state: {snapshot_state:?}"),
+            }),
+        }
+    }
 }
 
 type WatchRunStream = Pin<Box<dyn tokio_stream::Stream<Item = Result<RunEvent, Status>> + Send>>;
@@ -221,41 +346,7 @@ impl PipelineService for PipelineServiceImpl {
         request: Request<WatchRunRequest>,
     ) -> Result<Response<Self::WatchRunStream>, Status> {
         let run_id = request.into_inner().run_id;
-
-        // Verify the run exists and check if already terminal.
-        // If terminal, build the event while we still hold the read lock so we
-        // can use the real outcome data from the run record.
-        let terminal_event = {
-            let runs = self.state.runs.read().await;
-            let record = runs
-                .get_run(&run_id)
-                .ok_or_else(|| Status::not_found(format!("Run {run_id} not found")))?;
-            if record.state.is_terminal() {
-                Some(terminal_event_for_run(record))
-            } else {
-                None
-            }
-        };
-
-        // If the run is already terminal, return a single-event stream immediately.
-        // The broadcast channel may already be removed by publish_terminal, so
-        // subscribing would create an empty channel that never yields events.
-        if let Some(event) = terminal_event {
-            let stream = tokio_stream::once(Ok(event));
-            return Ok(Response::new(Box::pin(stream)));
-        }
-
-        let rx = {
-            let mut watchers = self.state.watchers.write().await;
-            watchers.subscribe(&run_id)
-        };
-
-        let stream = BroadcastStream::new(rx).filter_map(|result| match result {
-            Ok(event) => Some(Ok(event)),
-            Err(_) => None, // Lag or closed — skip
-        });
-
-        Ok(Response::new(Box::pin(stream)))
+        self.watch_run_after_subscribe(&run_id).await
     }
 
     async fn cancel_run(
@@ -275,57 +366,9 @@ impl PipelineService for PipelineServiceImpl {
             record.state
         };
 
-        match current_state {
-            InternalRunState::Pending => {
-                // Transition run to Cancelled, then cancel the task in the queue
-                {
-                    let mut runs = self.state.runs.write().await;
-                    runs.transition(&run_id, InternalRunState::Cancelled)
-                        .map_err(|e| Status::internal(e.to_string()))?;
-                }
-                // runs lock dropped — now safe to acquire tasks lock
-                {
-                    let mut tasks = self.state.tasks.write().await;
-                    if let Some(task) = tasks.find_by_run_id(&run_id) {
-                        let task_id = task.task_id.clone();
-                        let _ = tasks.cancel(&task_id);
-                    }
-                }
-
-                // Notify any WatchRun subscribers
-                self.state.watchers.write().await.publish_terminal(
-                    &run_id,
-                    RunEvent {
-                        run_id: run_id.clone(),
-                        event: Some(run_event::Event::Cancelled(RunCancelled {})),
-                    },
-                );
-
-                Ok(Response::new(CancelRunResponse {
-                    accepted: true,
-                    message: "Queued run cancelled".into(),
-                }))
-            }
-            InternalRunState::Assigned | InternalRunState::Running => {
-                // Set to Cancelling — delivered via heartbeat
-                let mut runs = self.state.runs.write().await;
-                runs.transition(&run_id, InternalRunState::Cancelling)
-                    .map_err(|e| Status::internal(e.to_string()))?;
-
-                Ok(Response::new(CancelRunResponse {
-                    accepted: true,
-                    message: "Running — cancel will be delivered via heartbeat".into(),
-                }))
-            }
-            _ if current_state.is_terminal() => Ok(Response::new(CancelRunResponse {
-                accepted: false,
-                message: format!("Run is already in terminal state: {current_state:?}"),
-            })),
-            _ => Ok(Response::new(CancelRunResponse {
-                accepted: false,
-                message: format!("Cannot cancel run in state: {current_state:?}"),
-            })),
-        }
+        Ok(Response::new(
+            self.cancel_run_for_state(&run_id, current_state).await?,
+        ))
     }
 
     async fn list_runs(
@@ -370,6 +413,8 @@ fn test_state() -> ControllerState {
 mod tests {
     use super::*;
     use crate::proto::rapidbyte::v1::ExecutionOptions;
+    use crate::run_state::RunState as InternalRunState;
+    use tokio_stream::StreamExt;
 
     #[tokio::test]
     async fn test_submit_pipeline_returns_run_id() {
@@ -543,5 +588,81 @@ mod tests {
             .into_inner();
 
         assert!(!resp.accepted);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_run_with_stale_running_snapshot_returns_not_accepted() {
+        let state = test_state();
+        let svc = PipelineServiceImpl::new(state.clone());
+
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+        let run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::Running).unwrap();
+            runs.transition(&run_id, InternalRunState::Completed)
+                .unwrap();
+        }
+
+        let resp = svc
+            .cancel_run_for_state(&run_id, InternalRunState::Running)
+            .await
+            .unwrap();
+
+        assert!(!resp.accepted);
+        assert!(resp.message.contains("terminal state"));
+    }
+
+    #[tokio::test]
+    async fn test_watch_run_rechecks_terminal_state_after_subscribe() {
+        let state = test_state();
+        let svc = PipelineServiceImpl::new(state.clone());
+
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+        let run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::Running).unwrap();
+            runs.transition(&run_id, InternalRunState::Completed)
+                .unwrap();
+            if let Some(record) = runs.get_run_mut(&run_id) {
+                record.total_records = 11;
+            }
+        }
+
+        let response = svc.watch_run_after_subscribe(&run_id).await.unwrap();
+        let mut stream = response.into_inner();
+        let event = stream.next().await.unwrap().unwrap();
+
+        match event.event {
+            Some(run_event::Event::Completed(completed)) => {
+                assert_eq!(completed.total_records, 11);
+            }
+            other => panic!("Expected completed event, got {other:?}"),
+        }
     }
 }

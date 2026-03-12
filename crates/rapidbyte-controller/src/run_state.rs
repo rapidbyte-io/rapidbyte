@@ -197,7 +197,14 @@ fn is_valid_transition(from: RunState, to: RunState) -> bool {
                     | RunState::PreviewReady
                     | RunState::Cancelling,
             )
-            | (RunState::Cancelling, RunState::Cancelled)
+            | (
+                RunState::Cancelling,
+                RunState::PreviewReady
+                    | RunState::Completed
+                    | RunState::Failed
+                    | RunState::TimedOut
+                    | RunState::Cancelled,
+            )
     )
 }
 
@@ -256,6 +263,26 @@ mod tests {
         store.transition("r1", RunState::Running).unwrap();
         store.transition("r1", RunState::PreviewReady).unwrap();
         assert!(store.transition("r1", RunState::Completed).is_ok());
+    }
+
+    #[test]
+    fn valid_transition_cancelling_to_completed() {
+        let mut store = RunStore::new();
+        store.create_run("r1".into(), "pipe".into(), None);
+        store.transition("r1", RunState::Assigned).unwrap();
+        store.transition("r1", RunState::Running).unwrap();
+        store.transition("r1", RunState::Cancelling).unwrap();
+        assert!(store.transition("r1", RunState::Completed).is_ok());
+    }
+
+    #[test]
+    fn valid_transition_cancelling_to_failed() {
+        let mut store = RunStore::new();
+        store.create_run("r1".into(), "pipe".into(), None);
+        store.transition("r1", RunState::Assigned).unwrap();
+        store.transition("r1", RunState::Running).unwrap();
+        store.transition("r1", RunState::Cancelling).unwrap();
+        assert!(store.transition("r1", RunState::Failed).is_ok());
     }
 
     #[test]

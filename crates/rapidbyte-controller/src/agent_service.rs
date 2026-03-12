@@ -754,4 +754,143 @@ mod tests {
             _ => panic!("Expected CancelTask directive"),
         }
     }
+
+    #[tokio::test]
+    async fn test_complete_task_from_cancelling_transitions_run_to_completed() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id,
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Running).unwrap();
+            runs.transition(&run_id, InternalRunState::Cancelling)
+                .unwrap();
+        }
+
+        let resp = svc
+            .complete_task(Request::new(CompleteTaskRequest {
+                agent_id: String::new(),
+                task_id: task.task_id,
+                lease_epoch: task.lease_epoch,
+                outcome: TaskOutcome::Completed.into(),
+                metrics: Some(crate::proto::rapidbyte::v1::TaskMetrics {
+                    records_processed: 7,
+                    bytes_processed: 42,
+                    elapsed_seconds: 1.5,
+                    cursors_advanced: 1,
+                }),
+                error: None,
+                preview: None,
+                backend_run_id: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(resp.acknowledged);
+
+        let runs = state.runs.read().await;
+        let record = runs.get_run(&run_id).unwrap();
+        assert_eq!(record.state, InternalRunState::Completed);
+        assert_eq!(record.total_records, 7);
+    }
+
+    #[tokio::test]
+    async fn test_complete_task_failure_from_cancelling_transitions_run_to_failed() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id,
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Running).unwrap();
+            runs.transition(&run_id, InternalRunState::Cancelling)
+                .unwrap();
+        }
+
+        let resp = svc
+            .complete_task(Request::new(CompleteTaskRequest {
+                agent_id: String::new(),
+                task_id: task.task_id,
+                lease_epoch: task.lease_epoch,
+                outcome: TaskOutcome::Failed.into(),
+                metrics: None,
+                error: Some(TaskError {
+                    code: "PLUGIN".into(),
+                    message: "boom".into(),
+                    retryable: false,
+                    safe_to_retry: false,
+                    commit_state: "before_commit".into(),
+                }),
+                preview: None,
+                backend_run_id: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(resp.acknowledged);
+
+        let runs = state.runs.read().await;
+        let record = runs.get_run(&run_id).unwrap();
+        assert_eq!(record.state, InternalRunState::Failed);
+        assert_eq!(record.error_message.as_deref(), Some("PLUGIN: boom"));
+    }
 }
