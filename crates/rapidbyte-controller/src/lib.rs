@@ -21,4 +21,5 @@
 
 #![warn(clippy::pedantic)]
 
+pub mod lease;
 pub mod proto;
