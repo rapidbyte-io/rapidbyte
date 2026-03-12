@@ -21,8 +21,7 @@ pub struct EnvironmentProfile {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DistributedRuntimeProfile {
     pub controller_url: String,
-    #[serde(default)]
-    pub controller_auth_token: Option<String>,
+    pub controller_auth_token: String,
     pub signing_key: String,
     pub agent_flight_url: String,
     #[serde(default = "default_agent_count")]
@@ -224,6 +223,9 @@ fn validate_environment_profile(profile: &EnvironmentProfile) -> Result<()> {
 
     if distributed.controller_url.trim().is_empty() {
         anyhow::bail!("distributed.controller_url must not be empty");
+    }
+    if distributed.controller_auth_token.trim().is_empty() {
+        anyhow::bail!("distributed.controller_auth_token must not be empty");
     }
     if distributed.signing_key.trim().is_empty() {
         anyhow::bail!("distributed.signing_key must not be empty");
@@ -574,10 +576,7 @@ bindings:
 
         let distributed = profile.distributed.expect("distributed profile metadata");
         assert_eq!(distributed.controller_url, "http://127.0.0.1:56090");
-        assert_eq!(
-            distributed.controller_auth_token.as_deref(),
-            Some("bench-token")
-        );
+        assert_eq!(distributed.controller_auth_token, "bench-token");
         assert_eq!(distributed.signing_key, "bench-signing-key");
         assert_eq!(distributed.agent_flight_url, "http://127.0.0.1:56091");
         assert_eq!(distributed.agent_count, 1);
@@ -640,7 +639,7 @@ bindings:
         let err = EnvironmentProfile::from_path(&profile_path).expect_err("should reject");
         let message = format!("{err:#}");
         assert!(message.contains("failed to parse environment profile"));
-        assert!(message.contains("missing field `signing_key`"));
+        assert!(message.contains("missing field `controller_auth_token`"));
     }
 
     #[test]

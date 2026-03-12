@@ -1,7 +1,7 @@
 id: local-bench-distributed-postgres
 provider:
   kind: docker_compose
-  project_dir: benchmarks/distributed
+  project_dir: benchmarks
   project_name: rapidbyte-bench-distributed
 services:
   postgres:

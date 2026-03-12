@@ -15,7 +15,7 @@ use crate::Verbosity;
 
 use rapidbyte_controller::proto::rapidbyte::v1::pipeline_service_client::PipelineServiceClient;
 use rapidbyte_controller::proto::rapidbyte::v1::{
-    run_event, ExecutionOptions, GetRunRequest, PreviewAccess, SubmitPipelineRequest,
+    run_event, ExecutionOptions, GetRunRequest, PreviewAccess, RunCompleted, SubmitPipelineRequest,
     WatchRunRequest,
 };
 
@@ -89,6 +89,7 @@ pub async fn execute(
                             c.total_records, c.total_bytes, c.elapsed_seconds,
                         );
                     }
+                    emit_bench_json_from_completed(&c);
 
                     if effective_dry_run {
                         handle_preview_result(
@@ -267,6 +268,31 @@ fn ensure_terminal_event_received(seen_terminal: bool) -> Result<()> {
         anyhow::bail!("WatchRun stream ended before a terminal event was received");
     }
 }
+
+fn emit_bench_json_from_completed(completed: &RunCompleted) {
+    if std::env::var_os("RAPIDBYTE_BENCH").is_none() {
+        return;
+    }
+
+    println!("@@BENCH_JSON@@{}", bench_json_from_completed(completed));
+}
+
+fn bench_json_from_completed(completed: &RunCompleted) -> serde_json::Value {
+    serde_json::json!({
+        "records_read": completed.total_records,
+        "records_written": completed.total_records,
+        "bytes_read": completed.total_bytes,
+        "bytes_written": completed.total_bytes,
+        "duration_secs": completed.elapsed_seconds,
+        "source_duration_secs": completed.elapsed_seconds,
+        "dest_duration_secs": completed.elapsed_seconds,
+        "dest_recv_count": 1,
+        "parallelism": 1,
+        "retry_count": 0,
+        "stream_metrics": [],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,5 +446,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(endpoint.uri().scheme_str(), Some("https"));
+    }
+
+    #[test]
+    fn emit_bench_json_from_completed_includes_required_fields() {
+        let completed = RunCompleted {
+            total_records: 123,
+            total_bytes: 456,
+            elapsed_seconds: 7.5,
+            cursors_advanced: 1,
+        };
+
+        let json = bench_json_from_completed(&completed);
+
+        assert_eq!(json["records_read"], 123);
+        assert_eq!(json["records_written"], 123);
+        assert_eq!(json["bytes_written"], 456);
+        assert_eq!(json["duration_secs"], 7.5);
     }
 }

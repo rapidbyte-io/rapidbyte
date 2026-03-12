@@ -1,6 +1,9 @@
 use std::fs::{self, File};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value as JsonValue};
@@ -9,8 +12,8 @@ use sha2::{Digest, Sha256};
 use crate::adapters::prepare_pipeline_fixtures;
 use crate::artifact::{ArtifactCorrectness, BenchmarkArtifact};
 use crate::environment::{
-    resolve_environment_profile, resolve_postgres_environment_from_profile, EnvironmentSession,
-    SystemEnvironmentCommandExecutor,
+    resolve_environment_profile, resolve_postgres_environment_from_profile,
+    DistributedRuntimeProfile, EnvironmentSession, SystemEnvironmentCommandExecutor,
 };
 use crate::isolation::{
     execute_destination_benchmark, execute_source_benchmark, execute_transform_benchmark,
@@ -395,15 +398,54 @@ fn execute_real_postgres_pipeline(
     })?;
     prepare_pipeline_fixtures(scenario, workload, env)?;
     let rendered = write_rendered_pipeline(scenario, env, &temp_root)?;
-    let bench_json = invoke_rapidbyte_run(root, scenario, &rendered.path, rapidbyte_bin)?;
+    let distributed_runtime = if scenario.benchmark.execution_mode
+        == crate::scenario::BenchmarkExecutionMode::Distributed
+    {
+        Some(resolve_distributed_runtime(root, scenario)?)
+    } else {
+        None
+    };
+    let _distributed_processes = distributed_runtime
+        .as_ref()
+        .map(|runtime| {
+            start_distributed_runtime(root, scenario, runtime, rapidbyte_bin, &temp_root)
+        })
+        .transpose()?;
+    let bench_json = invoke_rapidbyte_run(
+        root,
+        scenario,
+        &rendered.path,
+        distributed_runtime.as_ref(),
+        rapidbyte_bin,
+    )?;
     let correctness = enforce_row_count_assertions(&scenario.id, workload, &bench_json)?;
     run_result_from_bench_json(scenario, artifact_context, bench_json, correctness)
+}
+
+fn resolve_distributed_runtime(
+    root: &Path,
+    scenario: &ScenarioManifest,
+) -> Result<DistributedRuntimeProfile> {
+    let reference = scenario.environment.reference.as_deref().with_context(|| {
+        format!(
+            "scenario {} requires environment.ref for distributed execution",
+            scenario.id
+        )
+    })?;
+    let profile = resolve_environment_profile(root, reference)?;
+    profile.distributed.with_context(|| {
+        format!(
+            "environment profile {} does not define distributed runtime metadata",
+            reference
+        )
+    })
 }
 
 fn invoke_rapidbyte_run(
     repo_root: &Path,
     scenario: &ScenarioManifest,
     pipeline_path: &Path,
+    distributed_runtime: Option<&DistributedRuntimeProfile>,
     rapidbyte_bin: Option<&Path>,
 ) -> Result<JsonValue> {
     let binary_path = rapidbyte_bin
@@ -415,9 +457,15 @@ fn invoke_rapidbyte_run(
             binary_path.display()
         );
     }
-    let output = rapidbyte_run_command(repo_root, pipeline_path, scenario, Some(&binary_path))
-        .output()
-        .context("failed to invoke rapidbyte CLI")?;
+    let output = rapidbyte_run_command(
+        repo_root,
+        pipeline_path,
+        scenario,
+        distributed_runtime,
+        Some(&binary_path),
+    )
+    .output()
+    .context("failed to invoke rapidbyte CLI")?;
 
     if !output.status.success() {
         bail!(
@@ -431,10 +479,154 @@ fn invoke_rapidbyte_run(
     parse_bench_json_from_stdout(&String::from_utf8_lossy(&output.stdout))
 }
 
+struct DistributedRuntimeProcesses {
+    controller: Child,
+    agent: Child,
+}
+
+impl Drop for DistributedRuntimeProcesses {
+    fn drop(&mut self) {
+        terminate_child(&mut self.agent);
+        terminate_child(&mut self.controller);
+    }
+}
+
+fn terminate_child(child: &mut Child) {
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+fn start_distributed_runtime(
+    repo_root: &Path,
+    scenario: &ScenarioManifest,
+    runtime: &DistributedRuntimeProfile,
+    rapidbyte_bin: Option<&Path>,
+    temp_root: &Path,
+) -> Result<DistributedRuntimeProcesses> {
+    let binary_path = rapidbyte_bin
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| default_rapidbyte_binary(repo_root, scenario));
+    if !binary_path.exists() {
+        bail!(
+            "rapidbyte benchmark binary not found at {}; build it first or pass --rapidbyte-bin",
+            binary_path.display()
+        );
+    }
+
+    let controller_log = File::create(temp_root.join("controller.log"))
+        .context("failed to create controller benchmark log")?;
+    let agent_log = File::create(temp_root.join("agent.log"))
+        .context("failed to create agent benchmark log")?;
+    let controller_addr = socket_addr_from_url(&runtime.controller_url)
+        .with_context(|| format!("invalid controller_url {}", runtime.controller_url))?;
+    let agent_flight_addr = socket_addr_from_url(&runtime.agent_flight_url)
+        .with_context(|| format!("invalid agent_flight_url {}", runtime.agent_flight_url))?;
+
+    let mut controller = Command::new(&binary_path)
+        .current_dir(repo_root)
+        .env(
+            "RAPIDBYTE_PLUGIN_DIR",
+            repo_root.join("target").join("plugins"),
+        )
+        .args([
+            "--log-level",
+            "warn",
+            "--quiet",
+            "--auth-token",
+            runtime.controller_auth_token.as_str(),
+            "controller",
+            "--listen",
+            &controller_addr,
+            "--signing-key",
+            runtime.signing_key.as_str(),
+        ])
+        .stdout(Stdio::from(controller_log.try_clone()?))
+        .stderr(Stdio::from(controller_log))
+        .spawn()
+        .context("failed to start benchmark controller process")?;
+
+    wait_for_tcp_ready(&controller_addr, Duration::from_secs(10))
+        .context("controller did not become ready in time")?;
+
+    let mut agent = Command::new(&binary_path)
+        .current_dir(repo_root)
+        .env(
+            "RAPIDBYTE_PLUGIN_DIR",
+            repo_root.join("target").join("plugins"),
+        )
+        .args([
+            "--log-level",
+            "warn",
+            "--quiet",
+            "--auth-token",
+            runtime.controller_auth_token.as_str(),
+            "agent",
+            "--controller",
+            runtime.controller_url.as_str(),
+            "--flight-listen",
+            &agent_flight_addr,
+            "--flight-advertise",
+            &agent_flight_addr,
+            "--max-tasks",
+            "1",
+            "--signing-key",
+            runtime.signing_key.as_str(),
+        ])
+        .stdout(Stdio::from(agent_log.try_clone()?))
+        .stderr(Stdio::from(agent_log))
+        .spawn()
+        .context("failed to start benchmark agent process")?;
+
+    // The agent has no explicit readiness endpoint today; waiting for the Flight bind
+    // plus a short registration grace period keeps startup outside measured timing.
+    wait_for_tcp_ready(&agent_flight_addr, Duration::from_secs(10))
+        .context("agent Flight endpoint did not become ready in time")?;
+    thread::sleep(Duration::from_millis(500));
+
+    if let Some(status) = controller
+        .try_wait()
+        .context("failed to poll benchmark controller process")?
+    {
+        bail!("benchmark controller exited early with status {status}");
+    }
+    if let Some(status) = agent
+        .try_wait()
+        .context("failed to poll benchmark agent process")?
+    {
+        bail!("benchmark agent exited early with status {status}");
+    }
+
+    Ok(DistributedRuntimeProcesses { controller, agent })
+}
+
+fn socket_addr_from_url(url: &str) -> Result<String> {
+    url.strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .map(str::to_string)
+        .with_context(|| format!("expected http:// or https:// URL, got {url}"))
+}
+
+fn wait_for_tcp_ready(addr: &str, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match TcpStream::connect(addr) {
+            Ok(_) => return Ok(()),
+            Err(err) if Instant::now() < deadline => {
+                let _ = err;
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(err) => return Err(err).with_context(|| format!("tcp connect to {addr} failed")),
+        }
+    }
+}
+
 fn rapidbyte_run_command(
     repo_root: &Path,
     pipeline_path: &Path,
     scenario: &ScenarioManifest,
+    distributed_runtime: Option<&DistributedRuntimeProfile>,
     rapidbyte_bin: Option<&Path>,
 ) -> Command {
     let binary_path = rapidbyte_bin
@@ -452,7 +644,15 @@ fn rapidbyte_run_command(
         "RAPIDBYTE_WASMTIME_AOT",
         if scenario.benchmark.aot { "1" } else { "0" },
     );
-    command.args(["--quiet", "run"]).arg(pipeline_path);
+    command.arg("--quiet");
+    if let Some(runtime) = distributed_runtime {
+        command.args(["--controller", runtime.controller_url.as_str()]);
+        command.env(
+            "RAPIDBYTE_AUTH_TOKEN",
+            runtime.controller_auth_token.as_str(),
+        );
+    }
+    command.arg("run").arg(pipeline_path);
     command
 }
 
@@ -657,14 +857,14 @@ mod tests {
 
     use super::*;
     use crate::environment::{
-        EnvironmentBinding, EnvironmentBindings, EnvironmentCommandExecutor, EnvironmentProfile,
-        EnvironmentProvider, EnvironmentService,
+        DistributedRuntimeProfile, EnvironmentBinding, EnvironmentBindings,
+        EnvironmentCommandExecutor, EnvironmentProfile, EnvironmentProvider, EnvironmentService,
     };
     use crate::scenario::{
-        BenchmarkBuildMode, BenchmarkKind, ConnectorOptions, DestinationConnectorOptions,
-        EnvironmentConfig, ExecutionProfile, PostgresBenchmarkEnvironment,
-        PostgresConnectionProfile, ScenarioAssertions, ScenarioConnectorRef, ScenarioManifest,
-        SourceConnectorOptions, WorkloadProfile,
+        BenchmarkBuildMode, BenchmarkExecutionMode, BenchmarkKind, ConnectorOptions,
+        DestinationConnectorOptions, EnvironmentConfig, ExecutionProfile,
+        PostgresBenchmarkEnvironment, PostgresConnectionProfile, ScenarioAssertions,
+        ScenarioConnectorRef, ScenarioManifest, SourceConnectorOptions, WorkloadProfile,
     };
     use crate::workload::{resolve_workload_plan, WorkloadFamily};
 
@@ -1055,7 +1255,7 @@ mod tests {
         let pipeline_path = std::path::Path::new("/tmp/rapidbyte/bench.yaml");
         let scenario = sample_postgres_scenario("insert");
 
-        let command = rapidbyte_run_command(repo_root, pipeline_path, &scenario, None);
+        let command = rapidbyte_run_command(repo_root, pipeline_path, &scenario, None, None);
         let envs = command.get_envs().collect::<Vec<_>>();
         let plugin_dir = envs
             .iter()
@@ -1082,7 +1282,7 @@ mod tests {
         scenario.benchmark.build_mode = BenchmarkBuildMode::Release;
         scenario.benchmark.aot = true;
 
-        let command = rapidbyte_run_command(repo_root, pipeline_path, &scenario, None);
+        let command = rapidbyte_run_command(repo_root, pipeline_path, &scenario, None, None);
         let args = command.get_args().collect::<Vec<_>>();
         let program = command.get_program();
         let envs = command.get_envs().collect::<Vec<_>>();
@@ -1103,6 +1303,49 @@ mod tests {
             })
             .expect("aot env");
         assert_eq!(aot, std::ffi::OsStr::new("1"));
+    }
+
+    #[test]
+    fn distributed_scenarios_invoke_run_with_controller_and_auth() {
+        let repo_root = std::path::Path::new("/tmp/rapidbyte");
+        let pipeline_path = std::path::Path::new("/tmp/rapidbyte/bench.yaml");
+        let mut scenario = sample_postgres_scenario("copy");
+        scenario.benchmark.execution_mode = BenchmarkExecutionMode::Distributed;
+
+        let runtime = sample_distributed_runtime();
+        let command =
+            rapidbyte_run_command(repo_root, pipeline_path, &scenario, Some(&runtime), None);
+        let args = command.get_args().collect::<Vec<_>>();
+        let envs = command.get_envs().collect::<Vec<_>>();
+
+        assert!(args.contains(&std::ffi::OsStr::new("--controller")));
+        assert!(args.contains(&std::ffi::OsStr::new("http://127.0.0.1:56090")));
+        let auth = envs
+            .iter()
+            .find_map(|(key, value)| {
+                if *key == std::ffi::OsStr::new("RAPIDBYTE_AUTH_TOKEN") {
+                    value.as_deref()
+                } else {
+                    None
+                }
+            })
+            .expect("auth token env");
+        assert_eq!(auth, std::ffi::OsStr::new("bench-token"));
+    }
+
+    #[test]
+    fn distributed_pipeline_requires_runtime_profile() {
+        let root = temp_dir("distributed-runtime-required");
+        let mut scenario = logical_environment_scenario("pg_dest_copy_release_distributed");
+        scenario.benchmark.execution_mode = BenchmarkExecutionMode::Distributed;
+        scenario.environment.reference = Some("local-bench-distributed-postgres".to_string());
+
+        let err = resolve_distributed_runtime(&root, &scenario)
+            .expect_err("distributed runtime should be required");
+
+        assert!(err
+            .to_string()
+            .contains("failed to read environment profile"));
     }
 
     #[test]
@@ -1552,5 +1795,15 @@ mod tests {
         ));
         fs::create_dir_all(&path).expect("create temp dir");
         path
+    }
+
+    fn sample_distributed_runtime() -> DistributedRuntimeProfile {
+        DistributedRuntimeProfile {
+            controller_url: "http://127.0.0.1:56090".to_string(),
+            controller_auth_token: "bench-token".to_string(),
+            signing_key: "bench-signing-key".to_string(),
+            agent_flight_url: "http://127.0.0.1:56091".to_string(),
+            agent_count: 1,
+        }
     }
 }
