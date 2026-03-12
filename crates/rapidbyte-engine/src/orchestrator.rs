@@ -564,7 +564,11 @@ async fn execute_pipeline_once(
             phase: Phase::Finished,
         },
     );
-    ensure_not_cancelled(cancel_token, "Pipeline cancelled before finalization")?;
+    if !should_preserve_real_outcome_after_stream_execution(cancel_token) {
+        return Err(cancelled_pipeline_error(
+            "Pipeline cancelled before finalization",
+        ));
+    }
 
     if options.dry_run {
         let duration_secs = start.elapsed().as_secs_f64();
@@ -1647,6 +1651,10 @@ fn ensure_not_cancelled(
         return Err(cancelled_pipeline_error(message));
     }
     Ok(())
+}
+
+fn should_preserve_real_outcome_after_stream_execution(_cancel_token: &CancellationToken) -> bool {
+    true
 }
 
 async fn complete_run_status(
@@ -3019,6 +3027,14 @@ resources:
             .as_deref()
             .unwrap_or_default()
             .contains("Post-run finalization failed"));
+    }
+
+    #[test]
+    fn cancellation_after_stream_execution_allows_finalization() {
+        let token = CancellationToken::new();
+        token.cancel();
+
+        assert!(should_preserve_real_outcome_after_stream_execution(&token));
     }
 }
 
