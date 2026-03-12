@@ -301,7 +301,8 @@ impl AgentService for AgentServiceImpl {
     ) -> Result<Response<CompleteTaskResponse>, Status> {
         let req = request.into_inner();
 
-        let outcome = TaskOutcome::try_from(req.outcome).unwrap_or(TaskOutcome::Unspecified);
+        let outcome = TaskOutcome::try_from(req.outcome)
+            .map_err(|_| Status::invalid_argument("Unknown task outcome"))?;
 
         // Complete the task in the scheduler (validates lease epoch).
         // Returns run_id and attempt alongside acknowledgement to avoid a second lock.
@@ -462,6 +463,7 @@ impl AgentService for AgentServiceImpl {
             TaskOutcome::Cancelled => {
                 {
                     let mut runs = self.state.runs.write().await;
+                    runs.ensure_running(&run_id);
                     let _ = runs.transition(&run_id, InternalRunState::Cancelled);
                 }
 
@@ -473,7 +475,7 @@ impl AgentService for AgentServiceImpl {
                     },
                 );
             }
-            TaskOutcome::Unspecified => {}
+            TaskOutcome::Unspecified => unreachable!("invalid task outcome rejected above"),
         }
 
         Ok(Response::new(CompleteTaskResponse { acknowledged: true }))
@@ -854,6 +856,122 @@ mod tests {
         let record = tasks.get(&task.task_id).unwrap();
         assert_eq!(record.state, TaskState::Assigned);
         assert_eq!(record.assigned_agent_id.as_deref(), Some(agent_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn test_complete_task_rejects_unknown_outcome() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        let err = svc
+            .complete_task(Request::new(CompleteTaskRequest {
+                agent_id,
+                task_id: task.task_id.clone(),
+                lease_epoch: task.lease_epoch,
+                outcome: 999,
+                error: None,
+                metrics: None,
+                preview: None,
+                backend_run_id: 0,
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+        let tasks = state.tasks.read().await;
+        let record = tasks.get(&task.task_id).unwrap();
+        assert_eq!(record.state, TaskState::Assigned);
+        assert!(record.lease.is_some());
+
+        let runs = state.runs.read().await;
+        let run = runs.get_run(&run_id).unwrap();
+        assert_eq!(run.state, InternalRunState::Assigned);
+    }
+
+    #[tokio::test]
+    async fn test_complete_task_cancelled_from_assigned_transitions_run() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        let resp = svc
+            .complete_task(Request::new(CompleteTaskRequest {
+                agent_id,
+                task_id: task.task_id.clone(),
+                lease_epoch: task.lease_epoch,
+                outcome: TaskOutcome::Cancelled.into(),
+                error: None,
+                metrics: None,
+                preview: None,
+                backend_run_id: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(resp.acknowledged);
+
+        let runs = state.runs.read().await;
+        let run = runs.get_run(&run_id).unwrap();
+        assert_eq!(run.state, InternalRunState::Cancelled);
     }
 
     #[tokio::test]
