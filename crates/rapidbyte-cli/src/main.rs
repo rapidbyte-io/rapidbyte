@@ -139,7 +139,7 @@ enum Commands {
         allow_unauthenticated: bool,
         /// Explicitly allow the built-in insecure development signing key
         #[arg(long)]
-        allow_insecure_default_signing_key: bool,
+        allow_insecure_signing_key: bool,
         /// PEM certificate for TLS server mode
         #[arg(long)]
         tls_cert: Option<PathBuf>,
@@ -166,7 +166,7 @@ enum Commands {
         signing_key: Option<String>,
         /// Explicitly allow the built-in insecure development signing key
         #[arg(long)]
-        allow_insecure_default_signing_key: bool,
+        allow_insecure_signing_key: bool,
         /// PEM certificate for the agent Flight server
         #[arg(long)]
         flight_tls_cert: Option<PathBuf>,
@@ -226,7 +226,7 @@ async fn main() -> ExitCode {
 
     let verbosity = Verbosity::from_flags(cli.quiet, cli.verbose);
 
-    logging::init(&cli.log_level);
+    logging::init(verbosity, &cli.log_level);
 
     let tls = commands::transport::TlsClientConfig {
         ca_cert_path: cli.tls_ca_cert.clone(),
@@ -295,7 +295,7 @@ async fn main() -> ExitCode {
             listen,
             signing_key,
             allow_unauthenticated,
-            allow_insecure_default_signing_key,
+            allow_insecure_signing_key,
             tls_cert,
             tls_key,
         } => {
@@ -304,7 +304,7 @@ async fn main() -> ExitCode {
                 signing_key.as_deref(),
                 cli.auth_token.as_deref(),
                 allow_unauthenticated,
-                allow_insecure_default_signing_key,
+                allow_insecure_signing_key,
                 tls_cert.as_deref(),
                 tls_key.as_deref(),
             )
@@ -316,7 +316,7 @@ async fn main() -> ExitCode {
             flight_advertise,
             max_tasks,
             signing_key,
-            allow_insecure_default_signing_key,
+            allow_insecure_signing_key,
             flight_tls_cert,
             flight_tls_key,
         } => {
@@ -326,7 +326,7 @@ async fn main() -> ExitCode {
                 &flight_advertise,
                 max_tasks,
                 signing_key.as_deref(),
-                allow_insecure_default_signing_key,
+                allow_insecure_signing_key,
                 cli.auth_token.as_deref(),
                 cli.tls_ca_cert.as_deref(),
                 cli.tls_domain.as_deref(),

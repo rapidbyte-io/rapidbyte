@@ -92,8 +92,8 @@ For distributed controller/agent execution, see
 | Flag | Level | Behavior |
 |------|-------|----------|
 | *(none)* | Default | Standard progress output |
-| `-v` | Verbose | Detailed per-stream stats and timing |
-| `-vv` | Diagnostic | Full internal tracing (frame lifecycle, host calls) |
+| `-v` | Verbose | Detailed command output and `info`-level server logs |
+| `-vv` | Diagnostic | Diagnostic command output and `debug`-level tracing |
 | `--quiet` | Quiet | Suppress all output; exit code only, errors on stderr |
 
 **Other flags:** `--dry-run`, `--limit N`

@@ -10,7 +10,7 @@ pub async fn execute(
     flight_advertise: &str,
     max_tasks: u32,
     signing_key: Option<&str>,
-    allow_insecure_default_signing_key: bool,
+    allow_insecure_signing_key: bool,
     auth_token: Option<&str>,
     controller_ca_cert: Option<&Path>,
     controller_tls_domain: Option<&str>,
@@ -23,7 +23,7 @@ pub async fn execute(
         flight_advertise,
         max_tasks,
         signing_key,
-        allow_insecure_default_signing_key,
+        allow_insecure_signing_key,
         auth_token,
         controller_ca_cert,
         controller_tls_domain,
@@ -40,7 +40,7 @@ fn build_config(
     flight_advertise: &str,
     max_tasks: u32,
     signing_key: Option<&str>,
-    allow_insecure_default_signing_key: bool,
+    allow_insecure_signing_key: bool,
     auth_token: Option<&str>,
     controller_ca_cert: Option<&Path>,
     controller_tls_domain: Option<&str>,
@@ -57,12 +57,12 @@ fn build_config(
     if let Some(key) = signing_key {
         config.signing_key = key.as_bytes().to_vec();
     }
-    config.allow_insecure_default_signing_key = allow_insecure_default_signing_key;
+    config.allow_insecure_default_signing_key = allow_insecure_signing_key;
     if config.signing_key == rapidbyte_agent::AgentConfig::default().signing_key
         && !config.allow_insecure_default_signing_key
     {
         anyhow::bail!(
-            "agent requires --signing-key / RAPIDBYTE_SIGNING_KEY or --allow-insecure-default-signing-key"
+            "agent requires --signing-key / RAPIDBYTE_SIGNING_KEY or --allow-insecure-signing-key"
         );
     }
     config.auth_token = auth_token.map(str::to_owned);
@@ -159,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_execute_allows_insecure_default_signing_key() {
+    fn agent_execute_allows_insecure_signing_key() {
         let config = build_config(
             "http://controller.example:9090",
             "[::]:9091",

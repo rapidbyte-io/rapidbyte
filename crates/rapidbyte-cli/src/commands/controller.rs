@@ -8,7 +8,7 @@ pub async fn execute(
     signing_key: Option<&str>,
     auth_token: Option<&str>,
     allow_unauthenticated: bool,
-    allow_insecure_default_signing_key: bool,
+    allow_insecure_signing_key: bool,
     tls_cert: Option<&Path>,
     tls_key: Option<&Path>,
 ) -> Result<()> {
@@ -17,7 +17,7 @@ pub async fn execute(
         signing_key,
         auth_token,
         allow_unauthenticated,
-        allow_insecure_default_signing_key,
+        allow_insecure_signing_key,
         tls_cert,
         tls_key,
     )?;
@@ -29,7 +29,7 @@ fn build_config(
     signing_key: Option<&str>,
     auth_token: Option<&str>,
     allow_unauthenticated: bool,
-    allow_insecure_default_signing_key: bool,
+    allow_insecure_signing_key: bool,
     tls_cert: Option<&Path>,
     tls_key: Option<&Path>,
 ) -> Result<rapidbyte_controller::ControllerConfig> {
@@ -55,7 +55,7 @@ fn build_config(
         config.auth_tokens = vec![token.to_string()];
     }
     config.allow_unauthenticated = allow_unauthenticated;
-    config.allow_insecure_default_signing_key = allow_insecure_default_signing_key;
+    config.allow_insecure_default_signing_key = allow_insecure_signing_key;
     if config.auth_tokens.is_empty() && !config.allow_unauthenticated {
         anyhow::bail!(
             "controller requires --auth-token / RAPIDBYTE_AUTH_TOKEN or --allow-unauthenticated"
@@ -65,7 +65,7 @@ fn build_config(
         && !config.allow_insecure_default_signing_key
     {
         anyhow::bail!(
-            "controller requires --signing-key / RAPIDBYTE_SIGNING_KEY or --allow-insecure-default-signing-key"
+            "controller requires --signing-key / RAPIDBYTE_SIGNING_KEY or --allow-insecure-signing-key"
         );
     }
     match (tls_cert, tls_key) {
@@ -161,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn controller_execute_allows_insecure_default_signing_key() {
+    fn controller_execute_allows_insecure_signing_key() {
         let config =
             build_config("[::]:9090", None, Some("secret"), false, true, None, None).unwrap();
         assert!(config.allow_insecure_default_signing_key);
