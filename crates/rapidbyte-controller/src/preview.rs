@@ -202,13 +202,16 @@ impl PreviewStore {
     }
 
     #[must_use]
-    pub fn get(&self, run_id: &str) -> Option<&PreviewEntry> {
-        let entry = self.entries.get(run_id)?;
-        if entry.created_at.elapsed() < entry.ttl {
-            Some(entry)
-        } else {
-            None
+    pub fn get(&mut self, run_id: &str) -> Option<&PreviewEntry> {
+        let expired = self
+            .entries
+            .get(run_id)
+            .is_some_and(|entry| entry.created_at.elapsed() >= entry.ttl);
+        if expired {
+            self.entries.remove(run_id);
+            return None;
         }
+        self.entries.get(run_id)
     }
 
     /// Remove expired entries. Returns the number removed.
@@ -323,6 +326,7 @@ mod tests {
             ttl: Duration::from_secs(60),
         });
         assert!(store.get("r1").is_none());
+        assert_eq!(store.cleanup_expired(), 0);
     }
 
     #[test]

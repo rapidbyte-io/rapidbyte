@@ -394,7 +394,7 @@ impl PipelineService for PipelineServiceImpl {
 
         // Preview lookup with runs lock already released
         let preview = {
-            let previews = self.state.previews.read().await;
+            let mut previews = self.state.previews.write().await;
             previews.get(&run_id).map(|p| PreviewAccess {
                 state: PreviewState::Ready.into(),
                 flight_endpoint: p.flight_endpoint.clone(),

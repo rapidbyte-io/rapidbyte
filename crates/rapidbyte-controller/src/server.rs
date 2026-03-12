@@ -28,6 +28,7 @@ pub struct ControllerConfig {
     pub agent_reap_interval: Duration,
     pub agent_reap_timeout: Duration,
     pub lease_check_interval: Duration,
+    pub preview_cleanup_interval: Duration,
     /// Bearer tokens for authentication. Empty requires `allow_unauthenticated`.
     pub auth_tokens: Vec<String>,
     /// Explicit escape hatch for local/dev use. Production should configure auth.
@@ -50,6 +51,7 @@ impl Default for ControllerConfig {
             agent_reap_interval: Duration::from_secs(15),
             agent_reap_timeout: Duration::from_secs(60),
             lease_check_interval: Duration::from_secs(10),
+            preview_cleanup_interval: Duration::from_secs(30),
             auth_tokens: Vec::new(),
             allow_unauthenticated: false,
             allow_insecure_default_signing_key: false,
@@ -122,6 +124,22 @@ async fn handle_expired_lease(state: &ControllerState, task_id: &str, run_id: &s
     }
 }
 
+fn spawn_preview_cleanup_task(
+    state: ControllerState,
+    interval_duration: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(interval_duration);
+        loop {
+            interval.tick().await;
+            let removed = state.previews.write().await.cleanup_expired();
+            if removed > 0 {
+                info!(removed, "Removed expired preview metadata entries");
+            }
+        }
+    })
+}
+
 /// Start the controller gRPC server.
 ///
 /// # Errors
@@ -172,6 +190,12 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
             }
         }
     });
+
+    let preview_cleanup_state = state.clone();
+    std::mem::drop(spawn_preview_cleanup_task(
+        preview_cleanup_state,
+        config.preview_cleanup_interval,
+    ));
 
     let auth = BearerAuthInterceptor::new(config.auth_tokens.clone());
 
@@ -275,5 +299,32 @@ mod tests {
             record.error_message.as_deref(),
             Some(format!("Task {task_id} lease expired (agent unresponsive)").as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn preview_cleanup_task_removes_expired_entries() {
+        let state = ControllerState::new(b"test-signing-key");
+        {
+            let mut previews = state.previews.write().await;
+            previews.store(crate::preview::PreviewEntry {
+                run_id: "run-1".into(),
+                task_id: "task-1".into(),
+                flight_endpoint: "localhost:9091".into(),
+                ticket: bytes::Bytes::from_static(b"ticket"),
+                streams: vec![],
+                created_at: std::time::Instant::now()
+                    .checked_sub(Duration::from_secs(120))
+                    .unwrap(),
+                ttl: Duration::from_secs(60),
+            });
+        }
+
+        let handle = spawn_preview_cleanup_task(state.clone(), Duration::from_millis(10));
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        handle.abort();
+
+        let mut previews = state.previews.write().await;
+        assert!(previews.get("run-1").is_none());
+        assert_eq!(previews.cleanup_expired(), 0);
     }
 }
