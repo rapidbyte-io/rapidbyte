@@ -1047,6 +1047,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_complete_task_cancelled_from_cancelling_transitions_run() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Running).unwrap();
+            runs.transition(&run_id, InternalRunState::Cancelling)
+                .unwrap();
+        }
+
+        let resp = svc
+            .complete_task(Request::new(CompleteTaskRequest {
+                agent_id,
+                task_id: task.task_id,
+                lease_epoch: task.lease_epoch,
+                outcome: TaskOutcome::Cancelled.into(),
+                error: None,
+                metrics: None,
+                preview: None,
+                backend_run_id: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(resp.acknowledged);
+
+        let runs = state.runs.read().await;
+        let run = runs.get_run(&run_id).unwrap();
+        assert_eq!(run.state, InternalRunState::Cancelled);
+    }
+
+    #[tokio::test]
     async fn test_complete_task_safe_to_retry_requeues() {
         let state = test_state();
         let svc = AgentServiceImpl::new(state.clone());

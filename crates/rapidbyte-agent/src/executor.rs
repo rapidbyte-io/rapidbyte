@@ -54,6 +54,16 @@ impl TaskMetrics {
     }
 }
 
+fn is_pre_commit_cancellation(error: &PipelineError) -> bool {
+    match error {
+        PipelineError::Plugin(plugin_error) => {
+            plugin_error.code == "CANCELLED"
+                && matches!(plugin_error.commit_state, Some(CommitState::BeforeCommit))
+        }
+        PipelineError::Infrastructure(_) => false,
+    }
+}
+
 /// Execute a pipeline task.
 ///
 /// Parses the YAML, runs the pipeline, and returns structured results.
@@ -207,6 +217,18 @@ where
         }
         Err(e) => {
             let elapsed = start.elapsed().as_secs_f64();
+            if is_pre_commit_cancellation(&e) {
+                return TaskExecutionResult {
+                    outcome: TaskOutcomeKind::Cancelled,
+                    metrics: TaskMetrics {
+                        records_processed: 0,
+                        bytes_processed: 0,
+                        elapsed_seconds: elapsed,
+                        cursors_advanced: 0,
+                    },
+                    dry_run_result: None,
+                };
+            }
             let error_info = match &e {
                 PipelineError::Plugin(pe) => TaskErrorInfo {
                     code: pe.code.clone(),
@@ -419,12 +441,8 @@ destination:
 
         let result = handle.await.unwrap();
         match result.outcome {
-            TaskOutcomeKind::Failed(info) => {
-                assert_eq!(info.code, "CANCELLED");
-                assert!(info.safe_to_retry);
-                assert_eq!(info.commit_state, "before_commit");
-            }
-            _ => panic!("expected cancelled failure outcome"),
+            TaskOutcomeKind::Cancelled => {}
+            _ => panic!("expected cancelled outcome"),
         }
     }
 
