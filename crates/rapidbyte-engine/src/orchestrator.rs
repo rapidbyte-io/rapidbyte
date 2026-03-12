@@ -44,6 +44,22 @@ use crate::runner::{
     TransformRunResult,
 };
 
+async fn run_blocking_infrastructure_task<T, F>(
+    task: F,
+    context: &'static str,
+) -> Result<T, PipelineError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|e| {
+            PipelineError::Infrastructure(anyhow::anyhow!("{context} task panicked: {e}"))
+        })?
+        .map_err(PipelineError::Infrastructure)
+}
+
 struct StreamResult {
     stream_name: String,
     partition_index: Option<u32>,
@@ -499,104 +515,127 @@ async fn execute_pipeline_once(
         )
         .map_err(PipelineError::Infrastructure)?;
     }
-    let state = create_state_backend(config).map_err(PipelineError::Infrastructure)?;
-
-    // Skip run tracking in dry-run mode to avoid orphaned run records.
-    let run_id = if options.dry_run {
-        0
-    } else {
-        let state_for_run = state.clone();
-        let pipeline_id_for_run = pipeline_id.clone();
-        tokio::task::spawn_blocking(move || {
-            state_for_run.start_run(&pipeline_id_for_run, &StreamName::new("all"))
-        })
-        .await
-        .map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!("start_run task panicked: {e}"))
-        })?
-        .map_err(|e| PipelineError::Infrastructure(e.into()))?
-    };
-
-    send_progress(
-        &progress_tx,
-        ProgressEvent::PhaseChange {
-            phase: Phase::Loading,
-        },
-    );
-    let modules = load_modules(config, &plugins).await?;
-    let config_for_build = config.clone();
-    let state_for_build = state.clone();
-    let max_records = options.limit;
-    let source_manifest_for_build = plugins.source_manifest.clone();
-    let stream_build = tokio::task::spawn_blocking(move || {
-        build_stream_contexts(
-            &config_for_build,
-            state_for_build.as_ref(),
-            max_records,
-            source_manifest_for_build.as_ref(),
-        )
-    })
-    .await
-    .map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!("build_stream_contexts task panicked: {e}"))
-    })??;
-    send_progress(
-        &progress_tx,
-        ProgressEvent::PhaseChange {
-            phase: Phase::Running,
-        },
-    );
-    ensure_not_cancelled(cancel_token, "Pipeline cancelled before stream execution")?;
-    let aggregated = execute_streams(
-        config,
-        &plugins,
-        &modules,
-        &stream_build,
-        state.clone(),
-        options,
-        &progress_tx,
-        cancel_token,
+    let config_for_state = config.clone();
+    let state = run_blocking_infrastructure_task(
+        move || create_state_backend(&config_for_state),
+        "create_state_backend",
     )
     .await?;
 
-    send_progress(
-        &progress_tx,
-        ProgressEvent::PhaseChange {
-            phase: Phase::Finished,
-        },
-    );
-    preserve_real_outcome_after_stream_execution(cancel_token, async move {
-        if options.dry_run {
-            let duration_secs = start.elapsed().as_secs_f64();
-            let src_perf = aggregated.total_read_summary.perf.as_ref();
-            return Ok(PipelineOutcome::DryRun(DryRunResult {
-                streams: aggregated.dry_run_streams,
-                source: build_source_timing(
-                    &aggregated.src_timing_maxima,
-                    &aggregated.src_timings,
-                    src_perf,
-                    modules.source_module_load_ms,
-                ),
-                transform_count: config.transforms.len(),
-                transform_duration_secs: aggregated.transform_durations.iter().sum(),
-                duration_secs,
-            }));
-        }
+    let state_for_execution = state.clone();
+    let execution_result = async move {
+        // Skip run tracking in dry-run mode to avoid orphaned run records.
+        let run_id = if options.dry_run {
+            0
+        } else {
+            let state_for_run = state_for_execution.clone();
+            let pipeline_id_for_run = pipeline_id.clone();
+            tokio::task::spawn_blocking(move || {
+                state_for_run.start_run(&pipeline_id_for_run, &StreamName::new("all"))
+            })
+            .await
+            .map_err(|e| {
+                PipelineError::Infrastructure(anyhow::anyhow!("start_run task panicked: {e}"))
+            })?
+            .map_err(|e| PipelineError::Infrastructure(e.into()))?
+        };
 
-        let result = finalize_run(
+        send_progress(
+            &progress_tx,
+            ProgressEvent::PhaseChange {
+                phase: Phase::Loading,
+            },
+        );
+        let modules = load_modules(config, &plugins).await?;
+        let config_for_build = config.clone();
+        let state_for_build = state_for_execution.clone();
+        let max_records = options.limit;
+        let source_manifest_for_build = plugins.source_manifest.clone();
+        let stream_build = tokio::task::spawn_blocking(move || {
+            build_stream_contexts(
+                &config_for_build,
+                state_for_build.as_ref(),
+                max_records,
+                source_manifest_for_build.as_ref(),
+            )
+        })
+        .await
+        .map_err(|e| {
+            PipelineError::Infrastructure(anyhow::anyhow!(
+                "build_stream_contexts task panicked: {e}"
+            ))
+        })??;
+        send_progress(
+            &progress_tx,
+            ProgressEvent::PhaseChange {
+                phase: Phase::Running,
+            },
+        );
+        ensure_not_cancelled(cancel_token, "Pipeline cancelled before stream execution")?;
+        let aggregated = execute_streams(
             config,
-            &pipeline_id,
-            state.clone(),
-            run_id,
-            attempt,
-            start,
+            &plugins,
             &modules,
-            aggregated,
+            &stream_build,
+            state_for_execution.clone(),
+            options,
+            &progress_tx,
+            cancel_token,
         )
         .await?;
-        Ok(PipelineOutcome::Run(result))
-    })
-    .await
+
+        send_progress(
+            &progress_tx,
+            ProgressEvent::PhaseChange {
+                phase: Phase::Finished,
+            },
+        );
+        preserve_real_outcome_after_stream_execution(cancel_token, async move {
+            if options.dry_run {
+                let duration_secs = start.elapsed().as_secs_f64();
+                let src_perf = aggregated.total_read_summary.perf.as_ref();
+                return Ok(PipelineOutcome::DryRun(DryRunResult {
+                    streams: aggregated.dry_run_streams,
+                    source: build_source_timing(
+                        &aggregated.src_timing_maxima,
+                        &aggregated.src_timings,
+                        src_perf,
+                        modules.source_module_load_ms,
+                    ),
+                    transform_count: config.transforms.len(),
+                    transform_duration_secs: aggregated.transform_durations.iter().sum(),
+                    duration_secs,
+                }));
+            }
+
+            let result = finalize_run(
+                config,
+                &pipeline_id,
+                state_for_execution.clone(),
+                run_id,
+                attempt,
+                start,
+                &modules,
+                aggregated,
+            )
+            .await?;
+            Ok(PipelineOutcome::Run(result))
+        })
+        .await
+    }
+    .await;
+
+    let state_for_drop = state;
+    run_blocking_infrastructure_task(
+        move || {
+            drop(state_for_drop);
+            Ok(())
+        },
+        "drop_state_backend",
+    )
+    .await?;
+
+    execution_result
 }
 
 async fn load_modules(
@@ -3061,6 +3100,44 @@ resources:
                 .as_slice(),
             &[(RunStatus::Completed, None)]
         );
+    }
+
+    #[tokio::test]
+    async fn blocking_infrastructure_helper_moves_runtime_sensitive_init_off_worker_threads() {
+        let value = run_blocking_infrastructure_task(
+            || {
+                let runtime = tokio::runtime::Runtime::new().expect("runtime");
+                runtime.block_on(async { Ok::<_, anyhow::Error>(7) })
+            },
+            "test_blocking_init",
+        )
+        .await
+        .expect("blocking helper should allow runtime creation");
+
+        assert_eq!(value, 7);
+    }
+
+    #[tokio::test]
+    async fn blocking_infrastructure_helper_moves_runtime_sensitive_drop_off_worker_threads() {
+        struct RuntimeOnDrop;
+
+        impl Drop for RuntimeOnDrop {
+            fn drop(&mut self) {
+                let runtime = tokio::runtime::Runtime::new().expect("runtime in drop");
+                runtime.block_on(async {});
+            }
+        }
+
+        run_blocking_infrastructure_task(
+            || {
+                let value = RuntimeOnDrop;
+                drop(value);
+                Ok::<_, anyhow::Error>(())
+            },
+            "test_blocking_drop",
+        )
+        .await
+        .expect("blocking helper should allow runtime-sensitive drop");
     }
 }
 

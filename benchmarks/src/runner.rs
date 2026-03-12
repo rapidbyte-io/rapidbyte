@@ -419,7 +419,13 @@ fn execute_real_postgres_pipeline(
         rapidbyte_bin,
     )?;
     let correctness = enforce_row_count_assertions(&scenario.id, workload, &bench_json)?;
-    run_result_from_bench_json(scenario, artifact_context, bench_json, correctness)
+    run_result_from_bench_json(
+        scenario,
+        artifact_context,
+        bench_json,
+        correctness,
+        distributed_runtime.as_ref(),
+    )
 }
 
 fn resolve_distributed_runtime(
@@ -669,12 +675,13 @@ fn run_result_from_bench_json(
     artifact_context: &ArtifactContext,
     bench_json: JsonValue,
     correctness: ArtifactCorrectness,
+    distributed_runtime: Option<&DistributedRuntimeProfile>,
 ) -> Result<RunResult> {
     let duration_secs = required_f64(&bench_json, "duration_secs")?;
     let records_written = required_u64(&bench_json, "records_written")?;
     let bytes_written = required_u64(&bench_json, "bytes_written")?;
     let dest_recv_count = optional_u64(&bench_json, "dest_recv_count").unwrap_or(1);
-    let connector_metrics = json!({
+    let mut connector_metrics = json!({
         "source": {
             "duration_secs": optional_f64(&bench_json, "source_duration_secs"),
             "connect_secs": optional_f64(&bench_json, "source_connect_secs"),
@@ -712,6 +719,13 @@ fn run_result_from_bench_json(
             .cloned()
             .unwrap_or(JsonValue::Array(vec![])),
     });
+    if let Some(runtime) = distributed_runtime {
+        connector_metrics["distributed"] = json!({
+            "controller_url": runtime.controller_url,
+            "agent_count": runtime.agent_count,
+            "flight_endpoint": runtime.agent_flight_url,
+        });
+    }
 
     Ok(RunResult {
         suite_id: scenario.suite.clone(),
@@ -733,6 +747,10 @@ fn run_result_from_bench_json(
         execution_flags: json!({
             "synthetic": false,
             "aot": scenario.benchmark.aot,
+            "execution_mode": match scenario.benchmark.execution_mode {
+                crate::scenario::BenchmarkExecutionMode::Local => "local",
+                crate::scenario::BenchmarkExecutionMode::Distributed => "distributed",
+            },
         }),
         correctness,
     })
@@ -889,9 +907,14 @@ mod tests {
             serde_json::from_str(&sample_bench_json(1_000, 1_000)).expect("bench json");
         let correctness = enforce_row_count_assertions(&scenario.id, &workload, &bench_json_value)
             .expect("correctness");
-        let run =
-            run_result_from_bench_json(&scenario, &artifact_context(), bench_json, correctness)
-                .expect("run result");
+        let run = run_result_from_bench_json(
+            &scenario,
+            &artifact_context(),
+            bench_json,
+            correctness,
+            None,
+        )
+        .expect("run result");
         let artifact = materialize_artifact(run).expect("artifact");
 
         assert_eq!(artifact.scenario_id, "pg_dest_insert");
@@ -925,8 +948,14 @@ mod tests {
         )
         .expect("correctness");
         let artifact = materialize_artifact(
-            run_result_from_bench_json(&scenario, &artifact_context(), bench_json, correctness)
-                .expect("run result"),
+            run_result_from_bench_json(
+                &scenario,
+                &artifact_context(),
+                bench_json,
+                correctness,
+                None,
+            )
+            .expect("run result"),
         )
         .expect("artifact");
 
@@ -1366,13 +1395,53 @@ mod tests {
         let correctness = enforce_row_count_assertions(&scenario.id, &workload, &bench_json_value)
             .expect("correctness");
         let artifact = materialize_artifact(
-            run_result_from_bench_json(&scenario, &artifact_context(), bench_json, correctness)
-                .expect("run result"),
+            run_result_from_bench_json(
+                &scenario,
+                &artifact_context(),
+                bench_json,
+                correctness,
+                None,
+            )
+            .expect("run result"),
         )
         .expect("artifact");
 
         assert_eq!(artifact.build_mode, "release");
         assert_eq!(artifact.execution_flags["aot"], true);
+    }
+
+    #[test]
+    fn distributed_artifacts_include_additive_runtime_metrics() {
+        let mut scenario = sample_postgres_scenario("copy");
+        scenario.id = "pg_dest_copy_release_distributed".to_string();
+        scenario.benchmark.execution_mode = BenchmarkExecutionMode::Distributed;
+
+        let bench_json: JsonValue = serde_json::from_str(&sample_bench_json(1_000, 1_000)).unwrap();
+        let correctness = enforce_row_count_assertions(
+            &scenario.id,
+            &resolve_workload_plan(&scenario).expect("workload"),
+            &bench_json,
+        )
+        .expect("correctness");
+        let artifact = materialize_artifact(
+            run_result_from_bench_json(
+                &scenario,
+                &artifact_context(),
+                bench_json,
+                correctness,
+                Some(&sample_distributed_runtime()),
+            )
+            .expect("run result"),
+        )
+        .expect("artifact");
+
+        assert_eq!(
+            artifact.connector_metrics["distributed"]["controller_url"],
+            "http://127.0.0.1:56090"
+        );
+        assert_eq!(artifact.connector_metrics["distributed"]["agent_count"], 1);
+        assert_eq!(artifact.execution_flags["execution_mode"], "distributed");
+        assert_eq!(artifact.canonical_metrics["duration_secs"], 2.0);
     }
 
     #[test]

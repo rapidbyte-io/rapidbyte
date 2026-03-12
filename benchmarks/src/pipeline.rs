@@ -65,7 +65,10 @@ fn render_pipeline_yaml_with_environment_and_state(
             ),
         );
     }
-    root.insert(str_key("state"), render_state_mapping(state_connection));
+    root.insert(
+        str_key("state"),
+        render_state_mapping(scenario, env, state_connection),
+    );
 
     serde_yaml::to_string(&root).context("failed to serialize rendered pipeline")
 }
@@ -89,14 +92,36 @@ pub fn write_rendered_pipeline(
     Ok(RenderedPipeline { path, yaml })
 }
 
-fn render_state_mapping(state_connection: Option<&Path>) -> YamlValue {
+fn render_state_mapping(
+    scenario: &ScenarioManifest,
+    env: &crate::scenario::PostgresBenchmarkEnvironment,
+    state_connection: Option<&Path>,
+) -> YamlValue {
     let mut state = Mapping::new();
-    state.insert(str_key("backend"), YamlValue::String("sqlite".to_string()));
-    if let Some(path) = state_connection {
+    if scenario.benchmark.execution_mode == crate::scenario::BenchmarkExecutionMode::Distributed {
+        state.insert(
+            str_key("backend"),
+            YamlValue::String("postgres".to_string()),
+        );
         state.insert(
             str_key("connection"),
-            YamlValue::String(path.display().to_string()),
+            YamlValue::String(format!(
+                "host={} port={} user={} password={} dbname={}",
+                env.source.host,
+                env.source.port,
+                env.source.user,
+                env.source.password,
+                env.source.database
+            )),
         );
+    } else {
+        state.insert(str_key("backend"), YamlValue::String("sqlite".to_string()));
+        if let Some(path) = state_connection {
+            state.insert(
+                str_key("connection"),
+                YamlValue::String(path.display().to_string()),
+            );
+        }
     }
     YamlValue::Mapping(state)
 }
@@ -109,15 +134,18 @@ fn str_key(value: &str) -> YamlValue {
 mod tests {
     use std::fs;
 
-    use rapidbyte_engine::config::{parser::parse_pipeline_str, types::PipelineWriteMode};
+    use rapidbyte_engine::config::{
+        parser::parse_pipeline_str,
+        types::{PipelineWriteMode, StateBackendKind},
+    };
     use rapidbyte_types::wire::SyncMode;
 
     use super::*;
     use crate::scenario::{
-        BenchmarkKind, ConnectorOptions, DestinationConnectorOptions, EnvironmentConfig,
-        ExecutionProfile, PostgresBenchmarkEnvironment, PostgresConnectionProfile,
-        ScenarioAssertions, ScenarioConnectorRef, ScenarioManifest, SourceConnectorOptions,
-        TransformConnectorOptions, WorkloadProfile,
+        BenchmarkExecutionMode, BenchmarkKind, ConnectorOptions, DestinationConnectorOptions,
+        EnvironmentConfig, ExecutionProfile, PostgresBenchmarkEnvironment,
+        PostgresConnectionProfile, ScenarioAssertions, ScenarioConnectorRef, ScenarioManifest,
+        SourceConnectorOptions, TransformConnectorOptions, WorkloadProfile,
     };
     use crate::workload::WorkloadFamily;
 
@@ -185,6 +213,27 @@ mod tests {
             .expect("rendered pipeline should pin state db path");
         assert!(connection.starts_with(temp_root.to_string_lossy().as_ref()));
         assert!(connection.ends_with("pg_dest_insert.state.db"));
+    }
+
+    #[test]
+    fn writes_distributed_pipeline_with_postgres_state_backend() {
+        let mut scenario = sample_postgres_pipeline("copy");
+        scenario.benchmark.execution_mode = BenchmarkExecutionMode::Distributed;
+        let temp_root = temp_dir("pipeline-distributed-state");
+
+        let env = scenario.environment.postgres.clone().expect("env");
+        let rendered =
+            write_rendered_pipeline(&scenario, &env, &temp_root).expect("write pipeline");
+        let yaml = fs::read_to_string(&rendered.path).expect("read rendered pipeline");
+        let parsed = parse_pipeline_str(&yaml).expect("rendered yaml must parse");
+
+        assert_eq!(parsed.state.backend, StateBackendKind::Postgres);
+        let connection = parsed
+            .state
+            .connection
+            .expect("distributed pipeline should pin postgres state connection");
+        assert!(connection.contains("host=source-db"));
+        assert!(connection.contains("dbname=bench_source"));
     }
 
     #[test]
