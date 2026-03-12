@@ -27,4 +27,5 @@ pub mod proto;
 pub mod registry;
 pub mod run_state;
 pub mod scheduler;
+pub mod state;
 pub mod watcher;
