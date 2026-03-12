@@ -8,7 +8,7 @@ use std::sync::Arc;
 use arrow::ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
 use arrow_flight::flight_service_server::{FlightService, FlightServiceServer};
 use arrow_flight::{
-    Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
+    Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightEndpoint, FlightInfo,
     HandshakeRequest, HandshakeResponse, PollInfo, PutResult, SchemaAsIpc, SchemaResult, Ticket,
 };
 use tokio::sync::RwLock;
@@ -30,6 +30,28 @@ impl PreviewFlightService {
     #[must_use]
     pub fn into_server(self) -> FlightServiceServer<Self> {
         FlightServiceServer::new(self)
+    }
+
+    async fn lookup_stream(
+        &self,
+        payload: &crate::ticket::TicketPayload,
+    ) -> Result<(Vec<arrow::record_batch::RecordBatch>, u64, u64), Status> {
+        let spool = self.spool.read().await;
+        let dry_run = spool
+            .get(&payload.task_id)
+            .ok_or_else(|| Status::not_found("Preview not found or expired"))?;
+        dry_run
+            .streams
+            .iter()
+            .find(|stream| stream.stream_name == payload.stream_name)
+            .map(|stream| {
+                (
+                    stream.batches.clone(),
+                    stream.total_rows,
+                    stream.total_bytes,
+                )
+            })
+            .ok_or_else(|| Status::not_found("Preview stream not found"))
     }
 }
 
@@ -55,25 +77,14 @@ impl FlightService for PreviewFlightService {
             .verify(&ticket_bytes)
             .map_err(|e| Status::unauthenticated(format!("Invalid ticket: {e}")))?;
 
-        // Clone batches under the spool lock, then release it before IPC encoding
-        let all_batches = {
-            let spool = self.spool.read().await;
-            let dry_run = spool
-                .get(&payload.task_id)
-                .ok_or_else(|| Status::not_found("Preview not found or expired"))?;
-            let mut batches = Vec::new();
-            for stream in &dry_run.streams {
-                batches.extend(stream.batches.iter().cloned());
-            }
-            batches
-        };
+        let (batches, _, _) = self.lookup_stream(&payload).await?;
 
-        if all_batches.is_empty() {
+        if batches.is_empty() {
             let stream = tokio_stream::empty();
             return Ok(Response::new(Box::pin(stream)));
         }
 
-        let schema = all_batches[0].schema();
+        let schema = batches[0].schema();
 
         // IPC encoding happens outside the spool lock
         let options = IpcWriteOptions::default();
@@ -83,7 +94,7 @@ impl FlightService for PreviewFlightService {
         let data_gen = IpcDataGenerator::default();
         let mut dictionary_tracker = DictionaryTracker::new(false);
 
-        for batch in &all_batches {
+        for batch in &batches {
             let (encoded_dictionaries, encoded_batch) = data_gen
                 .encoded_batch(batch, &mut dictionary_tracker, &options)
                 .map_err(|e| Status::internal(format!("Failed to encode batch: {e}")))?;
@@ -110,16 +121,15 @@ impl FlightService for PreviewFlightService {
             .verify(&descriptor.cmd)
             .map_err(|e| Status::unauthenticated(format!("Invalid ticket: {e}")))?;
 
-        let spool = self.spool.read().await;
-        let dry_run = spool
-            .get(&payload.task_id)
-            .ok_or_else(|| Status::not_found("Preview not found or expired"))?;
-
-        let total_records: u64 = dry_run.streams.iter().map(|s| s.total_rows).sum();
-        let total_bytes: u64 = dry_run.streams.iter().map(|s| s.total_bytes).sum();
+        let (batches, total_rows, total_bytes) = self.lookup_stream(&payload).await?;
+        let endpoint = FlightEndpoint::new().with_ticket(Ticket::new(descriptor.cmd.clone()));
 
         let info = FlightInfo::new()
-            .with_total_records(total_records.cast_signed())
+            .try_with_schema(batches[0].schema().as_ref())
+            .map_err(|e| Status::internal(format!("Failed to encode preview schema: {e}")))?
+            .with_endpoint(endpoint)
+            .with_descriptor(descriptor)
+            .with_total_records(total_rows.cast_signed())
             .with_total_bytes(total_bytes.cast_signed());
 
         Ok(Response::new(info))
@@ -181,5 +191,159 @@ impl FlightService for PreviewFlightService {
         _request: Request<Streaming<FlightData>>,
     ) -> Result<Response<Self::DoExchangeStream>, Status> {
         Err(Status::unimplemented("do_exchange not supported"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use arrow::array::{Int32Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use rapidbyte_engine::result::SourceTiming;
+    use rapidbyte_engine::{DryRunResult, DryRunStreamResult};
+    use tokio_stream::StreamExt;
+
+    fn sign_ticket(key: &[u8], payload: &crate::ticket::TicketPayload) -> Vec<u8> {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        type HmacSha256 = Hmac<Sha256>;
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(payload.run_id.len() as u32).to_le_bytes());
+        buf.extend_from_slice(payload.run_id.as_bytes());
+        buf.extend_from_slice(&(payload.task_id.len() as u32).to_le_bytes());
+        buf.extend_from_slice(payload.task_id.as_bytes());
+        buf.extend_from_slice(&(payload.stream_name.len() as u32).to_le_bytes());
+        buf.extend_from_slice(payload.stream_name.as_bytes());
+        buf.extend_from_slice(&payload.lease_epoch.to_le_bytes());
+        buf.extend_from_slice(&payload.expires_at_unix.to_le_bytes());
+
+        let mut mac = HmacSha256::new_from_slice(key).unwrap();
+        mac.update(&buf);
+        buf.extend_from_slice(&mac.finalize().into_bytes());
+        buf
+    }
+
+    fn future_expiry() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 300
+    }
+
+    fn make_service() -> (PreviewFlightService, Vec<u8>, Arc<RwLock<PreviewSpool>>) {
+        let key = b"test-secret-key-32-bytes-long!!!".to_vec();
+        let spool = Arc::new(RwLock::new(PreviewSpool::new(
+            std::time::Duration::from_secs(300),
+        )));
+        let service = PreviewFlightService::new(spool.clone(), Arc::new(TicketVerifier::new(&key)));
+        (service, key, spool)
+    }
+
+    fn users_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1, 2, 3]))]).unwrap()
+    }
+
+    fn orders_batch() -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("name", DataType::Utf8, false)]));
+        RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(vec!["a", "b"]))]).unwrap()
+    }
+
+    fn dry_run_result() -> DryRunResult {
+        DryRunResult {
+            streams: vec![
+                DryRunStreamResult {
+                    stream_name: "users".into(),
+                    batches: vec![users_batch()],
+                    total_rows: 3,
+                    total_bytes: 12,
+                },
+                DryRunStreamResult {
+                    stream_name: "orders".into(),
+                    batches: vec![orders_batch()],
+                    total_rows: 2,
+                    total_bytes: 8,
+                },
+            ],
+            source: SourceTiming::default(),
+            transform_count: 0,
+            transform_duration_secs: 0.0,
+            duration_secs: 1.0,
+        }
+    }
+
+    #[tokio::test]
+    async fn do_get_returns_only_requested_stream_batches() {
+        let (service, key, spool) = make_service();
+        spool.write().await.store("task-1".into(), dry_run_result());
+
+        let ticket = sign_ticket(
+            &key,
+            &crate::ticket::TicketPayload {
+                run_id: "run-1".into(),
+                task_id: "task-1".into(),
+                stream_name: "users".into(),
+                lease_epoch: 1,
+                expires_at_unix: future_expiry(),
+            },
+        );
+
+        let mut stream = service
+            .do_get(Request::new(Ticket {
+                ticket: ticket.into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let mut flight_data = Vec::new();
+        while let Some(item) = stream.next().await {
+            flight_data.push(item.unwrap());
+        }
+
+        let batches = arrow_flight::utils::flight_data_to_batches(&flight_data).unwrap();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].schema().fields()[0].name(), "id");
+        assert_eq!(batches[0].num_rows(), 3);
+    }
+
+    #[tokio::test]
+    async fn get_flight_info_returns_schema_and_ticket_for_requested_stream() {
+        let (service, key, spool) = make_service();
+        spool.write().await.store("task-1".into(), dry_run_result());
+
+        let ticket = sign_ticket(
+            &key,
+            &crate::ticket::TicketPayload {
+                run_id: "run-1".into(),
+                task_id: "task-1".into(),
+                stream_name: "users".into(),
+                lease_epoch: 1,
+                expires_at_unix: future_expiry(),
+            },
+        );
+
+        let info = service
+            .get_flight_info(Request::new(FlightDescriptor::new_cmd(ticket.clone())))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(info.total_records, 3);
+        assert_eq!(info.total_bytes, 12);
+        assert!(!info.schema.is_empty());
+        assert_eq!(info.endpoint.len(), 1);
+        assert_eq!(
+            info.endpoint[0].ticket.as_ref().unwrap().ticket.as_ref(),
+            ticket.as_slice()
+        );
+        assert!(info.flight_descriptor.is_some());
     }
 }
