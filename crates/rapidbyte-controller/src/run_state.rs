@@ -239,7 +239,7 @@ fn is_valid_transition(from: RunState, to: RunState) -> bool {
         (RunState::Pending, RunState::Assigned | RunState::Cancelled)
             | (
                 RunState::Assigned,
-                RunState::Running | RunState::Failed | RunState::Cancelled
+                RunState::Running | RunState::Failed | RunState::Cancelled | RunState::TimedOut
             )
             | (
                 RunState::Running | RunState::PreviewReady,
@@ -299,6 +299,14 @@ mod tests {
         store.create_run("r1".into(), "pipe".into(), None);
         store.transition("r1", RunState::Assigned).unwrap();
         assert!(store.transition("r1", RunState::Cancelled).is_ok());
+    }
+
+    #[test]
+    fn valid_transition_assigned_to_timed_out() {
+        let mut store = RunStore::new();
+        store.create_run("r1".into(), "pipe".into(), None);
+        store.transition("r1", RunState::Assigned).unwrap();
+        assert!(store.transition("r1", RunState::TimedOut).is_ok());
     }
 
     #[test]

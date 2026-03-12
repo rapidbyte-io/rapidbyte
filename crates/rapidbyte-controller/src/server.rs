@@ -64,6 +64,52 @@ fn validate_auth_config(config: &ControllerConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn handle_expired_lease(state: &ControllerState, task_id: &str, run_id: &str) {
+    let error_msg = {
+        let mut runs = state.runs.write().await;
+        if let Ok(()) = runs.transition(run_id, InternalRunState::TimedOut) {
+            let record = runs.get_run_mut(run_id);
+            if let Some(r) = record {
+                let msg = format!("Task {task_id} lease expired (agent unresponsive)");
+                r.error_message = Some(msg.clone());
+                Some((msg, r.attempt))
+            } else {
+                None
+            }
+        } else {
+            let actual_state = runs.get_run(run_id).map(|r| r.state);
+            if let Some(actual_state) = actual_state {
+                tracing::warn!(
+                    task_id,
+                    run_id,
+                    ?actual_state,
+                    "Skipping lease-expiry terminal event because run could not transition to TimedOut"
+                );
+            }
+            None
+        }
+    };
+
+    if let Some((msg, attempt)) = error_msg {
+        state.watchers.write().await.publish_terminal(
+            run_id,
+            RunEvent {
+                run_id: run_id.to_string(),
+                event: Some(run_event::Event::Failed(RunFailed {
+                    error: Some(TaskError {
+                        code: "LEASE_EXPIRED".into(),
+                        message: msg,
+                        retryable: true,
+                        safe_to_retry: true,
+                        commit_state: String::new(),
+                    }),
+                    attempt,
+                })),
+            },
+        );
+    }
+}
+
 /// Start the controller gRPC server.
 ///
 /// # Errors
@@ -109,40 +155,7 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
             let expired = lease_state.tasks.write().await.expire_leases();
             for (task_id, run_id) in &expired {
                 info!(task_id, run_id, "Task lease expired");
-
-                // Transition run and capture error message for the terminal event
-                let error_msg = {
-                    let mut runs = lease_state.runs.write().await;
-                    let _ = runs.transition(run_id, InternalRunState::TimedOut);
-                    let record = runs.get_run_mut(run_id);
-                    if let Some(r) = record {
-                        let msg = format!("Task {task_id} lease expired (agent unresponsive)");
-                        r.error_message = Some(msg.clone());
-                        Some((msg, r.attempt))
-                    } else {
-                        None
-                    }
-                };
-
-                // Notify any WatchRun subscribers
-                if let Some((msg, attempt)) = error_msg {
-                    lease_state.watchers.write().await.publish_terminal(
-                        run_id,
-                        RunEvent {
-                            run_id: run_id.clone(),
-                            event: Some(run_event::Event::Failed(RunFailed {
-                                error: Some(TaskError {
-                                    code: "LEASE_EXPIRED".into(),
-                                    message: msg,
-                                    retryable: true,
-                                    safe_to_retry: true,
-                                    commit_state: String::new(),
-                                }),
-                                attempt,
-                            })),
-                        },
-                    );
-                }
+                handle_expired_lease(&lease_state, task_id, run_id).await;
             }
         }
     });
@@ -194,5 +207,38 @@ mod tests {
             ..Default::default()
         };
         validate_auth_config(&config).unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_expired_lease_transitions_assigned_run_to_timed_out() {
+        let state = ControllerState::new(b"test-signing-key");
+        let (run_id, _) = {
+            let mut runs = state.runs.write().await;
+            runs.create_run("run-1".into(), "pipe".into(), None)
+        };
+        let task_id = {
+            let mut tasks = state.tasks.write().await;
+            let task_id = tasks.enqueue(run_id.clone(), b"yaml".to_vec(), false, None, 1);
+            let assignment = tasks
+                .poll("agent-1", Duration::from_secs(60), &state.epoch_gen)
+                .expect("task should be assigned");
+            assert_eq!(assignment.task_id, task_id);
+            task_id
+        };
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+        }
+
+        handle_expired_lease(&state, &task_id, &run_id).await;
+
+        let runs = state.runs.read().await;
+        let record = runs.get_run(&run_id).unwrap();
+        assert_eq!(record.state, InternalRunState::TimedOut);
+        assert_eq!(
+            record.error_message.as_deref(),
+            Some(format!("Task {task_id} lease expired (agent unresponsive)").as_str())
+        );
     }
 }

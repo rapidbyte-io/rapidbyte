@@ -183,8 +183,7 @@ async fn fetch_and_display_preview(
                 flight_data_vec.push(flight_data);
             }
 
-            arrow_flight::utils::flight_data_to_batches(&flight_data_vec)
-                .context("Failed to decode Flight preview data")
+            decode_flight_batches(&flight_data_vec)
         }
     })
     .await?;
@@ -212,6 +211,15 @@ async fn fetch_and_display_preview(
     }
 
     Ok(())
+}
+
+fn decode_flight_batches(flight_data: &[arrow_flight::FlightData]) -> Result<Vec<RecordBatch>> {
+    if flight_data.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    arrow_flight::utils::flight_data_to_batches(flight_data)
+        .context("Failed to decode Flight preview data")
 }
 
 async fn fetch_preview_batches<F, Fut>(
@@ -388,6 +396,12 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("Flight DoGet failed"));
+    }
+
+    #[test]
+    fn decode_flight_batches_accepts_empty_stream() {
+        let batches = decode_flight_batches(&[]).unwrap();
+        assert!(batches.is_empty());
     }
 
     #[test]

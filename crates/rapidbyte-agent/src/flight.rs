@@ -364,6 +364,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn do_get_returns_empty_stream_for_zero_row_preview() {
+        let (service, key, spool) = make_service();
+        spool.write().await.store(
+            PreviewKey {
+                run_id: "run-1".into(),
+                task_id: "task-1".into(),
+                lease_epoch: 1,
+            },
+            empty_stream_result(),
+        );
+
+        let ticket = sign_ticket(
+            &key,
+            &crate::ticket::TicketPayload {
+                run_id: "run-1".into(),
+                task_id: "task-1".into(),
+                stream_name: "empty".into(),
+                lease_epoch: 1,
+                expires_at_unix: future_expiry(),
+            },
+        );
+
+        let mut stream = service
+            .do_get(Request::new(Ticket {
+                ticket: ticket.into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let mut flight_data = Vec::new();
+        while let Some(item) = stream.next().await {
+            flight_data.push(item.unwrap());
+        }
+
+        assert!(flight_data.is_empty());
+    }
+
+    #[tokio::test]
     async fn get_flight_info_returns_schema_and_ticket_for_requested_stream() {
         let (service, key, spool) = make_service();
         spool.write().await.store(
