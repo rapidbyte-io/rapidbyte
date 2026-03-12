@@ -2,12 +2,15 @@
 
 [![CI](https://github.com/rapidbyte-io/rapidbyte/actions/workflows/ci.yml/badge.svg)](https://github.com/rapidbyte-io/rapidbyte/actions/workflows/ci.yml) [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE) [![Rust 1.75+](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](rust-toolchain.toml) [![Docs: Contributing](https://img.shields.io/badge/docs-contributing-0A7EA4.svg)](CONTRIBUTING.md)
 
-Single-binary data pipeline engine with Wasm-sandboxed plugins.
+Single-executable data pipeline runtime with standalone and distributed
+execution modes.
 
 Rapidbyte replaces managed ETL platforms like Fivetran and Airbyte with a single
 native binary. Plugins run as WASI components inside a Wasmtime sandbox with
-host-proxied networking. Data flows between stages as Arrow IPC batches -- no
-JVM, no Docker, no sidecar processes.
+host-proxied networking. The same `rapidbyte` executable can run pipelines
+locally or as a distributed controller/agent runtime. Data flows between stages
+as Arrow IPC batches -- no JVM, no Docker, no sidecar processes in the data
+path.
 
 ## Features
 
@@ -22,6 +25,8 @@ JVM, no Docker, no sidecar processes.
 - **Host-proxied networking** with per-plugin ACLs (no raw sockets in guest)
 - **State backends:** SQLite or Postgres for cursor, checkpoint, and run metadata
 - **Dry-run mode** with `--limit` for instant feedback without writing data
+- **Distributed controller/agent runtime** for queueing, remote execution, and run tracking
+- **Distributed preview replay** over Arrow Flight with signed preview access
 - **Pipeline parallelism** -- stages run concurrently, connected by bounded channels
 
 ## Quick Start
@@ -64,13 +69,21 @@ Install the lightweight local Git hooks once after clone:
 just install-hooks
 ```
 
+For distributed controller/agent execution, see
+[Distributed Runtime](#distributed-runtime).
+
 ## CLI
 
 | Command | Description |
 |---------|-------------|
 | `rapidbyte run <pipeline.yaml>` | Execute a data pipeline |
+| `rapidbyte status <run_id>` | Fetch the current state of a distributed run |
+| `rapidbyte watch <run_id>` | Stream progress and terminal status for a distributed run |
+| `rapidbyte list-runs` | List recent distributed runs |
 | `rapidbyte check <pipeline.yaml>` | Validate config, manifests, and connectivity |
 | `rapidbyte discover <pipeline.yaml>` | Discover available streams from a source |
+| `rapidbyte controller` | Start the distributed controller server |
+| `rapidbyte agent` | Start a distributed worker agent |
 | `rapidbyte plugins` | List available plugins |
 | `rapidbyte scaffold <name>` | Scaffold a new plugin project |
 
@@ -84,6 +97,9 @@ just install-hooks
 | `--quiet` | Quiet | Suppress all output; exit code only, errors on stderr |
 
 **Other flags:** `--dry-run`, `--limit N`
+
+`run` works in standalone mode by default. Distributed execution is enabled
+when you pass `--controller <url>` or set `RAPIDBYTE_CONTROLLER`.
 
 ## Pipeline Configuration
 
@@ -128,6 +144,35 @@ state:
 
 See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for the full plugin protocol specification.
 
+## Distributed Runtime
+
+Rapidbyte supports two execution modes:
+
+- **Standalone:** `rapidbyte run pipeline.yaml`
+- **Distributed:** `rapidbyte --controller http://127.0.0.1:9090 run pipeline.yaml`
+
+In distributed mode, the controller owns run/task/agent metadata and scheduling,
+while agents execute pipelines and serve dry-run previews. The user-facing
+distributed CLI surface is:
+
+- `run`
+- `status`
+- `watch`
+- `list-runs`
+- `controller`
+- `agent`
+
+High-level operational rules:
+
+- Distributed mode requires a shared state backend such as Postgres.
+- SQLite is for standalone and local development workflows.
+- Controller auth is required by default.
+- Preview signing keys should be explicitly configured outside local/dev.
+- TLS is supported for both control-plane gRPC and Flight preview access.
+
+See [`docs/ARCHITECTUREv2.md`](docs/ARCHITECTUREv2.md) for the detailed
+controller/agent design and security model.
+
 ## Plugins
 
 | Plugin | Type | Description |
@@ -158,6 +203,11 @@ ACLs.
                   Arrow IPC batches          Arrow IPC batches
 ```
 
+The distributed runtime layers a controller control plane and agent preview
+data plane on top of this same engine core. The controller schedules work and
+tracks runs; agents execute full pipelines and expose replay-based dry-run
+previews over Arrow Flight.
+
 ### Crate Dependency Graph
 
 ```
@@ -165,7 +215,9 @@ types          (leaf -- no internal deps)
   +-- state    (types)
   +-- runtime  (types, state)
   +-- engine   (types, runtime, state)
-  +-- cli      (engine, runtime, types)
+  +-- controller (types, state, engine)
+  +-- agent    (types, runtime, engine, state)
+  +-- cli      (engine, runtime, types, controller, agent)
 
 sdk            (types -- plugins depend only on this)
 ```
@@ -176,7 +228,9 @@ sdk            (types -- plugins depend only on this)
 | `rapidbyte-state` | State backend (SQLite, Postgres) |
 | `rapidbyte-runtime` | Wasmtime component runtime, host imports, sandbox |
 | `rapidbyte-engine` | Pipeline orchestrator, config parsing, Arrow utilities |
-| `rapidbyte-cli` | CLI binary (`run`, `check`, `discover`, `plugins`, `scaffold`) |
+| `rapidbyte-controller` | Distributed control plane (scheduling, run/task/agent state) |
+| `rapidbyte-agent` | Distributed worker runtime and Flight preview server |
+| `rapidbyte-cli` | CLI binary (`run`, `status`, `watch`, `list-runs`, `check`, `discover`, `controller`, `agent`) |
 | `rapidbyte-sdk` | Plugin SDK (protocol types, component host bindings) |
 
 ## Development
@@ -228,11 +282,12 @@ just bench-lab pg_dest_copy_release_distributed
 ```
 
 `pg_dest_copy_regression` is the cheap regression-tracking COPY benchmark.
-`pg_dest_copy_release` is the production-like release benchmark. Benchmark
-throughput and bandwidth are reported as end-to-end wall-clock pipeline rates,
-and the rendered bandwidth unit is `MiB/sec`. `just bench-lab` now uses the
-scenario manifest's declared environment by default; pass `env=...` only when
-you intentionally want to override it.
+`pg_dest_copy_release` is the production-like local release benchmark, and
+`pg_dest_copy_release_distributed` is its single-node distributed analogue.
+Benchmark throughput and bandwidth are reported as end-to-end wall-clock
+pipeline rates, and the rendered bandwidth unit is `MiB/sec`. `just bench-lab`
+uses the scenario manifest's declared environment by default; pass `env=...`
+only when you intentionally want to override it.
 
 For local performance-regression checks against the checked-in PR baseline:
 
@@ -244,6 +299,14 @@ The GitHub benchmark workflow is manual-only for now and is intended for
 maintainer-triggered runs, not routine pull-request CI.
 
 Benchmark details live in [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md).
+
+## Further Reading
+
+- [`docs/ARCHITECTUREv2.md`](docs/ARCHITECTUREv2.md) — distributed controller/agent architecture
+- [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md) — local and distributed benchmark usage
+- [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — protocol and wire-format details
+- [`docs/PLUGIN_DEV.md`](docs/PLUGIN_DEV.md) — plugin development guide
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — contributor workflow
 
 ## Contributing
 
