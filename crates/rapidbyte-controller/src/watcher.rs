@@ -38,6 +38,13 @@ impl RunWatchers {
         }
     }
 
+    /// Publish a terminal event and remove the channel in one operation.
+    /// Takes `&mut self` so only a single write lock is needed.
+    pub fn publish_terminal(&mut self, run_id: &str, event: RunEvent) {
+        self.publish(run_id, event);
+        self.channels.remove(run_id);
+    }
+
     /// Remove the channel for a run (cleanup after terminal state).
     pub fn remove(&mut self, run_id: &str) {
         self.channels.remove(run_id);

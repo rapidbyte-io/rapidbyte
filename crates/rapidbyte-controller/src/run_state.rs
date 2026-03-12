@@ -146,6 +146,16 @@ impl RunStore {
             .collect()
     }
 
+    /// Idempotent transition from Assigned to Running.
+    /// No-op if the run is already in Running or a later state.
+    pub fn ensure_running(&mut self, run_id: &str) {
+        if let Some(run) = self.runs.get(run_id) {
+            if run.state == RunState::Assigned {
+                let _ = self.transition(run_id, RunState::Running);
+            }
+        }
+    }
+
     /// Find a run by idempotency key.
     #[must_use]
     pub fn find_by_idempotency_key(&self, key: &str) -> Option<&RunRecord> {
@@ -165,7 +175,7 @@ fn is_valid_transition(from: RunState, to: RunState) -> bool {
     matches!(
         (from, to),
         (RunState::Pending, RunState::Assigned | RunState::Cancelled)
-            | (RunState::Assigned, RunState::Running)
+            | (RunState::Assigned, RunState::Running | RunState::Failed)
             | (
                 RunState::Running | RunState::PreviewReady,
                 RunState::Completed
