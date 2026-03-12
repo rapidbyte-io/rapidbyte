@@ -286,7 +286,7 @@ impl AgentService for AgentServiceImpl {
         let (run_id, attempt) = {
             let mut tasks = self.state.tasks.write().await;
             match tasks
-                .complete(&req.task_id, req.lease_epoch, succeeded)
+                .complete(&req.task_id, &req.agent_id, req.lease_epoch, succeeded)
                 .map_err(|e| Status::not_found(e.to_string()))?
             {
                 Some(info) => info,
@@ -762,6 +762,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_complete_task_rejects_wrong_agent() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let wrong_agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9092".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        let resp = svc
+            .complete_task(Request::new(CompleteTaskRequest {
+                agent_id: wrong_agent_id,
+                task_id: task.task_id.clone(),
+                lease_epoch: task.lease_epoch,
+                outcome: TaskOutcome::Completed.into(),
+                error: None,
+                metrics: None,
+                preview: None,
+                backend_run_id: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!resp.acknowledged);
+
+        let tasks = state.tasks.read().await;
+        let record = tasks.get(&task.task_id).unwrap();
+        assert_eq!(record.state, TaskState::Assigned);
+        assert_eq!(record.assigned_agent_id.as_deref(), Some(agent_id.as_str()));
+    }
+
+    #[tokio::test]
     async fn test_complete_task_safe_to_retry_requeues() {
         let state = test_state();
         let svc = AgentServiceImpl::new(state.clone());
@@ -1144,7 +1214,7 @@ mod tests {
 
         let task = match svc
             .poll_task(Request::new(PollTaskRequest {
-                agent_id,
+                agent_id: agent_id.clone(),
                 wait_seconds: 0,
             }))
             .await
@@ -1165,7 +1235,7 @@ mod tests {
 
         let resp = svc
             .complete_task(Request::new(CompleteTaskRequest {
-                agent_id: String::new(),
+                agent_id,
                 task_id: task.task_id,
                 lease_epoch: task.lease_epoch,
                 outcome: TaskOutcome::Completed.into(),
@@ -1213,7 +1283,7 @@ mod tests {
 
         let task = match svc
             .poll_task(Request::new(PollTaskRequest {
-                agent_id,
+                agent_id: agent_id.clone(),
                 wait_seconds: 0,
             }))
             .await
@@ -1234,7 +1304,7 @@ mod tests {
 
         let resp = svc
             .complete_task(Request::new(CompleteTaskRequest {
-                agent_id: String::new(),
+                agent_id,
                 task_id: task.task_id,
                 lease_epoch: task.lease_epoch,
                 outcome: TaskOutcome::Failed.into(),

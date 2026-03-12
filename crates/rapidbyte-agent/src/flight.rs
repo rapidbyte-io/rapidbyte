@@ -15,12 +15,11 @@ use tokio::sync::RwLock;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::spool::{PreviewKey, PreviewSpool};
-use crate::ticket::{TicketPayload, TicketSigner, TicketVerifier};
+use crate::ticket::TicketVerifier;
 
 pub struct PreviewFlightService {
     spool: Arc<RwLock<PreviewSpool>>,
     verifier: Arc<TicketVerifier>,
-    signer: Arc<TicketSigner>,
 }
 
 impl PreviewFlightService {
@@ -28,7 +27,6 @@ impl PreviewFlightService {
         Self {
             spool,
             verifier: Arc::new(TicketVerifier::new(signing_key)),
-            signer: Arc::new(TicketSigner::new(signing_key)),
         }
     }
 
@@ -62,21 +60,6 @@ impl PreviewFlightService {
                 )
             })
             .ok_or_else(|| Status::not_found("Preview stream not found"))
-    }
-
-    fn ticket_for_stream(
-        &self,
-        key: &PreviewKey,
-        stream_name: &str,
-        expires_at_unix: u64,
-    ) -> Vec<u8> {
-        self.signer.sign(&TicketPayload {
-            run_id: key.run_id.clone(),
-            task_id: key.task_id.clone(),
-            stream_name: stream_name.to_string(),
-            lease_epoch: key.lease_epoch,
-            expires_at_unix,
-        })
     }
 }
 
@@ -184,42 +167,9 @@ impl FlightService for PreviewFlightService {
         &self,
         _request: Request<Criteria>,
     ) -> Result<Response<Self::ListFlightsStream>, Status> {
-        let listings = self.spool.write().await.list_active();
-        let infos = listings
-            .into_iter()
-            .map(|listing| {
-                let ticket = self.ticket_for_stream(
-                    &listing.key,
-                    &listing.stream_name,
-                    listing.expires_at_unix,
-                );
-                let endpoint = FlightEndpoint::new().with_ticket(Ticket::new(ticket.clone()));
-                let descriptor = FlightDescriptor::new_cmd(ticket);
-
-                let info = if let Some(schema) = listing.schema {
-                    FlightInfo::new()
-                        .try_with_schema(schema.as_ref())
-                        .map_err(|e| {
-                            Status::internal(format!(
-                                "Failed to encode preview schema for {}: {e}",
-                                listing.stream_name
-                            ))
-                        })?
-                } else {
-                    FlightInfo::new()
-                };
-
-                Ok(info
-                    .with_endpoint(endpoint)
-                    .with_descriptor(descriptor)
-                    .with_total_records(listing.total_rows.cast_signed())
-                    .with_total_bytes(listing.total_bytes.cast_signed()))
-            })
-            .collect::<Result<Vec<_>, Status>>()?;
-
-        Ok(Response::new(Box::pin(tokio_stream::iter(
-            infos.into_iter().map(Ok),
-        ))))
+        Err(Status::permission_denied(
+            "list_flights is disabled; obtain preview access from the controller",
+        ))
     }
 
     async fn get_schema(
@@ -561,7 +511,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_flights_returns_active_previews() {
+    async fn list_flights_is_disabled() {
         let (service, _key, spool) = make_service();
         spool.write().await.store(
             PreviewKey {
@@ -572,34 +522,14 @@ mod tests {
             dry_run_result(),
         );
 
-        let mut stream = service
+        let err = service
             .list_flights(Request::new(Criteria {
                 expression: Vec::new().into(),
             }))
             .await
-            .unwrap()
-            .into_inner();
+            .err()
+            .expect("list_flights should be disabled");
 
-        let mut infos = Vec::new();
-        while let Some(info) = stream.next().await {
-            infos.push(info.unwrap());
-        }
-
-        assert_eq!(infos.len(), 2);
-        assert!(infos.iter().all(|info| !info.endpoint.is_empty()));
-        assert!(infos.iter().all(|info| !info.schema.is_empty()));
-        assert!(infos.iter().all(|info| info.total_records > 0));
-
-        let ticket = infos[0].endpoint[0].ticket.as_ref().unwrap().ticket.clone();
-        let mut do_get = service
-            .do_get(Request::new(Ticket { ticket }))
-            .await
-            .unwrap()
-            .into_inner();
-        let mut flight_data = Vec::new();
-        while let Some(item) = do_get.next().await {
-            flight_data.push(item.unwrap());
-        }
-        assert!(!flight_data.is_empty());
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 }

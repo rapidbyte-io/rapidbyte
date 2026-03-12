@@ -169,6 +169,7 @@ impl TaskQueue {
     pub fn complete(
         &mut self,
         task_id: &str,
+        agent_id: &str,
         lease_epoch: u64,
         succeeded: bool,
     ) -> Result<Option<(String, u32)>, SchedulerError> {
@@ -183,6 +184,10 @@ impl TaskQueue {
         match &record.lease {
             Some(lease) if lease.is_valid(lease_epoch) => {}
             _ => return Ok(None),
+        }
+
+        if record.assigned_agent_id.as_deref() != Some(agent_id) {
+            return Ok(None);
         }
 
         record.state = if succeeded {
@@ -375,7 +380,7 @@ mod tests {
         let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
 
         let ack = q
-            .complete(&assignment.task_id, assignment.lease_epoch, true)
+            .complete(&assignment.task_id, "agent-1", assignment.lease_epoch, true)
             .unwrap();
         assert!(ack.is_some());
         assert_eq!(
@@ -392,7 +397,12 @@ mod tests {
 
         // Use a wrong epoch
         let ack = q
-            .complete(&assignment.task_id, assignment.lease_epoch + 999, true)
+            .complete(
+                &assignment.task_id,
+                "agent-1",
+                assignment.lease_epoch + 999,
+                true,
+            )
             .unwrap();
         assert!(ack.is_none());
     }
@@ -528,7 +538,8 @@ mod tests {
 
         assert_eq!(q.active_tasks_for_agent("agent-1"), 2);
 
-        q.complete(&first.task_id, first.lease_epoch, true).unwrap();
+        q.complete(&first.task_id, "agent-1", first.lease_epoch, true)
+            .unwrap();
         assert_eq!(q.active_tasks_for_agent("agent-1"), 1);
 
         q.cancel(&second.task_id).unwrap();
