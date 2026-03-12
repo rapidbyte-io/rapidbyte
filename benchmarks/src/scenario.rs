@@ -665,6 +665,38 @@ benchmark:
     }
 
     #[test]
+    fn distributed_lab_copy_release_scenario_matches_local_release_shape() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenarios/lab");
+        let local_release =
+            ScenarioManifest::from_path(&root.join("pg_dest_copy_release.yaml")).expect("release");
+        let distributed =
+            ScenarioManifest::from_path(&root.join("pg_dest_copy_release_distributed.yaml"))
+                .expect("distributed release");
+
+        assert_eq!(distributed.suite, "lab");
+        assert_eq!(distributed.kind, BenchmarkKind::Pipeline);
+        assert_eq!(
+            distributed.benchmark.execution_mode,
+            BenchmarkExecutionMode::Distributed
+        );
+        assert_eq!(
+            distributed.environment.reference.as_deref(),
+            Some("local-bench-distributed-postgres")
+        );
+        assert_eq!(distributed.workload, local_release.workload);
+        assert_eq!(
+            distributed.connector_options,
+            local_release.connector_options
+        );
+        assert_eq!(distributed.assertions, local_release.assertions);
+        assert_eq!(
+            distributed.benchmark.build_mode,
+            BenchmarkBuildMode::Release
+        );
+        assert!(distributed.benchmark.aot);
+    }
+
+    #[test]
     fn pr_smoke_scenario_references_committed_environment_profile() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scenarios/pr");
         let scenario = ScenarioManifest::from_path(&root.join("smoke.yaml")).expect("smoke");
