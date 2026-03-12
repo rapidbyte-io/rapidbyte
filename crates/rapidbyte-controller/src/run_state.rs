@@ -146,12 +146,12 @@ impl RunStore {
         Ok(())
     }
 
-    /// List runs, optionally filtered by state.
+    /// List runs, optionally filtered by a set of states.
     #[must_use]
-    pub fn list_runs(&self, state_filter: Option<RunState>) -> Vec<&RunRecord> {
+    pub fn list_runs(&self, state_filter: Option<&[RunState]>) -> Vec<&RunRecord> {
         self.runs
             .values()
-            .filter(|r| state_filter.is_none_or(|s| r.state == s))
+            .filter(|r| state_filter.is_none_or(|states| states.contains(&r.state)))
             .collect()
     }
 
@@ -302,7 +302,7 @@ mod tests {
         store.create_run("r2".into(), "pipe2".into(), None);
         store.transition("r1", RunState::Assigned).unwrap();
 
-        let pending = store.list_runs(Some(RunState::Pending));
+        let pending = store.list_runs(Some(&[RunState::Pending]));
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].run_id, "r2");
 

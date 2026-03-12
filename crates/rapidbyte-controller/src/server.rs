@@ -11,6 +11,7 @@ use crate::middleware::BearerAuthInterceptor;
 use crate::pipeline_service::PipelineServiceImpl;
 use crate::proto::rapidbyte::v1::agent_service_server::AgentServiceServer;
 use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineServiceServer;
+use crate::proto::rapidbyte::v1::{run_event, RunEvent, RunFailed, TaskError};
 use crate::run_state::RunState as InternalRunState;
 use crate::state::ControllerState;
 
@@ -25,11 +26,16 @@ pub struct ControllerConfig {
     pub auth_tokens: Vec<String>,
 }
 
+/// Default signing key used when no explicit key is configured.
+/// Shared between controller and agent so preview tickets work out of the box.
+/// **Not suitable for production** — always set `RAPIDBYTE_SIGNING_KEY` in deployed environments.
+const DEFAULT_SIGNING_KEY: &[u8] = b"rapidbyte-dev-signing-key-not-for-production";
+
 impl Default for ControllerConfig {
     fn default() -> Self {
         Self {
             listen_addr: "[::]:9090".parse().unwrap(),
-            signing_key: uuid::Uuid::new_v4().as_bytes().to_vec(),
+            signing_key: DEFAULT_SIGNING_KEY.to_vec(),
             agent_reap_interval: Duration::from_secs(15),
             agent_reap_timeout: Duration::from_secs(60),
             lease_check_interval: Duration::from_secs(10),
@@ -45,6 +51,12 @@ impl Default for ControllerConfig {
 /// Returns an error if the gRPC server fails to bind or encounters a
 /// transport-level failure.
 pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
+    if config.signing_key == DEFAULT_SIGNING_KEY {
+        tracing::warn!(
+            "Using default signing key — set RAPIDBYTE_SIGNING_KEY for production deployments"
+        );
+    }
+
     let state = ControllerState::new(&config.signing_key);
 
     // Background task: reap dead agents
@@ -70,11 +82,40 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
             let expired = lease_state.tasks.write().await.expire_leases();
             for (task_id, run_id) in &expired {
                 info!(task_id, run_id, "Task lease expired");
-                let _ = lease_state
-                    .runs
-                    .write()
-                    .await
-                    .transition(run_id, InternalRunState::TimedOut);
+
+                // Transition run and capture error message for the terminal event
+                let error_msg = {
+                    let mut runs = lease_state.runs.write().await;
+                    let _ = runs.transition(run_id, InternalRunState::TimedOut);
+                    let record = runs.get_run_mut(run_id);
+                    if let Some(r) = record {
+                        let msg = format!("Task {task_id} lease expired (agent unresponsive)");
+                        r.error_message = Some(msg.clone());
+                        Some((msg, r.attempt))
+                    } else {
+                        None
+                    }
+                };
+
+                // Notify any WatchRun subscribers
+                if let Some((msg, attempt)) = error_msg {
+                    lease_state.watchers.write().await.publish_terminal(
+                        run_id,
+                        RunEvent {
+                            run_id: run_id.clone(),
+                            event: Some(run_event::Event::Failed(RunFailed {
+                                error: Some(TaskError {
+                                    code: "LEASE_EXPIRED".into(),
+                                    message: msg,
+                                    retryable: true,
+                                    safe_to_retry: true,
+                                    commit_state: String::new(),
+                                }),
+                                attempt,
+                            })),
+                        },
+                    );
+                }
             }
         }
     });

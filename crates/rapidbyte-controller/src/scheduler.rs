@@ -179,11 +179,12 @@ impl TaskQueue {
             .get_mut(task_id)
             .ok_or_else(|| SchedulerError::UnknownTask(task_id.to_string()))?;
 
-        // Check lease validity
-        if let Some(lease) = &record.lease {
-            if !lease.is_valid(lease_epoch) {
-                return Ok(None); // stale epoch — not acknowledged
-            }
+        // Lease must be present and valid. A missing lease means it was
+        // already cleared by expire_leases() or cancel(), so the completion
+        // is stale and must be rejected.
+        match &record.lease {
+            Some(lease) if lease.is_valid(lease_epoch) => {}
+            _ => return Ok(None),
         }
 
         record.state = if succeeded {

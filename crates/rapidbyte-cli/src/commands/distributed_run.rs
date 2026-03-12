@@ -31,11 +31,17 @@ pub async fn execute(
 
     let mut client = PipelineServiceClient::new(channel);
 
+    // --limit implies dry-run (preview-only), matching local execution semantics
+    let effective_dry_run = dry_run || limit.is_some();
+
     // Submit
     let resp = client
         .submit_pipeline(SubmitPipelineRequest {
             pipeline_yaml_utf8: yaml,
-            execution: Some(ExecutionOptions { dry_run, limit }),
+            execution: Some(ExecutionOptions {
+                dry_run: effective_dry_run,
+                limit,
+            }),
             idempotency_key: uuid::Uuid::new_v4().to_string(),
         })
         .await?;
@@ -72,8 +78,8 @@ pub async fn execute(
                         );
                     }
 
-                    // If dry-run, fetch preview via Flight
-                    if dry_run {
+                    // If dry-run (including --limit), fetch preview via Flight
+                    if effective_dry_run {
                         if let Err(e) =
                             fetch_and_display_preview(&mut client, &run_id, verbosity).await
                         {

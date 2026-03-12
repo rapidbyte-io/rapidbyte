@@ -29,16 +29,21 @@ pub fn to_proto_state(s: InternalRunState) -> i32 {
     }
 }
 
-/// Maps proto `RunState` i32 back to internal `RunState` for filtering.
-fn from_proto_state(v: i32) -> Option<InternalRunState> {
+/// Maps proto `RunState` i32 back to internal `RunState`(s) for filtering.
+/// `RUNNING` maps to both `Running` and `Cancelling` (externally both appear as `RUNNING`).
+/// `FAILED` maps to both `Failed` and `TimedOut` (externally both appear as `FAILED`).
+fn from_proto_states(v: i32) -> Option<Vec<InternalRunState>> {
     match RunState::try_from(v) {
-        Ok(RunState::Pending) => Some(InternalRunState::Pending),
-        Ok(RunState::Assigned) => Some(InternalRunState::Assigned),
-        Ok(RunState::Running) => Some(InternalRunState::Running),
-        Ok(RunState::PreviewReady) => Some(InternalRunState::PreviewReady),
-        Ok(RunState::Completed) => Some(InternalRunState::Completed),
-        Ok(RunState::Failed) => Some(InternalRunState::Failed),
-        Ok(RunState::Cancelled) => Some(InternalRunState::Cancelled),
+        Ok(RunState::Pending) => Some(vec![InternalRunState::Pending]),
+        Ok(RunState::Assigned) => Some(vec![InternalRunState::Assigned]),
+        Ok(RunState::Running) => Some(vec![
+            InternalRunState::Running,
+            InternalRunState::Cancelling,
+        ]),
+        Ok(RunState::PreviewReady) => Some(vec![InternalRunState::PreviewReady]),
+        Ok(RunState::Completed) => Some(vec![InternalRunState::Completed]),
+        Ok(RunState::Failed) => Some(vec![InternalRunState::Failed, InternalRunState::TimedOut]),
+        Ok(RunState::Cancelled) => Some(vec![InternalRunState::Cancelled]),
         _ => None,
     }
 }
@@ -285,6 +290,15 @@ impl PipelineService for PipelineServiceImpl {
                     }
                 }
 
+                // Notify any WatchRun subscribers
+                self.state.watchers.write().await.publish_terminal(
+                    &run_id,
+                    RunEvent {
+                        run_id: run_id.clone(),
+                        event: Some(run_event::Event::Cancelled(RunCancelled {})),
+                    },
+                );
+
                 Ok(Response::new(CancelRunResponse {
                     accepted: true,
                     message: "Queued run cancelled".into(),
@@ -317,10 +331,10 @@ impl PipelineService for PipelineServiceImpl {
         request: Request<ListRunsRequest>,
     ) -> Result<Response<ListRunsResponse>, Status> {
         let req = request.into_inner();
-        let state_filter = req.filter_state.and_then(from_proto_state);
+        let state_filter = req.filter_state.and_then(from_proto_states);
 
         let runs = self.state.runs.read().await;
-        let mut records = runs.list_runs(state_filter);
+        let mut records = runs.list_runs(state_filter.as_deref());
 
         // Clamp limit to a positive value; default to 20 if unset or zero
         let limit = if req.limit > 0 {

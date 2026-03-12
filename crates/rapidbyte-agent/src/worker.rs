@@ -41,7 +41,7 @@ impl Default for AgentConfig {
             max_tasks: 1,
             heartbeat_interval: Duration::from_secs(10),
             poll_wait_seconds: 30,
-            signing_key: Vec::new(),
+            signing_key: b"rapidbyte-dev-signing-key-not-for-production".to_vec(),
             preview_ttl: Duration::from_secs(300),
         }
     }
