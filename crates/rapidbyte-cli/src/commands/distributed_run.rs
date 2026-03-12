@@ -23,6 +23,7 @@ pub async fn execute(
     dry_run: bool,
     limit: Option<u64>,
     verbosity: Verbosity,
+    auth_token: Option<&str>,
 ) -> Result<()> {
     let yaml = std::fs::read(pipeline_path)
         .with_context(|| format!("Failed to read pipeline: {}", pipeline_path.display()))?;
@@ -39,14 +40,17 @@ pub async fn execute(
 
     // Submit
     let resp = client
-        .submit_pipeline(SubmitPipelineRequest {
-            pipeline_yaml_utf8: yaml,
-            execution: Some(ExecutionOptions {
-                dry_run: effective_dry_run,
-                limit,
-            }),
-            idempotency_key: uuid::Uuid::new_v4().to_string(),
-        })
+        .submit_pipeline(request_with_bearer(
+            SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml,
+                execution: Some(ExecutionOptions {
+                    dry_run: effective_dry_run,
+                    limit,
+                }),
+                idempotency_key: uuid::Uuid::new_v4().to_string(),
+            },
+            auth_token,
+        ))
         .await?;
     let run_id = resp.into_inner().run_id;
 
@@ -56,9 +60,12 @@ pub async fn execute(
 
     // Watch
     let mut stream = client
-        .watch_run(WatchRunRequest {
-            run_id: run_id.clone(),
-        })
+        .watch_run(request_with_bearer(
+            WatchRunRequest {
+                run_id: run_id.clone(),
+            },
+            auth_token,
+        ))
         .await?
         .into_inner();
 
@@ -84,7 +91,8 @@ pub async fn execute(
                     // If dry-run (including --limit), fetch preview via Flight
                     if effective_dry_run {
                         if let Err(e) =
-                            fetch_and_display_preview(&mut client, &run_id, verbosity).await
+                            fetch_and_display_preview(&mut client, &run_id, verbosity, auth_token)
+                                .await
                         {
                             if verbosity != Verbosity::Quiet {
                                 eprintln!("Preview fetch failed: {e:#}");
@@ -113,14 +121,18 @@ async fn fetch_and_display_preview(
     client: &mut PipelineServiceClient<Channel>,
     run_id: &str,
     verbosity: Verbosity,
+    auth_token: Option<&str>,
 ) -> Result<()> {
     use arrow::util::pretty::pretty_format_batches;
 
     // Get run details to find preview access
     let resp = client
-        .get_run(GetRunRequest {
-            run_id: run_id.to_string(),
-        })
+        .get_run(request_with_bearer(
+            GetRunRequest {
+                run_id: run_id.to_string(),
+            },
+            auth_token,
+        ))
         .await?
         .into_inner();
 
@@ -223,11 +235,23 @@ where
 
     Ok(results)
 }
+
+fn request_with_bearer<T>(message: T, auth_token: Option<&str>) -> tonic::Request<T> {
+    let mut request = tonic::Request::new(message);
+    if let Some(token) = auth_token {
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    }
+    request
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rapidbyte_controller::proto::rapidbyte::v1::{PreviewState, StreamPreview};
     use std::sync::{Arc, Mutex};
+    use tonic::metadata::MetadataValue;
 
     #[tokio::test]
     async fn fetch_preview_batches_prefers_stream_tickets() {
@@ -304,5 +328,31 @@ mod tests {
             *seen.lock().unwrap(),
             vec![("preview".to_string(), vec![7])]
         );
+    }
+
+    #[test]
+    fn request_with_bearer_adds_authorization_metadata() {
+        let request = request_with_bearer(
+            WatchRunRequest {
+                run_id: "run-1".into(),
+            },
+            Some("secret"),
+        );
+
+        assert_eq!(
+            request.metadata().get("authorization"),
+            Some(&MetadataValue::from_static("Bearer secret"))
+        );
+    }
+
+    #[test]
+    fn request_with_bearer_is_noop_without_token() {
+        let request = request_with_bearer(
+            WatchRunRequest {
+                run_id: "run-1".into(),
+            },
+            None,
+        );
+        assert!(request.metadata().get("authorization").is_none());
     }
 }

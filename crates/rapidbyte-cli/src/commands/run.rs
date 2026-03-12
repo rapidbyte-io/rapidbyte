@@ -37,11 +37,19 @@ pub async fn execute(
     limit: Option<u64>,
     verbosity: Verbosity,
     controller: Option<&str>,
+    auth_token: Option<&str>,
 ) -> Result<()> {
     // If controller is set, route to distributed mode
     if let Some(url) = controller {
-        return super::distributed_run::execute(url, pipeline_path, dry_run, limit, verbosity)
-            .await;
+        return super::distributed_run::execute(
+            url,
+            pipeline_path,
+            dry_run,
+            limit,
+            verbosity,
+            auth_token,
+        )
+        .await;
     }
 
     let config = super::load_pipeline(pipeline_path)?;

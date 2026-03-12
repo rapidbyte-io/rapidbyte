@@ -8,6 +8,7 @@ pub async fn execute(
     flight_advertise: &str,
     max_tasks: u32,
     signing_key: Option<&str>,
+    auth_token: Option<&str>,
 ) -> Result<()> {
     let mut config = rapidbyte_agent::AgentConfig {
         controller_url: controller.into(),
@@ -19,5 +20,6 @@ pub async fn execute(
     if let Some(key) = signing_key {
         config.signing_key = key.as_bytes().to_vec();
     }
+    config.auth_token = auth_token.map(str::to_owned);
     rapidbyte_agent::run(config).await
 }

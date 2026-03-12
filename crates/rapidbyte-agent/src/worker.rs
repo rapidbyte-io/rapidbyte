@@ -11,6 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 use tracing::{error, info, warn};
 
+use crate::auth::request_with_bearer;
 use crate::executor::{self, TaskOutcomeKind};
 use crate::flight::PreviewFlightService;
 use crate::proto::rapidbyte::v1::agent_service_client::AgentServiceClient;
@@ -33,6 +34,7 @@ pub struct AgentConfig {
     pub poll_wait_seconds: u32,
     pub signing_key: Vec<u8>,
     pub preview_ttl: Duration,
+    pub auth_token: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -46,6 +48,7 @@ impl Default for AgentConfig {
             poll_wait_seconds: 30,
             signing_key: b"rapidbyte-dev-signing-key-not-for-production".to_vec(),
             preview_ttl: Duration::from_secs(300),
+            auth_token: None,
         }
     }
 }
@@ -94,13 +97,16 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
 
     // Register with controller
     let resp = client
-        .register_agent(RegisterAgentRequest {
-            max_tasks: config.max_tasks,
-            flight_advertise_endpoint: config.flight_advertise.clone(),
-            plugin_bundle_hash: String::new(),
-            available_plugins: vec![],
-            memory_bytes: 0,
-        })
+        .register_agent(request_with_bearer(
+            RegisterAgentRequest {
+                max_tasks: config.max_tasks,
+                flight_advertise_endpoint: config.flight_advertise.clone(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            },
+            config.auth_token.as_deref(),
+        ))
         .await?;
     let agent_id = resp.into_inner().agent_id;
     info!(agent_id, "Registered with controller");
@@ -115,8 +121,17 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
     let hb_interval = config.heartbeat_interval;
     let hb_leases = active_leases.clone();
     let hb_shutdown = shutdown_token.clone();
+    let hb_auth_token = config.auth_token.clone();
     let heartbeat_handle = tokio::spawn(async move {
-        heartbeat_loop(hb_client, hb_agent_id, hb_interval, hb_leases, hb_shutdown).await;
+        heartbeat_loop(
+            hb_client,
+            hb_agent_id,
+            hb_interval,
+            hb_leases,
+            hb_shutdown,
+            hb_auth_token,
+        )
+        .await;
     });
 
     let worker_pool = run_worker_pool(config.max_tasks, {
@@ -171,22 +186,28 @@ async fn worker_runner_loop(
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     let client = AgentServiceClient::new(channel.clone());
+    let poll_wait_seconds = config.poll_wait_seconds;
+    let poll_auth_token = config.auth_token.clone();
 
     worker_loop(
         || {
             let shutdown = shutdown.clone();
             let mut poll_client = client.clone();
             let agent_id = agent_id.clone();
+            let auth_token = poll_auth_token.clone();
             async move {
                 if shutdown.is_cancelled() {
                     return Ok(WorkerPoll::Stop);
                 }
 
                 let resp = poll_client
-                    .poll_task(PollTaskRequest {
-                        agent_id,
-                        wait_seconds: config.poll_wait_seconds,
-                    })
+                    .poll_task(request_with_bearer(
+                        PollTaskRequest {
+                            agent_id,
+                            wait_seconds: poll_wait_seconds,
+                        },
+                        auth_token.as_deref(),
+                    ))
                     .await?
                     .into_inner();
 
@@ -250,6 +271,7 @@ async fn process_task(
         agent_id.clone(),
         task.task_id.clone(),
         task.lease_epoch,
+        config.auth_token.clone(),
     ));
 
     let result = executor::execute_task(
@@ -322,9 +344,10 @@ async fn process_task(
         COMPLETE_TASK_RETRY_DELAY,
         |req| {
             let mut completion_client = AgentServiceClient::new(channel.clone());
+            let auth_token = config.auth_token.clone();
             async move {
                 completion_client
-                    .complete_task(req)
+                    .complete_task(request_with_bearer(req, auth_token.as_deref()))
                     .await
                     .map(tonic::Response::into_inner)
             }
@@ -374,6 +397,7 @@ async fn heartbeat_loop(
     interval: Duration,
     active_leases: ActiveLeaseMap,
     shutdown: CancellationToken,
+    auth_token: Option<String>,
 ) {
     let mut ticker = tokio::time::interval(interval);
     loop {
@@ -392,13 +416,16 @@ async fn heartbeat_loop(
             .collect();
         let active_count = u32::try_from(leases.len()).unwrap_or(u32::MAX);
         let resp = client
-            .heartbeat(HeartbeatRequest {
-                agent_id: agent_id.clone(),
-                active_leases: leases,
-                active_tasks: active_count,
-                cpu_usage: 0.0,
-                memory_used_bytes: 0,
-            })
+            .heartbeat(request_with_bearer(
+                HeartbeatRequest {
+                    agent_id: agent_id.clone(),
+                    active_leases: leases,
+                    active_tasks: active_count,
+                    cpu_usage: 0.0,
+                    memory_used_bytes: 0,
+                },
+                auth_token.as_deref(),
+            ))
             .await;
         match resp {
             Ok(resp) => {

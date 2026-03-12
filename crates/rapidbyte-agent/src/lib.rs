@@ -17,6 +17,7 @@
 
 #![warn(clippy::pedantic)]
 
+mod auth;
 pub mod executor;
 pub mod flight;
 pub mod progress;

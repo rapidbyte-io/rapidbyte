@@ -1,5 +1,8 @@
 //! Task execution wrapper around `engine::run_pipeline`.
 
+use std::future::Future;
+use std::pin::Pin;
+
 use rapidbyte_engine::config::parser;
 use rapidbyte_engine::config::validator;
 use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
@@ -8,6 +11,9 @@ use rapidbyte_engine::{orchestrator, PipelineError};
 use rapidbyte_types::prelude::CommitState;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+type PipelineRunFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<PipelineOutcome, PipelineError>> + Send + 'a>>;
 
 /// Result of executing a task on the agent.
 pub struct TaskExecutionResult {
@@ -59,6 +65,34 @@ pub async fn execute_task(
     progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
     cancel_token: CancellationToken,
 ) -> TaskExecutionResult {
+    execute_task_with_runner(
+        pipeline_yaml,
+        dry_run,
+        limit,
+        progress_tx,
+        cancel_token,
+        |config, options, progress_tx| {
+            Box::pin(orchestrator::run_pipeline(config, options, progress_tx))
+        },
+    )
+    .await
+}
+
+async fn execute_task_with_runner<R>(
+    pipeline_yaml: &[u8],
+    dry_run: bool,
+    limit: Option<u64>,
+    progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
+    cancel_token: CancellationToken,
+    run_pipeline: R,
+) -> TaskExecutionResult
+where
+    R: for<'a> FnOnce(
+        &'a rapidbyte_engine::config::types::PipelineConfig,
+        &'a ExecutionOptions,
+        Option<mpsc::UnboundedSender<ProgressEvent>>,
+    ) -> PipelineRunFuture<'a>,
+{
     // Check for early cancellation before doing any work
     if cancel_token.is_cancelled() {
         return TaskExecutionResult {
@@ -119,23 +153,24 @@ pub async fn execute_task(
     let options = ExecutionOptions { dry_run, limit };
     let start = std::time::Instant::now();
 
-    // Race pipeline execution against cancellation
-    let pipeline_result = tokio::select! {
-        result = orchestrator::run_pipeline(&config, &options, progress_tx) => result,
-        () = cancel_token.cancelled() => {
-            let elapsed = start.elapsed().as_secs_f64();
-            return TaskExecutionResult {
-                outcome: TaskOutcomeKind::Cancelled,
-                metrics: TaskMetrics {
-                    records_processed: 0,
-                    bytes_processed: 0,
-                    elapsed_seconds: elapsed,
-                    cursors_advanced: 0,
-                },
-                dry_run_result: None,
-            };
-        }
-    };
+    // Cancellation is only honored before execution begins. Once the engine
+    // starts, we wait for its real terminal outcome so commit-state metadata
+    // is preserved instead of fabricating a clean cancellation.
+    if cancel_token.is_cancelled() {
+        let elapsed = start.elapsed().as_secs_f64();
+        return TaskExecutionResult {
+            outcome: TaskOutcomeKind::Cancelled,
+            metrics: TaskMetrics {
+                records_processed: 0,
+                bytes_processed: 0,
+                elapsed_seconds: elapsed,
+                cursors_advanced: 0,
+            },
+            dry_run_result: None,
+        };
+    }
+
+    let pipeline_result = run_pipeline(&config, &options, progress_tx).await;
 
     match pipeline_result {
         Ok(outcome) => {
@@ -208,6 +243,49 @@ pub async fn execute_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rapidbyte_engine::execution::PipelineOutcome;
+    use rapidbyte_engine::result::{DestTiming, PipelineCounts, PipelineResult, SourceTiming};
+    use std::sync::Arc;
+    use tokio::sync::Notify;
+
+    fn valid_yaml() -> &'static [u8] {
+        br#"
+version: "1.0"
+pipeline: test_pipeline
+source:
+  use: postgres
+  config:
+    host: localhost
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: postgres
+  config:
+    host: localhost
+  write_mode: append
+"#
+    }
+
+    fn completed_outcome() -> PipelineOutcome {
+        PipelineOutcome::Run(PipelineResult {
+            counts: PipelineCounts {
+                records_written: 7,
+                bytes_written: 128,
+                ..PipelineCounts::default()
+            },
+            source: SourceTiming::default(),
+            dest: DestTiming::default(),
+            transform_count: 0,
+            transform_duration_secs: 0.0,
+            transform_module_load_ms: Vec::new(),
+            duration_secs: 0.5,
+            wasm_overhead_secs: 0.0,
+            retry_count: 0,
+            parallelism: 1,
+            stream_metrics: Vec::new(),
+        })
+    }
 
     #[tokio::test]
     async fn test_invalid_utf8_returns_failed() {
@@ -249,5 +327,39 @@ mod tests {
         token.cancel();
         let result = execute_task(b"pipeline: test\n", false, None, None, token).await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn test_cancellation_after_start_waits_for_pipeline_outcome() {
+        let token = CancellationToken::new();
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+
+        let handle = {
+            let token = token.clone();
+            let started = started.clone();
+            let release = release.clone();
+            tokio::spawn(async move {
+                execute_task_with_runner(valid_yaml(), false, None, None, token, move |_, _, _| {
+                    let started = started.clone();
+                    let release = release.clone();
+                    Box::pin(async move {
+                        started.notify_one();
+                        release.notified().await;
+                        Ok(completed_outcome())
+                    })
+                })
+                .await
+            })
+        };
+
+        started.notified().await;
+        token.cancel();
+        release.notify_one();
+
+        let result = handle.await.unwrap();
+        assert!(matches!(result.outcome, TaskOutcomeKind::Completed));
+        assert_eq!(result.metrics.records_processed, 7);
+        assert_eq!(result.metrics.bytes_processed, 128);
     }
 }

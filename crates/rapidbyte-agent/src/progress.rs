@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use tonic::transport::Channel;
 use tracing::warn;
 
+use crate::auth::request_with_bearer;
 use crate::proto::rapidbyte::v1::agent_service_client::AgentServiceClient;
 use crate::proto::rapidbyte::v1::{ProgressUpdate, ReportProgressRequest};
 
@@ -17,6 +18,7 @@ pub async fn forward_progress(
     agent_id: String,
     task_id: String,
     lease_epoch: u64,
+    auth_token: Option<String>,
 ) {
     while let Some(event) = rx.recv().await {
         let progress = match &event {
@@ -42,12 +44,15 @@ pub async fn forward_progress(
         };
 
         if let Some(progress) = progress {
-            let req = ReportProgressRequest {
-                agent_id: agent_id.clone(),
-                task_id: task_id.clone(),
-                lease_epoch,
-                progress: Some(progress),
-            };
+            let req = request_with_bearer(
+                ReportProgressRequest {
+                    agent_id: agent_id.clone(),
+                    task_id: task_id.clone(),
+                    lease_epoch,
+                    progress: Some(progress),
+                },
+                auth_token.as_deref(),
+            );
             if let Err(e) = client.report_progress(req).await {
                 warn!(error = %e, "Failed to report progress to controller");
             }

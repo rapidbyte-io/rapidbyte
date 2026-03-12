@@ -47,6 +47,10 @@ struct Cli {
     #[arg(long, global = true, env = "RAPIDBYTE_CONTROLLER")]
     controller: Option<String>,
 
+    /// Bearer token for authenticated controller RPCs
+    #[arg(long, global = true, env = "RAPIDBYTE_AUTH_TOKEN")]
+    auth_token: Option<String>,
+
     /// Log level (error, warn, info, debug, trace)
     #[arg(long, default_value = "info", global = true)]
     log_level: String,
@@ -161,6 +165,7 @@ async fn main() -> ExitCode {
                 limit,
                 verbosity,
                 controller_url.as_deref(),
+                cli.auth_token.as_deref(),
             )
             .await
         }
@@ -186,6 +191,7 @@ async fn main() -> ExitCode {
                 &flight_advertise,
                 max_tasks,
                 signing_key.as_deref(),
+                cli.auth_token.as_deref(),
             )
             .await
         }

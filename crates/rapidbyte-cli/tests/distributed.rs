@@ -73,6 +73,7 @@ async fn distributed_submit_and_complete() {
             poll_wait_seconds: 5,
             signing_key: Vec::new(),
             preview_ttl: Duration::from_secs(60),
+            auth_token: None,
         };
         let _ = rapidbyte_agent::run(config).await;
     });
