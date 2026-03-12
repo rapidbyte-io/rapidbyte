@@ -673,6 +673,11 @@ mod tests {
 
     use super::run;
 
+    fn assert_generated_rust_parses(label: &str, source: &str) {
+        syn::parse_file(source)
+            .unwrap_or_else(|error| panic!("{label} should be valid Rust syntax: {error}"));
+    }
+
     #[test]
     fn scaffold_source_generates_explicit_unimplemented_stubs() {
         let temp_dir = tempfile::tempdir().expect("temp dir should be created");
@@ -687,6 +692,8 @@ mod tests {
         let plugin_dir = root_dir.join("src");
         let readme = fs::read_to_string(root_dir.join("README.md"))
             .expect("README.md should exist in generated source plugin");
+        let main_rs = fs::read_to_string(plugin_dir.join("main.rs"))
+            .expect("main.rs should exist in generated source plugin");
         let config_rs = fs::read_to_string(plugin_dir.join("config.rs"))
             .expect("config.rs should exist in generated source plugin");
         let client_rs = fs::read_to_string(plugin_dir.join("client.rs"))
@@ -698,6 +705,7 @@ mod tests {
 
         assert!(readme.contains("NOT PRODUCTION-READY"));
         assert!(readme.contains("UNIMPLEMENTED"));
+        assert!(main_rs.contains("#[rapidbyte_sdk::plugin(source)]"));
         assert!(!config_rs.contains("3306"));
         assert!(config_rs.contains("pub struct Config"));
         assert!(client_rs.contains("NOT PRODUCTION-READY"));
@@ -711,6 +719,12 @@ mod tests {
         assert!(discover_rs.contains("\"UNIMPLEMENTED\""));
         assert!(!client_rs.contains("ValidationStatus::Success"));
         assert!(!read_rs.contains("records_read: 0"));
+
+        assert_generated_rust_parses("source main.rs", &main_rs);
+        assert_generated_rust_parses("source config.rs", &config_rs);
+        assert_generated_rust_parses("source client.rs", &client_rs);
+        assert_generated_rust_parses("source read.rs", &read_rs);
+        assert_generated_rust_parses("source discover.rs", &discover_rs);
     }
 
     #[test]
@@ -727,6 +741,8 @@ mod tests {
         let plugin_dir = root_dir.join("src");
         let readme = fs::read_to_string(root_dir.join("README.md"))
             .expect("README.md should exist in generated destination plugin");
+        let main_rs = fs::read_to_string(plugin_dir.join("main.rs"))
+            .expect("main.rs should exist in generated destination plugin");
         let config_rs = fs::read_to_string(plugin_dir.join("config.rs"))
             .expect("config.rs should exist in generated destination plugin");
         let client_rs = fs::read_to_string(plugin_dir.join("client.rs"))
@@ -736,6 +752,7 @@ mod tests {
 
         assert!(readme.contains("NOT PRODUCTION-READY"));
         assert!(readme.contains("UNIMPLEMENTED"));
+        assert!(main_rs.contains("#[rapidbyte_sdk::plugin(destination)]"));
         assert!(!config_rs.contains("3306"));
         assert!(client_rs.contains("NOT PRODUCTION-READY"));
         assert!(client_rs.contains("PluginError::config("));
@@ -745,6 +762,11 @@ mod tests {
         assert!(write_rs.contains("\"UNIMPLEMENTED\""));
         assert!(!client_rs.contains("ValidationStatus::Success"));
         assert!(!write_rs.contains("records_written: 0"));
+
+        assert_generated_rust_parses("destination main.rs", &main_rs);
+        assert_generated_rust_parses("destination config.rs", &config_rs);
+        assert_generated_rust_parses("destination client.rs", &client_rs);
+        assert_generated_rust_parses("destination write.rs", &write_rs);
     }
 
     #[test]
@@ -783,5 +805,10 @@ mod tests {
         assert!(transform_rs.contains("PluginError::internal("));
         assert!(transform_rs.contains("\"UNIMPLEMENTED\""));
         assert!(!transform_rs.contains("records_out: 0"));
+
+        assert_generated_rust_parses("transform main.rs", &main_rs);
+        assert_generated_rust_parses("transform config.rs", &config_rs);
+        assert_generated_rust_parses("transform validate.rs", &validate_rs);
+        assert_generated_rust_parses("transform transform.rs", &transform_rs);
     }
 }
