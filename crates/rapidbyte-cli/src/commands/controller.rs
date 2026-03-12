@@ -30,6 +30,13 @@ fn build_config(
     tls_cert: Option<&Path>,
     tls_key: Option<&Path>,
 ) -> Result<rapidbyte_controller::ControllerConfig> {
+    fn validate_auth_token(token: &str) -> Result<()> {
+        if token.trim().is_empty() {
+            anyhow::bail!("auth token must not be empty or whitespace");
+        }
+        Ok(())
+    }
+
     let addr = listen
         .parse()
         .map_err(|e| anyhow::anyhow!("Invalid listen address: {e}"))?;
@@ -41,6 +48,7 @@ fn build_config(
         config.signing_key = key.as_bytes().to_vec();
     }
     if let Some(token) = auth_token {
+        validate_auth_token(token)?;
         config.auth_tokens = vec![token.to_string()];
     }
     config.allow_unauthenticated = allow_unauthenticated;
@@ -95,6 +103,22 @@ mod tests {
         let config = build_config("[::]:9090", None, None, true, None, None).unwrap();
         assert!(config.auth_tokens.is_empty());
         assert!(config.allow_unauthenticated);
+    }
+
+    #[test]
+    fn controller_execute_rejects_empty_auth_token() {
+        let err = build_config("[::]:9090", None, Some(""), false, None, None)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("auth token must not be empty"));
+    }
+
+    #[test]
+    fn controller_execute_rejects_whitespace_auth_token() {
+        let err = build_config("[::]:9090", None, Some("   "), false, None, None)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("auth token must not be empty"));
     }
 
     #[test]

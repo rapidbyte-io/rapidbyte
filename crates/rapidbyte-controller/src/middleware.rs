@@ -42,6 +42,9 @@ impl BearerAuthInterceptor {
         match auth_header {
             Some(value) if value.starts_with("Bearer ") => {
                 let token = &value[7..];
+                if token.trim().is_empty() {
+                    return Err(Status::unauthenticated("Invalid bearer token"));
+                }
                 if self.valid_tokens.iter().any(|t| t == token) {
                     Ok(())
                 } else {
@@ -114,5 +117,21 @@ mod tests {
         assert!(interceptor.check(&request_with_token("token-a")).is_ok());
         assert!(interceptor.check(&request_with_token("token-b")).is_ok());
         assert!(interceptor.check(&request_with_token("token-c")).is_err());
+    }
+
+    #[test]
+    fn empty_bearer_credentials_are_rejected_even_if_configured() {
+        let interceptor = BearerAuthInterceptor::new(vec![String::new()]);
+        let req = request_with_token("");
+        let err = interceptor.check(&req).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+    }
+
+    #[test]
+    fn whitespace_bearer_credentials_are_rejected_even_if_configured() {
+        let interceptor = BearerAuthInterceptor::new(vec!["   ".into()]);
+        let req = request_with_token("   ");
+        let err = interceptor.check(&req).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 }
