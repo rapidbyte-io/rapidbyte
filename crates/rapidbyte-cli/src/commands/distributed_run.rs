@@ -1,8 +1,10 @@
 //! Distributed pipeline execution via controller.
 
+use std::future::Future;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use arrow::record_batch::RecordBatch;
 use arrow_flight::flight_service_client::FlightServiceClient;
 use arrow_flight::Ticket;
 use tonic::transport::Channel;
@@ -11,7 +13,8 @@ use crate::Verbosity;
 
 use rapidbyte_controller::proto::rapidbyte::v1::pipeline_service_client::PipelineServiceClient;
 use rapidbyte_controller::proto::rapidbyte::v1::{
-    run_event, ExecutionOptions, GetRunRequest, SubmitPipelineRequest, WatchRunRequest,
+    run_event, ExecutionOptions, GetRunRequest, PreviewAccess, SubmitPipelineRequest,
+    WatchRunRequest,
 };
 
 pub async fn execute(
@@ -143,34 +146,163 @@ async fn fetch_and_display_preview(
         .await
         .context("Failed to connect to agent Flight endpoint")?;
 
-    let mut flight_client = FlightServiceClient::new(flight_channel);
+    let previews = fetch_preview_batches(&preview, |stream, ticket| {
+        let flight_channel = flight_channel.clone();
+        let stream = stream.to_string();
+        async move {
+            let mut flight_client = FlightServiceClient::new(flight_channel);
+            let mut stream_resp = flight_client
+                .do_get(Ticket {
+                    ticket: ticket.into(),
+                })
+                .await
+                .with_context(|| format!("Flight DoGet failed for stream {stream}"))?
+                .into_inner();
 
-    // DoGet with the ticket
-    let ticket = Ticket {
-        ticket: preview.ticket.into(),
-    };
-    let mut stream = flight_client.do_get(ticket).await?.into_inner();
+            let mut flight_data_vec = Vec::new();
+            while let Some(flight_data) = stream_resp.message().await? {
+                flight_data_vec.push(flight_data);
+            }
 
-    // Collect all FlightData messages
-    let mut flight_data_vec = Vec::new();
-    while let Some(flight_data) = stream.message().await? {
-        flight_data_vec.push(flight_data);
-    }
+            arrow_flight::utils::flight_data_to_batches(&flight_data_vec)
+                .context("Failed to decode Flight preview data")
+        }
+    })
+    .await?;
 
-    // Decode all FlightData into RecordBatches
-    let batches = arrow_flight::utils::flight_data_to_batches(&flight_data_vec)
-        .context("Failed to decode Flight preview data")?;
-
-    if batches.is_empty() {
+    if previews.is_empty() {
         eprintln!("(no preview data)");
         return Ok(());
     }
 
-    // Display using pretty_format_batches
-    match pretty_format_batches(&batches) {
-        Ok(table) => eprintln!("{table}"),
-        Err(e) => eprintln!("(display error: {e})"),
+    let multiple_previews = previews.len() > 1;
+    for (stream_name, batches) in previews {
+        if multiple_previews && stream_name != "preview" && verbosity != Verbosity::Quiet {
+            eprintln!("Stream: {stream_name}");
+        }
+
+        if batches.is_empty() {
+            eprintln!("(no preview data)");
+            continue;
+        }
+
+        match pretty_format_batches(&batches) {
+            Ok(table) => eprintln!("{table}"),
+            Err(e) => eprintln!("(display error: {e})"),
+        }
     }
 
     Ok(())
+}
+
+async fn fetch_preview_batches<F, Fut>(
+    preview: &PreviewAccess,
+    mut fetcher: F,
+) -> Result<Vec<(String, Vec<RecordBatch>)>>
+where
+    F: FnMut(&str, Vec<u8>) -> Fut,
+    Fut: Future<Output = Result<Vec<RecordBatch>>>,
+{
+    let requests = if !preview.streams.is_empty() {
+        preview
+            .streams
+            .iter()
+            .map(|stream| (stream.stream.clone(), stream.ticket.clone()))
+            .collect::<Vec<_>>()
+    } else if !preview.ticket.is_empty() {
+        vec![("preview".to_string(), preview.ticket.clone())]
+    } else {
+        Vec::new()
+    };
+
+    let mut results = Vec::with_capacity(requests.len());
+    for (stream_name, ticket) in requests {
+        let batches = fetcher(&stream_name, ticket).await?;
+        results.push((stream_name, batches));
+    }
+
+    Ok(results)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rapidbyte_controller::proto::rapidbyte::v1::{PreviewState, StreamPreview};
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn fetch_preview_batches_prefers_stream_tickets() {
+        let preview = PreviewAccess {
+            state: PreviewState::Ready.into(),
+            flight_endpoint: "localhost:9091".into(),
+            ticket: vec![9],
+            expires_at: None,
+            streams: vec![
+                StreamPreview {
+                    stream: "users".into(),
+                    rows: 3,
+                    ticket: vec![1],
+                },
+                StreamPreview {
+                    stream: "orders".into(),
+                    rows: 2,
+                    ticket: vec![2],
+                },
+            ],
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+
+        let results = fetch_preview_batches(&preview, {
+            let seen = seen.clone();
+            move |stream_name, ticket| {
+                let seen = seen.clone();
+                let stream_name = stream_name.to_string();
+                async move {
+                    seen.lock().unwrap().push((stream_name, ticket));
+                    Ok(Vec::new())
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                ("users".to_string(), vec![1]),
+                ("orders".to_string(), vec![2]),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_preview_batches_falls_back_to_legacy_ticket() {
+        let preview = PreviewAccess {
+            state: PreviewState::Ready.into(),
+            flight_endpoint: "localhost:9091".into(),
+            ticket: vec![7],
+            expires_at: None,
+            streams: vec![],
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+
+        fetch_preview_batches(&preview, {
+            let seen = seen.clone();
+            move |stream_name, ticket| {
+                let seen = seen.clone();
+                let stream_name = stream_name.to_string();
+                async move {
+                    seen.lock().unwrap().push((stream_name, ticket));
+                    Ok(Vec::new())
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![("preview".to_string(), vec![7])]
+        );
+    }
 }
