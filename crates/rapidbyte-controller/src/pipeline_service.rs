@@ -120,7 +120,15 @@ impl PipelineServiceImpl {
             watchers.subscribe(run_id)
         };
 
-        if let Some(event) = self.terminal_event_for_existing_run(run_id).await? {
+        let terminal_event = match self.terminal_event_for_existing_run(run_id).await {
+            Ok(event) => event,
+            Err(err) => {
+                self.state.watchers.write().await.remove(run_id);
+                return Err(err);
+            }
+        };
+
+        if let Some(event) = terminal_event {
             self.state.watchers.write().await.remove(run_id);
             let stream: WatchRunStream = Box::pin(tokio_stream::once(Ok(event)));
             return Ok(Response::new(stream));
@@ -918,5 +926,18 @@ mod tests {
             }
             other => panic!("Expected completed event, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_watch_run_missing_run_cleans_up_subscription() {
+        let state = test_state();
+        let svc = PipelineServiceImpl::new(state.clone());
+
+        let Err(err) = svc.watch_run_after_subscribe("missing-run").await else {
+            panic!("expected missing run watch to fail");
+        };
+
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(state.watchers.read().await.channel_count(), 0);
     }
 }

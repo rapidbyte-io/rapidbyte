@@ -49,6 +49,12 @@ impl RunWatchers {
     pub fn remove(&mut self, run_id: &str) {
         self.channels.remove(run_id);
     }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn channel_count(&self) -> usize {
+        self.channels.len()
+    }
 }
 
 impl Default for RunWatchers {

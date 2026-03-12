@@ -1,6 +1,7 @@
 //! Pipeline orchestrator: resolves plugins, loads modules, executes streams, and finalizes state.
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::sync::{mpsc as sync_mpsc, Arc, Mutex};
 use std::time::Instant;
 
@@ -564,41 +565,38 @@ async fn execute_pipeline_once(
             phase: Phase::Finished,
         },
     );
-    if !should_preserve_real_outcome_after_stream_execution(cancel_token) {
-        return Err(cancelled_pipeline_error(
-            "Pipeline cancelled before finalization",
-        ));
-    }
+    preserve_real_outcome_after_stream_execution(cancel_token, async move {
+        if options.dry_run {
+            let duration_secs = start.elapsed().as_secs_f64();
+            let src_perf = aggregated.total_read_summary.perf.as_ref();
+            return Ok(PipelineOutcome::DryRun(DryRunResult {
+                streams: aggregated.dry_run_streams,
+                source: build_source_timing(
+                    &aggregated.src_timing_maxima,
+                    &aggregated.src_timings,
+                    src_perf,
+                    modules.source_module_load_ms,
+                ),
+                transform_count: config.transforms.len(),
+                transform_duration_secs: aggregated.transform_durations.iter().sum(),
+                duration_secs,
+            }));
+        }
 
-    if options.dry_run {
-        let duration_secs = start.elapsed().as_secs_f64();
-        let src_perf = aggregated.total_read_summary.perf.as_ref();
-        return Ok(PipelineOutcome::DryRun(DryRunResult {
-            streams: aggregated.dry_run_streams,
-            source: build_source_timing(
-                &aggregated.src_timing_maxima,
-                &aggregated.src_timings,
-                src_perf,
-                modules.source_module_load_ms,
-            ),
-            transform_count: config.transforms.len(),
-            transform_duration_secs: aggregated.transform_durations.iter().sum(),
-            duration_secs,
-        }));
-    }
-
-    let result = finalize_run(
-        config,
-        &pipeline_id,
-        state.clone(),
-        run_id,
-        attempt,
-        start,
-        &modules,
-        aggregated,
-    )
-    .await?;
-    Ok(PipelineOutcome::Run(result))
+        let result = finalize_run(
+            config,
+            &pipeline_id,
+            state.clone(),
+            run_id,
+            attempt,
+            start,
+            &modules,
+            aggregated,
+        )
+        .await?;
+        Ok(PipelineOutcome::Run(result))
+    })
+    .await
 }
 
 async fn load_modules(
@@ -1653,8 +1651,14 @@ fn ensure_not_cancelled(
     Ok(())
 }
 
-fn should_preserve_real_outcome_after_stream_execution(_cancel_token: &CancellationToken) -> bool {
-    true
+async fn preserve_real_outcome_after_stream_execution<T, Fut>(
+    _cancel_token: &CancellationToken,
+    finalize: Fut,
+) -> Result<T, PipelineError>
+where
+    Fut: Future<Output = Result<T, PipelineError>>,
+{
+    finalize.await
 }
 
 async fn complete_run_status(
@@ -3029,12 +3033,34 @@ resources:
             .contains("Post-run finalization failed"));
     }
 
-    #[test]
-    fn cancellation_after_stream_execution_allows_finalization() {
+    #[tokio::test]
+    async fn cancellation_after_stream_execution_preserves_real_finalization_outcome() {
+        let backend = Arc::new(TestStateBackend::new(false, false));
+        let mut aggregated = make_aggregated_results();
         let token = CancellationToken::new();
         token.cancel();
 
-        assert!(should_preserve_real_outcome_after_stream_execution(&token));
+        let advanced = preserve_real_outcome_after_stream_execution(&token, async {
+            finalize_successful_run_state(
+                backend.clone(),
+                &PipelineId::new("p"),
+                1,
+                &mut aggregated,
+            )
+            .await
+        })
+        .await
+        .expect("finalization should succeed even after late cancellation");
+
+        assert_eq!(advanced, 1);
+        assert_eq!(
+            backend
+                .complete_statuses
+                .lock()
+                .expect("complete statuses lock poisoned")
+                .as_slice(),
+            &[(RunStatus::Completed, None)]
+        );
     }
 }
 
