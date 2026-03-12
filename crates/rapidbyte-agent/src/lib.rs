@@ -17,4 +17,5 @@
 
 #![warn(clippy::pedantic)]
 
+pub mod executor;
 pub mod proto;
