@@ -10,9 +10,10 @@ mod copy;
 mod ddl;
 mod decode;
 mod insert;
+mod metrics;
 mod pg_error;
 mod session;
-mod type_map;
+mod types;
 mod watermark;
 mod writer;
 

@@ -7,23 +7,8 @@ use rapidbyte_sdk::prelude::*;
 use crate::contract::{
     async_prepare_stream_once, prepare_stream_once, schema_hint_has_shape, CheckpointConfig,
 };
+use crate::metrics::emit_write_perf_metrics;
 use crate::session::{clamp_copy_flush_bytes, WriteSession};
-
-fn emit_write_perf_metrics(ctx: &Context, perf: &WritePerf) {
-    let gauges = [
-        ("dest_connect_secs", perf.connect_secs),
-        ("dest_flush_secs", perf.flush_secs),
-        ("dest_commit_secs", perf.commit_secs),
-    ];
-
-    for (name, value) in gauges {
-        let _ = ctx.metric(&Metric {
-            name: name.to_string(),
-            value: MetricValue::Gauge(value),
-            labels: vec![],
-        });
-    }
-}
 
 fn resolve_copy_flush_bytes(
     stream_override: Option<u64>,
