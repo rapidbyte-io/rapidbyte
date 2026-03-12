@@ -194,7 +194,7 @@ sdk            (types -- plugins depend only on this)
 | `just install-hooks` | Configure repo-managed Git hooks in `.githooks/` |
 | `just ci` | Run the external-readiness baseline (`fmt`, `clippy`, workspace tests, e2e compile) |
 | `just bench` | Run benchmark scenarios (`--suite pr` or `--suite lab --scenario <id> --env-profile <profile>`) |
-| `just bench-lab <scenario>` | Bring up the local benchmark env and run one lab scenario |
+| `just bench-lab <scenario>` | Run one lab scenario against its manifest-declared benchmark environment |
 
 By default, `just` builds in release mode. Set `MODE=debug` for debug builds:
 
@@ -224,12 +224,15 @@ For the native Postgres destination benchmarks:
 just bench-lab pg_dest_insert
 just bench-lab pg_dest_copy_regression
 just bench-lab pg_dest_copy_release
+just bench-lab pg_dest_copy_release_distributed
 ```
 
 `pg_dest_copy_regression` is the cheap regression-tracking COPY benchmark.
 `pg_dest_copy_release` is the production-like release benchmark. Benchmark
 throughput and bandwidth are reported as end-to-end wall-clock pipeline rates,
-and the rendered bandwidth unit is `MiB/sec`.
+and the rendered bandwidth unit is `MiB/sec`. `just bench-lab` now uses the
+scenario manifest's declared environment by default; pass `env=...` only when
+you intentionally want to override it.
 
 For local performance-regression checks against the checked-in PR baseline:
 
