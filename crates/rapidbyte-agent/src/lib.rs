@@ -20,6 +20,8 @@
 pub mod executor;
 pub mod progress;
 pub mod proto;
+pub mod spool;
+pub mod ticket;
 pub mod worker;
 
 pub use worker::{run, AgentConfig};
