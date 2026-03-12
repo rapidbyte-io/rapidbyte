@@ -26,4 +26,4 @@ pub mod spool;
 pub mod ticket;
 pub mod worker;
 
-pub use worker::{run, AgentConfig};
+pub use worker::{run, AgentConfig, ClientTlsConfig, ServerTlsConfig};

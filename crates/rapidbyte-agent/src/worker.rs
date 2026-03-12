@@ -9,7 +9,10 @@ use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinSet;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::sync::CancellationToken;
-use tonic::transport::Channel;
+use tonic::transport::{
+    Certificate, Channel, ClientTlsConfig as TonicClientTlsConfig, Endpoint, Identity,
+    ServerTlsConfig as TonicServerTlsConfig,
+};
 use tracing::{error, info, warn};
 
 use crate::auth::request_with_bearer;
@@ -21,10 +24,21 @@ use crate::proto::rapidbyte::v1::{
     PollTaskRequest, PreviewAccess, PreviewState, RegisterAgentRequest, TaskError, TaskMetrics,
     TaskOutcome,
 };
-use crate::spool::PreviewSpool;
-use crate::ticket::TicketVerifier;
+use crate::spool::{PreviewKey, PreviewSpool};
 
 /// Configuration for the agent worker.
+#[derive(Clone)]
+pub struct ClientTlsConfig {
+    pub ca_cert_pem: Vec<u8>,
+    pub domain_name: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct ServerTlsConfig {
+    pub cert_pem: Vec<u8>,
+    pub key_pem: Vec<u8>,
+}
+
 #[derive(Clone)]
 pub struct AgentConfig {
     pub controller_url: String,
@@ -36,6 +50,8 @@ pub struct AgentConfig {
     pub signing_key: Vec<u8>,
     pub preview_ttl: Duration,
     pub auth_token: Option<String>,
+    pub controller_tls: Option<ClientTlsConfig>,
+    pub flight_tls: Option<ServerTlsConfig>,
 }
 
 impl Default for AgentConfig {
@@ -50,6 +66,8 @@ impl Default for AgentConfig {
             signing_key: b"rapidbyte-dev-signing-key-not-for-production".to_vec(),
             preview_ttl: Duration::from_secs(300),
             auth_token: None,
+            controller_tls: None,
+            flight_tls: None,
         }
     }
 }
@@ -79,19 +97,22 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
     let flight_listener = tokio::net::TcpListener::bind(&config.flight_listen).await?;
     let flight_addr = flight_listener.local_addr()?;
 
-    let channel = Channel::from_shared(config.controller_url.clone())?
-        .connect()
-        .await?;
+    let channel = connect_channel(&config.controller_url, config.controller_tls.as_ref()).await?;
     let mut client = AgentServiceClient::new(channel.clone());
 
     // Set up preview spool and Flight server
     let spool = Arc::new(RwLock::new(PreviewSpool::new(config.preview_ttl)));
-    let verifier = Arc::new(TicketVerifier::new(&config.signing_key));
-    let flight_svc = PreviewFlightService::new(spool.clone(), verifier);
+    let flight_svc = PreviewFlightService::new(spool.clone(), &config.signing_key);
 
     info!(addr = %flight_addr, "Starting Flight server");
+    let mut flight_server = tonic::transport::Server::builder();
+    if let Some(tls) = &config.flight_tls {
+        flight_server = flight_server.tls_config(TonicServerTlsConfig::new().identity(
+            Identity::from_pem(tls.cert_pem.clone(), tls.key_pem.clone()),
+        ))?;
+    }
     tokio::spawn(async move {
-        if let Err(e) = tonic::transport::Server::builder()
+        if let Err(e) = flight_server
             .add_service(flight_svc.into_server())
             .serve_with_incoming(TcpListenerStream::new(flight_listener))
             .await
@@ -182,6 +203,27 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
 
     info!("Agent stopped");
     Ok(())
+}
+
+async fn connect_channel(
+    controller_url: &str,
+    tls: Option<&ClientTlsConfig>,
+) -> anyhow::Result<Channel> {
+    let mut endpoint = Endpoint::from_shared(controller_url.to_string())?;
+    if controller_url.starts_with("https://") || tls.is_some() {
+        let mut tls_config = TonicClientTlsConfig::new();
+        if let Some(tls) = tls {
+            if !tls.ca_cert_pem.is_empty() {
+                tls_config =
+                    tls_config.ca_certificate(Certificate::from_pem(tls.ca_cert_pem.clone()));
+            }
+            if let Some(domain_name) = &tls.domain_name {
+                tls_config = tls_config.domain_name(domain_name.clone());
+            }
+        }
+        endpoint = endpoint.tls_config(tls_config)?;
+    }
+    Ok(endpoint.connect().await?)
 }
 
 async fn worker_runner_loop(
@@ -319,7 +361,14 @@ async fn process_task(
                 ticket: Vec::new(),
             })
             .collect();
-        spool.write().await.store(task.task_id.clone(), dr);
+        spool.write().await.store(
+            PreviewKey {
+                run_id: task.run_id.clone(),
+                task_id: task.task_id.clone(),
+                lease_epoch: task.lease_epoch,
+            },
+            dr,
+        );
         Some(PreviewAccess {
             state: PreviewState::Ready.into(),
             flight_endpoint: config.flight_advertise.clone(),

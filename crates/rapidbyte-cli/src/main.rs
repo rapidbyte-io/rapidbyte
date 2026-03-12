@@ -51,6 +51,14 @@ struct Cli {
     #[arg(long, global = true, env = "RAPIDBYTE_AUTH_TOKEN")]
     auth_token: Option<String>,
 
+    /// Custom CA certificate for TLS controller/Flight connections
+    #[arg(long, global = true, env = "RAPIDBYTE_TLS_CA_CERT")]
+    tls_ca_cert: Option<PathBuf>,
+
+    /// Optional TLS server name override for controller/Flight connections
+    #[arg(long, global = true, env = "RAPIDBYTE_TLS_DOMAIN")]
+    tls_domain: Option<String>,
+
     /// Log level (error, warn, info, debug, trace)
     #[arg(long, default_value = "info", global = true)]
     log_level: String,
@@ -76,6 +84,25 @@ enum Commands {
         /// Maximum rows to read per stream (implies --dry-run)
         #[arg(long)]
         limit: Option<u64>,
+    },
+    /// Show the current status of a distributed run
+    Status {
+        /// Controller run ID
+        run_id: String,
+    },
+    /// Stream progress for a distributed run until it reaches a terminal state
+    Watch {
+        /// Controller run ID
+        run_id: String,
+    },
+    /// List recent distributed runs
+    ListRuns {
+        /// Maximum number of runs to return
+        #[arg(long, default_value_t = 20)]
+        limit: i32,
+        /// Optional state filter (pending, assigned, running, preview_ready, completed, failed, cancelled)
+        #[arg(long)]
+        state: Option<String>,
     },
     /// Validate pipeline configuration and connectivity
     Check {
@@ -107,6 +134,12 @@ enum Commands {
         /// Shared signing key for preview tickets (hex or raw string)
         #[arg(long, env = "RAPIDBYTE_SIGNING_KEY")]
         signing_key: Option<String>,
+        /// PEM certificate for TLS server mode
+        #[arg(long)]
+        tls_cert: Option<PathBuf>,
+        /// PEM private key for TLS server mode
+        #[arg(long)]
+        tls_key: Option<PathBuf>,
     },
     /// Start an agent worker (long-running)
     Agent {
@@ -125,6 +158,12 @@ enum Commands {
         /// Shared signing key for preview tickets (must match controller)
         #[arg(long, env = "RAPIDBYTE_SIGNING_KEY")]
         signing_key: Option<String>,
+        /// PEM certificate for the agent Flight server
+        #[arg(long)]
+        flight_tls_cert: Option<PathBuf>,
+        /// PEM private key for the agent Flight server
+        #[arg(long)]
+        flight_tls_key: Option<PathBuf>,
     },
 }
 
@@ -152,6 +191,11 @@ async fn main() -> ExitCode {
     logging::init(&cli.log_level);
 
     let controller_url = cli.controller.or_else(controller_url_from_config);
+    let tls = commands::transport::TlsClientConfig {
+        ca_cert_path: cli.tls_ca_cert.clone(),
+        domain_name: cli.tls_domain.clone(),
+    };
+    let tls = tls.is_configured().then_some(tls);
 
     let result = match cli.command {
         Commands::Run {
@@ -166,6 +210,38 @@ async fn main() -> ExitCode {
                 verbosity,
                 controller_url.as_deref(),
                 cli.auth_token.as_deref(),
+                tls.as_ref(),
+            )
+            .await
+        }
+        Commands::Status { run_id } => {
+            commands::status::execute(
+                controller_url.as_deref(),
+                &run_id,
+                verbosity,
+                cli.auth_token.as_deref(),
+                tls.as_ref(),
+            )
+            .await
+        }
+        Commands::Watch { run_id } => {
+            commands::watch::execute(
+                controller_url.as_deref(),
+                &run_id,
+                verbosity,
+                cli.auth_token.as_deref(),
+                tls.as_ref(),
+            )
+            .await
+        }
+        Commands::ListRuns { limit, state } => {
+            commands::list_runs::execute(
+                controller_url.as_deref(),
+                limit,
+                state.as_deref(),
+                verbosity,
+                cli.auth_token.as_deref(),
+                tls.as_ref(),
             )
             .await
         }
@@ -177,11 +253,15 @@ async fn main() -> ExitCode {
         Commands::Controller {
             listen,
             signing_key,
+            tls_cert,
+            tls_key,
         } => {
             commands::controller::execute(
                 &listen,
                 signing_key.as_deref(),
                 cli.auth_token.as_deref(),
+                tls_cert.as_deref(),
+                tls_key.as_deref(),
             )
             .await
         }
@@ -191,6 +271,8 @@ async fn main() -> ExitCode {
             flight_advertise,
             max_tasks,
             signing_key,
+            flight_tls_cert,
+            flight_tls_key,
         } => {
             commands::agent::execute(
                 &controller,
@@ -199,6 +281,10 @@ async fn main() -> ExitCode {
                 max_tasks,
                 signing_key.as_deref(),
                 cli.auth_token.as_deref(),
+                cli.tls_ca_cert.as_deref(),
+                cli.tls_domain.as_deref(),
+                flight_tls_cert.as_deref(),
+                flight_tls_key.as_deref(),
             )
             .await
         }

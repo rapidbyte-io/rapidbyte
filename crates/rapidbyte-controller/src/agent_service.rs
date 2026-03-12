@@ -149,8 +149,21 @@ impl AgentService for AgentServiceImpl {
             if let Some(assignment) = tasks.poll(&req.agent_id, LEASE_TTL, &self.state.epoch_gen) {
                 let claimed = {
                     let mut runs = self.state.runs.write().await;
-                    runs.transition(&assignment.run_id, InternalRunState::Assigned)
+                    if runs
+                        .transition(&assignment.run_id, InternalRunState::Assigned)
                         .is_ok()
+                    {
+                        runs.set_current_task(
+                            &assignment.run_id,
+                            assignment.task_id.clone(),
+                            req.agent_id.clone(),
+                            assignment.attempt,
+                            assignment.lease_epoch,
+                        );
+                        true
+                    } else {
+                        false
+                    }
                 };
                 if claimed {
                     return Ok(Response::new(make_task_response(assignment)));
@@ -185,8 +198,21 @@ impl AgentService for AgentServiceImpl {
         if let Some(assignment) = tasks.poll(&req.agent_id, LEASE_TTL, &self.state.epoch_gen) {
             let claimed = {
                 let mut runs = self.state.runs.write().await;
-                runs.transition(&assignment.run_id, InternalRunState::Assigned)
+                if runs
+                    .transition(&assignment.run_id, InternalRunState::Assigned)
                     .is_ok()
+                {
+                    runs.set_current_task(
+                        &assignment.run_id,
+                        assignment.task_id.clone(),
+                        req.agent_id.clone(),
+                        assignment.attempt,
+                        assignment.lease_epoch,
+                    );
+                    true
+                } else {
+                    false
+                }
             };
             if claimed {
                 return Ok(Response::new(make_task_response(assignment)));
@@ -376,8 +402,8 @@ impl AgentService for AgentServiceImpl {
                         let _ = runs.transition(&run_id, InternalRunState::Failed);
                         if let Some(record) = runs.get_run_mut(&run_id) {
                             record.attempt += 1;
-                            record.state = InternalRunState::Pending;
                         }
+                        runs.prepare_retry(&run_id);
                     }
 
                     {

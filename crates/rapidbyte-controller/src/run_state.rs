@@ -1,7 +1,7 @@
 //! Run state machine with attempt tracking and idempotency dedup.
 
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::SystemTime;
 
 use thiserror::Error;
 
@@ -37,15 +37,26 @@ pub struct InvalidTransition {
     pub to: RunState,
 }
 
+#[derive(Debug, Clone)]
+pub struct CurrentTask {
+    pub task_id: String,
+    pub agent_id: String,
+    pub attempt: u32,
+    pub lease_epoch: u64,
+    pub assigned_at: SystemTime,
+}
+
 /// Record for a single pipeline run.
 #[derive(Debug, Clone)]
 pub struct RunRecord {
     pub run_id: String,
     pub pipeline_name: String,
     pub state: RunState,
-    pub created_at: Instant,
-    pub updated_at: Instant,
-    pub current_task_id: Option<String>,
+    pub created_at: SystemTime,
+    pub updated_at: SystemTime,
+    pub started_at: Option<SystemTime>,
+    pub completed_at: Option<SystemTime>,
+    pub current_task: Option<CurrentTask>,
     pub error_message: Option<String>,
     pub attempt: u32,
     pub idempotency_key: Option<String>,
@@ -89,14 +100,16 @@ impl RunStore {
             }
         }
 
-        let now = Instant::now();
+        let now = SystemTime::now();
         let record = RunRecord {
             run_id: run_id.clone(),
             pipeline_name,
             state: RunState::Pending,
             created_at: now,
             updated_at: now,
-            current_task_id: None,
+            started_at: None,
+            completed_at: None,
+            current_task: None,
             error_message: None,
             attempt: 1,
             idempotency_key: idempotency_key.clone(),
@@ -141,8 +154,19 @@ impl RunStore {
             });
         }
 
+        let now = SystemTime::now();
         record.state = to;
-        record.updated_at = Instant::now();
+        record.updated_at = now;
+
+        if to == RunState::Running && record.started_at.is_none() {
+            record.started_at = Some(now);
+        }
+
+        if to.is_terminal() {
+            record.completed_at = Some(now);
+            record.current_task = None;
+        }
+
         Ok(())
     }
 
@@ -162,6 +186,35 @@ impl RunStore {
             if run.state == RunState::Assigned {
                 let _ = self.transition(run_id, RunState::Running);
             }
+        }
+    }
+
+    pub fn set_current_task(
+        &mut self,
+        run_id: &str,
+        task_id: String,
+        agent_id: String,
+        attempt: u32,
+        lease_epoch: u64,
+    ) {
+        if let Some(record) = self.runs.get_mut(run_id) {
+            record.current_task = Some(CurrentTask {
+                task_id,
+                agent_id,
+                attempt,
+                lease_epoch,
+                assigned_at: SystemTime::now(),
+            });
+            record.updated_at = SystemTime::now();
+        }
+    }
+
+    pub fn prepare_retry(&mut self, run_id: &str) {
+        if let Some(record) = self.runs.get_mut(run_id) {
+            record.state = RunState::Pending;
+            record.completed_at = None;
+            record.current_task = None;
+            record.updated_at = SystemTime::now();
         }
     }
 

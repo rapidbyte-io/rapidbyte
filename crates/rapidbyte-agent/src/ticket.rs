@@ -132,6 +132,36 @@ impl TicketVerifier {
     }
 }
 
+/// Signs preview tickets using the same HMAC-SHA256 format as the controller.
+pub struct TicketSigner {
+    key: Vec<u8>,
+}
+
+impl TicketSigner {
+    #[must_use]
+    pub fn new(key: &[u8]) -> Self {
+        Self { key: key.to_vec() }
+    }
+
+    #[must_use]
+    pub fn sign(&self, payload: &TicketPayload) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(payload.run_id.len() as u32).to_le_bytes());
+        buf.extend_from_slice(payload.run_id.as_bytes());
+        buf.extend_from_slice(&(payload.task_id.len() as u32).to_le_bytes());
+        buf.extend_from_slice(payload.task_id.as_bytes());
+        buf.extend_from_slice(&(payload.stream_name.len() as u32).to_le_bytes());
+        buf.extend_from_slice(payload.stream_name.as_bytes());
+        buf.extend_from_slice(&payload.lease_epoch.to_le_bytes());
+        buf.extend_from_slice(&payload.expires_at_unix.to_le_bytes());
+
+        let mut mac = HmacSha256::new_from_slice(&self.key).expect("HMAC can take key of any size");
+        mac.update(&buf);
+        buf.extend_from_slice(&mac.finalize().into_bytes());
+        buf
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,5 +258,22 @@ mod tests {
             verifier.verify(&[0; 10]),
             Err(TicketError::TooShort)
         ));
+    }
+
+    #[test]
+    fn signer_round_trips_with_verifier() {
+        let key = b"test-secret-key-32-bytes-long!!!";
+        let signer = TicketSigner::new(key);
+        let verifier = TicketVerifier::new(key);
+        let payload = TicketPayload {
+            run_id: "r1".into(),
+            task_id: "t1".into(),
+            stream_name: "users".into(),
+            lease_epoch: 42,
+            expires_at_unix: future_expiry(),
+        };
+
+        let ticket = signer.sign(&payload);
+        assert_eq!(verifier.verify(&ticket).unwrap(), payload);
     }
 }

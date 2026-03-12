@@ -34,4 +34,4 @@ pub mod server;
 pub mod state;
 pub mod watcher;
 
-pub use server::{run, ControllerConfig};
+pub use server::{run, ControllerConfig, ServerTlsConfig};

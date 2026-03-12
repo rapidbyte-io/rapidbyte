@@ -1,7 +1,9 @@
 //! `PipelineService` gRPC handler implementations.
 
 use std::pin::Pin;
+use std::time::UNIX_EPOCH;
 
+use prost_types::Timestamp;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status};
@@ -10,7 +12,7 @@ use crate::proto::rapidbyte::v1::{
     pipeline_service_server::PipelineService, run_event, CancelRunRequest, CancelRunResponse,
     GetRunRequest, GetRunResponse, ListRunsRequest, ListRunsResponse, PreviewAccess, PreviewState,
     RunCancelled, RunCompleted, RunEvent, RunFailed, RunState, RunSummary, StreamPreview,
-    SubmitPipelineRequest, SubmitPipelineResponse, TaskError, WatchRunRequest,
+    SubmitPipelineRequest, SubmitPipelineResponse, TaskError, TaskRef, WatchRunRequest,
 };
 use crate::run_state::RunState as InternalRunState;
 use crate::state::ControllerState;
@@ -74,6 +76,14 @@ fn terminal_event_for_run(record: &crate::run_state::RunRecord) -> RunEvent {
     RunEvent {
         run_id: record.run_id.clone(),
         event: Some(event),
+    }
+}
+
+fn to_timestamp(time: std::time::SystemTime) -> Timestamp {
+    let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
+    Timestamp {
+        seconds: duration.as_secs() as i64,
+        nanos: duration.subsec_nanos() as i32,
     }
 }
 
@@ -297,7 +307,16 @@ impl PipelineService for PipelineServiceImpl {
         let run_id = request.into_inner().run_id;
 
         // Extract run data and drop the runs lock before touching previews
-        let (run_id_out, state, pipeline_name, last_error) = {
+        let (
+            run_id_out,
+            state,
+            pipeline_name,
+            submitted_at,
+            started_at,
+            completed_at,
+            current_task,
+            last_error,
+        ) = {
             let runs = self.state.runs.read().await;
             let record = runs
                 .get_run(&run_id)
@@ -306,6 +325,16 @@ impl PipelineService for PipelineServiceImpl {
                 record.run_id.clone(),
                 to_proto_state(record.state),
                 record.pipeline_name.clone(),
+                Some(to_timestamp(record.created_at)),
+                record.started_at.map(to_timestamp),
+                record.completed_at.map(to_timestamp),
+                record.current_task.as_ref().map(|task| TaskRef {
+                    task_id: task.task_id.clone(),
+                    agent_id: task.agent_id.clone(),
+                    attempt: task.attempt,
+                    lease_epoch: task.lease_epoch,
+                    assigned_at: Some(to_timestamp(task.assigned_at)),
+                }),
                 record.error_message.as_ref().map(|msg| TaskError {
                     code: String::new(),
                     message: msg.clone(),
@@ -340,10 +369,10 @@ impl PipelineService for PipelineServiceImpl {
             run_id: run_id_out,
             state,
             pipeline_name,
-            submitted_at: None,
-            started_at: None,
-            completed_at: None,
-            current_task: None,
+            submitted_at,
+            started_at,
+            completed_at,
+            current_task,
             preview,
             last_error,
         }))
@@ -388,6 +417,7 @@ impl PipelineService for PipelineServiceImpl {
 
         let runs = self.state.runs.read().await;
         let mut records = runs.list_runs(state_filter.as_deref());
+        records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
         // Clamp limit to a positive value; default to 20 if unset or zero
         let limit = if req.limit > 0 {
@@ -403,7 +433,7 @@ impl PipelineService for PipelineServiceImpl {
                 run_id: r.run_id.clone(),
                 pipeline_name: r.pipeline_name.clone(),
                 state: to_proto_state(r.state),
-                submitted_at: None,
+                submitted_at: Some(to_timestamp(r.created_at)),
             })
             .collect();
 
@@ -420,7 +450,10 @@ fn test_state() -> ControllerState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::rapidbyte::v1::ExecutionOptions;
+    use crate::proto::rapidbyte::v1::{
+        agent_service_server::AgentService as _, ExecutionOptions, PollTaskRequest,
+        RegisterAgentRequest,
+    };
     use crate::run_state::RunState as InternalRunState;
     use tokio_stream::StreamExt;
 
@@ -524,6 +557,116 @@ mod tests {
         assert_eq!(resp.run_id, run_id);
         assert_eq!(resp.state, RunState::Pending as i32);
         assert_eq!(resp.pipeline_name, "mytest");
+    }
+
+    #[tokio::test]
+    async fn get_run_returns_real_metadata() {
+        let state = test_state();
+        let svc = PipelineServiceImpl::new(state.clone());
+
+        let yaml = b"pipeline: mytest\nstate:\n  backend: postgres\n";
+        let run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        let pending = svc
+            .get_run(Request::new(GetRunRequest {
+                run_id: run_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(pending.submitted_at.is_some());
+        assert!(pending.started_at.is_none());
+        assert!(pending.completed_at.is_none());
+        assert!(pending.current_task.is_none());
+
+        let agent_svc = crate::agent_service::AgentServiceImpl::new(state.clone());
+        let agent_id = agent_svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let task = agent_svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(matches!(
+            task.result,
+            Some(crate::proto::rapidbyte::v1::poll_task_response::Result::Task(_))
+        ));
+
+        let assigned = svc
+            .get_run(Request::new(GetRunRequest { run_id }))
+            .await
+            .unwrap()
+            .into_inner();
+        let current_task = assigned.current_task.expect("assigned task metadata");
+        assert_eq!(current_task.agent_id, agent_id);
+        assert_eq!(current_task.attempt, 1);
+        assert!(current_task.assigned_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn list_runs_returns_most_recent_first() {
+        let state = test_state();
+        let svc = PipelineServiceImpl::new(state);
+
+        let first = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: b"pipeline: first\nstate:\n  backend: postgres\n".to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let second = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: b"pipeline: second\nstate:\n  backend: postgres\n".to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        let resp = svc
+            .list_runs(Request::new(ListRunsRequest {
+                limit: 2,
+                filter_state: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.runs.len(), 2);
+        assert_eq!(resp.runs[0].run_id, second);
+        assert_eq!(resp.runs[1].run_id, first);
+        assert!(resp.runs[0].submitted_at.is_some());
+        assert!(resp.runs[1].submitted_at.is_some());
     }
 
     #[tokio::test]

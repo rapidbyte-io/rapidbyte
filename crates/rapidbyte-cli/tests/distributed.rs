@@ -74,6 +74,8 @@ async fn distributed_submit_and_complete() {
             signing_key: Vec::new(),
             preview_ttl: Duration::from_secs(60),
             auth_token: None,
+            controller_tls: None,
+            flight_tls: None,
         };
         let _ = rapidbyte_agent::run(config).await;
     });

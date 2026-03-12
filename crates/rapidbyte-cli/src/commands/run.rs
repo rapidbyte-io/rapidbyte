@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_engine::orchestrator;
 
+use crate::commands::transport::TlsClientConfig;
 use crate::output::{
     format::{format_bytes, format_count, format_duration},
     progress, summary,
@@ -39,6 +40,7 @@ pub async fn execute(
     verbosity: Verbosity,
     controller: Option<&str>,
     auth_token: Option<&str>,
+    tls: Option<&TlsClientConfig>,
 ) -> Result<()> {
     // If controller is set, route to distributed mode
     if let Some(url) = controller {
@@ -49,6 +51,7 @@ pub async fn execute(
             limit,
             verbosity,
             auth_token,
+            tls,
         )
         .await;
     }

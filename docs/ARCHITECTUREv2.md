@@ -259,7 +259,7 @@ A stateless worker process. Participates in both planes:
 
 ### 9.1 Key Design Principle
 
-The agent reuses the existing engine without modification. A single call to `run_pipeline(config, options, progress_tx)` runs the full source → transform → destination pipeline on the agent using local mpsc channels. **No engine refactoring is needed for v1.1.**
+The agent reuses the existing engine as the execution core. A single call to `run_pipeline(config, options, progress_tx, cancel_token)` runs the full source → transform → destination pipeline on the agent using local mpsc channels. v1.1 still avoids distributed orchestrator refactoring, but now threads a cooperative cancellation token so the engine can stop at safe boundaries instead of being aborted mid-commit.
 
 The `progress_tx` channel is bridged to the controller's `ReportProgress` RPC so the CLI can display live progress via `WatchRun`.
 

@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use tonic::transport::Server;
+use tonic::transport::{Identity, Server, ServerTlsConfig as TonicServerTlsConfig};
 use tracing::info;
 
 use crate::agent_service::AgentServiceImpl;
@@ -16,6 +16,12 @@ use crate::run_state::RunState as InternalRunState;
 use crate::state::ControllerState;
 
 /// Configuration for the controller server.
+#[derive(Clone)]
+pub struct ServerTlsConfig {
+    pub cert_pem: Vec<u8>,
+    pub key_pem: Vec<u8>,
+}
+
 pub struct ControllerConfig {
     pub listen_addr: SocketAddr,
     pub signing_key: Vec<u8>,
@@ -24,6 +30,7 @@ pub struct ControllerConfig {
     pub lease_check_interval: Duration,
     /// Bearer tokens for authentication. Empty = auth disabled.
     pub auth_tokens: Vec<String>,
+    pub tls: Option<ServerTlsConfig>,
 }
 
 /// Default signing key used when no explicit key is configured.
@@ -40,6 +47,7 @@ impl Default for ControllerConfig {
             agent_reap_timeout: Duration::from_secs(60),
             lease_check_interval: Duration::from_secs(10),
             auth_tokens: Vec::new(),
+            tls: None,
         }
     }
 }
@@ -130,7 +138,15 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
 
     info!(addr = %config.listen_addr, "Controller listening");
 
-    Server::builder()
+    let mut server = Server::builder();
+    if let Some(tls) = &config.tls {
+        server = server.tls_config(TonicServerTlsConfig::new().identity(Identity::from_pem(
+            tls.cert_pem.clone(),
+            tls.key_pem.clone(),
+        )))?;
+    }
+
+    server
         .add_service(pipeline_svc)
         .add_service(agent_svc)
         .serve(config.listen_addr)

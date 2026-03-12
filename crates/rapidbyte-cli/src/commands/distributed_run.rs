@@ -7,8 +7,10 @@ use anyhow::{Context, Result};
 use arrow::record_batch::RecordBatch;
 use arrow_flight::flight_service_client::FlightServiceClient;
 use arrow_flight::Ticket;
-use tonic::transport::Channel;
 
+use crate::commands::transport::{
+    build_endpoint, connect_channel, request_with_bearer, TlsClientConfig,
+};
 use crate::Verbosity;
 
 use rapidbyte_controller::proto::rapidbyte::v1::pipeline_service_client::PipelineServiceClient;
@@ -24,12 +26,12 @@ pub async fn execute(
     limit: Option<u64>,
     verbosity: Verbosity,
     auth_token: Option<&str>,
+    tls: Option<&TlsClientConfig>,
 ) -> Result<()> {
     let yaml = std::fs::read(pipeline_path)
         .with_context(|| format!("Failed to read pipeline: {}", pipeline_path.display()))?;
 
-    let channel = Channel::from_shared(controller_url.to_string())?
-        .connect()
+    let channel = connect_channel(controller_url, tls)
         .await
         .with_context(|| format!("Failed to connect to controller at {controller_url}"))?;
 
@@ -91,8 +93,14 @@ pub async fn execute(
                     if effective_dry_run {
                         handle_preview_result(
                             true,
-                            fetch_and_display_preview(&mut client, &run_id, verbosity, auth_token)
-                                .await,
+                            fetch_and_display_preview(
+                                &mut client,
+                                &run_id,
+                                verbosity,
+                                auth_token,
+                                tls,
+                            )
+                            .await,
                         )?;
                     }
 
@@ -114,10 +122,11 @@ pub async fn execute(
 
 /// Fetch preview data from the agent's Flight endpoint and display it.
 async fn fetch_and_display_preview(
-    client: &mut PipelineServiceClient<Channel>,
+    client: &mut PipelineServiceClient<tonic::transport::Channel>,
     run_id: &str,
     verbosity: Verbosity,
     auth_token: Option<&str>,
+    tls: Option<&TlsClientConfig>,
 ) -> Result<()> {
     use arrow::util::pretty::pretty_format_batches;
 
@@ -149,16 +158,18 @@ async fn fetch_and_display_preview(
         format!("http://{}", preview.flight_endpoint)
     };
 
-    let flight_channel = Channel::from_shared(flight_url)?
-        .connect()
-        .await
-        .context("Failed to connect to agent Flight endpoint")?;
+    let flight_endpoint =
+        build_endpoint(&flight_url, tls).context("Failed to configure agent Flight endpoint")?;
 
     let previews = fetch_preview_batches(&preview, |stream, ticket| {
-        let flight_channel = flight_channel.clone();
+        let flight_endpoint = flight_endpoint.clone();
         let stream = stream.to_string();
         async move {
-            let mut flight_client = FlightServiceClient::new(flight_channel);
+            let channel = flight_endpoint
+                .connect()
+                .await
+                .context("Failed to connect to agent Flight endpoint")?;
+            let mut flight_client = FlightServiceClient::new(channel);
             let mut stream_resp = flight_client
                 .do_get(Ticket {
                     ticket: ticket.into(),
@@ -248,22 +259,12 @@ fn ensure_terminal_event_received(seen_terminal: bool) -> Result<()> {
         anyhow::bail!("WatchRun stream ended before a terminal event was received");
     }
 }
-
-fn request_with_bearer<T>(message: T, auth_token: Option<&str>) -> tonic::Request<T> {
-    let mut request = tonic::Request::new(message);
-    if let Some(token) = auth_token {
-        request
-            .metadata_mut()
-            .insert("authorization", format!("Bearer {token}").parse().unwrap());
-    }
-    request
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use rapidbyte_controller::proto::rapidbyte::v1::{PreviewState, StreamPreview};
     use std::sync::{Arc, Mutex};
+    use tempfile::tempdir;
     use tonic::metadata::MetadataValue;
 
     #[tokio::test]
@@ -385,5 +386,23 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("Flight DoGet failed"));
+    }
+
+    #[test]
+    fn distributed_run_builds_tls_channel_when_configured() {
+        let dir = tempdir().unwrap();
+        let ca_path = dir.path().join("ca.pem");
+        std::fs::write(&ca_path, b"ca-pem").unwrap();
+
+        let endpoint = build_endpoint(
+            "https://controller.example:9090",
+            Some(&TlsClientConfig {
+                ca_cert_path: Some(ca_path),
+                domain_name: Some("controller.example".into()),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(endpoint.uri().scheme_str(), Some("https"));
     }
 }

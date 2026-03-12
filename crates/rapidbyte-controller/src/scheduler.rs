@@ -57,7 +57,6 @@ pub struct TaskAssignment {
 pub struct TaskQueue {
     pending: VecDeque<String>, // task_ids in FIFO order
     tasks: HashMap<String, TaskRecord>,
-    next_task_id: u64,
 }
 
 impl TaskQueue {
@@ -66,7 +65,6 @@ impl TaskQueue {
         Self {
             pending: VecDeque::new(),
             tasks: HashMap::new(),
-            next_task_id: 1,
         }
     }
 
@@ -79,8 +77,7 @@ impl TaskQueue {
         limit: Option<u64>,
         attempt: u32,
     ) -> String {
-        let task_id = format!("task-{}", self.next_task_id);
-        self.next_task_id += 1;
+        let task_id = uuid::Uuid::new_v4().to_string();
 
         let record = TaskRecord {
             task_id: task_id.clone(),
@@ -352,6 +349,17 @@ mod tests {
         assert_eq!(assignment.attempt, 1);
         assert_eq!(assignment.lease_epoch, 1);
         assert_eq!(assignment.pipeline_yaml, b"yaml");
+    }
+
+    #[test]
+    fn enqueue_uses_unique_task_ids() {
+        let (mut q, _gen) = make_queue_and_gen();
+        let first = q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
+        let second = q.enqueue("r2".into(), b"yaml".to_vec(), false, None, 1);
+
+        assert_ne!(first, second);
+        assert!(uuid::Uuid::parse_str(&first).is_ok());
+        assert!(uuid::Uuid::parse_str(&second).is_ok());
     }
 
     #[test]

@@ -13,9 +13,13 @@ pub mod controller;
 pub mod dev;
 pub mod discover;
 pub mod distributed_run;
+pub mod list_runs;
 pub mod plugins;
 pub mod run;
 pub mod scaffold;
+pub mod status;
+pub mod transport;
+pub mod watch;
 
 /// Parse and validate a pipeline YAML file.
 ///
