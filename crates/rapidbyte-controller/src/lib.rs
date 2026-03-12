@@ -23,4 +23,5 @@
 
 pub mod lease;
 pub mod proto;
+pub mod registry;
 pub mod run_state;
