@@ -114,16 +114,18 @@ impl PipelineService for PipelineServiceImpl {
             .unwrap_or("unknown")
             .to_string();
 
-        // Reject SQLite backend in distributed mode
-        if let Some(state_cfg) = config.get("state") {
-            if let Some(backend) = state_cfg.get("backend") {
-                if backend.as_str() == Some("sqlite") {
-                    return Err(Status::invalid_argument(
-                        "Distributed mode requires a shared state backend (postgres). \
-                         SQLite is a local file and would be unreachable after agent reassignment.",
-                    ));
-                }
-            }
+        // Reject SQLite backend (explicit or implicit) in distributed mode.
+        // Pipelines without a state section or without state.backend default to
+        // SQLite in the engine, which is a local file unreachable after reassignment.
+        let backend = config
+            .get("state")
+            .and_then(|s| s.get("backend"))
+            .and_then(|b| b.as_str());
+        if backend != Some("postgres") {
+            return Err(Status::invalid_argument(
+                "Distributed mode requires state.backend: postgres. \
+                 SQLite (the default) is a local file and would be unreachable after agent reassignment.",
+            ));
         }
 
         // Check idempotency

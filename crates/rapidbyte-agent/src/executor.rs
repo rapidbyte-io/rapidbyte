@@ -5,6 +5,7 @@ use rapidbyte_engine::config::validator;
 use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_engine::progress::ProgressEvent;
 use rapidbyte_engine::{orchestrator, PipelineError};
+use rapidbyte_types::prelude::CommitState;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -172,7 +173,14 @@ pub async fn execute_task(
                     safe_to_retry: pe.safe_to_retry,
                     commit_state: pe.commit_state.map_or_else(
                         || "before_commit".into(),
-                        |cs| format!("{cs:?}").to_lowercase(),
+                        |cs| {
+                            match cs {
+                                CommitState::BeforeCommit => "before_commit",
+                                CommitState::AfterCommitUnknown => "after_commit_unknown",
+                                CommitState::AfterCommitConfirmed => "after_commit_confirmed",
+                            }
+                            .into()
+                        },
                     ),
                 },
                 PipelineError::Infrastructure(e) => TaskErrorInfo {

@@ -239,9 +239,15 @@ impl AgentService for AgentServiceImpl {
         // Transition run state and publish events
         match outcome {
             TaskOutcome::Completed => {
+                let has_preview = req.preview.is_some();
                 {
                     let mut runs = self.state.runs.write().await;
                     runs.ensure_running(&run_id);
+                    // Dry-run tasks with preview data pass through PreviewReady
+                    // so clients can discover previews via GetRun/ListRuns.
+                    if has_preview {
+                        let _ = runs.transition(&run_id, InternalRunState::PreviewReady);
+                    }
                     let _ = runs.transition(&run_id, InternalRunState::Completed);
                     if let Some(record) = runs.get_run_mut(&run_id) {
                         let metrics = req.metrics.as_ref();
