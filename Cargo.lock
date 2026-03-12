@@ -3340,6 +3340,7 @@ dependencies = [
  "rapidbyte-runtime",
  "rapidbyte-types",
  "serde_json",
+ "syn",
  "tempfile",
  "tokio",
  "tracing",
