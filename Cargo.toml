@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "benchmarks",
+    "crates/rapidbyte-agent",
     "crates/rapidbyte-cli",
     "crates/rapidbyte-controller",
     "crates/rapidbyte-dev",

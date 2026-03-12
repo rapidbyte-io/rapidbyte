@@ -280,6 +280,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrow-flight"
+version = "53.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "51e3a40b6ef36f4c17d1fae5af3438c3d6c660401f9ac8a4d921c27d368b8dee"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-cast",
+ "arrow-ipc",
+ "arrow-schema",
+ "base64",
+ "bytes",
+ "futures",
+ "paste",
+ "prost",
+ "prost-types",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
 name = "arrow-ipc"
 version = "53.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3531,6 +3552,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "rapidbyte-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "arrow-flight",
+ "bytes",
+ "hmac",
+ "prost",
+ "prost-types",
+ "rapidbyte-engine",
+ "rapidbyte-runtime",
+ "rapidbyte-state",
+ "rapidbyte-types",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tonic-build",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "rapidbyte-benchmarks"
 version = "0.1.0"
 dependencies = [
@@ -4633,6 +4679,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
