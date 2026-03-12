@@ -246,6 +246,7 @@ message PreviewAccess {
 message StreamPreview {
   string stream = 1;
   uint64 rows = 2;
+  bytes ticket = 3;
 }
 
 enum RunState {

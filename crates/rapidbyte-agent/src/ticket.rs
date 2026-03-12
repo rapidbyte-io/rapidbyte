@@ -30,6 +30,7 @@ pub enum TicketError {
 pub struct TicketPayload {
     pub run_id: String,
     pub task_id: String,
+    pub stream_name: String,
     pub lease_epoch: u64,
     pub expires_at_unix: u64,
 }
@@ -40,6 +41,7 @@ impl TicketPayload {
         let mut cursor = 0;
         let run_id = read_string(data, &mut cursor).map_err(TicketError::MalformedPayload)?;
         let task_id = read_string(data, &mut cursor).map_err(TicketError::MalformedPayload)?;
+        let stream_name = read_string(data, &mut cursor).map_err(TicketError::MalformedPayload)?;
 
         if cursor + 16 > data.len() {
             return Err(TicketError::MalformedPayload(
@@ -53,6 +55,7 @@ impl TicketPayload {
         Ok(Self {
             run_id,
             task_id,
+            stream_name,
             lease_epoch,
             expires_at_unix,
         })
@@ -142,6 +145,9 @@ mod tests {
         // Write task_id
         buf.extend_from_slice(&(payload.task_id.len() as u32).to_le_bytes());
         buf.extend_from_slice(payload.task_id.as_bytes());
+        // Write stream_name
+        buf.extend_from_slice(&(payload.stream_name.len() as u32).to_le_bytes());
+        buf.extend_from_slice(payload.stream_name.as_bytes());
         // Write u64 fields
         buf.extend_from_slice(&payload.lease_epoch.to_le_bytes());
         buf.extend_from_slice(&payload.expires_at_unix.to_le_bytes());
@@ -169,6 +175,7 @@ mod tests {
         let payload = TicketPayload {
             run_id: "r1".into(),
             task_id: "t1".into(),
+            stream_name: "users".into(),
             lease_epoch: 42,
             expires_at_unix: future_expiry(),
         };
@@ -184,6 +191,7 @@ mod tests {
         let payload = TicketPayload {
             run_id: "r1".into(),
             task_id: "t1".into(),
+            stream_name: "users".into(),
             lease_epoch: 42,
             expires_at_unix: future_expiry(),
         };
@@ -202,6 +210,7 @@ mod tests {
         let payload = TicketPayload {
             run_id: "r1".into(),
             task_id: "t1".into(),
+            stream_name: "users".into(),
             lease_epoch: 1,
             expires_at_unix: 0, // already expired
         };

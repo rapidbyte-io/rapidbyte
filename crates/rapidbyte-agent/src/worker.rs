@@ -190,13 +190,22 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
 
         // Store dry-run preview in spool and build PreviewAccess
         let preview = if let Some(dr) = result.dry_run_result {
+            let stream_previews = dr
+                .streams
+                .iter()
+                .map(|stream| crate::proto::rapidbyte::v1::StreamPreview {
+                    stream: stream.stream_name.clone(),
+                    rows: stream.total_rows,
+                    ticket: Vec::new(),
+                })
+                .collect();
             spool.write().await.store(task.task_id.clone(), dr);
             Some(PreviewAccess {
                 state: PreviewState::Ready.into(),
                 flight_endpoint: config.flight_advertise.clone(),
                 ticket: Vec::new(), // Controller signs the ticket
                 expires_at: None,
-                streams: vec![],
+                streams: stream_previews,
             })
         } else {
             None

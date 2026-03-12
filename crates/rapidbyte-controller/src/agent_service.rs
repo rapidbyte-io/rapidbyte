@@ -261,17 +261,32 @@ impl AgentService for AgentServiceImpl {
                 // Store preview if provided (runs lock dropped first).
                 // Controller signs the ticket — agent sends flight_endpoint only.
                 if let Some(preview) = &req.preview {
-                    let ticket_payload = crate::preview::TicketPayload {
-                        run_id: run_id.clone(),
-                        task_id: req.task_id.clone(),
-                        lease_epoch: req.lease_epoch,
-                        expires_at_unix: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs()
-                            + 300,
-                    };
-                    let signed_ticket = self.state.ticket_signer.sign(&ticket_payload);
+                    let expires_at_unix = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs()
+                        + 300;
+                    let signed_streams = preview
+                        .streams
+                        .iter()
+                        .map(|stream| {
+                            let payload = crate::preview::TicketPayload {
+                                run_id: run_id.clone(),
+                                task_id: req.task_id.clone(),
+                                stream_name: stream.stream.clone(),
+                                lease_epoch: req.lease_epoch,
+                                expires_at_unix,
+                            };
+                            crate::preview::PreviewStreamEntry {
+                                stream: stream.stream.clone(),
+                                rows: stream.rows,
+                                ticket: self.state.ticket_signer.sign(&payload),
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let signed_ticket = signed_streams
+                        .first()
+                        .map_or_else(bytes::Bytes::new, |stream| stream.ticket.clone());
 
                     let mut previews = self.state.previews.write().await;
                     previews.store(crate::preview::PreviewEntry {
@@ -279,6 +294,7 @@ impl AgentService for AgentServiceImpl {
                         task_id: req.task_id.clone(),
                         flight_endpoint: preview.flight_endpoint.clone(),
                         ticket: signed_ticket,
+                        streams: signed_streams,
                         created_at: std::time::Instant::now(),
                         ttl: Duration::from_secs(300),
                     });

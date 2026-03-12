@@ -9,8 +9,8 @@ use tonic::{Request, Response, Status};
 use crate::proto::rapidbyte::v1::{
     pipeline_service_server::PipelineService, run_event, CancelRunRequest, CancelRunResponse,
     GetRunRequest, GetRunResponse, ListRunsRequest, ListRunsResponse, PreviewAccess, PreviewState,
-    RunCancelled, RunCompleted, RunEvent, RunFailed, RunState, RunSummary, SubmitPipelineRequest,
-    SubmitPipelineResponse, TaskError, WatchRunRequest,
+    RunCancelled, RunCompleted, RunEvent, RunFailed, RunState, RunSummary, StreamPreview,
+    SubmitPipelineRequest, SubmitPipelineResponse, TaskError, WatchRunRequest,
 };
 use crate::run_state::RunState as InternalRunState;
 use crate::state::ControllerState;
@@ -324,7 +324,15 @@ impl PipelineService for PipelineServiceImpl {
                 flight_endpoint: p.flight_endpoint.clone(),
                 ticket: p.ticket.to_vec(),
                 expires_at: None,
-                streams: vec![],
+                streams: p
+                    .streams
+                    .iter()
+                    .map(|stream| StreamPreview {
+                        stream: stream.stream.clone(),
+                        rows: stream.rows,
+                        ticket: stream.ticket.to_vec(),
+                    })
+                    .collect(),
             })
         };
 

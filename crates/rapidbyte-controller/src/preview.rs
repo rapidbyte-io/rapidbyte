@@ -28,6 +28,7 @@ pub enum TicketError {
 pub struct TicketPayload {
     pub run_id: String,
     pub task_id: String,
+    pub stream_name: String,
     pub lease_epoch: u64,
     pub expires_at_unix: u64,
 }
@@ -38,6 +39,7 @@ impl TicketPayload {
         let mut buf = Vec::new();
         write_string(&mut buf, &self.run_id);
         write_string(&mut buf, &self.task_id);
+        write_string(&mut buf, &self.stream_name);
         buf.extend_from_slice(&self.lease_epoch.to_le_bytes());
         buf.extend_from_slice(&self.expires_at_unix.to_le_bytes());
         buf
@@ -48,6 +50,7 @@ impl TicketPayload {
         let mut cursor = 0;
         let run_id = read_string(data, &mut cursor).map_err(TicketError::MalformedPayload)?;
         let task_id = read_string(data, &mut cursor).map_err(TicketError::MalformedPayload)?;
+        let stream_name = read_string(data, &mut cursor).map_err(TicketError::MalformedPayload)?;
 
         if cursor + 16 > data.len() {
             return Err(TicketError::MalformedPayload(
@@ -61,6 +64,7 @@ impl TicketPayload {
         Ok(Self {
             run_id,
             task_id,
+            stream_name,
             lease_epoch,
             expires_at_unix,
         })
@@ -167,8 +171,17 @@ pub struct PreviewEntry {
     pub task_id: String,
     pub flight_endpoint: String,
     pub ticket: bytes::Bytes,
+    pub streams: Vec<PreviewStreamEntry>,
     pub created_at: Instant,
     pub ttl: Duration,
+}
+
+/// Metadata for a single preview stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreviewStreamEntry {
+    pub stream: String,
+    pub rows: u64,
+    pub ticket: bytes::Bytes,
 }
 
 /// Stores preview metadata indexed by `run_id`.
@@ -230,6 +243,7 @@ mod tests {
         TicketPayload {
             run_id: "r1".into(),
             task_id: "t1".into(),
+            stream_name: "users".into(),
             lease_epoch: 42,
             expires_at_unix: expires,
         }
@@ -265,6 +279,7 @@ mod tests {
         let payload = TicketPayload {
             run_id: "r1".into(),
             task_id: "t1".into(),
+            stream_name: "users".into(),
             lease_epoch: 1,
             expires_at_unix: 0, // epoch 0 = already expired
         };
@@ -280,10 +295,17 @@ mod tests {
             task_id: "t1".into(),
             flight_endpoint: "localhost:9091".into(),
             ticket: bytes::Bytes::from_static(b"ticket"),
+            streams: vec![PreviewStreamEntry {
+                stream: "users".into(),
+                rows: 42,
+                ticket: bytes::Bytes::from_static(b"users-ticket"),
+            }],
             created_at: Instant::now(),
             ttl: Duration::from_secs(60),
         });
-        assert!(store.get("r1").is_some());
+        let entry = store.get("r1").unwrap();
+        assert_eq!(entry.streams.len(), 1);
+        assert_eq!(entry.streams[0].stream, "users");
     }
 
     #[test]
@@ -294,6 +316,7 @@ mod tests {
             task_id: "t1".into(),
             flight_endpoint: "localhost:9091".into(),
             ticket: bytes::Bytes::from_static(b"ticket"),
+            streams: vec![],
             created_at: Instant::now() - Duration::from_secs(120),
             ttl: Duration::from_secs(60),
         });
@@ -308,6 +331,7 @@ mod tests {
             task_id: "t1".into(),
             flight_endpoint: "localhost:9091".into(),
             ticket: bytes::Bytes::from_static(b"ticket"),
+            streams: vec![],
             created_at: Instant::now() - Duration::from_secs(120),
             ttl: Duration::from_secs(60),
         });
@@ -316,6 +340,7 @@ mod tests {
             task_id: "t2".into(),
             flight_endpoint: "localhost:9091".into(),
             ticket: bytes::Bytes::from_static(b"ticket2"),
+            streams: vec![],
             created_at: Instant::now(),
             ttl: Duration::from_secs(60),
         });
