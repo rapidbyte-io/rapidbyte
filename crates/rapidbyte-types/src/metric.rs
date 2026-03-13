@@ -1,37 +1,10 @@
-//! Metrics and execution summaries.
+//! Execution summaries for source, destination, and transform plugins.
 //!
-//! Plugins emit [`Metric`]s during operation and return role-specific
-//! summaries ([`ReadSummary`], [`WriteSummary`], [`TransformSummary`])
-//! upon completion.
+//! Plugins return role-specific summaries ([`ReadSummary`], [`WriteSummary`],
+//! [`TransformSummary`]) upon completion, along with optional timing
+//! breakdowns ([`ReadPerf`], [`WritePerf`]).
 
 use serde::{Deserialize, Serialize};
-
-// ── Metrics ─────────────────────────────────────────────────────────
-
-/// Type of a metric measurement.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[non_exhaustive]
-#[serde(tag = "type", content = "value", rename_all = "snake_case")]
-pub enum MetricValue {
-    /// Monotonically increasing count.
-    Counter(u64),
-    /// Point-in-time gauge reading.
-    Gauge(f64),
-    /// Single observation for histogram aggregation.
-    Histogram(f64),
-}
-
-/// A single metric observation emitted by a plugin.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Metric {
-    /// Metric name (e.g., `"rows_per_second"`).
-    pub name: String,
-    /// Metric value and type.
-    pub value: MetricValue,
-    /// Key-value labels for metric dimensions.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub labels: Vec<(String, String)>,
-}
 
 // ── Performance Breakdowns ──────────────────────────────────────────
 
@@ -104,18 +77,6 @@ pub struct TransformSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn metric_counter_roundtrip() {
-        let m = Metric {
-            name: "rows_read".into(),
-            value: MetricValue::Counter(42),
-            labels: vec![("stream".into(), "users".into())],
-        };
-        let json = serde_json::to_string(&m).unwrap();
-        let back: Metric = serde_json::from_str(&json).unwrap();
-        assert_eq!(m, back);
-    }
 
     #[test]
     fn read_summary_optional_perf() {
