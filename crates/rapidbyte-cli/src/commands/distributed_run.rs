@@ -289,7 +289,18 @@ fn bench_json_from_completed(completed: &RunCompleted) -> serde_json::Value {
         "dest_recv_count": 1,
         "parallelism": 1,
         "retry_count": 0,
-        "stream_metrics": [],
+        "stream_metrics": [{
+            "stream_name": "distributed.aggregate",
+            "partition_index": 0,
+            "partition_count": 1,
+            "records_read": completed.total_records,
+            "records_written": completed.total_records,
+            "bytes_read": completed.total_bytes,
+            "bytes_written": completed.total_bytes,
+            "source_duration_secs": completed.elapsed_seconds,
+            "dest_duration_secs": completed.elapsed_seconds,
+            "dest_recv_secs": completed.elapsed_seconds
+        }],
     })
 }
 
@@ -463,5 +474,7 @@ mod tests {
         assert_eq!(json["records_written"], 123);
         assert_eq!(json["bytes_written"], 456);
         assert_eq!(json["duration_secs"], 7.5);
+        assert_eq!(json["stream_metrics"][0]["records_written"], 123);
+        assert_eq!(json["stream_metrics"][0]["bytes_written"], 456);
     }
 }
