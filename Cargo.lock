@@ -3961,6 +3961,7 @@ dependencies = [
  "opentelemetry_sdk",
  "prometheus",
  "rapidbyte-types",
+ "serde_json",
  "tracing",
 ]
 
