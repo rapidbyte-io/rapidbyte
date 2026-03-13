@@ -205,6 +205,10 @@ impl PreviewStore {
         self.store(entry);
     }
 
+    pub fn remove(&mut self, run_id: &str) -> Option<PreviewEntry> {
+        self.entries.remove(run_id)
+    }
+
     #[must_use]
     pub fn get(&mut self, run_id: &str) -> Option<&PreviewEntry> {
         let expired = self

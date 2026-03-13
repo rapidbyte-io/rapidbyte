@@ -165,6 +165,31 @@ impl ControllerState {
         Ok(())
     }
 
+    /// Persist a preview snapshot directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable metadata write fails.
+    pub async fn persist_preview_record(
+        &self,
+        preview: &crate::preview::PreviewEntry,
+    ) -> anyhow::Result<()> {
+        let Some(metadata_store) = &self.metadata_store else {
+            return Ok(());
+        };
+        metadata_store
+            .upsert_preview(
+                &preview.run_id,
+                &preview.task_id,
+                &preview.flight_endpoint,
+                preview.ticket.as_ref(),
+                &preview.streams,
+                preview_created_at(preview.created_at),
+                preview.ttl,
+            )
+            .await
+    }
+
     /// Persist an agent record when durable metadata storage is configured.
     ///
     /// # Errors
@@ -233,6 +258,30 @@ impl ControllerState {
             return Ok(());
         };
         metadata_store.delete_run(run_id).await
+    }
+
+    /// Delete a task from durable metadata storage directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable metadata delete fails.
+    pub async fn delete_task(&self, task_id: &str) -> anyhow::Result<()> {
+        let Some(metadata_store) = &self.metadata_store else {
+            return Ok(());
+        };
+        metadata_store.delete_task(task_id).await
+    }
+
+    /// Delete preview metadata from durable storage directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable metadata delete fails.
+    pub async fn delete_preview(&self, run_id: &str) -> anyhow::Result<()> {
+        let Some(metadata_store) = &self.metadata_store else {
+            return Ok(());
+        };
+        metadata_store.delete_preview(run_id).await
     }
 }
 

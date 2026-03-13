@@ -157,6 +157,8 @@ pub trait DurableMetadataStore: Send + Sync {
     async fn upsert_agent(&self, agent: &AgentRecord) -> anyhow::Result<()>;
     async fn delete_agent(&self, agent_id: &str) -> anyhow::Result<()>;
     async fn delete_run(&self, run_id: &str) -> anyhow::Result<()>;
+    async fn delete_task(&self, task_id: &str) -> anyhow::Result<()>;
+    async fn delete_preview(&self, run_id: &str) -> anyhow::Result<()>;
 }
 
 impl MetadataStore {
@@ -562,6 +564,26 @@ impl DurableMetadataStore for MetadataStore {
     async fn delete_run(&self, run_id: &str) -> anyhow::Result<()> {
         self.client
             .execute("DELETE FROM controller_runs WHERE run_id = $1", &[&run_id])
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_task(&self, task_id: &str) -> anyhow::Result<()> {
+        self.client
+            .execute(
+                "DELETE FROM controller_tasks WHERE task_id = $1",
+                &[&task_id],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn delete_preview(&self, run_id: &str) -> anyhow::Result<()> {
+        self.client
+            .execute(
+                "DELETE FROM controller_previews WHERE run_id = $1",
+                &[&run_id],
+            )
             .await?;
         Ok(())
     }
@@ -1007,14 +1029,17 @@ pub mod test_support {
         run_upsert_fail_on: Option<usize>,
         task_upsert_fail_on: Option<usize>,
         agent_upsert_fail_on: Option<usize>,
+        preview_upsert_fail_on: Option<usize>,
         delete_run_fail_on: Option<usize>,
         run_upsert_calls: usize,
         task_upsert_calls: usize,
         agent_upsert_calls: usize,
+        preview_upsert_calls: usize,
         delete_run_calls: usize,
         persisted_runs: HashMap<String, RunRecord>,
         persisted_tasks: HashMap<String, TaskRecord>,
         persisted_agents: HashMap<String, AgentRecord>,
+        persisted_previews: HashMap<String, String>,
     }
 
     #[derive(Default)]
@@ -1043,6 +1068,12 @@ pub mod test_support {
         #[must_use]
         pub fn fail_agent_upsert_on(self: Arc<Self>, call: usize) -> Arc<Self> {
             self.failures.lock().unwrap().agent_upsert_fail_on = Some(call);
+            self
+        }
+
+        #[must_use]
+        pub fn fail_preview_upsert_on(self: Arc<Self>, call: usize) -> Arc<Self> {
+            self.failures.lock().unwrap().preview_upsert_fail_on = Some(call);
             self
         }
 
@@ -1119,6 +1150,14 @@ pub mod test_support {
             _created_at: SystemTime,
             _ttl: Duration,
         ) -> anyhow::Result<()> {
+            let mut failures = self.failures.lock().unwrap();
+            failures.preview_upsert_calls += 1;
+            if failures.preview_upsert_fail_on == Some(failures.preview_upsert_calls) {
+                anyhow::bail!("injected preview upsert failure");
+            }
+            failures
+                .persisted_previews
+                .insert(_run_id.to_string(), _task_id.to_string());
             Ok(())
         }
 
@@ -1153,6 +1192,24 @@ pub mod test_support {
             failures
                 .persisted_tasks
                 .retain(|_, task| task.run_id != _run_id);
+            Ok(())
+        }
+
+        async fn delete_task(&self, task_id: &str) -> anyhow::Result<()> {
+            self.failures
+                .lock()
+                .unwrap()
+                .persisted_tasks
+                .remove(task_id);
+            Ok(())
+        }
+
+        async fn delete_preview(&self, run_id: &str) -> anyhow::Result<()> {
+            self.failures
+                .lock()
+                .unwrap()
+                .persisted_previews
+                .remove(run_id);
             Ok(())
         }
     }
