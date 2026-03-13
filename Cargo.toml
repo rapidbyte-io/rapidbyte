@@ -2,7 +2,9 @@
 resolver = "2"
 members = [
     "benchmarks",
+    "crates/rapidbyte-agent",
     "crates/rapidbyte-cli",
+    "crates/rapidbyte-controller",
     "crates/rapidbyte-dev",
     "crates/rapidbyte-engine",
     "crates/rapidbyte-runtime",
@@ -36,7 +38,7 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 chrono = { version = "0.4", features = ["serde"] }
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -45,3 +47,16 @@ indicatif = "0.17"
 console = "0.15"
 datafusion = "43"
 reedline = "0.38"
+tonic = { version = "0.12", features = ["tls"] }
+prost = "0.13"
+prost-types = "0.13"
+tonic-build = "0.12"
+protoc-bin-vendored = "3"
+arrow-flight = { version = "53", features = ["tls"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+hmac = "0.12"
+sha2 = "0.10"
+bytes = "1"
+tower = { version = "0.5", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }

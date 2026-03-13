@@ -23,6 +23,7 @@ Run the explicit native PostgreSQL destination benchmarks:
 just bench-lab pg_dest_insert
 just bench-lab pg_dest_copy_regression
 just bench-lab pg_dest_copy_release
+just bench-lab pg_dest_copy_release_distributed
 ```
 
 Print a readable summary for a single artifact set:
@@ -67,9 +68,12 @@ just bench-compare benchmarks/baselines/main/pr.jsonl target/benchmarks/pr/candi
   `bytes / 1024 / 1024`.
 - Native lab scenarios should be run with `--env-profile <id>` or the `just bench-lab` wrapper.
 - The benchmark-owned local profile is `local-bench-postgres`.
-- `just bench-lab` and `just bench-pr` default to `local-bench-postgres`, which
-  provisions an isolated Docker Compose project under `benchmarks/` and tears
-  it down afterward.
+- `just bench-lab` uses the scenario manifest's `environment.ref` by default.
+  `just bench-pr` still defaults to `local-bench-postgres`.
+- `local-bench-postgres` provisions an isolated Docker Compose project under
+  `benchmarks/` and tears it down afterward for local benchmark scenarios.
+- `local-bench-distributed-postgres` does the same for the single-node
+  distributed benchmark stack.
 - `local-dev-postgres` remains a shared/manual profile for ad hoc runs against
   an already running stack, but it is not the default benchmark-owned path.
 - Override local profile settings with:

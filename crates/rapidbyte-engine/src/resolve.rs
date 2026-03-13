@@ -13,16 +13,22 @@ use crate::config::types::{parse_byte_size, PipelineConfig, StateBackendKind};
 use crate::error::PipelineError;
 use crate::result::CheckItemResult;
 
-pub(crate) struct ResolvedPlugins {
-    pub(crate) source_wasm: PathBuf,
-    pub(crate) dest_wasm: PathBuf,
-    pub(crate) source_manifest: Option<PluginManifest>,
-    pub(crate) dest_manifest: Option<PluginManifest>,
-    pub(crate) source_permissions: Option<Permissions>,
-    pub(crate) dest_permissions: Option<Permissions>,
+pub struct ResolvedPlugins {
+    pub source_wasm: PathBuf,
+    pub dest_wasm: PathBuf,
+    pub source_manifest: Option<PluginManifest>,
+    pub dest_manifest: Option<PluginManifest>,
+    pub source_permissions: Option<Permissions>,
+    pub dest_permissions: Option<Permissions>,
 }
 
-pub(crate) fn resolve_plugins(config: &PipelineConfig) -> Result<ResolvedPlugins, PipelineError> {
+/// Resolve source and destination plugin paths, load manifests, and extract permissions.
+///
+/// # Errors
+///
+/// Returns `PipelineError::Infrastructure` if plugin paths cannot be resolved
+/// or manifests fail validation.
+pub fn resolve_plugins(config: &PipelineConfig) -> Result<ResolvedPlugins, PipelineError> {
     let source_wasm =
         rapidbyte_runtime::resolve_plugin_path(&config.source.use_ref, PluginKind::Source)
             .map_err(PipelineError::Infrastructure)?;
@@ -52,7 +58,13 @@ pub(crate) fn resolve_plugins(config: &PipelineConfig) -> Result<ResolvedPlugins
     })
 }
 
-pub(crate) fn load_and_validate_manifest(
+/// Load a plugin manifest from the WASM binary and validate kind/protocol version.
+///
+/// # Errors
+///
+/// Returns an error if the manifest cannot be loaded, the plugin kind does not match
+/// `expected_kind`, or the protocol version is incompatible.
+pub fn load_and_validate_manifest(
     wasm_path: &Path,
     plugin_ref: &str,
     expected_kind: PluginKind,
@@ -83,7 +95,13 @@ pub(crate) fn load_and_validate_manifest(
     Ok(manifest)
 }
 
-pub(crate) fn validate_config_against_schema(
+/// Validate plugin configuration against the JSON Schema declared in its manifest.
+///
+/// # Errors
+///
+/// Returns an error if the manifest's JSON Schema is invalid or the configuration
+/// does not conform to the schema.
+pub fn validate_config_against_schema(
     plugin_ref: &str,
     config: &serde_json::Value,
     manifest: &PluginManifest,
@@ -112,7 +130,12 @@ pub(crate) fn validate_config_against_schema(
     Ok(())
 }
 
-pub(crate) fn create_state_backend(config: &PipelineConfig) -> Result<Arc<dyn StateBackend>> {
+/// Create and open the state backend (`SQLite` or Postgres) based on pipeline config.
+///
+/// # Errors
+///
+/// Returns an error if the database cannot be opened or connected to.
+pub fn create_state_backend(config: &PipelineConfig) -> Result<Arc<dyn StateBackend>> {
     match config.state.backend {
         StateBackendKind::Sqlite => {
             let backend = if let Some(path) = &config.state.connection {
@@ -137,7 +160,7 @@ pub(crate) fn create_state_backend(config: &PipelineConfig) -> Result<Arc<dyn St
     }
 }
 
-pub(crate) fn check_state_backend(config: &PipelineConfig) -> CheckItemResult {
+pub fn check_state_backend(config: &PipelineConfig) -> CheckItemResult {
     match create_state_backend(config) {
         Ok(_) => {
             tracing::info!("State backend: OK");
@@ -158,7 +181,8 @@ pub(crate) fn check_state_backend(config: &PipelineConfig) -> CheckItemResult {
 
 /// Build `SandboxOverrides` from pipeline permissions/limits and manifest resource limits.
 /// Returns `None` if no overrides are specified from either side.
-pub(crate) fn build_sandbox_overrides(
+#[must_use]
+pub fn build_sandbox_overrides(
     pipeline_perms: Option<&crate::config::types::PipelinePermissions>,
     pipeline_limits: Option<&crate::config::types::PipelineLimits>,
     manifest_limits: &rapidbyte_types::manifest::ResourceLimits,

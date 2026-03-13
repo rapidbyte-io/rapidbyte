@@ -7,10 +7,12 @@
 use std::path::Path;
 
 use anyhow::Result;
+use tokio_util::sync::CancellationToken;
 
 use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_engine::orchestrator;
 
+use crate::commands::transport::TlsClientConfig;
 use crate::output::{
     format::{format_bytes, format_count, format_duration},
     progress, summary,
@@ -36,7 +38,24 @@ pub async fn execute(
     dry_run: bool,
     limit: Option<u64>,
     verbosity: Verbosity,
+    controller: Option<&str>,
+    auth_token: Option<&str>,
+    tls: Option<&TlsClientConfig>,
 ) -> Result<()> {
+    // If controller is set, route to distributed mode
+    if let Some(url) = controller {
+        return super::distributed_run::execute(
+            url,
+            pipeline_path,
+            dry_run,
+            limit,
+            verbosity,
+            auth_token,
+            tls,
+        )
+        .await;
+    }
+
     let config = super::load_pipeline(pipeline_path)?;
 
     // Build execution options (--limit implies --dry-run)
@@ -64,7 +83,8 @@ pub async fn execute(
 
     // Run the pipeline
     let cpu_start = process_cpu_seconds();
-    let outcome = orchestrator::run_pipeline(&config, &options, progress_tx).await;
+    let outcome =
+        orchestrator::run_pipeline(&config, &options, progress_tx, CancellationToken::new()).await;
     let (cpu_end, peak_rss_mb) = post_pipeline_metrics();
 
     // Wait for spinner to finish before printing results

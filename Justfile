@@ -1,4 +1,5 @@
 # Default build mode (release or debug)
+
 MODE := "release"
 
 default:
@@ -11,7 +12,7 @@ dev-up rows="1000000":
     @echo "Starting dev environment..."
     docker compose up -d --wait
     just build-all
-    just seed {{rows}}
+    just seed {{ rows }}
     @echo ""
     @echo "Dev environment ready. Run a pipeline:"
     @echo "  just run tests/fixtures/pipelines/simple_pg_to_pg.yaml"
@@ -24,14 +25,14 @@ dev-down:
 # Launch interactive dev shell (REPL)
 dev *args="": build-all
     RAPIDBYTE_PLUGIN_DIR=target/plugins \
-    ./target/{{MODE}}/rapidbyte dev {{args}}
+    ./target/{{ MODE }}/rapidbyte dev {{ args }}
 
 # Build + run a pipeline (pass flags like -v, -vv, --dry-run)
 run pipeline *args="": build-all
     RAPIDBYTE_PLUGIN_DIR=target/plugins \
     TEST_SOURCE_PG_HOST=localhost TEST_SOURCE_PG_PORT=5433 \
     TEST_DEST_PG_HOST=localhost TEST_DEST_PG_PORT=5433 \
-    ./target/{{MODE}}/rapidbyte run {{pipeline}} {{args}}
+    ./target/{{ MODE }}/rapidbyte run {{ pipeline }} {{ args }}
 
 # ── Build ────────────────────────────────────────────────────────────
 
@@ -55,10 +56,10 @@ _build-plugins:
     cd plugins/transforms/sql && cargo build {{ if MODE == "release" { "--release" } else { "" } }}
     cd plugins/transforms/validate && cargo build {{ if MODE == "release" { "--release" } else { "" } }}
     mkdir -p target/plugins/sources target/plugins/destinations target/plugins/transforms
-    cp plugins/sources/postgres/target/wasm32-wasip2/{{MODE}}/source_postgres.wasm target/plugins/sources/postgres.wasm
-    cp plugins/destinations/postgres/target/wasm32-wasip2/{{MODE}}/dest_postgres.wasm target/plugins/destinations/postgres.wasm
-    cp plugins/transforms/sql/target/wasm32-wasip2/{{MODE}}/transform_sql.wasm target/plugins/transforms/sql.wasm
-    cp plugins/transforms/validate/target/wasm32-wasip2/{{MODE}}/transform_validate.wasm target/plugins/transforms/validate.wasm
+    cp plugins/sources/postgres/target/wasm32-wasip2/{{ MODE }}/source_postgres.wasm target/plugins/sources/postgres.wasm
+    cp plugins/destinations/postgres/target/wasm32-wasip2/{{ MODE }}/dest_postgres.wasm target/plugins/destinations/postgres.wasm
+    cp plugins/transforms/sql/target/wasm32-wasip2/{{ MODE }}/transform_sql.wasm target/plugins/transforms/sql.wasm
+    cp plugins/transforms/validate/target/wasm32-wasip2/{{ MODE }}/transform_validate.wasm target/plugins/transforms/validate.wasm
     {{ if MODE == "release" { "./scripts/strip-wasm.sh target/plugins/sources/postgres.wasm target/plugins/sources/postgres.wasm && ./scripts/strip-wasm.sh target/plugins/destinations/postgres.wasm target/plugins/destinations/postgres.wasm && ./scripts/strip-wasm.sh target/plugins/transforms/sql.wasm target/plugins/transforms/sql.wasm && ./scripts/strip-wasm.sh target/plugins/transforms/validate.wasm target/plugins/transforms/validate.wasm" } else { "true" } }}
 
 release:
@@ -93,47 +94,63 @@ ci:
 # ── E2E & bench ──────────────────────────────────────────────────────
 
 e2e *args="":
-    cargo test --manifest-path tests/e2e/Cargo.toml {{args}}
+    cargo test --manifest-path tests/e2e/Cargo.toml {{ args }}
 
 # Run the connector-agnostic benchmark runner
 bench *args="":
-    cargo run --manifest-path benchmarks/Cargo.toml -- run {{args}}
+    cargo run --manifest-path benchmarks/Cargo.toml -- run {{ args }}
 
-# Run a lab benchmark scenario against a named benchmark environment profile
-bench-lab scenario env="local-bench-postgres" *args="":
+# Run a lab benchmark scenario against its declared benchmark environment profile
+bench-lab scenario env="" *args="":
     just build-all
-    cargo run --manifest-path benchmarks/Cargo.toml -- run --suite lab --scenario {{scenario}} --env-profile {{env}} --output target/benchmarks/lab/{{scenario}}.jsonl {{args}}
+    scenario_path="benchmarks/scenarios/lab/{{ scenario }}.yaml"; \
+    env_override="{{ env }}"; \
+    if [ -n "$env_override" ]; then \
+      env_profile="${env_override#env=}"; \
+    else \
+      if [ ! -f "$scenario_path" ]; then \
+        echo "missing lab scenario manifest: $scenario_path" >&2; \
+        exit 1; \
+      fi; \
+      env_profile=$(awk ' \
+        $1 == "environment:" { in_environment = 1; next } \
+        in_environment && $1 == "ref:" { print $2; found = 1; exit } \
+        in_environment && $0 !~ /^ / { exit } \
+        END { if (!found) print "local-bench-postgres" } \
+      ' "$scenario_path"); \
+    fi; \
+    cargo run --manifest-path benchmarks/Cargo.toml -- run --suite lab --scenario {{ scenario }} --env-profile "$env_profile" --output target/benchmarks/lab/{{ scenario }}.jsonl {{ args }}
 
 # Compare two benchmark artifact sets
 bench-compare baseline candidate *args="":
-    python3 benchmarks/analysis/compare.py {{baseline}} {{candidate}} {{args}}
+    python3 benchmarks/analysis/compare.py {{ baseline }} {{ candidate }} {{ args }}
 
 # Print a readable summary for a single benchmark artifact set
 bench-summary artifact:
-    cargo run --manifest-path benchmarks/Cargo.toml -- summary {{artifact}}
+    cargo run --manifest-path benchmarks/Cargo.toml -- summary {{ artifact }}
 
 # Run the next-generation connector-agnostic benchmark runner
 benchmarks *args="":
-    cargo run --manifest-path benchmarks/Cargo.toml -- {{args}}
+    cargo run --manifest-path benchmarks/Cargo.toml -- {{ args }}
 
 # Run the PR benchmark smoke suite and compare against the checked-in baseline artifact set
 bench-pr env="local-bench-postgres":
     just build-all
-    cargo run --manifest-path benchmarks/Cargo.toml -- run --suite pr --env-profile {{env}} --output target/benchmarks/pr/candidate.jsonl
+    cargo run --manifest-path benchmarks/Cargo.toml -- run --suite pr --env-profile {{ env }} --output target/benchmarks/pr/candidate.jsonl
     python3 benchmarks/analysis/compare.py benchmarks/baselines/main/pr.jsonl target/benchmarks/pr/candidate.jsonl --min-samples 1
 
 # ── Utilities ────────────────────────────────────────────────────────
 
 # Scaffold a new plugin project
 scaffold name:
-    cargo run -- scaffold {{name}}
+    cargo run -- scaffold {{ name }}
 
 install-hooks:
     ./scripts/install-git-hooks.sh
 
 # Seed local Postgres (default 1M rows)
 seed rows="1000000":
-    ./scripts/seed-dev.sh {{rows}}
+    ./scripts/seed-dev.sh {{ rows }}
 
 docker-up:
     docker compose up -d --wait
