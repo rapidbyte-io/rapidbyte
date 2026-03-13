@@ -51,25 +51,59 @@ pub enum Frame {
     EndStream,
 }
 
-/// Cumulative timing counters for host function calls.
-#[derive(Debug, Clone, Default)]
+/// Records host-side operation timings directly into OTel instruments.
+#[derive(Debug, Clone)]
 pub struct HostTimings {
-    pub emit_batch_nanos: u64,
-    pub next_batch_nanos: u64,
-    pub next_batch_wait_nanos: u64,
-    pub next_batch_process_nanos: u64,
-    pub compress_nanos: u64,
-    pub decompress_nanos: u64,
-    pub emit_batch_count: u64,
-    pub next_batch_count: u64,
-    pub source_connect_secs: f64,
-    pub source_query_secs: f64,
-    pub source_fetch_secs: f64,
-    pub source_arrow_encode_secs: f64,
-    pub dest_connect_secs: f64,
-    pub dest_flush_secs: f64,
-    pub dest_commit_secs: f64,
-    pub dest_arrow_decode_secs: f64,
+    labels: Vec<opentelemetry::KeyValue>,
+}
+
+impl Default for HostTimings {
+    fn default() -> Self {
+        Self { labels: Vec::new() }
+    }
+}
+
+impl HostTimings {
+    #[must_use]
+    pub fn new(pipeline: &str, stream: &str, shard: usize) -> Self {
+        use opentelemetry::KeyValue;
+        Self {
+            labels: vec![
+                KeyValue::new("pipeline", pipeline.to_owned()),
+                KeyValue::new("stream", stream.to_owned()),
+                KeyValue::new("shard", shard.to_string()),
+            ],
+        }
+    }
+
+    pub fn record_emit_batch(&self, duration: std::time::Duration) {
+        rapidbyte_metrics::instruments::host::emit_batch_duration()
+            .record(duration.as_secs_f64(), &self.labels);
+    }
+
+    pub fn record_next_batch(
+        &self,
+        total: std::time::Duration,
+        wait: std::time::Duration,
+        process: std::time::Duration,
+    ) {
+        rapidbyte_metrics::instruments::host::next_batch_duration()
+            .record(total.as_secs_f64(), &self.labels);
+        rapidbyte_metrics::instruments::host::next_batch_wait_duration()
+            .record(wait.as_secs_f64(), &self.labels);
+        rapidbyte_metrics::instruments::host::next_batch_process_duration()
+            .record(process.as_secs_f64(), &self.labels);
+    }
+
+    pub fn record_compress(&self, duration: std::time::Duration) {
+        rapidbyte_metrics::instruments::host::compress_duration()
+            .record(duration.as_secs_f64(), &self.labels);
+    }
+
+    pub fn record_decompress(&self, duration: std::time::Duration) {
+        rapidbyte_metrics::instruments::host::decompress_duration()
+            .record(duration.as_secs_f64(), &self.labels);
+    }
 }
 
 // --- Inner types ---
@@ -96,7 +130,7 @@ pub(crate) struct CheckpointCollector {
     pub source: Arc<Mutex<Vec<Checkpoint>>>,
     pub dest: Arc<Mutex<Vec<Checkpoint>>>,
     pub dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
-    pub timings: Arc<Mutex<HostTimings>>,
+    pub timings: HostTimings,
     pub dlq_limit: usize,
 }
 
@@ -132,7 +166,7 @@ pub struct HostStateBuilder {
     source_checkpoints: Option<Arc<Mutex<Vec<Checkpoint>>>>,
     dest_checkpoints: Option<Arc<Mutex<Vec<Checkpoint>>>>,
     dlq_records: Option<Arc<Mutex<Vec<DlqRecord>>>>,
-    timings: Option<Arc<Mutex<HostTimings>>>,
+    timings: Option<HostTimings>,
     permissions: Option<Permissions>,
     config: serde_json::Value,
     compression: Option<CompressionCodec>,
@@ -225,7 +259,7 @@ impl HostStateBuilder {
     }
 
     #[must_use]
-    pub fn timings(mut self, t: Arc<Mutex<HostTimings>>) -> Self {
+    pub fn timings(mut self, t: HostTimings) -> Self {
         self.timings = Some(t);
         self
     }
@@ -309,9 +343,7 @@ impl HostStateBuilder {
                 source: self.source_checkpoints.unwrap_or_default(),
                 dest: self.dest_checkpoints.unwrap_or_default(),
                 dlq_records: self.dlq_records.unwrap_or_default(),
-                timings: self
-                    .timings
-                    .unwrap_or_else(|| Arc::new(Mutex::new(HostTimings::default()))),
+                timings: self.timings.unwrap_or_default(),
                 dlq_limit: self.dlq_limit,
             },
             sockets: SocketManager {
@@ -470,10 +502,13 @@ impl ComponentHostState {
 
         self.batch.last_emitted_checkpoint_id = Some(checkpoint_id);
 
-        let mut t = lock_mutex(&self.checkpoints.timings, "timings")?;
-        t.emit_batch_nanos += fn_start.elapsed().as_nanos() as u64;
-        t.emit_batch_count += 1;
-        t.compress_nanos += compress_elapsed_nanos;
+        self.checkpoints
+            .timings
+            .record_emit_batch(fn_start.elapsed());
+        let compress_duration = Duration::from_nanos(compress_elapsed_nanos);
+        if compress_duration > Duration::ZERO {
+            self.checkpoints.timings.record_compress(compress_duration);
+        }
 
         Ok(())
     }
@@ -518,13 +553,18 @@ impl ComponentHostState {
         // Insert as sealed read-only frame
         let handle = self.frames.insert_sealed(payload);
 
-        let mut t = lock_mutex(&self.checkpoints.timings, "timings")?;
-        let total_elapsed_nanos = fn_start.elapsed().as_nanos() as u64;
-        t.next_batch_nanos += total_elapsed_nanos;
-        t.next_batch_wait_nanos += wait_elapsed_nanos;
-        t.next_batch_process_nanos += total_elapsed_nanos.saturating_sub(wait_elapsed_nanos);
-        t.next_batch_count += 1;
-        t.decompress_nanos += decompress_elapsed_nanos;
+        let total_elapsed = fn_start.elapsed();
+        let wait_elapsed = Duration::from_nanos(wait_elapsed_nanos);
+        let process_elapsed = total_elapsed.saturating_sub(wait_elapsed);
+        self.checkpoints
+            .timings
+            .record_next_batch(total_elapsed, wait_elapsed, process_elapsed);
+        let decompress_duration = Duration::from_nanos(decompress_elapsed_nanos);
+        if decompress_duration > Duration::ZERO {
+            self.checkpoints
+                .timings
+                .record_decompress(decompress_duration);
+        }
 
         Ok(Some(handle))
     }
@@ -1186,5 +1226,30 @@ mod tests {
         let mut host = test_host_state();
         let result = host.checkpoint_impl(0, r#"{"payload":{"stream":1}}"#.to_string());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn host_timings_new_sets_labels() {
+        let ht = HostTimings::new("my-pipeline", "users", 0);
+        assert_eq!(ht.labels.len(), 3);
+    }
+
+    #[test]
+    fn host_timings_default_has_no_labels() {
+        let ht = HostTimings::default();
+        assert!(ht.labels.is_empty());
+    }
+
+    #[test]
+    fn record_methods_do_not_panic() {
+        let ht = HostTimings::new("test", "stream", 0);
+        ht.record_emit_batch(Duration::from_millis(5));
+        ht.record_next_batch(
+            Duration::from_millis(10),
+            Duration::from_millis(7),
+            Duration::from_millis(3),
+        );
+        ht.record_compress(Duration::from_micros(500));
+        ht.record_decompress(Duration::from_micros(300));
     }
 }
