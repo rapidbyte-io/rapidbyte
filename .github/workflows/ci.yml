@@ -46,6 +46,42 @@ jobs:
       - name: Workspace tests
         run: cargo test --workspace --all-targets
 
+  durable-metadata:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      RAPIDBYTE_CONTROLLER_METADATA_TEST_DATABASE_URL: host=127.0.0.1 port=5432 user=postgres password=postgres dbname=postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+      - uses: Swatinem/rust-cache@v2
+      - name: Controller durable metadata tests
+        run: |
+          cargo test -p rapidbyte-controller metadata_store_roundtrips_runs_and_tasks -- --ignored
+          cargo test -p rapidbyte-controller metadata_store_transaction_create_run_with_task_commits_both_records -- --ignored
+          cargo test -p rapidbyte-controller metadata_store_repaired_snapshot_preserves_original_recovery_started_at -- --ignored
+          cargo test -p rapidbyte-controller metadata_store_repaired_snapshot_prunes_expired_previews -- --ignored
+      - name: Distributed restart recovery tests
+        run: |
+          cargo test -p rapidbyte-cli distributed_submit_and_complete -- --ignored
+          cargo test -p rapidbyte-cli distributed_restart_reconciles_then_times_out -- --ignored
+          cargo test -p rapidbyte-cli distributed_restart_reconciles_and_resumes_execution -- --ignored
+
   e2e-compile:
     runs-on: ubuntu-latest
     steps:
