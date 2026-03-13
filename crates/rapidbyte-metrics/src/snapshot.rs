@@ -1,0 +1,1 @@
+//! Metric snapshot for PipelineResult.

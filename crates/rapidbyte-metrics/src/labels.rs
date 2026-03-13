@@ -1,0 +1,1 @@
+//! Bounded label keys.

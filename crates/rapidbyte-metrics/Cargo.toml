@@ -1,0 +1,17 @@
+[package]
+name = "rapidbyte-metrics"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rapidbyte-types = { path = "../rapidbyte-types" }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+opentelemetry-prometheus = { workspace = true }
+prometheus = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
