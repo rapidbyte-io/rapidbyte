@@ -138,6 +138,54 @@ impl ControllerState {
         Ok(())
     }
 
+    /// Atomically persist a new run and its initial task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable metadata transaction fails.
+    pub async fn create_run_with_task_records(
+        &self,
+        run: &crate::run_state::RunRecord,
+        task: &crate::scheduler::TaskRecord,
+    ) -> anyhow::Result<()> {
+        let Some(metadata_store) = &self.metadata_store else {
+            return Ok(());
+        };
+        metadata_store.create_run_with_task(run, task).await
+    }
+
+    /// Atomically persist an assigned run/task pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable metadata transaction fails.
+    pub async fn persist_assignment_records(
+        &self,
+        run: &crate::run_state::RunRecord,
+        task: &crate::scheduler::TaskRecord,
+    ) -> anyhow::Result<()> {
+        let Some(metadata_store) = &self.metadata_store else {
+            return Ok(());
+        };
+        metadata_store.assign_task(run, task).await
+    }
+
+    /// Atomically persist a running run/task pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable metadata transaction fails.
+    pub async fn persist_running_records(
+        &self,
+        run: &crate::run_state::RunRecord,
+        task: &crate::scheduler::TaskRecord,
+    ) -> anyhow::Result<()> {
+        let Some(metadata_store) = &self.metadata_store else {
+            return Ok(());
+        };
+        metadata_store.mark_task_running(run, task).await
+    }
+
     /// Persist preview metadata when durable metadata storage is configured.
     ///
     /// # Errors

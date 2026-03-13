@@ -502,21 +502,13 @@ impl PipelineService for PipelineServiceImpl {
             };
 
             tracing::info!(run_id = %actual_run_id, task_id, "Pipeline submitted");
-            if let Err(error) = self.state.persist_run_record(&run_snapshot).await {
+            if let Err(error) = self
+                .state
+                .create_run_with_task_records(&run_snapshot, &task_snapshot)
+                .await
+            {
                 self.rollback_new_submission(&actual_run_id, &task_id).await;
                 return Err(Status::internal(error.to_string()));
-            }
-            if let Err(error) = self.state.persist_task_record(&task_snapshot).await {
-                let rollback_error = self.state.delete_run(&actual_run_id).await.err();
-                self.rollback_new_submission(&actual_run_id, &task_id).await;
-                return Err(Status::internal(match rollback_error {
-                    Some(rollback_error) => {
-                        format!(
-                            "{error}; durable rollback for run {actual_run_id} also failed: {rollback_error}"
-                        )
-                    }
-                    None => error.to_string(),
-                }));
             }
             self.state.task_notify.notify_waiters();
         }

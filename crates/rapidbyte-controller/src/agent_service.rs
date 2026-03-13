@@ -153,20 +153,13 @@ impl AgentServiceImpl {
 
         let (assignment, previous_task, previous_run, assigned_task, assigned_run) = claimed;
 
-        if let Err(error) = self.state.persist_run_record(&assigned_run).await {
+        if let Err(error) = self
+            .state
+            .persist_assignment_records(&assigned_run, &assigned_task)
+            .await
+        {
             self.rollback_assignment(previous_run, previous_task).await;
             return Err(Status::internal(error.to_string()));
-        }
-        if let Err(error) = self.state.persist_task_record(&assigned_task).await {
-            let rollback_error = self.state.persist_run_record(&previous_run).await.err();
-            self.rollback_assignment(previous_run, previous_task).await;
-            return Err(Status::internal(match rollback_error {
-                Some(rollback_error) => format!(
-                    "{error}; durable rollback for run {} also failed: {rollback_error}",
-                    assignment.run_id
-                ),
-                None => error.to_string(),
-            }));
         }
 
         Ok(Some(assignment))
@@ -428,6 +421,23 @@ impl AgentService for AgentServiceImpl {
     ) -> Result<Response<ReportProgressResponse>, Status> {
         let req = request.into_inner();
 
+        let previous_task = self
+            .state
+            .tasks
+            .read()
+            .await
+            .get(&req.task_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("Task not found"))?;
+        let previous_run = self
+            .state
+            .runs
+            .read()
+            .await
+            .get_run(&previous_task.run_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found(format!("unknown run: {}", previous_task.run_id)))?;
+
         // Validate lease and update scheduler state while holding the task lock.
         let run_id = {
             let mut tasks = self.state.tasks.write().await;
@@ -463,14 +473,30 @@ impl AgentService for AgentServiceImpl {
         };
 
         self.state.runs.write().await.ensure_running(&run_id);
-        self.state
-            .persist_task(&req.task_id)
+        let running_task = self
+            .state
+            .tasks
+            .read()
             .await
-            .map_err(|error| Status::internal(error.to_string()))?;
-        self.state
-            .persist_run(&run_id)
+            .get(&req.task_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found(format!("unknown task: {}", req.task_id)))?;
+        let running_run = self
+            .state
+            .runs
+            .read()
             .await
-            .map_err(|error| Status::internal(error.to_string()))?;
+            .get_run(&run_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found(format!("unknown run: {run_id}")))?;
+        if let Err(error) = self
+            .state
+            .persist_running_records(&running_run, &running_task)
+            .await
+        {
+            self.rollback_assignment(previous_run, previous_task).await;
+            return Err(Status::internal(error.to_string()));
+        }
 
         if let Some(progress) = req.progress {
             let watchers = self.state.watchers.read().await;
@@ -2977,6 +3003,69 @@ mod tests {
             state.runs.read().await.get_run(&run_id).unwrap().state,
             InternalRunState::Assigned
         );
+    }
+
+    #[tokio::test]
+    async fn test_report_progress_rolls_back_when_persist_fails() {
+        let store = FailingMetadataStore::new().fail_run_upsert_on(3);
+        let state = ControllerState::with_metadata_store(b"test-key-for-agent-service!!!!", store);
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(task)) => task,
+            _ => panic!("Expected task"),
+        };
+
+        let err = svc
+            .report_progress(Request::new(ReportProgressRequest {
+                agent_id,
+                task_id: task.task_id.clone(),
+                lease_epoch: task.lease_epoch,
+                progress: Some(ProgressUpdate {
+                    stream: "users".into(),
+                    phase: "running".into(),
+                    records: 1,
+                    bytes: 64,
+                }),
+            }))
+            .await
+            .expect_err("progress persistence failure should reject progress");
+
+        assert_eq!(err.code(), tonic::Code::Internal);
+
+        {
+            let tasks = state.tasks.read().await;
+            let record = tasks.get(&task.task_id).unwrap();
+            assert_eq!(record.state, TaskState::Assigned);
+            assert!(record.lease.is_some());
+        }
+
+        let runs = state.runs.read().await;
+        let run = runs.get_run(&run_id).unwrap();
+        assert_eq!(run.state, InternalRunState::Assigned);
     }
 
     #[tokio::test]

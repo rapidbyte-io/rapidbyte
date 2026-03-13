@@ -10,8 +10,9 @@ use std::time::{Duration, Instant, SystemTime};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tokio::io::{AsyncRead, AsyncWrite, BufReader, ReadBuf};
+use tokio::sync::Mutex;
 use tokio_postgres::tls::{self, MakeTlsConnect, TlsConnect};
-use tokio_postgres::{config::SslMode, Client, Config as PgConfig, NoTls, Row};
+use tokio_postgres::{config::SslMode, Client, Config as PgConfig, GenericClient, NoTls, Row};
 use tokio_rustls::{
     client::TlsStream as RustlsClientStream, rustls, TlsConnector as RustlsConnector,
 };
@@ -36,7 +37,7 @@ pub struct MetadataSnapshot {
 
 #[derive(Clone)]
 pub struct MetadataStore {
-    client: Arc<Client>,
+    client: Arc<Mutex<Client>>,
 }
 
 #[derive(Clone)]
@@ -143,6 +144,9 @@ where
 pub trait DurableMetadataStore: Send + Sync {
     async fn upsert_run(&self, run: &RunRecord) -> anyhow::Result<()>;
     async fn upsert_task(&self, task: &TaskRecord) -> anyhow::Result<()>;
+    async fn create_run_with_task(&self, run: &RunRecord, task: &TaskRecord) -> anyhow::Result<()>;
+    async fn assign_task(&self, run: &RunRecord, task: &TaskRecord) -> anyhow::Result<()>;
+    async fn mark_task_running(&self, run: &RunRecord, task: &TaskRecord) -> anyhow::Result<()>;
     #[allow(clippy::too_many_arguments)]
     async fn upsert_preview(
         &self,
@@ -190,7 +194,7 @@ impl MetadataStore {
         };
         client.batch_execute(CONTROLLER_METADATA_MIGRATIONS).await?;
         Ok(Self {
-            client: Arc::new(client),
+            client: Arc::new(Mutex::new(client)),
         })
     }
 
@@ -201,26 +205,23 @@ impl MetadataStore {
     ///
     /// Returns an error if the snapshot query fails or contains invalid data.
     pub async fn load_snapshot(&self) -> anyhow::Result<MetadataSnapshot> {
-        let run_rows = self
-            .client
+        let client = self.client.lock().await;
+        let run_rows = client
             .query("SELECT * FROM controller_runs ORDER BY created_at ASC", &[])
             .await?;
-        let task_rows = self
-            .client
+        let task_rows = client
             .query(
                 "SELECT * FROM controller_tasks ORDER BY created_at ASC",
                 &[],
             )
             .await?;
-        let agent_rows = self
-            .client
+        let agent_rows = client
             .query(
                 "SELECT * FROM controller_agents ORDER BY created_at ASC",
                 &[],
             )
             .await?;
-        let preview_rows = self
-            .client
+        let preview_rows = client
             .query(
                 "SELECT * FROM controller_previews ORDER BY created_at ASC",
                 &[],
@@ -262,94 +263,64 @@ impl MetadataStore {
         })
     }
 
+    /// Atomically persist a new run and its initial task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database transaction fails.
+    pub async fn create_run_with_task(
+        &self,
+        run: &RunRecord,
+        task: &TaskRecord,
+    ) -> anyhow::Result<()> {
+        let mut client = self.client.lock().await;
+        let transaction = client.transaction().await?;
+        upsert_run_on(&transaction, run).await?;
+        upsert_task_on(&transaction, task).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Atomically persist an assigned run/task pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database transaction fails.
+    pub async fn assign_task(&self, run: &RunRecord, task: &TaskRecord) -> anyhow::Result<()> {
+        let mut client = self.client.lock().await;
+        let transaction = client.transaction().await?;
+        upsert_run_on(&transaction, run).await?;
+        upsert_task_on(&transaction, task).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Atomically persist a running run/task pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database transaction fails.
+    pub async fn mark_task_running(
+        &self,
+        run: &RunRecord,
+        task: &TaskRecord,
+    ) -> anyhow::Result<()> {
+        let mut client = self.client.lock().await;
+        let transaction = client.transaction().await?;
+        upsert_run_on(&transaction, run).await?;
+        upsert_task_on(&transaction, task).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Upsert a durable run record.
     ///
     /// # Errors
     ///
     /// Returns an error if the database write fails.
     pub async fn upsert_run(&self, run: &RunRecord) -> anyhow::Result<()> {
-        let current_task = run.current_task.as_ref();
-        let current_attempt = current_task
-            .map(|task| i32::try_from(task.attempt))
-            .transpose()?;
-        let current_lease_epoch = current_task
-            .map(|task| i64::try_from(task.lease_epoch))
-            .transpose()?;
-        let attempt = i32::try_from(run.attempt)?;
-        let total_records = i64::try_from(run.total_records)?;
-        let total_bytes = i64::try_from(run.total_bytes)?;
-        let cursors_advanced = i64::try_from(run.cursors_advanced)?;
-
-        self.client
-            .execute(
-                "INSERT INTO controller_runs (
-                    run_id, pipeline_name, state, created_at, updated_at, started_at, completed_at,
-                    recovery_started_at,
-                    current_task_id, current_agent_id, current_attempt, current_lease_epoch,
-                    current_task_assigned_at, error_code, error_message, error_retryable,
-                    error_safe_to_retry, error_commit_state, attempt, idempotency_key,
-                    total_records, total_bytes, elapsed_seconds, cursors_advanced
-                ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7,
-                    $8,
-                    $9, $10, $11, $12,
-                    $13, $14, $15, $16,
-                    $17, $18, $19, $20,
-                    $21, $22, $23, $24
-                )
-                ON CONFLICT (run_id) DO UPDATE SET
-                    pipeline_name = EXCLUDED.pipeline_name,
-                    state = EXCLUDED.state,
-                    created_at = EXCLUDED.created_at,
-                    updated_at = EXCLUDED.updated_at,
-                    started_at = EXCLUDED.started_at,
-                    completed_at = EXCLUDED.completed_at,
-                    recovery_started_at = EXCLUDED.recovery_started_at,
-                    current_task_id = EXCLUDED.current_task_id,
-                    current_agent_id = EXCLUDED.current_agent_id,
-                    current_attempt = EXCLUDED.current_attempt,
-                    current_lease_epoch = EXCLUDED.current_lease_epoch,
-                    current_task_assigned_at = EXCLUDED.current_task_assigned_at,
-                    error_code = EXCLUDED.error_code,
-                    error_message = EXCLUDED.error_message,
-                    error_retryable = EXCLUDED.error_retryable,
-                    error_safe_to_retry = EXCLUDED.error_safe_to_retry,
-                    error_commit_state = EXCLUDED.error_commit_state,
-                    attempt = EXCLUDED.attempt,
-                    idempotency_key = EXCLUDED.idempotency_key,
-                    total_records = EXCLUDED.total_records,
-                    total_bytes = EXCLUDED.total_bytes,
-                    elapsed_seconds = EXCLUDED.elapsed_seconds,
-                    cursors_advanced = EXCLUDED.cursors_advanced",
-                &[
-                    &run.run_id,
-                    &run.pipeline_name,
-                    &run_state_to_db(run.state),
-                    &to_datetime(run.created_at),
-                    &to_datetime(run.updated_at),
-                    &run.started_at.map(to_datetime),
-                    &run.completed_at.map(to_datetime),
-                    &run.recovery_started_at.map(to_datetime),
-                    &current_task.map(|task| task.task_id.clone()),
-                    &current_task.map(|task| task.agent_id.clone()),
-                    &current_attempt,
-                    &current_lease_epoch,
-                    &current_task.map(|task| to_datetime(task.assigned_at)),
-                    &run.error_code,
-                    &run.error_message,
-                    &run.error_retryable,
-                    &run.error_safe_to_retry,
-                    &run.error_commit_state,
-                    &attempt,
-                    &run.idempotency_key,
-                    &total_records,
-                    &total_bytes,
-                    &run.elapsed_seconds,
-                    &cursors_advanced,
-                ],
-            )
-            .await?;
-        Ok(())
+        let client = self.client.lock().await;
+        upsert_run_on(&*client, run).await
     }
 
     /// Upsert a durable task record.
@@ -358,50 +329,8 @@ impl MetadataStore {
     ///
     /// Returns an error if the database write fails.
     pub async fn upsert_task(&self, task: &TaskRecord) -> anyhow::Result<()> {
-        let attempt = i32::try_from(task.attempt)?;
-        let limit_rows = task.limit.map(i64::try_from).transpose()?;
-        let lease_epoch = task
-            .lease
-            .as_ref()
-            .map(|lease| i64::try_from(lease.epoch))
-            .transpose()?;
-        let lease_expires_at = task.lease.as_ref().map(lease_expiry_to_datetime);
-
-        self.client
-            .execute(
-                "INSERT INTO controller_tasks (
-                    task_id, run_id, attempt, state, pipeline_yaml, dry_run, limit_rows,
-                    assigned_agent_id, lease_epoch, lease_expires_at, created_at, updated_at
-                ) VALUES (
-                    $1, $2, $3, $4, $5, $6, $7,
-                    $8, $9, $10, NOW(), NOW()
-                )
-                ON CONFLICT (task_id) DO UPDATE SET
-                    run_id = EXCLUDED.run_id,
-                    attempt = EXCLUDED.attempt,
-                    state = EXCLUDED.state,
-                    pipeline_yaml = EXCLUDED.pipeline_yaml,
-                    dry_run = EXCLUDED.dry_run,
-                    limit_rows = EXCLUDED.limit_rows,
-                    assigned_agent_id = EXCLUDED.assigned_agent_id,
-                    lease_epoch = EXCLUDED.lease_epoch,
-                    lease_expires_at = EXCLUDED.lease_expires_at,
-                    updated_at = NOW()",
-                &[
-                    &task.task_id,
-                    &task.run_id,
-                    &attempt,
-                    &task_state_to_db(task.state),
-                    &task.pipeline_yaml,
-                    &task.dry_run,
-                    &limit_rows,
-                    &task.assigned_agent_id,
-                    &lease_epoch,
-                    &lease_expires_at,
-                ],
-            )
-            .await?;
-        Ok(())
+        let client = self.client.lock().await;
+        upsert_task_on(&*client, task).await
     }
 
     /// Upsert durable preview metadata.
@@ -434,7 +363,8 @@ impl MetadataStore {
                 .collect::<Vec<_>>(),
         )?;
 
-        self.client
+        let client = self.client.lock().await;
+        client
             .execute(
                 "INSERT INTO controller_previews (
                     run_id, task_id, flight_endpoint, ticket, streams_json, created_at, expires_at
@@ -471,7 +401,8 @@ impl MetadataStore {
         let memory_bytes = i64::try_from(agent.memory_bytes)?;
         let last_heartbeat_at = to_datetime(system_time_from_instant(agent.last_heartbeat));
 
-        self.client
+        let client = self.client.lock().await;
+        client
             .execute(
                 "INSERT INTO controller_agents (
                     agent_id, max_tasks, active_tasks, flight_endpoint, plugin_bundle_hash,
@@ -510,7 +441,8 @@ impl MetadataStore {
     ///
     /// Returns an error if the database write fails.
     pub async fn delete_agent(&self, agent_id: &str) -> anyhow::Result<()> {
-        self.client
+        let client = self.client.lock().await;
+        client
             .execute(
                 "DELETE FROM controller_agents WHERE agent_id = $1",
                 &[&agent_id],
@@ -528,6 +460,18 @@ impl DurableMetadataStore for MetadataStore {
 
     async fn upsert_task(&self, task: &TaskRecord) -> anyhow::Result<()> {
         Self::upsert_task(self, task).await
+    }
+
+    async fn create_run_with_task(&self, run: &RunRecord, task: &TaskRecord) -> anyhow::Result<()> {
+        Self::create_run_with_task(self, run, task).await
+    }
+
+    async fn assign_task(&self, run: &RunRecord, task: &TaskRecord) -> anyhow::Result<()> {
+        Self::assign_task(self, run, task).await
+    }
+
+    async fn mark_task_running(&self, run: &RunRecord, task: &TaskRecord) -> anyhow::Result<()> {
+        Self::mark_task_running(self, run, task).await
     }
 
     async fn upsert_preview(
@@ -562,14 +506,16 @@ impl DurableMetadataStore for MetadataStore {
     }
 
     async fn delete_run(&self, run_id: &str) -> anyhow::Result<()> {
-        self.client
+        let client = self.client.lock().await;
+        client
             .execute("DELETE FROM controller_runs WHERE run_id = $1", &[&run_id])
             .await?;
         Ok(())
     }
 
     async fn delete_task(&self, task_id: &str) -> anyhow::Result<()> {
-        self.client
+        let client = self.client.lock().await;
+        client
             .execute(
                 "DELETE FROM controller_tasks WHERE task_id = $1",
                 &[&task_id],
@@ -579,7 +525,8 @@ impl DurableMetadataStore for MetadataStore {
     }
 
     async fn delete_preview(&self, run_id: &str) -> anyhow::Result<()> {
-        self.client
+        let client = self.client.lock().await;
+        client
             .execute(
                 "DELETE FROM controller_previews WHERE run_id = $1",
                 &[&run_id],
@@ -587,6 +534,144 @@ impl DurableMetadataStore for MetadataStore {
             .await?;
         Ok(())
     }
+}
+
+async fn upsert_run_on(
+    client: &(impl GenericClient + Sync),
+    run: &RunRecord,
+) -> anyhow::Result<()> {
+    let current_task = run.current_task.as_ref();
+    let current_attempt = current_task
+        .map(|task| i32::try_from(task.attempt))
+        .transpose()?;
+    let current_lease_epoch = current_task
+        .map(|task| i64::try_from(task.lease_epoch))
+        .transpose()?;
+    let attempt = i32::try_from(run.attempt)?;
+    let total_records = i64::try_from(run.total_records)?;
+    let total_bytes = i64::try_from(run.total_bytes)?;
+    let cursors_advanced = i64::try_from(run.cursors_advanced)?;
+
+    client
+        .execute(
+            "INSERT INTO controller_runs (
+                run_id, pipeline_name, state, created_at, updated_at, started_at, completed_at,
+                recovery_started_at,
+                current_task_id, current_agent_id, current_attempt, current_lease_epoch,
+                current_task_assigned_at, error_code, error_message, error_retryable,
+                error_safe_to_retry, error_commit_state, attempt, idempotency_key,
+                total_records, total_bytes, elapsed_seconds, cursors_advanced
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7,
+                $8,
+                $9, $10, $11, $12,
+                $13, $14, $15, $16,
+                $17, $18, $19, $20,
+                $21, $22, $23, $24
+            )
+            ON CONFLICT (run_id) DO UPDATE SET
+                pipeline_name = EXCLUDED.pipeline_name,
+                state = EXCLUDED.state,
+                created_at = EXCLUDED.created_at,
+                updated_at = EXCLUDED.updated_at,
+                started_at = EXCLUDED.started_at,
+                completed_at = EXCLUDED.completed_at,
+                recovery_started_at = EXCLUDED.recovery_started_at,
+                current_task_id = EXCLUDED.current_task_id,
+                current_agent_id = EXCLUDED.current_agent_id,
+                current_attempt = EXCLUDED.current_attempt,
+                current_lease_epoch = EXCLUDED.current_lease_epoch,
+                current_task_assigned_at = EXCLUDED.current_task_assigned_at,
+                error_code = EXCLUDED.error_code,
+                error_message = EXCLUDED.error_message,
+                error_retryable = EXCLUDED.error_retryable,
+                error_safe_to_retry = EXCLUDED.error_safe_to_retry,
+                error_commit_state = EXCLUDED.error_commit_state,
+                attempt = EXCLUDED.attempt,
+                idempotency_key = EXCLUDED.idempotency_key,
+                total_records = EXCLUDED.total_records,
+                total_bytes = EXCLUDED.total_bytes,
+                elapsed_seconds = EXCLUDED.elapsed_seconds,
+                cursors_advanced = EXCLUDED.cursors_advanced",
+            &[
+                &run.run_id,
+                &run.pipeline_name,
+                &run_state_to_db(run.state),
+                &to_datetime(run.created_at),
+                &to_datetime(run.updated_at),
+                &run.started_at.map(to_datetime),
+                &run.completed_at.map(to_datetime),
+                &run.recovery_started_at.map(to_datetime),
+                &current_task.map(|task| task.task_id.clone()),
+                &current_task.map(|task| task.agent_id.clone()),
+                &current_attempt,
+                &current_lease_epoch,
+                &current_task.map(|task| to_datetime(task.assigned_at)),
+                &run.error_code,
+                &run.error_message,
+                &run.error_retryable,
+                &run.error_safe_to_retry,
+                &run.error_commit_state,
+                &attempt,
+                &run.idempotency_key,
+                &total_records,
+                &total_bytes,
+                &run.elapsed_seconds,
+                &cursors_advanced,
+            ],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn upsert_task_on(
+    client: &(impl GenericClient + Sync),
+    task: &TaskRecord,
+) -> anyhow::Result<()> {
+    let attempt = i32::try_from(task.attempt)?;
+    let limit_rows = task.limit.map(i64::try_from).transpose()?;
+    let lease_epoch = task
+        .lease
+        .as_ref()
+        .map(|lease| i64::try_from(lease.epoch))
+        .transpose()?;
+    let lease_expires_at = task.lease.as_ref().map(lease_expiry_to_datetime);
+
+    client
+        .execute(
+            "INSERT INTO controller_tasks (
+                task_id, run_id, attempt, state, pipeline_yaml, dry_run, limit_rows,
+                assigned_agent_id, lease_epoch, lease_expires_at, created_at, updated_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7,
+                $8, $9, $10, NOW(), NOW()
+            )
+            ON CONFLICT (task_id) DO UPDATE SET
+                run_id = EXCLUDED.run_id,
+                attempt = EXCLUDED.attempt,
+                state = EXCLUDED.state,
+                pipeline_yaml = EXCLUDED.pipeline_yaml,
+                dry_run = EXCLUDED.dry_run,
+                limit_rows = EXCLUDED.limit_rows,
+                assigned_agent_id = EXCLUDED.assigned_agent_id,
+                lease_epoch = EXCLUDED.lease_epoch,
+                lease_expires_at = EXCLUDED.lease_expires_at,
+                updated_at = NOW()",
+            &[
+                &task.task_id,
+                &task.run_id,
+                &attempt,
+                &task_state_to_db(task.state),
+                &task.pipeline_yaml,
+                &task.dry_run,
+                &limit_rows,
+                &task.assigned_agent_id,
+                &lease_epoch,
+                &lease_expires_at,
+            ],
+        )
+        .await?;
+    Ok(())
 }
 
 /// Initialize the controller metadata store and apply schema migrations.
@@ -1006,6 +1091,86 @@ mod tests {
             .await
             .expect("schema cleanup should succeed");
     }
+
+    #[tokio::test]
+    #[ignore = "requires RAPIDBYTE_CONTROLLER_METADATA_TEST_DATABASE_URL"]
+    async fn metadata_store_transaction_create_run_with_task_commits_both_records() {
+        let admin_url = env::var("RAPIDBYTE_CONTROLLER_METADATA_TEST_DATABASE_URL")
+            .expect("test database URL env var must be set");
+        let (admin_client, admin_connection) = tokio_postgres::connect(&admin_url, NoTls)
+            .await
+            .expect("admin connection should succeed");
+        tokio::spawn(async move {
+            admin_connection
+                .await
+                .expect("admin connection task should stay healthy");
+        });
+
+        let schema = format!("controller_store_test_{}", uuid::Uuid::new_v4().simple());
+        admin_client
+            .batch_execute(&format!("CREATE SCHEMA \"{schema}\""))
+            .await
+            .expect("schema creation should succeed");
+
+        let scoped_url = format!("{admin_url} options='-c search_path={schema}'");
+        let store = MetadataStore::connect(&scoped_url)
+            .await
+            .expect("metadata store connect should succeed");
+
+        let now = SystemTime::now();
+        let run = RunRecord {
+            run_id: "run-transaction".into(),
+            pipeline_name: "pipe".into(),
+            state: RunState::Pending,
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            completed_at: None,
+            current_task: None,
+            recovery_started_at: None,
+            error_code: None,
+            error_message: None,
+            error_retryable: None,
+            error_safe_to_retry: None,
+            error_commit_state: None,
+            attempt: 1,
+            idempotency_key: None,
+            total_records: 0,
+            total_bytes: 0,
+            elapsed_seconds: 0.0,
+            cursors_advanced: 0,
+        };
+        let task = TaskRecord {
+            task_id: "task-transaction".into(),
+            run_id: run.run_id.clone(),
+            attempt: 1,
+            lease: None,
+            state: TaskState::Pending,
+            pipeline_yaml: b"pipeline: test".to_vec(),
+            dry_run: false,
+            limit: None,
+            assigned_agent_id: None,
+        };
+
+        store
+            .create_run_with_task(&run, &task)
+            .await
+            .expect("transactional create should succeed");
+
+        let snapshot = store
+            .load_snapshot()
+            .await
+            .expect("snapshot load should succeed");
+        assert_eq!(snapshot.runs.len(), 1);
+        assert_eq!(snapshot.tasks.len(), 1);
+        assert_eq!(snapshot.runs[0].run_id, "run-transaction");
+        assert_eq!(snapshot.tasks[0].task_id, "task-transaction");
+
+        admin_client
+            .batch_execute(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
+            .await
+            .expect("schema cleanup should succeed");
+    }
 }
 
 #[cfg(test)]
@@ -1138,6 +1303,53 @@ pub mod test_support {
                 .persisted_tasks
                 .insert(_task.task_id.clone(), _task.clone());
             Ok(())
+        }
+
+        async fn create_run_with_task(
+            &self,
+            run: &RunRecord,
+            task: &TaskRecord,
+        ) -> anyhow::Result<()> {
+            let previous_run = self.persisted_run(&run.run_id);
+            let previous_task = self.persisted_task(&task.task_id);
+            self.upsert_run(run).await?;
+            if let Err(error) = self.upsert_task(task).await {
+                let mut failures = self.failures.lock().unwrap();
+                match previous_run {
+                    Some(previous_run) => {
+                        failures
+                            .persisted_runs
+                            .insert(run.run_id.clone(), previous_run);
+                    }
+                    None => {
+                        failures.persisted_runs.remove(&run.run_id);
+                    }
+                }
+                match previous_task {
+                    Some(previous_task) => {
+                        failures
+                            .persisted_tasks
+                            .insert(task.task_id.clone(), previous_task);
+                    }
+                    None => {
+                        failures.persisted_tasks.remove(&task.task_id);
+                    }
+                }
+                return Err(error);
+            }
+            Ok(())
+        }
+
+        async fn assign_task(&self, run: &RunRecord, task: &TaskRecord) -> anyhow::Result<()> {
+            self.create_run_with_task(run, task).await
+        }
+
+        async fn mark_task_running(
+            &self,
+            run: &RunRecord,
+            task: &TaskRecord,
+        ) -> anyhow::Result<()> {
+            self.create_run_with_task(run, task).await
         }
 
         async fn upsert_preview(
