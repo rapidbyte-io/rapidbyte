@@ -14,6 +14,7 @@ use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineServiceServer;
 use crate::proto::rapidbyte::v1::{run_event, RunEvent, RunFailed, TaskError};
 use crate::run_state::RunState as InternalRunState;
 use crate::state::ControllerState;
+use crate::store;
 
 /// Configuration for the controller server.
 #[derive(Clone)]
@@ -25,9 +26,11 @@ pub struct ServerTlsConfig {
 pub struct ControllerConfig {
     pub listen_addr: SocketAddr,
     pub signing_key: Vec<u8>,
+    pub metadata_database_url: Option<String>,
     pub agent_reap_interval: Duration,
     pub agent_reap_timeout: Duration,
     pub lease_check_interval: Duration,
+    pub reconciliation_timeout: Duration,
     pub preview_cleanup_interval: Duration,
     /// Bearer tokens for authentication. Empty requires `allow_unauthenticated`.
     pub auth_tokens: Vec<String>,
@@ -48,9 +51,11 @@ impl Default for ControllerConfig {
         Self {
             listen_addr: "[::]:9090".parse().unwrap(),
             signing_key: DEFAULT_SIGNING_KEY.to_vec(),
+            metadata_database_url: None,
             agent_reap_interval: Duration::from_secs(15),
             agent_reap_timeout: Duration::from_secs(60),
             lease_check_interval: Duration::from_secs(10),
+            reconciliation_timeout: Duration::from_secs(300),
             preview_cleanup_interval: Duration::from_secs(30),
             auth_tokens: Vec::new(),
             allow_unauthenticated: false,
@@ -78,24 +83,101 @@ fn validate_signing_key_config(config: &ControllerConfig) -> anyhow::Result<()> 
     Ok(())
 }
 
-async fn handle_expired_lease(state: &ControllerState, task_id: &str, run_id: &str) {
-    let error_msg = {
+fn metadata_database_url(config: &ControllerConfig) -> anyhow::Result<&str> {
+    match config.metadata_database_url.as_deref().map(str::trim) {
+        Some("") | None => {
+            anyhow::bail!(
+                "Controller metadata database URL is required. Set --metadata-database-url / RAPIDBYTE_CONTROLLER_METADATA_DATABASE_URL."
+            );
+        }
+        Some(url) => Ok(url),
+    }
+}
+
+async fn initialize_metadata_store(
+    config: &ControllerConfig,
+) -> anyhow::Result<store::MetadataStore> {
+    let url = metadata_database_url(config)?;
+    store::initialize_metadata_store(url).await
+}
+
+async fn rollback_background_timeout(
+    state: &ControllerState,
+    previous_run: crate::run_state::RunRecord,
+    previous_task: Option<crate::scheduler::TaskRecord>,
+) {
+    {
         let mut runs = state.runs.write().await;
-        if let Ok(()) = runs.transition(run_id, InternalRunState::TimedOut) {
-            let record = runs.get_run_mut(run_id);
+        runs.restore_run(previous_run);
+    }
+    if let Some(previous_task) = previous_task {
+        let mut tasks = state.tasks.write().await;
+        tasks.restore_task(previous_task);
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn handle_expired_lease(
+    state: &ControllerState,
+    previous_task: crate::scheduler::TaskRecord,
+) {
+    let task_id = previous_task.task_id.clone();
+    let run_id = previous_task.run_id.clone();
+    let previous_run = state
+        .runs
+        .read()
+        .await
+        .get_run(&run_id)
+        .cloned()
+        .expect("run should exist for expired lease");
+    let timeout_outcome = {
+        let mut runs = state.runs.write().await;
+        let target_state = if runs
+            .get_run(&run_id)
+            .is_some_and(|record| record.state == InternalRunState::Reconciling)
+        {
+            InternalRunState::RecoveryFailed
+        } else {
+            InternalRunState::TimedOut
+        };
+
+        if let Ok(()) = runs.transition(&run_id, target_state) {
+            let record = runs.get_run_mut(&run_id);
             if let Some(r) = record {
-                let msg = format!("Task {task_id} lease expired (agent unresponsive)");
+                let (code, msg, retryable, safe_to_retry) = if target_state
+                    == InternalRunState::RecoveryFailed
+                {
+                    (
+                            "RECOVERY_TIMEOUT",
+                            format!(
+                                "Run recovery reconciliation timed out after controller restart for task {task_id}"
+                            ),
+                            false,
+                            false,
+                        )
+                } else {
+                    (
+                        "LEASE_EXPIRED",
+                        format!("Task {task_id} lease expired (agent unresponsive)"),
+                        true,
+                        true,
+                    )
+                };
                 r.error_message = Some(msg.clone());
-                Some((msg, r.attempt))
+                r.error_code = Some(code.into());
+                r.error_retryable = Some(retryable);
+                r.error_safe_to_retry = Some(safe_to_retry);
+                r.error_commit_state = Some(String::new());
+                Some((code, msg, retryable, safe_to_retry, r.attempt))
             } else {
                 None
             }
         } else {
-            let actual_state = runs.get_run(run_id).map(|r| r.state);
+            let actual_state = runs.get_run(&run_id).map(|r| r.state);
             if let Some(actual_state) = actual_state {
                 tracing::warn!(
-                    task_id,
-                    run_id,
+                    task_id = %task_id,
+                    run_id = %run_id,
                     ?actual_state,
                     "Skipping lease-expiry terminal event because run could not transition to TimedOut"
                 );
@@ -103,25 +185,218 @@ async fn handle_expired_lease(state: &ControllerState, task_id: &str, run_id: &s
             None
         }
     };
+    if timeout_outcome.is_none() {
+        return;
+    }
+    let timed_out_run = state
+        .runs
+        .read()
+        .await
+        .get_run(&run_id)
+        .cloned()
+        .expect("timed-out run should exist");
+    let timed_out_task = state
+        .tasks
+        .read()
+        .await
+        .get(&task_id)
+        .cloned()
+        .expect("timed-out task should exist");
+    let durable = match state
+        .persist_timeout_records(&timed_out_run, Some(&timed_out_task))
+        .await
+    {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::error!(
+                task_id = %task_id,
+                run_id = %run_id,
+                ?error,
+                "failed to persist lease-expiry timeout transition"
+            );
+            false
+        }
+    };
 
-    if let Some((msg, attempt)) = error_msg {
+    if !durable {
+        rollback_background_timeout(state, previous_run, Some(previous_task)).await;
+    }
+
+    if durable {
+        let (code, msg, retryable, safe_to_retry, attempt) =
+            timeout_outcome.expect("timeout outcome checked above");
         state.watchers.write().await.publish_terminal(
-            run_id,
+            &run_id,
             RunEvent {
-                run_id: run_id.to_string(),
+                run_id: run_id.clone(),
                 event: Some(run_event::Event::Failed(RunFailed {
                     error: Some(TaskError {
-                        code: "LEASE_EXPIRED".into(),
+                        code: code.into(),
                         message: msg,
-                        retryable: true,
-                        safe_to_retry: true,
+                        retryable,
+                        safe_to_retry,
                         commit_state: String::new(),
                     }),
                     attempt,
                 })),
             },
         );
+    } else {
+        tracing::warn!(
+            task_id = %task_id,
+            run_id = %run_id,
+            "skipping lease-expiry terminal publish because durable persistence failed"
+        );
     }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_timeout: Duration) {
+    let now = std::time::SystemTime::now();
+    let stale_run_ids = {
+        let runs = state.runs.read().await;
+        runs.all_runs()
+            .into_iter()
+            .filter(|run| run.state == InternalRunState::Reconciling)
+            .filter(|run| {
+                run.recovery_started_at
+                    .and_then(|started_at| now.duration_since(started_at).ok())
+                    .is_some_and(|elapsed| elapsed >= reconciliation_timeout)
+            })
+            .map(|run| run.run_id)
+            .collect::<Vec<_>>()
+    };
+
+    for run_id in stale_run_ids {
+        let previous_run = state
+            .runs
+            .read()
+            .await
+            .get_run(&run_id)
+            .cloned()
+            .expect("reconciling run should exist");
+        let task_id = previous_run
+            .current_task
+            .as_ref()
+            .map(|task| task.task_id.clone());
+        let previous_task = if let Some(task_id) = task_id.as_deref() {
+            state.tasks.read().await.get(task_id).cloned()
+        } else {
+            None
+        };
+        let attempt = {
+            let mut runs = state.runs.write().await;
+            let Some(run) = runs.get_run(&run_id) else {
+                continue;
+            };
+            if run.state != InternalRunState::Reconciling {
+                continue;
+            }
+            let attempt = run.attempt;
+            if runs
+                .transition(&run_id, InternalRunState::RecoveryFailed)
+                .is_err()
+            {
+                continue;
+            }
+            if let Some(run) = runs.get_run_mut(&run_id) {
+                run.error_code = Some("RECOVERY_TIMEOUT".into());
+                run.error_message =
+                    Some("Run recovery reconciliation timed out after controller restart".into());
+                run.error_retryable = Some(false);
+                run.error_safe_to_retry = Some(false);
+                run.error_commit_state = Some(String::new());
+            }
+            attempt
+        };
+
+        let timed_out_task = if let Some(task_id) = task_id.as_deref() {
+            let timed_out = {
+                let mut tasks = state.tasks.write().await;
+                tasks.mark_timed_out(task_id)
+            };
+            if timed_out {
+                state.tasks.read().await.get(task_id).cloned()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let recovery_failed_run = state
+            .runs
+            .read()
+            .await
+            .get_run(&run_id)
+            .cloned()
+            .expect("recovery-failed run should exist");
+        let durable = match state
+            .persist_timeout_records(&recovery_failed_run, timed_out_task.as_ref())
+            .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::error!(
+                    run_id,
+                    ?error,
+                    "failed to persist reconciliation-timeout transition"
+                );
+                false
+            }
+        };
+
+        if !durable {
+            rollback_background_timeout(state, previous_run, previous_task).await;
+        }
+
+        if durable {
+            state.watchers.write().await.publish_terminal(
+                &run_id,
+                RunEvent {
+                    run_id: run_id.clone(),
+                    event: Some(run_event::Event::Failed(RunFailed {
+                        error: Some(TaskError {
+                            code: "RECOVERY_TIMEOUT".into(),
+                            message:
+                                "Run recovery reconciliation timed out after controller restart"
+                                    .into(),
+                            retryable: false,
+                            safe_to_retry: false,
+                            commit_state: String::new(),
+                        }),
+                        attempt,
+                    })),
+                },
+            );
+        } else {
+            tracing::warn!(run_id, "skipping reconciliation-timeout terminal publish because durable persistence failed");
+        }
+    }
+}
+
+async fn cleanup_expired_previews(state: &ControllerState) -> usize {
+    let expired_run_ids = { state.previews.write().await.remove_expired() };
+    {
+        let mut retry_set = state.preview_delete_retries.write().await;
+        retry_set.extend(expired_run_ids);
+    }
+    let pending = state
+        .preview_delete_retries
+        .read()
+        .await
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut removed = 0usize;
+    for run_id in &pending {
+        if let Err(error) = state.delete_preview(run_id).await {
+            tracing::error!(run_id, ?error, "failed to delete expired durable preview");
+        } else {
+            state.preview_delete_retries.write().await.remove(run_id);
+            removed += 1;
+        }
+    }
+    removed
 }
 
 fn spawn_preview_cleanup_task(
@@ -132,7 +407,7 @@ fn spawn_preview_cleanup_task(
         let mut interval = tokio::time::interval(interval_duration);
         loop {
             interval.tick().await;
-            let removed = state.previews.write().await.cleanup_expired();
+            let removed = cleanup_expired_previews(&state).await;
             if removed > 0 {
                 info!(removed, "Removed expired preview metadata entries");
             }
@@ -149,6 +424,7 @@ fn spawn_preview_cleanup_task(
 pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
     validate_auth_config(&config)?;
     validate_signing_key_config(&config)?;
+    let metadata_store = initialize_metadata_store(&config).await?;
 
     if config.signing_key == DEFAULT_SIGNING_KEY {
         tracing::warn!(
@@ -161,7 +437,7 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
         );
     }
 
-    let state = ControllerState::new(&config.signing_key);
+    let state = ControllerState::from_metadata_store(&config.signing_key, metadata_store).await?;
 
     // Background task: reap dead agents
     let reap_state = state.clone();
@@ -172,6 +448,9 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
             interval.tick().await;
             let dead = reap_state.registry.write().await.reap_dead(reap_timeout);
             for agent_id in &dead {
+                if let Err(error) = reap_state.delete_agent(agent_id).await {
+                    tracing::error!(agent_id, ?error, "failed to delete reaped agent");
+                }
                 info!(agent_id, "Reaped dead agent");
             }
         }
@@ -179,15 +458,17 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
 
     // Background task: expire leases
     let lease_state = state.clone();
+    let reconciliation_timeout = config.reconciliation_timeout;
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(config.lease_check_interval);
         loop {
             interval.tick().await;
             let expired = lease_state.tasks.write().await.expire_leases();
-            for (task_id, run_id) in &expired {
-                info!(task_id, run_id, "Task lease expired");
-                handle_expired_lease(&lease_state, task_id, run_id).await;
+            for previous_task in expired {
+                info!(task_id = %previous_task.task_id, run_id = %previous_task.run_id, "Task lease expired");
+                handle_expired_lease(&lease_state, previous_task).await;
             }
+            sweep_reconciliation_timeouts(&lease_state, reconciliation_timeout).await;
         }
     });
 
@@ -227,6 +508,7 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::test_support::FailingMetadataStore;
 
     #[test]
     fn auth_is_required_by_default() {
@@ -256,6 +538,47 @@ mod tests {
         assert!(err
             .to_string()
             .contains("preview signing key must be set explicitly"));
+    }
+
+    #[test]
+    fn metadata_database_url_is_required() {
+        let config = ControllerConfig {
+            auth_tokens: vec!["secret".into()],
+            signing_key: b"signing".to_vec(),
+            ..Default::default()
+        };
+        let err = metadata_database_url(&config).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Controller metadata database URL is required"));
+    }
+
+    #[test]
+    fn metadata_database_url_rejects_whitespace() {
+        let config = ControllerConfig {
+            auth_tokens: vec!["secret".into()],
+            signing_key: b"signing".to_vec(),
+            metadata_database_url: Some("   ".into()),
+            ..Default::default()
+        };
+        let err = metadata_database_url(&config).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Controller metadata database URL is required"));
+    }
+
+    #[test]
+    fn metadata_database_url_accepts_non_empty_value() {
+        let config = ControllerConfig {
+            auth_tokens: vec!["secret".into()],
+            signing_key: b"signing".to_vec(),
+            metadata_database_url: Some("postgresql://localhost/controller".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            metadata_database_url(&config).unwrap(),
+            "postgresql://localhost/controller"
+        );
     }
 
     #[test]
@@ -290,7 +613,12 @@ mod tests {
                 .unwrap();
         }
 
-        handle_expired_lease(&state, &task_id, &run_id).await;
+        let previous_task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        {
+            let mut tasks = state.tasks.write().await;
+            assert!(tasks.mark_timed_out(&task_id));
+        }
+        handle_expired_lease(&state, previous_task).await;
 
         let runs = state.runs.read().await;
         let record = runs.get_run(&run_id).unwrap();
@@ -302,22 +630,259 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preview_cleanup_task_removes_expired_entries() {
+    async fn handle_expired_lease_transitions_reconciling_run_to_recovery_failed() {
         let state = ControllerState::new(b"test-signing-key");
+        let (run_id, _) = {
+            let mut runs = state.runs.write().await;
+            runs.create_run("run-1".into(), "pipe".into(), None)
+        };
+        let task_id = {
+            let mut tasks = state.tasks.write().await;
+            let task_id = tasks.enqueue(run_id.clone(), b"yaml".to_vec(), false, None, 1);
+            let assignment = tasks
+                .poll("agent-1", Duration::from_secs(60), &state.epoch_gen)
+                .expect("task should be assigned");
+            assert_eq!(assignment.task_id, task_id);
+            task_id
+        };
         {
-            let mut previews = state.previews.write().await;
-            previews.store(crate::preview::PreviewEntry {
-                run_id: "run-1".into(),
-                task_id: "task-1".into(),
-                flight_endpoint: "localhost:9091".into(),
-                ticket: bytes::Bytes::from_static(b"ticket"),
-                streams: vec![],
-                created_at: std::time::Instant::now()
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::Reconciling)
+                .unwrap();
+        }
+
+        let previous_task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        {
+            let mut tasks = state.tasks.write().await;
+            assert!(tasks.mark_timed_out(&task_id));
+        }
+        handle_expired_lease(&state, previous_task).await;
+
+        let runs = state.runs.read().await;
+        let record = runs.get_run(&run_id).unwrap();
+        assert_eq!(record.state, InternalRunState::RecoveryFailed);
+        assert!(record
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("reconciliation timed out")));
+    }
+
+    #[tokio::test]
+    async fn handle_expired_lease_rolls_back_when_persist_fails() {
+        let state = ControllerState::with_metadata_store(
+            b"test-signing-key",
+            FailingMetadataStore::new().fail_task_upsert_on(1),
+        );
+        let (run_id, _) = {
+            let mut runs = state.runs.write().await;
+            runs.create_run("run-1".into(), "pipe".into(), None)
+        };
+        let task_id = {
+            let mut tasks = state.tasks.write().await;
+            let task_id = tasks.enqueue(run_id.clone(), b"yaml".to_vec(), false, None, 1);
+            let assignment = tasks
+                .poll("agent-1", Duration::from_secs(60), &state.epoch_gen)
+                .expect("task should be assigned");
+            assert_eq!(assignment.task_id, task_id);
+            task_id
+        };
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+        }
+
+        let mut rx = state.watchers.write().await.subscribe(&run_id);
+        let previous_task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        {
+            let mut tasks = state.tasks.write().await;
+            assert!(tasks.mark_timed_out(&task_id));
+        }
+        handle_expired_lease(&state, previous_task).await;
+
+        let recv = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+        assert!(
+            recv.is_err(),
+            "terminal event should not publish on persist failure"
+        );
+        assert_eq!(state.watchers.read().await.channel_count(), 1);
+        let task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        assert_eq!(task.state, crate::scheduler::TaskState::Assigned);
+        assert!(task.lease.is_some());
+        let run = state.runs.read().await.get_run(&run_id).unwrap().clone();
+        assert_eq!(run.state, InternalRunState::Assigned);
+    }
+
+    #[tokio::test]
+    async fn handle_expired_lease_keeps_durable_state_consistent_when_timeout_persist_fails() {
+        let store = FailingMetadataStore::new().fail_run_upsert_on(2);
+        let state = ControllerState::with_metadata_store(b"test-signing-key", store.clone());
+        let (run_id, _) = {
+            let mut runs = state.runs.write().await;
+            runs.create_run("run-1".into(), "pipe".into(), None)
+        };
+        let task_id = {
+            let mut tasks = state.tasks.write().await;
+            let task_id = tasks.enqueue(run_id.clone(), b"yaml".to_vec(), false, None, 1);
+            let assignment = tasks
+                .poll("agent-1", Duration::from_secs(60), &state.epoch_gen)
+                .expect("task should be assigned");
+            assert_eq!(assignment.task_id, task_id);
+            task_id
+        };
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+        }
+
+        let previous_run = state.runs.read().await.get_run(&run_id).unwrap().clone();
+        let previous_task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        state
+            .persist_run_record(&previous_run)
+            .await
+            .expect("initial run persistence should succeed");
+        state
+            .persist_task_record(&previous_task)
+            .await
+            .expect("initial task persistence should succeed");
+
+        {
+            let mut tasks = state.tasks.write().await;
+            assert!(tasks.mark_timed_out(&task_id));
+        }
+        handle_expired_lease(&state, previous_task).await;
+
+        let durable_task = store
+            .persisted_task(&task_id)
+            .expect("durable task snapshot should exist");
+        assert_eq!(durable_task.state, crate::scheduler::TaskState::Assigned);
+        assert!(durable_task.lease.is_some());
+        let durable_run = store
+            .persisted_run(&run_id)
+            .expect("durable run snapshot should exist");
+        assert_eq!(durable_run.state, InternalRunState::Assigned);
+    }
+
+    #[tokio::test]
+    async fn handle_reconciliation_timeout_fails_stale_reconciling_run() {
+        let state = ControllerState::new(b"test-signing-key");
+        let (run_id, _) = {
+            let mut runs = state.runs.write().await;
+            runs.create_run("run-1".into(), "pipe".into(), None)
+        };
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::Reconciling)
+                .unwrap();
+            runs.get_run_mut(&run_id).unwrap().recovery_started_at = Some(
+                std::time::SystemTime::now()
                     .checked_sub(Duration::from_secs(120))
                     .unwrap(),
-                ttl: Duration::from_secs(60),
-            });
+            );
         }
+
+        sweep_reconciliation_timeouts(&state, Duration::from_secs(30)).await;
+
+        let runs = state.runs.read().await;
+        let record = runs.get_run(&run_id).unwrap();
+        assert_eq!(record.state, InternalRunState::RecoveryFailed);
+        assert!(record
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("reconciliation timed out")));
+    }
+
+    #[tokio::test]
+    async fn handle_reconciliation_timeout_rolls_back_when_persist_fails() {
+        let state = ControllerState::with_metadata_store(
+            b"test-signing-key",
+            FailingMetadataStore::new().fail_run_upsert_on(1),
+        );
+        let (run_id, _) = {
+            let mut runs = state.runs.write().await;
+            runs.create_run("run-1".into(), "pipe".into(), None)
+        };
+        let task_id = {
+            let mut tasks = state.tasks.write().await;
+            let task_id = tasks.enqueue(run_id.clone(), b"yaml".to_vec(), false, None, 1);
+            let assignment = tasks
+                .poll("agent-1", Duration::from_secs(60), &state.epoch_gen)
+                .expect("task should be assigned");
+            assert_eq!(assignment.task_id, task_id);
+            task_id
+        };
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::Reconciling)
+                .unwrap();
+            runs.get_run_mut(&run_id).unwrap().recovery_started_at = Some(
+                std::time::SystemTime::now()
+                    .checked_sub(Duration::from_secs(120))
+                    .unwrap(),
+            );
+        }
+
+        sweep_reconciliation_timeouts(&state, Duration::from_secs(30)).await;
+
+        let run = state.runs.read().await.get_run(&run_id).unwrap().clone();
+        assert_eq!(run.state, InternalRunState::Reconciling);
+        let task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        assert_eq!(task.state, crate::scheduler::TaskState::Assigned);
+        assert!(task.lease.is_some());
+    }
+
+    #[tokio::test]
+    async fn handle_reconciliation_timeout_leaves_fresh_reconciling_run_unchanged() {
+        let state = ControllerState::new(b"test-signing-key");
+        let (run_id, _) = {
+            let mut runs = state.runs.write().await;
+            runs.create_run("run-1".into(), "pipe".into(), None)
+        };
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::Reconciling)
+                .unwrap();
+        }
+
+        sweep_reconciliation_timeouts(&state, Duration::from_secs(300)).await;
+
+        let runs = state.runs.read().await;
+        let record = runs.get_run(&run_id).unwrap();
+        assert_eq!(record.state, InternalRunState::Reconciling);
+    }
+
+    #[tokio::test]
+    async fn preview_cleanup_task_removes_expired_entries() {
+        let store = FailingMetadataStore::new();
+        let state = ControllerState::with_metadata_store(b"test-signing-key", store.clone());
+        let preview = crate::preview::PreviewEntry {
+            run_id: "run-1".into(),
+            task_id: "task-1".into(),
+            flight_endpoint: "localhost:9091".into(),
+            ticket: bytes::Bytes::from_static(b"ticket"),
+            streams: vec![],
+            created_at: std::time::Instant::now()
+                .checked_sub(Duration::from_secs(120))
+                .unwrap(),
+            ttl: Duration::from_secs(60),
+        };
+        {
+            let mut previews = state.previews.write().await;
+            previews.store(preview.clone());
+        }
+        state
+            .persist_preview_record(&preview)
+            .await
+            .expect("preview persistence should succeed");
 
         let handle = spawn_preview_cleanup_task(state.clone(), Duration::from_millis(10));
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -326,5 +891,42 @@ mod tests {
         let mut previews = state.previews.write().await;
         assert!(previews.get("run-1").is_none());
         assert_eq!(previews.cleanup_expired(), 0);
+        assert!(store.persisted_preview("run-1").is_none());
+        assert!(state.preview_delete_retries.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn preview_cleanup_retries_failed_durable_deletes() {
+        let store = FailingMetadataStore::new().fail_delete_preview_on(1);
+        let state = ControllerState::with_metadata_store(b"test-signing-key", store.clone());
+        let preview = crate::preview::PreviewEntry {
+            run_id: "run-1".into(),
+            task_id: "task-1".into(),
+            flight_endpoint: "localhost:9091".into(),
+            ticket: bytes::Bytes::from_static(b"ticket"),
+            streams: vec![],
+            created_at: std::time::Instant::now()
+                .checked_sub(Duration::from_secs(120))
+                .unwrap(),
+            ttl: Duration::from_secs(60),
+        };
+        {
+            let mut previews = state.previews.write().await;
+            previews.store(preview.clone());
+        }
+        state
+            .persist_preview_record(&preview)
+            .await
+            .expect("preview persistence should succeed");
+
+        let removed = cleanup_expired_previews(&state).await;
+        assert_eq!(removed, 0);
+        assert!(store.persisted_preview("run-1").is_some());
+        assert!(state.preview_delete_retries.read().await.contains("run-1"));
+
+        let removed = cleanup_expired_previews(&state).await;
+        assert_eq!(removed, 1);
+        assert!(store.persisted_preview("run-1").is_none());
+        assert!(state.preview_delete_retries.read().await.is_empty());
     }
 }

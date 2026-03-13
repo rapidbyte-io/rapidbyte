@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use rustls::crypto::ring::default_provider;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Verbosity {
@@ -131,6 +132,9 @@ enum Commands {
         /// gRPC listen address
         #[arg(long, default_value = "[::]:9090")]
         listen: String,
+        /// Postgres connection string for durable controller metadata
+        #[arg(long, env = "RAPIDBYTE_CONTROLLER_METADATA_DATABASE_URL")]
+        metadata_database_url: Option<String>,
         /// Shared signing key for preview tickets (hex or raw string)
         #[arg(long, env = "RAPIDBYTE_SIGNING_KEY")]
         signing_key: Option<String>,
@@ -140,6 +144,9 @@ enum Commands {
         /// Explicitly allow the built-in insecure development signing key
         #[arg(long)]
         allow_insecure_signing_key: bool,
+        /// Max time to wait for restart reconciliation before failing recovery
+        #[arg(long, env = "RAPIDBYTE_CONTROLLER_RECONCILIATION_TIMEOUT_SECONDS")]
+        reconciliation_timeout_seconds: Option<u64>,
         /// PEM certificate for TLS server mode
         #[arg(long)]
         tls_cert: Option<PathBuf>,
@@ -222,6 +229,7 @@ fn resolve_controller_url(
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> ExitCode {
+    let _ = default_provider().install_default();
     let cli = Cli::parse();
 
     let verbosity = Verbosity::from_flags(cli.quiet, cli.verbose);
@@ -293,18 +301,22 @@ async fn main() -> ExitCode {
         Commands::Dev => commands::dev::execute().await,
         Commands::Controller {
             listen,
+            metadata_database_url,
             signing_key,
             allow_unauthenticated,
             allow_insecure_signing_key,
+            reconciliation_timeout_seconds,
             tls_cert,
             tls_key,
         } => {
             commands::controller::execute(
                 &listen,
+                metadata_database_url.as_deref(),
                 signing_key.as_deref(),
                 cli.auth_token.as_deref(),
                 allow_unauthenticated,
                 allow_insecure_signing_key,
+                reconciliation_timeout_seconds.map(std::time::Duration::from_secs),
                 tls_cert.as_deref(),
                 tls_key.as_deref(),
             )

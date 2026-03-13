@@ -2,34 +2,43 @@
 
 use anyhow::Result;
 use std::path::Path;
+use std::time::Duration;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute(
     listen: &str,
+    metadata_database_url: Option<&str>,
     signing_key: Option<&str>,
     auth_token: Option<&str>,
     allow_unauthenticated: bool,
     allow_insecure_signing_key: bool,
+    reconciliation_timeout: Option<Duration>,
     tls_cert: Option<&Path>,
     tls_key: Option<&Path>,
 ) -> Result<()> {
     let config = build_config(
         listen,
+        metadata_database_url,
         signing_key,
         auth_token,
         allow_unauthenticated,
         allow_insecure_signing_key,
+        reconciliation_timeout,
         tls_cert,
         tls_key,
     )?;
     rapidbyte_controller::run(config).await
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_config(
     listen: &str,
+    metadata_database_url: Option<&str>,
     signing_key: Option<&str>,
     auth_token: Option<&str>,
     allow_unauthenticated: bool,
     allow_insecure_signing_key: bool,
+    reconciliation_timeout: Option<Duration>,
     tls_cert: Option<&Path>,
     tls_key: Option<&Path>,
 ) -> Result<rapidbyte_controller::ControllerConfig> {
@@ -47,6 +56,12 @@ fn build_config(
         listen_addr: addr,
         ..Default::default()
     };
+    if let Some(url) = metadata_database_url {
+        if url.trim().is_empty() {
+            anyhow::bail!("metadata database URL must not be empty or whitespace");
+        }
+        config.metadata_database_url = Some(url.to_string());
+    }
     if let Some(key) = signing_key {
         config.signing_key = key.as_bytes().to_vec();
     }
@@ -56,6 +71,9 @@ fn build_config(
     }
     config.allow_unauthenticated = allow_unauthenticated;
     config.allow_insecure_default_signing_key = allow_insecure_signing_key;
+    if let Some(timeout) = reconciliation_timeout {
+        config.reconciliation_timeout = timeout;
+    }
     if config.auth_tokens.is_empty() && !config.allow_unauthenticated {
         anyhow::bail!(
             "controller requires --auth-token / RAPIDBYTE_AUTH_TOKEN or --allow-unauthenticated"
@@ -66,6 +84,11 @@ fn build_config(
     {
         anyhow::bail!(
             "controller requires --signing-key / RAPIDBYTE_SIGNING_KEY or --allow-insecure-signing-key"
+        );
+    }
+    if config.metadata_database_url.is_none() {
+        anyhow::bail!(
+            "controller requires --metadata-database-url / RAPIDBYTE_CONTROLLER_METADATA_DATABASE_URL"
         );
     }
     match (tls_cert, tls_key) {
@@ -90,10 +113,12 @@ mod tests {
     fn controller_execute_uses_auth_token() {
         let config = build_config(
             "[::]:9090",
+            Some("postgresql://localhost/controller"),
             Some("signing"),
             Some("secret"),
             false,
             false,
+            None,
             None,
             None,
         )
@@ -104,16 +129,36 @@ mod tests {
 
     #[test]
     fn controller_execute_requires_auth_or_explicit_override() {
-        let err = build_config("[::]:9090", Some("signing"), None, false, false, None, None)
-            .err()
-            .unwrap();
+        let err = build_config(
+            "[::]:9090",
+            Some("postgresql://localhost/controller"),
+            Some("signing"),
+            None,
+            false,
+            false,
+            None,
+            None,
+            None,
+        )
+        .err()
+        .unwrap();
         assert!(err.to_string().contains("controller requires --auth-token"));
     }
 
     #[test]
     fn controller_execute_allows_explicit_unauthenticated_mode() {
-        let config =
-            build_config("[::]:9090", Some("signing"), None, true, false, None, None).unwrap();
+        let config = build_config(
+            "[::]:9090",
+            Some("postgresql://localhost/controller"),
+            Some("signing"),
+            None,
+            true,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(config.auth_tokens.is_empty());
         assert!(config.allow_unauthenticated);
     }
@@ -122,10 +167,12 @@ mod tests {
     fn controller_execute_rejects_empty_auth_token() {
         let err = build_config(
             "[::]:9090",
+            Some("postgresql://localhost/controller"),
             Some("signing"),
             Some(""),
             false,
             false,
+            None,
             None,
             None,
         )
@@ -138,10 +185,12 @@ mod tests {
     fn controller_execute_rejects_whitespace_auth_token() {
         let err = build_config(
             "[::]:9090",
+            Some("postgresql://localhost/controller"),
             Some("signing"),
             Some("   "),
             false,
             false,
+            None,
             None,
             None,
         )
@@ -152,9 +201,19 @@ mod tests {
 
     #[test]
     fn controller_execute_rejects_default_signing_key() {
-        let err = build_config("[::]:9090", None, Some("secret"), false, false, None, None)
-            .err()
-            .unwrap();
+        let err = build_config(
+            "[::]:9090",
+            Some("postgresql://localhost/controller"),
+            None,
+            Some("secret"),
+            false,
+            false,
+            None,
+            None,
+            None,
+        )
+        .err()
+        .unwrap();
         assert!(err
             .to_string()
             .contains("controller requires --signing-key"));
@@ -162,9 +221,39 @@ mod tests {
 
     #[test]
     fn controller_execute_allows_insecure_signing_key() {
-        let config =
-            build_config("[::]:9090", None, Some("secret"), false, true, None, None).unwrap();
+        let config = build_config(
+            "[::]:9090",
+            Some("postgresql://localhost/controller"),
+            None,
+            Some("secret"),
+            false,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(config.allow_insecure_default_signing_key);
+    }
+
+    #[test]
+    fn controller_execute_requires_metadata_database_url() {
+        let err = build_config(
+            "[::]:9090",
+            None,
+            Some("signing"),
+            Some("secret"),
+            false,
+            false,
+            None,
+            None,
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(err
+            .to_string()
+            .contains("controller requires --metadata-database-url"));
     }
 
     #[test]
@@ -177,10 +266,12 @@ mod tests {
 
         let config = build_config(
             "[::]:9090",
+            Some("postgresql://localhost/controller"),
             Some("signing"),
             None,
             true,
             false,
+            None,
             Some(cert_path.as_path()),
             Some(key_path.as_path()),
         )
@@ -188,5 +279,42 @@ mod tests {
 
         assert_eq!(config.tls.as_ref().unwrap().cert_pem, b"cert-pem");
         assert_eq!(config.tls.as_ref().unwrap().key_pem, b"key-pem");
+    }
+
+    #[test]
+    fn controller_execute_rejects_empty_metadata_database_url() {
+        let err = build_config(
+            "[::]:9090",
+            Some("   "),
+            Some("signing"),
+            Some("secret"),
+            false,
+            false,
+            None,
+            None,
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(err
+            .to_string()
+            .contains("metadata database URL must not be empty"));
+    }
+
+    #[test]
+    fn controller_execute_wires_reconciliation_timeout() {
+        let config = build_config(
+            "[::]:9090",
+            Some("postgresql://localhost/controller"),
+            Some("signing"),
+            Some("secret"),
+            false,
+            false,
+            Some(Duration::from_secs(42)),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(config.reconciliation_timeout, Duration::from_secs(42));
     }
 }

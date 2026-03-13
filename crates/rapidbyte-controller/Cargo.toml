@@ -7,6 +7,7 @@ edition.workspace = true
 rapidbyte-types = { path = "../rapidbyte-types" }
 rapidbyte-engine = { path = "../rapidbyte-engine" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
@@ -21,6 +22,12 @@ sha2 = { workspace = true }
 bytes = { workspace = true }
 tokio-stream = { workspace = true }
 tower = { workspace = true }
+tokio-postgres = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

@@ -32,6 +32,7 @@ pub mod run_state;
 pub mod scheduler;
 pub mod server;
 pub mod state;
+pub mod store;
 pub mod watcher;
 
 pub use server::{run, ControllerConfig, ServerTlsConfig};

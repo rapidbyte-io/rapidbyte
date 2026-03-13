@@ -2,6 +2,10 @@
 
 use std::time::Duration;
 
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use tokio::sync::Barrier;
 use tonic::{Request, Response, Status};
 
 use crate::proto::rapidbyte::v1::{
@@ -20,12 +24,169 @@ const LEASE_TTL: Duration = Duration::from_secs(300);
 
 pub struct AgentServiceImpl {
     state: ControllerState,
+    #[cfg(test)]
+    poll_barrier: Option<Arc<Barrier>>,
 }
 
 impl AgentServiceImpl {
     #[must_use]
     pub fn new(state: ControllerState) -> Self {
-        Self { state }
+        Self {
+            state,
+            #[cfg(test)]
+            poll_barrier: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_poll_barrier(state: ControllerState, poll_barrier: Arc<Barrier>) -> Self {
+        Self {
+            state,
+            poll_barrier: Some(poll_barrier),
+        }
+    }
+
+    async fn rollback_assignment(
+        &self,
+        previous_run: crate::run_state::RunRecord,
+        previous_task: crate::scheduler::TaskRecord,
+    ) {
+        {
+            let mut runs = self.state.runs.write().await;
+            runs.restore_run(previous_run);
+        }
+        {
+            let mut tasks = self.state.tasks.write().await;
+            tasks.restore_task(previous_task);
+        }
+    }
+
+    async fn rollback_renewed_tasks(&self, previous_tasks: Vec<crate::scheduler::TaskRecord>) {
+        let mut tasks = self.state.tasks.write().await;
+        for previous_task in previous_tasks {
+            tasks.restore_task(previous_task);
+        }
+    }
+
+    async fn rollback_completion_state(
+        &self,
+        run_id: &str,
+        previous_task: crate::scheduler::TaskRecord,
+        previous_run: crate::run_state::RunRecord,
+        previous_preview: Option<crate::preview::PreviewEntry>,
+        next_task_id: Option<&str>,
+    ) {
+        {
+            let mut tasks = self.state.tasks.write().await;
+            if let Some(next_task_id) = next_task_id {
+                let _ = tasks.remove_task(next_task_id);
+            }
+            tasks.restore_task(previous_task);
+        }
+        {
+            let mut runs = self.state.runs.write().await;
+            runs.restore_run(previous_run);
+        }
+        {
+            let mut previews = self.state.previews.write().await;
+            let _ = previews.remove(run_id);
+            if let Some(previous_preview) = previous_preview {
+                previews.restore(previous_preview);
+            }
+        }
+    }
+
+    async fn rollback_preview_durable(
+        &self,
+        run_id: &str,
+        previous_preview: Option<&crate::preview::PreviewEntry>,
+    ) -> Option<anyhow::Error> {
+        match previous_preview {
+            Some(previous_preview) => self
+                .state
+                .persist_preview_record(previous_preview)
+                .await
+                .err(),
+            None => self.state.delete_preview(run_id).await.err(),
+        }
+    }
+
+    async fn try_claim_task(
+        &self,
+        agent_id: &str,
+        max_tasks: u32,
+    ) -> Result<Option<crate::scheduler::TaskAssignment>, Status> {
+        let claimed = {
+            let mut tasks = self.state.tasks.write().await;
+            if tasks.active_tasks_for_agent(agent_id)
+                >= usize::try_from(max_tasks).unwrap_or(usize::MAX)
+            {
+                return Ok(None);
+            }
+            let Some(previous_task) = tasks.peek_pending().cloned() else {
+                return Ok(None);
+            };
+            let Some(assignment) = tasks.poll(agent_id, LEASE_TTL, &self.state.epoch_gen) else {
+                return Ok(None);
+            };
+            let assigned_task = tasks
+                .get(&assignment.task_id)
+                .cloned()
+                .expect("claimed task should still exist");
+            let mut runs = self.state.runs.write().await;
+            let previous_run = runs
+                .get_run(&assignment.run_id)
+                .cloned()
+                .expect("claimed run should exist");
+            if runs
+                .transition(&assignment.run_id, InternalRunState::Assigned)
+                .is_err()
+            {
+                drop(runs);
+                let _ = tasks.reject_assignment(&assignment.task_id, assignment.lease_epoch);
+                let rejected_task = tasks
+                    .get(&assignment.task_id)
+                    .cloned()
+                    .expect("rejected task should still exist");
+                drop(tasks);
+                self.state
+                    .persist_task_record(&rejected_task)
+                    .await
+                    .map_err(|error| Status::internal(error.to_string()))?;
+                return Ok(None);
+            }
+            runs.set_current_task(
+                &assignment.run_id,
+                assignment.task_id.clone(),
+                agent_id.to_string(),
+                assignment.attempt,
+                assignment.lease_epoch,
+            );
+            let assigned_run = runs
+                .get_run(&assignment.run_id)
+                .cloned()
+                .expect("assigned run should exist");
+            (
+                assignment,
+                previous_task,
+                previous_run,
+                assigned_task,
+                assigned_run,
+            )
+        };
+
+        let (assignment, previous_task, previous_run, assigned_task, assigned_run) = claimed;
+
+        if let Err(error) = self
+            .state
+            .persist_assignment_records(&assigned_run, &assigned_task)
+            .await
+        {
+            self.rollback_assignment(previous_run, previous_task).await;
+            return Err(Status::internal(error.to_string()));
+        }
+
+        Ok(Some(assignment))
     }
 
     async fn prepare_retry_if_allowed(
@@ -94,6 +255,12 @@ impl AgentService for AgentServiceImpl {
             req.available_plugins,
             req.memory_bytes,
         );
+        drop(registry);
+
+        if let Err(error) = self.state.persist_agent(&agent_id).await {
+            self.state.registry.write().await.remove(&agent_id);
+            return Err(Status::internal(error.to_string()));
+        }
 
         tracing::info!(agent_id, "Agent registered");
         Ok(Response::new(RegisterAgentResponse { agent_id }))
@@ -112,17 +279,66 @@ impl AgentService for AgentServiceImpl {
                 .heartbeat(&req.agent_id, req.active_tasks)
                 .map_err(|e| Status::not_found(e.to_string()))?;
         }
+        self.state
+            .persist_agent(&req.agent_id)
+            .await
+            .map_err(|error| Status::internal(error.to_string()))?;
 
         // Renew leases for active tasks reported by the agent
         if !req.active_leases.is_empty() {
+            let mut renewed = Vec::new();
             let mut tasks = self.state.tasks.write().await;
             for active_lease in &req.active_leases {
-                tasks.renew_lease(
+                let previous_task = tasks.get(&active_lease.task_id).cloned();
+                if tasks.renew_lease(
                     &active_lease.task_id,
                     &req.agent_id,
                     active_lease.lease_epoch,
                     LEASE_TTL,
-                );
+                ) {
+                    let renewed_task = tasks
+                        .get(&active_lease.task_id)
+                        .cloned()
+                        .expect("renewed task should still exist");
+                    renewed.push((
+                        previous_task.expect("renewed task should have previous snapshot"),
+                        renewed_task,
+                    ));
+                }
+            }
+            drop(tasks);
+
+            let mut persisted_previous = Vec::new();
+            for (previous_task, renewed_task) in &renewed {
+                if let Err(error) = self.state.persist_task_record(renewed_task).await {
+                    let rollback_error = if persisted_previous.is_empty() {
+                        None
+                    } else {
+                        let mut first_error = None;
+                        for previous_task in &persisted_previous {
+                            if let Err(rollback_error) =
+                                self.state.persist_task_record(previous_task).await
+                            {
+                                if first_error.is_none() {
+                                    first_error = Some(rollback_error);
+                                }
+                            }
+                        }
+                        first_error
+                    };
+                    let previous_tasks = renewed
+                        .into_iter()
+                        .map(|(previous_task, _)| previous_task)
+                        .collect();
+                    self.rollback_renewed_tasks(previous_tasks).await;
+                    return Err(Status::internal(match rollback_error {
+                        Some(rollback_error) => format!(
+                            "{error}; durable rollback for renewed leases also failed: {rollback_error}"
+                        ),
+                        None => error.to_string(),
+                    }));
+                }
+                persisted_previous.push(previous_task.clone());
             }
         }
 
@@ -178,7 +394,7 @@ impl AgentService for AgentServiceImpl {
 
         // Try immediate poll
         {
-            let mut tasks = self.state.tasks.write().await;
+            let tasks = self.state.tasks.read().await;
             if tasks.active_tasks_for_agent(&req.agent_id)
                 >= usize::try_from(max_tasks).unwrap_or(usize::MAX)
             {
@@ -186,31 +402,13 @@ impl AgentService for AgentServiceImpl {
                     result: Some(poll_task_response::Result::NoTask(NoTask {})),
                 }));
             }
-            if let Some(assignment) = tasks.poll(&req.agent_id, LEASE_TTL, &self.state.epoch_gen) {
-                let claimed = {
-                    let mut runs = self.state.runs.write().await;
-                    if runs
-                        .transition(&assignment.run_id, InternalRunState::Assigned)
-                        .is_ok()
-                    {
-                        runs.set_current_task(
-                            &assignment.run_id,
-                            assignment.task_id.clone(),
-                            req.agent_id.clone(),
-                            assignment.attempt,
-                            assignment.lease_epoch,
-                        );
-                        true
-                    } else {
-                        false
-                    }
-                };
-                if claimed {
-                    return Ok(Response::new(make_task_response(assignment)));
-                }
-
-                let _ = tasks.reject_assignment(&assignment.task_id, assignment.lease_epoch);
-            }
+        }
+        #[cfg(test)]
+        if let Some(poll_barrier) = &self.poll_barrier {
+            poll_barrier.wait().await;
+        }
+        if let Some(assignment) = self.try_claim_task(&req.agent_id, max_tasks).await? {
+            return Ok(Response::new(make_task_response(assignment)));
         }
 
         // Long-poll: wait for notification or timeout
@@ -227,7 +425,7 @@ impl AgentService for AgentServiceImpl {
                 return Err(Status::not_found("Unknown agent"));
             }
         }
-        let mut tasks = self.state.tasks.write().await;
+        let tasks = self.state.tasks.read().await;
         if tasks.active_tasks_for_agent(&req.agent_id)
             >= usize::try_from(max_tasks).unwrap_or(usize::MAX)
         {
@@ -235,30 +433,9 @@ impl AgentService for AgentServiceImpl {
                 result: Some(poll_task_response::Result::NoTask(NoTask {})),
             }));
         }
-        if let Some(assignment) = tasks.poll(&req.agent_id, LEASE_TTL, &self.state.epoch_gen) {
-            let claimed = {
-                let mut runs = self.state.runs.write().await;
-                if runs
-                    .transition(&assignment.run_id, InternalRunState::Assigned)
-                    .is_ok()
-                {
-                    runs.set_current_task(
-                        &assignment.run_id,
-                        assignment.task_id.clone(),
-                        req.agent_id.clone(),
-                        assignment.attempt,
-                        assignment.lease_epoch,
-                    );
-                    true
-                } else {
-                    false
-                }
-            };
-            if claimed {
-                return Ok(Response::new(make_task_response(assignment)));
-            }
-
-            let _ = tasks.reject_assignment(&assignment.task_id, assignment.lease_epoch);
+        drop(tasks);
+        if let Some(assignment) = self.try_claim_task(&req.agent_id, max_tasks).await? {
+            return Ok(Response::new(make_task_response(assignment)));
         }
 
         Ok(Response::new(PollTaskResponse {
@@ -271,6 +448,23 @@ impl AgentService for AgentServiceImpl {
         request: Request<ReportProgressRequest>,
     ) -> Result<Response<ReportProgressResponse>, Status> {
         let req = request.into_inner();
+
+        let previous_task = self
+            .state
+            .tasks
+            .read()
+            .await
+            .get(&req.task_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found("Task not found"))?;
+        let previous_run = self
+            .state
+            .runs
+            .read()
+            .await
+            .get_run(&previous_task.run_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found(format!("unknown run: {}", previous_task.run_id)))?;
 
         // Validate lease and update scheduler state while holding the task lock.
         let run_id = {
@@ -307,6 +501,30 @@ impl AgentService for AgentServiceImpl {
         };
 
         self.state.runs.write().await.ensure_running(&run_id);
+        let running_task = self
+            .state
+            .tasks
+            .read()
+            .await
+            .get(&req.task_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found(format!("unknown task: {}", req.task_id)))?;
+        let running_run = self
+            .state
+            .runs
+            .read()
+            .await
+            .get_run(&run_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found(format!("unknown run: {run_id}")))?;
+        if let Err(error) = self
+            .state
+            .persist_running_records(&running_run, &running_task)
+            .await
+        {
+            self.rollback_assignment(previous_run, previous_task).await;
+            return Err(Status::internal(error.to_string()));
+        }
 
         if let Some(progress) = req.progress {
             let watchers = self.state.watchers.read().await;
@@ -343,6 +561,22 @@ impl AgentService for AgentServiceImpl {
             TaskOutcome::Cancelled => TerminalTaskOutcome::Cancelled,
             TaskOutcome::Unspecified => unreachable!("invalid task outcome rejected above"),
         };
+        let previous_task = self
+            .state
+            .tasks
+            .read()
+            .await
+            .get(&req.task_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found(format!("unknown task: {}", req.task_id)))?;
+        let previous_run = self
+            .state
+            .runs
+            .read()
+            .await
+            .get_run(&previous_task.run_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found(format!("unknown run: {}", previous_task.run_id)))?;
         let (run_id, attempt) = {
             let mut tasks = self.state.tasks.write().await;
             match tasks
@@ -362,11 +596,34 @@ impl AgentService for AgentServiceImpl {
                 }
             }
         };
+        let completed_task = self
+            .state
+            .tasks
+            .read()
+            .await
+            .get(&req.task_id)
+            .cloned()
+            .ok_or_else(|| Status::not_found(format!("unknown task: {}", req.task_id)))?;
+        if let Err(error) = self.state.persist_task_record(&completed_task).await {
+            self.rollback_completion_state(
+                &run_id,
+                previous_task.clone(),
+                previous_run.clone(),
+                None,
+                None,
+            )
+            .await;
+            return Err(Status::internal(error.to_string()));
+        }
 
         // Transition run state and publish events
         match outcome {
             TaskOutcome::Completed => {
                 let has_preview = req.preview.is_some();
+                let previous_preview = {
+                    let mut previews = self.state.previews.write().await;
+                    previews.get(&run_id).cloned()
+                };
                 {
                     let mut runs = self.state.runs.write().await;
                     runs.ensure_running(&run_id);
@@ -426,6 +683,76 @@ impl AgentService for AgentServiceImpl {
                         ttl: Duration::from_secs(300),
                     });
                 }
+                let new_preview = if req.preview.is_some() {
+                    self.state.previews.write().await.get(&run_id).cloned()
+                } else {
+                    None
+                };
+                if let Some(preview) = new_preview.as_ref() {
+                    if let Err(error) = self.state.persist_preview_record(preview).await {
+                        let rollback_error =
+                            self.state.persist_task_record(&previous_task).await.err();
+                        self.rollback_completion_state(
+                            &run_id,
+                            previous_task.clone(),
+                            previous_run.clone(),
+                            previous_preview,
+                            None,
+                        )
+                        .await;
+                        return Err(Status::internal(match rollback_error {
+                            Some(rollback_error) => format!(
+                                "{error}; durable rollback for task {} also failed: {rollback_error}",
+                                req.task_id
+                            ),
+                            None => error.to_string(),
+                        }));
+                    }
+                }
+                let completed_run = self
+                    .state
+                    .runs
+                    .read()
+                    .await
+                    .get_run(&run_id)
+                    .cloned()
+                    .ok_or_else(|| Status::not_found(format!("unknown run: {run_id}")))?;
+                if let Err(error) = self.state.persist_run_record(&completed_run).await {
+                    let task_rollback_error =
+                        self.state.persist_task_record(&previous_task).await.err();
+                    let preview_rollback_error = if new_preview.is_some() {
+                        self.rollback_preview_durable(&run_id, previous_preview.as_ref())
+                            .await
+                    } else {
+                        None
+                    };
+                    self.rollback_completion_state(
+                        &run_id,
+                        previous_task.clone(),
+                        previous_run.clone(),
+                        previous_preview,
+                        None,
+                    )
+                    .await;
+                    let mut details = Vec::new();
+                    if let Some(task_rollback_error) = task_rollback_error {
+                        details.push(format!(
+                            "durable rollback for task {} also failed: {task_rollback_error}",
+                            req.task_id
+                        ));
+                    }
+                    if let Some(preview_rollback_error) = preview_rollback_error {
+                        details.push(format!(
+                            "durable rollback for preview {run_id} also failed: {preview_rollback_error}"
+                        ));
+                    }
+                    let message = if details.is_empty() {
+                        error.to_string()
+                    } else {
+                        format!("{error}; {}", details.join("; "))
+                    };
+                    return Err(Status::internal(message));
+                }
 
                 let metrics = req.metrics.as_ref();
                 self.state.watchers.write().await.publish_terminal(
@@ -469,9 +796,78 @@ impl AgentService for AgentServiceImpl {
                         (task.pipeline_yaml.clone(), task.dry_run, task.limit)
                     };
 
-                    {
+                    let next_task_id = {
                         let mut tasks = self.state.tasks.write().await;
-                        tasks.enqueue(run_id.clone(), yaml, dry_run, limit, attempt + 1);
+                        tasks.enqueue(run_id.clone(), yaml, dry_run, limit, attempt + 1)
+                    };
+                    let next_task = self
+                        .state
+                        .tasks
+                        .read()
+                        .await
+                        .get(&next_task_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            Status::not_found(format!("unknown task: {next_task_id}"))
+                        })?;
+                    if let Err(error) = self.state.persist_task_record(&next_task).await {
+                        let rollback_error =
+                            self.state.persist_task_record(&previous_task).await.err();
+                        self.rollback_completion_state(
+                            &run_id,
+                            previous_task.clone(),
+                            previous_run.clone(),
+                            None,
+                            Some(&next_task_id),
+                        )
+                        .await;
+                        return Err(Status::internal(match rollback_error {
+                            Some(rollback_error) => format!(
+                                "{error}; durable rollback for task {} also failed: {rollback_error}",
+                                req.task_id
+                            ),
+                            None => error.to_string(),
+                        }));
+                    }
+                    let retried_run = self
+                        .state
+                        .runs
+                        .read()
+                        .await
+                        .get_run(&run_id)
+                        .cloned()
+                        .ok_or_else(|| Status::not_found(format!("unknown run: {run_id}")))?;
+                    if let Err(error) = self.state.persist_run_record(&retried_run).await {
+                        let task_rollback_error =
+                            self.state.persist_task_record(&previous_task).await.err();
+                        let next_task_rollback_error =
+                            self.state.delete_task(&next_task_id).await.err();
+                        self.rollback_completion_state(
+                            &run_id,
+                            previous_task.clone(),
+                            previous_run.clone(),
+                            None,
+                            Some(&next_task_id),
+                        )
+                        .await;
+                        let mut details = Vec::new();
+                        if let Some(task_rollback_error) = task_rollback_error {
+                            details.push(format!(
+                                "durable rollback for task {} also failed: {task_rollback_error}",
+                                req.task_id
+                            ));
+                        }
+                        if let Some(next_task_rollback_error) = next_task_rollback_error {
+                            details.push(format!(
+                                "durable rollback for queued task {next_task_id} also failed: {next_task_rollback_error}"
+                            ));
+                        }
+                        let message = if details.is_empty() {
+                            error.to_string()
+                        } else {
+                            format!("{error}; {}", details.join("; "))
+                        };
+                        return Err(Status::internal(message));
                     }
                     self.state.task_notify.notify_waiters();
 
@@ -482,9 +878,40 @@ impl AgentService for AgentServiceImpl {
                         runs.ensure_running(&run_id);
                         let _ = runs.transition(&run_id, InternalRunState::Failed);
                         if let Some(record) = runs.get_run_mut(&run_id) {
+                            record.error_code = error.map(|e| e.code.clone());
                             record.error_message =
                                 error.map(|e| format!("{}: {}", e.code, e.message));
+                            record.error_retryable = error.map(|e| e.retryable);
+                            record.error_safe_to_retry = error.map(|e| e.safe_to_retry);
+                            record.error_commit_state = error.map(|e| e.commit_state.clone());
                         }
+                    }
+                    let failed_run = self
+                        .state
+                        .runs
+                        .read()
+                        .await
+                        .get_run(&run_id)
+                        .cloned()
+                        .ok_or_else(|| Status::not_found(format!("unknown run: {run_id}")))?;
+                    if let Err(error) = self.state.persist_run_record(&failed_run).await {
+                        let rollback_error =
+                            self.state.persist_task_record(&previous_task).await.err();
+                        self.rollback_completion_state(
+                            &run_id,
+                            previous_task.clone(),
+                            previous_run.clone(),
+                            None,
+                            None,
+                        )
+                        .await;
+                        return Err(Status::internal(match rollback_error {
+                            Some(rollback_error) => format!(
+                                "{error}; durable rollback for task {} also failed: {rollback_error}",
+                                req.task_id
+                            ),
+                            None => error.to_string(),
+                        }));
                     }
 
                     self.state.watchers.write().await.publish_terminal(
@@ -504,6 +931,32 @@ impl AgentService for AgentServiceImpl {
                     let mut runs = self.state.runs.write().await;
                     runs.ensure_running(&run_id);
                     let _ = runs.transition(&run_id, InternalRunState::Cancelled);
+                }
+                let cancelled_run = self
+                    .state
+                    .runs
+                    .read()
+                    .await
+                    .get_run(&run_id)
+                    .cloned()
+                    .ok_or_else(|| Status::not_found(format!("unknown run: {run_id}")))?;
+                if let Err(error) = self.state.persist_run_record(&cancelled_run).await {
+                    let rollback_error = self.state.persist_task_record(&previous_task).await.err();
+                    self.rollback_completion_state(
+                        &run_id,
+                        previous_task.clone(),
+                        previous_run.clone(),
+                        None,
+                        None,
+                    )
+                    .await;
+                    return Err(Status::internal(match rollback_error {
+                        Some(rollback_error) => format!(
+                            "{error}; durable rollback for task {} also failed: {rollback_error}",
+                            req.task_id
+                        ),
+                        None => error.to_string(),
+                    }));
                 }
 
                 self.state.watchers.write().await.publish_terminal(
@@ -549,9 +1002,10 @@ mod tests {
 
     use super::*;
     use crate::proto::rapidbyte::v1::{
-        pipeline_service_server::PipelineService as _, ActiveLease, ProgressUpdate,
-        SubmitPipelineRequest, TaskError,
+        pipeline_service_server::PipelineService as _, ActiveLease, PreviewAccess, PreviewState,
+        ProgressUpdate, StreamPreview, SubmitPipelineRequest, TaskError,
     };
+    use crate::store::test_support::FailingMetadataStore;
 
     /// Helper to submit a pipeline and return the `run_id`.
     async fn submit_pipeline(state: &ControllerState) -> String {
@@ -594,6 +1048,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_register_agent_rolls_back_when_persist_fails() {
+        let store = FailingMetadataStore::new().fail_agent_upsert_on(1);
+        let state =
+            ControllerState::with_metadata_store(b"test-key-for-agent-service!!!!", store.clone());
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let err = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .expect_err("register should fail when agent persistence fails");
+        assert_eq!(err.code(), tonic::Code::Internal);
+
+        assert!(state.registry.read().await.all_agents().is_empty());
+        assert!(store.persisted_agent("nonexistent-agent").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_accepts_restored_agent() {
+        let state = test_state();
+        state
+            .registry
+            .write()
+            .await
+            .restore_agent(crate::registry::AgentRecord {
+                agent_id: "restored-agent".into(),
+                max_tasks: 1,
+                active_tasks: 0,
+                flight_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                last_heartbeat: std::time::Instant::now(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            });
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let resp = svc
+            .heartbeat(Request::new(HeartbeatRequest {
+                agent_id: "restored-agent".into(),
+                active_tasks: 0,
+                active_leases: vec![],
+                cpu_usage: 0.0,
+                memory_used_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(resp.directives.is_empty());
+    }
+
+    #[tokio::test]
     async fn test_poll_task_returns_pending_task() {
         let state = test_state();
         let svc = AgentServiceImpl::new(state.clone());
@@ -632,6 +1143,107 @@ mod tests {
             }
             _ => panic!("Expected a task assignment"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_poll_task_rolls_back_assignment_when_task_persist_fails() {
+        let store = FailingMetadataStore::new().fail_task_upsert_on(2);
+        let state = ControllerState::with_metadata_store(b"test-key-for-agent-service!!!!", store);
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+
+        let err = svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .expect_err("assignment persistence failure should reject poll");
+        assert_eq!(err.code(), tonic::Code::Internal);
+
+        let runs = state.runs.read().await;
+        let run = runs.get_run(&run_id).unwrap();
+        assert_eq!(run.state, InternalRunState::Pending);
+        assert!(run.current_task.is_none());
+        drop(runs);
+
+        let tasks = state.tasks.read().await;
+        let task = tasks.find_by_run_id(&run_id).unwrap();
+        assert_eq!(task.state, TaskState::Pending);
+        assert!(task.lease.is_none());
+        assert!(task.assigned_agent_id.is_none());
+        assert_eq!(tasks.active_tasks_for_agent(&agent_id), 0);
+    }
+
+    #[tokio::test]
+    async fn poll_task_persists_rejected_assignment() {
+        let store = FailingMetadataStore::new();
+        let state =
+            ControllerState::with_metadata_store(b"test-key-for-agent-service!!!!", store.clone());
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+        let task_id = state
+            .tasks
+            .read()
+            .await
+            .find_by_run_id(&run_id)
+            .expect("submitted task should exist")
+            .task_id
+            .clone();
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Cancelled)
+                .unwrap();
+        }
+
+        let resp = svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id,
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(matches!(
+            resp.result,
+            Some(poll_task_response::Result::NoTask(_))
+        ));
+
+        assert_eq!(
+            store
+                .persisted_task(&task_id)
+                .expect("durable task should exist")
+                .state,
+            TaskState::Cancelled
+        );
     }
 
     #[tokio::test]
@@ -774,6 +1386,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_poll_task_concurrent_polls_respect_agent_capacity() {
+        let state = test_state();
+        let poll_barrier = Arc::new(Barrier::new(2));
+        let svc_a = AgentServiceImpl::with_poll_barrier(state.clone(), poll_barrier.clone());
+        let svc_b = AgentServiceImpl::with_poll_barrier(state.clone(), poll_barrier);
+        let register_svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = register_svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        submit_pipeline(&state).await;
+        submit_pipeline(&state).await;
+
+        let (first, second) = tokio::join!(
+            svc_a.poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            })),
+            svc_b.poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            })),
+        );
+
+        let first = first.unwrap().into_inner();
+        let second = second.unwrap().into_inner();
+        let assigned = usize::from(matches!(
+            first.result,
+            Some(poll_task_response::Result::Task(_))
+        )) + usize::from(matches!(
+            second.result,
+            Some(poll_task_response::Result::Task(_))
+        ));
+        let empty = usize::from(matches!(
+            first.result,
+            Some(poll_task_response::Result::NoTask(_))
+        )) + usize::from(matches!(
+            second.result,
+            Some(poll_task_response::Result::NoTask(_))
+        ));
+
+        assert_eq!(assigned, 1, "only one concurrent poll should claim a task");
+        assert_eq!(
+            empty, 1,
+            "the second concurrent poll should observe capacity"
+        );
+        assert_eq!(
+            state.tasks.read().await.active_tasks_for_agent(&agent_id),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn test_complete_task_with_stale_epoch_returns_unacknowledged() {
         let state = test_state();
         let svc = AgentServiceImpl::new(state.clone());
@@ -825,6 +1500,231 @@ mod tests {
             .into_inner();
 
         assert!(!resp.acknowledged);
+    }
+
+    #[tokio::test]
+    async fn test_complete_task_completed_rolls_back_when_task_persist_fails() {
+        let store = FailingMetadataStore::new().fail_task_upsert_on(3);
+        let state = ControllerState::with_metadata_store(b"test-key-for-agent-service!!!!", store);
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        let request = CompleteTaskRequest {
+            agent_id: agent_id.clone(),
+            task_id: task.task_id.clone(),
+            lease_epoch: task.lease_epoch,
+            outcome: TaskOutcome::Completed.into(),
+            error: None,
+            metrics: None,
+            preview: None,
+            backend_run_id: 0,
+        };
+
+        let err = svc
+            .complete_task(Request::new(request.clone()))
+            .await
+            .expect_err("task persistence failure should reject completion");
+        assert_eq!(err.code(), tonic::Code::Internal);
+
+        let tasks = state.tasks.read().await;
+        let task_record = tasks.get(&task.task_id).unwrap();
+        assert_eq!(task_record.state, TaskState::Assigned);
+        assert!(task_record.lease.is_some());
+        drop(tasks);
+
+        let runs = state.runs.read().await;
+        let run = runs.get_run(&run_id).unwrap();
+        assert_eq!(run.state, InternalRunState::Assigned);
+        drop(runs);
+
+        let retry = svc
+            .complete_task(Request::new(request))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(retry.acknowledged);
+    }
+
+    #[tokio::test]
+    async fn test_complete_task_completed_rolls_back_when_preview_persist_fails() {
+        let store = FailingMetadataStore::new().fail_preview_upsert_on(1);
+        let state = ControllerState::with_metadata_store(b"test-key-for-agent-service!!!!", store);
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        let request = CompleteTaskRequest {
+            agent_id: agent_id.clone(),
+            task_id: task.task_id.clone(),
+            lease_epoch: task.lease_epoch,
+            outcome: TaskOutcome::Completed.into(),
+            error: None,
+            metrics: None,
+            preview: Some(PreviewAccess {
+                state: PreviewState::Ready.into(),
+                flight_endpoint: "localhost:9093".into(),
+                ticket: Vec::new(),
+                expires_at: None,
+                streams: vec![StreamPreview {
+                    stream: "users".into(),
+                    rows: 1,
+                    ticket: Vec::new(),
+                }],
+            }),
+            backend_run_id: 0,
+        };
+
+        let err = svc
+            .complete_task(Request::new(request.clone()))
+            .await
+            .expect_err("preview persistence failure should reject completion");
+        assert_eq!(err.code(), tonic::Code::Internal);
+
+        let tasks = state.tasks.read().await;
+        let task_record = tasks.get(&task.task_id).unwrap();
+        assert_eq!(task_record.state, TaskState::Assigned);
+        assert!(task_record.lease.is_some());
+        drop(tasks);
+
+        let runs = state.runs.read().await;
+        let run = runs.get_run(&run_id).unwrap();
+        assert_eq!(run.state, InternalRunState::Assigned);
+        drop(runs);
+
+        assert!(state.previews.write().await.get(&run_id).is_none());
+
+        let retry = svc
+            .complete_task(Request::new(request))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(retry.acknowledged);
+    }
+
+    #[tokio::test]
+    async fn test_complete_task_completed_rolls_back_when_run_persist_fails() {
+        let store = FailingMetadataStore::new().fail_run_upsert_on(3);
+        let state = ControllerState::with_metadata_store(b"test-key-for-agent-service!!!!", store);
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        let request = CompleteTaskRequest {
+            agent_id: agent_id.clone(),
+            task_id: task.task_id.clone(),
+            lease_epoch: task.lease_epoch,
+            outcome: TaskOutcome::Completed.into(),
+            error: None,
+            metrics: None,
+            preview: None,
+            backend_run_id: 0,
+        };
+
+        let err = svc
+            .complete_task(Request::new(request.clone()))
+            .await
+            .expect_err("run persistence failure should reject completion");
+        assert_eq!(err.code(), tonic::Code::Internal);
+
+        let tasks = state.tasks.read().await;
+        let task_record = tasks.get(&task.task_id).unwrap();
+        assert_eq!(task_record.state, TaskState::Assigned);
+        assert!(task_record.lease.is_some());
+        drop(tasks);
+
+        let runs = state.runs.read().await;
+        let run = runs.get_run(&run_id).unwrap();
+        assert_eq!(run.state, InternalRunState::Assigned);
+        drop(runs);
+
+        let retry = svc
+            .complete_task(Request::new(request))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(retry.acknowledged);
     }
 
     #[tokio::test]
@@ -1210,6 +2110,100 @@ mod tests {
             .unwrap()
             .into_inner();
 
+        match resp.result {
+            Some(poll_task_response::Result::Task(t)) => {
+                assert_eq!(t.run_id, run_id);
+                assert_eq!(t.attempt, 2);
+            }
+            _ => panic!("Expected requeued task"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_complete_task_retry_requeue_rolls_back_when_run_persist_fails() {
+        let store = FailingMetadataStore::new().fail_run_upsert_on(3);
+        let state = ControllerState::with_metadata_store(b"test-key-for-agent-service!!!!", store);
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(t)) => t,
+            _ => panic!("Expected task"),
+        };
+
+        let request = CompleteTaskRequest {
+            agent_id: agent_id.clone(),
+            task_id: task.task_id.clone(),
+            lease_epoch: task.lease_epoch,
+            outcome: TaskOutcome::Failed.into(),
+            error: Some(TaskError {
+                code: "CONN_RESET".into(),
+                message: "connection reset".into(),
+                retryable: true,
+                safe_to_retry: true,
+                commit_state: "before_commit".into(),
+            }),
+            metrics: None,
+            preview: None,
+            backend_run_id: 0,
+        };
+
+        let err = svc
+            .complete_task(Request::new(request.clone()))
+            .await
+            .expect_err("run persistence failure should reject retry requeue");
+        assert_eq!(err.code(), tonic::Code::Internal);
+
+        let tasks = state.tasks.read().await;
+        let task_record = tasks.get(&task.task_id).unwrap();
+        assert_eq!(task_record.state, TaskState::Assigned);
+        assert!(task_record.lease.is_some());
+        assert_eq!(tasks.all_tasks().len(), 1);
+        drop(tasks);
+
+        let runs = state.runs.read().await;
+        let run = runs.get_run(&run_id).unwrap();
+        assert_eq!(run.state, InternalRunState::Assigned);
+        drop(runs);
+
+        let retry = svc
+            .complete_task(Request::new(request))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(retry.acknowledged);
+
+        let resp = svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id,
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
         match resp.result {
             Some(poll_task_response::Result::Task(t)) => {
                 assert_eq!(t.run_id, run_id);
@@ -1736,6 +2730,144 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn test_heartbeat_rolls_back_renewed_leases_when_persist_fails() {
+        let store = FailingMetadataStore::new().fail_task_upsert_on(6);
+        let state =
+            ControllerState::with_metadata_store(b"test-key-for-agent-service!!!!", store.clone());
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 2,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let first_run_id = submit_pipeline(&state).await;
+        let second_run_id = submit_pipeline(&state).await;
+
+        let first_task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(task)) => task,
+            _ => panic!("expected first task"),
+        };
+        let second_task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(task)) => task,
+            _ => panic!("expected second task"),
+        };
+
+        let before = {
+            let tasks = state.tasks.read().await;
+            [
+                tasks
+                    .get(&first_task.task_id)
+                    .unwrap()
+                    .lease
+                    .clone()
+                    .expect("first lease should exist"),
+                tasks
+                    .get(&second_task.task_id)
+                    .unwrap()
+                    .lease
+                    .clone()
+                    .expect("second lease should exist"),
+            ]
+        };
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let err = svc
+            .heartbeat(Request::new(HeartbeatRequest {
+                agent_id: agent_id.clone(),
+                active_leases: vec![
+                    ActiveLease {
+                        task_id: first_task.task_id.clone(),
+                        lease_epoch: first_task.lease_epoch,
+                    },
+                    ActiveLease {
+                        task_id: second_task.task_id.clone(),
+                        lease_epoch: second_task.lease_epoch,
+                    },
+                ],
+                active_tasks: 2,
+                cpu_usage: 0.0,
+                memory_used_bytes: 0,
+            }))
+            .await
+            .expect_err("heartbeat should fail when one renewed lease cannot persist");
+        assert_eq!(err.code(), tonic::Code::Internal);
+
+        let tasks = state.tasks.read().await;
+        let first_after = tasks
+            .get(&first_task.task_id)
+            .unwrap()
+            .lease
+            .clone()
+            .expect("first lease should still exist");
+        let second_after = tasks
+            .get(&second_task.task_id)
+            .unwrap()
+            .lease
+            .clone()
+            .expect("second lease should still exist");
+        drop(tasks);
+
+        assert_eq!(first_after.epoch, before[0].epoch);
+        assert_eq!(first_after.expires_at, before[0].expires_at);
+        assert_eq!(second_after.epoch, before[1].epoch);
+        assert_eq!(second_after.expires_at, before[1].expires_at);
+
+        let first_persisted = store
+            .persisted_task(
+                &state
+                    .tasks
+                    .read()
+                    .await
+                    .find_by_run_id(&first_run_id)
+                    .unwrap()
+                    .task_id,
+            )
+            .expect("first durable task should exist");
+        let second_persisted = store
+            .persisted_task(
+                &state
+                    .tasks
+                    .read()
+                    .await
+                    .find_by_run_id(&second_run_id)
+                    .unwrap()
+                    .task_id,
+            )
+            .expect("second durable task should exist");
+        assert_eq!(first_persisted.lease.unwrap().epoch, before[0].epoch);
+        assert_eq!(second_persisted.lease.unwrap().epoch, before[1].epoch);
+    }
+
+    #[tokio::test]
     async fn test_report_progress_rejects_missing_lease() {
         let state = test_state();
         let svc = AgentServiceImpl::new(state.clone());
@@ -1961,6 +3093,128 @@ mod tests {
         assert_eq!(
             state.runs.read().await.get_run(&run_id).unwrap().state,
             InternalRunState::Assigned
+        );
+    }
+
+    #[tokio::test]
+    async fn test_report_progress_rolls_back_when_persist_fails() {
+        let store = FailingMetadataStore::new().fail_run_upsert_on(3);
+        let state = ControllerState::with_metadata_store(b"test-key-for-agent-service!!!!", store);
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(task)) => task,
+            _ => panic!("Expected task"),
+        };
+
+        let err = svc
+            .report_progress(Request::new(ReportProgressRequest {
+                agent_id,
+                task_id: task.task_id.clone(),
+                lease_epoch: task.lease_epoch,
+                progress: Some(ProgressUpdate {
+                    stream: "users".into(),
+                    phase: "running".into(),
+                    records: 1,
+                    bytes: 64,
+                }),
+            }))
+            .await
+            .expect_err("progress persistence failure should reject progress");
+
+        assert_eq!(err.code(), tonic::Code::Internal);
+
+        {
+            let tasks = state.tasks.read().await;
+            let record = tasks.get(&task.task_id).unwrap();
+            assert_eq!(record.state, TaskState::Assigned);
+            assert!(record.lease.is_some());
+        }
+
+        let runs = state.runs.read().await;
+        let run = runs.get_run(&run_id).unwrap();
+        assert_eq!(run.state, InternalRunState::Assigned);
+    }
+
+    #[tokio::test]
+    async fn test_report_progress_transitions_reconciling_run_to_running() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(task)) => task,
+            _ => panic!("Expected task"),
+        };
+
+        {
+            let mut runs = state.runs.write().await;
+            let run = runs.get_run_mut(&run_id).unwrap();
+            run.state = InternalRunState::Reconciling;
+        }
+
+        svc.report_progress(Request::new(ReportProgressRequest {
+            agent_id,
+            task_id: task.task_id,
+            lease_epoch: task.lease_epoch,
+            progress: Some(ProgressUpdate {
+                stream: "users".into(),
+                phase: "running".into(),
+                records: 5,
+                bytes: 10,
+            }),
+        }))
+        .await
+        .unwrap();
+
+        assert_eq!(
+            state.runs.read().await.get_run(&run_id).unwrap().state,
+            InternalRunState::Running
         );
     }
 

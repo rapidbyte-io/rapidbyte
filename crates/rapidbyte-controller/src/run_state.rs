@@ -10,10 +10,12 @@ use thiserror::Error;
 pub enum RunState {
     Pending,
     Assigned,
+    Reconciling,
     Running,
     PreviewReady,
     Completed,
     Failed,
+    RecoveryFailed,
     Cancelling,
     Cancelled,
     TimedOut,
@@ -25,7 +27,11 @@ impl RunState {
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
-            Self::Completed | Self::Failed | Self::Cancelled | Self::TimedOut
+            Self::Completed
+                | Self::Failed
+                | Self::RecoveryFailed
+                | Self::Cancelled
+                | Self::TimedOut
         )
     }
 }
@@ -56,8 +62,13 @@ pub struct RunRecord {
     pub updated_at: SystemTime,
     pub started_at: Option<SystemTime>,
     pub completed_at: Option<SystemTime>,
+    pub recovery_started_at: Option<SystemTime>,
     pub current_task: Option<CurrentTask>,
+    pub error_code: Option<String>,
     pub error_message: Option<String>,
+    pub error_retryable: Option<bool>,
+    pub error_safe_to_retry: Option<bool>,
+    pub error_commit_state: Option<String>,
     pub attempt: u32,
     pub idempotency_key: Option<String>,
     /// Terminal completion metrics (populated when a run completes successfully).
@@ -109,8 +120,13 @@ impl RunStore {
             updated_at: now,
             started_at: None,
             completed_at: None,
+            recovery_started_at: None,
             current_task: None,
+            error_code: None,
             error_message: None,
+            error_retryable: None,
+            error_safe_to_retry: None,
+            error_commit_state: None,
             attempt: 1,
             idempotency_key: idempotency_key.clone(),
             total_records: 0,
@@ -133,6 +149,21 @@ impl RunStore {
 
     pub fn get_run_mut(&mut self, run_id: &str) -> Option<&mut RunRecord> {
         self.runs.get_mut(run_id)
+    }
+
+    /// Restore an existing run record loaded from durable storage.
+    pub fn restore_run(&mut self, record: RunRecord) {
+        if let Some(key) = &record.idempotency_key {
+            self.idempotency_index
+                .insert(key.clone(), record.run_id.clone());
+        }
+        self.runs.insert(record.run_id.clone(), record);
+    }
+
+    /// Snapshot all run records.
+    #[must_use]
+    pub fn all_runs(&self) -> Vec<RunRecord> {
+        self.runs.values().cloned().collect()
     }
 
     /// Transition a run to a new state. Returns error if the transition is invalid.
@@ -158,8 +189,13 @@ impl RunStore {
         record.state = to;
         record.updated_at = now;
 
-        if to == RunState::Running && record.started_at.is_none() {
+        if matches!(to, RunState::Running | RunState::Reconciling) && record.started_at.is_none() {
             record.started_at = Some(now);
+        }
+        if to == RunState::Reconciling {
+            record.recovery_started_at = Some(now);
+        } else if record.state != RunState::Reconciling {
+            record.recovery_started_at = None;
         }
 
         if to.is_terminal() {
@@ -183,7 +219,7 @@ impl RunStore {
     /// No-op if the run is already in Running or a later state.
     pub fn ensure_running(&mut self, run_id: &str) {
         if let Some(run) = self.runs.get(run_id) {
-            if run.state == RunState::Assigned {
+            if matches!(run.state, RunState::Assigned | RunState::Reconciling) {
                 let _ = self.transition(run_id, RunState::Running);
             }
         }
@@ -218,6 +254,14 @@ impl RunStore {
         }
     }
 
+    pub fn remove_run(&mut self, run_id: &str) -> Option<RunRecord> {
+        let removed = self.runs.remove(run_id)?;
+        if let Some(key) = &removed.idempotency_key {
+            self.idempotency_index.remove(key);
+        }
+        Some(removed)
+    }
+
     /// Find a run by idempotency key.
     #[must_use]
     pub fn find_by_idempotency_key(&self, key: &str) -> Option<&RunRecord> {
@@ -239,19 +283,31 @@ fn is_valid_transition(from: RunState, to: RunState) -> bool {
         (RunState::Pending, RunState::Assigned | RunState::Cancelled)
             | (
                 RunState::Assigned,
-                RunState::Running
+                RunState::Reconciling
+                    | RunState::Running
                     | RunState::Failed
+                    | RunState::RecoveryFailed
                     | RunState::Cancelled
                     | RunState::TimedOut
                     | RunState::Cancelling
             )
             | (
-                RunState::Running | RunState::PreviewReady,
+                RunState::Reconciling,
+                RunState::Running
+                    | RunState::Failed
+                    | RunState::RecoveryFailed
+                    | RunState::Cancelled
+                    | RunState::TimedOut
+                    | RunState::Cancelling
+            )
+            | (
+                RunState::Running | RunState::Reconciling | RunState::PreviewReady,
                 RunState::Completed
             )
             | (
                 RunState::Running,
                 RunState::Failed
+                    | RunState::RecoveryFailed
                     | RunState::Cancelled
                     | RunState::TimedOut
                     | RunState::PreviewReady
@@ -262,6 +318,7 @@ fn is_valid_transition(from: RunState, to: RunState) -> bool {
                 RunState::PreviewReady
                     | RunState::Completed
                     | RunState::Failed
+                    | RunState::RecoveryFailed
                     | RunState::TimedOut
                     | RunState::Cancelled,
             )
@@ -306,6 +363,15 @@ mod tests {
     }
 
     #[test]
+    fn valid_transition_assigned_to_reconciling() {
+        let mut store = RunStore::new();
+        store.create_run("r1".into(), "pipe".into(), None);
+        store.transition("r1", RunState::Assigned).unwrap();
+        assert!(store.transition("r1", RunState::Reconciling).is_ok());
+        assert!(store.get_run("r1").unwrap().recovery_started_at.is_some());
+    }
+
+    #[test]
     fn valid_transition_assigned_to_timed_out() {
         let mut store = RunStore::new();
         store.create_run("r1".into(), "pipe".into(), None);
@@ -320,6 +386,34 @@ mod tests {
         store.transition("r1", RunState::Assigned).unwrap();
         store.transition("r1", RunState::Running).unwrap();
         assert!(store.transition("r1", RunState::Completed).is_ok());
+    }
+
+    #[test]
+    fn valid_transition_reconciling_to_running() {
+        let mut store = RunStore::new();
+        store.create_run("r1".into(), "pipe".into(), None);
+        store.transition("r1", RunState::Assigned).unwrap();
+        store.transition("r1", RunState::Reconciling).unwrap();
+        assert!(store.transition("r1", RunState::Running).is_ok());
+        assert!(store.get_run("r1").unwrap().recovery_started_at.is_none());
+    }
+
+    #[test]
+    fn valid_transition_reconciling_to_completed() {
+        let mut store = RunStore::new();
+        store.create_run("r1".into(), "pipe".into(), None);
+        store.transition("r1", RunState::Assigned).unwrap();
+        store.transition("r1", RunState::Reconciling).unwrap();
+        assert!(store.transition("r1", RunState::Completed).is_ok());
+    }
+
+    #[test]
+    fn valid_transition_reconciling_to_recovery_failed() {
+        let mut store = RunStore::new();
+        store.create_run("r1".into(), "pipe".into(), None);
+        store.transition("r1", RunState::Assigned).unwrap();
+        store.transition("r1", RunState::Reconciling).unwrap();
+        assert!(store.transition("r1", RunState::RecoveryFailed).is_ok());
     }
 
     #[test]
@@ -436,5 +530,38 @@ mod tests {
         let (id1, _) = store.create_run("r1".into(), "pipe".into(), Some("key1".into()));
         let (id2, _) = store.create_run("r2".into(), "pipe".into(), Some("key2".into()));
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn restore_run_rebuilds_idempotency_index() {
+        let now = SystemTime::now();
+        let mut store = RunStore::new();
+        store.restore_run(RunRecord {
+            run_id: "r1".into(),
+            pipeline_name: "pipe".into(),
+            state: RunState::Pending,
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            completed_at: None,
+            recovery_started_at: None,
+            current_task: None,
+            error_code: None,
+            error_message: None,
+            error_retryable: None,
+            error_safe_to_retry: None,
+            error_commit_state: None,
+            attempt: 1,
+            idempotency_key: Some("idem-key".into()),
+            total_records: 0,
+            total_bytes: 0,
+            elapsed_seconds: 0.0,
+            cursors_advanced: 0,
+        });
+
+        assert_eq!(
+            store.find_by_idempotency_key("idem-key").unwrap().run_id,
+            "r1"
+        );
     }
 }

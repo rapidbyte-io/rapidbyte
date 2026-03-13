@@ -288,15 +288,15 @@ impl TaskQueue {
     }
 
     /// Find tasks with expired leases, transition them to `TimedOut`.
-    /// Returns `(task_id, run_id)` pairs for expired tasks.
-    pub fn expire_leases(&mut self) -> Vec<(String, String)> {
+    /// Returns the pre-timeout task snapshots for expired tasks.
+    pub fn expire_leases(&mut self) -> Vec<TaskRecord> {
         let mut expired = Vec::new();
 
         for record in self.tasks.values_mut() {
             if matches!(record.state, TaskState::Assigned | TaskState::Running) {
                 if let Some(lease) = &record.lease {
                     if lease.is_expired() {
-                        expired.push((record.task_id.clone(), record.run_id.clone()));
+                        expired.push(record.clone());
                         record.state = TaskState::TimedOut;
                         record.lease = None;
                     }
@@ -305,6 +305,21 @@ impl TaskQueue {
         }
 
         expired
+    }
+
+    /// Mark a task as timed out and clear its lease.
+    ///
+    /// Returns `true` if the task was transitioned from a live state.
+    pub fn mark_timed_out(&mut self, task_id: &str) -> bool {
+        let Some(record) = self.tasks.get_mut(task_id) else {
+            return false;
+        };
+        if !matches!(record.state, TaskState::Assigned | TaskState::Running) {
+            return false;
+        }
+        record.state = TaskState::TimedOut;
+        record.lease = None;
+        true
     }
 
     /// Renew the lease for a task if the epoch matches. Returns `true` if renewed.
@@ -337,6 +352,31 @@ impl TaskQueue {
     #[must_use]
     pub fn get(&self, task_id: &str) -> Option<&TaskRecord> {
         self.tasks.get(task_id)
+    }
+
+    #[must_use]
+    pub fn peek_pending(&self) -> Option<&TaskRecord> {
+        let task_id = self.pending.front()?;
+        self.tasks.get(task_id)
+    }
+
+    /// Restore an existing task record loaded from durable storage.
+    pub fn restore_task(&mut self, record: TaskRecord) {
+        if record.state == TaskState::Pending {
+            self.pending.push_back(record.task_id.clone());
+        }
+        self.tasks.insert(record.task_id.clone(), record);
+    }
+
+    pub fn remove_task(&mut self, task_id: &str) -> Option<TaskRecord> {
+        self.pending.retain(|id| id != task_id);
+        self.tasks.remove(task_id)
+    }
+
+    /// Snapshot all task records.
+    #[must_use]
+    pub fn all_tasks(&self) -> Vec<TaskRecord> {
+        self.tasks.values().cloned().collect()
     }
 
     /// Find the task for a given `run_id` (most recent attempt).
@@ -475,7 +515,8 @@ mod tests {
 
         let expired = q.expire_leases();
         assert_eq!(expired.len(), 1);
-        assert_eq!(expired[0], (assignment.task_id.clone(), "r1".to_string()));
+        assert_eq!(expired[0].task_id, assignment.task_id);
+        assert_eq!(expired[0].run_id, "r1");
         assert_eq!(
             q.get(&assignment.task_id).unwrap().state,
             TaskState::TimedOut
@@ -657,5 +698,25 @@ mod tests {
         assert_eq!(a1.run_id, "r1");
         assert_eq!(a2.run_id, "r2");
         assert_eq!(a3.run_id, "r3");
+    }
+
+    #[test]
+    fn restore_task_rebuilds_pending_queue() {
+        let (mut q, gen) = make_queue_and_gen();
+        q.restore_task(TaskRecord {
+            task_id: "task-1".into(),
+            run_id: "r1".into(),
+            attempt: 1,
+            lease: None,
+            state: TaskState::Pending,
+            pipeline_yaml: b"yaml".to_vec(),
+            dry_run: false,
+            limit: None,
+            assigned_agent_id: None,
+        });
+
+        let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
+        assert_eq!(assignment.task_id, "task-1");
+        assert_eq!(assignment.run_id, "r1");
     }
 }
