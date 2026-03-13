@@ -4222,6 +4222,7 @@ dependencies = [
 name = "rapidbyte-metrics"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "dashmap",
  "opentelemetry",
  "opentelemetry-otlp",
