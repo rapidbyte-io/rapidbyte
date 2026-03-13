@@ -12,7 +12,6 @@ use crate::envelope::PayloadEnvelope;
 #[cfg(target_arch = "wasm32")]
 use crate::error::{BackoffClass, CommitState, ErrorScope};
 use crate::error::{ErrorCategory, PluginError};
-use crate::metric::Metric;
 #[cfg(target_arch = "wasm32")]
 use crate::wire::ProtocolVersion;
 use arrow::datatypes::Schema;
@@ -71,7 +70,14 @@ pub trait HostImports: Send + Sync {
         stream_name: &str,
         cp: &Checkpoint,
     ) -> Result<(), PluginError>;
-    fn metric(&self, plugin_id: &str, stream_name: &str, m: &Metric) -> Result<(), PluginError>;
+    fn counter_add(&self, name: &str, value: u64, labels_json: &str) -> Result<(), PluginError>;
+    fn gauge_set(&self, name: &str, value: f64, labels_json: &str) -> Result<(), PluginError>;
+    fn histogram_record(
+        &self,
+        name: &str,
+        value: f64,
+        labels_json: &str,
+    ) -> Result<(), PluginError>;
     fn emit_dlq_record(
         &self,
         stream_name: &str,
@@ -263,17 +269,24 @@ impl HostImports for WasmHostImports {
             .map_err(from_component_error)
     }
 
-    fn metric(&self, plugin_id: &str, stream_name: &str, m: &Metric) -> Result<(), PluginError> {
-        let envelope = PayloadEnvelope {
-            protocol_version: ProtocolVersion::V5,
-            plugin_id: plugin_id.to_string(),
-            stream_name: stream_name.to_string(),
-            payload: m,
-        };
-        let payload_json = serde_json::to_string(&envelope)
-            .map_err(|e| PluginError::internal("SERIALIZE_METRIC", e.to_string()))?;
+    fn counter_add(&self, name: &str, value: u64, labels_json: &str) -> Result<(), PluginError> {
+        bindings::rapidbyte::plugin::host::counter_add(name, value, labels_json)
+            .map_err(from_component_error)
+    }
 
-        bindings::rapidbyte::plugin::host::metric(&payload_json).map_err(from_component_error)
+    fn gauge_set(&self, name: &str, value: f64, labels_json: &str) -> Result<(), PluginError> {
+        bindings::rapidbyte::plugin::host::gauge_set(name, value, labels_json)
+            .map_err(from_component_error)
+    }
+
+    fn histogram_record(
+        &self,
+        name: &str,
+        value: f64,
+        labels_json: &str,
+    ) -> Result<(), PluginError> {
+        bindings::rapidbyte::plugin::host::histogram_record(name, value, labels_json)
+            .map_err(from_component_error)
     }
 
     fn emit_dlq_record(
@@ -392,7 +405,20 @@ impl HostImports for StubHostImports {
         Ok(())
     }
 
-    fn metric(&self, _plugin_id: &str, _stream_name: &str, _m: &Metric) -> Result<(), PluginError> {
+    fn counter_add(&self, _name: &str, _value: u64, _labels_json: &str) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    fn gauge_set(&self, _name: &str, _value: f64, _labels_json: &str) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    fn histogram_record(
+        &self,
+        _name: &str,
+        _value: f64,
+        _labels_json: &str,
+    ) -> Result<(), PluginError> {
         Ok(())
     }
 
@@ -566,13 +592,31 @@ pub fn checkpoint(plugin_id: &str, stream_name: &str, cp: &Checkpoint) -> Result
     host_imports().checkpoint(plugin_id, stream_name, cp)
 }
 
-/// Emit a metric to the host runtime.
+/// Add to a counter in the host runtime.
 ///
 /// # Errors
 ///
-/// Returns `Err` if metric emission fails.
-pub fn metric(plugin_id: &str, stream_name: &str, m: &Metric) -> Result<(), PluginError> {
-    host_imports().metric(plugin_id, stream_name, m)
+/// Returns `Err` if the host rejects the counter update.
+pub fn counter_add(name: &str, value: u64, labels_json: &str) -> Result<(), PluginError> {
+    host_imports().counter_add(name, value, labels_json)
+}
+
+/// Set a gauge value in the host runtime.
+///
+/// # Errors
+///
+/// Returns `Err` if the host rejects the gauge update.
+pub fn gauge_set(name: &str, value: f64, labels_json: &str) -> Result<(), PluginError> {
+    host_imports().gauge_set(name, value, labels_json)
+}
+
+/// Record a histogram observation in the host runtime.
+///
+/// # Errors
+///
+/// Returns `Err` if the host rejects the histogram observation.
+pub fn histogram_record(name: &str, value: f64, labels_json: &str) -> Result<(), PluginError> {
+    host_imports().histogram_record(name, value, labels_json)
 }
 
 /// Emit a dead-letter queue record to the host runtime.

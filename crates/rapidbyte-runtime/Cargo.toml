@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 rapidbyte-types = { path = "../rapidbyte-types" }
+rapidbyte-metrics = { path = "../rapidbyte-metrics" }
 rapidbyte-state = { path = "../rapidbyte-state", default-features = false }
 
 bytes = "1"

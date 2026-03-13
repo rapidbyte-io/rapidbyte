@@ -20,7 +20,6 @@ use rapidbyte_types::checkpoint::{Checkpoint, CheckpointKind, StateScope};
 use rapidbyte_types::envelope::{DlqRecord, Timestamp};
 use rapidbyte_types::error::{ErrorCategory, PluginError};
 use rapidbyte_types::manifest::Permissions;
-use rapidbyte_types::metric::{Metric, MetricValue};
 use rapidbyte_types::state::{CursorState, PipelineId, StreamName};
 
 use crate::acl::{derive_network_acl, NetworkAcl};
@@ -653,46 +652,83 @@ impl ComponentHostState {
         Ok(())
     }
 
-    pub(crate) fn metric_impl(&mut self, payload_json: String) -> Result<(), PluginError> {
-        let metric_json: serde_json::Value = serde_json::from_str(&payload_json)
-            .map_err(|e| PluginError::internal("PARSE_METRIC", e.to_string()))?;
-
-        tracing::debug!(
-            pipeline = self.identity.pipeline.as_str(),
-            stream = %self.current_stream(),
-            "Received metric: {}",
-            payload_json
-        );
-
-        let payload = match metric_json {
-            serde_json::Value::Object(mut map) => map
-                .remove("payload")
-                .unwrap_or(serde_json::Value::Object(map)),
-            other => other,
-        };
-        let metric = serde_json::from_value::<Metric>(payload)
-            .map_err(|e| PluginError::internal("PARSE_METRIC", e.to_string()))?;
-
-        let value = match metric.value {
-            MetricValue::Gauge(v) | MetricValue::Histogram(v) => v,
-            #[allow(clippy::cast_precision_loss)]
-            MetricValue::Counter(v) => v as f64,
-            _ => return Ok(()),
-        };
-
-        let mut timings = lock_mutex(&self.checkpoints.timings, "timings")?;
-        match metric.name.as_str() {
-            "source_connect_secs" => timings.source_connect_secs += value,
-            "source_query_secs" => timings.source_query_secs += value,
-            "source_fetch_secs" => timings.source_fetch_secs += value,
-            "source_arrow_encode_secs" => timings.source_arrow_encode_secs += value,
-            "dest_connect_secs" => timings.dest_connect_secs += value,
-            "dest_flush_secs" => timings.dest_flush_secs += value,
-            "dest_commit_secs" => timings.dest_commit_secs += value,
-            "dest_arrow_decode_secs" => timings.dest_arrow_decode_secs += value,
-            _ => {}
+    pub(crate) fn counter_add_impl(
+        &self,
+        name: String,
+        value: u64,
+        labels_json: String,
+    ) -> Result<(), PluginError> {
+        let labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
+        match name.as_str() {
+            "records_read" => {
+                rapidbyte_metrics::instruments::pipeline::records_read().add(value, &labels);
+            }
+            "records_written" => {
+                rapidbyte_metrics::instruments::pipeline::records_written().add(value, &labels);
+            }
+            _ => {
+                rapidbyte_metrics::instruments::plugin::custom_counter(&name).add(value, &labels);
+            }
         }
+        Ok(())
+    }
 
+    pub(crate) fn gauge_set_impl(
+        &self,
+        name: String,
+        value: f64,
+        labels_json: String,
+    ) -> Result<(), PluginError> {
+        let labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
+        rapidbyte_metrics::instruments::plugin::custom_gauge(&name).record(value, &labels);
+        Ok(())
+    }
+
+    pub(crate) fn histogram_record_impl(
+        &self,
+        name: String,
+        value: f64,
+        labels_json: String,
+    ) -> Result<(), PluginError> {
+        let labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
+        match name.as_str() {
+            "source_connect_secs" => {
+                rapidbyte_metrics::instruments::plugin::source_connect_duration()
+                    .record(value, &labels);
+            }
+            "source_query_secs" => {
+                rapidbyte_metrics::instruments::plugin::source_query_duration()
+                    .record(value, &labels);
+            }
+            "source_fetch_secs" => {
+                rapidbyte_metrics::instruments::plugin::source_fetch_duration()
+                    .record(value, &labels);
+            }
+            "source_arrow_encode_secs" => {
+                rapidbyte_metrics::instruments::plugin::source_encode_duration()
+                    .record(value, &labels);
+            }
+            "dest_connect_secs" => {
+                rapidbyte_metrics::instruments::plugin::dest_connect_duration()
+                    .record(value, &labels);
+            }
+            "dest_flush_secs" => {
+                rapidbyte_metrics::instruments::plugin::dest_flush_duration()
+                    .record(value, &labels);
+            }
+            "dest_commit_secs" => {
+                rapidbyte_metrics::instruments::plugin::dest_commit_duration()
+                    .record(value, &labels);
+            }
+            "dest_arrow_decode_secs" => {
+                rapidbyte_metrics::instruments::plugin::dest_decode_duration()
+                    .record(value, &labels);
+            }
+            _ => {
+                rapidbyte_metrics::instruments::plugin::custom_histogram(&name)
+                    .record(value, &labels);
+            }
+        }
         Ok(())
     }
 
