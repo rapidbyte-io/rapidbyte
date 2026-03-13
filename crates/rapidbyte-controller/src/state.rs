@@ -41,7 +41,7 @@ impl ControllerState {
         metadata_store: Option<Arc<dyn DurableMetadataStore>>,
         snapshot: MetadataSnapshot,
     ) -> Self {
-        let snapshot = normalize_recovery_snapshot(snapshot);
+        let (snapshot, _) = normalize_recovery_snapshot(snapshot);
         let mut runs = RunStore::new();
         for run in snapshot.runs {
             runs.restore_run(run);
@@ -84,7 +84,7 @@ impl ControllerState {
         signing_key: &[u8],
         metadata_store: MetadataStore,
     ) -> anyhow::Result<Self> {
-        let snapshot = metadata_store.load_snapshot().await?;
+        let snapshot = metadata_store.load_repaired_snapshot().await?;
         let metadata_store: Arc<dyn DurableMetadataStore> = Arc::new(metadata_store);
         Ok(Self::from_snapshot(
             signing_key,
@@ -333,7 +333,9 @@ impl ControllerState {
     }
 }
 
-fn normalize_recovery_snapshot(mut snapshot: MetadataSnapshot) -> MetadataSnapshot {
+pub(crate) fn normalize_recovery_snapshot(
+    mut snapshot: MetadataSnapshot,
+) -> (MetadataSnapshot, Vec<crate::run_state::RunRecord>) {
     let inflight_run_ids = snapshot
         .tasks
         .iter()
@@ -341,6 +343,7 @@ fn normalize_recovery_snapshot(mut snapshot: MetadataSnapshot) -> MetadataSnapsh
         .map(|task| task.run_id.clone())
         .collect::<std::collections::HashSet<_>>();
 
+    let mut repaired_runs = Vec::new();
     for run in &mut snapshot.runs {
         if inflight_run_ids.contains(&run.run_id)
             && matches!(
@@ -348,13 +351,15 @@ fn normalize_recovery_snapshot(mut snapshot: MetadataSnapshot) -> MetadataSnapsh
                 crate::run_state::RunState::Assigned | crate::run_state::RunState::Running
             )
         {
+            let recovery_started_at = run.recovery_started_at.unwrap_or_else(SystemTime::now);
             run.state = crate::run_state::RunState::Reconciling;
             run.updated_at = SystemTime::now();
-            run.recovery_started_at = Some(SystemTime::now());
+            run.recovery_started_at = Some(recovery_started_at);
+            repaired_runs.push(run.clone());
         }
     }
 
-    snapshot
+    (snapshot, repaired_runs)
 }
 
 fn preview_created_at(created_at: Instant) -> SystemTime {
@@ -486,6 +491,65 @@ mod tests {
             .recovery_started_at
             .is_some());
         assert_eq!(state.epoch_gen.next(), 12);
+    }
+
+    #[test]
+    fn from_snapshot_preserves_existing_recovery_started_at() {
+        let now = SystemTime::now();
+        let recovery_started_at = now.checked_sub(Duration::from_secs(120)).unwrap();
+        let snapshot = MetadataSnapshot {
+            runs: vec![RunRecord {
+                run_id: "run-1".into(),
+                pipeline_name: "pipe".into(),
+                state: RunState::Assigned,
+                created_at: now,
+                updated_at: now,
+                started_at: None,
+                completed_at: None,
+                current_task: Some(crate::run_state::CurrentTask {
+                    task_id: "task-1".into(),
+                    agent_id: "agent-1".into(),
+                    attempt: 1,
+                    lease_epoch: 11,
+                    assigned_at: now,
+                }),
+                recovery_started_at: Some(recovery_started_at),
+                error_code: None,
+                error_message: None,
+                error_retryable: None,
+                error_safe_to_retry: None,
+                error_commit_state: None,
+                attempt: 1,
+                idempotency_key: None,
+                total_records: 0,
+                total_bytes: 0,
+                elapsed_seconds: 0.0,
+                cursors_advanced: 0,
+            }],
+            tasks: vec![TaskRecord {
+                task_id: "task-1".into(),
+                run_id: "run-1".into(),
+                attempt: 1,
+                lease: Some(crate::lease::Lease::new(
+                    11,
+                    std::time::Duration::from_secs(60),
+                )),
+                state: TaskState::Assigned,
+                pipeline_yaml: b"pipeline: test".to_vec(),
+                dry_run: false,
+                limit: None,
+                assigned_agent_id: Some("agent-1".into()),
+            }],
+            agents: vec![],
+            previews: vec![],
+            max_lease_epoch: 11,
+        };
+
+        let state = ControllerState::from_snapshot(b"signing-key", None, snapshot);
+        let run = state.runs.blocking_read().get_run("run-1").unwrap().clone();
+
+        assert_eq!(run.state, RunState::Reconciling);
+        assert_eq!(run.recovery_started_at, Some(recovery_started_at));
     }
 
     #[test]

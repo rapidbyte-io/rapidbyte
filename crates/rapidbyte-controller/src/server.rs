@@ -291,6 +291,16 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
     }
 }
 
+async fn cleanup_expired_previews(state: &ControllerState) -> usize {
+    let expired_run_ids = { state.previews.write().await.remove_expired() };
+    for run_id in &expired_run_ids {
+        if let Err(error) = state.delete_preview(run_id).await {
+            tracing::error!(run_id, ?error, "failed to delete expired durable preview");
+        }
+    }
+    expired_run_ids.len()
+}
+
 fn spawn_preview_cleanup_task(
     state: ControllerState,
     interval_duration: Duration,
@@ -299,7 +309,7 @@ fn spawn_preview_cleanup_task(
         let mut interval = tokio::time::interval(interval_duration);
         loop {
             interval.tick().await;
-            let removed = state.previews.write().await.cleanup_expired();
+            let removed = cleanup_expired_previews(&state).await;
             if removed > 0 {
                 info!(removed, "Removed expired preview metadata entries");
             }
@@ -642,21 +652,27 @@ mod tests {
 
     #[tokio::test]
     async fn preview_cleanup_task_removes_expired_entries() {
-        let state = ControllerState::new(b"test-signing-key");
+        let store = FailingMetadataStore::new();
+        let state = ControllerState::with_metadata_store(b"test-signing-key", store.clone());
+        let preview = crate::preview::PreviewEntry {
+            run_id: "run-1".into(),
+            task_id: "task-1".into(),
+            flight_endpoint: "localhost:9091".into(),
+            ticket: bytes::Bytes::from_static(b"ticket"),
+            streams: vec![],
+            created_at: std::time::Instant::now()
+                .checked_sub(Duration::from_secs(120))
+                .unwrap(),
+            ttl: Duration::from_secs(60),
+        };
         {
             let mut previews = state.previews.write().await;
-            previews.store(crate::preview::PreviewEntry {
-                run_id: "run-1".into(),
-                task_id: "task-1".into(),
-                flight_endpoint: "localhost:9091".into(),
-                ticket: bytes::Bytes::from_static(b"ticket"),
-                streams: vec![],
-                created_at: std::time::Instant::now()
-                    .checked_sub(Duration::from_secs(120))
-                    .unwrap(),
-                ttl: Duration::from_secs(60),
-            });
+            previews.store(preview.clone());
         }
+        state
+            .persist_preview_record(&preview)
+            .await
+            .expect("preview persistence should succeed");
 
         let handle = spawn_preview_cleanup_task(state.clone(), Duration::from_millis(10));
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -665,5 +681,6 @@ mod tests {
         let mut previews = state.previews.write().await;
         assert!(previews.get("run-1").is_none());
         assert_eq!(previews.cleanup_expired(), 0);
+        assert!(store.persisted_preview("run-1").is_none());
     }
 }

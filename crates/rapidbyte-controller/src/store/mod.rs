@@ -263,6 +263,20 @@ impl MetadataStore {
         })
     }
 
+    /// Load the durable controller snapshot and persist startup reconciliation normalization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the snapshot query or repair writes fail.
+    pub async fn load_repaired_snapshot(&self) -> anyhow::Result<MetadataSnapshot> {
+        let snapshot = self.load_snapshot().await?;
+        let (snapshot, repaired_runs) = crate::state::normalize_recovery_snapshot(snapshot);
+        for run in &repaired_runs {
+            self.upsert_run(run).await?;
+        }
+        Ok(snapshot)
+    }
+
     /// Atomically persist a new run and its initial task.
     ///
     /// # Errors
@@ -1171,6 +1185,122 @@ mod tests {
             .await
             .expect("schema cleanup should succeed");
     }
+
+    #[tokio::test]
+    #[ignore = "requires RAPIDBYTE_CONTROLLER_METADATA_TEST_DATABASE_URL"]
+    async fn metadata_store_repaired_snapshot_preserves_original_recovery_started_at() {
+        let admin_url = env::var("RAPIDBYTE_CONTROLLER_METADATA_TEST_DATABASE_URL")
+            .expect("test database URL env var must be set");
+        let (admin_client, admin_connection) = tokio_postgres::connect(&admin_url, NoTls)
+            .await
+            .expect("admin connection should succeed");
+        tokio::spawn(async move {
+            admin_connection
+                .await
+                .expect("admin connection task should stay healthy");
+        });
+
+        let schema = format!("controller_store_test_{}", uuid::Uuid::new_v4().simple());
+        admin_client
+            .batch_execute(&format!("CREATE SCHEMA \"{schema}\""))
+            .await
+            .expect("schema creation should succeed");
+
+        let scoped_url = format!("{admin_url} options='-c search_path={schema}'");
+        let store = MetadataStore::connect(&scoped_url)
+            .await
+            .expect("metadata store connect should succeed");
+
+        let now = SystemTime::now();
+        let run = RunRecord {
+            run_id: "run-repair".into(),
+            pipeline_name: "pipe".into(),
+            state: RunState::Assigned,
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            completed_at: None,
+            current_task: Some(CurrentTask {
+                task_id: "task-repair".into(),
+                agent_id: "agent-1".into(),
+                attempt: 1,
+                lease_epoch: 9,
+                assigned_at: now,
+            }),
+            recovery_started_at: None,
+            error_code: None,
+            error_message: None,
+            error_retryable: None,
+            error_safe_to_retry: None,
+            error_commit_state: None,
+            attempt: 1,
+            idempotency_key: None,
+            total_records: 0,
+            total_bytes: 0,
+            elapsed_seconds: 0.0,
+            cursors_advanced: 0,
+        };
+        let task = TaskRecord {
+            task_id: "task-repair".into(),
+            run_id: "run-repair".into(),
+            attempt: 1,
+            lease: Some(Lease::new(9, Duration::from_secs(60))),
+            state: TaskState::Assigned,
+            pipeline_yaml: b"pipeline: test".to_vec(),
+            dry_run: false,
+            limit: None,
+            assigned_agent_id: Some("agent-1".into()),
+        };
+
+        store
+            .upsert_run(&run)
+            .await
+            .expect("run upsert should succeed");
+        store
+            .upsert_task(&task)
+            .await
+            .expect("task upsert should succeed");
+
+        let first = store
+            .load_repaired_snapshot()
+            .await
+            .expect("repaired snapshot should succeed");
+        let first_run = first
+            .runs
+            .iter()
+            .find(|run| run.run_id == "run-repair")
+            .expect("repaired run should exist");
+        let first_started_at = first_run
+            .recovery_started_at
+            .expect("first repair should stamp recovery_started_at");
+        assert_eq!(first_run.state, RunState::Reconciling);
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let second = store
+            .load_repaired_snapshot()
+            .await
+            .expect("second repaired snapshot should succeed");
+        let second_run = second
+            .runs
+            .iter()
+            .find(|run| run.run_id == "run-repair")
+            .expect("repaired run should exist");
+        assert_eq!(second_run.state, RunState::Reconciling);
+        let second_started_at = second_run
+            .recovery_started_at
+            .expect("second repair should keep recovery_started_at");
+        let precision_delta = second_started_at
+            .duration_since(first_started_at)
+            .or_else(|_| first_started_at.duration_since(second_started_at))
+            .expect("timestamps should be comparable");
+        assert!(precision_delta < Duration::from_millis(1));
+
+        admin_client
+            .batch_execute(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
+            .await
+            .expect("schema cleanup should succeed");
+    }
 }
 
 #[cfg(test)]
@@ -1275,6 +1405,16 @@ pub mod test_support {
                 .unwrap()
                 .persisted_agents
                 .get(agent_id)
+                .cloned()
+        }
+
+        #[must_use]
+        pub fn persisted_preview(&self, run_id: &str) -> Option<String> {
+            self.failures
+                .lock()
+                .unwrap()
+                .persisted_previews
+                .get(run_id)
                 .cloned()
         }
     }

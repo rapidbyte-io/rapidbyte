@@ -222,11 +222,22 @@ impl PreviewStore {
         self.entries.get(run_id)
     }
 
+    pub fn remove_expired(&mut self) -> Vec<String> {
+        let expired_run_ids = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.created_at.elapsed() >= entry.ttl)
+            .map(|(run_id, _)| run_id.clone())
+            .collect::<Vec<_>>();
+        for run_id in &expired_run_ids {
+            let _ = self.entries.remove(run_id);
+        }
+        expired_run_ids
+    }
+
     /// Remove expired entries. Returns the number removed.
     pub fn cleanup_expired(&mut self) -> usize {
-        let before = self.entries.len();
-        self.entries.retain(|_, e| e.created_at.elapsed() < e.ttl);
-        before - self.entries.len()
+        self.remove_expired().len()
     }
 
     #[must_use]
