@@ -268,4 +268,45 @@ mod tests {
         let ticket = signer.sign(&payload);
         assert_eq!(verifier.verify(&ticket).unwrap(), payload);
     }
+
+    /// Verify against a manually-constructed wire-format ticket to ensure
+    /// the binary layout stays compatible with the controller's signer.
+    /// This catches signer+verifier drifting together without detection.
+    #[test]
+    fn verify_independent_wire_format() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let key = b"test-secret-key-32-bytes-long!!!";
+        let verifier = TicketVerifier::new(key);
+
+        // Manually encode: len-prefixed strings + u64 LE fields
+        let mut buf = Vec::new();
+        // run_id = "r1"
+        buf.extend_from_slice(&2u32.to_le_bytes());
+        buf.extend_from_slice(b"r1");
+        // task_id = "t1"
+        buf.extend_from_slice(&2u32.to_le_bytes());
+        buf.extend_from_slice(b"t1");
+        // stream_name = "users"
+        buf.extend_from_slice(&5u32.to_le_bytes());
+        buf.extend_from_slice(b"users");
+        // lease_epoch = 42
+        buf.extend_from_slice(&42u64.to_le_bytes());
+        // expires_at_unix = far future
+        let expires = future_expiry();
+        buf.extend_from_slice(&expires.to_le_bytes());
+
+        // HMAC-SHA256
+        let mut mac = <Hmac<Sha256>>::new_from_slice(key).unwrap();
+        mac.update(&buf);
+        buf.extend_from_slice(&mac.finalize().into_bytes());
+
+        let payload = verifier.verify(&buf).unwrap();
+        assert_eq!(payload.run_id, "r1");
+        assert_eq!(payload.task_id, "t1");
+        assert_eq!(payload.stream_name, "users");
+        assert_eq!(payload.lease_epoch, 42);
+        assert_eq!(payload.expires_at_unix, expires);
+    }
 }

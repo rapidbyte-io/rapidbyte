@@ -139,7 +139,7 @@ impl PreviewSpool {
 
     #[must_use]
     pub fn list_active(&mut self) -> Vec<PreviewListing> {
-        self.evict_expired();
+        self.evict_stale();
 
         self.entries
             .iter()
@@ -163,18 +163,22 @@ impl PreviewSpool {
     }
 
     pub fn cleanup_expired(&mut self) -> usize {
-        self.evict_expired()
+        self.evict_stale()
     }
 
-    fn evict_expired(&mut self) -> usize {
-        let expired_keys: Vec<_> = self
+    /// Evict entries that are expired by TTL or have broken file-backed storage.
+    fn evict_stale(&mut self) -> usize {
+        let stale_keys: Vec<_> = self
             .entries
             .iter()
-            .filter(|(_, entry)| entry.created_at.elapsed() >= entry.ttl)
+            .filter(|(_, entry)| {
+                entry.created_at.elapsed() >= entry.ttl
+                    || entry.streams.iter().any(StoredStream::is_storage_broken)
+            })
             .map(|(key, _)| key.clone())
             .collect();
-        let count = expired_keys.len();
-        for key in expired_keys {
+        let count = stale_keys.len();
+        for key in stale_keys {
             if let Some(entry) = self.entries.remove(&key) {
                 remove_entry_files(entry);
             }
@@ -214,6 +218,11 @@ impl PreviewSpool {
 }
 
 impl StoredStream {
+    /// Returns true if file-backed storage is missing from disk.
+    fn is_storage_broken(&self) -> bool {
+        matches!(&self.storage, StoredStreamData::File { path, .. } if !path.exists())
+    }
+
     fn schema(&self) -> Option<SchemaRef> {
         match &self.storage {
             StoredStreamData::Memory(batches) => batches.first().map(RecordBatch::schema),
@@ -430,5 +439,45 @@ mod tests {
 
         let loaded = spool.get(&key).expect("file-backed preview should load");
         assert_eq!(loaded.streams[0].batches[0].num_rows(), 4);
+    }
+
+    #[test]
+    fn cleanup_evicts_entry_with_missing_spill_file() {
+        let mut spool = PreviewSpool::with_spill_threshold(Duration::from_secs(60), 1);
+        let key = PreviewKey {
+            run_id: "r1".into(),
+            task_id: "t1".into(),
+            lease_epoch: 1,
+        };
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1, 2, 3, 4]))])
+                .unwrap();
+        let result = DryRunResult {
+            streams: vec![DryRunStreamResult {
+                stream_name: "users".into(),
+                batches: vec![batch],
+                total_rows: 4,
+                total_bytes: 16,
+            }],
+            source: SourceTiming::default(),
+            transform_count: 0,
+            transform_duration_secs: 0.0,
+            duration_secs: 1.0,
+        };
+        spool.store(key.clone(), result);
+
+        // Delete the spill file behind the spool's back
+        let path = match &spool.entries.get(&key).unwrap().streams[0].storage {
+            StoredStreamData::File { path, .. } => path.clone(),
+            StoredStreamData::Memory(_) => panic!("preview should spill to disk"),
+        };
+        std::fs::remove_file(&path).unwrap();
+
+        // get() returns None for broken storage
+        assert!(spool.get(&key).is_none());
+        // Entry still in map (not TTL-expired), but cleanup detects broken storage
+        assert_eq!(spool.cleanup_expired(), 1);
+        assert!(spool.entries.is_empty());
     }
 }
