@@ -18,8 +18,12 @@ pub struct SummaryGroup {
     pub git_sha: String,
     pub build_mode: String,
     pub aot: bool,
+    pub execution_mode: Option<String>,
     pub sample_count: usize,
     pub parallelism: Option<u64>,
+    pub distributed_agent_count: Option<u64>,
+    pub distributed_controller_url: Option<String>,
+    pub distributed_flight_endpoint: Option<String>,
     pub records_written: Option<u64>,
     pub bytes_written: Option<u64>,
     pub bytes_per_row: Option<f64>,
@@ -129,6 +133,11 @@ fn summarize_group(group: &[&BenchmarkArtifact]) -> Result<SummaryGroup> {
             .get("aot")
             .and_then(|value| value.as_bool())
             .unwrap_or(false),
+        execution_mode: first
+            .execution_flags
+            .get("execution_mode")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
         sample_count: group.len(),
         parallelism: median_u64(
             group
@@ -136,24 +145,32 @@ fn summarize_group(group: &[&BenchmarkArtifact]) -> Result<SummaryGroup> {
                 .filter_map(|artifact| connector_metric_u64(artifact, "parallelism"))
                 .collect(),
         ),
+        distributed_agent_count: median_u64(
+            group
+                .iter()
+                .filter_map(|artifact| distributed_agent_count(artifact))
+                .collect(),
+        ),
+        distributed_controller_url: first_distributed_string(group, "controller_url"),
+        distributed_flight_endpoint: first_distributed_string(group, "flight_endpoint"),
         records_written: median_u64(
             group
                 .iter()
-                .filter_map(|artifact| stream_metric_sum(artifact, "records_written"))
+                .filter_map(|artifact| total_records_written(artifact))
                 .collect(),
         ),
         bytes_written: median_u64(
             group
                 .iter()
-                .filter_map(|artifact| stream_metric_sum(artifact, "bytes_written"))
+                .filter_map(|artifact| total_bytes_written(artifact))
                 .collect(),
         ),
         bytes_per_row: median_f64(
             group
                 .iter()
                 .filter_map(|artifact| {
-                    let records = stream_metric_sum(artifact, "records_written")?;
-                    let bytes = stream_metric_sum(artifact, "bytes_written")?;
+                    let records = total_records_written(artifact)?;
+                    let bytes = total_bytes_written(artifact)?;
                     (records > 0).then_some(bytes as f64 / records as f64)
                 })
                 .collect(),
@@ -225,12 +242,59 @@ fn stream_metric_sum(artifact: &BenchmarkArtifact, key: &str) -> Option<u64> {
         .connector_metrics
         .get("stream_metrics")?
         .as_array()?;
+    if metrics.is_empty() {
+        return None;
+    }
     Some(
         metrics
             .iter()
             .filter_map(|metric| metric.get(key).and_then(|value| value.as_u64()))
             .sum(),
     )
+}
+
+fn total_records_written(artifact: &BenchmarkArtifact) -> Option<u64> {
+    stream_metric_sum(artifact, "records_written").or_else(|| {
+        artifact
+            .correctness
+            .details
+            .as_ref()?
+            .get("actual_records_written")
+            .and_then(|value| value.as_u64())
+    })
+}
+
+fn total_bytes_written(artifact: &BenchmarkArtifact) -> Option<u64> {
+    stream_metric_sum(artifact, "bytes_written").or_else(|| {
+        let mb_per_sec = artifact
+            .canonical_metrics
+            .get("mb_per_sec")
+            .and_then(|value| value.as_f64())?;
+        let duration_secs = artifact
+            .canonical_metrics
+            .get("duration_secs")
+            .and_then(|value| value.as_f64())?;
+        Some((mb_per_sec * 1024.0 * 1024.0 * duration_secs).round() as u64)
+    })
+}
+
+fn distributed_agent_count(artifact: &BenchmarkArtifact) -> Option<u64> {
+    artifact
+        .connector_metrics
+        .get("distributed")?
+        .get("agent_count")
+        .and_then(|value| value.as_u64())
+}
+
+fn first_distributed_string(group: &[&BenchmarkArtifact], key: &str) -> Option<String> {
+    group.iter().find_map(|artifact| {
+        artifact
+            .connector_metrics
+            .get("distributed")?
+            .get(key)?
+            .as_str()
+            .map(str::to_string)
+    })
 }
 
 fn median_u64(mut values: Vec<u64>) -> Option<u64> {
@@ -272,8 +336,20 @@ pub fn render_summary_report(report: &SummaryReport) -> String {
         lines.push("  measurement: end-to-end wall-clock".to_string());
         lines.push(format!("  build mode: {}", group.build_mode));
         lines.push(format!("  aot: {}", group.aot));
+        if let Some(execution_mode) = &group.execution_mode {
+            lines.push(format!("  execution mode: {}", execution_mode));
+        }
         if let Some(parallelism) = group.parallelism {
             lines.push(format!("  parallelism: {}", parallelism));
+        }
+        if let Some(agent_count) = group.distributed_agent_count {
+            lines.push(format!("  agent count: {}", agent_count));
+        }
+        if let Some(controller_url) = &group.distributed_controller_url {
+            lines.push(format!("  controller url: {}", controller_url));
+        }
+        if let Some(flight_endpoint) = &group.distributed_flight_endpoint {
+            lines.push(format!("  flight endpoint: {}", flight_endpoint));
         }
         if let Some(records_written) = group.records_written {
             lines.push(format!("  records written: {}", records_written));
@@ -451,6 +527,48 @@ mod tests {
         }
     }
 
+    fn sample_distributed_artifact_with_empty_stream_metrics() -> BenchmarkArtifact {
+        BenchmarkArtifact {
+            schema_version: 1,
+            suite_id: "lab".to_string(),
+            scenario_id: "pg_dest_copy_release_distributed".to_string(),
+            benchmark_kind: BenchmarkKind::Pipeline,
+            git_sha: "abc1234".to_string(),
+            hardware_class: "local-dev".to_string(),
+            scenario_fingerprint: "fingerprint".to_string(),
+            build_mode: "release".to_string(),
+            execution_flags: json!({
+                "aot": true,
+                "execution_mode": "distributed",
+                "synthetic": false,
+            }),
+            canonical_metrics: json!({
+                "records_per_sec": 1_500_000.0,
+                "mb_per_sec": 96.0,
+                "duration_secs": 0.6666666667,
+            }),
+            connector_metrics: json!({
+                "parallelism": 1,
+                "stream_metrics": [],
+                "distributed": {
+                    "controller_url": "http://127.0.0.1:56090",
+                    "agent_count": 1,
+                    "flight_endpoint": "http://127.0.0.1:56091"
+                }
+            }),
+            correctness: ArtifactCorrectness {
+                passed: true,
+                validator: "row_count".to_string(),
+                details: Some(json!({
+                    "expected_records_read": 1_000_000,
+                    "actual_records_read": 1_000_000,
+                    "expected_records_written": 1_000_000,
+                    "actual_records_written": 1_000_000
+                })),
+            },
+        }
+    }
+
     #[test]
     fn summarize_artifacts_groups_samples_and_computes_stats() {
         let report = summarize_artifacts(&[
@@ -536,6 +654,43 @@ mod tests {
         assert!(rendered.contains("64000000"));
         assert!(rendered.contains("bytes/row"));
         assert!(rendered.contains("end-to-end wall-clock"));
+    }
+
+    #[test]
+    fn render_summary_report_includes_distributed_context_and_fallback_totals() {
+        let report = summarize_artifacts(&[
+            sample_distributed_artifact_with_empty_stream_metrics(),
+            sample_distributed_artifact_with_empty_stream_metrics(),
+            sample_distributed_artifact_with_empty_stream_metrics(),
+        ])
+        .expect("summary");
+
+        let rendered = render_summary_report(&report);
+        assert!(rendered.contains("execution mode"));
+        assert!(rendered.contains("distributed"));
+        assert!(rendered.contains("agent count"));
+        assert!(rendered.contains("controller url"));
+        assert!(rendered.contains("flight endpoint"));
+        assert!(rendered.contains("records written"));
+        assert!(rendered.contains("1000000"));
+        assert!(rendered.contains("bytes written"));
+        assert!(rendered.contains("67108864"));
+    }
+
+    #[test]
+    fn render_summary_report_preserves_zero_write_totals_from_nonempty_stream_metrics() {
+        let report = summarize_artifacts(&[
+            sample_artifact_with_context("release", true, 1, 0, 0),
+            sample_artifact_with_context("release", true, 1, 0, 0),
+            sample_artifact_with_context("release", true, 1, 0, 0),
+        ])
+        .expect("summary");
+
+        let rendered = render_summary_report(&report);
+        assert!(rendered.contains("records written"));
+        assert!(rendered.contains("  records written: 0"));
+        assert!(rendered.contains("bytes written"));
+        assert!(rendered.contains("  bytes written: 0"));
     }
 
     #[test]
