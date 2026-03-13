@@ -254,6 +254,14 @@ impl RunStore {
         }
     }
 
+    pub fn remove_run(&mut self, run_id: &str) -> Option<RunRecord> {
+        let removed = self.runs.remove(run_id)?;
+        if let Some(key) = &removed.idempotency_key {
+            self.idempotency_index.remove(key);
+        }
+        Some(removed)
+    }
+
     /// Find a run by idempotency key.
     #[must_use]
     pub fn find_by_idempotency_key(&self, key: &str) -> Option<&RunRecord> {

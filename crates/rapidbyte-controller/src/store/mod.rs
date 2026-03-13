@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use tokio_postgres::{Client, NoTls, Row};
 
@@ -27,6 +28,26 @@ pub struct MetadataSnapshot {
 #[derive(Clone)]
 pub struct MetadataStore {
     client: Arc<Client>,
+}
+
+#[async_trait]
+pub trait DurableMetadataStore: Send + Sync {
+    async fn upsert_run(&self, run: &RunRecord) -> anyhow::Result<()>;
+    async fn upsert_task(&self, task: &TaskRecord) -> anyhow::Result<()>;
+    #[allow(clippy::too_many_arguments)]
+    async fn upsert_preview(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        flight_endpoint: &str,
+        ticket: &[u8],
+        streams: &[PreviewStreamEntry],
+        created_at: SystemTime,
+        ttl: Duration,
+    ) -> anyhow::Result<()>;
+    async fn upsert_agent(&self, agent: &AgentRecord) -> anyhow::Result<()>;
+    async fn delete_agent(&self, agent_id: &str) -> anyhow::Result<()>;
+    async fn delete_run(&self, run_id: &str) -> anyhow::Result<()>;
 }
 
 impl MetadataStore {
@@ -370,6 +391,55 @@ impl MetadataStore {
                 "DELETE FROM controller_agents WHERE agent_id = $1",
                 &[&agent_id],
             )
+            .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl DurableMetadataStore for MetadataStore {
+    async fn upsert_run(&self, run: &RunRecord) -> anyhow::Result<()> {
+        Self::upsert_run(self, run).await
+    }
+
+    async fn upsert_task(&self, task: &TaskRecord) -> anyhow::Result<()> {
+        Self::upsert_task(self, task).await
+    }
+
+    async fn upsert_preview(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        flight_endpoint: &str,
+        ticket: &[u8],
+        streams: &[PreviewStreamEntry],
+        created_at: SystemTime,
+        ttl: Duration,
+    ) -> anyhow::Result<()> {
+        Self::upsert_preview(
+            self,
+            run_id,
+            task_id,
+            flight_endpoint,
+            ticket,
+            streams,
+            created_at,
+            ttl,
+        )
+        .await
+    }
+
+    async fn upsert_agent(&self, agent: &AgentRecord) -> anyhow::Result<()> {
+        Self::upsert_agent(self, agent).await
+    }
+
+    async fn delete_agent(&self, agent_id: &str) -> anyhow::Result<()> {
+        Self::delete_agent(self, agent_id).await
+    }
+
+    async fn delete_run(&self, run_id: &str) -> anyhow::Result<()> {
+        self.client
+            .execute("DELETE FROM controller_runs WHERE run_id = $1", &[&run_id])
             .await?;
         Ok(())
     }
@@ -752,5 +822,112 @@ mod tests {
             .batch_execute(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
             .await
             .expect("schema cleanup should succeed");
+    }
+}
+
+#[cfg(test)]
+pub mod test_support {
+    #![allow(clippy::missing_panics_doc)]
+
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, SystemTime};
+
+    use async_trait::async_trait;
+
+    use super::DurableMetadataStore;
+    use crate::preview::PreviewStreamEntry;
+    use crate::registry::AgentRecord;
+    use crate::run_state::RunRecord;
+    use crate::scheduler::TaskRecord;
+
+    #[derive(Default)]
+    struct FailureConfig {
+        run_upsert_fail_on: Option<usize>,
+        task_upsert_fail_on: Option<usize>,
+        delete_run_fail_on: Option<usize>,
+        run_upsert_calls: usize,
+        task_upsert_calls: usize,
+        delete_run_calls: usize,
+    }
+
+    #[derive(Default)]
+    pub struct FailingMetadataStore {
+        failures: Mutex<FailureConfig>,
+    }
+
+    impl FailingMetadataStore {
+        #[must_use]
+        pub fn new() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+
+        #[must_use]
+        pub fn fail_run_upsert_on(self: Arc<Self>, call: usize) -> Arc<Self> {
+            self.failures.lock().unwrap().run_upsert_fail_on = Some(call);
+            self
+        }
+
+        #[must_use]
+        pub fn fail_task_upsert_on(self: Arc<Self>, call: usize) -> Arc<Self> {
+            self.failures.lock().unwrap().task_upsert_fail_on = Some(call);
+            self
+        }
+
+        #[must_use]
+        pub fn fail_delete_run_on(self: Arc<Self>, call: usize) -> Arc<Self> {
+            self.failures.lock().unwrap().delete_run_fail_on = Some(call);
+            self
+        }
+    }
+
+    #[async_trait]
+    impl DurableMetadataStore for FailingMetadataStore {
+        async fn upsert_run(&self, _run: &RunRecord) -> anyhow::Result<()> {
+            let mut failures = self.failures.lock().unwrap();
+            failures.run_upsert_calls += 1;
+            if failures.run_upsert_fail_on == Some(failures.run_upsert_calls) {
+                anyhow::bail!("injected run upsert failure");
+            }
+            Ok(())
+        }
+
+        async fn upsert_task(&self, _task: &TaskRecord) -> anyhow::Result<()> {
+            let mut failures = self.failures.lock().unwrap();
+            failures.task_upsert_calls += 1;
+            if failures.task_upsert_fail_on == Some(failures.task_upsert_calls) {
+                anyhow::bail!("injected task upsert failure");
+            }
+            Ok(())
+        }
+
+        async fn upsert_preview(
+            &self,
+            _run_id: &str,
+            _task_id: &str,
+            _flight_endpoint: &str,
+            _ticket: &[u8],
+            _streams: &[PreviewStreamEntry],
+            _created_at: SystemTime,
+            _ttl: Duration,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn upsert_agent(&self, _agent: &AgentRecord) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn delete_agent(&self, _agent_id: &str) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn delete_run(&self, _run_id: &str) -> anyhow::Result<()> {
+            let mut failures = self.failures.lock().unwrap();
+            failures.delete_run_calls += 1;
+            if failures.delete_run_fail_on == Some(failures.delete_run_calls) {
+                anyhow::bail!("injected run delete failure");
+            }
+            Ok(())
+        }
     }
 }

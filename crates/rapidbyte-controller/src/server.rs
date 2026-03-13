@@ -157,29 +157,40 @@ async fn handle_expired_lease(state: &ControllerState, task_id: &str, run_id: &s
             None
         }
     };
+    let mut durable = true;
     if let Err(error) = state.persist_task(task_id).await {
+        durable = false;
         tracing::error!(task_id, run_id, ?error, "failed to persist expired task");
     }
     if let Err(error) = state.persist_run(run_id).await {
+        durable = false;
         tracing::error!(task_id, run_id, ?error, "failed to persist timed-out run");
     }
 
-    if let Some((code, msg, retryable, safe_to_retry, attempt)) = timeout_outcome {
-        state.watchers.write().await.publish_terminal(
+    if durable {
+        if let Some((code, msg, retryable, safe_to_retry, attempt)) = timeout_outcome {
+            state.watchers.write().await.publish_terminal(
+                run_id,
+                RunEvent {
+                    run_id: run_id.to_string(),
+                    event: Some(run_event::Event::Failed(RunFailed {
+                        error: Some(TaskError {
+                            code: code.into(),
+                            message: msg,
+                            retryable,
+                            safe_to_retry,
+                            commit_state: String::new(),
+                        }),
+                        attempt,
+                    })),
+                },
+            );
+        }
+    } else if timeout_outcome.is_some() {
+        tracing::warn!(
+            task_id,
             run_id,
-            RunEvent {
-                run_id: run_id.to_string(),
-                event: Some(run_event::Event::Failed(RunFailed {
-                    error: Some(TaskError {
-                        code: code.into(),
-                        message: msg,
-                        retryable,
-                        safe_to_retry,
-                        commit_state: String::new(),
-                    }),
-                    attempt,
-                })),
-            },
+            "skipping lease-expiry terminal publish because durable persistence failed"
         );
     }
 }
@@ -228,6 +239,7 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
             (task_id, attempt)
         };
 
+        let mut durable = true;
         if let Some(task_id) = task_id.as_deref() {
             let timed_out = {
                 let mut tasks = state.tasks.write().await;
@@ -235,6 +247,7 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
             };
             if timed_out {
                 if let Err(error) = state.persist_task(task_id).await {
+                    durable = false;
                     tracing::error!(
                         task_id,
                         run_id,
@@ -245,6 +258,7 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
             }
         }
         if let Err(error) = state.persist_run(&run_id).await {
+            durable = false;
             tracing::error!(
                 run_id,
                 ?error,
@@ -252,23 +266,28 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
             );
         }
 
-        state.watchers.write().await.publish_terminal(
-            &run_id,
-            RunEvent {
-                run_id: run_id.clone(),
-                event: Some(run_event::Event::Failed(RunFailed {
-                    error: Some(TaskError {
-                        code: "RECOVERY_TIMEOUT".into(),
-                        message: "Run recovery reconciliation timed out after controller restart"
-                            .into(),
-                        retryable: false,
-                        safe_to_retry: false,
-                        commit_state: String::new(),
-                    }),
-                    attempt,
-                })),
-            },
-        );
+        if durable {
+            state.watchers.write().await.publish_terminal(
+                &run_id,
+                RunEvent {
+                    run_id: run_id.clone(),
+                    event: Some(run_event::Event::Failed(RunFailed {
+                        error: Some(TaskError {
+                            code: "RECOVERY_TIMEOUT".into(),
+                            message:
+                                "Run recovery reconciliation timed out after controller restart"
+                                    .into(),
+                            retryable: false,
+                            safe_to_retry: false,
+                            commit_state: String::new(),
+                        }),
+                        attempt,
+                    })),
+                },
+            );
+        } else {
+            tracing::warn!(run_id, "skipping reconciliation-timeout terminal publish because durable persistence failed");
+        }
     }
 }
 
@@ -381,6 +400,7 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::test_support::FailingMetadataStore;
 
     #[test]
     fn auth_is_required_by_default() {
@@ -529,6 +549,42 @@ mod tests {
             .error_message
             .as_deref()
             .is_some_and(|message| message.contains("reconciliation timed out")));
+    }
+
+    #[tokio::test]
+    async fn handle_expired_lease_skips_publish_when_persist_fails() {
+        let state = ControllerState::with_metadata_store(
+            b"test-signing-key",
+            FailingMetadataStore::new().fail_task_upsert_on(1),
+        );
+        let (run_id, _) = {
+            let mut runs = state.runs.write().await;
+            runs.create_run("run-1".into(), "pipe".into(), None)
+        };
+        let task_id = {
+            let mut tasks = state.tasks.write().await;
+            let task_id = tasks.enqueue(run_id.clone(), b"yaml".to_vec(), false, None, 1);
+            let assignment = tasks
+                .poll("agent-1", Duration::from_secs(60), &state.epoch_gen)
+                .expect("task should be assigned");
+            assert_eq!(assignment.task_id, task_id);
+            task_id
+        };
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+        }
+
+        let mut rx = state.watchers.write().await.subscribe(&run_id);
+        handle_expired_lease(&state, &task_id, &run_id).await;
+
+        let recv = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
+        assert!(
+            recv.is_err(),
+            "terminal event should not publish on persist failure"
+        );
+        assert_eq!(state.watchers.read().await.channel_count(), 1);
     }
 
     #[tokio::test]

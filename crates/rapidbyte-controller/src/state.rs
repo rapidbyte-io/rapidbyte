@@ -10,7 +10,7 @@ use crate::preview::{PreviewStore, TicketSigner};
 use crate::registry::AgentRegistry;
 use crate::run_state::RunStore;
 use crate::scheduler::{TaskQueue, TaskState};
-use crate::store::{MetadataSnapshot, MetadataStore};
+use crate::store::{DurableMetadataStore, MetadataSnapshot, MetadataStore};
 use crate::watcher::RunWatchers;
 
 /// Shared state container for the controller.
@@ -25,7 +25,7 @@ pub struct ControllerState {
     pub previews: Arc<RwLock<PreviewStore>>,
     pub epoch_gen: Arc<EpochGenerator>,
     pub ticket_signer: Arc<TicketSigner>,
-    pub metadata_store: Option<Arc<MetadataStore>>,
+    pub metadata_store: Option<Arc<dyn DurableMetadataStore>>,
     /// Notified when a new task is enqueued, waking long-poll waiters.
     pub task_notify: Arc<Notify>,
 }
@@ -38,7 +38,7 @@ impl ControllerState {
 
     fn from_snapshot(
         signing_key: &[u8],
-        metadata_store: Option<Arc<MetadataStore>>,
+        metadata_store: Option<Arc<dyn DurableMetadataStore>>,
         snapshot: MetadataSnapshot,
     ) -> Self {
         let snapshot = normalize_recovery_snapshot(snapshot);
@@ -84,13 +84,26 @@ impl ControllerState {
         signing_key: &[u8],
         metadata_store: MetadataStore,
     ) -> anyhow::Result<Self> {
-        let metadata_store = Arc::new(metadata_store);
         let snapshot = metadata_store.load_snapshot().await?;
+        let metadata_store: Arc<dyn DurableMetadataStore> = Arc::new(metadata_store);
         Ok(Self::from_snapshot(
             signing_key,
             Some(metadata_store),
             snapshot,
         ))
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_metadata_store(
+        signing_key: &[u8],
+        metadata_store: Arc<dyn DurableMetadataStore>,
+    ) -> Self {
+        Self::from_snapshot(
+            signing_key,
+            Some(metadata_store),
+            MetadataSnapshot::default(),
+        )
     }
 
     /// Persist a run record when durable metadata storage is configured.
@@ -178,6 +191,48 @@ impl ControllerState {
             return Ok(());
         };
         metadata_store.delete_agent(agent_id).await
+    }
+
+    /// Persist a run snapshot directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable metadata write fails.
+    pub async fn persist_run_record(
+        &self,
+        run: &crate::run_state::RunRecord,
+    ) -> anyhow::Result<()> {
+        let Some(metadata_store) = &self.metadata_store else {
+            return Ok(());
+        };
+        metadata_store.upsert_run(run).await
+    }
+
+    /// Persist a task snapshot directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable metadata write fails.
+    pub async fn persist_task_record(
+        &self,
+        task: &crate::scheduler::TaskRecord,
+    ) -> anyhow::Result<()> {
+        let Some(metadata_store) = &self.metadata_store else {
+            return Ok(());
+        };
+        metadata_store.upsert_task(task).await
+    }
+
+    /// Delete a run and its cascading task metadata directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable metadata delete fails.
+    pub async fn delete_run(&self, run_id: &str) -> anyhow::Result<()> {
+        let Some(metadata_store) = &self.metadata_store else {
+            return Ok(());
+        };
+        metadata_store.delete_run(run_id).await
     }
 }
 

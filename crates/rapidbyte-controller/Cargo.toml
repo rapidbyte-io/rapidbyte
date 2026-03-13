@@ -24,6 +24,7 @@ tokio-stream = { workspace = true }
 tower = { workspace = true }
 tokio-postgres = { workspace = true }
 chrono = { workspace = true }
+async-trait = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

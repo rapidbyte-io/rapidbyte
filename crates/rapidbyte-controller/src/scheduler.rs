@@ -354,12 +354,23 @@ impl TaskQueue {
         self.tasks.get(task_id)
     }
 
+    #[must_use]
+    pub fn peek_pending(&self) -> Option<&TaskRecord> {
+        let task_id = self.pending.front()?;
+        self.tasks.get(task_id)
+    }
+
     /// Restore an existing task record loaded from durable storage.
     pub fn restore_task(&mut self, record: TaskRecord) {
         if record.state == TaskState::Pending {
             self.pending.push_back(record.task_id.clone());
         }
         self.tasks.insert(record.task_id.clone(), record);
+    }
+
+    pub fn remove_task(&mut self, task_id: &str) -> Option<TaskRecord> {
+        self.pending.retain(|id| id != task_id);
+        self.tasks.remove(task_id)
     }
 
     /// Snapshot all task records.

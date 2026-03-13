@@ -129,6 +129,17 @@ impl PipelineServiceImpl {
         Self { state }
     }
 
+    async fn rollback_new_submission(&self, run_id: &str, task_id: &str) {
+        {
+            let mut tasks = self.state.tasks.write().await;
+            let _ = tasks.remove_task(task_id);
+        }
+        {
+            let mut runs = self.state.runs.write().await;
+            let _ = runs.remove_run(run_id);
+        }
+    }
+
     async fn terminal_event_for_existing_run(
         &self,
         run_id: &str,
@@ -414,16 +425,42 @@ impl PipelineService for PipelineServiceImpl {
                     1,
                 )
             };
+            let run_snapshot = {
+                self.state
+                    .runs
+                    .read()
+                    .await
+                    .get_run(&actual_run_id)
+                    .cloned()
+                    .expect("newly created run should exist")
+            };
+            let task_snapshot = {
+                self.state
+                    .tasks
+                    .read()
+                    .await
+                    .get(&task_id)
+                    .cloned()
+                    .expect("newly created task should exist")
+            };
 
             tracing::info!(run_id = %actual_run_id, task_id, "Pipeline submitted");
-            self.state
-                .persist_run(&actual_run_id)
-                .await
-                .map_err(|error| Status::internal(error.to_string()))?;
-            self.state
-                .persist_task(&task_id)
-                .await
-                .map_err(|error| Status::internal(error.to_string()))?;
+            if let Err(error) = self.state.persist_run_record(&run_snapshot).await {
+                self.rollback_new_submission(&actual_run_id, &task_id).await;
+                return Err(Status::internal(error.to_string()));
+            }
+            if let Err(error) = self.state.persist_task_record(&task_snapshot).await {
+                let rollback_error = self.state.delete_run(&actual_run_id).await.err();
+                self.rollback_new_submission(&actual_run_id, &task_id).await;
+                return Err(Status::internal(match rollback_error {
+                    Some(rollback_error) => {
+                        format!(
+                            "{error}; durable rollback for run {actual_run_id} also failed: {rollback_error}"
+                        )
+                    }
+                    None => error.to_string(),
+                }));
+            }
             self.state.task_notify.notify_waiters();
         }
 
@@ -587,6 +624,7 @@ mod tests {
         RegisterAgentRequest,
     };
     use crate::run_state::RunState as InternalRunState;
+    use crate::store::test_support::FailingMetadataStore;
     use tokio_stream::StreamExt;
 
     #[tokio::test]
@@ -659,6 +697,46 @@ mod tests {
             .run_id;
 
         assert_eq!(resp1, resp2);
+    }
+
+    #[tokio::test]
+    async fn test_submit_pipeline_rolls_back_when_task_persist_fails() {
+        let store = FailingMetadataStore::new().fail_task_upsert_on(1);
+        let state = ControllerState::with_metadata_store(b"test-key-for-pipeline-service!!", store);
+        let svc = PipelineServiceImpl::new(state.clone());
+
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+        let first = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: "dedup-key".into(),
+            }))
+            .await
+            .expect_err("persistence failure should reject submit");
+        assert_eq!(first.code(), tonic::Code::Internal);
+        assert!(state.runs.read().await.all_runs().is_empty());
+        assert!(state.tasks.read().await.all_tasks().is_empty());
+        assert!(state
+            .runs
+            .read()
+            .await
+            .find_by_idempotency_key("dedup-key")
+            .is_none());
+
+        let second = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: "dedup-key".into(),
+            }))
+            .await
+            .expect("second submit should succeed after rollback")
+            .into_inner();
+
+        assert!(!second.run_id.is_empty());
+        assert_eq!(state.runs.read().await.all_runs().len(), 1);
+        assert_eq!(state.tasks.read().await.all_tasks().len(), 1);
     }
 
     #[tokio::test]
