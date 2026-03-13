@@ -131,6 +131,9 @@ enum Commands {
         /// gRPC listen address
         #[arg(long, default_value = "[::]:9090")]
         listen: String,
+        /// Postgres connection string for durable controller metadata
+        #[arg(long, env = "RAPIDBYTE_CONTROLLER_METADATA_DATABASE_URL")]
+        metadata_database_url: Option<String>,
         /// Shared signing key for preview tickets (hex or raw string)
         #[arg(long, env = "RAPIDBYTE_SIGNING_KEY")]
         signing_key: Option<String>,
@@ -293,6 +296,7 @@ async fn main() -> ExitCode {
         Commands::Dev => commands::dev::execute().await,
         Commands::Controller {
             listen,
+            metadata_database_url,
             signing_key,
             allow_unauthenticated,
             allow_insecure_signing_key,
@@ -301,6 +305,7 @@ async fn main() -> ExitCode {
         } => {
             commands::controller::execute(
                 &listen,
+                metadata_database_url.as_deref(),
                 signing_key.as_deref(),
                 cli.auth_token.as_deref(),
                 allow_unauthenticated,

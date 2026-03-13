@@ -14,6 +14,7 @@ use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineServiceServer;
 use crate::proto::rapidbyte::v1::{run_event, RunEvent, RunFailed, TaskError};
 use crate::run_state::RunState as InternalRunState;
 use crate::state::ControllerState;
+use crate::store;
 
 /// Configuration for the controller server.
 #[derive(Clone)]
@@ -25,6 +26,7 @@ pub struct ServerTlsConfig {
 pub struct ControllerConfig {
     pub listen_addr: SocketAddr,
     pub signing_key: Vec<u8>,
+    pub metadata_database_url: Option<String>,
     pub agent_reap_interval: Duration,
     pub agent_reap_timeout: Duration,
     pub lease_check_interval: Duration,
@@ -48,6 +50,7 @@ impl Default for ControllerConfig {
         Self {
             listen_addr: "[::]:9090".parse().unwrap(),
             signing_key: DEFAULT_SIGNING_KEY.to_vec(),
+            metadata_database_url: None,
             agent_reap_interval: Duration::from_secs(15),
             agent_reap_timeout: Duration::from_secs(60),
             lease_check_interval: Duration::from_secs(10),
@@ -76,6 +79,22 @@ fn validate_signing_key_config(config: &ControllerConfig) -> anyhow::Result<()> 
         );
     }
     Ok(())
+}
+
+fn metadata_database_url(config: &ControllerConfig) -> anyhow::Result<&str> {
+    match config.metadata_database_url.as_deref().map(str::trim) {
+        Some("") | None => {
+            anyhow::bail!(
+                "Controller metadata database URL is required. Set --metadata-database-url / RAPIDBYTE_CONTROLLER_METADATA_DATABASE_URL."
+            );
+        }
+        Some(url) => Ok(url),
+    }
+}
+
+async fn initialize_metadata_store(config: &ControllerConfig) -> anyhow::Result<()> {
+    let url = metadata_database_url(config)?;
+    store::initialize_metadata_store(url).await
 }
 
 async fn handle_expired_lease(state: &ControllerState, task_id: &str, run_id: &str) {
@@ -149,6 +168,7 @@ fn spawn_preview_cleanup_task(
 pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
     validate_auth_config(&config)?;
     validate_signing_key_config(&config)?;
+    initialize_metadata_store(&config).await?;
 
     if config.signing_key == DEFAULT_SIGNING_KEY {
         tracing::warn!(
@@ -256,6 +276,47 @@ mod tests {
         assert!(err
             .to_string()
             .contains("preview signing key must be set explicitly"));
+    }
+
+    #[test]
+    fn metadata_database_url_is_required() {
+        let config = ControllerConfig {
+            auth_tokens: vec!["secret".into()],
+            signing_key: b"signing".to_vec(),
+            ..Default::default()
+        };
+        let err = metadata_database_url(&config).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Controller metadata database URL is required"));
+    }
+
+    #[test]
+    fn metadata_database_url_rejects_whitespace() {
+        let config = ControllerConfig {
+            auth_tokens: vec!["secret".into()],
+            signing_key: b"signing".to_vec(),
+            metadata_database_url: Some("   ".into()),
+            ..Default::default()
+        };
+        let err = metadata_database_url(&config).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Controller metadata database URL is required"));
+    }
+
+    #[test]
+    fn metadata_database_url_accepts_non_empty_value() {
+        let config = ControllerConfig {
+            auth_tokens: vec!["secret".into()],
+            signing_key: b"signing".to_vec(),
+            metadata_database_url: Some("postgresql://localhost/controller".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            metadata_database_url(&config).unwrap(),
+            "postgresql://localhost/controller"
+        );
     }
 
     #[test]
