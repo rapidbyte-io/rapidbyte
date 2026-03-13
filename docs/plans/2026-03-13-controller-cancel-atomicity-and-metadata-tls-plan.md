@@ -317,3 +317,56 @@ Expected:
 git add crates/rapidbyte-controller/src/agent_service.rs crates/rapidbyte-controller/src/store/mod.rs crates/rapidbyte-controller/src/registry.rs
 git commit -m "fix(controller): roll back agent registration and lease renewals"
 ```
+
+### Task 6: Make CompleteTask rollback-safe
+
+**Files:**
+- Modify: `crates/rapidbyte-controller/src/agent_service.rs`
+- Modify: `crates/rapidbyte-controller/src/store/mod.rs`
+- Modify: `crates/rapidbyte-controller/src/preview.rs`
+
+**Step 1: Write the failing tests**
+
+Add focused tests that inject metadata persistence failures for:
+
+- `COMPLETED` when task persistence fails
+- `COMPLETED` when preview persistence fails
+- `COMPLETED` when run persistence fails
+- failed-without-retry when run persistence fails
+- retry path when next-task or run persistence fails
+
+Each test should verify the original lease remains retryable after the failed RPC rather than being downgraded into stale `acknowledged: false`.
+
+**Step 2: Run tests to verify they fail**
+
+Run:
+
+```bash
+cargo test -p rapidbyte-controller test_complete_task_completed_rolls_back_when_task_persist_fails -- --nocapture
+cargo test -p rapidbyte-controller test_complete_task_completed_rolls_back_when_preview_persist_fails -- --nocapture
+cargo test -p rapidbyte-controller test_complete_task_completed_rolls_back_when_run_persist_fails -- --nocapture
+```
+
+Expected:
+- FAIL because `complete_task` currently consumes the lease before durability completes
+
+**Step 3: Write minimal implementation**
+
+Implement snapshot-based rollback for every `complete_task` outcome:
+
+- restore task/run/preview state in memory on persist failure
+- best-effort restore already-persisted rows
+- keep the original completion lease retryable until durability succeeds
+
+Do not broaden this into unrelated task-completion refactoring.
+
+**Step 4: Run tests to verify they pass**
+
+Run the same targeted tests, then extend to the retry-path failure tests.
+
+**Step 5: Commit**
+
+```bash
+git add crates/rapidbyte-controller/src/agent_service.rs crates/rapidbyte-controller/src/store/mod.rs crates/rapidbyte-controller/src/preview.rs
+git commit -m "fix(controller): make complete task rollback-safe"
+```

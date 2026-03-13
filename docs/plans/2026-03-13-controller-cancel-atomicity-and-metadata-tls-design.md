@@ -60,6 +60,21 @@ For heartbeat renewals, capture a pre-renew snapshot for every task whose lease 
 
 This keeps lease expiry data coherent across memory and Postgres, which matters directly for timeout and restart-recovery correctness.
 
+### CompleteTask Atomicity
+
+`complete_task` must follow the same rollback rule. Today the scheduler consumes the live lease before durable writes, which means a transient metadata-store error can permanently turn a legitimate retry into a stale completion.
+
+The fix is outcome-specific but follows one pattern:
+
+- snapshot the pre-completion task record and any affected run/preview state
+- apply the in-memory transition for the requested terminal outcome
+- persist the exact new task/run/preview/retry snapshots
+- if any durable write fails, restore the pre-completion snapshots in memory
+- best-effort restore any already-persisted durable rows to the previous snapshots
+- return `INTERNAL` until durability succeeds
+
+That preserves the agent’s ability to retry `CompleteTask` with the same lease epoch after a transient DB failure.
+
 ### Metadata DB TLS
 
 Do not add controller-specific flags like `--metadata-db-tls-cert`. Instead, pass the metadata Postgres URL through the standard tokio-postgres config parser and let URL parameters drive transport mode.
@@ -95,6 +110,7 @@ CLI validation stays simple: require a non-empty metadata DB URL, but do not ins
 - Add or extend an agent-service test for the rejected-assignment branch if durable persistence changes there.
 - Add a failing agent-service test proving `register_agent` rolls back the registry on `persist_agent` failure.
 - Add a failing agent-service test proving heartbeat lease renewal rolls every renewed task back when one persistence write fails.
+- Add failing agent-service tests proving `complete_task` rolls back task/run/preview state on persistence failures and remains retryable with the same lease.
 - Add metadata store tests proving TLS-capable config parsing accepts URL parameters and that non-TLS local URLs still work.
 - Re-run the controller and CLI suites plus the ignored Postgres-backed persistence/restart tests.
 
