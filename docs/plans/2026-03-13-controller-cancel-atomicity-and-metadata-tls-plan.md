@@ -260,3 +260,60 @@ Only do this if verification required code changes after the prior commits.
 ```bash
 git push
 ```
+
+### Task 5: Make agent registration and heartbeat lease renewal atomic
+
+**Files:**
+- Modify: `crates/rapidbyte-controller/src/agent_service.rs`
+- Modify: `crates/rapidbyte-controller/src/store/mod.rs`
+- Modify: `crates/rapidbyte-controller/src/registry.rs`
+
+**Step 1: Write the failing tests**
+
+Add agent-service tests that prove:
+
+- `register_agent` removes the inserted registry record when `persist_agent` fails
+- heartbeat renewal rolls every renewed task back when one task persistence write fails mid-request
+
+Use the existing failure-injection store and durable snapshot recording.
+
+**Step 2: Run tests to verify they fail**
+
+Run:
+
+```bash
+cargo test -p rapidbyte-controller test_register_agent_rolls_back_when_persist_fails -- --nocapture
+cargo test -p rapidbyte-controller test_heartbeat_rolls_back_renewed_leases_when_persist_fails -- --nocapture
+```
+
+Expected:
+- FAIL because registration and multi-lease heartbeat currently mutate memory before durability completes
+
+**Step 3: Write minimal implementation**
+
+Implement:
+
+- registry rollback for failed `persist_agent`
+- pre/post lease snapshots for heartbeat renewal
+- in-memory rollback plus best-effort durable rollback when any renewed-task persistence write fails
+
+Do not broaden this into unrelated heartbeat refactoring.
+
+**Step 4: Run tests to verify they pass**
+
+Run:
+
+```bash
+cargo test -p rapidbyte-controller test_register_agent_rolls_back_when_persist_fails -- --nocapture
+cargo test -p rapidbyte-controller test_heartbeat_rolls_back_renewed_leases_when_persist_fails -- --nocapture
+```
+
+Expected:
+- PASS
+
+**Step 5: Commit**
+
+```bash
+git add crates/rapidbyte-controller/src/agent_service.rs crates/rapidbyte-controller/src/store/mod.rs crates/rapidbyte-controller/src/registry.rs
+git commit -m "fix(controller): roll back agent registration and lease renewals"
+```

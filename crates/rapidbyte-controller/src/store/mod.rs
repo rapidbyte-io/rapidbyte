@@ -1006,12 +1006,15 @@ pub mod test_support {
     struct FailureConfig {
         run_upsert_fail_on: Option<usize>,
         task_upsert_fail_on: Option<usize>,
+        agent_upsert_fail_on: Option<usize>,
         delete_run_fail_on: Option<usize>,
         run_upsert_calls: usize,
         task_upsert_calls: usize,
+        agent_upsert_calls: usize,
         delete_run_calls: usize,
         persisted_runs: HashMap<String, RunRecord>,
         persisted_tasks: HashMap<String, TaskRecord>,
+        persisted_agents: HashMap<String, AgentRecord>,
     }
 
     #[derive(Default)]
@@ -1038,6 +1041,12 @@ pub mod test_support {
         }
 
         #[must_use]
+        pub fn fail_agent_upsert_on(self: Arc<Self>, call: usize) -> Arc<Self> {
+            self.failures.lock().unwrap().agent_upsert_fail_on = Some(call);
+            self
+        }
+
+        #[must_use]
         pub fn fail_delete_run_on(self: Arc<Self>, call: usize) -> Arc<Self> {
             self.failures.lock().unwrap().delete_run_fail_on = Some(call);
             self
@@ -1060,6 +1069,16 @@ pub mod test_support {
                 .unwrap()
                 .persisted_tasks
                 .get(task_id)
+                .cloned()
+        }
+
+        #[must_use]
+        pub fn persisted_agent(&self, agent_id: &str) -> Option<AgentRecord> {
+            self.failures
+                .lock()
+                .unwrap()
+                .persisted_agents
+                .get(agent_id)
                 .cloned()
         }
     }
@@ -1104,10 +1123,23 @@ pub mod test_support {
         }
 
         async fn upsert_agent(&self, _agent: &AgentRecord) -> anyhow::Result<()> {
+            let mut failures = self.failures.lock().unwrap();
+            failures.agent_upsert_calls += 1;
+            if failures.agent_upsert_fail_on == Some(failures.agent_upsert_calls) {
+                anyhow::bail!("injected agent upsert failure");
+            }
+            failures
+                .persisted_agents
+                .insert(_agent.agent_id.clone(), _agent.clone());
             Ok(())
         }
 
         async fn delete_agent(&self, _agent_id: &str) -> anyhow::Result<()> {
+            self.failures
+                .lock()
+                .unwrap()
+                .persisted_agents
+                .remove(_agent_id);
             Ok(())
         }
 

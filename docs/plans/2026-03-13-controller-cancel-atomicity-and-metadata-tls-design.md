@@ -43,6 +43,23 @@ This keeps durable state and in-memory state aligned and prevents restart from r
 
 The review also called out the `poll_task` rejection branch. That branch is not the primary root cause for the queued-cancel zombie, but it should still preserve persistence symmetry when a claimed assignment is rejected because the run cannot transition. The fix is to persist the rejected task state before returning `None`, so a process crash cannot leave durable `Assigned` state after in-memory rejection.
 
+### Agent Registration And Heartbeat Atomicity
+
+The same durability rule applies to the agent registry and heartbeat lease renewals:
+
+- `register_agent` must not leave a live in-memory agent if durable persistence fails
+- heartbeat lease renewal must be all-or-nothing across every renewed task in the request
+
+For registration, capture the inserted agent record and remove it from the in-memory registry if `persist_agent` fails.
+
+For heartbeat renewals, capture a pre-renew snapshot for every task whose lease is successfully renewed in memory, capture the renewed snapshots, persist the renewed task snapshots one by one, and if any persistence write fails:
+
+- restore every renewed task in memory to its pre-heartbeat snapshot
+- best-effort durably restore any already-persisted task snapshots to their previous values
+- return `INTERNAL`
+
+This keeps lease expiry data coherent across memory and Postgres, which matters directly for timeout and restart-recovery correctness.
+
 ### Metadata DB TLS
 
 Do not add controller-specific flags like `--metadata-db-tls-cert`. Instead, pass the metadata Postgres URL through the standard tokio-postgres config parser and let URL parameters drive transport mode.
@@ -76,6 +93,8 @@ CLI validation stays simple: require a non-empty metadata DB URL, but do not ins
 - Add a failing controller test that injects task persistence failure during queued cancel and proves the run and task both roll back to pending state.
 - Add a failing controller test that simulates run persistence failure after durable task cancellation and proves the task is durably restored and in-memory state is rolled back.
 - Add or extend an agent-service test for the rejected-assignment branch if durable persistence changes there.
+- Add a failing agent-service test proving `register_agent` rolls back the registry on `persist_agent` failure.
+- Add a failing agent-service test proving heartbeat lease renewal rolls every renewed task back when one persistence write fails.
 - Add metadata store tests proving TLS-capable config parsing accepts URL parameters and that non-TLS local URLs still work.
 - Re-run the controller and CLI suites plus the ignored Postgres-backed persistence/restart tests.
 

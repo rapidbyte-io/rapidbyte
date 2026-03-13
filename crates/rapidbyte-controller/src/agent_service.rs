@@ -43,6 +43,13 @@ impl AgentServiceImpl {
         }
     }
 
+    async fn rollback_renewed_tasks(&self, previous_tasks: Vec<crate::scheduler::TaskRecord>) {
+        let mut tasks = self.state.tasks.write().await;
+        for previous_task in previous_tasks {
+            tasks.restore_task(previous_task);
+        }
+    }
+
     async fn try_claim_task(
         &self,
         agent_id: &str,
@@ -190,10 +197,10 @@ impl AgentService for AgentServiceImpl {
         );
         drop(registry);
 
-        self.state
-            .persist_agent(&agent_id)
-            .await
-            .map_err(|error| Status::internal(error.to_string()))?;
+        if let Err(error) = self.state.persist_agent(&agent_id).await {
+            self.state.registry.write().await.remove(&agent_id);
+            return Err(Status::internal(error.to_string()));
+        }
 
         tracing::info!(agent_id, "Agent registered");
         Ok(Response::new(RegisterAgentResponse { agent_id }))
@@ -219,25 +226,59 @@ impl AgentService for AgentServiceImpl {
 
         // Renew leases for active tasks reported by the agent
         if !req.active_leases.is_empty() {
-            let mut renewed_tasks = Vec::new();
+            let mut renewed = Vec::new();
             let mut tasks = self.state.tasks.write().await;
             for active_lease in &req.active_leases {
+                let previous_task = tasks.get(&active_lease.task_id).cloned();
                 if tasks.renew_lease(
                     &active_lease.task_id,
                     &req.agent_id,
                     active_lease.lease_epoch,
                     LEASE_TTL,
                 ) {
-                    renewed_tasks.push(active_lease.task_id.clone());
+                    let renewed_task = tasks
+                        .get(&active_lease.task_id)
+                        .cloned()
+                        .expect("renewed task should still exist");
+                    renewed.push((
+                        previous_task.expect("renewed task should have previous snapshot"),
+                        renewed_task,
+                    ));
                 }
             }
             drop(tasks);
 
-            for task_id in renewed_tasks {
-                self.state
-                    .persist_task(&task_id)
-                    .await
-                    .map_err(|error| Status::internal(error.to_string()))?;
+            let mut persisted_previous = Vec::new();
+            for (previous_task, renewed_task) in &renewed {
+                if let Err(error) = self.state.persist_task_record(renewed_task).await {
+                    let rollback_error = if persisted_previous.is_empty() {
+                        None
+                    } else {
+                        let mut first_error = None;
+                        for previous_task in &persisted_previous {
+                            if let Err(rollback_error) =
+                                self.state.persist_task_record(previous_task).await
+                            {
+                                if first_error.is_none() {
+                                    first_error = Some(rollback_error);
+                                }
+                            }
+                        }
+                        first_error
+                    };
+                    let previous_tasks = renewed
+                        .into_iter()
+                        .map(|(previous_task, _)| previous_task)
+                        .collect();
+                    self.rollback_renewed_tasks(previous_tasks).await;
+                    return Err(Status::internal(match rollback_error {
+                        Some(rollback_error) => format!(
+                            "{error}; durable rollback for renewed leases also failed: {rollback_error}"
+                        ),
+                        None => error.to_string(),
+                    }));
+                }
+                persisted_previous.push(previous_task.clone());
             }
         }
 
@@ -704,6 +745,29 @@ mod tests {
         assert!(!resp.agent_id.is_empty());
         // Should be a valid UUID
         assert!(uuid::Uuid::parse_str(&resp.agent_id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_register_agent_rolls_back_when_persist_fails() {
+        let store = FailingMetadataStore::new().fail_agent_upsert_on(1);
+        let state =
+            ControllerState::with_metadata_store(b"test-key-for-agent-service!!!!", store.clone());
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let err = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .expect_err("register should fail when agent persistence fails");
+        assert_eq!(err.code(), tonic::Code::Internal);
+
+        assert!(state.registry.read().await.all_agents().is_empty());
+        assert!(store.persisted_agent("nonexistent-agent").is_none());
     }
 
     #[tokio::test]
@@ -1981,6 +2045,143 @@ mod tests {
         };
 
         assert_eq!(after, before);
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_rolls_back_renewed_leases_when_persist_fails() {
+        let store = FailingMetadataStore::new().fail_task_upsert_on(6);
+        let state =
+            ControllerState::with_metadata_store(b"test-key-for-agent-service!!!!", store.clone());
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 2,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let first_run_id = submit_pipeline(&state).await;
+        let second_run_id = submit_pipeline(&state).await;
+
+        let first_task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(task)) => task,
+            _ => panic!("expected first task"),
+        };
+        let second_task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(task)) => task,
+            _ => panic!("expected second task"),
+        };
+
+        let before = {
+            let tasks = state.tasks.read().await;
+            [
+                tasks
+                    .get(&first_task.task_id)
+                    .unwrap()
+                    .lease
+                    .clone()
+                    .expect("first lease should exist"),
+                tasks
+                    .get(&second_task.task_id)
+                    .unwrap()
+                    .lease
+                    .clone()
+                    .expect("second lease should exist"),
+            ]
+        };
+
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let err = svc
+            .heartbeat(Request::new(HeartbeatRequest {
+                agent_id: agent_id.clone(),
+                active_leases: vec![
+                    ActiveLease {
+                        task_id: first_task.task_id.clone(),
+                        lease_epoch: first_task.lease_epoch,
+                    },
+                    ActiveLease {
+                        task_id: second_task.task_id.clone(),
+                        lease_epoch: second_task.lease_epoch,
+                    },
+                ],
+                active_tasks: 2,
+                cpu_usage: 0.0,
+                memory_used_bytes: 0,
+            }))
+            .await
+            .expect_err("heartbeat should fail when one renewed lease cannot persist");
+        assert_eq!(err.code(), tonic::Code::Internal);
+
+        let tasks = state.tasks.read().await;
+        let first_after = tasks
+            .get(&first_task.task_id)
+            .unwrap()
+            .lease
+            .clone()
+            .expect("first lease should still exist");
+        let second_after = tasks
+            .get(&second_task.task_id)
+            .unwrap()
+            .lease
+            .clone()
+            .expect("second lease should still exist");
+        drop(tasks);
+
+        assert_eq!(first_after.epoch, before[0].epoch);
+        assert_eq!(first_after.expires_at, before[0].expires_at);
+        assert_eq!(second_after.epoch, before[1].epoch);
+        assert_eq!(second_after.expires_at, before[1].expires_at);
+
+        let first_persisted = store
+            .persisted_task(
+                &state
+                    .tasks
+                    .read()
+                    .await
+                    .find_by_run_id(&first_run_id)
+                    .unwrap()
+                    .task_id,
+            )
+            .expect("first durable task should exist");
+        let second_persisted = store
+            .persisted_task(
+                &state
+                    .tasks
+                    .read()
+                    .await
+                    .find_by_run_id(&second_run_id)
+                    .unwrap()
+                    .task_id,
+            )
+            .expect("second durable task should exist");
+        assert_eq!(first_persisted.lease.unwrap().epoch, before[0].epoch);
+        assert_eq!(second_persisted.lease.unwrap().epoch, before[1].epoch);
     }
 
     #[tokio::test]
