@@ -2,6 +2,10 @@
 
 use std::time::Duration;
 
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use tokio::sync::Barrier;
 use tonic::{Request, Response, Status};
 
 use crate::proto::rapidbyte::v1::{
@@ -20,12 +24,26 @@ const LEASE_TTL: Duration = Duration::from_secs(300);
 
 pub struct AgentServiceImpl {
     state: ControllerState,
+    #[cfg(test)]
+    poll_barrier: Option<Arc<Barrier>>,
 }
 
 impl AgentServiceImpl {
     #[must_use]
     pub fn new(state: ControllerState) -> Self {
-        Self { state }
+        Self {
+            state,
+            #[cfg(test)]
+            poll_barrier: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_poll_barrier(state: ControllerState, poll_barrier: Arc<Barrier>) -> Self {
+        Self {
+            state,
+            poll_barrier: Some(poll_barrier),
+        }
     }
 
     async fn rollback_assignment(
@@ -96,9 +114,15 @@ impl AgentServiceImpl {
     async fn try_claim_task(
         &self,
         agent_id: &str,
+        max_tasks: u32,
     ) -> Result<Option<crate::scheduler::TaskAssignment>, Status> {
         let claimed = {
             let mut tasks = self.state.tasks.write().await;
+            if tasks.active_tasks_for_agent(agent_id)
+                >= usize::try_from(max_tasks).unwrap_or(usize::MAX)
+            {
+                return Ok(None);
+            }
             let Some(previous_task) = tasks.peek_pending().cloned() else {
                 return Ok(None);
             };
@@ -379,7 +403,11 @@ impl AgentService for AgentServiceImpl {
                 }));
             }
         }
-        if let Some(assignment) = self.try_claim_task(&req.agent_id).await? {
+        #[cfg(test)]
+        if let Some(poll_barrier) = &self.poll_barrier {
+            poll_barrier.wait().await;
+        }
+        if let Some(assignment) = self.try_claim_task(&req.agent_id, max_tasks).await? {
             return Ok(Response::new(make_task_response(assignment)));
         }
 
@@ -406,7 +434,7 @@ impl AgentService for AgentServiceImpl {
             }));
         }
         drop(tasks);
-        if let Some(assignment) = self.try_claim_task(&req.agent_id).await? {
+        if let Some(assignment) = self.try_claim_task(&req.agent_id, max_tasks).await? {
             return Ok(Response::new(make_task_response(assignment)));
         }
 
@@ -1355,6 +1383,69 @@ mod tests {
             }
             _ => panic!("Expected second agent to receive queued task"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_poll_task_concurrent_polls_respect_agent_capacity() {
+        let state = test_state();
+        let poll_barrier = Arc::new(Barrier::new(2));
+        let svc_a = AgentServiceImpl::with_poll_barrier(state.clone(), poll_barrier.clone());
+        let svc_b = AgentServiceImpl::with_poll_barrier(state.clone(), poll_barrier);
+        let register_svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = register_svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        submit_pipeline(&state).await;
+        submit_pipeline(&state).await;
+
+        let (first, second) = tokio::join!(
+            svc_a.poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            })),
+            svc_b.poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            })),
+        );
+
+        let first = first.unwrap().into_inner();
+        let second = second.unwrap().into_inner();
+        let assigned = usize::from(matches!(
+            first.result,
+            Some(poll_task_response::Result::Task(_))
+        )) + usize::from(matches!(
+            second.result,
+            Some(poll_task_response::Result::Task(_))
+        ));
+        let empty = usize::from(matches!(
+            first.result,
+            Some(poll_task_response::Result::NoTask(_))
+        )) + usize::from(matches!(
+            second.result,
+            Some(poll_task_response::Result::NoTask(_))
+        ));
+
+        assert_eq!(assigned, 1, "only one concurrent poll should claim a task");
+        assert_eq!(
+            empty, 1,
+            "the second concurrent poll should observe capacity"
+        );
+        assert_eq!(
+            state.tasks.read().await.active_tasks_for_agent(&agent_id),
+            1
+        );
     }
 
     #[tokio::test]
