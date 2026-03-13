@@ -278,6 +278,7 @@ fn run_state_to_db(state: RunState) -> &'static str {
     match state {
         RunState::Pending => "pending",
         RunState::Assigned => "assigned",
+        RunState::Reconciling => "reconciling",
         RunState::Running => "running",
         RunState::PreviewReady => "preview_ready",
         RunState::Completed => "completed",
@@ -292,6 +293,7 @@ fn run_state_from_db(state: &str) -> anyhow::Result<RunState> {
     match state {
         "pending" => Ok(RunState::Pending),
         "assigned" => Ok(RunState::Assigned),
+        "reconciling" => Ok(RunState::Reconciling),
         "running" => Ok(RunState::Running),
         "preview_ready" => Ok(RunState::PreviewReady),
         "completed" => Ok(RunState::Completed),

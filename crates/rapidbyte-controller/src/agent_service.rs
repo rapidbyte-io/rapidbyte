@@ -2028,6 +2028,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_report_progress_transitions_reconciling_run_to_running() {
+        let state = test_state();
+        let svc = AgentServiceImpl::new(state.clone());
+
+        let agent_id = svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .agent_id;
+
+        let run_id = submit_pipeline(&state).await;
+        let task = match svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_id.clone(),
+                wait_seconds: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .result
+        {
+            Some(poll_task_response::Result::Task(task)) => task,
+            _ => panic!("Expected task"),
+        };
+
+        {
+            let mut runs = state.runs.write().await;
+            let run = runs.get_run_mut(&run_id).unwrap();
+            run.state = InternalRunState::Reconciling;
+        }
+
+        svc.report_progress(Request::new(ReportProgressRequest {
+            agent_id,
+            task_id: task.task_id,
+            lease_epoch: task.lease_epoch,
+            progress: Some(ProgressUpdate {
+                stream: "users".into(),
+                phase: "running".into(),
+                records: 5,
+                bytes: 10,
+            }),
+        }))
+        .await
+        .unwrap();
+
+        assert_eq!(
+            state.runs.read().await.get_run(&run_id).unwrap().state,
+            InternalRunState::Running
+        );
+    }
+
+    #[tokio::test]
     async fn test_complete_task_from_cancelling_transitions_run_to_completed() {
         let state = test_state();
         let svc = AgentServiceImpl::new(state.clone());

@@ -10,6 +10,7 @@ use thiserror::Error;
 pub enum RunState {
     Pending,
     Assigned,
+    Reconciling,
     Running,
     PreviewReady,
     Completed,
@@ -173,7 +174,7 @@ impl RunStore {
         record.state = to;
         record.updated_at = now;
 
-        if to == RunState::Running && record.started_at.is_none() {
+        if matches!(to, RunState::Running | RunState::Reconciling) && record.started_at.is_none() {
             record.started_at = Some(now);
         }
 
@@ -198,7 +199,7 @@ impl RunStore {
     /// No-op if the run is already in Running or a later state.
     pub fn ensure_running(&mut self, run_id: &str) {
         if let Some(run) = self.runs.get(run_id) {
-            if run.state == RunState::Assigned {
+            if matches!(run.state, RunState::Assigned | RunState::Reconciling) {
                 let _ = self.transition(run_id, RunState::Running);
             }
         }
@@ -254,6 +255,15 @@ fn is_valid_transition(from: RunState, to: RunState) -> bool {
         (RunState::Pending, RunState::Assigned | RunState::Cancelled)
             | (
                 RunState::Assigned,
+                RunState::Reconciling
+                    | RunState::Running
+                    | RunState::Failed
+                    | RunState::Cancelled
+                    | RunState::TimedOut
+                    | RunState::Cancelling
+            )
+            | (
+                RunState::Reconciling,
                 RunState::Running
                     | RunState::Failed
                     | RunState::Cancelled
@@ -261,7 +271,7 @@ fn is_valid_transition(from: RunState, to: RunState) -> bool {
                     | RunState::Cancelling
             )
             | (
-                RunState::Running | RunState::PreviewReady,
+                RunState::Running | RunState::Reconciling | RunState::PreviewReady,
                 RunState::Completed
             )
             | (
@@ -321,6 +331,14 @@ mod tests {
     }
 
     #[test]
+    fn valid_transition_assigned_to_reconciling() {
+        let mut store = RunStore::new();
+        store.create_run("r1".into(), "pipe".into(), None);
+        store.transition("r1", RunState::Assigned).unwrap();
+        assert!(store.transition("r1", RunState::Reconciling).is_ok());
+    }
+
+    #[test]
     fn valid_transition_assigned_to_timed_out() {
         let mut store = RunStore::new();
         store.create_run("r1".into(), "pipe".into(), None);
@@ -334,6 +352,24 @@ mod tests {
         store.create_run("r1".into(), "pipe".into(), None);
         store.transition("r1", RunState::Assigned).unwrap();
         store.transition("r1", RunState::Running).unwrap();
+        assert!(store.transition("r1", RunState::Completed).is_ok());
+    }
+
+    #[test]
+    fn valid_transition_reconciling_to_running() {
+        let mut store = RunStore::new();
+        store.create_run("r1".into(), "pipe".into(), None);
+        store.transition("r1", RunState::Assigned).unwrap();
+        store.transition("r1", RunState::Reconciling).unwrap();
+        assert!(store.transition("r1", RunState::Running).is_ok());
+    }
+
+    #[test]
+    fn valid_transition_reconciling_to_completed() {
+        let mut store = RunStore::new();
+        store.create_run("r1".into(), "pipe".into(), None);
+        store.transition("r1", RunState::Assigned).unwrap();
+        store.transition("r1", RunState::Reconciling).unwrap();
         assert!(store.transition("r1", RunState::Completed).is_ok());
     }
 

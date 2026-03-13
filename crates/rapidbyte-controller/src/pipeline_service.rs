@@ -23,7 +23,9 @@ pub fn to_proto_state(s: InternalRunState) -> i32 {
     match s {
         InternalRunState::Pending => RunState::Pending.into(),
         InternalRunState::Assigned => RunState::Assigned.into(),
-        InternalRunState::Running | InternalRunState::Cancelling => RunState::Running.into(),
+        InternalRunState::Reconciling
+        | InternalRunState::Running
+        | InternalRunState::Cancelling => RunState::Running.into(),
         InternalRunState::PreviewReady => RunState::PreviewReady.into(),
         InternalRunState::Completed => RunState::Completed.into(),
         InternalRunState::Failed | InternalRunState::TimedOut => RunState::Failed.into(),
@@ -39,6 +41,7 @@ fn from_proto_states(v: i32) -> Option<Vec<InternalRunState>> {
         Ok(RunState::Pending) => Some(vec![InternalRunState::Pending]),
         Ok(RunState::Assigned) => Some(vec![InternalRunState::Assigned]),
         Ok(RunState::Running) => Some(vec![
+            InternalRunState::Reconciling,
             InternalRunState::Running,
             InternalRunState::Cancelling,
         ]),
@@ -151,7 +154,9 @@ impl PipelineServiceImpl {
         match snapshot_state {
             InternalRunState::Pending => self.cancel_queued_run(run_id, snapshot_state).await,
             InternalRunState::Assigned => self.cancel_assigned_run(run_id, snapshot_state).await,
-            InternalRunState::Running => self.cancel_running_run(run_id, snapshot_state).await,
+            InternalRunState::Reconciling | InternalRunState::Running => {
+                self.cancel_running_run(run_id, snapshot_state).await
+            }
             InternalRunState::Cancelling => Ok(CancelRunResponse {
                 accepted: true,
                 message: "Run is already being cancelled".into(),
@@ -898,6 +903,47 @@ mod tests {
         let task = tasks.get(&task_id).unwrap();
         assert_eq!(task.state, crate::scheduler::TaskState::Assigned);
         assert!(task.lease.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_cancel_reconciling_run_enters_cancelling() {
+        let state = test_state();
+        let svc = PipelineServiceImpl::new(state.clone());
+
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+        let run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        {
+            let mut runs = state.runs.write().await;
+            runs.transition(&run_id, InternalRunState::Assigned)
+                .unwrap();
+            runs.transition(&run_id, InternalRunState::Reconciling)
+                .unwrap();
+        }
+
+        let resp = svc
+            .cancel_run(Request::new(CancelRunRequest {
+                run_id: run_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(resp.accepted);
+        assert!(resp.message.contains("heartbeat"));
+        assert_eq!(
+            state.runs.read().await.get_run(&run_id).unwrap().state,
+            InternalRunState::Cancelling
+        );
     }
 
     #[tokio::test]
