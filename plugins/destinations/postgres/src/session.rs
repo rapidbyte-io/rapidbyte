@@ -247,16 +247,8 @@ impl<'a> WriteSession<'a> {
         self.stats.rows_since_commit += rows_written;
         self.stats.batches_written += 1;
 
-        let _ = self.ctx.metric(&Metric {
-            name: "records_written".to_string(),
-            value: MetricValue::Counter(self.stats.total_rows),
-            labels: vec![],
-        });
-        let _ = self.ctx.metric(&Metric {
-            name: "bytes_written".to_string(),
-            value: MetricValue::Counter(self.stats.total_bytes),
-            labels: vec![],
-        });
+        self.ctx.counter("records_written", self.stats.total_rows);
+        self.ctx.counter("bytes_written", self.stats.total_bytes);
 
         self.maybe_checkpoint().await?;
 

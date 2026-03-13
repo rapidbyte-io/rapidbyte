@@ -77,11 +77,7 @@ pub async fn write_stream(
             Ok(None) => break,
             Ok(Some(decoded)) => {
                 arrow_decode_secs += decoded.decode_secs;
-                let _ = ctx.metric(&Metric {
-                    name: "dest_arrow_decode_secs".to_string(),
-                    value: MetricValue::Gauge(decoded.decode_secs),
-                    labels: vec![],
-                });
+                ctx.histogram("dest_arrow_decode_secs", decoded.decode_secs);
 
                 if let Err(e) = session.process_batch(&decoded.schema, &decoded.batches).await {
                     loop_error = Some(e);

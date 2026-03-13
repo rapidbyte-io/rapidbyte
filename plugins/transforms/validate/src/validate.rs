@@ -311,29 +311,22 @@ fn evaluate_unique_rule(
     None
 }
 
-pub(crate) fn build_validation_metrics(evaluation: &BatchEvaluation) -> Vec<Metric> {
-    let mut metrics = Vec::new();
+pub(crate) fn emit_validation_metrics(ctx: &Context, evaluation: &BatchEvaluation) {
     for ((rule, field), count) in &evaluation.failure_counts {
-        metrics.push(Metric {
-            name: "validation_failures_total".to_string(),
-            value: MetricValue::Counter(*count),
-            labels: vec![
-                ("rule".to_string(), rule.clone()),
-                ("field".to_string(), field.clone()),
-            ],
-        });
+        ctx.counter_with_labels(
+            "validation_failures_total",
+            *count,
+            &[("rule", rule.as_str()), ("field", field.as_str())],
+        );
     }
-    metrics.push(Metric {
-        name: "validation_rows_valid_total".to_string(),
-        value: MetricValue::Counter(evaluation.valid_indices.len() as u64),
-        labels: Vec::new(),
-    });
-    metrics.push(Metric {
-        name: "validation_rows_invalid_total".to_string(),
-        value: MetricValue::Counter(evaluation.invalid_rows.len() as u64),
-        labels: Vec::new(),
-    });
-    metrics
+    ctx.counter(
+        "validation_rows_valid_total",
+        evaluation.valid_indices.len() as u64,
+    );
+    ctx.counter(
+        "validation_rows_invalid_total",
+        evaluation.invalid_rows.len() as u64,
+    );
 }
 
 fn string_value<'a>(array: &'a dyn Array, row: usize) -> Option<&'a str> {
@@ -669,23 +662,10 @@ mod tests {
                 .get(&("unique".to_string(), "id".to_string())),
             Some(&3)
         );
-
-        let metrics = build_validation_metrics(&evaluation);
-        let unique_failure = metrics
-            .iter()
-            .find(|m| {
-                m.name == "validation_failures_total"
-                    && m
-                        .labels
-                        .contains(&("rule".to_string(), "unique".to_string()))
-                    && m.labels.contains(&("field".to_string(), "id".to_string()))
-            })
-            .expect("unique failure metric should exist");
-        assert_eq!(unique_failure.value, MetricValue::Counter(3));
     }
 
     #[test]
-    fn build_validation_metrics_includes_rule_and_field_labels() {
+    fn validation_failure_counts_include_rule_and_field_keys() {
         let evaluation = BatchEvaluation {
             valid_indices: vec![0, 2],
             invalid_rows: vec![InvalidRow {
@@ -695,18 +675,14 @@ mod tests {
             failure_counts: BTreeMap::from([(("regex".to_string(), "email".to_string()), 3)]),
         };
 
-        let metrics = build_validation_metrics(&evaluation);
-        let failure = metrics
-            .iter()
-            .find(|m| m.name == "validation_failures_total")
-            .expect("failure metric should exist");
         assert_eq!(
-            failure.labels,
-            vec![
-                ("rule".to_string(), "regex".to_string()),
-                ("field".to_string(), "email".to_string())
-            ]
+            evaluation
+                .failure_counts
+                .get(&("regex".to_string(), "email".to_string())),
+            Some(&3)
         );
+        assert_eq!(evaluation.valid_indices.len(), 2);
+        assert_eq!(evaluation.invalid_rows.len(), 1);
     }
 
     #[test]

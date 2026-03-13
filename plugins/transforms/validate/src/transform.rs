@@ -9,7 +9,7 @@ use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::stream::DataErrorPolicy;
 
 use crate::config::CompiledConfig;
-use crate::validate::{build_validation_metrics, evaluate_batch};
+use crate::validate::{emit_validation_metrics, evaluate_batch};
 
 /// Run the validation transform for a single stream.
 ///
@@ -37,7 +37,7 @@ pub async fn run(
             bytes_in += batch.get_array_memory_size() as u64;
 
             let evaluation = evaluate_batch(batch, config);
-            emit_validation_metrics(ctx, &evaluation)?;
+            emit_validation_metrics(ctx, &evaluation);
 
             if !evaluation.valid_indices.is_empty() {
                 let filtered = select_rows(batch, &evaluation.valid_indices)?;
@@ -97,16 +97,6 @@ pub async fn run(
         bytes_out,
         batches_processed,
     })
-}
-
-fn emit_validation_metrics(
-    ctx: &Context,
-    evaluation: &crate::validate::BatchEvaluation,
-) -> Result<(), PluginError> {
-    for metric in build_validation_metrics(evaluation) {
-        ctx.metric(&metric)?;
-    }
-    Ok(())
 }
 
 fn select_rows(batch: &RecordBatch, indices: &[u32]) -> Result<RecordBatch, PluginError> {
