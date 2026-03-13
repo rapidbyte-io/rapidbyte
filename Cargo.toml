@@ -67,7 +67,7 @@ rustls = { version = "0.23", default-features = false, features = ["std", "tls12
 tokio-rustls = "0.26"
 rustls-native-certs = "0.8"
 opentelemetry = "0.28"
-opentelemetry_sdk = { version = "0.28", features = ["rt-tokio", "metrics", "spec_unstable_metrics_views"] }
+opentelemetry_sdk = { version = "0.28", features = ["rt-tokio", "metrics", "spec_unstable_metrics_views", "testing"] }
 opentelemetry-otlp = { version = "0.28", features = ["metrics", "grpc-tonic"] }
 opentelemetry-prometheus = "0.28"
 prometheus = "0.13"
