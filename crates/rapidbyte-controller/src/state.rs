@@ -189,6 +189,22 @@ impl ControllerState {
         metadata_store.mark_task_running(run, task).await
     }
 
+    /// Atomically persist a timeout transition for a run and optional task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the durable metadata transaction fails.
+    pub async fn persist_timeout_records(
+        &self,
+        run: &crate::run_state::RunRecord,
+        task: Option<&crate::scheduler::TaskRecord>,
+    ) -> anyhow::Result<()> {
+        let Some(metadata_store) = &self.metadata_store else {
+            return Ok(());
+        };
+        metadata_store.persist_timeout_transition(run, task).await
+    }
+
     /// Persist preview metadata when durable metadata storage is configured.
     ///
     /// # Errors

@@ -147,6 +147,11 @@ pub trait DurableMetadataStore: Send + Sync {
     async fn create_run_with_task(&self, run: &RunRecord, task: &TaskRecord) -> anyhow::Result<()>;
     async fn assign_task(&self, run: &RunRecord, task: &TaskRecord) -> anyhow::Result<()>;
     async fn mark_task_running(&self, run: &RunRecord, task: &TaskRecord) -> anyhow::Result<()>;
+    async fn persist_timeout_transition(
+        &self,
+        run: &RunRecord,
+        task: Option<&TaskRecord>,
+    ) -> anyhow::Result<()>;
     #[allow(clippy::too_many_arguments)]
     async fn upsert_preview(
         &self,
@@ -269,6 +274,7 @@ impl MetadataStore {
     ///
     /// Returns an error if the snapshot query or repair writes fail.
     pub async fn load_repaired_snapshot(&self) -> anyhow::Result<MetadataSnapshot> {
+        self.prune_expired_previews().await?;
         let snapshot = self.load_snapshot().await?;
         let (snapshot, repaired_runs) = crate::state::normalize_recovery_snapshot(snapshot);
         for run in &repaired_runs {
@@ -327,6 +333,26 @@ impl MetadataStore {
         Ok(())
     }
 
+    /// Atomically persist a timeout transition for a run and optional task.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database transaction fails.
+    pub async fn persist_timeout_transition(
+        &self,
+        run: &RunRecord,
+        task: Option<&TaskRecord>,
+    ) -> anyhow::Result<()> {
+        let mut client = self.client.lock().await;
+        let transaction = client.transaction().await?;
+        upsert_run_on(&transaction, run).await?;
+        if let Some(task) = task {
+            upsert_task_on(&transaction, task).await?;
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Upsert a durable run record.
     ///
     /// # Errors
@@ -345,6 +371,22 @@ impl MetadataStore {
     pub async fn upsert_task(&self, task: &TaskRecord) -> anyhow::Result<()> {
         let client = self.client.lock().await;
         upsert_task_on(&*client, task).await
+    }
+
+    /// Delete expired preview rows from durable metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database delete fails.
+    pub async fn prune_expired_previews(&self) -> anyhow::Result<u64> {
+        let client = self.client.lock().await;
+        let removed = client
+            .execute(
+                "DELETE FROM controller_previews WHERE expires_at <= NOW()",
+                &[],
+            )
+            .await?;
+        Ok(removed)
     }
 
     /// Upsert durable preview metadata.
@@ -486,6 +528,14 @@ impl DurableMetadataStore for MetadataStore {
 
     async fn mark_task_running(&self, run: &RunRecord, task: &TaskRecord) -> anyhow::Result<()> {
         Self::mark_task_running(self, run, task).await
+    }
+
+    async fn persist_timeout_transition(
+        &self,
+        run: &RunRecord,
+        task: Option<&TaskRecord>,
+    ) -> anyhow::Result<()> {
+        Self::persist_timeout_transition(self, run, task).await
     }
 
     async fn upsert_preview(
@@ -1302,6 +1352,129 @@ mod tests {
             .await
             .expect("schema cleanup should succeed");
     }
+
+    #[tokio::test]
+    #[ignore = "requires RAPIDBYTE_CONTROLLER_METADATA_TEST_DATABASE_URL"]
+    #[allow(clippy::too_many_lines)]
+    async fn metadata_store_repaired_snapshot_prunes_expired_previews() {
+        let admin_url = env::var("RAPIDBYTE_CONTROLLER_METADATA_TEST_DATABASE_URL")
+            .expect("test database URL env var must be set");
+        let (admin_client, admin_connection) = tokio_postgres::connect(&admin_url, NoTls)
+            .await
+            .expect("admin connection should succeed");
+        tokio::spawn(async move {
+            admin_connection
+                .await
+                .expect("admin connection task should stay healthy");
+        });
+
+        let schema = format!("controller_store_test_{}", uuid::Uuid::new_v4().simple());
+        admin_client
+            .batch_execute(&format!("CREATE SCHEMA \"{schema}\""))
+            .await
+            .expect("schema creation should succeed");
+
+        let scoped_url = format!("{admin_url} options='-c search_path={schema}'");
+        let store = MetadataStore::connect(&scoped_url)
+            .await
+            .expect("metadata store connect should succeed");
+
+        let now = SystemTime::now();
+        let run = RunRecord {
+            run_id: "run-expired-preview".into(),
+            pipeline_name: "pipe".into(),
+            state: RunState::PreviewReady,
+            created_at: now,
+            updated_at: now,
+            started_at: Some(now),
+            completed_at: None,
+            current_task: Some(CurrentTask {
+                task_id: "task-expired-preview".into(),
+                agent_id: "agent-1".into(),
+                attempt: 1,
+                lease_epoch: 4,
+                assigned_at: now,
+            }),
+            recovery_started_at: None,
+            error_code: None,
+            error_message: None,
+            error_retryable: None,
+            error_safe_to_retry: None,
+            error_commit_state: None,
+            attempt: 1,
+            idempotency_key: None,
+            total_records: 0,
+            total_bytes: 0,
+            elapsed_seconds: 0.0,
+            cursors_advanced: 0,
+        };
+        let task = TaskRecord {
+            task_id: "task-expired-preview".into(),
+            run_id: "run-expired-preview".into(),
+            attempt: 1,
+            lease: Some(Lease::new(4, Duration::from_secs(60))),
+            state: TaskState::Completed,
+            pipeline_yaml: b"pipeline: test".to_vec(),
+            dry_run: false,
+            limit: None,
+            assigned_agent_id: Some("agent-1".into()),
+        };
+        store
+            .upsert_run(&run)
+            .await
+            .expect("run upsert should succeed");
+        store
+            .upsert_task(&task)
+            .await
+            .expect("task upsert should succeed");
+
+        let created_at = SystemTime::now()
+            .checked_sub(Duration::from_secs(120))
+            .expect("created_at should be in the past");
+        store
+            .upsert_preview(
+                "run-expired-preview",
+                "task-expired-preview",
+                "localhost:9091",
+                b"ticket",
+                &[],
+                created_at,
+                Duration::from_secs(60),
+            )
+            .await
+            .expect("expired preview insert should succeed");
+
+        let count_before: i64 = admin_client
+            .query_one(
+                &format!("SELECT COUNT(*) FROM \"{schema}\".controller_previews"),
+                &[],
+            )
+            .await
+            .expect("count query should succeed")
+            .get(0);
+        assert_eq!(count_before, 1);
+
+        let snapshot = store
+            .load_repaired_snapshot()
+            .await
+            .expect("repaired snapshot should succeed");
+        assert!(snapshot.previews.is_empty());
+
+        let count_after: i64 = admin_client
+            .query_one(
+                &format!("SELECT COUNT(*) FROM \"{schema}\".controller_previews"),
+                &[],
+            )
+            .await
+            .expect("count query should succeed")
+            .get(0);
+        assert_eq!(count_after, 0);
+
+        admin_client
+            .batch_execute(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
+            .await
+            .expect("schema cleanup should succeed");
+    }
 }
 
 #[cfg(test)]
@@ -1499,6 +1672,43 @@ pub mod test_support {
             task: &TaskRecord,
         ) -> anyhow::Result<()> {
             self.create_run_with_task(run, task).await
+        }
+
+        async fn persist_timeout_transition(
+            &self,
+            run: &RunRecord,
+            task: Option<&TaskRecord>,
+        ) -> anyhow::Result<()> {
+            let previous_run = self.persisted_run(&run.run_id);
+            let previous_task = task.and_then(|task| self.persisted_task(&task.task_id));
+            self.upsert_run(run).await?;
+            if let Some(task) = task {
+                if let Err(error) = self.upsert_task(task).await {
+                    let mut failures = self.failures.lock().unwrap();
+                    match previous_run {
+                        Some(previous_run) => {
+                            failures
+                                .persisted_runs
+                                .insert(run.run_id.clone(), previous_run);
+                        }
+                        None => {
+                            failures.persisted_runs.remove(&run.run_id);
+                        }
+                    }
+                    match previous_task {
+                        Some(previous_task) => {
+                            failures
+                                .persisted_tasks
+                                .insert(task.task_id.clone(), previous_task);
+                        }
+                        None => {
+                            failures.persisted_tasks.remove(&task.task_id);
+                        }
+                    }
+                    return Err(error);
+                }
+            }
+            Ok(())
         }
 
         async fn upsert_preview(
