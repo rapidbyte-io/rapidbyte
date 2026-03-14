@@ -97,7 +97,9 @@ fn validate_manifest_compatibility(
     let host_protocol = ProtocolVersion::current();
     if manifest.protocol_version != host_protocol {
         anyhow::bail!(
-            "Plugin '{plugin_ref}' protocol version mismatch: manifest={:?}, host={:?}",
+            "Plugin '{plugin_ref}' protocol version mismatch: manifest={:?}, host={:?}. \
+             Protocol V5 plugins are intentionally rejected because the host import ABI changed; \
+             rebuild the plugin against rapidbyte:plugin@6.0.0.",
             manifest.protocol_version,
             host_protocol
         );
@@ -299,7 +301,17 @@ mod tests {
     }
 
     #[test]
-    fn validate_manifest_compatibility_rejects_legacy_protocol_versions() {
+    fn validate_manifest_compatibility_accepts_current_protocol_version() {
+        validate_manifest_compatibility(
+            &test_source_manifest(ProtocolVersion::V6),
+            "test-plugin",
+            PluginKind::Source,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_manifest_compatibility_rejects_v5_with_migration_guidance() {
         let err = validate_manifest_compatibility(
             &test_source_manifest(ProtocolVersion::V5),
             "test-plugin",
@@ -311,5 +323,6 @@ mod tests {
         assert!(message.contains("protocol version mismatch"));
         assert!(message.contains("manifest=V5"));
         assert!(message.contains("host=V6"));
+        assert!(message.contains("rebuild the plugin against rapidbyte:plugin@6.0.0"));
     }
 }

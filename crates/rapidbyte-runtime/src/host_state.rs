@@ -140,7 +140,21 @@ impl HostTimings {
     }
 
     pub fn record_plugin_duration(&self, name: &str, value_secs: f64) {
-        self.update_raw_snapshot(|snapshot| snapshot.record_plugin_duration(name, value_secs));
+        let stream = self
+            .labels
+            .iter()
+            .find(|label| label.key.as_str() == rapidbyte_metrics::labels::STREAM)
+            .map(|label| label.value.as_str().into_owned())
+            .unwrap_or_default();
+        let shard = self
+            .labels
+            .iter()
+            .find(|label| label.key.as_str() == rapidbyte_metrics::labels::SHARD)
+            .and_then(|label| label.value.as_str().parse::<usize>().ok())
+            .unwrap_or_default();
+        self.update_raw_snapshot(|snapshot| {
+            snapshot.record_plugin_duration_for_series(name, &stream, shard, value_secs);
+        });
     }
 }
 

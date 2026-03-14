@@ -1,5 +1,6 @@
 //! [`InMemoryMetricExporter`] wrapper and `PipelineResult` bridge.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use opentelemetry_sdk::metrics::data::Aggregation;
@@ -37,6 +38,7 @@ pub struct PipelineMetricsSnapshot {
     pub next_batch_process_nanos: u64,
     pub decompress_nanos: u64,
     pub next_batch_count: u64,
+    plugin_timing_series_totals: HashMap<(String, String, usize), f64>,
 }
 
 impl PipelineMetricsSnapshot {
@@ -77,15 +79,37 @@ impl PipelineMetricsSnapshot {
     }
 
     pub fn record_plugin_duration(&mut self, name: &str, value_secs: f64) {
+        self.record_plugin_duration_for_series(name, "", 0, value_secs);
+    }
+
+    pub fn record_plugin_duration_for_series(
+        &mut self,
+        name: &str,
+        stream: &str,
+        shard: usize,
+        value_secs: f64,
+    ) {
+        let total = {
+            let entry = self
+                .plugin_timing_series_totals
+                .entry((name.to_owned(), stream.to_owned(), shard))
+                .or_default();
+            *entry += value_secs;
+            *entry
+        };
         match name {
-            "source_connect_secs" => self.source_connect_secs += value_secs,
-            "source_query_secs" => self.source_query_secs += value_secs,
-            "source_fetch_secs" => self.source_fetch_secs += value_secs,
-            "source_arrow_encode_secs" => self.source_encode_secs += value_secs,
-            "dest_connect_secs" => self.dest_connect_secs += value_secs,
-            "dest_flush_secs" => self.dest_flush_secs += value_secs,
-            "dest_commit_secs" => self.dest_commit_secs += value_secs,
-            "dest_decode_secs" | "dest_arrow_decode_secs" => self.dest_decode_secs += value_secs,
+            "source_connect_secs" => self.source_connect_secs = self.source_connect_secs.max(total),
+            "source_query_secs" => self.source_query_secs = self.source_query_secs.max(total),
+            "source_fetch_secs" => self.source_fetch_secs = self.source_fetch_secs.max(total),
+            "source_arrow_encode_secs" => {
+                self.source_encode_secs = self.source_encode_secs.max(total);
+            }
+            "dest_connect_secs" => self.dest_connect_secs = self.dest_connect_secs.max(total),
+            "dest_flush_secs" => self.dest_flush_secs = self.dest_flush_secs.max(total),
+            "dest_commit_secs" => self.dest_commit_secs = self.dest_commit_secs.max(total),
+            "dest_decode_secs" | "dest_arrow_decode_secs" => {
+                self.dest_decode_secs = self.dest_decode_secs.max(total);
+            }
             _ => {}
         }
     }
@@ -249,22 +273,45 @@ fn extract_metric_value(
             .filter(|dp| matches_metric_scope(&dp.attributes, pipeline, run));
         let mut total_sum: f64 = 0.0;
         let mut total_count: u64 = 0;
+        let mut max_value: f64 = 0.0;
+        let mut saw_datapoint = false;
         for dp in filtered {
             total_sum += dp.sum;
             total_count += dp.count;
+            max_value = max_value.max(dp.max.unwrap_or(dp.sum));
+            saw_datapoint = true;
+        }
+
+        if !saw_datapoint {
+            return;
         }
 
         match name {
-            // Plugin source timings (seconds)
-            "plugin.source_connect_duration" => snap.source_connect_secs += total_sum,
-            "plugin.source_query_duration" => snap.source_query_secs += total_sum,
-            "plugin.source_fetch_duration" => snap.source_fetch_secs += total_sum,
-            "plugin.source_encode_duration" => snap.source_encode_secs += total_sum,
-            // Plugin dest timings (seconds)
-            "plugin.dest_connect_duration" => snap.dest_connect_secs += total_sum,
-            "plugin.dest_flush_duration" => snap.dest_flush_secs += total_sum,
-            "plugin.dest_commit_duration" => snap.dest_commit_secs += total_sum,
-            "plugin.dest_decode_duration" => snap.dest_decode_secs += total_sum,
+            // Plugin source/dest timings are reported as critical-path durations.
+            "plugin.source_connect_duration" => {
+                snap.source_connect_secs = snap.source_connect_secs.max(max_value);
+            }
+            "plugin.source_query_duration" => {
+                snap.source_query_secs = snap.source_query_secs.max(max_value);
+            }
+            "plugin.source_fetch_duration" => {
+                snap.source_fetch_secs = snap.source_fetch_secs.max(max_value);
+            }
+            "plugin.source_encode_duration" => {
+                snap.source_encode_secs = snap.source_encode_secs.max(max_value);
+            }
+            "plugin.dest_connect_duration" => {
+                snap.dest_connect_secs = snap.dest_connect_secs.max(max_value);
+            }
+            "plugin.dest_flush_duration" => {
+                snap.dest_flush_secs = snap.dest_flush_secs.max(max_value);
+            }
+            "plugin.dest_commit_duration" => {
+                snap.dest_commit_secs = snap.dest_commit_secs.max(max_value);
+            }
+            "plugin.dest_decode_duration" => {
+                snap.dest_decode_secs = snap.dest_decode_secs.max(max_value);
+            }
             // Host timings (seconds → nanos)
             "host.emit_batch_duration" => {
                 snap.emit_batch_nanos = snap
@@ -296,7 +343,9 @@ fn extract_metric_value(
                     .decompress_nanos
                     .saturating_add((total_sum * 1e9) as u64);
             }
-            "pipeline.duration" => snap.pipeline_duration_secs += total_sum,
+            "pipeline.duration" => {
+                snap.pipeline_duration_secs = snap.pipeline_duration_secs.max(max_value);
+            }
             _ => {}
         }
     }
@@ -347,29 +396,34 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_extracts_histogram_values() {
+    fn snapshot_uses_critical_path_max_for_plugin_histograms() {
         let (provider, reader) = test_provider();
         let meter = provider.meter("test");
 
         let hist = meter
             .f64_histogram("plugin.source_connect_duration")
             .build();
-        let labels = [KeyValue::new(crate::labels::PIPELINE, "my-pipe")];
+        let labels = [
+            KeyValue::new(crate::labels::PIPELINE, "my-pipe"),
+            KeyValue::new(crate::labels::RUN, "run-1"),
+            KeyValue::new(crate::labels::STREAM, "users"),
+        ];
 
         hist.record(0.5, &labels);
         hist.record(1.5, &labels);
 
-        let snap = reader.flush_and_snapshot(&provider, "my-pipe");
-        assert!((snap.source_connect_secs - 2.0).abs() < 0.001);
+        let snap = reader.flush_and_snapshot_for_run(&provider, "my-pipe", Some("run-1"));
+        assert!((snap.source_connect_secs - 1.5).abs() < 0.001);
     }
 
     #[test]
-    fn snapshot_accumulates_counters_and_histograms_across_multiple_flushes() {
+    fn snapshot_accumulates_counters_and_uses_histogram_max_across_multiple_flushes() {
         let (provider, reader) = test_provider();
         let meter = provider.meter("test");
         let labels = [
             KeyValue::new(crate::labels::PIPELINE, "my-pipe"),
             KeyValue::new(crate::labels::RUN, "run-1"),
+            KeyValue::new(crate::labels::STREAM, "users"),
         ];
 
         let records_read = meter.u64_counter("pipeline.records_read").build();
@@ -387,7 +441,18 @@ mod tests {
 
         let snap = reader.snapshot_pipeline_result_for_run("my-pipe", Some("run-1"));
         assert_eq!(snap.records_read, 150);
-        assert!((snap.source_connect_secs - 2.0).abs() < 0.001);
+        assert!((snap.source_connect_secs - 1.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn raw_snapshot_uses_critical_path_max_across_parallel_shards() {
+        let mut snapshot = PipelineMetricsSnapshot::default();
+
+        snapshot.record_plugin_duration_for_series("source_connect_secs", "users", 0, 1.0);
+        snapshot.record_plugin_duration_for_series("source_connect_secs", "users", 1, 1.0);
+        snapshot.record_plugin_duration_for_series("source_connect_secs", "users", 0, 0.25);
+
+        assert!((snapshot.source_connect_secs - 1.25).abs() < 0.001);
     }
 
     #[test]
