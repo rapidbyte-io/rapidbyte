@@ -72,17 +72,7 @@ pub fn load_and_validate_manifest(
     let manifest = rapidbyte_runtime::load_plugin_manifest(wasm_path)?;
 
     if let Some(ref m) = manifest {
-        if !m.supports_kind(expected_kind) {
-            anyhow::bail!("Plugin '{plugin_ref}' does not support {expected_kind:?} kind");
-        }
-
-        if m.protocol_version != ProtocolVersion::V5 {
-            anyhow::bail!(
-                "Plugin '{plugin_ref}' protocol version mismatch: manifest={:?}, host={:?}",
-                m.protocol_version,
-                ProtocolVersion::V5
-            );
-        }
+        validate_manifest_compatibility(m, plugin_ref, expected_kind)?;
 
         tracing::info!(plugin = m.id, version = m.version, "Loaded plugin manifest");
     } else {
@@ -93,6 +83,29 @@ pub fn load_and_validate_manifest(
     }
 
     Ok(manifest)
+}
+
+fn validate_manifest_compatibility(
+    manifest: &PluginManifest,
+    plugin_ref: &str,
+    expected_kind: PluginKind,
+) -> Result<()> {
+    if !manifest.supports_kind(expected_kind) {
+        anyhow::bail!("Plugin '{plugin_ref}' does not support {expected_kind:?} kind");
+    }
+
+    let host_protocol = ProtocolVersion::current();
+    if manifest.protocol_version != host_protocol {
+        anyhow::bail!(
+            "Plugin '{plugin_ref}' protocol version mismatch: manifest={:?}, host={:?}. \
+             Protocol V5 plugins are intentionally rejected because the host import ABI changed; \
+             rebuild the plugin against rapidbyte:plugin@6.0.0.",
+            manifest.protocol_version,
+            host_protocol
+        );
+    }
+
+    Ok(())
 }
 
 /// Validate plugin configuration against the JSON Schema declared in its manifest.
@@ -219,8 +232,34 @@ pub fn build_sandbox_overrides(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rapidbyte_types::manifest::{
+        Permissions, PluginManifest, ResourceLimits, Roles, SourceCapabilities,
+    };
     use rapidbyte_types::state::{PipelineId, StreamName};
+    use rapidbyte_types::wire::SyncMode;
     use tempfile::tempdir;
+
+    fn test_source_manifest(protocol_version: ProtocolVersion) -> PluginManifest {
+        PluginManifest {
+            id: "rapidbyte/source-test".into(),
+            name: "Test Source".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            author: None,
+            license: None,
+            protocol_version,
+            permissions: Permissions::default(),
+            limits: ResourceLimits::default(),
+            roles: Roles {
+                source: Some(SourceCapabilities {
+                    supported_sync_modes: vec![SyncMode::FullRefresh],
+                    features: vec![],
+                }),
+                ..Roles::default()
+            },
+            config_schema: None,
+        }
+    }
 
     #[test]
     fn test_create_state_backend_custom_path() {
@@ -259,5 +298,31 @@ mod tests {
             .start_run(&PipelineId::new("test"), &StreamName::new("all"))
             .unwrap();
         assert!(run_id > 0);
+    }
+
+    #[test]
+    fn validate_manifest_compatibility_accepts_current_protocol_version() {
+        validate_manifest_compatibility(
+            &test_source_manifest(ProtocolVersion::V6),
+            "test-plugin",
+            PluginKind::Source,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_manifest_compatibility_rejects_v5_with_migration_guidance() {
+        let err = validate_manifest_compatibility(
+            &test_source_manifest(ProtocolVersion::V5),
+            "test-plugin",
+            PluginKind::Source,
+        )
+        .unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("protocol version mismatch"));
+        assert!(message.contains("manifest=V5"));
+        assert!(message.contains("host=V6"));
+        assert!(message.contains("rebuild the plugin against rapidbyte:plugin@6.0.0"));
     }
 }

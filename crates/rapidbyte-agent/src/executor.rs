@@ -15,6 +15,12 @@ use tokio_util::sync::CancellationToken;
 type PipelineRunFuture<'a> =
     Pin<Box<dyn Future<Output = Result<PipelineOutcome, PipelineError>> + Send + 'a>>;
 
+#[derive(Clone, Copy)]
+struct MetricsRuntime<'a> {
+    snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
+    meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
+}
+
 /// Result of executing a task on the agent.
 pub struct TaskExecutionResult {
     pub outcome: TaskOutcomeKind,
@@ -64,29 +70,35 @@ fn is_pre_commit_cancellation(error: &PipelineError) -> bool {
     }
 }
 
-/// Execute a pipeline task.
-///
-/// Parses the YAML, runs the pipeline, and returns structured results.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_task(
     pipeline_yaml: &[u8],
     dry_run: bool,
     limit: Option<u64>,
     progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
     cancel_token: CancellationToken,
+    snapshot_reader: &rapidbyte_metrics::snapshot::SnapshotReader,
+    meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
 ) -> TaskExecutionResult {
+    let metrics_runtime = MetricsRuntime {
+        snapshot_reader,
+        meter_provider,
+    };
     execute_task_with_runner(
         pipeline_yaml,
         dry_run,
         limit,
         progress_tx,
         cancel_token,
-        |config, options, progress_tx, cancel_token| {
+        metrics_runtime,
+        |config, options, progress_tx, cancel_token, metrics_runtime| {
             Box::pin(orchestrator::run_pipeline(
                 config,
                 options,
                 progress_tx,
                 cancel_token,
+                metrics_runtime.snapshot_reader,
+                metrics_runtime.meter_provider,
             ))
         },
     )
@@ -100,6 +112,7 @@ async fn execute_task_with_runner<R>(
     limit: Option<u64>,
     progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
     cancel_token: CancellationToken,
+    metrics_runtime: MetricsRuntime<'_>,
     run_pipeline: R,
 ) -> TaskExecutionResult
 where
@@ -108,6 +121,7 @@ where
         &'a ExecutionOptions,
         Option<mpsc::UnboundedSender<ProgressEvent>>,
         CancellationToken,
+        MetricsRuntime<'a>,
     ) -> PipelineRunFuture<'a>,
 {
     // Check for early cancellation before doing any work
@@ -187,7 +201,14 @@ where
         };
     }
 
-    let pipeline_result = run_pipeline(&config, &options, progress_tx, cancel_token.clone()).await;
+    let pipeline_result = run_pipeline(
+        &config,
+        &options,
+        progress_tx,
+        cancel_token.clone(),
+        metrics_runtime,
+    )
+    .await;
 
     match pipeline_result {
         Ok(outcome) => {
@@ -275,9 +296,18 @@ mod tests {
     use rapidbyte_engine::execution::PipelineOutcome;
     use rapidbyte_engine::result::{DestTiming, PipelineCounts, PipelineResult, SourceTiming};
     use rapidbyte_engine::PipelineError;
+    use rapidbyte_metrics::snapshot::SnapshotReader;
     use rapidbyte_types::error::{CommitState, PluginError};
     use std::sync::Arc;
     use tokio::sync::Notify;
+
+    fn test_metrics_runtime() -> (SnapshotReader, opentelemetry_sdk::metrics::SdkMeterProvider) {
+        let reader = SnapshotReader::new();
+        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+            .with_reader(reader.build_reader())
+            .build();
+        (reader, provider)
+    }
 
     fn valid_yaml() -> &'static [u8] {
         br#"
@@ -320,7 +350,17 @@ destination:
 
     #[tokio::test]
     async fn test_invalid_utf8_returns_failed() {
-        let result = execute_task(&[0xFF, 0xFE], false, None, None, CancellationToken::new()).await;
+        let (reader, provider) = test_metrics_runtime();
+        let result = execute_task(
+            &[0xFF, 0xFE],
+            false,
+            None,
+            None,
+            CancellationToken::new(),
+            &reader,
+            &provider,
+        )
+        .await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Failed(_)));
         if let TaskOutcomeKind::Failed(info) = &result.outcome {
             assert_eq!(info.code, "INVALID_YAML");
@@ -330,12 +370,15 @@ destination:
 
     #[tokio::test]
     async fn test_invalid_yaml_returns_failed() {
+        let (reader, provider) = test_metrics_runtime();
         let result = execute_task(
             b"not: [valid: yaml",
             false,
             None,
             None,
             CancellationToken::new(),
+            &reader,
+            &provider,
         )
         .await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Failed(_)));
@@ -346,7 +389,17 @@ destination:
 
     #[tokio::test]
     async fn test_zero_metrics_on_early_failure() {
-        let result = execute_task(&[0xFF], false, None, None, CancellationToken::new()).await;
+        let (reader, provider) = test_metrics_runtime();
+        let result = execute_task(
+            &[0xFF],
+            false,
+            None,
+            None,
+            CancellationToken::new(),
+            &reader,
+            &provider,
+        )
+        .await;
         assert_eq!(result.metrics.records_processed, 0);
         assert_eq!(result.metrics.bytes_processed, 0);
         assert!(result.metrics.elapsed_seconds.abs() < f64::EPSILON);
@@ -354,9 +407,19 @@ destination:
 
     #[tokio::test]
     async fn test_pre_cancelled_token_returns_cancelled() {
+        let (reader, provider) = test_metrics_runtime();
         let token = CancellationToken::new();
         token.cancel();
-        let result = execute_task(b"pipeline: test\n", false, None, None, token).await;
+        let result = execute_task(
+            b"pipeline: test\n",
+            false,
+            None,
+            None,
+            token,
+            &reader,
+            &provider,
+        )
+        .await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Cancelled));
     }
 
@@ -371,13 +434,18 @@ destination:
             let started = started.clone();
             let release = release.clone();
             tokio::spawn(async move {
+                let (reader, provider) = test_metrics_runtime();
                 execute_task_with_runner(
                     valid_yaml(),
                     false,
                     None,
                     None,
                     token,
-                    move |_, _, _, _cancel_token| {
+                    MetricsRuntime {
+                        snapshot_reader: &reader,
+                        meter_provider: &provider,
+                    },
+                    move |_, _, _, _cancel_token, _metrics_runtime| {
                         let started = started.clone();
                         let release = release.clone();
                         Box::pin(async move {
@@ -410,13 +478,22 @@ destination:
             let token = token.clone();
             let started = started.clone();
             tokio::spawn(async move {
+                let (reader, provider) = test_metrics_runtime();
                 execute_task_with_runner(
                     valid_yaml(),
                     false,
                     None,
                     None,
                     token,
-                    move |_, _, _, cancel_token| {
+                    MetricsRuntime {
+                        snapshot_reader: &reader,
+                        meter_provider: &provider,
+                    },
+                    move |_,
+                          _,
+                          _,
+                          cancel_token: CancellationToken,
+                          _metrics_runtime: MetricsRuntime<'_>| {
                         let started = started.clone();
                         Box::pin(async move {
                             let mut cancelled = PluginError::internal(
@@ -457,13 +534,18 @@ destination:
             let started_destination = started_destination.clone();
             let release = release.clone();
             tokio::spawn(async move {
+                let (reader, provider) = test_metrics_runtime();
                 execute_task_with_runner(
                     valid_yaml(),
                     false,
                     None,
                     None,
                     token,
-                    move |_, _, _, _cancel_token| {
+                    MetricsRuntime {
+                        snapshot_reader: &reader,
+                        meter_provider: &provider,
+                    },
+                    move |_, _, _, _cancel_token, _metrics_runtime| {
                         let started_destination = started_destination.clone();
                         let release = release.clone();
                         Box::pin(async move {
@@ -496,5 +578,35 @@ destination:
             }
             _ => panic!("expected real post-commit failure outcome"),
         }
+    }
+
+    #[tokio::test]
+    async fn execute_task_forwards_snapshot_provider_to_runner() {
+        let snapshot_reader = SnapshotReader::new();
+        let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+            .with_reader(snapshot_reader.build_reader())
+            .build();
+
+        let result = execute_task_with_runner(
+            valid_yaml(),
+            false,
+            None,
+            None,
+            CancellationToken::new(),
+            MetricsRuntime {
+                snapshot_reader: &snapshot_reader,
+                meter_provider: &meter_provider,
+            },
+            |_config,
+             _options,
+             _progress_tx,
+             _cancel_token: CancellationToken,
+             _metrics_runtime: MetricsRuntime<'_>| {
+                Box::pin(async move { Ok(completed_outcome()) })
+            },
+        )
+        .await;
+
+        assert!(matches!(result.outcome, TaskOutcomeKind::Completed));
     }
 }

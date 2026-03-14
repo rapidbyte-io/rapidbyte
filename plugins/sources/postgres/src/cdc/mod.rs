@@ -16,7 +16,7 @@ use tokio_postgres::Client;
 use rapidbyte_sdk::prelude::*;
 
 use crate::config::Config;
-use crate::metrics::{emit_read_metrics, EmitState, BATCH_SIZE};
+use crate::metrics::{emit_batch_counters, emit_source_timings, EmitState, BATCH_SIZE};
 
 use encode::{encode_cdc_batch, CdcRow, RelationInfo};
 use pgoutput::{CdcOp, PgOutputMessage, TupleData};
@@ -63,7 +63,7 @@ fn emit_batch(
 
     ctx.emit_batch(&batch)
         .map_err(|e| format!("emit_batch failed: {}", e.message))?;
-    emit_read_metrics(ctx, state.total_records, state.total_bytes);
+    emit_batch_counters(ctx, state);
 
     rows.clear();
     Ok(())
@@ -128,6 +128,8 @@ pub async fn read_cdc_changes(
         total_bytes: 0,
         batches_emitted: 0,
         arrow_encode_nanos: 0,
+        last_emitted_records: 0,
+        last_emitted_bytes: 0,
     };
     let mut max_lsn: Option<u64> = None;
 
@@ -286,18 +288,20 @@ pub async fn read_cdc_changes(
     #[allow(clippy::cast_precision_loss)]
     let arrow_encode_secs = state.arrow_encode_nanos as f64 / 1e9;
 
+    let perf = ReadPerf {
+        connect_secs,
+        query_secs,
+        fetch_secs,
+        arrow_encode_secs,
+    };
+    emit_source_timings(ctx, &perf);
+
     Ok(ReadSummary {
         records_read: state.total_records,
         bytes_read: state.total_bytes,
         batches_emitted: state.batches_emitted,
         checkpoint_count,
         records_skipped: 0,
-        perf: Some(ReadPerf {
-            connect_secs,
-            query_secs,
-            fetch_secs,
-            arrow_encode_secs,
-        }),
     })
 }
 

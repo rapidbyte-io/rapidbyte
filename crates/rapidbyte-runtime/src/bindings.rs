@@ -199,11 +199,34 @@ macro_rules! impl_host_trait_for_world {
                     .map_err($to_world_error)
             }
 
-            fn metric(
+            fn counter_add(
                 &mut self,
-                payload_json: String,
+                name: String,
+                value: u64,
+                labels_json: String,
             ) -> std::result::Result<(), $module::rapidbyte::plugin::types::PluginError> {
-                self.metric_impl(payload_json).map_err($to_world_error)
+                self.counter_add_impl(name, value, labels_json)
+                    .map_err($to_world_error)
+            }
+
+            fn gauge_set(
+                &mut self,
+                name: String,
+                value: f64,
+                labels_json: String,
+            ) -> std::result::Result<(), $module::rapidbyte::plugin::types::PluginError> {
+                self.gauge_set_impl(name, value, labels_json)
+                    .map_err($to_world_error)
+            }
+
+            fn histogram_record(
+                &mut self,
+                name: String,
+                value: f64,
+                labels_json: String,
+            ) -> std::result::Result<(), $module::rapidbyte::plugin::types::PluginError> {
+                self.histogram_record_impl(name, value, labels_json)
+                    .map_err($to_world_error)
             }
 
             fn emit_dlq_record(

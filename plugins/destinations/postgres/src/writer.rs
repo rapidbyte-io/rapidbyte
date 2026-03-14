@@ -7,7 +7,7 @@ use rapidbyte_sdk::prelude::*;
 use crate::contract::{
     async_prepare_stream_once, prepare_stream_once, schema_hint_has_shape, CheckpointConfig,
 };
-use crate::metrics::emit_write_perf_metrics;
+use crate::metrics::emit_dest_timings;
 use crate::session::{clamp_copy_flush_bytes, WriteSession};
 
 fn resolve_copy_flush_bytes(
@@ -77,11 +77,7 @@ pub async fn write_stream(
             Ok(None) => break,
             Ok(Some(decoded)) => {
                 arrow_decode_secs += decoded.decode_secs;
-                let _ = ctx.metric(&Metric {
-                    name: "dest_arrow_decode_secs".to_string(),
-                    value: MetricValue::Gauge(decoded.decode_secs),
-                    labels: vec![],
-                });
+                let _ = ctx.histogram("dest_arrow_decode_secs", decoded.decode_secs);
 
                 if let Err(e) = session.process_batch(&decoded.schema, &decoded.batches).await {
                     loop_error = Some(e);
@@ -112,7 +108,7 @@ pub async fn write_stream(
         commit_secs: result.commit_secs,
         arrow_decode_secs,
     };
-    emit_write_perf_metrics(ctx, &perf);
+    emit_dest_timings(ctx, &perf);
 
     Ok(WriteSummary {
         records_written: result.total_rows,
@@ -120,7 +116,6 @@ pub async fn write_stream(
         batches_written: result.batches_written,
         checkpoint_count: result.checkpoint_count,
         records_failed: 0,
-        perf: Some(perf),
     })
 }
 

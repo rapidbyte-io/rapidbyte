@@ -11,7 +11,6 @@ use arrow::record_batch::RecordBatch;
 use crate::checkpoint::{Checkpoint, StateScope};
 use crate::error::{ErrorCategory, PluginError};
 use crate::host_ffi;
-use crate::metric::Metric;
 
 /// Log severity levels used by [`Context::log`].
 #[repr(i32)]
@@ -107,9 +106,71 @@ impl Context {
         host_ffi::checkpoint(&self.plugin_id, &self.stream_name, cp)
     }
 
-    /// Emit a metric using the context's plugin ID and stream name.
-    pub fn metric(&self, m: &Metric) -> Result<(), PluginError> {
-        host_ffi::metric(&self.plugin_id, &self.stream_name, m)
+    /// Add to a counter metric.
+    pub fn counter(&self, name: &str, value: u64) -> Result<(), PluginError> {
+        self.counter_with_labels(name, value, &[])
+    }
+
+    /// Add to a counter metric with extra labels.
+    pub fn counter_with_labels(
+        &self,
+        name: &str,
+        value: u64,
+        labels: &[(&str, &str)],
+    ) -> Result<(), PluginError> {
+        let labels_json = self.merge_default_labels(labels);
+        host_ffi::counter_add(name, value, &labels_json)
+    }
+
+    /// Set a gauge metric.
+    pub fn gauge(&self, name: &str, value: f64) -> Result<(), PluginError> {
+        self.gauge_with_labels(name, value, &[])
+    }
+
+    /// Set a gauge metric with extra labels.
+    pub fn gauge_with_labels(
+        &self,
+        name: &str,
+        value: f64,
+        labels: &[(&str, &str)],
+    ) -> Result<(), PluginError> {
+        let labels_json = self.merge_default_labels(labels);
+        host_ffi::gauge_set(name, value, &labels_json)
+    }
+
+    /// Record a histogram observation.
+    pub fn histogram(&self, name: &str, value: f64) -> Result<(), PluginError> {
+        self.histogram_with_labels(name, value, &[])
+    }
+
+    /// Record a histogram observation with extra labels.
+    pub fn histogram_with_labels(
+        &self,
+        name: &str,
+        value: f64,
+        labels: &[(&str, &str)],
+    ) -> Result<(), PluginError> {
+        let labels_json = self.merge_default_labels(labels);
+        host_ffi::histogram_record(name, value, &labels_json)
+    }
+
+    fn merge_default_labels(&self, extra: &[(&str, &str)]) -> String {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "plugin".to_owned(),
+            serde_json::Value::String(self.plugin_id.clone()),
+        );
+        map.insert(
+            "stream".to_owned(),
+            serde_json::Value::String(self.stream_name.clone()),
+        );
+        for (k, v) in extra {
+            if is_reserved_metric_label(k) {
+                continue;
+            }
+            map.insert((*k).to_owned(), serde_json::Value::String((*v).to_owned()));
+        }
+        serde_json::Value::Object(map).to_string()
     }
 
     /// Emit a dead-letter-queue record using the context's stream name.
@@ -128,9 +189,17 @@ impl Context {
     }
 }
 
+fn is_reserved_metric_label(label: &str) -> bool {
+    matches!(label, "pipeline" | "run" | "plugin" | "stream" | "shard")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host_ffi::test_support::{self, MetricCall};
+    use std::sync::{LazyLock, Mutex};
+
+    static METRIC_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn test_new_stores_metadata() {
@@ -235,17 +304,106 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn test_metric_delegates() {
-        use crate::metric::MetricValue;
+    fn test_typed_metric_delegates_with_expected_labels() {
+        let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
+        test_support::reset();
+        let ctx = Context::new("test-plugin", "users");
+        ctx.counter("records_read", 42).unwrap();
+        ctx.histogram("source_connect_secs", 0.5).unwrap();
+        ctx.gauge_with_labels("rows_per_second", 1000.0, &[("phase", "scan")])
+            .unwrap();
 
-        let ctx = Context::new("my-conn", "my-stream");
-        let m = Metric {
-            name: "rows_read".to_string(),
-            value: MetricValue::Counter(42),
-            labels: vec![],
+        let calls = test_support::take_metric_calls();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            calls[0],
+            MetricCall::Counter {
+                name: "records_read".to_string(),
+                value: 42,
+                labels_json: r#"{"plugin":"test-plugin","stream":"users"}"#.to_string(),
+            }
+        );
+        assert_eq!(
+            calls[1],
+            MetricCall::Histogram {
+                name: "source_connect_secs".to_string(),
+                value: 0.5,
+                labels_json: r#"{"plugin":"test-plugin","stream":"users"}"#.to_string(),
+            }
+        );
+        let MetricCall::Gauge {
+            name,
+            value,
+            labels_json,
+        } = &calls[2]
+        else {
+            panic!("expected gauge metric call");
         };
-        let result = ctx.metric(&m);
-        assert!(result.is_ok());
+        assert_eq!(name, "rows_per_second");
+        assert!((*value - 1000.0).abs() < f64::EPSILON);
+        let gauge_labels: serde_json::Value =
+            serde_json::from_str(labels_json).expect("labels json should parse");
+        assert_eq!(
+            gauge_labels,
+            serde_json::json!({
+                "plugin": "test-plugin",
+                "stream": "users",
+                "phase": "scan"
+            })
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_reserved_metric_labels_are_not_overridden() {
+        let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
+        test_support::reset();
+        let ctx = Context::new("test-plugin", "users");
+        ctx.counter_with_labels(
+            "records_read",
+            1,
+            &[
+                ("plugin", "spoofed-plugin"),
+                ("stream", "spoofed-stream"),
+                ("pipeline", "spoofed-pipeline"),
+                ("run", "spoofed-run"),
+                ("phase", "scan"),
+            ],
+        )
+        .unwrap();
+
+        let calls = test_support::take_metric_calls();
+        let MetricCall::Counter { labels_json, .. } = &calls[0] else {
+            panic!("expected counter metric call");
+        };
+        let labels: serde_json::Value =
+            serde_json::from_str(labels_json).expect("labels json should parse");
+        assert_eq!(
+            labels,
+            serde_json::json!({
+                "plugin": "test-plugin",
+                "stream": "users",
+                "phase": "scan"
+            })
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_typed_metric_methods_surface_host_failures() {
+        let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
+        test_support::reset();
+        test_support::set_metric_error(PluginError::internal(
+            "METRIC_REJECTED",
+            "metric rejected by host",
+        ));
+
+        let ctx = Context::new("test-plugin", "users");
+        let error = ctx
+            .counter("records_read", 1)
+            .expect_err("counter should return host error");
+        assert_eq!(error.code, "METRIC_REJECTED");
+        assert!(test_support::take_metric_calls().is_empty());
     }
 
     #[cfg(not(target_arch = "wasm32"))]

@@ -20,7 +20,6 @@ use rapidbyte_types::checkpoint::{Checkpoint, CheckpointKind, StateScope};
 use rapidbyte_types::envelope::{DlqRecord, Timestamp};
 use rapidbyte_types::error::{ErrorCategory, PluginError};
 use rapidbyte_types::manifest::Permissions;
-use rapidbyte_types::metric::{Metric, MetricValue};
 use rapidbyte_types::state::{CursorState, PipelineId, StreamName};
 
 use crate::acl::{derive_network_acl, NetworkAcl};
@@ -52,33 +51,75 @@ pub enum Frame {
     EndStream,
 }
 
-/// Cumulative timing counters for host function calls.
+/// Records host-side operation timings directly into OpenTelemetry instruments.
 #[derive(Debug, Clone, Default)]
 pub struct HostTimings {
-    pub emit_batch_nanos: u64,
-    pub next_batch_nanos: u64,
-    pub next_batch_wait_nanos: u64,
-    pub next_batch_process_nanos: u64,
-    pub compress_nanos: u64,
-    pub decompress_nanos: u64,
-    pub emit_batch_count: u64,
-    pub next_batch_count: u64,
-    pub source_connect_secs: f64,
-    pub source_query_secs: f64,
-    pub source_fetch_secs: f64,
-    pub source_arrow_encode_secs: f64,
-    pub dest_connect_secs: f64,
-    pub dest_flush_secs: f64,
-    pub dest_commit_secs: f64,
-    pub dest_arrow_decode_secs: f64,
+    labels: Vec<opentelemetry::KeyValue>,
+}
+
+impl HostTimings {
+    #[must_use]
+    pub fn new(pipeline: &str, stream: &str, shard: usize) -> Self {
+        use opentelemetry::KeyValue;
+        use rapidbyte_metrics::labels;
+        Self {
+            labels: vec![
+                KeyValue::new(labels::PIPELINE, pipeline.to_owned()),
+                KeyValue::new(labels::STREAM, stream.to_owned()),
+                KeyValue::new(labels::SHARD, shard.to_string()),
+            ],
+        }
+    }
+
+    #[must_use]
+    pub fn with_run_label(mut self, run: &str) -> Self {
+        if !run.is_empty() {
+            self.labels.push(opentelemetry::KeyValue::new(
+                rapidbyte_metrics::labels::RUN,
+                run.to_owned(),
+            ));
+        }
+        self
+    }
+
+    pub fn record_emit_batch(&self, duration: std::time::Duration) {
+        rapidbyte_metrics::instruments::host::emit_batch_duration()
+            .record(duration.as_secs_f64(), &self.labels);
+    }
+
+    pub fn record_next_batch(
+        &self,
+        total: std::time::Duration,
+        wait: std::time::Duration,
+        process: std::time::Duration,
+    ) {
+        rapidbyte_metrics::instruments::host::next_batch_duration()
+            .record(total.as_secs_f64(), &self.labels);
+        rapidbyte_metrics::instruments::host::next_batch_wait_duration()
+            .record(wait.as_secs_f64(), &self.labels);
+        rapidbyte_metrics::instruments::host::next_batch_process_duration()
+            .record(process.as_secs_f64(), &self.labels);
+    }
+
+    pub fn record_compress(&self, duration: std::time::Duration) {
+        rapidbyte_metrics::instruments::host::compress_duration()
+            .record(duration.as_secs_f64(), &self.labels);
+    }
+
+    pub fn record_decompress(&self, duration: std::time::Duration) {
+        rapidbyte_metrics::instruments::host::decompress_duration()
+            .record(duration.as_secs_f64(), &self.labels);
+    }
 }
 
 // --- Inner types ---
 
 pub(crate) struct PluginIdentity {
     pub pipeline: PipelineId,
+    pub plugin_id: String,
     pub plugin_instance_key: String,
     pub stream: StreamName,
+    pub metric_run_label: Option<String>,
     pub state_backend: Arc<dyn StateBackend>,
 }
 
@@ -97,7 +138,7 @@ pub(crate) struct CheckpointCollector {
     pub source: Arc<Mutex<Vec<Checkpoint>>>,
     pub dest: Arc<Mutex<Vec<Checkpoint>>>,
     pub dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
-    pub timings: Arc<Mutex<HostTimings>>,
+    pub timings: HostTimings,
     pub dlq_limit: usize,
 }
 
@@ -115,6 +156,7 @@ pub struct ComponentHostState {
     pub(crate) sockets: SocketManager,
     pub(crate) frames: FrameTable,
     pub(crate) store_limits: StoreLimits,
+    pub(crate) scope_labels: rapidbyte_metrics::labels::ScopeLabels,
     ctx: WasiCtx,
     table: ResourceTable,
 }
@@ -127,13 +169,14 @@ pub struct HostStateBuilder {
     plugin_id: Option<String>,
     plugin_instance_key: Option<String>,
     stream: Option<String>,
+    metric_run_label: Option<String>,
     state_backend: Option<Arc<dyn StateBackend>>,
     sender: Option<mpsc::SyncSender<Frame>>,
     receiver: Option<mpsc::Receiver<Frame>>,
     source_checkpoints: Option<Arc<Mutex<Vec<Checkpoint>>>>,
     dest_checkpoints: Option<Arc<Mutex<Vec<Checkpoint>>>>,
     dlq_records: Option<Arc<Mutex<Vec<DlqRecord>>>>,
-    timings: Option<Arc<Mutex<HostTimings>>>,
+    timings: Option<HostTimings>,
     permissions: Option<Permissions>,
     config: serde_json::Value,
     compression: Option<CompressionCodec>,
@@ -149,6 +192,7 @@ impl HostStateBuilder {
             plugin_id: None,
             plugin_instance_key: None,
             stream: None,
+            metric_run_label: None,
             state_backend: None,
             sender: None,
             receiver: None,
@@ -190,6 +234,13 @@ impl HostStateBuilder {
     }
 
     #[must_use]
+    pub fn metric_run_label(mut self, label: impl Into<String>) -> Self {
+        let label = label.into();
+        self.metric_run_label = if label.is_empty() { None } else { Some(label) };
+        self
+    }
+
+    #[must_use]
     pub fn state_backend(mut self, backend: Arc<dyn StateBackend>) -> Self {
         self.state_backend = Some(backend);
         self
@@ -226,7 +277,7 @@ impl HostStateBuilder {
     }
 
     #[must_use]
-    pub fn timings(mut self, t: Arc<Mutex<HostTimings>>) -> Self {
+    pub fn timings(mut self, t: HostTimings) -> Self {
         self.timings = Some(t);
         self
     }
@@ -290,11 +341,33 @@ impl HostStateBuilder {
             .state_backend
             .ok_or_else(|| anyhow::anyhow!("state_backend is required"))?;
 
+        // Extract shard index from timings labels (stored as a KeyValue string).
+        let shard_index: usize = self
+            .timings
+            .as_ref()
+            .and_then(|t| {
+                t.labels
+                    .iter()
+                    .find(|kv| kv.key.as_str() == rapidbyte_metrics::labels::SHARD)
+                    .and_then(|kv| kv.value.as_str().into_owned().parse().ok())
+            })
+            .unwrap_or(0);
+
+        let scope_labels = rapidbyte_metrics::labels::ScopeLabels::new(
+            &pipeline,
+            &plugin_id,
+            &stream,
+            self.metric_run_label.as_deref(),
+            shard_index,
+        );
+
         Ok(ComponentHostState {
             identity: PluginIdentity {
                 pipeline: PipelineId::new(pipeline),
+                plugin_id,
                 plugin_instance_key,
                 stream: StreamName::new(stream),
+                metric_run_label: self.metric_run_label,
                 state_backend,
             },
             batch: BatchRouter {
@@ -310,9 +383,7 @@ impl HostStateBuilder {
                 source: self.source_checkpoints.unwrap_or_default(),
                 dest: self.dest_checkpoints.unwrap_or_default(),
                 dlq_records: self.dlq_records.unwrap_or_default(),
-                timings: self
-                    .timings
-                    .unwrap_or_else(|| Arc::new(Mutex::new(HostTimings::default()))),
+                timings: self.timings.unwrap_or_default(),
                 dlq_limit: self.dlq_limit,
             },
             sockets: SocketManager {
@@ -328,6 +399,7 @@ impl HostStateBuilder {
             },
             frames: FrameTable::new(),
             store_limits: build_store_limits(self.overrides.as_ref()),
+            scope_labels,
             ctx: build_wasi_ctx(self.permissions.as_ref(), self.overrides.as_ref())?,
             table: ResourceTable::new(),
         })
@@ -349,6 +421,51 @@ impl ComponentHostState {
 
     fn current_stream(&self) -> &str {
         self.identity.stream.as_str()
+    }
+
+    /// Rewrite reserved scope labels to the host-authoritative values.
+    fn ensure_metric_scope_labels(&self, labels: &mut Vec<opentelemetry::KeyValue>) {
+        labels.retain(|kv| {
+            !matches!(
+                kv.key.as_str(),
+                rapidbyte_metrics::labels::PIPELINE
+                    | rapidbyte_metrics::labels::RUN
+                    | rapidbyte_metrics::labels::PLUGIN
+                    | rapidbyte_metrics::labels::STREAM
+                    | rapidbyte_metrics::labels::SHARD
+            )
+        });
+        labels.push(opentelemetry::KeyValue::new(
+            rapidbyte_metrics::labels::PIPELINE,
+            self.identity.pipeline.as_str().to_owned(),
+        ));
+        labels.push(opentelemetry::KeyValue::new(
+            rapidbyte_metrics::labels::PLUGIN,
+            self.identity.plugin_id.clone(),
+        ));
+        labels.push(opentelemetry::KeyValue::new(
+            rapidbyte_metrics::labels::STREAM,
+            self.identity.stream.as_str().to_owned(),
+        ));
+        if let Some(run_label) = self.identity.metric_run_label.as_deref() {
+            labels.push(opentelemetry::KeyValue::new(
+                rapidbyte_metrics::labels::RUN,
+                run_label.to_owned(),
+            ));
+        }
+        if let Some(shard) = self
+            .checkpoints
+            .timings
+            .labels
+            .iter()
+            .find(|label| label.key.as_str() == rapidbyte_metrics::labels::SHARD)
+            .map(|label| label.value.as_str().into_owned())
+        {
+            labels.push(opentelemetry::KeyValue::new(
+                rapidbyte_metrics::labels::SHARD,
+                shard,
+            ));
+        }
     }
 
     fn next_checkpoint_frontier(&mut self) -> u64 {
@@ -471,10 +588,13 @@ impl ComponentHostState {
 
         self.batch.last_emitted_checkpoint_id = Some(checkpoint_id);
 
-        let mut t = lock_mutex(&self.checkpoints.timings, "timings")?;
-        t.emit_batch_nanos += fn_start.elapsed().as_nanos() as u64;
-        t.emit_batch_count += 1;
-        t.compress_nanos += compress_elapsed_nanos;
+        self.checkpoints
+            .timings
+            .record_emit_batch(fn_start.elapsed());
+        let compress_duration = Duration::from_nanos(compress_elapsed_nanos);
+        if compress_duration > Duration::ZERO {
+            self.checkpoints.timings.record_compress(compress_duration);
+        }
 
         Ok(())
     }
@@ -519,13 +639,18 @@ impl ComponentHostState {
         // Insert as sealed read-only frame
         let handle = self.frames.insert_sealed(payload);
 
-        let mut t = lock_mutex(&self.checkpoints.timings, "timings")?;
-        let total_elapsed_nanos = fn_start.elapsed().as_nanos() as u64;
-        t.next_batch_nanos += total_elapsed_nanos;
-        t.next_batch_wait_nanos += wait_elapsed_nanos;
-        t.next_batch_process_nanos += total_elapsed_nanos.saturating_sub(wait_elapsed_nanos);
-        t.next_batch_count += 1;
-        t.decompress_nanos += decompress_elapsed_nanos;
+        let total_elapsed = fn_start.elapsed();
+        let wait_elapsed = Duration::from_nanos(wait_elapsed_nanos);
+        let process_elapsed = total_elapsed.saturating_sub(wait_elapsed);
+        self.checkpoints
+            .timings
+            .record_next_batch(total_elapsed, wait_elapsed, process_elapsed);
+        let decompress_duration = Duration::from_nanos(decompress_elapsed_nanos);
+        if decompress_duration > Duration::ZERO {
+            self.checkpoints
+                .timings
+                .record_decompress(decompress_duration);
+        }
 
         Ok(Some(handle))
     }
@@ -653,46 +778,83 @@ impl ComponentHostState {
         Ok(())
     }
 
-    pub(crate) fn metric_impl(&mut self, payload_json: String) -> Result<(), PluginError> {
-        let metric_json: serde_json::Value = serde_json::from_str(&payload_json)
-            .map_err(|e| PluginError::internal("PARSE_METRIC", e.to_string()))?;
-
-        tracing::debug!(
-            pipeline = self.identity.pipeline.as_str(),
-            stream = %self.current_stream(),
-            "Received metric: {}",
-            payload_json
-        );
-
-        let payload = match metric_json {
-            serde_json::Value::Object(mut map) => map
-                .remove("payload")
-                .unwrap_or(serde_json::Value::Object(map)),
-            other => other,
-        };
-        let metric = serde_json::from_value::<Metric>(payload)
-            .map_err(|e| PluginError::internal("PARSE_METRIC", e.to_string()))?;
-
-        let value = match metric.value {
-            MetricValue::Gauge(v) | MetricValue::Histogram(v) => v,
-            #[allow(clippy::cast_precision_loss)]
-            MetricValue::Counter(v) => v as f64,
-            _ => return Ok(()),
-        };
-
-        let mut timings = lock_mutex(&self.checkpoints.timings, "timings")?;
-        match metric.name.as_str() {
-            "source_connect_secs" => timings.source_connect_secs += value,
-            "source_query_secs" => timings.source_query_secs += value,
-            "source_fetch_secs" => timings.source_fetch_secs += value,
-            "source_arrow_encode_secs" => timings.source_arrow_encode_secs += value,
-            "dest_connect_secs" => timings.dest_connect_secs += value,
-            "dest_flush_secs" => timings.dest_flush_secs += value,
-            "dest_commit_secs" => timings.dest_commit_secs += value,
-            "dest_arrow_decode_secs" => timings.dest_arrow_decode_secs += value,
-            _ => {}
+    #[allow(clippy::unnecessary_wraps)]
+    pub(crate) fn counter_add_impl(
+        &self,
+        name: String,
+        value: u64,
+        labels_json: String,
+    ) -> Result<(), PluginError> {
+        match name.as_str() {
+            "records_read" => {
+                rapidbyte_metrics::instruments::pipeline::records_read()
+                    .add(value, self.scope_labels.as_slice());
+            }
+            "records_written" => {
+                rapidbyte_metrics::instruments::pipeline::records_written()
+                    .add(value, self.scope_labels.as_slice());
+            }
+            "bytes_read" => {
+                rapidbyte_metrics::instruments::pipeline::bytes_read()
+                    .add(value, self.scope_labels.as_slice());
+            }
+            "bytes_written" => {
+                rapidbyte_metrics::instruments::pipeline::bytes_written()
+                    .add(value, self.scope_labels.as_slice());
+            }
+            _ => {
+                // Custom metrics still need JSON parsing for user-supplied labels
+                let mut labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
+                self.ensure_metric_scope_labels(&mut labels);
+                match rapidbyte_metrics::instruments::plugin::custom_counter(&name) {
+                    Ok(counter) => counter.add(value, &labels),
+                    Err(err) => {
+                        tracing::debug!(metric = %name, "custom counter skipped: {err}");
+                    }
+                }
+            }
         }
+        Ok(())
+    }
 
+    #[allow(clippy::unnecessary_wraps)]
+    pub(crate) fn gauge_set_impl(
+        &self,
+        name: String,
+        value: f64,
+        labels_json: String,
+    ) -> Result<(), PluginError> {
+        let mut labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
+        self.ensure_metric_scope_labels(&mut labels);
+        match rapidbyte_metrics::instruments::plugin::custom_gauge(&name) {
+            Ok(gauge) => gauge.record(value, &labels),
+            Err(err) => {
+                tracing::debug!(metric = %name, "custom gauge skipped: {err}");
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::unnecessary_wraps)]
+    pub(crate) fn histogram_record_impl(
+        &self,
+        name: String,
+        value: f64,
+        labels_json: String,
+    ) -> Result<(), PluginError> {
+        if let Some(hist) = builtin_plugin_histogram(name.as_str()) {
+            hist.record(value, self.scope_labels.as_slice());
+        } else {
+            // Custom histograms still need JSON parsing for user-supplied labels
+            let mut labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
+            self.ensure_metric_scope_labels(&mut labels);
+            match rapidbyte_metrics::instruments::plugin::custom_histogram(&name) {
+                Ok(histogram) => histogram.record(value, &labels),
+                Err(err) => {
+                    tracing::debug!(metric = %name, "custom histogram skipped: {err}");
+                }
+            }
+        }
         Ok(())
     }
 
@@ -958,6 +1120,21 @@ impl WasiView for ComponentHostState {
 
 // --- Helpers ---
 
+fn builtin_plugin_histogram(name: &str) -> Option<opentelemetry::metrics::Histogram<f64>> {
+    use rapidbyte_metrics::instruments::plugin;
+    match name {
+        "source_connect_secs" => Some(plugin::source_connect_duration()),
+        "source_query_secs" => Some(plugin::source_query_duration()),
+        "source_fetch_secs" => Some(plugin::source_fetch_duration()),
+        "source_arrow_encode_secs" => Some(plugin::source_encode_duration()),
+        "dest_connect_secs" => Some(plugin::dest_connect_duration()),
+        "dest_flush_secs" => Some(plugin::dest_flush_duration()),
+        "dest_commit_secs" => Some(plugin::dest_commit_duration()),
+        "dest_arrow_decode_secs" => Some(plugin::dest_decode_duration()),
+        _ => None,
+    }
+}
+
 fn lock_mutex<'a, T>(
     mutex: &'a Mutex<T>,
     name: &str,
@@ -992,7 +1169,57 @@ fn parse_state_scope(scope: u32) -> Result<StateScope, PluginError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentelemetry::global;
+    use opentelemetry_sdk::metrics::data::{Histogram, Sum};
+    use opentelemetry_sdk::metrics::InMemoryMetricExporter;
     use rapidbyte_state::SqliteStateBackend;
+    use std::sync::LazyLock;
+
+    static METRIC_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn metric_labels(exporter: &InMemoryMetricExporter, metric_name: &str) -> serde_json::Value {
+        let metrics = exporter.get_finished_metrics().unwrap_or_default();
+        for resource_metrics in &metrics {
+            for scope_metrics in &resource_metrics.scope_metrics {
+                for metric in &scope_metrics.metrics {
+                    if metric.name != metric_name {
+                        continue;
+                    }
+                    if let Some(sum) = metric.data.as_any().downcast_ref::<Sum<u64>>() {
+                        if let Some(dp) = sum.data_points.first() {
+                            return serde_json::Value::Object(
+                                dp.attributes
+                                    .iter()
+                                    .map(|kv| {
+                                        (
+                                            kv.key.as_str().to_owned(),
+                                            serde_json::Value::String(kv.value.to_string()),
+                                        )
+                                    })
+                                    .collect(),
+                            );
+                        }
+                    }
+                    if let Some(hist) = metric.data.as_any().downcast_ref::<Histogram<f64>>() {
+                        if let Some(dp) = hist.data_points.first() {
+                            return serde_json::Value::Object(
+                                dp.attributes
+                                    .iter()
+                                    .map(|kv| {
+                                        (
+                                            kv.key.as_str().to_owned(),
+                                            serde_json::Value::String(kv.value.to_string()),
+                                        )
+                                    })
+                                    .collect(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        panic!("metric {metric_name} not found");
+    }
 
     fn test_host_state() -> ComponentHostState {
         let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
@@ -1150,5 +1377,157 @@ mod tests {
         let mut host = test_host_state();
         let result = host.checkpoint_impl(0, r#"{"payload":{"stream":1}}"#.to_string());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn host_timings_new_sets_labels() {
+        let ht = HostTimings::new("my-pipeline", "users", 0);
+        assert_eq!(ht.labels.len(), 3);
+    }
+
+    #[test]
+    fn host_timings_default_has_no_labels() {
+        let ht = HostTimings::default();
+        assert!(ht.labels.is_empty());
+    }
+
+    #[test]
+    fn record_methods_do_not_panic() {
+        let ht = HostTimings::new("test", "stream", 0);
+        ht.record_emit_batch(Duration::from_millis(5));
+        ht.record_next_batch(
+            Duration::from_millis(10),
+            Duration::from_millis(7),
+            Duration::from_millis(3),
+        );
+        ht.record_compress(Duration::from_micros(500));
+        ht.record_decompress(Duration::from_micros(300));
+    }
+
+    #[test]
+    fn gauge_set_silently_skips_overlong_custom_metric_name() {
+        let host = test_host_state();
+        let name = "m".repeat(rapidbyte_metrics::cache::MAX_CUSTOM_METRIC_NAME_LEN + 1);
+
+        host.gauge_set_impl(name, 1.0, "{}".to_string())
+            .expect("overlong metric name should be silently skipped, not error");
+    }
+
+    #[test]
+    fn invalid_custom_histogram_name_is_silently_skipped() {
+        let host = test_host_state();
+
+        // Overlong metric name should return Ok (silently skipped), not abort.
+        host.histogram_record_impl(
+            "m".repeat(rapidbyte_metrics::cache::MAX_CUSTOM_METRIC_NAME_LEN + 1),
+            1.0,
+            "{}".to_string(),
+        )
+        .expect("overlong histogram name should be silently skipped, not error");
+    }
+
+    #[test]
+    fn builtin_counters_use_prebuilt_scope_labels() {
+        let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
+        let (provider, exporter) = rapidbyte_metrics::test_support::exporter_test_provider();
+        global::set_meter_provider(provider.clone());
+
+        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let host = ComponentHostState::builder()
+            .pipeline("test-pipeline")
+            .plugin_id("postgres")
+            .stream("users")
+            .metric_run_label("run-42")
+            .timings(HostTimings::new("test-pipeline", "users", 0))
+            .state_backend(state)
+            .build()
+            .unwrap();
+
+        // Built-in counters skip JSON parsing entirely; spoofed and extra labels are ignored.
+        host.counter_add_impl(
+            "records_read".to_string(),
+            1,
+            r#"{"pipeline":"spoofed-pipeline","run":"spoofed-run","plugin":"spoofed-plugin","stream":"spoofed-stream","rule":"not_null"}"#.to_string(),
+        )
+        .unwrap();
+
+        let _ = provider.force_flush();
+        let labels = metric_labels(&exporter, "pipeline.records_read");
+        assert_eq!(
+            labels,
+            serde_json::json!({
+                "pipeline": "test-pipeline",
+                "run": "run-42",
+                "plugin": "postgres",
+                "stream": "users",
+            })
+        );
+    }
+
+    #[test]
+    fn custom_counter_labels_are_rewritten_to_host_scope() {
+        let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
+        let (provider, exporter) = rapidbyte_metrics::test_support::exporter_test_provider();
+        global::set_meter_provider(provider.clone());
+
+        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let host = ComponentHostState::builder()
+            .pipeline("test-pipeline")
+            .plugin_id("postgres")
+            .stream("users")
+            .metric_run_label("run-42")
+            .timings(HostTimings::new("test-pipeline", "users", 0))
+            .state_backend(state)
+            .build()
+            .unwrap();
+
+        // Custom counters still parse JSON and rewrite scope labels.
+        host.counter_add_impl(
+            "my_custom_counter".to_string(),
+            1,
+            r#"{"pipeline":"spoofed-pipeline","run":"spoofed-run","plugin":"spoofed-plugin","stream":"spoofed-stream","rule":"not_null"}"#.to_string(),
+        )
+        .unwrap();
+
+        let _ = provider.force_flush();
+        let labels = metric_labels(&exporter, "my_custom_counter");
+        assert_eq!(
+            labels,
+            serde_json::json!({
+                "pipeline": "test-pipeline",
+                "run": "run-42",
+                "plugin": "postgres",
+                "stream": "users",
+                "shard": "0",
+                "rule": "not_null"
+            })
+        );
+    }
+
+    #[test]
+    fn histogram_labels_include_host_shard_scope() {
+        let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
+        let (provider, exporter) = rapidbyte_metrics::test_support::exporter_test_provider();
+        global::set_meter_provider(provider.clone());
+
+        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let host = ComponentHostState::builder()
+            .pipeline("test-pipeline")
+            .plugin_id("postgres")
+            .stream("users")
+            .metric_run_label("run-42")
+            .timings(HostTimings::new("test-pipeline", "users", 3))
+            .state_backend(state)
+            .build()
+            .unwrap();
+
+        host.histogram_record_impl("source_connect_secs".to_string(), 1.0, "{}".to_string())
+            .unwrap();
+
+        let _ = provider.force_flush();
+        let labels = metric_labels(&exporter, "plugin.source_connect_duration");
+        assert_eq!(labels["shard"], "3");
+        assert_eq!(labels["stream"], "users");
+        assert_eq!(labels["run"], "run-42");
     }
 }

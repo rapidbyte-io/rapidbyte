@@ -311,29 +311,23 @@ fn evaluate_unique_rule(
     None
 }
 
-pub(crate) fn build_validation_metrics(evaluation: &BatchEvaluation) -> Vec<Metric> {
-    let mut metrics = Vec::new();
+/// Best-effort: metric failures are silently ignored.
+pub(crate) fn emit_validation_metrics(ctx: &Context, evaluation: &BatchEvaluation) {
     for ((rule, field), count) in &evaluation.failure_counts {
-        metrics.push(Metric {
-            name: "validation_failures_total".to_string(),
-            value: MetricValue::Counter(*count),
-            labels: vec![
-                ("rule".to_string(), rule.clone()),
-                ("field".to_string(), field.clone()),
-            ],
-        });
+        let _ = ctx.counter_with_labels(
+            "validation_failures_total",
+            *count,
+            &[("rule", rule.as_str()), ("field", field.as_str())],
+        );
     }
-    metrics.push(Metric {
-        name: "validation_rows_valid_total".to_string(),
-        value: MetricValue::Counter(evaluation.valid_indices.len() as u64),
-        labels: Vec::new(),
-    });
-    metrics.push(Metric {
-        name: "validation_rows_invalid_total".to_string(),
-        value: MetricValue::Counter(evaluation.invalid_rows.len() as u64),
-        labels: Vec::new(),
-    });
-    metrics
+    let _ = ctx.counter(
+        "validation_rows_valid_total",
+        evaluation.valid_indices.len() as u64,
+    );
+    let _ = ctx.counter(
+        "validation_rows_invalid_total",
+        evaluation.invalid_rows.len() as u64,
+    );
 }
 
 fn string_value<'a>(array: &'a dyn Array, row: usize) -> Option<&'a str> {
@@ -453,13 +447,28 @@ fn unique_key(array: &dyn Array, row: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Once};
 
     use ::arrow::array::{Decimal128Array, Decimal256Array, Float64Array, StringArray};
     use ::arrow::datatypes::{Field, Schema};
     use arrow_buffer::i256;
+    use rapidbyte_sdk::host_ffi::{self, test_support, test_support::MetricCall};
 
     use super::*;
+
+    fn install_recording_host_imports() {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            let installed =
+                host_ffi::set_host_imports(Box::new(test_support::RecordingHostImports));
+            assert!(installed.is_ok(), "recording host imports should install");
+        });
+    }
+
+    fn drain_stale_metric_calls() -> Vec<MetricCall> {
+        install_recording_host_imports();
+        test_support::take_metric_calls()
+    }
 
     fn bound(literal: &str) -> NumericBound {
         NumericBound {
@@ -669,23 +678,10 @@ mod tests {
                 .get(&("unique".to_string(), "id".to_string())),
             Some(&3)
         );
-
-        let metrics = build_validation_metrics(&evaluation);
-        let unique_failure = metrics
-            .iter()
-            .find(|m| {
-                m.name == "validation_failures_total"
-                    && m
-                        .labels
-                        .contains(&("rule".to_string(), "unique".to_string()))
-                    && m.labels.contains(&("field".to_string(), "id".to_string()))
-            })
-            .expect("unique failure metric should exist");
-        assert_eq!(unique_failure.value, MetricValue::Counter(3));
     }
 
     #[test]
-    fn build_validation_metrics_includes_rule_and_field_labels() {
+    fn validation_failure_counts_include_rule_and_field_keys() {
         let evaluation = BatchEvaluation {
             valid_indices: vec![0, 2],
             invalid_rows: vec![InvalidRow {
@@ -695,17 +691,68 @@ mod tests {
             failure_counts: BTreeMap::from([(("regex".to_string(), "email".to_string()), 3)]),
         };
 
-        let metrics = build_validation_metrics(&evaluation);
-        let failure = metrics
-            .iter()
-            .find(|m| m.name == "validation_failures_total")
-            .expect("failure metric should exist");
         assert_eq!(
-            failure.labels,
-            vec![
-                ("rule".to_string(), "regex".to_string()),
-                ("field".to_string(), "email".to_string())
-            ]
+            evaluation
+                .failure_counts
+                .get(&("regex".to_string(), "email".to_string())),
+            Some(&3)
+        );
+        assert_eq!(evaluation.valid_indices.len(), 2);
+        assert_eq!(evaluation.invalid_rows.len(), 1);
+    }
+
+    #[test]
+    fn emit_validation_metrics_records_rule_and_field_labels() {
+        drain_stale_metric_calls();
+        let ctx = Context::new("validate", "users");
+        let evaluation = BatchEvaluation {
+            valid_indices: vec![0, 2],
+            invalid_rows: vec![InvalidRow {
+                row_index: 1,
+                message: "bad".to_string(),
+            }],
+            failure_counts: BTreeMap::from([(("regex".to_string(), "email".to_string()), 3)]),
+        };
+
+        emit_validation_metrics(&ctx, &evaluation);
+
+        let calls = test_support::take_metric_calls();
+        let MetricCall::Counter {
+            name,
+            value,
+            labels_json,
+        } = &calls[0]
+        else {
+            panic!("expected Counter variant at index 0");
+        };
+        assert_eq!(name, "validation_failures_total");
+        assert_eq!(*value, 3);
+        let labels: serde_json::Value =
+            serde_json::from_str(labels_json).expect("labels json should parse");
+        assert_eq!(
+            labels,
+            serde_json::json!({
+                "plugin": "validate",
+                "stream": "users",
+                "rule": "regex",
+                "field": "email"
+            })
+        );
+        assert_eq!(
+            calls[1],
+            MetricCall::Counter {
+                name: "validation_rows_valid_total".to_string(),
+                value: 2,
+                labels_json: r#"{"plugin":"validate","stream":"users"}"#.to_string(),
+            }
+        );
+        assert_eq!(
+            calls[2],
+            MetricCall::Counter {
+                name: "validation_rows_invalid_total".to_string(),
+                value: 1,
+                labels_json: r#"{"plugin":"validate","stream":"users"}"#.to_string(),
+            }
         );
     }
 

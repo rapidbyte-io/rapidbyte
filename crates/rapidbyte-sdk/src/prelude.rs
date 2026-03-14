@@ -29,7 +29,6 @@ pub use crate::wire::{SyncMode, WriteMode};
 // Protocol types — data flow
 pub use crate::arrow_types::ArrowDataType;
 pub use crate::checkpoint::{Checkpoint, CheckpointKind};
-pub use crate::metric::{Metric, MetricValue};
 
 // Protocol types — summaries
 pub use crate::metric::{ReadPerf, ReadSummary, TransformSummary, WritePerf, WriteSummary};

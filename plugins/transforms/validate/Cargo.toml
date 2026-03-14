@@ -19,6 +19,9 @@ arrow-json = "53"
 arrow-buffer = "53"
 wit-bindgen = "0.46"
 
+[dev-dependencies]
+rapidbyte-sdk = { path = "../../../crates/rapidbyte-sdk", features = ["test-support"] }
+
 [build-dependencies]
 rapidbyte-sdk = { path = "../../../crates/rapidbyte-sdk", default-features = false, features = ["build"] }
 

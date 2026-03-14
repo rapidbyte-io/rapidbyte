@@ -1,8 +1,10 @@
 //! gRPC server startup and wiring.
 
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+use opentelemetry::metrics::UpDownCounter;
 use tonic::transport::{Identity, Server, ServerTlsConfig as TonicServerTlsConfig};
 use tracing::info;
 
@@ -41,6 +43,9 @@ pub struct ControllerConfig {
     /// Explicit escape hatch for the built-in development preview signing key.
     pub allow_insecure_default_signing_key: bool,
     pub tls: Option<ServerTlsConfig>,
+    /// Optional Prometheus metrics listen address (e.g. `127.0.0.1:9190`).
+    /// Prometheus endpoint is only started when this is set.
+    pub metrics_listen: Option<String>,
 }
 
 /// Default signing key used when no explicit key is configured.
@@ -63,6 +68,7 @@ impl Default for ControllerConfig {
             allow_unauthenticated: false,
             allow_insecure_default_signing_key: false,
             tls: None,
+            metrics_listen: None,
         }
     }
 }
@@ -157,6 +163,10 @@ async fn rollback_background_timeout(
     }
 }
 
+fn decrement_active_runs(counter: &UpDownCounter<i64>) {
+    counter.add(-1, &[]);
+}
+
 #[allow(clippy::too_many_lines)]
 async fn handle_expired_lease(
     state: &ControllerState,
@@ -237,6 +247,7 @@ async fn handle_expired_lease(
         .get(&task_id)
         .cloned()
         .expect("timed-out task should exist");
+    let persist_start = Instant::now();
     let durable = match state
         .persist_timeout_records(&timed_out_run, Some(&timed_out_task))
         .await
@@ -252,6 +263,8 @@ async fn handle_expired_lease(
             false
         }
     };
+    rapidbyte_metrics::instruments::controller::state_persist_duration()
+        .record(persist_start.elapsed().as_secs_f64(), &[]);
 
     if !durable {
         rollback_background_timeout(state, previous_run, Some(previous_task)).await;
@@ -259,6 +272,7 @@ async fn handle_expired_lease(
 
     if durable {
         publish_run_failed(state, &run_id, error_info, attempt).await;
+        decrement_active_runs(&rapidbyte_metrics::instruments::controller::active_runs());
     } else {
         tracing::warn!(
             task_id = %task_id,
@@ -370,6 +384,7 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
 
         if durable {
             publish_run_failed(state, &run_id, error_info, attempt).await;
+            decrement_active_runs(&rapidbyte_metrics::instruments::controller::active_runs());
         } else {
             tracing::warn!(run_id, "skipping reconciliation-timeout terminal publish because durable persistence failed");
         }
@@ -422,9 +437,23 @@ fn spawn_preview_cleanup_task(
 ///
 /// Returns an error if the gRPC server fails to bind or encounters a
 /// transport-level failure.
-pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
+///
+pub async fn run(
+    config: ControllerConfig,
+    otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
+) -> anyhow::Result<()> {
     validate_auth_config(&config)?;
     validate_signing_key_config(&config)?;
+
+    if let Some(ref metrics_addr) = config.metrics_listen {
+        tracing::info!("Prometheus metrics endpoint at {metrics_addr}");
+        let metrics_listener = rapidbyte_metrics::bind_prometheus(metrics_addr).await?;
+        tokio::spawn(rapidbyte_metrics::serve_prometheus(
+            otel_guard.clone(),
+            metrics_listener,
+        ));
+    }
+
     let metadata_store = initialize_metadata_store(&config).await?;
 
     if config.signing_key == DEFAULT_SIGNING_KEY {
@@ -453,6 +482,8 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
                     tracing::error!(agent_id, ?error, "failed to delete reaped agent");
                 }
                 info!(agent_id, "Reaped dead agent");
+                rapidbyte_metrics::instruments::controller::heartbeat_timeouts().add(1, &[]);
+                rapidbyte_metrics::instruments::controller::active_agents().add(-1, &[]);
             }
         }
     });
@@ -470,6 +501,7 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
                 handle_expired_lease(&lease_state, previous_task).await;
             }
             sweep_reconciliation_timeouts(&lease_state, reconciliation_timeout).await;
+            rapidbyte_metrics::instruments::controller::reconciliation_sweeps().add(1, &[]);
         }
     });
 
@@ -489,7 +521,7 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
 
     info!(addr = %config.listen_addr, "Controller listening");
 
-    let mut server = Server::builder();
+    let mut server = Server::builder().layer(rapidbyte_metrics::grpc_layer::GrpcMetricsLayer);
     if let Some(tls) = &config.tls {
         server = server.tls_config(TonicServerTlsConfig::new().identity(Identity::from_pem(
             tls.cert_pem.clone(),
@@ -510,6 +542,26 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::store::test_support::FailingMetadataStore;
+    use opentelemetry::metrics::MeterProvider;
+    use opentelemetry_sdk::metrics::data::Sum;
+    use opentelemetry_sdk::metrics::InMemoryMetricExporter;
+
+    fn active_runs_value(exporter: &InMemoryMetricExporter) -> i64 {
+        let metrics = exporter.get_finished_metrics().unwrap_or_default();
+        for resource_metrics in metrics.iter().rev() {
+            for scope_metrics in &resource_metrics.scope_metrics {
+                for metric in &scope_metrics.metrics {
+                    if metric.name != "controller.active_runs" {
+                        continue;
+                    }
+                    if let Some(sum) = metric.data.as_any().downcast_ref::<Sum<i64>>() {
+                        return sum.data_points.iter().map(|dp| dp.value).sum();
+                    }
+                }
+            }
+        }
+        0
+    }
 
     #[test]
     fn auth_is_required_by_default() {
@@ -590,6 +642,44 @@ mod tests {
             ..Default::default()
         };
         validate_signing_key_config(&config).unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_fails_when_metrics_listener_is_unavailable() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let guard =
+            Arc::new(rapidbyte_metrics::init("test-controller").expect("otel init should succeed"));
+        let err = run(
+            ControllerConfig {
+                auth_tokens: vec!["secret".into()],
+                signing_key: b"test-signing-key".to_vec(),
+                metrics_listen: Some(addr.to_string()),
+                ..Default::default()
+            },
+            guard,
+        )
+        .await
+        .unwrap_err();
+
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("address already in use") || msg.contains("addrinuse"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn decrement_active_runs_records_metric() {
+        let (provider, exporter) = rapidbyte_metrics::test_support::exporter_test_provider();
+        let counter = provider
+            .meter("test")
+            .i64_up_down_counter("controller.active_runs")
+            .build();
+        decrement_active_runs(&counter);
+        let _ = provider.force_flush();
+        assert_eq!(active_runs_value(&exporter), -1);
     }
 
     #[tokio::test]

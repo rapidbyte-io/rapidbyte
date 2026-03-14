@@ -19,6 +19,9 @@ tempfile = "3"
 rusqlite = { version = "0.31", features = ["bundled"] }
 
 rapidbyte-engine = { path = "../../crates/rapidbyte-engine" }
+rapidbyte-metrics = { path = "../../crates/rapidbyte-metrics" }
+opentelemetry = { version = "0.28" }
+opentelemetry_sdk = { version = "0.28" }
 
 [dev-dependencies]
 rstest = "0.21"

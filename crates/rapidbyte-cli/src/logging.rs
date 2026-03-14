@@ -37,14 +37,37 @@ fn default_filter(verbosity: Verbosity, log_level: &str) -> EnvFilter {
 ///
 /// By default, `-v` enables `info` tracing and `-vv` enables `debug` tracing.
 /// `RUST_LOG` overrides the derived verbosity-based filter when set.
-pub fn init(verbosity: Verbosity, log_level: &str) {
+///
+/// When `otel_guard` is `Some`, a `tracing_opentelemetry` layer is added so
+/// that spans are exported via the OpenTelemetry tracer pipeline.
+pub fn init(
+    verbosity: Verbosity,
+    log_level: &str,
+    otel_guard: Option<&rapidbyte_metrics::OtelGuard>,
+) {
+    use opentelemetry::trace::TracerProvider as _;
+    use tracing_subscriber::prelude::*;
+
     let env_filter = default_filter(verbosity, log_level);
 
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
+    let fmt_layer = tracing_subscriber::fmt::layer()
         .with_target(false)
-        .with_writer(std::io::stderr)
-        .init();
+        .with_writer(std::io::stderr);
+
+    if let Some(guard) = otel_guard {
+        let otel_layer =
+            tracing_opentelemetry::layer().with_tracer(guard.tracer_provider().tracer("rapidbyte"));
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
+            .with(otel_layer)
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(fmt_layer)
+            .init();
+    }
 }
 
 #[cfg(test)]

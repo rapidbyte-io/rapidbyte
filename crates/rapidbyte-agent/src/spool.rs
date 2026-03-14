@@ -81,6 +81,12 @@ impl PreviewSpool {
         }
     }
 
+    #[allow(clippy::cast_precision_loss)]
+    fn record_spool_size(&self) {
+        rapidbyte_metrics::instruments::agent::spool_entries()
+            .record(self.entries.len() as f64, &[]);
+    }
+
     pub fn store(&mut self, key: PreviewKey, result: DryRunResult) {
         if let Some(old) = self.entries.remove(&key) {
             remove_entry_files(old);
@@ -104,6 +110,8 @@ impl PreviewSpool {
                 ttl: self.default_ttl,
             },
         );
+        rapidbyte_metrics::instruments::agent::previews_stored().add(1, &[]);
+        self.record_spool_size();
     }
 
     #[must_use]
@@ -183,6 +191,10 @@ impl PreviewSpool {
                 remove_entry_files(entry);
             }
         }
+        if count > 0 {
+            rapidbyte_metrics::instruments::agent::previews_evicted().add(count as u64, &[]);
+            self.record_spool_size();
+        }
         count
     }
 
@@ -201,7 +213,10 @@ impl PreviewSpool {
         let should_spill = bytes > self.spill_threshold_bytes;
         let storage = if should_spill && !batches.is_empty() {
             match write_batches_to_file(&batches) {
-                Ok(storage) => storage,
+                Ok(storage) => {
+                    rapidbyte_metrics::instruments::agent::preview_spill_to_disk().add(1, &[]);
+                    storage
+                }
                 Err(_) => StoredStreamData::Memory(batches),
             }
         } else {

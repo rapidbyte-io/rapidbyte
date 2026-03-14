@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinSet;
@@ -14,6 +14,8 @@ use tonic::transport::{
     ServerTlsConfig as TonicServerTlsConfig,
 };
 use tracing::{error, info, warn};
+
+use opentelemetry::KeyValue;
 
 use crate::auth::request_with_bearer;
 use crate::executor::{self, TaskOutcomeKind};
@@ -53,6 +55,9 @@ pub struct AgentConfig {
     pub allow_insecure_default_signing_key: bool,
     pub controller_tls: Option<ClientTlsConfig>,
     pub flight_tls: Option<ServerTlsConfig>,
+    /// Optional Prometheus metrics listen address (e.g. `127.0.0.1:9191`).
+    /// Prometheus endpoint is only started when this is set.
+    pub metrics_listen: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -70,6 +75,7 @@ impl Default for AgentConfig {
             allow_insecure_default_signing_key: false,
             controller_tls: None,
             flight_tls: None,
+            metrics_listen: None,
         }
     }
 }
@@ -80,6 +86,17 @@ type ActiveLeaseMap = Arc<RwLock<HashMap<String, (u64, CancellationToken)>>>;
 
 const COMPLETE_TASK_RETRY_DELAY: Duration = Duration::from_secs(1);
 const DEFAULT_SIGNING_KEY: &[u8] = b"rapidbyte-dev-signing-key-not-for-production";
+
+#[derive(Clone)]
+struct TaskExecutionContext {
+    channel: Channel,
+    agent_id: String,
+    active_leases: ActiveLeaseMap,
+    spool: Arc<RwLock<PreviewSpool>>,
+    otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
+    config: AgentConfig,
+    shutdown: CancellationToken,
+}
 
 enum WorkerPoll<T> {
     Task(T),
@@ -93,9 +110,22 @@ enum WorkerPoll<T> {
 ///
 /// Returns an error if the controller connection fails, agent registration
 /// is rejected, or the Flight server address cannot be parsed.
+///
 #[allow(clippy::too_many_lines)]
-pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
+pub async fn run(
+    config: AgentConfig,
+    otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
+) -> anyhow::Result<()> {
     validate_signing_key_config(&config)?;
+
+    if let Some(ref metrics_addr) = config.metrics_listen {
+        info!("Prometheus metrics endpoint at {metrics_addr}");
+        let metrics_listener = rapidbyte_metrics::bind_prometheus(metrics_addr).await?;
+        tokio::spawn(rapidbyte_metrics::serve_prometheus(
+            otel_guard.clone(),
+            metrics_listener,
+        ));
+    }
 
     // Bind Flight first so startup fails fast before the agent registers
     // itself as preview-capable.
@@ -110,7 +140,8 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
     let flight_svc = PreviewFlightService::new(spool.clone(), &config.signing_key);
 
     info!(addr = %flight_addr, "Starting Flight server");
-    let mut flight_server = tonic::transport::Server::builder();
+    let mut flight_server =
+        tonic::transport::Server::builder().layer(rapidbyte_metrics::grpc_layer::GrpcMetricsLayer);
     if let Some(tls) = &config.flight_tls {
         flight_server = flight_server.tls_config(TonicServerTlsConfig::new().identity(
             Identity::from_pem(tls.cert_pem.clone(), tls.key_pem.clone()),
@@ -175,6 +206,7 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
         let agent_id = agent_id.clone();
         let active_leases = active_leases.clone();
         let spool = spool.clone();
+        let otel_guard = otel_guard.clone();
         let config = config.clone();
         let shutdown = shutdown_token.clone();
         move || {
@@ -183,6 +215,7 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
                 agent_id.clone(),
                 active_leases.clone(),
                 spool.clone(),
+                otel_guard.clone(),
                 config.clone(),
                 shutdown.clone(),
             )
@@ -248,6 +281,7 @@ async fn worker_runner_loop(
     agent_id: String,
     active_leases: ActiveLeaseMap,
     spool: Arc<RwLock<PreviewSpool>>,
+    otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
     config: AgentConfig,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -294,13 +328,16 @@ async fn worker_runner_loop(
         },
         |task| {
             process_task(
-                channel.clone(),
-                agent_id.clone(),
+                TaskExecutionContext {
+                    channel: channel.clone(),
+                    agent_id: agent_id.clone(),
+                    active_leases: active_leases.clone(),
+                    spool: spool.clone(),
+                    otel_guard: otel_guard.clone(),
+                    config: config.clone(),
+                    shutdown: shutdown.clone(),
+                },
                 task,
-                active_leases.clone(),
-                spool.clone(),
-                config.clone(),
-                shutdown.clone(),
             )
         },
     )
@@ -309,14 +346,13 @@ async fn worker_runner_loop(
 
 #[allow(clippy::too_many_lines)]
 async fn process_task(
-    channel: Channel,
-    agent_id: String,
+    ctx: TaskExecutionContext,
     task: crate::proto::rapidbyte::v1::TaskAssignment,
-    active_leases: ActiveLeaseMap,
-    spool: Arc<RwLock<PreviewSpool>>,
-    config: AgentConfig,
-    shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
+    rapidbyte_metrics::instruments::agent::tasks_received().add(1, &[]);
+    rapidbyte_metrics::instruments::agent::active_tasks().add(1, &[]);
+    let task_start = Instant::now();
+
     info!(
         task_id = task.task_id,
         run_id = task.run_id,
@@ -326,7 +362,7 @@ async fn process_task(
     );
 
     let cancel_token = CancellationToken::new();
-    active_leases.write().await.insert(
+    ctx.active_leases.write().await.insert(
         task.task_id.clone(),
         (task.lease_epoch, cancel_token.clone()),
     );
@@ -336,14 +372,14 @@ async fn process_task(
     let limit = exec_opts.and_then(|e| e.limit);
 
     let (progress_tx, progress_rx) = mpsc::unbounded_channel();
-    let progress_client = AgentServiceClient::new(channel.clone());
+    let progress_client = AgentServiceClient::new(ctx.channel.clone());
     let progress_handle = tokio::spawn(crate::progress::forward_progress(
         progress_rx,
         progress_client,
-        agent_id.clone(),
+        ctx.agent_id.clone(),
         task.task_id.clone(),
         task.lease_epoch,
-        config.auth_token.clone(),
+        ctx.config.auth_token.clone(),
     ));
 
     let result = executor::execute_task(
@@ -352,6 +388,8 @@ async fn process_task(
         limit,
         Some(progress_tx),
         cancel_token,
+        ctx.otel_guard.snapshot_reader(),
+        ctx.otel_guard.meter_provider(),
     )
     .await;
 
@@ -382,7 +420,7 @@ async fn process_task(
                 ticket: Vec::new(),
             })
             .collect();
-        spool.write().await.store(
+        ctx.spool.write().await.store(
             PreviewKey {
                 run_id: task.run_id.clone(),
                 task_id: task.task_id.clone(),
@@ -392,7 +430,7 @@ async fn process_task(
         );
         Some(PreviewAccess {
             state: PreviewState::Ready.into(),
-            flight_endpoint: config.flight_advertise.clone(),
+            flight_endpoint: ctx.config.flight_advertise.clone(),
             ticket: Vec::new(),
             expires_at: None,
             streams: stream_previews,
@@ -402,7 +440,7 @@ async fn process_task(
     };
 
     let complete_request = CompleteTaskRequest {
-        agent_id: agent_id.clone(),
+        agent_id: ctx.agent_id.clone(),
         task_id: task.task_id.clone(),
         lease_epoch: task.lease_epoch,
         outcome,
@@ -417,13 +455,29 @@ async fn process_task(
         backend_run_id: 0,
     };
 
+    let status_label = match &result.outcome {
+        TaskOutcomeKind::Completed => "ok",
+        TaskOutcomeKind::Failed(_) => "error",
+        TaskOutcomeKind::Cancelled => "cancelled",
+    };
+    rapidbyte_metrics::instruments::agent::tasks_completed().add(
+        1,
+        &[KeyValue::new(
+            rapidbyte_metrics::labels::STATUS,
+            status_label,
+        )],
+    );
+    rapidbyte_metrics::instruments::agent::active_tasks().add(-1, &[]);
+    rapidbyte_metrics::instruments::agent::task_duration()
+        .record(task_start.elapsed().as_secs_f64(), &[]);
+
     let _ = report_completion_until_terminal(
-        &active_leases,
+        &ctx.active_leases,
         complete_request,
         COMPLETE_TASK_RETRY_DELAY,
         |req| {
-            let mut completion_client = AgentServiceClient::new(channel.clone());
-            let auth_token = config.auth_token.clone();
+            let mut completion_client = AgentServiceClient::new(ctx.channel.clone());
+            let auth_token = ctx.config.auth_token.clone();
             async move {
                 completion_client
                     .complete_task(
@@ -434,7 +488,7 @@ async fn process_task(
                     .map(tonic::Response::into_inner)
             }
         },
-        shutdown,
+        ctx.shutdown,
     )
     .await;
 
@@ -899,13 +953,46 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let err = run(AgentConfig {
-            controller_url: "http://127.0.0.1:1".into(),
-            flight_listen: addr.to_string(),
-            flight_advertise: addr.to_string(),
-            signing_key: b"test-signing-key".to_vec(),
-            ..Default::default()
-        })
+        let guard =
+            Arc::new(rapidbyte_metrics::init("test-agent").expect("otel init should succeed"));
+        let err = run(
+            AgentConfig {
+                controller_url: "http://127.0.0.1:1".into(),
+                flight_listen: addr.to_string(),
+                flight_advertise: addr.to_string(),
+                signing_key: b"test-signing-key".to_vec(),
+                ..Default::default()
+            },
+            guard,
+        )
+        .await
+        .unwrap_err();
+
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("address already in use") || msg.contains("addrinuse"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_fails_when_metrics_listener_is_unavailable() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let guard =
+            Arc::new(rapidbyte_metrics::init("test-agent").expect("otel init should succeed"));
+        let err = run(
+            AgentConfig {
+                controller_url: "http://127.0.0.1:1".into(),
+                flight_listen: "127.0.0.1:0".into(),
+                flight_advertise: "127.0.0.1:0".into(),
+                metrics_listen: Some(addr.to_string()),
+                signing_key: b"test-signing-key".to_vec(),
+                ..Default::default()
+            },
+            guard,
+        )
         .await
         .unwrap_err();
 

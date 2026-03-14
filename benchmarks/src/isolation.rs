@@ -5,8 +5,10 @@ use anyhow::{bail, Context, Result};
 use arrow::array::{Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use bytes::Bytes;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use rapidbyte_engine::arrow::record_batch_to_ipc;
 use rapidbyte_engine::runner::{run_destination_stream, run_source_stream, run_transform_stream};
+use rapidbyte_metrics::snapshot::SnapshotReader;
 use rapidbyte_runtime::{
     load_plugin_manifest, parse_plugin_ref, resolve_plugin_path, Frame, WasmRuntime,
 };
@@ -24,6 +26,14 @@ use crate::scenario::{
     BenchmarkBuildMode, BenchmarkKind, PostgresBenchmarkEnvironment, ScenarioManifest,
 };
 use crate::workload::ResolvedWorkloadPlan;
+
+fn benchmark_metrics() -> (SdkMeterProvider, SnapshotReader) {
+    let reader = SnapshotReader::new();
+    let provider = SdkMeterProvider::builder()
+        .with_reader(reader.build_reader())
+        .build();
+    (provider, reader)
+}
 
 pub fn execute_source_benchmark(
     scenario: &ScenarioManifest,
@@ -61,6 +71,8 @@ pub fn execute_source_benchmark(
     let (plugin_id, plugin_version) = parse_plugin_ref(&plugin_ref);
     let state = Arc::new(SqliteStateBackend::in_memory()?);
     let stats = Arc::new(Mutex::new(RunStats::default()));
+    let (bench_provider, bench_reader) = benchmark_metrics();
+    opentelemetry::global::set_meter_provider(bench_provider.clone());
     let (sender, receiver) = mpsc::sync_channel(32);
     let drain = std::thread::spawn(move || {
         while let Ok(frame) = receiver.recv() {
@@ -74,6 +86,7 @@ pub fn execute_source_benchmark(
         sender,
         state,
         "benchmark-source",
+        "benchmark-source-run",
         &plugin_id,
         &plugin_version,
         &config,
@@ -85,6 +98,11 @@ pub fn execute_source_benchmark(
         None,
     )?;
     let _ = drain.join();
+    let otel_snap = bench_reader.flush_and_snapshot_for_run(
+        &bench_provider,
+        "benchmark-source",
+        Some("benchmark-source-run"),
+    );
 
     Ok(RunResult {
         suite_id: scenario.suite.clone(),
@@ -97,11 +115,10 @@ pub fn execute_source_benchmark(
         connector_metrics: serde_json::json!({
             "source": {
                 "duration_secs": result.duration_secs,
-                "connect_secs": result.host_timings.source_connect_secs,
-                "query_secs": result.host_timings.source_query_secs,
-                "fetch_secs": result.host_timings.source_fetch_secs,
-                "arrow_encode_secs": result.host_timings.source_arrow_encode_secs,
-                "emit_count": result.host_timings.emit_batch_count,
+                "connect_secs": otel_snap.source_connect_secs,
+                "query_secs": otel_snap.source_query_secs,
+                "fetch_secs": otel_snap.source_fetch_secs,
+                "arrow_encode_secs": otel_snap.source_encode_secs,
             },
             "checkpoint_count": result.checkpoints.len(),
         }),
@@ -164,6 +181,8 @@ pub fn execute_destination_benchmark(
     let state = Arc::new(SqliteStateBackend::in_memory()?);
     let stats = Arc::new(Mutex::new(RunStats::default()));
     let dlq_records = Arc::new(Mutex::new(Vec::new()));
+    let (bench_provider, bench_reader) = benchmark_metrics();
+    opentelemetry::global::set_meter_provider(bench_provider.clone());
     let (sender, receiver) = mpsc::sync_channel(destination_input_channel_capacity(batches.len()));
     send_input_batches(sender, &batches)?;
     let result = run_destination_stream(
@@ -172,6 +191,7 @@ pub fn execute_destination_benchmark(
         dlq_records,
         state,
         "benchmark-destination",
+        "benchmark-destination-run",
         &plugin_id,
         &plugin_version,
         &config,
@@ -181,6 +201,11 @@ pub fn execute_destination_benchmark(
         None,
         None,
     )?;
+    let otel_snap = bench_reader.flush_and_snapshot_for_run(
+        &bench_provider,
+        "benchmark-destination",
+        Some("benchmark-destination-run"),
+    );
 
     Ok(RunResult {
         suite_id: scenario.suite.clone(),
@@ -195,10 +220,10 @@ pub fn execute_destination_benchmark(
                 "duration_secs": result.duration_secs,
                 "vm_setup_secs": result.vm_setup_secs,
                 "recv_secs": result.recv_secs,
-                "connect_secs": result.host_timings.dest_connect_secs,
-                "flush_secs": result.host_timings.dest_flush_secs,
-                "commit_secs": result.host_timings.dest_commit_secs,
-                "arrow_decode_secs": result.host_timings.dest_arrow_decode_secs,
+                "connect_secs": otel_snap.dest_connect_secs,
+                "flush_secs": otel_snap.dest_flush_secs,
+                "commit_secs": otel_snap.dest_commit_secs,
+                "arrow_decode_secs": otel_snap.dest_decode_secs,
             },
             "checkpoint_count": result.checkpoints.len(),
         }),
@@ -237,6 +262,11 @@ pub fn execute_transform_benchmark(
     let batches = generate_input_batches(workload.rows)?;
     let stream_ctx = transform_stream_context(first_batch_schema_hint(&batches)?);
     let _aot = AotEnvGuard::new(scenario.benchmark.aot);
+    // Provider must be installed so OTel instruments record during the transform
+    // run, but transforms don't emit per-phase timing histograms so we discard
+    // the reader (no connector_metrics to extract).
+    let (bench_provider, _bench_reader) = benchmark_metrics();
+    opentelemetry::global::set_meter_provider(bench_provider.clone());
     let runtime = WasmRuntime::new()?;
     let state = Arc::new(SqliteStateBackend::in_memory()?);
     let dlq_records = Arc::new(Mutex::new(Vec::new()));
@@ -278,6 +308,7 @@ pub fn execute_transform_benchmark(
             dlq_records.clone(),
             state.clone(),
             "benchmark-transform",
+            "benchmark-transform-run",
             &plugin_id,
             &plugin_version,
             index,

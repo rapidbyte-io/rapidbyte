@@ -3,6 +3,7 @@
 //! Starts a controller and agent in-process, submits a pipeline,
 //! and verifies the coordination (submit -> assign -> execute -> report).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use rapidbyte_agent::AgentConfig;
@@ -120,7 +121,9 @@ fn spawn_controller(
             signing_key,
             ..Default::default()
         };
-        rapidbyte_controller::run(config)
+        let guard =
+            Arc::new(rapidbyte_metrics::init("test-controller").expect("otel init should succeed"));
+        rapidbyte_controller::run(config, guard)
             .await
             .expect("controller should stay running");
     })
@@ -201,8 +204,11 @@ async fn distributed_submit_and_complete() {
             allow_insecure_default_signing_key: false,
             controller_tls: None,
             flight_tls: None,
+            metrics_listen: None,
         };
-        rapidbyte_agent::run(config)
+        let guard =
+            Arc::new(rapidbyte_metrics::init("test-agent").expect("otel init should succeed"));
+        rapidbyte_agent::run(config, guard)
             .await
             .expect("agent should stay running");
     });

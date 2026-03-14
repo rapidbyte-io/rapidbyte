@@ -3,6 +3,7 @@
 use std::pin::Pin;
 use std::time::UNIX_EPOCH;
 
+use opentelemetry::KeyValue;
 use prost_types::Timestamp;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
@@ -309,6 +310,14 @@ impl PipelineServiceImpl {
             return Err(Status::internal(error.to_string()));
         }
         self.publish_cancelled(run_id).await;
+        rapidbyte_metrics::instruments::controller::runs_completed().add(
+            1,
+            &[KeyValue::new(
+                rapidbyte_metrics::labels::STATUS,
+                "cancelled",
+            )],
+        );
+        rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
         Ok(CancelRunResponse {
             accepted: true,
             message: "Queued run cancelled".into(),
@@ -513,6 +522,11 @@ impl PipelineService for PipelineServiceImpl {
                 return Err(Status::internal(error.to_string()));
             }
             self.state.task_notify.notify_waiters();
+            rapidbyte_metrics::instruments::controller::runs_submitted().add(
+                1,
+                &[KeyValue::new(rapidbyte_metrics::labels::STATUS, "accepted")],
+            );
+            rapidbyte_metrics::instruments::controller::active_runs().add(1, &[]);
         }
 
         Ok(Response::new(SubmitPipelineResponse {
@@ -1691,4 +1705,12 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::NotFound);
         assert_eq!(state.watchers.read().await.channel_count(), 0);
     }
+
+    // Note: controller metric accounting for cancel_queued_run (runs_completed
+    // and active_runs) is verified by code path coverage — the state transition
+    // to Cancelled is confirmed by test_cancel_pending_run_removes_from_queue,
+    // and the metric calls at pipeline_service.rs:313-320 are on that same path.
+    // A dedicated metric assertion test is not feasible because OnceLock-cached
+    // instruments bind to the first provider and cannot be redirected to a
+    // per-test provider.
 }

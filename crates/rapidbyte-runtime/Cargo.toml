@@ -5,7 +5,9 @@ edition.workspace = true
 
 [dependencies]
 rapidbyte-types = { path = "../rapidbyte-types" }
+rapidbyte-metrics = { path = "../rapidbyte-metrics" }
 rapidbyte-state = { path = "../rapidbyte-state", default-features = false }
+opentelemetry = { workspace = true }
 
 bytes = "1"
 anyhow = { workspace = true }
@@ -24,6 +26,7 @@ zstd = "0.13"
 
 [dev-dependencies]
 rapidbyte-state = { path = "../rapidbyte-state", features = ["sqlite"] }
+opentelemetry_sdk = { workspace = true }
 wasm-encoder = "0.243"
 
 [target.'cfg(unix)'.dependencies]

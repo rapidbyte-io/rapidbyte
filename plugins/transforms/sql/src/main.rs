@@ -47,7 +47,7 @@ impl Transform for TransformSql {
                 statement,
             },
             PluginInfo {
-                protocol_version: ProtocolVersion::V5,
+                protocol_version: ProtocolVersion::V6,
                 features: vec![],
                 default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
             },

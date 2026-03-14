@@ -1,4 +1,4 @@
-package rapidbyte:plugin@5.0.0;
+package rapidbyte:plugin@6.0.0;
 
 interface types {
     type session = u64;
@@ -154,7 +154,9 @@ interface host {
     next-batch: func() -> result<option<u64>, plugin-error>;
     log: func(level: u32, msg: string);
     checkpoint: func(kind: u32, payload-json: string) -> result<_, plugin-error>;
-    metric: func(payload-json: string) -> result<_, plugin-error>;
+    counter-add: func(name: string, value: u64, labels-json: string) -> result<_, plugin-error>;
+    gauge-set: func(name: string, value: f64, labels-json: string) -> result<_, plugin-error>;
+    histogram-record: func(name: string, value: f64, labels-json: string) -> result<_, plugin-error>;
     emit-dlq-record: func(stream-name: string, record-json: string, error-message: string, error-category: string) -> result<_, plugin-error>;
     state-get: func(scope: u32, key: string) -> result<option<string>, plugin-error>;
     state-put: func(scope: u32, key: string, val: string) -> result<_, plugin-error>;

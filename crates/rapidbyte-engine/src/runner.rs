@@ -49,7 +49,6 @@ pub struct SourceRunResult {
     pub duration_secs: f64,
     pub summary: ReadSummary,
     pub checkpoints: Vec<Checkpoint>,
-    pub host_timings: HostTimings,
 }
 
 /// Result of running a destination plugin for a single stream.
@@ -59,7 +58,6 @@ pub struct DestRunResult {
     pub vm_setup_secs: f64,
     pub recv_secs: f64,
     pub checkpoints: Vec<Checkpoint>,
-    pub host_timings: HostTimings,
 }
 
 /// Result of running a transform plugin for a single stream.
@@ -111,6 +109,7 @@ pub fn run_source_stream(
     sender: mpsc::SyncSender<Frame>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
+    metric_run_label: &str,
     plugin_id: &str,
     plugin_version: &str,
     source_config: &serde_json::Value,
@@ -124,17 +123,20 @@ pub fn run_source_stream(
     let phase_start = Instant::now();
 
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
-    let source_timings = Arc::new(Mutex::new(HostTimings::default()));
+    let shard_index = stream_ctx.partition_index.unwrap_or(0) as usize;
+    let host_timings = HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index)
+        .with_run_label(metric_run_label);
 
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)
         .plugin_id(plugin_id)
         .plugin_instance_key(plugin_instance_key("source", plugin_id, stream_ctx, None))
         .stream(stream_ctx.stream_name.clone())
+        .metric_run_label(metric_run_label)
         .state_backend(state_backend)
         .sender(sender.clone())
         .source_checkpoints(source_checkpoints.clone())
-        .timings(source_timings.clone())
+        .timings(host_timings)
         .config(source_config)
         .compression(compression);
     if let Some(p) = permissions {
@@ -206,7 +208,6 @@ pub fn run_source_stream(
                 batches_emitted: summary.batches_emitted,
                 checkpoint_count: summary.checkpoint_count,
                 records_skipped: summary.records_skipped,
-                perf: None,
             }
         }
         Err(err) => {
@@ -252,18 +253,11 @@ pub fn run_source_stream(
         })?
         .drain(..)
         .collect::<Vec<_>>();
-    let source_host_timings = source_timings
-        .lock()
-        .map_err(|_| {
-            PipelineError::Infrastructure(anyhow::anyhow!("source timing mutex poisoned"))
-        })?
-        .clone();
 
     Ok(SourceRunResult {
         duration_secs: phase_start.elapsed().as_secs_f64(),
         summary,
         checkpoints,
-        host_timings: source_host_timings,
     })
 }
 
@@ -284,6 +278,7 @@ pub fn run_destination_stream(
     dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
+    metric_run_label: &str,
     plugin_id: &str,
     plugin_version: &str,
     dest_config: &serde_json::Value,
@@ -297,7 +292,9 @@ pub fn run_destination_stream(
     let vm_setup_start = Instant::now();
 
     let dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
-    let dest_timings = Arc::new(Mutex::new(HostTimings::default()));
+    let shard_index = stream_ctx.partition_index.unwrap_or(0) as usize;
+    let host_timings = HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index)
+        .with_run_label(metric_run_label);
 
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)
@@ -309,11 +306,12 @@ pub fn run_destination_stream(
             None,
         ))
         .stream(stream_ctx.stream_name.clone())
+        .metric_run_label(metric_run_label)
         .state_backend(state_backend)
         .receiver(receiver)
         .dest_checkpoints(dest_checkpoints.clone())
         .dlq_records(dlq_records.clone())
-        .timings(dest_timings.clone())
+        .timings(host_timings)
         .config(dest_config)
         .compression(compression);
     if let Some(p) = permissions {
@@ -387,7 +385,6 @@ pub fn run_destination_stream(
                 batches_written: summary.batches_written,
                 checkpoint_count: summary.checkpoint_count,
                 records_failed: summary.records_failed,
-                perf: None,
             }
         }
         Err(err) => {
@@ -433,12 +430,6 @@ pub fn run_destination_stream(
         })?
         .drain(..)
         .collect::<Vec<_>>();
-    let dest_host_timings = dest_timings
-        .lock()
-        .map_err(|_| {
-            PipelineError::Infrastructure(anyhow::anyhow!("destination timing mutex poisoned"))
-        })?
-        .clone();
 
     Ok(DestRunResult {
         duration_secs: phase_start.elapsed().as_secs_f64(),
@@ -446,7 +437,6 @@ pub fn run_destination_stream(
         vm_setup_secs,
         recv_secs,
         checkpoints,
-        host_timings: dest_host_timings,
     })
 }
 
@@ -468,6 +458,7 @@ pub fn run_transform_stream(
     dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
+    metric_run_label: &str,
     plugin_id: &str,
     plugin_version: &str,
     transform_index: usize,
@@ -481,7 +472,9 @@ pub fn run_transform_stream(
 
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
-    let timings = Arc::new(Mutex::new(HostTimings::default()));
+    let shard_index = stream_ctx.partition_index.unwrap_or(0) as usize;
+    let host_timings = HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index)
+        .with_run_label(metric_run_label);
 
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)
@@ -493,13 +486,14 @@ pub fn run_transform_stream(
             Some(transform_index),
         ))
         .stream(stream_ctx.stream_name.clone())
+        .metric_run_label(metric_run_label)
         .state_backend(state_backend)
         .sender(sender.clone())
         .receiver(receiver)
         .dlq_records(dlq_records)
         .source_checkpoints(source_checkpoints)
         .dest_checkpoints(dest_checkpoints)
-        .timings(timings)
+        .timings(host_timings)
         .config(transform_config)
         .compression(compression);
     if let Some(p) = permissions {

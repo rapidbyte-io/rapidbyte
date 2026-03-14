@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[allow(clippy::too_many_arguments)]
@@ -15,6 +16,8 @@ pub async fn execute(
     reconciliation_timeout: Option<Duration>,
     tls_cert: Option<&Path>,
     tls_key: Option<&Path>,
+    metrics_listen: Option<&str>,
+    otel_guard: rapidbyte_metrics::OtelGuard,
 ) -> Result<()> {
     let config = build_config(
         listen,
@@ -26,8 +29,9 @@ pub async fn execute(
         reconciliation_timeout,
         tls_cert,
         tls_key,
+        metrics_listen,
     )?;
-    rapidbyte_controller::run(config).await
+    rapidbyte_controller::run(config, Arc::new(otel_guard)).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -41,6 +45,7 @@ fn build_config(
     reconciliation_timeout: Option<Duration>,
     tls_cert: Option<&Path>,
     tls_key: Option<&Path>,
+    metrics_listen: Option<&str>,
 ) -> Result<rapidbyte_controller::ControllerConfig> {
     fn validate_auth_token(token: &str) -> Result<()> {
         if token.trim().is_empty() {
@@ -91,6 +96,7 @@ fn build_config(
             "controller requires --metadata-database-url / RAPIDBYTE_CONTROLLER_METADATA_DATABASE_URL"
         );
     }
+    config.metrics_listen = metrics_listen.map(str::to_owned);
     match (tls_cert, tls_key) {
         (Some(cert), Some(key)) => {
             config.tls = Some(rapidbyte_controller::ServerTlsConfig {
@@ -121,6 +127,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(config.auth_tokens, vec!["secret".to_string()]);
@@ -136,6 +143,7 @@ mod tests {
             None,
             false,
             false,
+            None,
             None,
             None,
             None,
@@ -157,6 +165,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(config.auth_tokens.is_empty());
@@ -172,6 +181,7 @@ mod tests {
             Some(""),
             false,
             false,
+            None,
             None,
             None,
             None,
@@ -193,6 +203,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .err()
         .unwrap();
@@ -208,6 +219,7 @@ mod tests {
             Some("secret"),
             false,
             false,
+            None,
             None,
             None,
             None,
@@ -231,6 +243,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(config.allow_insecure_default_signing_key);
@@ -245,6 +258,7 @@ mod tests {
             Some("secret"),
             false,
             false,
+            None,
             None,
             None,
             None,
@@ -274,6 +288,7 @@ mod tests {
             None,
             Some(cert_path.as_path()),
             Some(key_path.as_path()),
+            None,
         )
         .unwrap();
 
@@ -290,6 +305,7 @@ mod tests {
             Some("secret"),
             false,
             false,
+            None,
             None,
             None,
             None,
@@ -311,6 +327,7 @@ mod tests {
             false,
             false,
             Some(Duration::from_secs(42)),
+            None,
             None,
             None,
         )

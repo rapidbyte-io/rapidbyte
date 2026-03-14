@@ -37,7 +37,7 @@ impl ManifestBuilder {
                 description: String::new(),
                 author: None,
                 license: None,
-                protocol_version: ProtocolVersion::V5,
+                protocol_version: ProtocolVersion::current(),
                 permissions: Permissions::default(),
                 limits: ResourceLimits::default(),
                 roles,

@@ -349,7 +349,7 @@ impl Source for {struct_name} {{
         Ok((
             Self {{ config }},
             PluginInfo {{
-                protocol_version: ProtocolVersion::V5,
+                protocol_version: ProtocolVersion::current(),
                 features: vec![],
                 default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
             }},
@@ -400,7 +400,7 @@ impl Destination for {struct_name} {{
         Ok((
             Self {{ config }},
             PluginInfo {{
-                protocol_version: ProtocolVersion::V5,
+                protocol_version: ProtocolVersion::current(),
                 features: vec![],
                 default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
             }},
@@ -488,7 +488,7 @@ impl Transform for {struct_name} {{
         Ok((
             Self {{ config }},
             PluginInfo {{
-                protocol_version: ProtocolVersion::V5,
+                protocol_version: ProtocolVersion::current(),
                 features: vec![],
                 default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
             }},
