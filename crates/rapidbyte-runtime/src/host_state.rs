@@ -55,9 +55,6 @@ pub enum Frame {
 #[derive(Debug, Clone, Default)]
 pub struct HostTimings {
     labels: Vec<opentelemetry::KeyValue>,
-    raw_snapshot: Option<
-        std::sync::Arc<std::sync::Mutex<rapidbyte_metrics::snapshot::PipelineMetricsSnapshot>>,
-    >,
 }
 
 impl HostTimings {
@@ -71,7 +68,6 @@ impl HostTimings {
                 KeyValue::new(labels::STREAM, stream.to_owned()),
                 KeyValue::new(labels::SHARD, shard.to_string()),
             ],
-            raw_snapshot: None,
         }
     }
 
@@ -84,30 +80,7 @@ impl HostTimings {
         self
     }
 
-    #[must_use]
-    pub fn with_raw_snapshot(
-        mut self,
-        snapshot: std::sync::Arc<
-            std::sync::Mutex<rapidbyte_metrics::snapshot::PipelineMetricsSnapshot>,
-        >,
-    ) -> Self {
-        self.raw_snapshot = Some(snapshot);
-        self
-    }
-
-    fn update_raw_snapshot(
-        &self,
-        update: impl FnOnce(&mut rapidbyte_metrics::snapshot::PipelineMetricsSnapshot),
-    ) {
-        if let Some(snapshot) = &self.raw_snapshot {
-            if let Ok(mut snapshot) = snapshot.lock() {
-                update(&mut snapshot);
-            }
-        }
-    }
-
     pub fn record_emit_batch(&self, duration: std::time::Duration) {
-        self.update_raw_snapshot(|snapshot| snapshot.record_emit_batch(duration));
         rapidbyte_metrics::instruments::host::emit_batch_duration()
             .record(duration.as_secs_f64(), &self.labels);
     }
@@ -118,7 +91,6 @@ impl HostTimings {
         wait: std::time::Duration,
         process: std::time::Duration,
     ) {
-        self.update_raw_snapshot(|snapshot| snapshot.record_next_batch(total, wait, process));
         rapidbyte_metrics::instruments::host::next_batch_duration()
             .record(total.as_secs_f64(), &self.labels);
         rapidbyte_metrics::instruments::host::next_batch_wait_duration()
@@ -128,33 +100,13 @@ impl HostTimings {
     }
 
     pub fn record_compress(&self, duration: std::time::Duration) {
-        self.update_raw_snapshot(|snapshot| snapshot.record_compress(duration));
         rapidbyte_metrics::instruments::host::compress_duration()
             .record(duration.as_secs_f64(), &self.labels);
     }
 
     pub fn record_decompress(&self, duration: std::time::Duration) {
-        self.update_raw_snapshot(|snapshot| snapshot.record_decompress(duration));
         rapidbyte_metrics::instruments::host::decompress_duration()
             .record(duration.as_secs_f64(), &self.labels);
-    }
-
-    pub fn record_plugin_duration(&self, name: &str, value_secs: f64) {
-        let stream = self
-            .labels
-            .iter()
-            .find(|label| label.key.as_str() == rapidbyte_metrics::labels::STREAM)
-            .map(|label| label.value.as_str().into_owned())
-            .unwrap_or_default();
-        let shard = self
-            .labels
-            .iter()
-            .find(|label| label.key.as_str() == rapidbyte_metrics::labels::SHARD)
-            .and_then(|label| label.value.as_str().parse::<usize>().ok())
-            .unwrap_or_default();
-        self.update_raw_snapshot(|snapshot| {
-            snapshot.record_plugin_duration_for_series(name, &stream, shard, value_secs);
-        });
     }
 }
 
@@ -862,58 +814,34 @@ impl ComponentHostState {
         self.ensure_metric_scope_labels(&mut labels);
         match name.as_str() {
             "source_connect_secs" => {
-                self.checkpoints
-                    .timings
-                    .record_plugin_duration(&name, value);
                 rapidbyte_metrics::instruments::plugin::source_connect_duration()
                     .record(value, &labels);
             }
             "source_query_secs" => {
-                self.checkpoints
-                    .timings
-                    .record_plugin_duration(&name, value);
                 rapidbyte_metrics::instruments::plugin::source_query_duration()
                     .record(value, &labels);
             }
             "source_fetch_secs" => {
-                self.checkpoints
-                    .timings
-                    .record_plugin_duration(&name, value);
                 rapidbyte_metrics::instruments::plugin::source_fetch_duration()
                     .record(value, &labels);
             }
             "source_arrow_encode_secs" => {
-                self.checkpoints
-                    .timings
-                    .record_plugin_duration(&name, value);
                 rapidbyte_metrics::instruments::plugin::source_encode_duration()
                     .record(value, &labels);
             }
             "dest_connect_secs" => {
-                self.checkpoints
-                    .timings
-                    .record_plugin_duration(&name, value);
                 rapidbyte_metrics::instruments::plugin::dest_connect_duration()
                     .record(value, &labels);
             }
             "dest_flush_secs" => {
-                self.checkpoints
-                    .timings
-                    .record_plugin_duration(&name, value);
                 rapidbyte_metrics::instruments::plugin::dest_flush_duration()
                     .record(value, &labels);
             }
             "dest_commit_secs" => {
-                self.checkpoints
-                    .timings
-                    .record_plugin_duration(&name, value);
                 rapidbyte_metrics::instruments::plugin::dest_commit_duration()
                     .record(value, &labels);
             }
             "dest_arrow_decode_secs" => {
-                self.checkpoints
-                    .timings
-                    .record_plugin_duration(&name, value);
                 rapidbyte_metrics::instruments::plugin::dest_decode_duration()
                     .record(value, &labels);
             }
@@ -1478,21 +1406,8 @@ mod tests {
     }
 
     #[test]
-    fn invalid_custom_histogram_name_is_silently_skipped_without_mutating_snapshot() {
-        let snapshot = Arc::new(Mutex::new(
-            rapidbyte_metrics::snapshot::PipelineMetricsSnapshot::default(),
-        ));
-        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
-        let host = ComponentHostState::builder()
-            .pipeline("test-pipeline")
-            .plugin_id("postgres")
-            .stream("users")
-            .state_backend(state)
-            .timings(
-                HostTimings::new("test-pipeline", "users", 0).with_raw_snapshot(snapshot.clone()),
-            )
-            .build()
-            .unwrap();
+    fn invalid_custom_histogram_name_is_silently_skipped() {
+        let host = test_host_state();
 
         // Overlong metric name should return Ok (silently skipped), not abort.
         host.histogram_record_impl(
@@ -1501,11 +1416,6 @@ mod tests {
             "{}".to_string(),
         )
         .expect("overlong histogram name should be silently skipped, not error");
-
-        let raw_snapshot = snapshot.lock().unwrap().clone();
-        assert_eq!(raw_snapshot.tracked_plugin_timing_series_count(), 0);
-        assert!(raw_snapshot.dest_decode_secs.abs() < f64::EPSILON);
-        assert!(raw_snapshot.source_connect_secs.abs() < f64::EPSILON);
     }
 
     #[test]
