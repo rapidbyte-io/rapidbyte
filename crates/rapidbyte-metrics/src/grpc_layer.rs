@@ -73,10 +73,11 @@ where
 mod tests {
     use super::*;
 
+    fn assert_layer<L: tower::Layer<tower::util::BoxService<(), (), ()>>>(_l: &L) {}
+
     #[test]
     fn layer_compiles_with_tower() {
         let layer = GrpcMetricsLayer;
-        fn assert_layer<L: tower::Layer<tower::util::BoxService<(), (), ()>>>(_l: &L) {}
         assert_layer(&layer);
     }
 }
