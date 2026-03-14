@@ -18,8 +18,12 @@ pub async fn execute(pipeline_path: &Path, verbosity: Verbosity) -> Result<()> {
     let config = super::load_pipeline(pipeline_path)?;
 
     // Discover catalog from source plugin
-    let catalog =
-        orchestrator::discover_plugin(&config.source.use_ref, &config.source.config).await?;
+    let catalog = orchestrator::discover_plugin(
+        &config.source.use_ref,
+        &config.source.config,
+        &rapidbyte_registry::RegistryConfig::default(),
+    )
+    .await?;
 
     // Human-readable output to stderr (skip in quiet mode)
     if verbosity != Verbosity::Quiet {
