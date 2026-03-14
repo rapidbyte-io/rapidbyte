@@ -543,7 +543,7 @@ async fn execute_pipeline_once(
             },
         );
         ensure_not_cancelled(cancel_token, "Pipeline cancelled before stream execution")?;
-        let aggregated = execute_streams(
+        let aggregated = match execute_streams(
             config,
             &plugins,
             &modules,
@@ -554,7 +554,16 @@ async fn execute_pipeline_once(
             &progress_tx,
             cancel_token,
         )
-        .await?;
+        .await
+        {
+            Ok(agg) => agg,
+            Err(err) => {
+                // Drain the run's snapshot entry to prevent memory leaks in
+                // long-lived processes with repeated failed attempts.
+                let _ = metrics_runtime.snapshot_for_run(&config.pipeline, Some(&metric_run_label));
+                return Err(err);
+            }
+        };
 
         send_progress(
             &progress_tx,
@@ -1062,6 +1071,9 @@ async fn execute_streams(
                 })?;
                 drop(tx);
 
+                // Use a distinct label so preflight timings don't accumulate
+                // into the real run's snapshot.
+                let preflight_label = format!("{}-preflight", params.metric_run_label);
                 let preflight_result = tokio::task::spawn_blocking(move || {
                     run_destination_stream(
                         &dest_module,
@@ -1069,7 +1081,7 @@ async fn execute_streams(
                         Arc::new(Mutex::new(Vec::new())),
                         state_dst,
                         &params.pipeline_name,
-                        &params.metric_run_label,
+                        &preflight_label,
                         &params.dest_plugin_id,
                         &params.dest_plugin_version,
                         &params.dest_config,
