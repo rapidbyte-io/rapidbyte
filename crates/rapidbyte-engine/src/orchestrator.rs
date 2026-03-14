@@ -312,7 +312,7 @@ async fn collect_stream_task_results(
 /// Convenience wrapper that creates a throwaway metrics provider.
 ///
 /// Use this when you do not need accurate post-run metric snapshots.
-/// For production use, prefer [`run_pipeline`] with the real OtelGuard's
+/// For production use, prefer [`run_pipeline`] with the real `OtelGuard`'s
 /// snapshot reader and meter provider.
 ///
 /// # Errors

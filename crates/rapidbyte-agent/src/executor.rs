@@ -73,7 +73,7 @@ fn is_pre_commit_cancellation(error: &PipelineError) -> bool {
 /// Convenience wrapper that creates a throwaway metrics provider.
 ///
 /// Use this when you do not need accurate post-run metric snapshots.
-/// For production use, prefer [`execute_task`] with the real OtelGuard's
+/// For production use, prefer [`execute_task`] with the real `OtelGuard`'s
 /// snapshot reader and meter provider.
 #[allow(clippy::too_many_lines)]
 pub async fn execute_task_unmonitored(
