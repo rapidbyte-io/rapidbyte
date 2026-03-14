@@ -103,7 +103,7 @@ impl HostTimings {
 
 fn map_custom_metric_error(
     name: &str,
-    err: rapidbyte_metrics::cache::InstrumentCacheError,
+    err: &rapidbyte_metrics::cache::InstrumentCacheError,
 ) -> PluginError {
     match err {
         rapidbyte_metrics::cache::InstrumentCacheError::MetricNameTooLong { max, .. } => {
@@ -744,7 +744,7 @@ impl ComponentHostState {
             }
             _ => {
                 rapidbyte_metrics::instruments::plugin::custom_counter(&name)
-                    .map_err(|err| map_custom_metric_error(&name, err))?
+                    .map_err(|err| map_custom_metric_error(&name, &err))?
                     .add(value, &labels);
             }
         }
@@ -760,7 +760,7 @@ impl ComponentHostState {
     ) -> Result<(), PluginError> {
         let labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
         rapidbyte_metrics::instruments::plugin::custom_gauge(&name)
-            .map_err(|err| map_custom_metric_error(&name, err))?
+            .map_err(|err| map_custom_metric_error(&name, &err))?
             .record(value, &labels);
         Ok(())
     }
@@ -809,7 +809,7 @@ impl ComponentHostState {
             }
             _ => {
                 rapidbyte_metrics::instruments::plugin::custom_histogram(&name)
-                    .map_err(|err| map_custom_metric_error(&name, err))?
+                    .map_err(|err| map_custom_metric_error(&name, &err))?
                     .record(value, &labels);
             }
         }

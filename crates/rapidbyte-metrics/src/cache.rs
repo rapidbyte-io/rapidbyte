@@ -78,6 +78,15 @@ fn validate_name(name: &str) -> Result<(), InstrumentCacheError> {
 }
 
 /// Get or create a counter for the given metric name.
+///
+/// # Errors
+///
+/// Returns [`InstrumentCacheError`] when the metric name exceeds the configured
+/// length limit or the per-kind custom metric cache is full.
+///
+/// # Panics
+///
+/// Panics if the internal cache insert lock is poisoned.
 pub fn custom_counter(name: &str) -> Result<Counter<u64>, InstrumentCacheError> {
     validate_name(name)?;
     if let Some(existing) = counters().get(name) {
@@ -103,6 +112,15 @@ pub fn custom_counter(name: &str) -> Result<Counter<u64>, InstrumentCacheError> 
 }
 
 /// Get or create a gauge for the given metric name.
+///
+/// # Errors
+///
+/// Returns [`InstrumentCacheError`] when the metric name exceeds the configured
+/// length limit or the per-kind custom metric cache is full.
+///
+/// # Panics
+///
+/// Panics if the internal cache insert lock is poisoned.
 pub fn custom_gauge(name: &str) -> Result<Gauge<f64>, InstrumentCacheError> {
     validate_name(name)?;
     if let Some(existing) = gauges().get(name) {
@@ -128,6 +146,15 @@ pub fn custom_gauge(name: &str) -> Result<Gauge<f64>, InstrumentCacheError> {
 }
 
 /// Get or create a histogram for the given metric name.
+///
+/// # Errors
+///
+/// Returns [`InstrumentCacheError`] when the metric name exceeds the configured
+/// length limit or the per-kind custom metric cache is full.
+///
+/// # Panics
+///
+/// Panics if the internal cache insert lock is poisoned.
 pub fn custom_histogram(name: &str) -> Result<Histogram<f64>, InstrumentCacheError> {
     validate_name(name)?;
     if let Some(existing) = histograms().get(name) {
