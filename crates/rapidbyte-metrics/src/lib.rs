@@ -11,6 +11,7 @@
 //! | `labels`     | Bounded label keys and parsing |
 //! | `snapshot`   | InMemoryMetricExporter and PipelineResult bridge |
 //! | `views`      | Histogram bucket configuration |
+//! | `plugin_names`| Built-in plugin duration metric name registry |
 
 #![warn(clippy::pedantic)]
 
@@ -18,6 +19,7 @@ pub mod cache;
 pub mod grpc_layer;
 pub mod instruments;
 pub mod labels;
+pub mod plugin_names;
 pub mod snapshot;
 pub mod test_support;
 pub mod views;
@@ -183,10 +185,6 @@ pub fn init(service_name: &str) -> Result<OtelGuard> {
         .with_view(views::bucket_view(
             "plugin.",
             views::normal_duration_buckets(),
-        ))
-        .with_view(views::bucket_view(
-            "pipeline.duration",
-            views::slow_duration_buckets(),
         ))
         .with_view(views::bucket_view(
             "agent.task_duration",
