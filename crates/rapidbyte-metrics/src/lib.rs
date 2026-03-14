@@ -61,22 +61,29 @@ impl OtelGuard {
     }
 }
 
-/// Spawn a Prometheus metrics HTTP server on the given address.
+/// Bind a Prometheus metrics listener on the given address.
+///
+/// This is separated from [`serve_prometheus`] so callers can fail startup
+/// synchronously if the metrics port is unavailable.
+///
+/// # Errors
+///
+/// Returns an error if the TCP listener cannot bind to the given address.
+pub async fn bind_prometheus(listen_addr: &str) -> std::io::Result<tokio::net::TcpListener> {
+    tokio::net::TcpListener::bind(listen_addr).await
+}
+
+/// Serve Prometheus metrics on an already-bound listener.
 ///
 /// Serves the Prometheus text exposition format on every incoming TCP connection.
 /// Runs until the process exits. Intended to be called once at startup.
-///
-/// # Panics
-///
-/// Panics if the TCP listener cannot bind to the given address.
-pub async fn serve_prometheus(guard: std::sync::Arc<OtelGuard>, listen_addr: String) {
+pub async fn serve_prometheus(guard: std::sync::Arc<OtelGuard>, listener: tokio::net::TcpListener) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     const MAX_CONNECTIONS: usize = 64;
     const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-    let listener = tokio::net::TcpListener::bind(&listen_addr).await.unwrap();
     let active = std::sync::Arc::new(AtomicUsize::new(0));
 
     loop {

@@ -431,9 +431,6 @@ fn spawn_preview_cleanup_task(
 /// Returns an error if the gRPC server fails to bind or encounters a
 /// transport-level failure.
 ///
-/// # Panics
-///
-/// Panics if the Prometheus metrics listener cannot bind to the configured address.
 pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
     validate_auth_config(&config)?;
     validate_signing_key_config(&config)?;
@@ -442,9 +439,10 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
 
     if let Some(ref metrics_addr) = config.metrics_listen {
         tracing::info!("Prometheus metrics endpoint at {metrics_addr}");
+        let metrics_listener = rapidbyte_metrics::bind_prometheus(metrics_addr).await?;
         tokio::spawn(rapidbyte_metrics::serve_prometheus(
             otel_guard.clone(),
-            metrics_addr.clone(),
+            metrics_listener,
         ));
     }
 
@@ -616,6 +614,27 @@ mod tests {
             ..Default::default()
         };
         validate_signing_key_config(&config).unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_fails_when_metrics_listener_is_unavailable() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let err = run(ControllerConfig {
+            auth_tokens: vec!["secret".into()],
+            signing_key: b"test-signing-key".to_vec(),
+            metrics_listen: Some(addr.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("address already in use") || msg.contains("addrinuse"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[tokio::test]

@@ -85,7 +85,7 @@ impl PipelineMetricsSnapshot {
             "dest_connect_secs" => self.dest_connect_secs += value_secs,
             "dest_flush_secs" => self.dest_flush_secs += value_secs,
             "dest_commit_secs" => self.dest_commit_secs += value_secs,
-            "dest_decode_secs" => self.dest_decode_secs += value_secs,
+            "dest_decode_secs" | "dest_arrow_decode_secs" => self.dest_decode_secs += value_secs,
             _ => {}
         }
     }
@@ -424,5 +424,14 @@ mod tests {
         );
         let run_b = reader.flush_and_snapshot_for_run(&provider, "my-pipe", Some("run-b"));
         assert!((run_b.source_connect_secs - 1.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn raw_snapshot_accepts_destination_arrow_decode_key() {
+        let mut snapshot = PipelineMetricsSnapshot::default();
+
+        snapshot.record_plugin_duration("dest_arrow_decode_secs", 0.75);
+
+        assert!((snapshot.dest_decode_secs - 0.75).abs() < 0.001);
     }
 }

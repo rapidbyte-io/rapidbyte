@@ -111,9 +111,6 @@ enum WorkerPoll<T> {
 /// Returns an error if the controller connection fails, agent registration
 /// is rejected, or the Flight server address cannot be parsed.
 ///
-/// # Panics
-///
-/// Panics if the Prometheus metrics listener cannot bind to the configured address.
 #[allow(clippy::too_many_lines)]
 pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
     validate_signing_key_config(&config)?;
@@ -122,9 +119,10 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
 
     if let Some(ref metrics_addr) = config.metrics_listen {
         info!("Prometheus metrics endpoint at {metrics_addr}");
+        let metrics_listener = rapidbyte_metrics::bind_prometheus(metrics_addr).await?;
         tokio::spawn(rapidbyte_metrics::serve_prometheus(
             otel_guard.clone(),
-            metrics_addr.clone(),
+            metrics_listener,
         ));
     }
 
@@ -958,6 +956,29 @@ mod tests {
             controller_url: "http://127.0.0.1:1".into(),
             flight_listen: addr.to_string(),
             flight_advertise: addr.to_string(),
+            signing_key: b"test-signing-key".to_vec(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("address already in use") || msg.contains("addrinuse"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_fails_when_metrics_listener_is_unavailable() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let err = run(AgentConfig {
+            controller_url: "http://127.0.0.1:1".into(),
+            flight_listen: "127.0.0.1:0".into(),
+            flight_advertise: "127.0.0.1:0".into(),
+            metrics_listen: Some(addr.to_string()),
             signing_key: b"test-signing-key".to_vec(),
             ..Default::default()
         })
