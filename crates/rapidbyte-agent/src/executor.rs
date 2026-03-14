@@ -15,6 +15,12 @@ use tokio_util::sync::CancellationToken;
 type PipelineRunFuture<'a> =
     Pin<Box<dyn Future<Output = Result<PipelineOutcome, PipelineError>> + Send + 'a>>;
 
+#[derive(Clone, Copy)]
+struct MetricsRuntime<'a> {
+    snapshot_reader: Option<&'a rapidbyte_metrics::snapshot::SnapshotReader>,
+    meter_provider: Option<&'a opentelemetry_sdk::metrics::SdkMeterProvider>,
+}
+
 /// Result of executing a task on the agent.
 pub struct TaskExecutionResult {
     pub outcome: TaskOutcomeKind,
@@ -75,18 +81,47 @@ pub async fn execute_task(
     progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
     cancel_token: CancellationToken,
 ) -> TaskExecutionResult {
+    execute_task_with_metrics(
+        pipeline_yaml,
+        dry_run,
+        limit,
+        progress_tx,
+        cancel_token,
+        None,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_task_with_metrics(
+    pipeline_yaml: &[u8],
+    dry_run: bool,
+    limit: Option<u64>,
+    progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
+    cancel_token: CancellationToken,
+    snapshot_reader: Option<&rapidbyte_metrics::snapshot::SnapshotReader>,
+    meter_provider: Option<&opentelemetry_sdk::metrics::SdkMeterProvider>,
+) -> TaskExecutionResult {
+    let metrics_runtime = MetricsRuntime {
+        snapshot_reader,
+        meter_provider,
+    };
     execute_task_with_runner(
         pipeline_yaml,
         dry_run,
         limit,
         progress_tx,
         cancel_token,
-        |config, options, progress_tx, cancel_token| {
-            Box::pin(orchestrator::run_pipeline(
+        metrics_runtime,
+        |config, options, progress_tx, cancel_token, metrics_runtime| {
+            Box::pin(orchestrator::run_pipeline_with_metrics(
                 config,
                 options,
                 progress_tx,
                 cancel_token,
+                metrics_runtime.snapshot_reader,
+                metrics_runtime.meter_provider,
             ))
         },
     )
@@ -100,6 +135,7 @@ async fn execute_task_with_runner<R>(
     limit: Option<u64>,
     progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
     cancel_token: CancellationToken,
+    metrics_runtime: MetricsRuntime<'_>,
     run_pipeline: R,
 ) -> TaskExecutionResult
 where
@@ -108,6 +144,7 @@ where
         &'a ExecutionOptions,
         Option<mpsc::UnboundedSender<ProgressEvent>>,
         CancellationToken,
+        MetricsRuntime<'a>,
     ) -> PipelineRunFuture<'a>,
 {
     // Check for early cancellation before doing any work
@@ -187,7 +224,14 @@ where
         };
     }
 
-    let pipeline_result = run_pipeline(&config, &options, progress_tx, cancel_token.clone()).await;
+    let pipeline_result = run_pipeline(
+        &config,
+        &options,
+        progress_tx,
+        cancel_token.clone(),
+        metrics_runtime,
+    )
+    .await;
 
     match pipeline_result {
         Ok(outcome) => {
@@ -275,6 +319,7 @@ mod tests {
     use rapidbyte_engine::execution::PipelineOutcome;
     use rapidbyte_engine::result::{DestTiming, PipelineCounts, PipelineResult, SourceTiming};
     use rapidbyte_engine::PipelineError;
+    use rapidbyte_metrics::snapshot::SnapshotReader;
     use rapidbyte_types::error::{CommitState, PluginError};
     use std::sync::Arc;
     use tokio::sync::Notify;
@@ -377,7 +422,11 @@ destination:
                     None,
                     None,
                     token,
-                    move |_, _, _, _cancel_token| {
+                    MetricsRuntime {
+                        snapshot_reader: None,
+                        meter_provider: None,
+                    },
+                    move |_, _, _, _cancel_token, _metrics_runtime| {
                         let started = started.clone();
                         let release = release.clone();
                         Box::pin(async move {
@@ -416,7 +465,15 @@ destination:
                     None,
                     None,
                     token,
-                    move |_, _, _, cancel_token| {
+                    MetricsRuntime {
+                        snapshot_reader: None,
+                        meter_provider: None,
+                    },
+                    move |_,
+                          _,
+                          _,
+                          cancel_token: CancellationToken,
+                          _metrics_runtime: MetricsRuntime<'_>| {
                         let started = started.clone();
                         Box::pin(async move {
                             let mut cancelled = PluginError::internal(
@@ -463,7 +520,11 @@ destination:
                     None,
                     None,
                     token,
-                    move |_, _, _, _cancel_token| {
+                    MetricsRuntime {
+                        snapshot_reader: None,
+                        meter_provider: None,
+                    },
+                    move |_, _, _, _cancel_token, _metrics_runtime| {
                         let started_destination = started_destination.clone();
                         let release = release.clone();
                         Box::pin(async move {
@@ -496,5 +557,39 @@ destination:
             }
             _ => panic!("expected real post-commit failure outcome"),
         }
+    }
+
+    #[tokio::test]
+    async fn execute_task_with_metrics_forwards_snapshot_provider_to_runner() {
+        let snapshot_reader = SnapshotReader::new();
+        let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+            .with_reader(snapshot_reader.build_reader())
+            .build();
+
+        let result = execute_task_with_runner(
+            valid_yaml(),
+            false,
+            None,
+            None,
+            CancellationToken::new(),
+            MetricsRuntime {
+                snapshot_reader: Some(&snapshot_reader),
+                meter_provider: Some(&meter_provider),
+            },
+            |_config,
+             _options,
+             _progress_tx,
+             _cancel_token: CancellationToken,
+             metrics_runtime: MetricsRuntime<'_>| {
+                Box::pin(async move {
+                    assert!(metrics_runtime.snapshot_reader.is_some());
+                    assert!(metrics_runtime.meter_provider.is_some());
+                    Ok(completed_outcome())
+                })
+            },
+        )
+        .await;
+
+        assert!(matches!(result.outcome, TaskOutcomeKind::Completed));
     }
 }

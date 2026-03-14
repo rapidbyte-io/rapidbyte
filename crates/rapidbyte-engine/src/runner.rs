@@ -109,6 +109,7 @@ pub fn run_source_stream(
     sender: mpsc::SyncSender<Frame>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
+    metric_run_label: &str,
     plugin_id: &str,
     plugin_version: &str,
     source_config: &serde_json::Value,
@@ -123,13 +124,15 @@ pub fn run_source_stream(
 
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let shard_index = stream_ctx.partition_index.unwrap_or(0) as usize;
-    let host_timings = HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index);
+    let host_timings = HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index)
+        .with_run_label(metric_run_label);
 
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)
         .plugin_id(plugin_id)
         .plugin_instance_key(plugin_instance_key("source", plugin_id, stream_ctx, None))
         .stream(stream_ctx.stream_name.clone())
+        .metric_run_label(metric_run_label)
         .state_backend(state_backend)
         .sender(sender.clone())
         .source_checkpoints(source_checkpoints.clone())
@@ -276,6 +279,7 @@ pub fn run_destination_stream(
     dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
+    metric_run_label: &str,
     plugin_id: &str,
     plugin_version: &str,
     dest_config: &serde_json::Value,
@@ -290,7 +294,8 @@ pub fn run_destination_stream(
 
     let dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let shard_index = stream_ctx.partition_index.unwrap_or(0) as usize;
-    let host_timings = HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index);
+    let host_timings = HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index)
+        .with_run_label(metric_run_label);
 
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)
@@ -302,6 +307,7 @@ pub fn run_destination_stream(
             None,
         ))
         .stream(stream_ctx.stream_name.clone())
+        .metric_run_label(metric_run_label)
         .state_backend(state_backend)
         .receiver(receiver)
         .dest_checkpoints(dest_checkpoints.clone())
@@ -454,6 +460,7 @@ pub fn run_transform_stream(
     dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
+    metric_run_label: &str,
     plugin_id: &str,
     plugin_version: &str,
     transform_index: usize,
@@ -468,7 +475,8 @@ pub fn run_transform_stream(
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let shard_index = stream_ctx.partition_index.unwrap_or(0) as usize;
-    let host_timings = HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index);
+    let host_timings = HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index)
+        .with_run_label(metric_run_label);
 
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)
@@ -480,6 +488,7 @@ pub fn run_transform_stream(
             Some(transform_index),
         ))
         .stream(stream_ctx.stream_name.clone())
+        .metric_run_label(metric_run_label)
         .state_backend(state_backend)
         .sender(sender.clone())
         .receiver(receiver)

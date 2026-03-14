@@ -87,6 +87,17 @@ type ActiveLeaseMap = Arc<RwLock<HashMap<String, (u64, CancellationToken)>>>;
 const COMPLETE_TASK_RETRY_DELAY: Duration = Duration::from_secs(1);
 const DEFAULT_SIGNING_KEY: &[u8] = b"rapidbyte-dev-signing-key-not-for-production";
 
+#[derive(Clone)]
+struct TaskExecutionContext {
+    channel: Channel,
+    agent_id: String,
+    active_leases: ActiveLeaseMap,
+    spool: Arc<RwLock<PreviewSpool>>,
+    otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
+    config: AgentConfig,
+    shutdown: CancellationToken,
+}
+
 enum WorkerPoll<T> {
     Task(T),
     Idle,
@@ -196,6 +207,7 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
         let agent_id = agent_id.clone();
         let active_leases = active_leases.clone();
         let spool = spool.clone();
+        let otel_guard = otel_guard.clone();
         let config = config.clone();
         let shutdown = shutdown_token.clone();
         move || {
@@ -204,6 +216,7 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
                 agent_id.clone(),
                 active_leases.clone(),
                 spool.clone(),
+                otel_guard.clone(),
                 config.clone(),
                 shutdown.clone(),
             )
@@ -269,6 +282,7 @@ async fn worker_runner_loop(
     agent_id: String,
     active_leases: ActiveLeaseMap,
     spool: Arc<RwLock<PreviewSpool>>,
+    otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
     config: AgentConfig,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -315,13 +329,16 @@ async fn worker_runner_loop(
         },
         |task| {
             process_task(
-                channel.clone(),
-                agent_id.clone(),
+                TaskExecutionContext {
+                    channel: channel.clone(),
+                    agent_id: agent_id.clone(),
+                    active_leases: active_leases.clone(),
+                    spool: spool.clone(),
+                    otel_guard: otel_guard.clone(),
+                    config: config.clone(),
+                    shutdown: shutdown.clone(),
+                },
                 task,
-                active_leases.clone(),
-                spool.clone(),
-                config.clone(),
-                shutdown.clone(),
             )
         },
     )
@@ -330,13 +347,8 @@ async fn worker_runner_loop(
 
 #[allow(clippy::too_many_lines)]
 async fn process_task(
-    channel: Channel,
-    agent_id: String,
+    ctx: TaskExecutionContext,
     task: crate::proto::rapidbyte::v1::TaskAssignment,
-    active_leases: ActiveLeaseMap,
-    spool: Arc<RwLock<PreviewSpool>>,
-    config: AgentConfig,
-    shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     rapidbyte_metrics::instruments::agent::tasks_received().add(1, &[]);
     rapidbyte_metrics::instruments::agent::active_tasks().add(1, &[]);
@@ -351,7 +363,7 @@ async fn process_task(
     );
 
     let cancel_token = CancellationToken::new();
-    active_leases.write().await.insert(
+    ctx.active_leases.write().await.insert(
         task.task_id.clone(),
         (task.lease_epoch, cancel_token.clone()),
     );
@@ -361,22 +373,24 @@ async fn process_task(
     let limit = exec_opts.and_then(|e| e.limit);
 
     let (progress_tx, progress_rx) = mpsc::unbounded_channel();
-    let progress_client = AgentServiceClient::new(channel.clone());
+    let progress_client = AgentServiceClient::new(ctx.channel.clone());
     let progress_handle = tokio::spawn(crate::progress::forward_progress(
         progress_rx,
         progress_client,
-        agent_id.clone(),
+        ctx.agent_id.clone(),
         task.task_id.clone(),
         task.lease_epoch,
-        config.auth_token.clone(),
+        ctx.config.auth_token.clone(),
     ));
 
-    let result = executor::execute_task(
+    let result = executor::execute_task_with_metrics(
         &task.pipeline_yaml_utf8,
         dry_run,
         limit,
         Some(progress_tx),
         cancel_token,
+        Some(ctx.otel_guard.snapshot_reader()),
+        Some(ctx.otel_guard.meter_provider()),
     )
     .await;
 
@@ -407,7 +421,7 @@ async fn process_task(
                 ticket: Vec::new(),
             })
             .collect();
-        spool.write().await.store(
+        ctx.spool.write().await.store(
             PreviewKey {
                 run_id: task.run_id.clone(),
                 task_id: task.task_id.clone(),
@@ -417,7 +431,7 @@ async fn process_task(
         );
         Some(PreviewAccess {
             state: PreviewState::Ready.into(),
-            flight_endpoint: config.flight_advertise.clone(),
+            flight_endpoint: ctx.config.flight_advertise.clone(),
             ticket: Vec::new(),
             expires_at: None,
             streams: stream_previews,
@@ -427,7 +441,7 @@ async fn process_task(
     };
 
     let complete_request = CompleteTaskRequest {
-        agent_id: agent_id.clone(),
+        agent_id: ctx.agent_id.clone(),
         task_id: task.task_id.clone(),
         lease_epoch: task.lease_epoch,
         outcome,
@@ -459,12 +473,12 @@ async fn process_task(
         .record(task_start.elapsed().as_secs_f64(), &[]);
 
     let _ = report_completion_until_terminal(
-        &active_leases,
+        &ctx.active_leases,
         complete_request,
         COMPLETE_TASK_RETRY_DELAY,
         |req| {
-            let mut completion_client = AgentServiceClient::new(channel.clone());
-            let auth_token = config.auth_token.clone();
+            let mut completion_client = AgentServiceClient::new(ctx.channel.clone());
+            let auth_token = ctx.config.auth_token.clone();
             async move {
                 completion_client
                     .complete_task(
@@ -475,7 +489,7 @@ async fn process_task(
                     .map(tonic::Response::into_inner)
             }
         },
-        shutdown,
+        ctx.shutdown,
     )
     .await;
 

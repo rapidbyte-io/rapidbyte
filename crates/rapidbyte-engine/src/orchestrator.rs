@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc as sync_mpsc, Arc, Mutex};
 use std::time::Instant;
 
@@ -101,6 +102,7 @@ struct StreamBuild {
 
 struct StreamParams {
     pipeline_name: String,
+    metric_run_label: String,
     source_config: serde_json::Value,
     dest_config: serde_json::Value,
     source_plugin_id: String,
@@ -143,6 +145,7 @@ const SYSTEM_CORE_RESERVE_DIVISOR: u32 = 8;
 const MIN_PIPELINE_COORDINATION_CORES: u32 = 1;
 const MAX_PIPELINE_COORDINATION_CORES: u32 = 2;
 const TRANSFORM_PENALTY_SLOPE: f64 = 0.05;
+static NEXT_METRIC_RUN_LABEL: AtomicU64 = AtomicU64::new(1);
 const MIN_TRANSFORM_FACTOR: f64 = 0.75;
 
 fn resolve_effective_parallelism(config: &PipelineConfig, supports_partitioned_read: bool) -> u32 {
@@ -462,7 +465,6 @@ fn prepare_metrics_runtime<'a>(
     meter_provider: Option<&'a opentelemetry_sdk::metrics::SdkMeterProvider>,
 ) -> MetricsRuntime<'a> {
     if let (Some(snapshot_reader), Some(meter_provider)) = (snapshot_reader, meter_provider) {
-        opentelemetry::global::set_meter_provider(meter_provider.clone());
         return MetricsRuntime::Borrowed {
             snapshot_reader,
             meter_provider,
@@ -544,6 +546,14 @@ async fn execute_pipeline_once(
             })?
             .map_err(|e| PipelineError::Infrastructure(e.into()))?
         };
+        let metric_run_label = if options.dry_run {
+            format!(
+                "dry-run-{}-{attempt}",
+                NEXT_METRIC_RUN_LABEL.fetch_add(1, Ordering::Relaxed)
+            )
+        } else {
+            format!("{run_id}:{attempt}")
+        };
 
         send_progress(
             &progress_tx,
@@ -584,6 +594,7 @@ async fn execute_pipeline_once(
             &stream_build,
             state_for_execution.clone(),
             options,
+            &metric_run_label,
             &progress_tx,
             cancel_token,
         )
@@ -602,7 +613,11 @@ async fn execute_pipeline_once(
 
                 let snap = metrics_runtime
                     .snapshot_reader()
-                    .flush_and_snapshot(metrics_runtime.meter_provider(), &config.pipeline);
+                    .flush_and_snapshot_for_run(
+                        metrics_runtime.meter_provider(),
+                        &config.pipeline,
+                        Some(&metric_run_label),
+                    );
 
                 return Ok(PipelineOutcome::DryRun(DryRunResult {
                     streams: aggregated.dry_run_streams,
@@ -624,6 +639,7 @@ async fn execute_pipeline_once(
                 run_id,
                 attempt,
                 start,
+                &metric_run_label,
                 &modules,
                 aggregated,
                 metrics_runtime.snapshot_reader(),
@@ -981,6 +997,7 @@ async fn execute_streams(
     stream_build: &StreamBuild,
     state: Arc<dyn StateBackend>,
     options: &ExecutionOptions,
+    metric_run_label: &str,
     progress_tx: &ProgressTx,
     cancel_token: &CancellationToken,
 ) -> Result<AggregatedStreamResults, PipelineError> {
@@ -1024,6 +1041,7 @@ async fn execute_streams(
 
     let params = Arc::new(StreamParams {
         pipeline_name: config.pipeline.clone(),
+        metric_run_label: metric_run_label.to_owned(),
         source_config: config.source.config.clone(),
         dest_config: config.destination.config.clone(),
         source_plugin_id,
@@ -1106,6 +1124,7 @@ async fn execute_streams(
                         Arc::new(Mutex::new(Vec::new())),
                         state_dst,
                         &params.pipeline_name,
+                        &params.metric_run_label,
                         &params.dest_plugin_id,
                         &params.dest_plugin_version,
                         &params.dest_config,
@@ -1213,6 +1232,7 @@ async fn execute_streams(
                     source_tx,
                     state_src,
                     &params_src.pipeline_name,
+                    &params_src.metric_run_label,
                     &params_src.source_plugin_id,
                     &params_src.source_plugin_version,
                     &params_src.source_config,
@@ -1241,6 +1261,7 @@ async fn execute_streams(
                         dlq_records_t,
                         state_t,
                         &params_t.pipeline_name,
+                        &params_t.metric_run_label,
                         &t.plugin_id,
                         &t.plugin_version,
                         i,
@@ -1325,6 +1346,7 @@ async fn execute_streams(
                         run_dlq_records,
                         state_dst,
                         &params.pipeline_name,
+                        &params.metric_run_label,
                         &params.dest_plugin_id,
                         &params.dest_plugin_version,
                         &params.dest_config,
@@ -1530,6 +1552,7 @@ async fn finalize_run(
     run_id: i64,
     attempt: u32,
     start: Instant,
+    metric_run_label: &str,
     modules: &LoadedModules,
     mut aggregated: AggregatedStreamResults,
     snapshot_reader: &rapidbyte_metrics::snapshot::SnapshotReader,
@@ -1573,7 +1596,11 @@ async fn finalize_run(
         return Err(err);
     }
 
-    let snap = snapshot_reader.flush_and_snapshot(meter_provider, &config.pipeline);
+    let snap = snapshot_reader.flush_and_snapshot_for_run(
+        meter_provider,
+        &config.pipeline,
+        Some(metric_run_label),
+    );
 
     let plugin_internal_secs =
         snap.dest_connect_secs + snap.dest_flush_secs + snap.dest_commit_secs;

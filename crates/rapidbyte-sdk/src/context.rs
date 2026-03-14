@@ -174,6 +174,7 @@ impl Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host_ffi::test_support::{self, MetricCall};
 
     #[test]
     fn test_new_stores_metadata() {
@@ -278,11 +279,51 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn test_typed_metric_delegates() {
+    fn test_typed_metric_delegates_with_expected_labels() {
+        test_support::reset();
         let ctx = Context::new("test-plugin", "users");
         ctx.counter("records_read", 42);
         ctx.histogram("source_connect_secs", 0.5);
-        ctx.gauge("rows_per_second", 1000.0);
+        ctx.gauge_with_labels("rows_per_second", 1000.0, &[("phase", "scan")]);
+
+        let calls = test_support::take_metric_calls();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            calls[0],
+            MetricCall::Counter {
+                name: "records_read".to_string(),
+                value: 42,
+                labels_json: r#"{"plugin":"test-plugin","stream":"users"}"#.to_string(),
+            }
+        );
+        assert_eq!(
+            calls[1],
+            MetricCall::Histogram {
+                name: "source_connect_secs".to_string(),
+                value: 0.5,
+                labels_json: r#"{"plugin":"test-plugin","stream":"users"}"#.to_string(),
+            }
+        );
+        let MetricCall::Gauge {
+            name,
+            value,
+            labels_json,
+        } = &calls[2]
+        else {
+            panic!("expected gauge metric call");
+        };
+        assert_eq!(name, "rows_per_second");
+        assert!((*value - 1000.0).abs() < f64::EPSILON);
+        let gauge_labels: serde_json::Value =
+            serde_json::from_str(labels_json).expect("labels json should parse");
+        assert_eq!(
+            gauge_labels,
+            serde_json::json!({
+                "plugin": "test-plugin",
+                "stream": "users",
+                "phase": "scan"
+            })
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

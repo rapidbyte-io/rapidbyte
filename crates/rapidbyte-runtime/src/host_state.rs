@@ -71,6 +71,15 @@ impl HostTimings {
         }
     }
 
+    #[must_use]
+    pub fn with_run_label(mut self, run: &str) -> Self {
+        self.labels.push(opentelemetry::KeyValue::new(
+            rapidbyte_metrics::labels::RUN,
+            run.to_owned(),
+        ));
+        self
+    }
+
     pub fn record_emit_batch(&self, duration: std::time::Duration) {
         rapidbyte_metrics::instruments::host::emit_batch_duration()
             .record(duration.as_secs_f64(), &self.labels);
@@ -127,6 +136,7 @@ pub(crate) struct PluginIdentity {
     pub pipeline: PipelineId,
     pub plugin_instance_key: String,
     pub stream: StreamName,
+    pub metric_run_label: Option<String>,
     pub state_backend: Arc<dyn StateBackend>,
 }
 
@@ -175,6 +185,7 @@ pub struct HostStateBuilder {
     plugin_id: Option<String>,
     plugin_instance_key: Option<String>,
     stream: Option<String>,
+    metric_run_label: Option<String>,
     state_backend: Option<Arc<dyn StateBackend>>,
     sender: Option<mpsc::SyncSender<Frame>>,
     receiver: Option<mpsc::Receiver<Frame>>,
@@ -197,6 +208,7 @@ impl HostStateBuilder {
             plugin_id: None,
             plugin_instance_key: None,
             stream: None,
+            metric_run_label: None,
             state_backend: None,
             sender: None,
             receiver: None,
@@ -234,6 +246,12 @@ impl HostStateBuilder {
     #[must_use]
     pub fn stream(mut self, name: impl Into<String>) -> Self {
         self.stream = Some(name.into());
+        self
+    }
+
+    #[must_use]
+    pub fn metric_run_label(mut self, label: impl Into<String>) -> Self {
+        self.metric_run_label = Some(label.into());
         self
     }
 
@@ -343,6 +361,7 @@ impl HostStateBuilder {
                 pipeline: PipelineId::new(pipeline),
                 plugin_instance_key,
                 stream: StreamName::new(stream),
+                metric_run_label: self.metric_run_label,
                 state_backend,
             },
             batch: BatchRouter {
@@ -397,8 +416,8 @@ impl ComponentHostState {
         self.identity.stream.as_str()
     }
 
-    /// Inject the pipeline label into metric labels if not already present.
-    fn ensure_pipeline_label(&self, labels: &mut Vec<opentelemetry::KeyValue>) {
+    /// Inject the pipeline/run labels into metric labels if not already present.
+    fn ensure_metric_scope_labels(&self, labels: &mut Vec<opentelemetry::KeyValue>) {
         let has_pipeline = labels
             .iter()
             .any(|kv| kv.key.as_str() == rapidbyte_metrics::labels::PIPELINE);
@@ -407,6 +426,18 @@ impl ComponentHostState {
                 rapidbyte_metrics::labels::PIPELINE,
                 self.identity.pipeline.as_str().to_owned(),
             ));
+        }
+
+        if let Some(run_label) = self.identity.metric_run_label.as_deref() {
+            let has_run = labels
+                .iter()
+                .any(|kv| kv.key.as_str() == rapidbyte_metrics::labels::RUN);
+            if !has_run {
+                labels.push(opentelemetry::KeyValue::new(
+                    rapidbyte_metrics::labels::RUN,
+                    run_label.to_owned(),
+                ));
+            }
         }
     }
 
@@ -728,7 +759,7 @@ impl ComponentHostState {
         labels_json: String,
     ) -> Result<(), PluginError> {
         let mut labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
-        self.ensure_pipeline_label(&mut labels);
+        self.ensure_metric_scope_labels(&mut labels);
         match name.as_str() {
             "records_read" => {
                 rapidbyte_metrics::instruments::pipeline::records_read().add(value, &labels);
@@ -758,7 +789,8 @@ impl ComponentHostState {
         value: f64,
         labels_json: String,
     ) -> Result<(), PluginError> {
-        let labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
+        let mut labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
+        self.ensure_metric_scope_labels(&mut labels);
         rapidbyte_metrics::instruments::plugin::custom_gauge(&name)
             .map_err(|err| map_custom_metric_error(&name, &err))?
             .record(value, &labels);
@@ -773,7 +805,7 @@ impl ComponentHostState {
         labels_json: String,
     ) -> Result<(), PluginError> {
         let mut labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
-        self.ensure_pipeline_label(&mut labels);
+        self.ensure_metric_scope_labels(&mut labels);
         match name.as_str() {
             "source_connect_secs" => {
                 rapidbyte_metrics::instruments::plugin::source_connect_duration()

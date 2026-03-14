@@ -106,13 +106,209 @@ const fn state_scope_to_i32(scope: StateScope) -> i32 {
 
 static HOST_IMPORTS: OnceLock<Box<dyn HostImports>> = OnceLock::new();
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) mod test_support {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum MetricCall {
+        Counter {
+            name: String,
+            value: u64,
+            labels_json: String,
+        },
+        Gauge {
+            name: String,
+            value: f64,
+            labels_json: String,
+        },
+        Histogram {
+            name: String,
+            value: f64,
+            labels_json: String,
+        },
+    }
+
+    static METRIC_CALLS: OnceLock<Mutex<Vec<MetricCall>>> = OnceLock::new();
+
+    fn metric_calls() -> &'static Mutex<Vec<MetricCall>> {
+        METRIC_CALLS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    pub fn reset() {
+        metric_calls()
+            .lock()
+            .expect("metric calls lock poisoned")
+            .clear();
+    }
+
+    pub fn take_metric_calls() -> Vec<MetricCall> {
+        let mut calls = metric_calls().lock().expect("metric calls lock poisoned");
+        std::mem::take(&mut *calls)
+    }
+
+    #[derive(Default)]
+    pub struct RecordingHostImports;
+
+    impl HostImports for RecordingHostImports {
+        fn log(&self, _level: i32, _message: &str) {}
+
+        fn frame_new(&self, _capacity: u64) -> Result<u64, PluginError> {
+            Ok(1)
+        }
+
+        fn frame_write(&self, _handle: u64, _chunk: &[u8]) -> Result<u64, PluginError> {
+            Ok(0)
+        }
+
+        fn frame_seal(&self, _handle: u64) -> Result<(), PluginError> {
+            Ok(())
+        }
+
+        fn frame_len(&self, _handle: u64) -> Result<u64, PluginError> {
+            Ok(0)
+        }
+
+        fn frame_read(
+            &self,
+            _handle: u64,
+            _offset: u64,
+            _len: u64,
+        ) -> Result<Vec<u8>, PluginError> {
+            Ok(vec![])
+        }
+
+        fn frame_drop(&self, _handle: u64) {}
+
+        fn emit_batch(&self, _handle: u64) -> Result<(), PluginError> {
+            Ok(())
+        }
+
+        fn next_batch(&self) -> Result<Option<u64>, PluginError> {
+            Ok(None)
+        }
+
+        fn state_get(&self, _scope: StateScope, _key: &str) -> Result<Option<String>, PluginError> {
+            Ok(None)
+        }
+
+        fn state_put(
+            &self,
+            _scope: StateScope,
+            _key: &str,
+            _value: &str,
+        ) -> Result<(), PluginError> {
+            Ok(())
+        }
+
+        fn state_compare_and_set(
+            &self,
+            _scope: StateScope,
+            _key: &str,
+            _expected: Option<&str>,
+            _new_value: &str,
+        ) -> Result<bool, PluginError> {
+            Ok(false)
+        }
+
+        fn checkpoint(
+            &self,
+            _plugin_id: &str,
+            _stream_name: &str,
+            _cp: &Checkpoint,
+        ) -> Result<(), PluginError> {
+            Ok(())
+        }
+
+        fn counter_add(
+            &self,
+            name: &str,
+            value: u64,
+            labels_json: &str,
+        ) -> Result<(), PluginError> {
+            metric_calls()
+                .lock()
+                .expect("metric calls lock poisoned")
+                .push(MetricCall::Counter {
+                    name: name.to_owned(),
+                    value,
+                    labels_json: labels_json.to_owned(),
+                });
+            Ok(())
+        }
+
+        fn gauge_set(&self, name: &str, value: f64, labels_json: &str) -> Result<(), PluginError> {
+            metric_calls()
+                .lock()
+                .expect("metric calls lock poisoned")
+                .push(MetricCall::Gauge {
+                    name: name.to_owned(),
+                    value,
+                    labels_json: labels_json.to_owned(),
+                });
+            Ok(())
+        }
+
+        fn histogram_record(
+            &self,
+            name: &str,
+            value: f64,
+            labels_json: &str,
+        ) -> Result<(), PluginError> {
+            metric_calls()
+                .lock()
+                .expect("metric calls lock poisoned")
+                .push(MetricCall::Histogram {
+                    name: name.to_owned(),
+                    value,
+                    labels_json: labels_json.to_owned(),
+                });
+            Ok(())
+        }
+
+        fn emit_dlq_record(
+            &self,
+            _stream_name: &str,
+            _record_json: &str,
+            _error_message: &str,
+            _error_category: ErrorCategory,
+        ) -> Result<(), PluginError> {
+            Ok(())
+        }
+
+        fn connect_tcp(&self, _host: &str, _port: u16) -> Result<u64, PluginError> {
+            Err(PluginError::internal("STUB", "No-op stub"))
+        }
+
+        fn socket_read(&self, _handle: u64, _len: u64) -> Result<SocketReadResult, PluginError> {
+            Ok(SocketReadResult::Eof)
+        }
+
+        fn socket_write(
+            &self,
+            _handle: u64,
+            data: &[u8],
+        ) -> Result<SocketWriteResult, PluginError> {
+            Ok(SocketWriteResult::Written(data.len() as u64))
+        }
+
+        fn socket_close(&self, _handle: u64) {}
+    }
+}
+
 fn default_host_imports() -> Box<dyn HostImports> {
     #[cfg(target_arch = "wasm32")]
     {
         Box::new(WasmHostImports)
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    {
+        Box::new(test_support::RecordingHostImports)
+    }
+
+    #[cfg(all(not(test), not(target_arch = "wasm32")))]
     {
         Box::new(StubHostImports)
     }

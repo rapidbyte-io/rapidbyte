@@ -2,7 +2,9 @@
 
 use opentelemetry_sdk::metrics::data::Aggregation;
 use opentelemetry_sdk::metrics::InMemoryMetricExporter;
+use opentelemetry_sdk::metrics::InMemoryMetricExporterBuilder;
 use opentelemetry_sdk::metrics::PeriodicReader;
+use opentelemetry_sdk::metrics::Temporality;
 
 /// Snapshot of pipeline metrics from `OTel` instruments.
 /// The engine converts this to `PipelineResult` by adding non-instrument fields
@@ -45,7 +47,9 @@ impl SnapshotReader {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            exporter: InMemoryMetricExporter::default(),
+            exporter: InMemoryMetricExporterBuilder::new()
+                .with_temporality(Temporality::Delta)
+                .build(),
         }
     }
 
@@ -62,8 +66,19 @@ impl SnapshotReader {
         meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
         pipeline: &str,
     ) -> PipelineMetricsSnapshot {
+        self.flush_and_snapshot_for_run(meter_provider, pipeline, None)
+    }
+
+    /// Flush the meter provider and return a pipeline metrics snapshot for one run label.
+    #[must_use]
+    pub fn flush_and_snapshot_for_run(
+        &self,
+        meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
+        pipeline: &str,
+        run: Option<&str>,
+    ) -> PipelineMetricsSnapshot {
         let _ = meter_provider.force_flush();
-        self.snapshot_pipeline_result(pipeline)
+        self.snapshot_pipeline_result_for_run(pipeline, run)
     }
 
     /// Return a pipeline metrics snapshot filtered by pipeline label.
@@ -73,6 +88,16 @@ impl SnapshotReader {
     /// to ensure all pending metrics are available.
     #[must_use]
     pub fn snapshot_pipeline_result(&self, pipeline: &str) -> PipelineMetricsSnapshot {
+        self.snapshot_pipeline_result_for_run(pipeline, None)
+    }
+
+    /// Return a pipeline metrics snapshot filtered by pipeline and optional run label.
+    #[must_use]
+    pub fn snapshot_pipeline_result_for_run(
+        &self,
+        pipeline: &str,
+        run: Option<&str>,
+    ) -> PipelineMetricsSnapshot {
         let metrics = self.exporter.get_finished_metrics().unwrap_or_default();
 
         let mut snap = PipelineMetricsSnapshot::default();
@@ -80,12 +105,23 @@ impl SnapshotReader {
         for resource_metrics in &metrics {
             for scope_metrics in &resource_metrics.scope_metrics {
                 for metric in &scope_metrics.metrics {
-                    extract_metric_value(&metric.name, metric.data.as_ref(), pipeline, &mut snap);
+                    extract_metric_value(
+                        &metric.name,
+                        metric.data.as_ref(),
+                        pipeline,
+                        run,
+                        &mut snap,
+                    );
                 }
             }
         }
 
         snap
+    }
+
+    /// Clears collected finished metrics from the in-memory snapshot exporter.
+    pub fn reset(&self) {
+        self.exporter.reset();
     }
 }
 
@@ -96,12 +132,25 @@ impl Default for SnapshotReader {
 }
 
 /// Check whether a data point's attributes contain a matching pipeline label.
-fn has_pipeline_attr(attrs: &[opentelemetry::KeyValue], pipeline: &str) -> bool {
-    // If no pipeline label is present, include the data point (host/global instruments).
-    // If present, it must match the requested pipeline.
-    attrs
+fn matches_metric_scope(
+    attrs: &[opentelemetry::KeyValue],
+    pipeline: &str,
+    run: Option<&str>,
+) -> bool {
+    let pipeline_matches = attrs
         .iter()
-        .all(|kv| kv.key.as_str() != crate::labels::PIPELINE || kv.value.as_str() == pipeline)
+        .all(|kv| kv.key.as_str() != crate::labels::PIPELINE || kv.value.as_str() == pipeline);
+
+    if !pipeline_matches {
+        return false;
+    }
+
+    match run {
+        Some(run) => attrs
+            .iter()
+            .any(|kv| kv.key.as_str() == crate::labels::RUN && kv.value.as_str() == run),
+        None => true,
+    }
 }
 
 /// Extract a metric value into the snapshot struct by matching instrument name.
@@ -111,6 +160,7 @@ fn extract_metric_value(
     name: &str,
     data: &dyn Aggregation,
     pipeline: &str,
+    run: Option<&str>,
     snap: &mut PipelineMetricsSnapshot,
 ) {
     use opentelemetry_sdk::metrics::data::{Histogram, Sum};
@@ -120,7 +170,7 @@ fn extract_metric_value(
         let total: u64 = sum
             .data_points
             .iter()
-            .filter(|dp| has_pipeline_attr(&dp.attributes, pipeline))
+            .filter(|dp| matches_metric_scope(&dp.attributes, pipeline, run))
             .map(|dp| dp.value)
             .sum();
         match name {
@@ -138,7 +188,7 @@ fn extract_metric_value(
         let filtered = hist
             .data_points
             .iter()
-            .filter(|dp| has_pipeline_attr(&dp.attributes, pipeline));
+            .filter(|dp| matches_metric_scope(&dp.attributes, pipeline, run));
         let mut total_sum: f64 = 0.0;
         let mut total_count: u64 = 0;
         for dp in filtered {
@@ -274,5 +324,34 @@ mod tests {
         let snap = reader.flush_and_snapshot(&provider, "my-pipe");
         assert_eq!(snap.emit_batch_nanos, 3_000_000); // 3ms in nanos
         assert_eq!(snap.emit_count, 2);
+    }
+
+    #[test]
+    fn snapshot_can_filter_metrics_by_run_label() {
+        let (provider, reader) = test_provider();
+        let meter = provider.meter("test");
+        let hist = meter
+            .f64_histogram("plugin.source_connect_duration")
+            .build();
+
+        hist.record(
+            0.5,
+            &[
+                KeyValue::new(crate::labels::PIPELINE, "my-pipe"),
+                KeyValue::new(crate::labels::RUN, "run-a"),
+            ],
+        );
+        let run_a = reader.flush_and_snapshot_for_run(&provider, "my-pipe", Some("run-a"));
+        assert!((run_a.source_connect_secs - 0.5).abs() < 0.001);
+
+        hist.record(
+            1.5,
+            &[
+                KeyValue::new(crate::labels::PIPELINE, "my-pipe"),
+                KeyValue::new(crate::labels::RUN, "run-b"),
+            ],
+        );
+        let run_b = reader.flush_and_snapshot_for_run(&provider, "my-pipe", Some("run-b"));
+        assert!((run_b.source_connect_secs - 1.5).abs() < 0.001);
     }
 }

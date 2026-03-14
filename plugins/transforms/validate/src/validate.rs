@@ -446,13 +446,99 @@ fn unique_key(array: &dyn Array, row: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex, Once, OnceLock};
 
     use ::arrow::array::{Decimal128Array, Decimal256Array, Float64Array, StringArray};
     use ::arrow::datatypes::{Field, Schema};
     use arrow_buffer::i256;
+    use rapidbyte_sdk::checkpoint::StateScope;
+    use rapidbyte_sdk::error::ErrorCategory;
+    use rapidbyte_sdk::host_ffi::{self, HostImports};
 
     use super::*;
+
+    #[derive(Debug, Clone, PartialEq)]
+    enum MetricCall {
+        Counter {
+            name: String,
+            value: u64,
+            labels_json: String,
+        },
+    }
+
+    struct RecordingHostImports {
+        metric_calls: Arc<Mutex<Vec<MetricCall>>>,
+    }
+
+    impl HostImports for RecordingHostImports {
+        fn log(&self, _level: i32, _message: &str) {}
+        fn frame_new(&self, _capacity: u64) -> Result<u64, PluginError> { Ok(1) }
+        fn frame_write(&self, _handle: u64, _chunk: &[u8]) -> Result<u64, PluginError> { Ok(0) }
+        fn frame_seal(&self, _handle: u64) -> Result<(), PluginError> { Ok(()) }
+        fn frame_len(&self, _handle: u64) -> Result<u64, PluginError> { Ok(0) }
+        fn frame_read(&self, _handle: u64, _offset: u64, _len: u64) -> Result<Vec<u8>, PluginError> {
+            Ok(vec![])
+        }
+        fn frame_drop(&self, _handle: u64) {}
+        fn emit_batch(&self, _handle: u64) -> Result<(), PluginError> { Ok(()) }
+        fn next_batch(&self) -> Result<Option<u64>, PluginError> { Ok(None) }
+        fn state_get(&self, _scope: StateScope, _key: &str) -> Result<Option<String>, PluginError> { Ok(None) }
+        fn state_put(&self, _scope: StateScope, _key: &str, _value: &str) -> Result<(), PluginError> { Ok(()) }
+        fn state_compare_and_set(
+            &self,
+            _scope: StateScope,
+            _key: &str,
+            _expected: Option<&str>,
+            _new_value: &str,
+        ) -> Result<bool, PluginError> { Ok(false) }
+        fn checkpoint(&self, _plugin_id: &str, _stream_name: &str, _cp: &Checkpoint) -> Result<(), PluginError> {
+            Ok(())
+        }
+        fn counter_add(&self, name: &str, value: u64, labels_json: &str) -> Result<(), PluginError> {
+            self.metric_calls.lock().expect("metric calls lock poisoned").push(MetricCall::Counter {
+                name: name.to_owned(),
+                value,
+                labels_json: labels_json.to_owned(),
+            });
+            Ok(())
+        }
+        fn gauge_set(&self, _name: &str, _value: f64, _labels_json: &str) -> Result<(), PluginError> { Ok(()) }
+        fn histogram_record(&self, _name: &str, _value: f64, _labels_json: &str) -> Result<(), PluginError> { Ok(()) }
+        fn emit_dlq_record(
+            &self,
+            _stream_name: &str,
+            _record_json: &str,
+            _error_message: &str,
+            _error_category: ErrorCategory,
+        ) -> Result<(), PluginError> { Ok(()) }
+        fn connect_tcp(&self, _host: &str, _port: u16) -> Result<u64, PluginError> {
+            Err(PluginError::internal("STUB", "No-op stub"))
+        }
+        fn socket_read(&self, _handle: u64, _len: u64) -> Result<host_ffi::SocketReadResult, PluginError> {
+            Ok(host_ffi::SocketReadResult::Eof)
+        }
+        fn socket_write(&self, _handle: u64, data: &[u8]) -> Result<host_ffi::SocketWriteResult, PluginError> {
+            Ok(host_ffi::SocketWriteResult::Written(data.len() as u64))
+        }
+        fn socket_close(&self, _handle: u64) {}
+    }
+
+    fn metric_calls() -> Arc<Mutex<Vec<MetricCall>>> {
+        static INSTALL: Once = Once::new();
+        static CALLS: OnceLock<Arc<Mutex<Vec<MetricCall>>>> = OnceLock::new();
+
+        let calls = CALLS
+            .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
+            .clone();
+        INSTALL.call_once(|| {
+            let installed = host_ffi::set_host_imports(Box::new(RecordingHostImports {
+                metric_calls: calls.clone(),
+            }));
+            assert!(installed.is_ok(), "recording host imports should install");
+        });
+        calls.lock().expect("metric calls lock poisoned").clear();
+        calls
+    }
 
     fn bound(literal: &str) -> NumericBound {
         NumericBound {
@@ -683,6 +769,58 @@ mod tests {
         );
         assert_eq!(evaluation.valid_indices.len(), 2);
         assert_eq!(evaluation.invalid_rows.len(), 1);
+    }
+
+    #[test]
+    fn emit_validation_metrics_records_rule_and_field_labels() {
+        let calls = metric_calls();
+        let ctx = Context::new("validate", "users");
+        let evaluation = BatchEvaluation {
+            valid_indices: vec![0, 2],
+            invalid_rows: vec![InvalidRow {
+                row_index: 1,
+                message: "bad".to_string(),
+            }],
+            failure_counts: BTreeMap::from([(("regex".to_string(), "email".to_string()), 3)]),
+        };
+
+        emit_validation_metrics(&ctx, &evaluation);
+
+        let calls = calls.lock().expect("metric calls lock poisoned").clone();
+        let MetricCall::Counter {
+            name,
+            value,
+            labels_json,
+        } = &calls[0];
+        assert_eq!(name, "validation_failures_total");
+        assert_eq!(*value, 3);
+        let labels: serde_json::Value =
+            serde_json::from_str(labels_json).expect("labels json should parse");
+        assert_eq!(
+            labels,
+            serde_json::json!({
+                "plugin": "validate",
+                "stream": "users",
+                "rule": "regex",
+                "field": "email"
+            })
+        );
+        assert_eq!(
+            calls[1],
+            MetricCall::Counter {
+                name: "validation_rows_valid_total".to_string(),
+                value: 2,
+                labels_json: r#"{"plugin":"validate","stream":"users"}"#.to_string(),
+            }
+        );
+        assert_eq!(
+            calls[2],
+            MetricCall::Counter {
+                name: "validation_rows_invalid_total".to_string(),
+                value: 1,
+                labels_json: r#"{"plugin":"validate","stream":"users"}"#.to_string(),
+            }
+        );
     }
 
     #[test]

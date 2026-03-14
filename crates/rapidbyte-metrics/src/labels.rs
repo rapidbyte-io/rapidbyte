@@ -13,6 +13,7 @@ pub const STATUS: &str = "status";
 pub const METHOD: &str = "method";
 pub const REASON: &str = "reason";
 pub const PLUGIN: &str = "plugin";
+pub const RUN: &str = "run";
 pub const AGENT_ID: &str = "agent_id";
 pub const RULE: &str = "rule";
 pub const FIELD: &str = "field";
@@ -28,6 +29,7 @@ static ALLOWED_KEYS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         METHOD,
         REASON,
         PLUGIN,
+        RUN,
         AGENT_ID,
         RULE,
         FIELD,
