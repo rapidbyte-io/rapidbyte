@@ -316,6 +316,7 @@ impl HarnessContext {
         let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
             .with_reader(reader.build_reader())
             .build();
+        opentelemetry::global::set_meter_provider(provider.clone());
         let outcome = rapidbyte_engine::orchestrator::run_pipeline(
             &config,
             &ExecutionOptions::default(),
@@ -412,6 +413,7 @@ impl HarnessContext {
         let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
             .with_reader(reader.build_reader())
             .build();
+        opentelemetry::global::set_meter_provider(provider.clone());
         let outcome = rapidbyte_engine::orchestrator::run_pipeline(
             &config,
             &ExecutionOptions::default(),
@@ -452,6 +454,7 @@ impl HarnessContext {
         let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
             .with_reader(reader.build_reader())
             .build();
+        opentelemetry::global::set_meter_provider(provider.clone());
         let outcome = rapidbyte_engine::orchestrator::run_pipeline(
             &config,
             &ExecutionOptions::default(),
@@ -566,6 +569,7 @@ impl HarnessContext {
         let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
             .with_reader(reader.build_reader())
             .build();
+        opentelemetry::global::set_meter_provider(provider.clone());
         let outcome = rapidbyte_engine::orchestrator::run_pipeline(
             &config,
             &ExecutionOptions::default(),
