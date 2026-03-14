@@ -18,7 +18,7 @@ use rapidbyte_types::cursor::{CursorInfo, CursorType, CursorValue};
 use rapidbyte_types::envelope::DlqRecord;
 use rapidbyte_types::error::{CommitState, PluginError, ValidationResult, ValidationStatus};
 use rapidbyte_types::manifest::{Permissions, PluginManifest, ResourceLimits};
-use rapidbyte_types::metric::{ReadPerf, ReadSummary, WritePerf, WriteSummary};
+use rapidbyte_types::metric::{ReadSummary, WriteSummary};
 use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
 use rapidbyte_types::stream::{PartitionStrategy, StreamContext, StreamLimits, StreamPolicies};
 use rapidbyte_types::wire::Feature;
@@ -322,14 +322,25 @@ pub async fn run_pipeline(
     progress_tx: Option<tokio_mpsc::UnboundedSender<ProgressEvent>>,
     cancel_token: CancellationToken,
 ) -> Result<PipelineOutcome, PipelineError> {
-    run_pipeline_with_metrics(config, options, progress_tx, cancel_token, None, None).await
+    let reader = rapidbyte_metrics::snapshot::SnapshotReader::new();
+    let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+        .with_reader(reader.build_reader())
+        .build();
+    run_pipeline_with_metrics(
+        config,
+        options,
+        progress_tx,
+        cancel_token,
+        &reader,
+        &provider,
+    )
+    .await
 }
 
-/// Run a pipeline with optional OpenTelemetry metric snapshot support.
+/// Run a pipeline with OpenTelemetry metric snapshot support.
 ///
-/// When `snapshot_reader` and `meter_provider` are supplied, `finalize_run()` reads
-/// timing data from the OpenTelemetry metric snapshot. Otherwise, the engine
-/// uses a per-run fallback accumulator without mutating the global meter provider.
+/// `finalize_run()` reads timing data from the OpenTelemetry metric snapshot
+/// provided by `snapshot_reader` and `meter_provider`.
 ///
 /// # Errors
 ///
@@ -339,8 +350,8 @@ pub async fn run_pipeline_with_metrics(
     options: &ExecutionOptions,
     progress_tx: Option<tokio_mpsc::UnboundedSender<ProgressEvent>>,
     cancel_token: CancellationToken,
-    snapshot_reader: Option<&rapidbyte_metrics::snapshot::SnapshotReader>,
-    meter_provider: Option<&opentelemetry_sdk::metrics::SdkMeterProvider>,
+    snapshot_reader: &rapidbyte_metrics::snapshot::SnapshotReader,
+    meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
 ) -> Result<PipelineOutcome, PipelineError> {
     let max_retries = config.resources.max_retries;
     let mut attempt = 0u32;
@@ -430,59 +441,29 @@ pub async fn run_pipeline_with_metrics(
     }
 }
 
-enum MetricsRuntime<'a> {
-    Borrowed {
-        snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
-        meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
-    },
-    Fallback {
-        raw_snapshot: Arc<Mutex<rapidbyte_metrics::snapshot::PipelineMetricsSnapshot>>,
-    },
+struct MetricsRuntime<'a> {
+    snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
+    meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
 }
 
 impl MetricsRuntime<'_> {
-    fn fallback_metrics_snapshot(
-        &self,
-    ) -> Option<Arc<Mutex<rapidbyte_metrics::snapshot::PipelineMetricsSnapshot>>> {
-        match self {
-            Self::Borrowed { .. } => None,
-            Self::Fallback { raw_snapshot } => Some(raw_snapshot.clone()),
-        }
-    }
-
     fn snapshot_for_run(
         &self,
         pipeline: &str,
         run: Option<&str>,
     ) -> rapidbyte_metrics::snapshot::PipelineMetricsSnapshot {
-        match self {
-            Self::Borrowed {
-                snapshot_reader,
-                meter_provider,
-            } => snapshot_reader.flush_and_snapshot_for_run(meter_provider, pipeline, run),
-            Self::Fallback { raw_snapshot } => raw_snapshot
-                .lock()
-                .map(|snapshot| snapshot.clone())
-                .unwrap_or_default(),
-        }
+        self.snapshot_reader
+            .flush_and_snapshot_for_run(self.meter_provider, pipeline, run)
     }
 }
 
 fn prepare_metrics_runtime<'a>(
-    snapshot_reader: Option<&'a rapidbyte_metrics::snapshot::SnapshotReader>,
-    meter_provider: Option<&'a opentelemetry_sdk::metrics::SdkMeterProvider>,
+    snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
+    meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
 ) -> MetricsRuntime<'a> {
-    if let (Some(snapshot_reader), Some(meter_provider)) = (snapshot_reader, meter_provider) {
-        return MetricsRuntime::Borrowed {
-            snapshot_reader,
-            meter_provider,
-        };
-    }
-
-    MetricsRuntime::Fallback {
-        raw_snapshot: Arc::new(Mutex::new(
-            rapidbyte_metrics::snapshot::PipelineMetricsSnapshot::default(),
-        )),
+    MetricsRuntime {
+        snapshot_reader,
+        meter_provider,
     }
 }
 
@@ -493,8 +474,8 @@ async fn execute_pipeline_once(
     attempt: u32,
     progress_tx: ProgressTx,
     cancel_token: &CancellationToken,
-    snapshot_reader: Option<&rapidbyte_metrics::snapshot::SnapshotReader>,
-    meter_provider: Option<&opentelemetry_sdk::metrics::SdkMeterProvider>,
+    snapshot_reader: &rapidbyte_metrics::snapshot::SnapshotReader,
+    meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
 ) -> Result<PipelineOutcome, PipelineError> {
     let start = Instant::now();
     let pipeline_id = PipelineId::new(config.pipeline.clone());
@@ -925,44 +906,6 @@ fn execution_parallelism(config: &PipelineConfig, stream_ctxs: &[StreamContext])
         .unwrap_or_else(|| resolve_effective_parallelism(config, false));
 
     usize::try_from(resolved.max(1)).unwrap_or(usize::MAX)
-}
-
-fn merge_read_perf_maxima(current: &mut Option<ReadPerf>, perf: Option<&ReadPerf>) {
-    let Some(perf) = perf else {
-        return;
-    };
-    match current {
-        Some(current) => {
-            current.connect_secs = current.connect_secs.max(perf.connect_secs);
-            current.query_secs = current.query_secs.max(perf.query_secs);
-            current.fetch_secs = current.fetch_secs.max(perf.fetch_secs);
-            current.arrow_encode_secs = current.arrow_encode_secs.max(perf.arrow_encode_secs);
-        }
-        None => *current = Some(perf.clone()),
-    }
-}
-
-fn merge_write_perf_maxima(current: &mut Option<WritePerf>, perf: Option<&WritePerf>) {
-    let Some(perf) = perf else {
-        return;
-    };
-    match current {
-        Some(current) => {
-            current.connect_secs = current.connect_secs.max(perf.connect_secs);
-            current.flush_secs = current.flush_secs.max(perf.flush_secs);
-            current.commit_secs = current.commit_secs.max(perf.commit_secs);
-            current.arrow_decode_secs = current.arrow_decode_secs.max(perf.arrow_decode_secs);
-        }
-        None => *current = Some(perf.clone()),
-    }
-}
-
-fn metric_or_perf_fallback(snapshot_value: f64, fallback_value: Option<f64>) -> f64 {
-    if snapshot_value > 0.0 {
-        snapshot_value
-    } else {
-        fallback_value.unwrap_or(0.0)
-    }
 }
 
 struct CollectedTransforms {
@@ -1480,17 +1423,12 @@ async fn execute_streams(
         total_read_summary.batches_emitted += sr.read_summary.batches_emitted;
         total_read_summary.checkpoint_count += sr.read_summary.checkpoint_count;
         total_read_summary.records_skipped += sr.read_summary.records_skipped;
-        merge_read_perf_maxima(&mut total_read_summary.perf, sr.read_summary.perf.as_ref());
 
         total_write_summary.records_written += sr.write_summary.records_written;
         total_write_summary.bytes_written += sr.write_summary.bytes_written;
         total_write_summary.batches_written += sr.write_summary.batches_written;
         total_write_summary.checkpoint_count += sr.write_summary.checkpoint_count;
         total_write_summary.records_failed += sr.write_summary.records_failed;
-        merge_write_perf_maxima(
-            &mut total_write_summary.perf,
-            sr.write_summary.perf.as_ref(),
-        );
 
         source_checkpoints.extend(sr.source_checkpoints);
         dest_checkpoints.extend(sr.dest_checkpoints);
@@ -1682,7 +1620,6 @@ async fn finalize_run(
             &snap,
             aggregated.max_source_duration,
             modules.source_module_load_ms,
-            aggregated.total_read_summary.perf.as_ref(),
         ),
         dest: build_dest_timing(&snap, &aggregated, modules.dest_module_load_ms),
         transform_count: aggregated.transform_durations.len(),
@@ -1708,27 +1645,14 @@ fn build_source_timing(
     snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
     max_source_duration: f64,
     source_module_load_ms: u64,
-    fallback_perf: Option<&ReadPerf>,
 ) -> SourceTiming {
     SourceTiming {
         duration_secs: max_source_duration,
         module_load_ms: source_module_load_ms,
-        connect_secs: metric_or_perf_fallback(
-            snap.source_connect_secs,
-            fallback_perf.map(|perf| perf.connect_secs),
-        ),
-        query_secs: metric_or_perf_fallback(
-            snap.source_query_secs,
-            fallback_perf.map(|perf| perf.query_secs),
-        ),
-        fetch_secs: metric_or_perf_fallback(
-            snap.source_fetch_secs,
-            fallback_perf.map(|perf| perf.fetch_secs),
-        ),
-        arrow_encode_secs: metric_or_perf_fallback(
-            snap.source_encode_secs,
-            fallback_perf.map(|perf| perf.arrow_encode_secs),
-        ),
+        connect_secs: snap.source_connect_secs,
+        query_secs: snap.source_query_secs,
+        fetch_secs: snap.source_fetch_secs,
+        arrow_encode_secs: snap.source_encode_secs,
         emit_nanos: snap.emit_batch_nanos,
         compress_nanos: snap.compress_nanos,
         emit_count: snap.emit_count,
@@ -1743,12 +1667,7 @@ fn build_dry_run_result(
 ) -> DryRunResult {
     DryRunResult {
         streams: aggregated.dry_run_streams,
-        source: build_source_timing(
-            snap,
-            aggregated.max_source_duration,
-            source_module_load_ms,
-            aggregated.total_read_summary.perf.as_ref(),
-        ),
+        source: build_source_timing(snap, aggregated.max_source_duration, source_module_load_ms),
         transform_count: aggregated.transform_durations.len(),
         transform_duration_secs: aggregated.transform_durations.iter().sum(),
         duration_secs,
@@ -1759,28 +1678,8 @@ fn compute_wasm_overhead_secs(
     snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
     aggregated: &AggregatedStreamResults,
 ) -> f64 {
-    let plugin_internal_secs = metric_or_perf_fallback(
-        snap.dest_connect_secs,
-        aggregated
-            .total_write_summary
-            .perf
-            .as_ref()
-            .map(|perf| perf.connect_secs),
-    ) + metric_or_perf_fallback(
-        snap.dest_flush_secs,
-        aggregated
-            .total_write_summary
-            .perf
-            .as_ref()
-            .map(|perf| perf.flush_secs),
-    ) + metric_or_perf_fallback(
-        snap.dest_commit_secs,
-        aggregated
-            .total_write_summary
-            .perf
-            .as_ref()
-            .map(|perf| perf.commit_secs),
-    );
+    let plugin_internal_secs =
+        snap.dest_connect_secs + snap.dest_flush_secs + snap.dest_commit_secs;
 
     (aggregated.max_dest_duration
         - aggregated.max_vm_setup_secs
@@ -1797,38 +1696,10 @@ fn build_dest_timing(
     DestTiming {
         duration_secs: aggregated.max_dest_duration,
         module_load_ms: dest_module_load_ms,
-        connect_secs: metric_or_perf_fallback(
-            snap.dest_connect_secs,
-            aggregated
-                .total_write_summary
-                .perf
-                .as_ref()
-                .map(|perf| perf.connect_secs),
-        ),
-        flush_secs: metric_or_perf_fallback(
-            snap.dest_flush_secs,
-            aggregated
-                .total_write_summary
-                .perf
-                .as_ref()
-                .map(|perf| perf.flush_secs),
-        ),
-        commit_secs: metric_or_perf_fallback(
-            snap.dest_commit_secs,
-            aggregated
-                .total_write_summary
-                .perf
-                .as_ref()
-                .map(|perf| perf.commit_secs),
-        ),
-        arrow_decode_secs: metric_or_perf_fallback(
-            snap.dest_decode_secs,
-            aggregated
-                .total_write_summary
-                .perf
-                .as_ref()
-                .map(|perf| perf.arrow_decode_secs),
-        ),
+        connect_secs: snap.dest_connect_secs,
+        flush_secs: snap.dest_flush_secs,
+        commit_secs: snap.dest_commit_secs,
+        arrow_decode_secs: snap.dest_decode_secs,
         vm_setup_secs: aggregated.max_vm_setup_secs,
         recv_secs: aggregated.max_recv_secs,
         recv_nanos: snap.next_batch_nanos,
@@ -2837,50 +2708,14 @@ state:
 
 #[cfg(test)]
 mod metrics_runtime_tests {
-    use super::*;
     use opentelemetry::KeyValue;
     use opentelemetry_sdk::metrics::SdkMeterProvider;
     use rapidbyte_metrics::snapshot::SnapshotReader;
-    use rapidbyte_runtime::HostTimings;
     use std::sync::Mutex;
-    use std::time::Duration;
 
     /// Tests in this module set the process-global meter provider and must not
     /// run concurrently with each other.
     static PROVIDER_LOCK: Mutex<()> = Mutex::new(());
-
-    #[test]
-    fn fallback_metrics_runtime_captures_host_timings_without_overwriting_global_provider() {
-        let _guard = PROVIDER_LOCK.lock().expect("provider lock poisoned");
-        let global_reader = SnapshotReader::new();
-        let global_provider = SdkMeterProvider::builder()
-            .with_reader(global_reader.build_reader())
-            .build();
-        opentelemetry::global::set_meter_provider(global_provider.clone());
-
-        let metrics_runtime = prepare_metrics_runtime(None, None);
-        let timings = HostTimings::new("test-pipeline", "users", 0).with_raw_snapshot(
-            metrics_runtime
-                .fallback_metrics_snapshot()
-                .expect("fallback runtime should provide raw snapshot"),
-        );
-
-        timings.record_emit_batch(Duration::from_millis(5));
-        rapidbyte_metrics::instruments::pipeline::records_read().add(
-            7,
-            &[KeyValue::new(
-                rapidbyte_metrics::labels::PIPELINE,
-                "test-pipeline",
-            )],
-        );
-
-        let snapshot = metrics_runtime.snapshot_for_run("test-pipeline", None);
-        let global_snapshot = global_reader.flush_and_snapshot(&global_provider, "test-pipeline");
-
-        assert_eq!(snapshot.emit_batch_nanos, 5_000_000);
-        assert_eq!(snapshot.emit_count, 1);
-        assert_eq!(global_snapshot.records_read, 7);
-    }
 
     #[test]
     fn snapshot_for_run_drains_entry_so_repeated_calls_return_default() {
@@ -2919,7 +2754,6 @@ mod finalize_run_state_tests {
     use rapidbyte_state::error::{Result as StateResult, StateError};
     use rapidbyte_types::checkpoint::{Checkpoint, CheckpointKind};
     use rapidbyte_types::cursor::CursorValue;
-    use rapidbyte_types::metric::{ReadPerf, WritePerf};
     use rapidbyte_types::state::CursorState;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -3080,82 +2914,6 @@ resources:
         aggregated.execution_parallelism = 12;
 
         assert_eq!(reported_parallelism(&config, &aggregated), 12);
-    }
-
-    #[test]
-    fn source_timing_falls_back_to_summary_perf_when_snapshot_is_missing() {
-        let snap = rapidbyte_metrics::snapshot::PipelineMetricsSnapshot::default();
-        let perf = ReadPerf {
-            connect_secs: 0.1,
-            query_secs: 0.2,
-            fetch_secs: 0.3,
-            arrow_encode_secs: 0.4,
-        };
-
-        let timing = build_source_timing(&snap, 1.5, 12, Some(&perf));
-
-        assert!((timing.connect_secs - 0.1).abs() < f64::EPSILON);
-        assert!((timing.query_secs - 0.2).abs() < f64::EPSILON);
-        assert!((timing.fetch_secs - 0.3).abs() < f64::EPSILON);
-        assert!((timing.arrow_encode_secs - 0.4).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn dest_timing_falls_back_to_summary_perf_when_snapshot_is_missing() {
-        let snap = rapidbyte_metrics::snapshot::PipelineMetricsSnapshot::default();
-        let mut aggregated = make_aggregated_results();
-        aggregated.total_write_summary.perf = Some(WritePerf {
-            connect_secs: 0.5,
-            flush_secs: 0.6,
-            commit_secs: 0.7,
-            arrow_decode_secs: 0.8,
-        });
-
-        let timing = build_dest_timing(&snap, &aggregated, 34);
-
-        assert!((timing.connect_secs - 0.5).abs() < f64::EPSILON);
-        assert!((timing.flush_secs - 0.6).abs() < f64::EPSILON);
-        assert!((timing.commit_secs - 0.7).abs() < f64::EPSILON);
-        assert!((timing.arrow_decode_secs - 0.8).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn wasm_overhead_uses_destination_perf_fallback_when_snapshot_is_missing() {
-        let snap = rapidbyte_metrics::snapshot::PipelineMetricsSnapshot::default();
-        let mut aggregated = make_aggregated_results();
-        aggregated.max_dest_duration = 5.0;
-        aggregated.max_vm_setup_secs = 1.0;
-        aggregated.max_recv_secs = 0.5;
-        aggregated.total_write_summary.perf = Some(WritePerf {
-            connect_secs: 0.5,
-            flush_secs: 0.6,
-            commit_secs: 0.7,
-            arrow_decode_secs: 0.8,
-        });
-
-        let wasm_overhead_secs = compute_wasm_overhead_secs(&snap, &aggregated);
-
-        assert!((wasm_overhead_secs - 1.7).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn dry_run_result_uses_summary_perf_when_snapshot_is_missing() {
-        let snap = rapidbyte_metrics::snapshot::PipelineMetricsSnapshot::default();
-        let mut aggregated = make_aggregated_results();
-        aggregated.max_source_duration = 1.5;
-        aggregated.total_read_summary.perf = Some(ReadPerf {
-            connect_secs: 0.1,
-            query_secs: 0.2,
-            fetch_secs: 0.3,
-            arrow_encode_secs: 0.4,
-        });
-
-        let result = build_dry_run_result(&snap, aggregated, 12, 3.0);
-
-        assert!((result.source.connect_secs - 0.1).abs() < f64::EPSILON);
-        assert!((result.source.query_secs - 0.2).abs() < f64::EPSILON);
-        assert!((result.source.fetch_secs - 0.3).abs() < f64::EPSILON);
-        assert!((result.source.arrow_encode_secs - 0.4).abs() < f64::EPSILON);
     }
 
     #[tokio::test]

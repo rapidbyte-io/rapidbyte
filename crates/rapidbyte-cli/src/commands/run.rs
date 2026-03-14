@@ -84,15 +84,19 @@ pub async fn execute(
 
     // Run the pipeline
     let cpu_start = process_cpu_seconds();
-    let outcome = orchestrator::run_pipeline_with_metrics(
-        &config,
-        &options,
-        progress_tx,
-        CancellationToken::new(),
-        otel_guard.map(rapidbyte_metrics::OtelGuard::snapshot_reader),
-        otel_guard.map(rapidbyte_metrics::OtelGuard::meter_provider),
-    )
-    .await;
+    let outcome = if let Some(guard) = otel_guard {
+        orchestrator::run_pipeline_with_metrics(
+            &config,
+            &options,
+            progress_tx,
+            CancellationToken::new(),
+            guard.snapshot_reader(),
+            guard.meter_provider(),
+        )
+        .await
+    } else {
+        orchestrator::run_pipeline(&config, &options, progress_tx, CancellationToken::new()).await
+    };
     let (cpu_end, peak_rss_mb) = post_pipeline_metrics();
 
     // Wait for spinner to finish before printing results

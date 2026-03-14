@@ -17,8 +17,8 @@ type PipelineRunFuture<'a> =
 
 #[derive(Clone, Copy)]
 struct MetricsRuntime<'a> {
-    snapshot_reader: Option<&'a rapidbyte_metrics::snapshot::SnapshotReader>,
-    meter_provider: Option<&'a opentelemetry_sdk::metrics::SdkMeterProvider>,
+    snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
+    meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
 }
 
 /// Result of executing a task on the agent.
@@ -81,14 +81,18 @@ pub async fn execute_task(
     progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
     cancel_token: CancellationToken,
 ) -> TaskExecutionResult {
+    let reader = rapidbyte_metrics::snapshot::SnapshotReader::new();
+    let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+        .with_reader(reader.build_reader())
+        .build();
     execute_task_with_metrics(
         pipeline_yaml,
         dry_run,
         limit,
         progress_tx,
         cancel_token,
-        None,
-        None,
+        &reader,
+        &provider,
     )
     .await
 }
@@ -100,8 +104,8 @@ pub async fn execute_task_with_metrics(
     limit: Option<u64>,
     progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
     cancel_token: CancellationToken,
-    snapshot_reader: Option<&rapidbyte_metrics::snapshot::SnapshotReader>,
-    meter_provider: Option<&opentelemetry_sdk::metrics::SdkMeterProvider>,
+    snapshot_reader: &rapidbyte_metrics::snapshot::SnapshotReader,
+    meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
 ) -> TaskExecutionResult {
     let metrics_runtime = MetricsRuntime {
         snapshot_reader,
@@ -324,6 +328,14 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Notify;
 
+    fn test_metrics_runtime() -> (SnapshotReader, opentelemetry_sdk::metrics::SdkMeterProvider) {
+        let reader = SnapshotReader::new();
+        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+            .with_reader(reader.build_reader())
+            .build();
+        (reader, provider)
+    }
+
     fn valid_yaml() -> &'static [u8] {
         br#"
 version: "1.0"
@@ -416,6 +428,7 @@ destination:
             let started = started.clone();
             let release = release.clone();
             tokio::spawn(async move {
+                let (reader, provider) = test_metrics_runtime();
                 execute_task_with_runner(
                     valid_yaml(),
                     false,
@@ -423,8 +436,8 @@ destination:
                     None,
                     token,
                     MetricsRuntime {
-                        snapshot_reader: None,
-                        meter_provider: None,
+                        snapshot_reader: &reader,
+                        meter_provider: &provider,
                     },
                     move |_, _, _, _cancel_token, _metrics_runtime| {
                         let started = started.clone();
@@ -459,6 +472,7 @@ destination:
             let token = token.clone();
             let started = started.clone();
             tokio::spawn(async move {
+                let (reader, provider) = test_metrics_runtime();
                 execute_task_with_runner(
                     valid_yaml(),
                     false,
@@ -466,8 +480,8 @@ destination:
                     None,
                     token,
                     MetricsRuntime {
-                        snapshot_reader: None,
-                        meter_provider: None,
+                        snapshot_reader: &reader,
+                        meter_provider: &provider,
                     },
                     move |_,
                           _,
@@ -514,6 +528,7 @@ destination:
             let started_destination = started_destination.clone();
             let release = release.clone();
             tokio::spawn(async move {
+                let (reader, provider) = test_metrics_runtime();
                 execute_task_with_runner(
                     valid_yaml(),
                     false,
@@ -521,8 +536,8 @@ destination:
                     None,
                     token,
                     MetricsRuntime {
-                        snapshot_reader: None,
-                        meter_provider: None,
+                        snapshot_reader: &reader,
+                        meter_provider: &provider,
                     },
                     move |_, _, _, _cancel_token, _metrics_runtime| {
                         let started_destination = started_destination.clone();
@@ -573,19 +588,15 @@ destination:
             None,
             CancellationToken::new(),
             MetricsRuntime {
-                snapshot_reader: Some(&snapshot_reader),
-                meter_provider: Some(&meter_provider),
+                snapshot_reader: &snapshot_reader,
+                meter_provider: &meter_provider,
             },
             |_config,
              _options,
              _progress_tx,
              _cancel_token: CancellationToken,
-             metrics_runtime: MetricsRuntime<'_>| {
-                Box::pin(async move {
-                    assert!(metrics_runtime.snapshot_reader.is_some());
-                    assert!(metrics_runtime.meter_provider.is_some());
-                    Ok(completed_outcome())
-                })
+             _metrics_runtime: MetricsRuntime<'_>| {
+                Box::pin(async move { Ok(completed_outcome()) })
             },
         )
         .await;

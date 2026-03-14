@@ -388,8 +388,8 @@ async fn process_task(
         limit,
         Some(progress_tx),
         cancel_token,
-        Some(ctx.otel_guard.snapshot_reader()),
-        Some(ctx.otel_guard.meter_provider()),
+        ctx.otel_guard.snapshot_reader(),
+        ctx.otel_guard.meter_provider(),
     )
     .await;
 
