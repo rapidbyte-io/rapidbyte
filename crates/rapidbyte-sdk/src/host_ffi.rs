@@ -453,7 +453,7 @@ impl HostImports for WasmHostImports {
         };
 
         let envelope = PayloadEnvelope {
-            protocol_version: ProtocolVersion::V5,
+            protocol_version: ProtocolVersion::current(),
             plugin_id: plugin_id.to_string(),
             stream_name: stream_name.to_string(),
             payload: cp,

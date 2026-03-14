@@ -2392,7 +2392,7 @@ mod stream_context_partition_tests {
             description: String::new(),
             author: None,
             license: None,
-            protocol_version: ProtocolVersion::V5,
+            protocol_version: ProtocolVersion::current(),
             roles: Roles {
                 source: Some(SourceCapabilities {
                     supported_sync_modes: vec![SyncMode::FullRefresh],

@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use opentelemetry::metrics::UpDownCounter;
 use tonic::transport::{Identity, Server, ServerTlsConfig as TonicServerTlsConfig};
 use tracing::info;
 
@@ -162,6 +163,10 @@ async fn rollback_background_timeout(
     }
 }
 
+fn decrement_active_runs(counter: &UpDownCounter<i64>) {
+    counter.add(-1, &[]);
+}
+
 #[allow(clippy::too_many_lines)]
 async fn handle_expired_lease(
     state: &ControllerState,
@@ -267,7 +272,7 @@ async fn handle_expired_lease(
 
     if durable {
         publish_run_failed(state, &run_id, error_info, attempt).await;
-        rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
+        decrement_active_runs(&rapidbyte_metrics::instruments::controller::active_runs());
     } else {
         tracing::warn!(
             task_id = %task_id,
@@ -379,7 +384,7 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
 
         if durable {
             publish_run_failed(state, &run_id, error_info, attempt).await;
-            rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
+            decrement_active_runs(&rapidbyte_metrics::instruments::controller::active_runs());
         } else {
             tracing::warn!(run_id, "skipping reconciliation-timeout terminal publish because durable persistence failed");
         }
@@ -536,15 +541,11 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::store::test_support::FailingMetadataStore;
-    use opentelemetry::global;
+    use opentelemetry::metrics::MeterProvider;
     use opentelemetry_sdk::metrics::data::Sum;
     use opentelemetry_sdk::metrics::{
         InMemoryMetricExporter, InMemoryMetricExporterBuilder, PeriodicReader, SdkMeterProvider,
     };
-    use std::sync::LazyLock;
-    use tokio::sync::Mutex;
-
-    static METRIC_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn metric_test_provider() -> (SdkMeterProvider, InMemoryMetricExporter) {
         let exporter = InMemoryMetricExporterBuilder::new().build();
@@ -673,13 +674,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn decrement_active_runs_records_metric() {
+        let (provider, exporter) = metric_test_provider();
+        let counter = provider
+            .meter("test")
+            .i64_up_down_counter("controller.active_runs")
+            .build();
+        decrement_active_runs(&counter);
+        let _ = provider.force_flush();
+        assert_eq!(active_runs_value(&exporter), -1);
+    }
+
     #[tokio::test]
     async fn handle_expired_lease_transitions_assigned_run_to_timed_out() {
-        let _guard = METRIC_TEST_LOCK.lock().await;
-        let (provider, exporter) = metric_test_provider();
-        global::set_meter_provider(provider.clone());
-        rapidbyte_metrics::instruments::controller::active_runs().add(1, &[]);
-
         let state = ControllerState::new(b"test-signing-key");
         let (run_id, _) = {
             let mut runs = state.runs.write().await;
@@ -714,8 +722,6 @@ mod tests {
             record.error_message.as_deref(),
             Some(format!("Task {task_id} lease expired (agent unresponsive)").as_str())
         );
-        let _ = provider.force_flush();
-        assert_eq!(active_runs_value(&exporter), 0);
     }
 
     #[tokio::test]
@@ -857,11 +863,6 @@ mod tests {
 
     #[tokio::test]
     async fn handle_reconciliation_timeout_fails_stale_reconciling_run() {
-        let _guard = METRIC_TEST_LOCK.lock().await;
-        let (provider, exporter) = metric_test_provider();
-        global::set_meter_provider(provider.clone());
-        rapidbyte_metrics::instruments::controller::active_runs().add(1, &[]);
-
         let state = ControllerState::new(b"test-signing-key");
         let (run_id, _) = {
             let mut runs = state.runs.write().await;
@@ -889,8 +890,6 @@ mod tests {
             .error_message
             .as_deref()
             .is_some_and(|message| message.contains("reconciliation timed out")));
-        let _ = provider.force_flush();
-        assert_eq!(active_runs_value(&exporter), 0);
     }
 
     #[tokio::test]

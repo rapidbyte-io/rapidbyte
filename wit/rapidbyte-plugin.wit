@@ -1,4 +1,4 @@
-package rapidbyte:plugin@5.0.0;
+package rapidbyte:plugin@6.0.0;
 
 interface types {
     type session = u64;

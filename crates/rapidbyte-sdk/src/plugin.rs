@@ -138,7 +138,7 @@ mod tests {
             Ok((
                 Self { config },
                 PluginInfo {
-                    protocol_version: ProtocolVersion::V5,
+                    protocol_version: ProtocolVersion::current(),
                     features: vec![],
                     default_max_batch_bytes: 64 * 1024 * 1024,
                 },
@@ -180,7 +180,7 @@ mod tests {
                     write_calls: 0,
                 },
                 PluginInfo {
-                    protocol_version: ProtocolVersion::V5,
+                    protocol_version: ProtocolVersion::current(),
                     features: vec![],
                     default_max_batch_bytes: 64 * 1024 * 1024,
                 },
@@ -215,7 +215,7 @@ mod tests {
             Ok((
                 Self { config },
                 PluginInfo {
-                    protocol_version: ProtocolVersion::V5,
+                    protocol_version: ProtocolVersion::current(),
                     features: vec![],
                     default_max_batch_bytes: 64 * 1024 * 1024,
                 },

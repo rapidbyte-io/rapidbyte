@@ -11,10 +11,20 @@ use serde::{Deserialize, Serialize};
 /// Determines serialization format and available host imports.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ProtocolVersion {
-    /// Version 5 — current stable protocol.
-    #[default]
+    /// Version 5 — legacy protocol kept for compatibility checks.
     #[serde(rename = "5")]
     V5,
+    /// Version 6 — current stable protocol.
+    #[default]
+    #[serde(rename = "6")]
+    V6,
+}
+
+impl ProtocolVersion {
+    #[must_use]
+    pub const fn current() -> Self {
+        Self::V6
+    }
 }
 
 /// How data is read from a source stream.
@@ -114,10 +124,10 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_default_is_v5() {
+    fn protocol_version_default_is_v6() {
         let v = ProtocolVersion::default();
-        assert_eq!(v, ProtocolVersion::V5);
-        assert_eq!(serde_json::to_string(&v).unwrap(), "\"5\"");
+        assert_eq!(v, ProtocolVersion::current());
+        assert_eq!(serde_json::to_string(&v).unwrap(), "\"6\"");
     }
 
     #[test]
@@ -156,12 +166,18 @@ mod tests {
     #[test]
     fn plugin_info_roundtrip() {
         let info = PluginInfo {
-            protocol_version: ProtocolVersion::V5,
+            protocol_version: ProtocolVersion::current(),
             features: vec![Feature::Cdc, Feature::Stateful],
             default_max_batch_bytes: 64 * 1024 * 1024,
         };
         let json = serde_json::to_string(&info).unwrap();
         let back: PluginInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(info, back);
+    }
+
+    #[test]
+    fn legacy_protocol_version_still_deserializes() {
+        let legacy: ProtocolVersion = serde_json::from_str("\"5\"").unwrap();
+        assert_eq!(legacy, ProtocolVersion::V5);
     }
 }

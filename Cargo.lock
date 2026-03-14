@@ -4245,6 +4245,7 @@ dependencies = [
  "rapidbyte-types",
  "serde_json",
  "tokio",
+ "tonic",
  "tower 0.5.3",
  "tracing",
 ]

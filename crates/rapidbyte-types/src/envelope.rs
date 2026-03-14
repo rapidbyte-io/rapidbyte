@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn payload_envelope_explicit_payload_field() {
         let env = PayloadEnvelope {
-            protocol_version: ProtocolVersion::V5,
+            protocol_version: ProtocolVersion::current(),
             plugin_id: "rapidbyte/source-postgres".into(),
             stream_name: "public.users".into(),
             payload: serde_json::json!({"id": 1}),

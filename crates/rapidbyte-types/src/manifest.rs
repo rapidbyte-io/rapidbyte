@@ -179,7 +179,7 @@ mod tests {
             description: "Reads from PostgreSQL".into(),
             author: None,
             license: Some("MIT".into()),
-            protocol_version: ProtocolVersion::V5,
+            protocol_version: ProtocolVersion::current(),
             permissions: Permissions {
                 network: NetworkPermissions {
                     allowed_domains: None,
@@ -245,7 +245,7 @@ mod tests {
             description: String::new(),
             author: None,
             license: None,
-            protocol_version: ProtocolVersion::V5,
+            protocol_version: ProtocolVersion::current(),
             roles: Roles {
                 source: Some(SourceCapabilities {
                     supported_sync_modes: vec![SyncMode::FullRefresh],
