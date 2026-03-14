@@ -4210,6 +4210,7 @@ dependencies = [
  "chrono",
  "criterion",
  "jsonschema",
+ "opentelemetry",
  "opentelemetry_sdk",
  "proptest",
  "rapidbyte-metrics",
