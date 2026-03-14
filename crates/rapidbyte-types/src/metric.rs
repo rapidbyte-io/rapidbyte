@@ -47,8 +47,6 @@ pub struct ReadSummary {
     pub checkpoint_count: u64,
     #[serde(default)]
     pub records_skipped: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub perf: Option<ReadPerf>,
 }
 
 /// Aggregate metrics for a completed destination write operation.
@@ -60,8 +58,6 @@ pub struct WriteSummary {
     pub checkpoint_count: u64,
     #[serde(default)]
     pub records_failed: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub perf: Option<WritePerf>,
 }
 
 /// Aggregate metrics for a completed transform operation.
@@ -79,17 +75,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn read_summary_optional_perf() {
+    fn read_summary_roundtrip() {
         let s = ReadSummary {
             records_read: 1000,
             bytes_read: 65536,
             batches_emitted: 2,
             checkpoint_count: 1,
             records_skipped: 0,
-            perf: None,
         };
-        let json = serde_json::to_value(&s).unwrap();
-        assert!(json.get("perf").is_none());
+        let json = serde_json::to_string(&s).unwrap();
+        let back: ReadSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(s, back);
     }
 
     #[test]
@@ -100,12 +96,6 @@ mod tests {
             batches_written: 1,
             checkpoint_count: 1,
             records_failed: 0,
-            perf: Some(WritePerf {
-                connect_secs: 0.1,
-                flush_secs: 0.5,
-                commit_secs: 0.05,
-                arrow_decode_secs: 0.02,
-            }),
         };
         let json = serde_json::to_string(&s).unwrap();
         let back: WriteSummary = serde_json::from_str(&json).unwrap();

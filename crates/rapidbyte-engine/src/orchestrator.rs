@@ -1299,7 +1299,6 @@ async fn execute_streams(
                         batches_written: 0,
                         checkpoint_count: 0,
                         records_failed: 0,
-                        perf: None,
                     },
                     source_checkpoints: src.checkpoints,
                     dest_checkpoints: Vec::new(),
@@ -1393,7 +1392,6 @@ async fn execute_streams(
         batches_emitted: 0,
         checkpoint_count: 0,
         records_skipped: 0,
-        perf: None,
     };
     let mut total_write_summary = WriteSummary {
         records_written: 0,
@@ -1401,7 +1399,6 @@ async fn execute_streams(
         batches_written: 0,
         checkpoint_count: 0,
         records_failed: 0,
-        perf: None,
     };
     let mut max_source_duration: f64 = 0.0;
     let mut max_dest_duration: f64 = 0.0;
@@ -2150,7 +2147,6 @@ mod stream_task_collection_tests {
                 batches_emitted: 0,
                 checkpoint_count: 0,
                 records_skipped: 0,
-                perf: None,
             },
             write_summary: WriteSummary {
                 records_written: 0,
@@ -2158,7 +2154,6 @@ mod stream_task_collection_tests {
                 batches_written: 0,
                 checkpoint_count: 0,
                 records_failed: 0,
-                perf: None,
             },
             source_checkpoints: Vec::new(),
             dest_checkpoints: Vec::new(),
@@ -2850,7 +2845,6 @@ mod finalize_run_state_tests {
                 batches_emitted: 1,
                 checkpoint_count: 1,
                 records_skipped: 0,
-                perf: None,
             },
             total_write_summary: WriteSummary {
                 records_written: 10,
@@ -2858,7 +2852,6 @@ mod finalize_run_state_tests {
                 batches_written: 1,
                 checkpoint_count: 1,
                 records_failed: 0,
-                perf: None,
             },
             source_checkpoints: vec![Checkpoint {
                 id: 7,

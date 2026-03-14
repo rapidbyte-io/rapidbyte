@@ -208,7 +208,6 @@ pub fn run_source_stream(
                 batches_emitted: summary.batches_emitted,
                 checkpoint_count: summary.checkpoint_count,
                 records_skipped: summary.records_skipped,
-                perf: None,
             }
         }
         Err(err) => {
@@ -386,7 +385,6 @@ pub fn run_destination_stream(
                 batches_written: summary.batches_written,
                 checkpoint_count: summary.checkpoint_count,
                 records_failed: summary.records_failed,
-                perf: None,
             }
         }
         Err(err) => {

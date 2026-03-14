@@ -160,7 +160,6 @@ mod tests {
                 batches_emitted: 0,
                 checkpoint_count: 0,
                 records_skipped: 0,
-                perf: None,
             })
         }
     }
@@ -199,7 +198,6 @@ mod tests {
                 batches_written: 0,
                 checkpoint_count: 0,
                 records_failed: 0,
-                perf: None,
             })
         }
     }
