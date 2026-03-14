@@ -111,6 +111,9 @@ enum WorkerPoll<T> {
 /// Returns an error if the controller connection fails, agent registration
 /// is rejected, or the Flight server address cannot be parsed.
 ///
+/// # Panics
+///
+/// Panics if the SIGTERM signal handler cannot be installed (Unix only).
 #[allow(clippy::too_many_lines)]
 pub async fn run(
     config: AgentConfig,
@@ -223,21 +226,34 @@ pub async fn run(
     });
     tokio::pin!(worker_pool);
 
-    // Main coordinator loop with graceful shutdown
-    let shutdown = tokio::signal::ctrl_c();
-    tokio::pin!(shutdown);
+    // Main coordinator loop with graceful shutdown.
+    // Handle both SIGINT (Ctrl-C) and SIGTERM (container orchestrators).
+    let signal_token = shutdown_token.clone();
+    tokio::spawn(async move {
+        let sigint = tokio::signal::ctrl_c();
 
-    let pool_result = tokio::select! {
-        _ = &mut shutdown => {
-            info!("Shutdown signal received, stopping agent...");
-            shutdown_token.cancel();
-            worker_pool.await
+        #[cfg(unix)]
+        {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to install SIGTERM handler");
+            tokio::select! {
+                _ = sigint => { info!("SIGINT received, stopping agent..."); }
+                _ = sigterm.recv() => { info!("SIGTERM received, stopping agent..."); }
+            }
         }
-        result = &mut worker_pool => {
-            shutdown_token.cancel();
-            result
+
+        #[cfg(not(unix))]
+        {
+            let _ = sigint.await;
+            info!("SIGINT received, stopping agent...");
         }
-    };
+
+        signal_token.cancel();
+    });
+
+    let pool_result = worker_pool.await;
+    shutdown_token.cancel();
 
     let _ = heartbeat_handle.await;
     pool_result?;

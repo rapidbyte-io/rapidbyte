@@ -82,13 +82,32 @@ pub async fn execute(
         (None, None)
     };
 
-    // Run the pipeline
+    // Run the pipeline with signal-driven cooperative cancellation.
     let cpu_start = process_cpu_seconds();
+    let cancel_token = CancellationToken::new();
+    let sigint_token = cancel_token.clone();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("Interrupt received, cancelling pipeline...");
+        sigint_token.cancel();
+    });
+    #[cfg(unix)]
+    {
+        let sigterm_token = cancel_token.clone();
+        tokio::spawn(async move {
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("failed to install SIGTERM handler");
+            sigterm.recv().await;
+            tracing::info!("SIGTERM received, cancelling pipeline...");
+            sigterm_token.cancel();
+        });
+    }
     let outcome = orchestrator::run_pipeline(
         &config,
         &options,
         progress_tx,
-        CancellationToken::new(),
+        cancel_token,
         otel_guard.snapshot_reader(),
         otel_guard.meter_provider(),
     )
