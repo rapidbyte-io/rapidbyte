@@ -8,6 +8,7 @@ members = [
     "crates/rapidbyte-dev",
     "crates/rapidbyte-engine",
     "crates/rapidbyte-metrics",
+    "crates/rapidbyte-registry",
     "crates/rapidbyte-runtime",
     "crates/rapidbyte-sdk",
     "crates/rapidbyte-sdk/macros",
@@ -73,4 +74,5 @@ opentelemetry-prometheus = "0.28"
 prometheus = "0.13"
 tracing-opentelemetry = "0.29"
 dashmap = "6"
+oci-client = "0.16"
 http = "1"
