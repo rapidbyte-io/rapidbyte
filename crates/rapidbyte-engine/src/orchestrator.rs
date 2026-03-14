@@ -1643,13 +1643,7 @@ async fn finalize_run(
 
     let snap = metrics_runtime.snapshot_for_run(&config.pipeline, Some(metric_run_label));
 
-    let plugin_internal_secs =
-        snap.dest_connect_secs + snap.dest_flush_secs + snap.dest_commit_secs;
-    let wasm_overhead_secs = (aggregated.max_dest_duration
-        - aggregated.max_vm_setup_secs
-        - aggregated.max_recv_secs
-        - plugin_internal_secs)
-        .max(0.0);
+    let wasm_overhead_secs = compute_wasm_overhead_secs(&snap, &aggregated);
 
     tracing::debug!(
         pipeline = config.pipeline,
@@ -1765,6 +1759,40 @@ fn build_dry_run_result(
         transform_duration_secs: aggregated.transform_durations.iter().sum(),
         duration_secs,
     }
+}
+
+fn compute_wasm_overhead_secs(
+    snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
+    aggregated: &AggregatedStreamResults,
+) -> f64 {
+    let plugin_internal_secs = metric_or_perf_fallback(
+        snap.dest_connect_secs,
+        aggregated
+            .total_write_summary
+            .perf
+            .as_ref()
+            .map(|perf| perf.connect_secs),
+    ) + metric_or_perf_fallback(
+        snap.dest_flush_secs,
+        aggregated
+            .total_write_summary
+            .perf
+            .as_ref()
+            .map(|perf| perf.flush_secs),
+    ) + metric_or_perf_fallback(
+        snap.dest_commit_secs,
+        aggregated
+            .total_write_summary
+            .perf
+            .as_ref()
+            .map(|perf| perf.commit_secs),
+    );
+
+    (aggregated.max_dest_duration
+        - aggregated.max_vm_setup_secs
+        - aggregated.max_recv_secs
+        - plugin_internal_secs)
+        .max(0.0)
 }
 
 fn build_dest_timing(
@@ -3059,6 +3087,25 @@ resources:
         assert!((timing.flush_secs - 0.6).abs() < f64::EPSILON);
         assert!((timing.commit_secs - 0.7).abs() < f64::EPSILON);
         assert!((timing.arrow_decode_secs - 0.8).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn wasm_overhead_uses_destination_perf_fallback_when_snapshot_is_missing() {
+        let snap = rapidbyte_metrics::snapshot::PipelineMetricsSnapshot::default();
+        let mut aggregated = make_aggregated_results();
+        aggregated.max_dest_duration = 5.0;
+        aggregated.max_vm_setup_secs = 1.0;
+        aggregated.max_recv_secs = 0.5;
+        aggregated.total_write_summary.perf = Some(WritePerf {
+            connect_secs: 0.5,
+            flush_secs: 0.6,
+            commit_secs: 0.7,
+            arrow_decode_secs: 0.8,
+        });
+
+        let wasm_overhead_secs = compute_wasm_overhead_secs(&snap, &aggregated);
+
+        assert!((wasm_overhead_secs - 1.7).abs() < f64::EPSILON);
     }
 
     #[test]
