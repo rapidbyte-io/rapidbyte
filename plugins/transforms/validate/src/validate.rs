@@ -311,26 +311,23 @@ fn evaluate_unique_rule(
     None
 }
 
-pub(crate) fn emit_validation_metrics(
-    ctx: &Context,
-    evaluation: &BatchEvaluation,
-) -> Result<(), PluginError> {
+/// Best-effort: metric failures are silently ignored.
+pub(crate) fn emit_validation_metrics(ctx: &Context, evaluation: &BatchEvaluation) {
     for ((rule, field), count) in &evaluation.failure_counts {
-        ctx.counter_with_labels(
+        let _ = ctx.counter_with_labels(
             "validation_failures_total",
             *count,
             &[("rule", rule.as_str()), ("field", field.as_str())],
-        )?;
+        );
     }
-    ctx.counter(
+    let _ = ctx.counter(
         "validation_rows_valid_total",
         evaluation.valid_indices.len() as u64,
-    )?;
-    ctx.counter(
+    );
+    let _ = ctx.counter(
         "validation_rows_invalid_total",
         evaluation.invalid_rows.len() as u64,
-    )?;
-    Ok(())
+    );
 }
 
 fn string_value<'a>(array: &'a dyn Array, row: usize) -> Option<&'a str> {

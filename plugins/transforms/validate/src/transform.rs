@@ -37,9 +37,7 @@ pub async fn run(
             bytes_in += batch.get_array_memory_size() as u64;
 
             let evaluation = evaluate_batch(batch, config);
-            if let Err(err) = emit_validation_metrics(ctx, &evaluation) {
-                ctx.log(LogLevel::Warn, &format!("validation metrics skipped: {err}"));
-            }
+            emit_validation_metrics(ctx, &evaluation);
 
             if !evaluation.valid_indices.is_empty() {
                 let filtered = select_rows(batch, &evaluation.valid_indices)?;

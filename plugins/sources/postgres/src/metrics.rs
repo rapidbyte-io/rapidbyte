@@ -17,25 +17,28 @@ pub(crate) struct EmitState {
 }
 
 /// Emit per-batch source read counter deltas for a stream.
-pub(crate) fn emit_batch_counters(ctx: &Context, state: &mut EmitState) -> Result<(), PluginError> {
+///
+/// Best-effort: metric failures are silently ignored to avoid aborting
+/// data movement on telemetry issues.
+pub(crate) fn emit_batch_counters(ctx: &Context, state: &mut EmitState) {
     let delta_records = state.total_records - state.last_emitted_records;
     let delta_bytes = state.total_bytes - state.last_emitted_bytes;
     state.last_emitted_records = state.total_records;
     state.last_emitted_bytes = state.total_bytes;
     if delta_records > 0 {
-        ctx.counter("records_read", delta_records)?;
+        let _ = ctx.counter("records_read", delta_records);
     }
     if delta_bytes > 0 {
-        ctx.counter("bytes_read", delta_bytes)?;
+        let _ = ctx.counter("bytes_read", delta_bytes);
     }
-    Ok(())
 }
 
 /// Emit end-of-stream source timing histograms (connect, query, fetch, encode).
-pub(crate) fn emit_source_timings(ctx: &Context, perf: &ReadPerf) -> Result<(), PluginError> {
-    ctx.histogram("source_connect_secs", perf.connect_secs)?;
-    ctx.histogram("source_query_secs", perf.query_secs)?;
-    ctx.histogram("source_fetch_secs", perf.fetch_secs)?;
-    ctx.histogram("source_arrow_encode_secs", perf.arrow_encode_secs)?;
-    Ok(())
+///
+/// Best-effort: metric failures are silently ignored.
+pub(crate) fn emit_source_timings(ctx: &Context, perf: &ReadPerf) {
+    let _ = ctx.histogram("source_connect_secs", perf.connect_secs);
+    let _ = ctx.histogram("source_query_secs", perf.query_secs);
+    let _ = ctx.histogram("source_fetch_secs", perf.fetch_secs);
+    let _ = ctx.histogram("source_arrow_encode_secs", perf.arrow_encode_secs);
 }

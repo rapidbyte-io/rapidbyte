@@ -108,9 +108,7 @@ pub async fn write_stream(
         commit_secs: result.commit_secs,
         arrow_decode_secs,
     };
-    if let Err(err) = emit_dest_timings(ctx, &perf) {
-        ctx.log(LogLevel::Warn, &format!("dest timings skipped: {err}"));
-    }
+    emit_dest_timings(ctx, &perf);
 
     Ok(WriteSummary {
         records_written: result.total_rows,

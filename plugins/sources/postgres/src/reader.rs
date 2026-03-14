@@ -245,7 +245,7 @@ fn emit_accumulated_batch(
 
         ctx.emit_batch(&batch)
             .map_err(|e| format!("emit_batch failed: {}", e.message))?;
-        emit_batch_counters(ctx, state).map_err(|e| format!("emit_batch_counters failed: {}", e.message))?;
+        emit_batch_counters(ctx, state);
     }
 
     *estimated_bytes = BATCH_OVERHEAD_BYTES;
@@ -668,9 +668,7 @@ pub async fn read_stream(
         fetch_secs,
         arrow_encode_secs,
     };
-    if let Err(err) = emit_source_timings(ctx, &perf) {
-        ctx.log(LogLevel::Warn, &format!("source timings skipped: {err}"));
-    }
+    emit_source_timings(ctx, &perf);
 
     Ok(ReadSummary {
         records_read: state.total_records,
