@@ -34,8 +34,7 @@ pub async fn execute(
         flight_tls_key,
         metrics_listen,
     )?;
-    let guard =
-        Arc::new(otel_guard.ok_or_else(|| anyhow::anyhow!("telemetry initialization failed"))?);
+    let guard = Arc::new(otel_guard.expect("agent telemetry guard is always provided by main"));
     rapidbyte_agent::run(config, guard).await
 }
 

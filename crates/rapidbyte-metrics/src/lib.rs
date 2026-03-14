@@ -87,33 +87,39 @@ pub async fn serve_prometheus(guard: std::sync::Arc<OtelGuard>, listener: tokio:
     let active = std::sync::Arc::new(AtomicUsize::new(0));
 
     loop {
-        if let Ok((mut stream, _)) = listener.accept().await {
-            if active.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
-                drop(stream);
+        let (mut stream, _) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                tracing::warn!("prometheus accept error: {err}");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 continue;
             }
-            let guard = guard.clone();
-            let active = active.clone();
-            active.fetch_add(1, Ordering::Relaxed);
-            tokio::spawn(async move {
-                struct ConnGuard(std::sync::Arc<AtomicUsize>);
-                impl Drop for ConnGuard {
-                    fn drop(&mut self) {
-                        self.0.fetch_sub(1, Ordering::Relaxed);
-                    }
-                }
-                let _conn_guard = ConnGuard(active);
-                let mut buf = [0u8; 1024];
-                let _ = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf)).await;
-                let body = guard.prometheus_text();
-                let header = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\n\r\n",
-                    body.len(),
-                );
-                let _ = stream.write_all(header.as_bytes()).await;
-                let _ = stream.write_all(body.as_bytes()).await;
-            });
+        };
+        if active.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+            drop(stream);
+            continue;
         }
+        let guard = guard.clone();
+        let active = active.clone();
+        active.fetch_add(1, Ordering::Relaxed);
+        tokio::spawn(async move {
+            struct ConnGuard(std::sync::Arc<AtomicUsize>);
+            impl Drop for ConnGuard {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+            let _conn_guard = ConnGuard(active);
+            let mut buf = [0u8; 1024];
+            let _ = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf)).await;
+            let body = guard.prometheus_text();
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\n\r\n",
+                body.len(),
+            );
+            let _ = stream.write_all(header.as_bytes()).await;
+            let _ = stream.write_all(body.as_bytes()).await;
+        });
     }
 }
 

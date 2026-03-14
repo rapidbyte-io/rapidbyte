@@ -245,7 +245,23 @@ async fn main() -> ExitCode {
         Commands::Agent { .. } => "rapidbyte-agent",
         _ => "rapidbyte-cli",
     };
-    let otel_guard = rapidbyte_metrics::init(service_name).ok();
+    let otel_result = rapidbyte_metrics::init(service_name);
+    let otel_guard = match &cli.command {
+        // Controller and agent require telemetry for Prometheus metrics.
+        // Propagate the real init error so the user sees the root cause.
+        Commands::Controller { .. } | Commands::Agent { .. } => match otel_result {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                eprintln!(
+                    "{} telemetry initialization failed: {e:#}",
+                    console::style("\u{2718}").red().bold(),
+                );
+                return ExitCode::FAILURE;
+            }
+        },
+        // CLI commands treat telemetry as optional.
+        _ => otel_result.ok(),
+    };
     logging::init(verbosity, &cli.log_level, otel_guard.as_ref());
 
     let tls = commands::transport::TlsClientConfig {

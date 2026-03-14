@@ -32,7 +32,7 @@ pub async fn execute(
         metrics_listen,
     )?;
     let guard =
-        Arc::new(otel_guard.ok_or_else(|| anyhow::anyhow!("telemetry initialization failed"))?);
+        Arc::new(otel_guard.expect("controller telemetry guard is always provided by main"));
     rapidbyte_controller::run(config, guard).await
 }
 
