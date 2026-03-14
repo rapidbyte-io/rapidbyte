@@ -10,9 +10,7 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use rapidbyte_runtime::{
-    parse_plugin_ref, Frame, HostTimings, LoadedComponent, SandboxOverrides, WasmRuntime,
-};
+use rapidbyte_runtime::{parse_plugin_ref, Frame, LoadedComponent, SandboxOverrides, WasmRuntime};
 use rapidbyte_state::StateBackend;
 use rapidbyte_types::catalog::{Catalog, SchemaHint};
 use rapidbyte_types::cursor::{CursorInfo, CursorType, CursorValue};
@@ -68,8 +66,6 @@ struct StreamResult {
     write_summary: WriteSummary,
     source_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
     dest_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
-    src_host_timings: HostTimings,
-    dst_host_timings: HostTimings,
     src_duration: f64,
     dst_duration: f64,
     vm_setup_secs: f64,
@@ -126,42 +122,16 @@ struct AggregatedStreamResults {
     total_write_summary: WriteSummary,
     source_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
     dest_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
-    src_timings: HostTimings,
-    dst_timings: HostTimings,
-    src_timing_maxima: SourceTimingMaxima,
-    dst_timing_maxima: DestTimingMaxima,
+    max_source_duration: f64,
+    max_dest_duration: f64,
+    max_vm_setup_secs: f64,
+    max_recv_secs: f64,
     transform_durations: Vec<f64>,
     dlq_records: Vec<DlqRecord>,
     final_stats: RunStats,
     first_error: Option<PipelineError>,
     dry_run_streams: Vec<DryRunStreamResult>,
     stream_metrics: Vec<StreamShardMetric>,
-}
-
-#[allow(clippy::struct_field_names)]
-#[derive(Debug, Clone, Copy, Default)]
-struct SourceTimingMaxima {
-    duration_secs: f64,
-    connect_secs: f64,
-    query_secs: f64,
-    fetch_secs: f64,
-    arrow_encode_secs: f64,
-}
-
-fn observe_source_timing(maxima: &mut SourceTimingMaxima, stream: &StreamResult) {
-    maxima.duration_secs = maxima.duration_secs.max(stream.src_duration);
-    maxima.connect_secs = maxima
-        .connect_secs
-        .max(stream.src_host_timings.source_connect_secs);
-    maxima.query_secs = maxima
-        .query_secs
-        .max(stream.src_host_timings.source_query_secs);
-    maxima.fetch_secs = maxima
-        .fetch_secs
-        .max(stream.src_host_timings.source_fetch_secs);
-    maxima.arrow_encode_secs = maxima
-        .arrow_encode_secs
-        .max(stream.src_host_timings.source_arrow_encode_secs);
 }
 
 struct StreamTaskCollection {
@@ -284,56 +254,6 @@ fn decode_incremental_last_value(raw: String, tie_breaker_field: Option<&str>) -
     CursorValue::Utf8 { value: raw }
 }
 
-#[allow(clippy::struct_field_names)]
-#[derive(Debug, Clone, Copy, Default)]
-struct DestTimingMaxima {
-    duration_secs: f64,
-    vm_setup_secs: f64,
-    recv_secs: f64,
-    connect_secs: f64,
-    flush_secs: f64,
-    commit_secs: f64,
-    arrow_decode_secs: f64,
-}
-
-fn build_source_timing(
-    src_timing_maxima: &SourceTimingMaxima,
-    src_timings: &HostTimings,
-    src_perf: Option<&rapidbyte_types::metric::ReadPerf>,
-    source_module_load_ms: u64,
-) -> SourceTiming {
-    SourceTiming {
-        duration_secs: src_timing_maxima.duration_secs,
-        module_load_ms: source_module_load_ms,
-        connect_secs: src_perf.map_or(src_timing_maxima.connect_secs, |p| p.connect_secs),
-        query_secs: src_perf.map_or(src_timing_maxima.query_secs, |p| p.query_secs),
-        fetch_secs: src_perf.map_or(src_timing_maxima.fetch_secs, |p| p.fetch_secs),
-        arrow_encode_secs: src_perf
-            .map_or(src_timing_maxima.arrow_encode_secs, |p| p.arrow_encode_secs),
-        emit_nanos: src_timings.emit_batch_nanos,
-        compress_nanos: src_timings.compress_nanos,
-        emit_count: src_timings.emit_batch_count,
-    }
-}
-
-fn observe_dest_timing(maxima: &mut DestTimingMaxima, stream: &StreamResult) {
-    maxima.duration_secs = maxima.duration_secs.max(stream.dst_duration);
-    maxima.vm_setup_secs = maxima.vm_setup_secs.max(stream.vm_setup_secs);
-    maxima.recv_secs = maxima.recv_secs.max(stream.recv_secs);
-    maxima.connect_secs = maxima
-        .connect_secs
-        .max(stream.dst_host_timings.dest_connect_secs);
-    maxima.flush_secs = maxima
-        .flush_secs
-        .max(stream.dst_host_timings.dest_flush_secs);
-    maxima.commit_secs = maxima
-        .commit_secs
-        .max(stream.dst_host_timings.dest_commit_secs);
-    maxima.arrow_decode_secs = maxima
-        .arrow_decode_secs
-        .max(stream.dst_host_timings.dest_arrow_decode_secs);
-}
-
 /// Type alias for the progress channel sender used throughout the orchestrator.
 type ProgressTx = Option<tokio_mpsc::UnboundedSender<ProgressEvent>>;
 
@@ -399,15 +319,41 @@ pub async fn run_pipeline(
     progress_tx: Option<tokio_mpsc::UnboundedSender<ProgressEvent>>,
     cancel_token: CancellationToken,
 ) -> Result<PipelineOutcome, PipelineError> {
+    run_pipeline_with_metrics(config, options, progress_tx, cancel_token, None, None).await
+}
+
+/// Run a pipeline with optional OTel metric snapshot support.
+///
+/// When `snapshot_reader` and `meter_provider` are supplied, `finalize_run()` reads
+/// timing data from the OTel metric snapshot. Otherwise, timing fields are zeroed.
+///
+/// # Errors
+///
+/// Returns a `PipelineError` if the pipeline fails.
+pub async fn run_pipeline_with_metrics(
+    config: &PipelineConfig,
+    options: &ExecutionOptions,
+    progress_tx: Option<tokio_mpsc::UnboundedSender<ProgressEvent>>,
+    cancel_token: CancellationToken,
+    snapshot_reader: Option<&rapidbyte_metrics::snapshot::SnapshotReader>,
+    meter_provider: Option<&opentelemetry_sdk::metrics::SdkMeterProvider>,
+) -> Result<PipelineOutcome, PipelineError> {
     let max_retries = config.resources.max_retries;
     let mut attempt = 0u32;
 
     loop {
         ensure_not_cancelled(&cancel_token, "Pipeline cancelled before execution")?;
         attempt += 1;
-        let result =
-            execute_pipeline_once(config, options, attempt, progress_tx.clone(), &cancel_token)
-                .await;
+        let result = execute_pipeline_once(
+            config,
+            options,
+            attempt,
+            progress_tx.clone(),
+            &cancel_token,
+            snapshot_reader,
+            meter_provider,
+        )
+        .await;
 
         match result {
             Ok(outcome) => return Ok(outcome),
@@ -480,13 +426,15 @@ pub async fn run_pipeline(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn execute_pipeline_once(
     config: &PipelineConfig,
     options: &ExecutionOptions,
     attempt: u32,
     progress_tx: ProgressTx,
     cancel_token: &CancellationToken,
+    snapshot_reader: Option<&rapidbyte_metrics::snapshot::SnapshotReader>,
+    meter_provider: Option<&opentelemetry_sdk::metrics::SdkMeterProvider>,
 ) -> Result<PipelineOutcome, PipelineError> {
     let start = Instant::now();
     let pipeline_id = PipelineId::new(config.pipeline.clone());
@@ -590,18 +538,45 @@ async fn execute_pipeline_once(
                 phase: Phase::Finished,
             },
         );
+        // Construct fallback snapshot reader/provider when none are supplied.
+        let fallback_reader;
+        let fallback_provider;
+        let snap_reader = match snapshot_reader {
+            Some(r) => r,
+            None => {
+                fallback_reader = rapidbyte_metrics::snapshot::SnapshotReader::new();
+                &fallback_reader
+            }
+        };
+        let meter_prov = match meter_provider {
+            Some(p) => p,
+            None => {
+                fallback_provider = opentelemetry_sdk::metrics::SdkMeterProvider::default();
+                &fallback_provider
+            }
+        };
+
         preserve_real_outcome_after_stream_execution(cancel_token, async move {
             if options.dry_run {
                 let duration_secs = start.elapsed().as_secs_f64();
-                let src_perf = aggregated.total_read_summary.perf.as_ref();
+
+                // Flush OTel and take a snapshot for source timing
+                let _ = meter_prov.force_flush();
+                let snap = snap_reader.snapshot_pipeline_result(&config.pipeline);
+
                 return Ok(PipelineOutcome::DryRun(DryRunResult {
                     streams: aggregated.dry_run_streams,
-                    source: build_source_timing(
-                        &aggregated.src_timing_maxima,
-                        &aggregated.src_timings,
-                        src_perf,
-                        modules.source_module_load_ms,
-                    ),
+                    source: SourceTiming {
+                        duration_secs: aggregated.max_source_duration,
+                        module_load_ms: modules.source_module_load_ms,
+                        connect_secs: snap.source_connect_secs,
+                        query_secs: snap.source_query_secs,
+                        fetch_secs: snap.source_fetch_secs,
+                        arrow_encode_secs: snap.source_encode_secs,
+                        emit_nanos: snap.emit_batch_nanos,
+                        compress_nanos: snap.compress_nanos,
+                        emit_count: snap.emit_count,
+                    },
                     transform_count: config.transforms.len(),
                     transform_duration_secs: aggregated.transform_durations.iter().sum(),
                     duration_secs,
@@ -617,6 +592,8 @@ async fn execute_pipeline_once(
                 start,
                 &modules,
                 aggregated,
+                snap_reader,
+                meter_prov,
             )
             .await?;
             Ok(PipelineOutcome::Run(result))
@@ -1298,8 +1275,6 @@ async fn execute_streams(
                     },
                     source_checkpoints: src.checkpoints,
                     dest_checkpoints: Vec::new(),
-                    src_host_timings: src.host_timings,
-                    dst_host_timings: HostTimings::default(),
                     src_duration: src.duration_secs,
                     dst_duration: 0.0,
                     vm_setup_secs: 0.0,
@@ -1364,8 +1339,6 @@ async fn execute_streams(
                     write_summary: dst.summary,
                     source_checkpoints: src.checkpoints,
                     dest_checkpoints: dst.checkpoints,
-                    src_host_timings: src.host_timings,
-                    dst_host_timings: dst.host_timings,
                     src_duration: src.duration_secs,
                     dst_duration: dst.duration_secs,
                     vm_setup_secs: dst.vm_setup_secs,
@@ -1401,18 +1374,20 @@ async fn execute_streams(
         records_failed: 0,
         perf: None,
     };
-    let mut src_timings = HostTimings::default();
-    let mut dst_timings = HostTimings::default();
-    let mut src_timing_maxima = SourceTimingMaxima::default();
-    let mut dst_timing_maxima = DestTimingMaxima::default();
+    let mut max_source_duration: f64 = 0.0;
+    let mut max_dest_duration: f64 = 0.0;
+    let mut max_vm_setup_secs: f64 = 0.0;
+    let mut max_recv_secs: f64 = 0.0;
     let mut transform_durations = Vec::new();
     let mut dry_run_streams: Vec<DryRunStreamResult> = Vec::new();
     let mut stream_metrics: Vec<StreamShardMetric> = Vec::new();
     let stream_collection = collect_stream_task_results(stream_join_set, progress_tx).await?;
 
     for sr in stream_collection.successes {
-        observe_source_timing(&mut src_timing_maxima, &sr);
-        observe_dest_timing(&mut dst_timing_maxima, &sr);
+        max_source_duration = max_source_duration.max(sr.src_duration);
+        max_dest_duration = max_dest_duration.max(sr.dst_duration);
+        max_vm_setup_secs = max_vm_setup_secs.max(sr.vm_setup_secs);
+        max_recv_secs = max_recv_secs.max(sr.recv_secs);
 
         total_read_summary.records_read += sr.read_summary.records_read;
         total_read_summary.bytes_read += sr.read_summary.bytes_read;
@@ -1428,23 +1403,6 @@ async fn execute_streams(
 
         source_checkpoints.extend(sr.source_checkpoints);
         dest_checkpoints.extend(sr.dest_checkpoints);
-
-        src_timings.emit_batch_nanos += sr.src_host_timings.emit_batch_nanos;
-        src_timings.compress_nanos += sr.src_host_timings.compress_nanos;
-        src_timings.emit_batch_count += sr.src_host_timings.emit_batch_count;
-        src_timings.source_connect_secs += sr.src_host_timings.source_connect_secs;
-        src_timings.source_query_secs += sr.src_host_timings.source_query_secs;
-        src_timings.source_fetch_secs += sr.src_host_timings.source_fetch_secs;
-        src_timings.source_arrow_encode_secs += sr.src_host_timings.source_arrow_encode_secs;
-        dst_timings.next_batch_nanos += sr.dst_host_timings.next_batch_nanos;
-        dst_timings.next_batch_wait_nanos += sr.dst_host_timings.next_batch_wait_nanos;
-        dst_timings.next_batch_process_nanos += sr.dst_host_timings.next_batch_process_nanos;
-        dst_timings.decompress_nanos += sr.dst_host_timings.decompress_nanos;
-        dst_timings.next_batch_count += sr.dst_host_timings.next_batch_count;
-        dst_timings.dest_connect_secs += sr.dst_host_timings.dest_connect_secs;
-        dst_timings.dest_flush_secs += sr.dst_host_timings.dest_flush_secs;
-        dst_timings.dest_commit_secs += sr.dst_host_timings.dest_commit_secs;
-        dst_timings.dest_arrow_decode_secs += sr.dst_host_timings.dest_arrow_decode_secs;
 
         transform_durations.extend(sr.transform_durations);
 
@@ -1517,10 +1475,10 @@ async fn execute_streams(
         total_write_summary,
         source_checkpoints,
         dest_checkpoints,
-        src_timings,
-        dst_timings,
-        src_timing_maxima,
-        dst_timing_maxima,
+        max_source_duration,
+        max_dest_duration,
+        max_vm_setup_secs,
+        max_recv_secs,
         transform_durations,
         dlq_records,
         final_stats,
@@ -1540,6 +1498,8 @@ async fn finalize_run(
     start: Instant,
     modules: &LoadedModules,
     mut aggregated: AggregatedStreamResults,
+    snapshot_reader: &rapidbyte_metrics::snapshot::SnapshotReader,
+    meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
 ) -> Result<PipelineResult, PipelineError> {
     if let Some(err) = aggregated.first_error {
         let state_for_complete = state.clone();
@@ -1579,12 +1539,15 @@ async fn finalize_run(
         return Err(err);
     }
 
-    let plugin_internal_secs = aggregated.dst_timing_maxima.connect_secs
-        + aggregated.dst_timing_maxima.flush_secs
-        + aggregated.dst_timing_maxima.commit_secs;
-    let wasm_overhead_secs = (aggregated.dst_timing_maxima.duration_secs
-        - aggregated.dst_timing_maxima.vm_setup_secs
-        - aggregated.dst_timing_maxima.recv_secs
+    // Flush OTel metrics and take a snapshot
+    let _ = meter_provider.force_flush();
+    let snap = snapshot_reader.snapshot_pipeline_result(&config.pipeline);
+
+    let plugin_internal_secs =
+        snap.dest_connect_secs + snap.dest_flush_secs + snap.dest_commit_secs;
+    let wasm_overhead_secs = (aggregated.max_dest_duration
+        - aggregated.max_vm_setup_secs
+        - aggregated.max_recv_secs
         - plugin_internal_secs)
         .max(0.0);
 
@@ -1606,8 +1569,6 @@ async fn finalize_run(
     }
 
     let duration = start.elapsed();
-    let src_perf = aggregated.total_read_summary.perf.as_ref();
-    let perf = aggregated.total_write_summary.perf.as_ref();
     let transform_module_load_ms = modules
         .transform_modules
         .iter()
@@ -1629,30 +1590,31 @@ async fn finalize_run(
             bytes_read: aggregated.total_read_summary.bytes_read,
             bytes_written: aggregated.total_write_summary.bytes_written,
         },
-        source: build_source_timing(
-            &aggregated.src_timing_maxima,
-            &aggregated.src_timings,
-            src_perf,
-            modules.source_module_load_ms,
-        ),
+        source: SourceTiming {
+            duration_secs: aggregated.max_source_duration,
+            module_load_ms: modules.source_module_load_ms,
+            connect_secs: snap.source_connect_secs,
+            query_secs: snap.source_query_secs,
+            fetch_secs: snap.source_fetch_secs,
+            arrow_encode_secs: snap.source_encode_secs,
+            emit_nanos: snap.emit_batch_nanos,
+            compress_nanos: snap.compress_nanos,
+            emit_count: snap.emit_count,
+        },
         dest: DestTiming {
-            duration_secs: aggregated.dst_timing_maxima.duration_secs,
+            duration_secs: aggregated.max_dest_duration,
             module_load_ms: modules.dest_module_load_ms,
-            connect_secs: perf.map_or(aggregated.dst_timing_maxima.connect_secs, |p| {
-                p.connect_secs
-            }),
-            flush_secs: perf.map_or(aggregated.dst_timing_maxima.flush_secs, |p| p.flush_secs),
-            commit_secs: perf.map_or(aggregated.dst_timing_maxima.commit_secs, |p| p.commit_secs),
-            arrow_decode_secs: perf.map_or(aggregated.dst_timing_maxima.arrow_decode_secs, |p| {
-                p.arrow_decode_secs
-            }),
-            vm_setup_secs: aggregated.dst_timing_maxima.vm_setup_secs,
-            recv_secs: aggregated.dst_timing_maxima.recv_secs,
-            recv_nanos: aggregated.dst_timings.next_batch_nanos,
-            recv_wait_nanos: aggregated.dst_timings.next_batch_wait_nanos,
-            recv_process_nanos: aggregated.dst_timings.next_batch_process_nanos,
-            decompress_nanos: aggregated.dst_timings.decompress_nanos,
-            recv_count: aggregated.dst_timings.next_batch_count,
+            connect_secs: snap.dest_connect_secs,
+            flush_secs: snap.dest_flush_secs,
+            commit_secs: snap.dest_commit_secs,
+            arrow_decode_secs: snap.dest_decode_secs,
+            vm_setup_secs: aggregated.max_vm_setup_secs,
+            recv_secs: aggregated.max_recv_secs,
+            recv_nanos: snap.next_batch_nanos,
+            recv_wait_nanos: snap.next_batch_wait_nanos,
+            recv_process_nanos: snap.next_batch_process_nanos,
+            decompress_nanos: snap.decompress_nanos,
+            recv_count: snap.next_batch_count,
         },
         transform_count: aggregated.transform_durations.len(),
         transform_duration_secs: aggregated.transform_durations.iter().sum(),
@@ -2125,8 +2087,6 @@ mod stream_task_collection_tests {
             },
             source_checkpoints: Vec::new(),
             dest_checkpoints: Vec::new(),
-            src_host_timings: HostTimings::default(),
-            dst_host_timings: HostTimings::default(),
             src_duration: 0.0,
             dst_duration: 0.0,
             vm_setup_secs: 0.0,
@@ -2672,148 +2632,6 @@ state:
 }
 
 #[cfg(test)]
-#[allow(clippy::field_reassign_with_default, clippy::float_cmp)]
-mod dest_timing_maxima_tests {
-    use super::*;
-
-    fn stream_result_with_dest_timing(
-        duration_secs: f64,
-        vm_setup_secs: f64,
-        recv_secs: f64,
-        connect_secs: f64,
-        flush_secs: f64,
-        commit_secs: f64,
-        arrow_decode_secs: f64,
-    ) -> StreamResult {
-        let mut dst_host_timings = HostTimings::default();
-        dst_host_timings.dest_connect_secs = connect_secs;
-        dst_host_timings.dest_flush_secs = flush_secs;
-        dst_host_timings.dest_commit_secs = commit_secs;
-        dst_host_timings.dest_arrow_decode_secs = arrow_decode_secs;
-
-        StreamResult {
-            stream_name: "users".to_string(),
-            partition_index: Some(0),
-            partition_count: Some(2),
-            read_summary: ReadSummary {
-                records_read: 0,
-                bytes_read: 0,
-                batches_emitted: 0,
-                checkpoint_count: 0,
-                records_skipped: 0,
-                perf: None,
-            },
-            write_summary: WriteSummary {
-                records_written: 0,
-                bytes_written: 0,
-                batches_written: 0,
-                checkpoint_count: 0,
-                records_failed: 0,
-                perf: None,
-            },
-            source_checkpoints: Vec::new(),
-            dest_checkpoints: Vec::new(),
-            src_host_timings: HostTimings::default(),
-            dst_host_timings,
-            src_duration: 0.0,
-            dst_duration: duration_secs,
-            vm_setup_secs,
-            recv_secs,
-            transform_durations: Vec::new(),
-            dry_run_result: None,
-        }
-    }
-
-    #[test]
-    fn observe_dest_timing_tracks_independent_maxima() {
-        let mut maxima = DestTimingMaxima::default();
-
-        let stream_a = stream_result_with_dest_timing(10.0, 1.0, 2.0, 0.5, 4.0, 1.0, 0.2);
-        let stream_b = stream_result_with_dest_timing(8.0, 3.0, 5.0, 0.7, 2.0, 1.5, 0.4);
-
-        observe_dest_timing(&mut maxima, &stream_a);
-        observe_dest_timing(&mut maxima, &stream_b);
-
-        assert_eq!(maxima.duration_secs, 10.0);
-        assert_eq!(maxima.vm_setup_secs, 3.0);
-        assert_eq!(maxima.recv_secs, 5.0);
-        assert_eq!(maxima.connect_secs, 0.7);
-        assert_eq!(maxima.flush_secs, 4.0);
-        assert_eq!(maxima.commit_secs, 1.5);
-        assert_eq!(maxima.arrow_decode_secs, 0.4);
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::field_reassign_with_default, clippy::float_cmp)]
-mod source_timing_maxima_tests {
-    use super::*;
-
-    fn stream_result_with_source_timing(
-        duration_secs: f64,
-        connect_secs: f64,
-        query_secs: f64,
-        fetch_secs: f64,
-        arrow_encode_secs: f64,
-    ) -> StreamResult {
-        let mut src_host_timings = HostTimings::default();
-        src_host_timings.source_connect_secs = connect_secs;
-        src_host_timings.source_query_secs = query_secs;
-        src_host_timings.source_fetch_secs = fetch_secs;
-        src_host_timings.source_arrow_encode_secs = arrow_encode_secs;
-
-        StreamResult {
-            stream_name: "users".to_string(),
-            partition_index: Some(0),
-            partition_count: Some(2),
-            read_summary: ReadSummary {
-                records_read: 0,
-                bytes_read: 0,
-                batches_emitted: 0,
-                checkpoint_count: 0,
-                records_skipped: 0,
-                perf: None,
-            },
-            write_summary: WriteSummary {
-                records_written: 0,
-                bytes_written: 0,
-                batches_written: 0,
-                checkpoint_count: 0,
-                records_failed: 0,
-                perf: None,
-            },
-            source_checkpoints: Vec::new(),
-            dest_checkpoints: Vec::new(),
-            src_host_timings,
-            dst_host_timings: HostTimings::default(),
-            src_duration: duration_secs,
-            dst_duration: 0.0,
-            vm_setup_secs: 0.0,
-            recv_secs: 0.0,
-            transform_durations: Vec::new(),
-            dry_run_result: None,
-        }
-    }
-
-    #[test]
-    fn observe_source_timing_tracks_independent_maxima() {
-        let mut maxima = SourceTimingMaxima::default();
-
-        let stream_a = stream_result_with_source_timing(10.0, 1.0, 2.0, 5.0, 0.6);
-        let stream_b = stream_result_with_source_timing(8.0, 3.0, 1.0, 4.0, 0.9);
-
-        observe_source_timing(&mut maxima, &stream_a);
-        observe_source_timing(&mut maxima, &stream_b);
-
-        assert_eq!(maxima.duration_secs, 10.0);
-        assert_eq!(maxima.connect_secs, 3.0);
-        assert_eq!(maxima.query_secs, 2.0);
-        assert_eq!(maxima.fetch_secs, 5.0);
-        assert_eq!(maxima.arrow_encode_secs, 0.9);
-    }
-}
-
-#[cfg(test)]
 mod finalize_run_state_tests {
     use super::*;
     use rapidbyte_state::error::{Result as StateResult, StateError};
@@ -2943,10 +2761,10 @@ mod finalize_run_state_tests {
                 records_processed: 10,
                 bytes_processed: 100,
             }],
-            src_timings: HostTimings::default(),
-            dst_timings: HostTimings::default(),
-            src_timing_maxima: SourceTimingMaxima::default(),
-            dst_timing_maxima: DestTimingMaxima::default(),
+            max_source_duration: 0.0,
+            max_dest_duration: 0.0,
+            max_vm_setup_secs: 0.0,
+            max_recv_secs: 0.0,
             transform_durations: Vec::new(),
             dlq_records: Vec::new(),
             final_stats: RunStats::default(),

@@ -97,11 +97,6 @@ pub fn execute_source_benchmark(
         connector_metrics: serde_json::json!({
             "source": {
                 "duration_secs": result.duration_secs,
-                "connect_secs": result.host_timings.source_connect_secs,
-                "query_secs": result.host_timings.source_query_secs,
-                "fetch_secs": result.host_timings.source_fetch_secs,
-                "arrow_encode_secs": result.host_timings.source_arrow_encode_secs,
-                "emit_count": result.host_timings.emit_batch_count,
             },
             "checkpoint_count": result.checkpoints.len(),
         }),
@@ -195,10 +190,6 @@ pub fn execute_destination_benchmark(
                 "duration_secs": result.duration_secs,
                 "vm_setup_secs": result.vm_setup_secs,
                 "recv_secs": result.recv_secs,
-                "connect_secs": result.host_timings.dest_connect_secs,
-                "flush_secs": result.host_timings.dest_flush_secs,
-                "commit_secs": result.host_timings.dest_commit_secs,
-                "arrow_decode_secs": result.host_timings.dest_arrow_decode_secs,
             },
             "checkpoint_count": result.checkpoints.len(),
         }),
