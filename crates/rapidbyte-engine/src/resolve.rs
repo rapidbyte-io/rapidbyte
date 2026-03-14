@@ -33,13 +33,14 @@ pub struct ResolvedPlugins {
 ///
 /// Returns `PipelineError::Infrastructure` if plugin paths cannot be resolved
 /// or manifests fail validation.
-pub async fn resolve_plugins(config: &PipelineConfig) -> Result<ResolvedPlugins, PipelineError> {
-    let registry_config = RegistryConfig::default();
-
+pub async fn resolve_plugins(
+    config: &PipelineConfig,
+    registry_config: &RegistryConfig,
+) -> Result<ResolvedPlugins, PipelineError> {
     let source_wasm = rapidbyte_runtime::resolve_plugin(
         &config.source.use_ref,
         PluginKind::Source,
-        &registry_config,
+        registry_config,
     )
     .await
     .map_err(PipelineError::Infrastructure)?;
@@ -47,7 +48,7 @@ pub async fn resolve_plugins(config: &PipelineConfig) -> Result<ResolvedPlugins,
     let dest_wasm = rapidbyte_runtime::resolve_plugin(
         &config.destination.use_ref,
         PluginKind::Destination,
-        &registry_config,
+        registry_config,
     )
     .await
     .map_err(PipelineError::Infrastructure)?;

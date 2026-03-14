@@ -51,6 +51,26 @@ impl PluginRef {
             "repository path cannot be empty: {input}"
         );
 
+        // Reject path traversal and unsafe characters in all components.
+        for (label, value) in [
+            ("registry", registry),
+            ("repository", repository),
+            ("tag", tag),
+        ] {
+            anyhow::ensure!(
+                !value.contains(".."),
+                "{label} must not contain '..': {input}"
+            );
+            anyhow::ensure!(
+                !value.starts_with('/'),
+                "{label} must not start with '/': {input}"
+            );
+            anyhow::ensure!(
+                !value.contains('\\'),
+                "{label} must not contain backslash: {input}"
+            );
+        }
+
         Ok(Self {
             registry: registry.to_owned(),
             repository: repository.to_owned(),
@@ -134,6 +154,24 @@ mod tests {
     fn reject_registry_only_no_repo() {
         let err = PluginRef::parse("registry.example.com/").unwrap_err();
         assert!(err.to_string().contains("repository path cannot be empty"));
+    }
+
+    #[test]
+    fn reject_path_traversal_in_repository() {
+        let err = PluginRef::parse("registry.example.com/../etc/passwd:1.0").unwrap_err();
+        assert!(err.to_string().contains(".."));
+    }
+
+    #[test]
+    fn reject_path_traversal_in_tag() {
+        let err = PluginRef::parse("registry.example.com/source/pg:../../etc").unwrap_err();
+        assert!(err.to_string().contains(".."));
+    }
+
+    #[test]
+    fn reject_backslash_in_repository() {
+        let err = PluginRef::parse("registry.example.com/source\\pg:1.0").unwrap_err();
+        assert!(err.to_string().contains("backslash"));
     }
 
     #[test]

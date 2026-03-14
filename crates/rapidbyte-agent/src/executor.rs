@@ -108,7 +108,7 @@ pub async fn execute_task(
     .await
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn execute_task_with_runner<R>(
     pipeline_yaml: &[u8],
     dry_run: bool,
