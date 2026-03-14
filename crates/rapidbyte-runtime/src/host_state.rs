@@ -862,39 +862,60 @@ impl ComponentHostState {
     ) -> Result<(), PluginError> {
         let mut labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
         self.ensure_metric_scope_labels(&mut labels);
-        self.checkpoints
-            .timings
-            .record_plugin_duration(&name, value);
         match name.as_str() {
             "source_connect_secs" => {
+                self.checkpoints
+                    .timings
+                    .record_plugin_duration(&name, value);
                 rapidbyte_metrics::instruments::plugin::source_connect_duration()
                     .record(value, &labels);
             }
             "source_query_secs" => {
+                self.checkpoints
+                    .timings
+                    .record_plugin_duration(&name, value);
                 rapidbyte_metrics::instruments::plugin::source_query_duration()
                     .record(value, &labels);
             }
             "source_fetch_secs" => {
+                self.checkpoints
+                    .timings
+                    .record_plugin_duration(&name, value);
                 rapidbyte_metrics::instruments::plugin::source_fetch_duration()
                     .record(value, &labels);
             }
             "source_arrow_encode_secs" => {
+                self.checkpoints
+                    .timings
+                    .record_plugin_duration(&name, value);
                 rapidbyte_metrics::instruments::plugin::source_encode_duration()
                     .record(value, &labels);
             }
             "dest_connect_secs" => {
+                self.checkpoints
+                    .timings
+                    .record_plugin_duration(&name, value);
                 rapidbyte_metrics::instruments::plugin::dest_connect_duration()
                     .record(value, &labels);
             }
             "dest_flush_secs" => {
+                self.checkpoints
+                    .timings
+                    .record_plugin_duration(&name, value);
                 rapidbyte_metrics::instruments::plugin::dest_flush_duration()
                     .record(value, &labels);
             }
             "dest_commit_secs" => {
+                self.checkpoints
+                    .timings
+                    .record_plugin_duration(&name, value);
                 rapidbyte_metrics::instruments::plugin::dest_commit_duration()
                     .record(value, &labels);
             }
             "dest_arrow_decode_secs" => {
+                self.checkpoints
+                    .timings
+                    .record_plugin_duration(&name, value);
                 rapidbyte_metrics::instruments::plugin::dest_decode_duration()
                     .record(value, &labels);
             }
@@ -1443,6 +1464,39 @@ mod tests {
             .expect_err("overlong metric name should be rejected");
 
         assert_eq!(err.code, "INVALID_METRIC_NAME");
+    }
+
+    #[test]
+    fn rejected_custom_histogram_name_does_not_mutate_fallback_timing_snapshot() {
+        let snapshot = Arc::new(Mutex::new(
+            rapidbyte_metrics::snapshot::PipelineMetricsSnapshot::default(),
+        ));
+        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let host = ComponentHostState::builder()
+            .pipeline("test-pipeline")
+            .plugin_id("postgres")
+            .stream("users")
+            .state_backend(state)
+            .timings(
+                HostTimings::new("test-pipeline", "users", 0).with_raw_snapshot(snapshot.clone()),
+            )
+            .build()
+            .unwrap();
+
+        let err = host
+            .histogram_record_impl(
+                "m".repeat(rapidbyte_metrics::cache::MAX_CUSTOM_METRIC_NAME_LEN + 1),
+                1.0,
+                "{}".to_string(),
+            )
+            .expect_err("overlong histogram name should be rejected");
+
+        assert_eq!(err.code, "INVALID_METRIC_NAME");
+
+        let raw_snapshot = snapshot.lock().unwrap().clone();
+        assert_eq!(raw_snapshot.tracked_plugin_timing_series_count(), 0);
+        assert!(raw_snapshot.dest_decode_secs.abs() < f64::EPSILON);
+        assert!(raw_snapshot.source_connect_secs.abs() < f64::EPSILON);
     }
 
     #[test]
