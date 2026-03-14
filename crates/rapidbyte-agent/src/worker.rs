@@ -99,6 +99,31 @@ enum WorkerPoll<T> {
 pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
     validate_signing_key_config(&config)?;
 
+    let otel_guard = Arc::new(rapidbyte_metrics::init("rapidbyte-agent")?);
+
+    // Spawn Prometheus metrics HTTP server on port 9191
+    let metrics_guard = otel_guard.clone();
+    tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind("0.0.0.0:9191").await.unwrap();
+        loop {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let guard = metrics_guard.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 1024];
+                    let _ = stream.read(&mut buf).await;
+                    let body = guard.prometheus_text();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body,
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        }
+    });
+
     // Bind Flight first so startup fails fast before the agent registers
     // itself as preview-capable.
     let flight_listener = tokio::net::TcpListener::bind(&config.flight_listen).await?;
