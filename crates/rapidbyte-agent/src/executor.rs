@@ -85,7 +85,6 @@ pub async fn execute_task(
     let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
         .with_reader(reader.build_reader())
         .build();
-    opentelemetry::global::set_meter_provider(provider.clone());
     execute_task_with_metrics(
         pipeline_yaml,
         dry_run,

@@ -322,11 +322,16 @@ pub async fn run_pipeline(
     progress_tx: Option<tokio_mpsc::UnboundedSender<ProgressEvent>>,
     cancel_token: CancellationToken,
 ) -> Result<PipelineOutcome, PipelineError> {
+    // Create a local provider that satisfies the API contract but does NOT
+    // replace the global provider. OnceLock-cached instruments record to
+    // whichever provider was installed at first access; overwriting it here
+    // would orphan those instruments and produce incorrect metrics on
+    // subsequent calls. Callers that need accurate metrics should use
+    // run_pipeline_with_metrics with the real OtelGuard's provider.
     let reader = rapidbyte_metrics::snapshot::SnapshotReader::new();
     let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
         .with_reader(reader.build_reader())
         .build();
-    opentelemetry::global::set_meter_provider(provider.clone());
     run_pipeline_with_metrics(
         config,
         options,
