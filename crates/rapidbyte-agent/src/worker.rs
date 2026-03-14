@@ -382,7 +382,7 @@ async fn process_task(
         ctx.config.auth_token.clone(),
     ));
 
-    let result = executor::execute_task_with_metrics(
+    let result = executor::execute_task(
         &task.pipeline_yaml_utf8,
         dry_run,
         limit,

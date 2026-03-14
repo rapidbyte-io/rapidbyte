@@ -40,6 +40,6 @@ pub use config::types::PipelineConfig;
 pub use config::validator::validate_pipeline;
 pub use error::PipelineError;
 pub use execution::{DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineOutcome};
-pub use orchestrator::{check_pipeline, discover_plugin, run_pipeline, run_pipeline_with_metrics};
+pub use orchestrator::{check_pipeline, discover_plugin, run_pipeline, run_pipeline_unmonitored};
 pub use progress::{Phase, ProgressEvent};
 pub use result::{CheckItemResult, CheckResult, PipelineResult};

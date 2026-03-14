@@ -70,11 +70,13 @@ fn is_pre_commit_cancellation(error: &PipelineError) -> bool {
     }
 }
 
-/// Execute a pipeline task.
+/// Convenience wrapper that creates a throwaway metrics provider.
 ///
-/// Parses the YAML, runs the pipeline, and returns structured results.
+/// Use this when you do not need accurate post-run metric snapshots.
+/// For production use, prefer [`execute_task`] with the real OtelGuard's
+/// snapshot reader and meter provider.
 #[allow(clippy::too_many_lines)]
-pub async fn execute_task(
+pub async fn execute_task_unmonitored(
     pipeline_yaml: &[u8],
     dry_run: bool,
     limit: Option<u64>,
@@ -85,7 +87,7 @@ pub async fn execute_task(
     let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
         .with_reader(reader.build_reader())
         .build();
-    execute_task_with_metrics(
+    execute_task(
         pipeline_yaml,
         dry_run,
         limit,
@@ -98,7 +100,7 @@ pub async fn execute_task(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub async fn execute_task_with_metrics(
+pub async fn execute_task(
     pipeline_yaml: &[u8],
     dry_run: bool,
     limit: Option<u64>,
@@ -119,7 +121,7 @@ pub async fn execute_task_with_metrics(
         cancel_token,
         metrics_runtime,
         |config, options, progress_tx, cancel_token, metrics_runtime| {
-            Box::pin(orchestrator::run_pipeline_with_metrics(
+            Box::pin(orchestrator::run_pipeline(
                 config,
                 options,
                 progress_tx,
@@ -377,7 +379,9 @@ destination:
 
     #[tokio::test]
     async fn test_invalid_utf8_returns_failed() {
-        let result = execute_task(&[0xFF, 0xFE], false, None, None, CancellationToken::new()).await;
+        let result =
+            execute_task_unmonitored(&[0xFF, 0xFE], false, None, None, CancellationToken::new())
+                .await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Failed(_)));
         if let TaskOutcomeKind::Failed(info) = &result.outcome {
             assert_eq!(info.code, "INVALID_YAML");
@@ -387,7 +391,7 @@ destination:
 
     #[tokio::test]
     async fn test_invalid_yaml_returns_failed() {
-        let result = execute_task(
+        let result = execute_task_unmonitored(
             b"not: [valid: yaml",
             false,
             None,
@@ -403,7 +407,8 @@ destination:
 
     #[tokio::test]
     async fn test_zero_metrics_on_early_failure() {
-        let result = execute_task(&[0xFF], false, None, None, CancellationToken::new()).await;
+        let result =
+            execute_task_unmonitored(&[0xFF], false, None, None, CancellationToken::new()).await;
         assert_eq!(result.metrics.records_processed, 0);
         assert_eq!(result.metrics.bytes_processed, 0);
         assert!(result.metrics.elapsed_seconds.abs() < f64::EPSILON);
@@ -413,7 +418,7 @@ destination:
     async fn test_pre_cancelled_token_returns_cancelled() {
         let token = CancellationToken::new();
         token.cancel();
-        let result = execute_task(b"pipeline: test\n", false, None, None, token).await;
+        let result = execute_task_unmonitored(b"pipeline: test\n", false, None, None, token).await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Cancelled));
     }
 
@@ -575,7 +580,7 @@ destination:
     }
 
     #[tokio::test]
-    async fn execute_task_with_metrics_forwards_snapshot_provider_to_runner() {
+    async fn execute_task_forwards_snapshot_provider_to_runner() {
         let snapshot_reader = SnapshotReader::new();
         let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
             .with_reader(snapshot_reader.build_reader())

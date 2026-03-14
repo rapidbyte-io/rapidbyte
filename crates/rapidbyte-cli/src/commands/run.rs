@@ -85,7 +85,7 @@ pub async fn execute(
     // Run the pipeline
     let cpu_start = process_cpu_seconds();
     let outcome = if let Some(guard) = otel_guard {
-        orchestrator::run_pipeline_with_metrics(
+        orchestrator::run_pipeline(
             &config,
             &options,
             progress_tx,
@@ -95,7 +95,13 @@ pub async fn execute(
         )
         .await
     } else {
-        orchestrator::run_pipeline(&config, &options, progress_tx, CancellationToken::new()).await
+        orchestrator::run_pipeline_unmonitored(
+            &config,
+            &options,
+            progress_tx,
+            CancellationToken::new(),
+        )
+        .await
     };
     let (cpu_end, peak_rss_mb) = post_pipeline_metrics();
 

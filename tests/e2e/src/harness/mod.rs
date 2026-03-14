@@ -312,7 +312,7 @@ impl HarnessContext {
             parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let outcome = rapidbyte_engine::orchestrator::run_pipeline(
+        let outcome = rapidbyte_engine::orchestrator::run_pipeline_unmonitored(
             &config,
             &ExecutionOptions::default(),
             None,
@@ -402,7 +402,7 @@ impl HarnessContext {
             parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let outcome = rapidbyte_engine::orchestrator::run_pipeline(
+        let outcome = rapidbyte_engine::orchestrator::run_pipeline_unmonitored(
             &config,
             &ExecutionOptions::default(),
             None,
@@ -436,7 +436,7 @@ impl HarnessContext {
             parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let outcome = rapidbyte_engine::orchestrator::run_pipeline(
+        let outcome = rapidbyte_engine::orchestrator::run_pipeline_unmonitored(
             &config,
             &ExecutionOptions::default(),
             None,
@@ -544,7 +544,7 @@ impl HarnessContext {
             parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let outcome = rapidbyte_engine::orchestrator::run_pipeline(
+        let outcome = rapidbyte_engine::orchestrator::run_pipeline_unmonitored(
             &config,
             &ExecutionOptions::default(),
             None,
