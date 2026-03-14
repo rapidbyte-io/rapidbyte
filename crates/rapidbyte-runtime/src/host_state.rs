@@ -475,6 +475,7 @@ impl ComponentHostState {
                     | rapidbyte_metrics::labels::RUN
                     | rapidbyte_metrics::labels::PLUGIN
                     | rapidbyte_metrics::labels::STREAM
+                    | rapidbyte_metrics::labels::SHARD
             )
         });
         labels.push(opentelemetry::KeyValue::new(
@@ -493,6 +494,19 @@ impl ComponentHostState {
             labels.push(opentelemetry::KeyValue::new(
                 rapidbyte_metrics::labels::RUN,
                 run_label.to_owned(),
+            ));
+        }
+        if let Some(shard) = self
+            .checkpoints
+            .timings
+            .labels
+            .iter()
+            .find(|label| label.key.as_str() == rapidbyte_metrics::labels::SHARD)
+            .map(|label| label.value.as_str().into_owned())
+        {
+            labels.push(opentelemetry::KeyValue::new(
+                rapidbyte_metrics::labels::SHARD,
+                shard,
             ));
         }
     }
@@ -1225,7 +1239,7 @@ fn parse_state_scope(scope: u32) -> Result<StateScope, PluginError> {
 mod tests {
     use super::*;
     use opentelemetry::global;
-    use opentelemetry_sdk::metrics::data::Sum;
+    use opentelemetry_sdk::metrics::data::{Histogram, Sum};
     use opentelemetry_sdk::metrics::{
         InMemoryMetricExporter, InMemoryMetricExporterBuilder, PeriodicReader, SdkMeterProvider,
     };
@@ -1252,6 +1266,21 @@ mod tests {
                     }
                     if let Some(sum) = metric.data.as_any().downcast_ref::<Sum<u64>>() {
                         if let Some(dp) = sum.data_points.first() {
+                            return serde_json::Value::Object(
+                                dp.attributes
+                                    .iter()
+                                    .map(|kv| {
+                                        (
+                                            kv.key.as_str().to_owned(),
+                                            serde_json::Value::String(kv.value.to_string()),
+                                        )
+                                    })
+                                    .collect(),
+                            );
+                        }
+                    }
+                    if let Some(hist) = metric.data.as_any().downcast_ref::<Histogram<f64>>() {
+                        if let Some(dp) = hist.data_points.first() {
                             return serde_json::Value::Object(
                                 dp.attributes
                                     .iter()
@@ -1511,6 +1540,7 @@ mod tests {
             .plugin_id("postgres")
             .stream("users")
             .metric_run_label("run-42")
+            .timings(HostTimings::new("test-pipeline", "users", 0))
             .state_backend(state)
             .build()
             .unwrap();
@@ -1531,8 +1561,36 @@ mod tests {
                 "run": "run-42",
                 "plugin": "postgres",
                 "stream": "users",
+                "shard": "0",
                 "rule": "not_null"
             })
         );
+    }
+
+    #[test]
+    fn histogram_labels_include_host_shard_scope() {
+        let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
+        let (provider, exporter) = metric_test_provider();
+        global::set_meter_provider(provider.clone());
+
+        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let host = ComponentHostState::builder()
+            .pipeline("test-pipeline")
+            .plugin_id("postgres")
+            .stream("users")
+            .metric_run_label("run-42")
+            .timings(HostTimings::new("test-pipeline", "users", 3))
+            .state_backend(state)
+            .build()
+            .unwrap();
+
+        host.histogram_record_impl("source_connect_secs".to_string(), 1.0, "{}".to_string())
+            .unwrap();
+
+        let _ = provider.force_flush();
+        let labels = metric_labels(&exporter, "plugin.source_connect_duration");
+        assert_eq!(labels["shard"], "3");
+        assert_eq!(labels["stream"], "users");
+        assert_eq!(labels["run"], "run-42");
     }
 }

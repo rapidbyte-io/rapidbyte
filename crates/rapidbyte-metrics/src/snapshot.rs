@@ -494,6 +494,37 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_uses_critical_path_max_across_shard_labeled_plugin_series() {
+        let (provider, reader) = test_provider();
+        let meter = provider.meter("test");
+        let hist = meter
+            .f64_histogram("plugin.source_connect_duration")
+            .build();
+
+        hist.record(
+            1.0,
+            &[
+                KeyValue::new(crate::labels::PIPELINE, "my-pipe"),
+                KeyValue::new(crate::labels::RUN, "run-1"),
+                KeyValue::new(crate::labels::STREAM, "users"),
+                KeyValue::new(crate::labels::SHARD, "0"),
+            ],
+        );
+        hist.record(
+            1.0,
+            &[
+                KeyValue::new(crate::labels::PIPELINE, "my-pipe"),
+                KeyValue::new(crate::labels::RUN, "run-1"),
+                KeyValue::new(crate::labels::STREAM, "users"),
+                KeyValue::new(crate::labels::SHARD, "1"),
+            ],
+        );
+
+        let snap = reader.flush_and_snapshot_for_run(&provider, "my-pipe", Some("run-1"));
+        assert!((snap.source_connect_secs - 1.0).abs() < 0.001);
+    }
+
+    #[test]
     fn raw_snapshot_uses_critical_path_max_across_parallel_shards() {
         let mut snapshot = PipelineMetricsSnapshot::default();
 
