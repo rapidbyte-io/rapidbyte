@@ -1071,9 +1071,8 @@ async fn execute_streams(
                 })?;
                 drop(tx);
 
-                // Use a distinct label so preflight timings don't accumulate
-                // into the real run's snapshot.
-                let preflight_label = format!("{}-preflight", params.metric_run_label);
+                // Empty run label so preflight metrics are unscoped and don't
+                // accumulate in the SnapshotReader's finished_run_snapshots map.
                 let preflight_result = tokio::task::spawn_blocking(move || {
                     run_destination_stream(
                         &dest_module,
@@ -1081,7 +1080,7 @@ async fn execute_streams(
                         Arc::new(Mutex::new(Vec::new())),
                         state_dst,
                         &params.pipeline_name,
-                        &preflight_label,
+                        "",
                         &params.dest_plugin_id,
                         &params.dest_plugin_version,
                         &params.dest_config,

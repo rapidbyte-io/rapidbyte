@@ -73,10 +73,12 @@ impl HostTimings {
 
     #[must_use]
     pub fn with_run_label(mut self, run: &str) -> Self {
-        self.labels.push(opentelemetry::KeyValue::new(
-            rapidbyte_metrics::labels::RUN,
-            run.to_owned(),
-        ));
+        if !run.is_empty() {
+            self.labels.push(opentelemetry::KeyValue::new(
+                rapidbyte_metrics::labels::RUN,
+                run.to_owned(),
+            ));
+        }
         self
     }
 
