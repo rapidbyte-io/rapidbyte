@@ -110,9 +110,6 @@ pub fn run_source_stream(
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
     metric_run_label: &str,
-    fallback_metrics_snapshot: Option<
-        Arc<Mutex<rapidbyte_metrics::snapshot::PipelineMetricsSnapshot>>,
-    >,
     plugin_id: &str,
     plugin_version: &str,
     source_config: &serde_json::Value,
@@ -127,11 +124,8 @@ pub fn run_source_stream(
 
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let shard_index = stream_ctx.partition_index.unwrap_or(0) as usize;
-    let mut host_timings = HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index)
+    let host_timings = HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index)
         .with_run_label(metric_run_label);
-    if let Some(snapshot) = fallback_metrics_snapshot {
-        host_timings = host_timings.with_raw_snapshot(snapshot);
-    }
 
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)
@@ -286,9 +280,6 @@ pub fn run_destination_stream(
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
     metric_run_label: &str,
-    fallback_metrics_snapshot: Option<
-        Arc<Mutex<rapidbyte_metrics::snapshot::PipelineMetricsSnapshot>>,
-    >,
     plugin_id: &str,
     plugin_version: &str,
     dest_config: &serde_json::Value,
@@ -303,11 +294,8 @@ pub fn run_destination_stream(
 
     let dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let shard_index = stream_ctx.partition_index.unwrap_or(0) as usize;
-    let mut host_timings = HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index)
+    let host_timings = HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index)
         .with_run_label(metric_run_label);
-    if let Some(snapshot) = fallback_metrics_snapshot {
-        host_timings = host_timings.with_raw_snapshot(snapshot);
-    }
 
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)
@@ -473,9 +461,6 @@ pub fn run_transform_stream(
     state_backend: Arc<dyn StateBackend>,
     pipeline_name: &str,
     metric_run_label: &str,
-    fallback_metrics_snapshot: Option<
-        Arc<Mutex<rapidbyte_metrics::snapshot::PipelineMetricsSnapshot>>,
-    >,
     plugin_id: &str,
     plugin_version: &str,
     transform_index: usize,
@@ -490,11 +475,8 @@ pub fn run_transform_stream(
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let shard_index = stream_ctx.partition_index.unwrap_or(0) as usize;
-    let mut host_timings = HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index)
+    let host_timings = HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index)
         .with_run_label(metric_run_label);
-    if let Some(snapshot) = fallback_metrics_snapshot {
-        host_timings = host_timings.with_raw_snapshot(snapshot);
-    }
 
     let mut builder = ComponentHostState::builder()
         .pipeline(pipeline_name)

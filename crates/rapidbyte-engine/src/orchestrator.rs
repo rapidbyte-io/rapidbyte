@@ -103,8 +103,6 @@ struct StreamBuild {
 struct StreamParams {
     pipeline_name: String,
     metric_run_label: String,
-    fallback_metrics_snapshot:
-        Option<Arc<Mutex<rapidbyte_metrics::snapshot::PipelineMetricsSnapshot>>>,
     source_config: serde_json::Value,
     dest_config: serde_json::Value,
     source_plugin_id: String,
@@ -600,7 +598,6 @@ async fn execute_pipeline_once(
             state_for_execution.clone(),
             options,
             &metric_run_label,
-            metrics_runtime.fallback_metrics_snapshot(),
             &progress_tx,
             cancel_token,
         )
@@ -1031,9 +1028,6 @@ async fn execute_streams(
     state: Arc<dyn StateBackend>,
     options: &ExecutionOptions,
     metric_run_label: &str,
-    fallback_metrics_snapshot: Option<
-        Arc<Mutex<rapidbyte_metrics::snapshot::PipelineMetricsSnapshot>>,
-    >,
     progress_tx: &ProgressTx,
     cancel_token: &CancellationToken,
 ) -> Result<AggregatedStreamResults, PipelineError> {
@@ -1078,7 +1072,6 @@ async fn execute_streams(
     let params = Arc::new(StreamParams {
         pipeline_name: config.pipeline.clone(),
         metric_run_label: metric_run_label.to_owned(),
-        fallback_metrics_snapshot,
         source_config: config.source.config.clone(),
         dest_config: config.destination.config.clone(),
         source_plugin_id,
@@ -1162,7 +1155,6 @@ async fn execute_streams(
                         state_dst,
                         &params.pipeline_name,
                         &params.metric_run_label,
-                        params.fallback_metrics_snapshot.clone(),
                         &params.dest_plugin_id,
                         &params.dest_plugin_version,
                         &params.dest_config,
@@ -1271,7 +1263,6 @@ async fn execute_streams(
                     state_src,
                     &params_src.pipeline_name,
                     &params_src.metric_run_label,
-                    params_src.fallback_metrics_snapshot.clone(),
                     &params_src.source_plugin_id,
                     &params_src.source_plugin_version,
                     &params_src.source_config,
@@ -1301,7 +1292,6 @@ async fn execute_streams(
                         state_t,
                         &params_t.pipeline_name,
                         &params_t.metric_run_label,
-                        params_t.fallback_metrics_snapshot.clone(),
                         &t.plugin_id,
                         &t.plugin_version,
                         i,
@@ -1387,7 +1377,6 @@ async fn execute_streams(
                         state_dst,
                         &params.pipeline_name,
                         &params.metric_run_label,
-                        params.fallback_metrics_snapshot.clone(),
                         &params.dest_plugin_id,
                         &params.dest_plugin_version,
                         &params.dest_config,
