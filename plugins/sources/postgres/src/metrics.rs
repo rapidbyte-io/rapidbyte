@@ -5,18 +5,29 @@ use rapidbyte_sdk::prelude::*;
 /// Maximum number of rows per Arrow `RecordBatch`.
 pub(crate) const BATCH_SIZE: usize = 10_000;
 
-/// Cumulative emit counters shared by both full-refresh and CDC read paths.
+/// Per-batch emit counters shared by both full-refresh and CDC read paths.
 pub(crate) struct EmitState {
     pub(crate) total_records: u64,
     pub(crate) total_bytes: u64,
     pub(crate) batches_emitted: u64,
     pub(crate) arrow_encode_nanos: u64,
+    /// Tracks the last emitted cumulative values so we emit deltas to the host counter.
+    pub(crate) last_emitted_records: u64,
+    pub(crate) last_emitted_bytes: u64,
 }
 
-/// Emit cumulative source read counters for a stream.
-pub(crate) fn emit_read_metrics(ctx: &Context, total_records: u64, total_bytes: u64) {
-    ctx.counter("records_read", total_records);
-    ctx.counter("bytes_read", total_bytes);
+/// Emit per-batch source read counter deltas for a stream.
+pub(crate) fn emit_read_metrics(ctx: &Context, state: &mut EmitState) {
+    let delta_records = state.total_records - state.last_emitted_records;
+    let delta_bytes = state.total_bytes - state.last_emitted_bytes;
+    state.last_emitted_records = state.total_records;
+    state.last_emitted_bytes = state.total_bytes;
+    if delta_records > 0 {
+        ctx.counter("records_read", delta_records);
+    }
+    if delta_bytes > 0 {
+        ctx.counter("bytes_read", delta_bytes);
+    }
 }
 
 /// Emit source read timing metrics so the host can aggregate per-phase timings.

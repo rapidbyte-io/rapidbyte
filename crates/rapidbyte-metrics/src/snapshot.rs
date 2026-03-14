@@ -96,16 +96,69 @@ impl Default for SnapshotReader {
 }
 
 /// Extract a metric value into the snapshot struct by matching instrument name.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn extract_metric_value(
     name: &str,
     data: &dyn Aggregation,
     _pipeline: &str,
     snap: &mut PipelineMetricsSnapshot,
 ) {
-    // Stub: matches instrument names to snapshot fields.
-    // Full implementation will downcast `data` to `Sum<u64>`, `Histogram<f64>`, etc.
-    // and read data points filtered by pipeline label attribute.
-    let _ = (name, data, snap);
+    use opentelemetry_sdk::metrics::data::{Histogram, Sum};
+
+    // Counter instruments produce Sum<u64>
+    if let Some(sum) = data.as_any().downcast_ref::<Sum<u64>>() {
+        let total: u64 = sum.data_points.iter().map(|dp| dp.value).sum();
+        match name {
+            "pipeline.records_read" => snap.records_read = total,
+            "pipeline.records_written" => snap.records_written = total,
+            "pipeline.bytes_read" => snap.bytes_read = total,
+            "pipeline.bytes_written" => snap.bytes_written = total,
+            _ => {}
+        }
+        return;
+    }
+
+    // Duration instruments produce Histogram<f64> (values in seconds)
+    if let Some(hist) = data.as_any().downcast_ref::<Histogram<f64>>() {
+        let total_sum: f64 = hist.data_points.iter().map(|dp| dp.sum).sum();
+        let total_count: u64 = hist.data_points.iter().map(|dp| dp.count).sum();
+
+        match name {
+            // Plugin source timings (seconds)
+            "plugin.source_connect_duration" => snap.source_connect_secs = total_sum,
+            "plugin.source_query_duration" => snap.source_query_secs = total_sum,
+            "plugin.source_fetch_duration" => snap.source_fetch_secs = total_sum,
+            "plugin.source_encode_duration" => snap.source_encode_secs = total_sum,
+            // Plugin dest timings (seconds)
+            "plugin.dest_connect_duration" => snap.dest_connect_secs = total_sum,
+            "plugin.dest_flush_duration" => snap.dest_flush_secs = total_sum,
+            "plugin.dest_commit_duration" => snap.dest_commit_secs = total_sum,
+            "plugin.dest_decode_duration" => snap.dest_decode_secs = total_sum,
+            // Host timings (seconds → nanos)
+            "host.emit_batch_duration" => {
+                snap.emit_batch_nanos = (total_sum * 1e9) as u64;
+                snap.emit_count = total_count;
+            }
+            "host.next_batch_duration" => {
+                snap.next_batch_nanos = (total_sum * 1e9) as u64;
+                snap.next_batch_count = total_count;
+            }
+            "host.next_batch_wait_duration" => {
+                snap.next_batch_wait_nanos = (total_sum * 1e9) as u64;
+            }
+            "host.next_batch_process_duration" => {
+                snap.next_batch_process_nanos = (total_sum * 1e9) as u64;
+            }
+            "host.compress_duration" => {
+                snap.compress_nanos = (total_sum * 1e9) as u64;
+            }
+            "host.decompress_duration" => {
+                snap.decompress_nanos = (total_sum * 1e9) as u64;
+            }
+            "pipeline.duration" => snap.pipeline_duration_secs = total_sum,
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]

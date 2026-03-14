@@ -74,6 +74,8 @@ struct WriteStats {
     pub(crate) commits_completed: u64,
     bytes_since_commit: u64,
     rows_since_commit: u64,
+    last_emitted_rows: u64,
+    last_emitted_bytes: u64,
 }
 
 /// Manages lifecycle of writing a single stream to `PostgreSQL`.
@@ -149,6 +151,8 @@ impl<'a> WriteSession<'a> {
                 commits_completed: 0,
                 bytes_since_commit: 0,
                 rows_since_commit: 0,
+                last_emitted_rows: 0,
+                last_emitted_bytes: 0,
             },
             schema_state,
         })
@@ -247,8 +251,16 @@ impl<'a> WriteSession<'a> {
         self.stats.rows_since_commit += rows_written;
         self.stats.batches_written += 1;
 
-        self.ctx.counter("records_written", self.stats.total_rows);
-        self.ctx.counter("bytes_written", self.stats.total_bytes);
+        let delta_rows = self.stats.total_rows - self.stats.last_emitted_rows;
+        let delta_bytes = self.stats.total_bytes - self.stats.last_emitted_bytes;
+        self.stats.last_emitted_rows = self.stats.total_rows;
+        self.stats.last_emitted_bytes = self.stats.total_bytes;
+        if delta_rows > 0 {
+            self.ctx.counter("records_written", delta_rows);
+        }
+        if delta_bytes > 0 {
+            self.ctx.counter("bytes_written", delta_bytes);
+        }
 
         self.maybe_checkpoint().await?;
 

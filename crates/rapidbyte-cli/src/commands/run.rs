@@ -32,7 +32,7 @@ struct ProcessCpuMetrics {
 /// # Errors
 ///
 /// Returns `Err` if pipeline parsing, validation, or execution fails.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn execute(
     pipeline_path: &Path,
     dry_run: bool,
@@ -41,6 +41,7 @@ pub async fn execute(
     controller: Option<&str>,
     auth_token: Option<&str>,
     tls: Option<&TlsClientConfig>,
+    otel_guard: Option<&rapidbyte_metrics::OtelGuard>,
 ) -> Result<()> {
     // If controller is set, route to distributed mode
     if let Some(url) = controller {
@@ -83,8 +84,15 @@ pub async fn execute(
 
     // Run the pipeline
     let cpu_start = process_cpu_seconds();
-    let outcome =
-        orchestrator::run_pipeline(&config, &options, progress_tx, CancellationToken::new()).await;
+    let outcome = orchestrator::run_pipeline_with_metrics(
+        &config,
+        &options,
+        progress_tx,
+        CancellationToken::new(),
+        otel_guard.map(rapidbyte_metrics::OtelGuard::snapshot_reader),
+        otel_guard.map(rapidbyte_metrics::OtelGuard::meter_provider),
+    )
+    .await;
     let (cpu_end, peak_rss_mb) = post_pipeline_metrics();
 
     // Wait for spinner to finish before printing results

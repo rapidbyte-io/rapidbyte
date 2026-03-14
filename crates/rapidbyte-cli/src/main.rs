@@ -258,6 +258,7 @@ async fn main() -> ExitCode {
                 controller_url.as_deref(),
                 cli.auth_token.as_deref(),
                 tls.as_ref(),
+                otel_guard.as_ref(),
             )
             .await
         }

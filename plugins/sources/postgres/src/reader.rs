@@ -245,7 +245,7 @@ fn emit_accumulated_batch(
 
         ctx.emit_batch(&batch)
             .map_err(|e| format!("emit_batch failed: {}", e.message))?;
-        emit_read_metrics(ctx, state.total_records, state.total_bytes);
+        emit_read_metrics(ctx, state);
     }
 
     *estimated_bytes = BATCH_OVERHEAD_BYTES;
@@ -417,6 +417,8 @@ pub async fn read_stream(
         total_bytes: 0,
         batches_emitted: 0,
         arrow_encode_nanos: 0,
+        last_emitted_records: 0,
+        last_emitted_bytes: 0,
     };
 
     let mut loop_error: Option<String> = None;
