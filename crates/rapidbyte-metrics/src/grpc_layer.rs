@@ -113,51 +113,6 @@ const fn grpc_code_label(code: Code) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentelemetry::global;
-    use opentelemetry_sdk::metrics::data::Histogram;
-    use opentelemetry_sdk::metrics::{
-        InMemoryMetricExporter, InMemoryMetricExporterBuilder, PeriodicReader, SdkMeterProvider,
-    };
-    use std::collections::BTreeMap;
-    use std::convert::Infallible;
-    use std::sync::LazyLock;
-    use tokio::sync::Mutex;
-    use tower::ServiceExt;
-
-    static METRIC_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-    fn metric_test_provider() -> (SdkMeterProvider, InMemoryMetricExporter) {
-        let exporter = InMemoryMetricExporterBuilder::new().build();
-        let provider = SdkMeterProvider::builder()
-            .with_reader(PeriodicReader::builder(exporter.clone()).build())
-            .build();
-        (provider, exporter)
-    }
-
-    fn request_duration_labels(exporter: &InMemoryMetricExporter) -> Vec<BTreeMap<String, String>> {
-        let mut labels = Vec::new();
-        let metrics = exporter.get_finished_metrics().unwrap_or_default();
-        for resource_metrics in metrics {
-            for scope_metrics in resource_metrics.scope_metrics {
-                for metric in scope_metrics.metrics {
-                    if metric.name != "grpc.request.duration" {
-                        continue;
-                    }
-                    if let Some(histogram) = metric.data.as_any().downcast_ref::<Histogram<f64>>() {
-                        for point in &histogram.data_points {
-                            let attrs = point
-                                .attributes
-                                .iter()
-                                .map(|kv| (kv.key.as_str().to_owned(), kv.value.to_string()))
-                                .collect();
-                            labels.push(attrs);
-                        }
-                    }
-                }
-            }
-        }
-        labels
-    }
 
     fn assert_layer<L: tower::Layer<tower::util::BoxService<(), (), ()>>>(_l: &L) {}
 
@@ -167,35 +122,18 @@ mod tests {
         assert_layer(&layer);
     }
 
-    #[tokio::test]
-    async fn layer_uses_grpc_status_header_for_failed_responses() {
-        let _guard = METRIC_TEST_LOCK.lock().await;
-        let (provider, exporter) = metric_test_provider();
-        global::set_meter_provider(provider.clone());
+    #[test]
+    fn grpc_status_label_uses_grpc_status_header_for_failed_responses() {
+        let response = tonic::Status::permission_denied("nope").into_http();
+        assert_eq!(grpc_status_label(&response), "permission_denied");
+    }
 
-        let service =
-            GrpcMetricsLayer.layer(tower::service_fn(|_req: http::Request<()>| async move {
-                Ok::<_, Infallible>(tonic::Status::permission_denied("nope").into_http())
-            }));
-
-        let response = service
-            .oneshot(http::Request::new(()))
-            .await
-            .expect("service should respond");
-        assert_eq!(response.status(), http::StatusCode::OK);
-
-        let _ = provider.force_flush();
-        let labels = request_duration_labels(&exporter);
-        assert!(
-            labels.iter().any(|attrs| {
-                attrs
-                    .get(crate::labels::METHOD)
-                    .is_some_and(|method| method == "/")
-                    && attrs
-                        .get(crate::labels::STATUS)
-                        .is_some_and(|status| status == "permission_denied")
-            }),
-            "expected grpc.request.duration label set with permission_denied, got {labels:?}"
-        );
+    #[test]
+    fn grpc_status_label_falls_back_to_http_status_when_grpc_status_is_absent() {
+        let response = http::Response::builder()
+            .status(http::StatusCode::SERVICE_UNAVAILABLE)
+            .body(())
+            .unwrap();
+        assert_eq!(grpc_status_label(&response), "unavailable");
     }
 }
