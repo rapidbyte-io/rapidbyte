@@ -154,6 +154,7 @@ pub struct ComponentHostState {
     pub(crate) sockets: SocketManager,
     pub(crate) frames: FrameTable,
     pub(crate) store_limits: StoreLimits,
+    pub(crate) scope_labels: rapidbyte_metrics::labels::ScopeLabels,
     ctx: WasiCtx,
     table: ResourceTable,
 }
@@ -337,6 +338,26 @@ impl HostStateBuilder {
             .state_backend
             .ok_or_else(|| anyhow::anyhow!("state_backend is required"))?;
 
+        // Extract shard index from timings labels (stored as a KeyValue string).
+        let shard_index: usize = self
+            .timings
+            .as_ref()
+            .and_then(|t| {
+                t.labels
+                    .iter()
+                    .find(|kv| kv.key.as_str() == rapidbyte_metrics::labels::SHARD)
+                    .and_then(|kv| kv.value.as_str().into_owned().parse().ok())
+            })
+            .unwrap_or(0);
+
+        let scope_labels = rapidbyte_metrics::labels::ScopeLabels::new(
+            &pipeline,
+            &plugin_id,
+            &stream,
+            self.metric_run_label.as_deref(),
+            shard_index,
+        );
+
         Ok(ComponentHostState {
             identity: PluginIdentity {
                 pipeline: PipelineId::new(pipeline),
@@ -375,6 +396,7 @@ impl HostStateBuilder {
             },
             frames: FrameTable::new(),
             store_limits: build_store_limits(self.overrides.as_ref()),
+            scope_labels,
             ctx: build_wasi_ctx(self.permissions.as_ref(), self.overrides.as_ref())?,
             table: ResourceTable::new(),
         })
@@ -760,27 +782,34 @@ impl ComponentHostState {
         value: u64,
         labels_json: String,
     ) -> Result<(), PluginError> {
-        let mut labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
-        self.ensure_metric_scope_labels(&mut labels);
         match name.as_str() {
             "records_read" => {
-                rapidbyte_metrics::instruments::pipeline::records_read().add(value, &labels);
+                rapidbyte_metrics::instruments::pipeline::records_read()
+                    .add(value, self.scope_labels.as_slice());
             }
             "records_written" => {
-                rapidbyte_metrics::instruments::pipeline::records_written().add(value, &labels);
+                rapidbyte_metrics::instruments::pipeline::records_written()
+                    .add(value, self.scope_labels.as_slice());
             }
             "bytes_read" => {
-                rapidbyte_metrics::instruments::pipeline::bytes_read().add(value, &labels);
+                rapidbyte_metrics::instruments::pipeline::bytes_read()
+                    .add(value, self.scope_labels.as_slice());
             }
             "bytes_written" => {
-                rapidbyte_metrics::instruments::pipeline::bytes_written().add(value, &labels);
+                rapidbyte_metrics::instruments::pipeline::bytes_written()
+                    .add(value, self.scope_labels.as_slice());
             }
-            _ => match rapidbyte_metrics::instruments::plugin::custom_counter(&name) {
-                Ok(counter) => counter.add(value, &labels),
-                Err(err) => {
-                    tracing::debug!(metric = %name, "custom counter skipped: {err}");
+            _ => {
+                // Custom metrics still need JSON parsing for user-supplied labels
+                let mut labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
+                self.ensure_metric_scope_labels(&mut labels);
+                match rapidbyte_metrics::instruments::plugin::custom_counter(&name) {
+                    Ok(counter) => counter.add(value, &labels),
+                    Err(err) => {
+                        tracing::debug!(metric = %name, "custom counter skipped: {err}");
+                    }
                 }
-            },
+            }
         }
         Ok(())
     }
@@ -810,11 +839,12 @@ impl ComponentHostState {
         value: f64,
         labels_json: String,
     ) -> Result<(), PluginError> {
-        let mut labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
-        self.ensure_metric_scope_labels(&mut labels);
         if let Some(hist) = builtin_plugin_histogram(name.as_str()) {
-            hist.record(value, &labels);
+            hist.record(value, self.scope_labels.as_slice());
         } else {
+            // Custom histograms still need JSON parsing for user-supplied labels
+            let mut labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
+            self.ensure_metric_scope_labels(&mut labels);
             match rapidbyte_metrics::instruments::plugin::custom_histogram(&name) {
                 Ok(histogram) => histogram.record(value, &labels),
                 Err(err) => {
@@ -1394,7 +1424,7 @@ mod tests {
     }
 
     #[test]
-    fn reserved_metric_labels_are_rewritten_to_host_scope() {
+    fn builtin_counters_use_prebuilt_scope_labels() {
         let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
         let (provider, exporter) = rapidbyte_metrics::test_support::exporter_test_provider();
         global::set_meter_provider(provider.clone());
@@ -1410,6 +1440,7 @@ mod tests {
             .build()
             .unwrap();
 
+        // Built-in counters skip JSON parsing entirely; spoofed and extra labels are ignored.
         host.counter_add_impl(
             "records_read".to_string(),
             1,
@@ -1419,6 +1450,44 @@ mod tests {
 
         let _ = provider.force_flush();
         let labels = metric_labels(&exporter, "pipeline.records_read");
+        assert_eq!(
+            labels,
+            serde_json::json!({
+                "pipeline": "test-pipeline",
+                "run": "run-42",
+                "plugin": "postgres",
+                "stream": "users",
+            })
+        );
+    }
+
+    #[test]
+    fn custom_counter_labels_are_rewritten_to_host_scope() {
+        let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
+        let (provider, exporter) = rapidbyte_metrics::test_support::exporter_test_provider();
+        global::set_meter_provider(provider.clone());
+
+        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let host = ComponentHostState::builder()
+            .pipeline("test-pipeline")
+            .plugin_id("postgres")
+            .stream("users")
+            .metric_run_label("run-42")
+            .timings(HostTimings::new("test-pipeline", "users", 0))
+            .state_backend(state)
+            .build()
+            .unwrap();
+
+        // Custom counters still parse JSON and rewrite scope labels.
+        host.counter_add_impl(
+            "my_custom_counter".to_string(),
+            1,
+            r#"{"pipeline":"spoofed-pipeline","run":"spoofed-run","plugin":"spoofed-plugin","stream":"spoofed-stream","rule":"not_null"}"#.to_string(),
+        )
+        .unwrap();
+
+        let _ = provider.force_flush();
+        let labels = metric_labels(&exporter, "my_custom_counter");
         assert_eq!(
             labels,
             serde_json::json!({

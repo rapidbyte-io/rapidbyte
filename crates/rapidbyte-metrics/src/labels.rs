@@ -61,6 +61,44 @@ pub fn parse_bounded_labels(json: &str) -> Vec<KeyValue> {
         .collect()
 }
 
+/// Pre-built label set for a specific metric scope (pipeline + plugin + stream + run + shard).
+/// Avoids JSON parsing and allocation on every metric emission for built-in metrics.
+#[derive(Clone)]
+pub struct ScopeLabels {
+    labels: Vec<KeyValue>,
+}
+
+impl ScopeLabels {
+    /// Build scope labels for a specific pipeline/plugin/stream context.
+    #[must_use]
+    pub fn new(
+        pipeline: &str,
+        plugin: &str,
+        stream: &str,
+        run: Option<&str>,
+        shard: usize,
+    ) -> Self {
+        let mut labels = vec![
+            KeyValue::new(PIPELINE, pipeline.to_owned()),
+            KeyValue::new(PLUGIN, plugin.to_owned()),
+            KeyValue::new(STREAM, stream.to_owned()),
+        ];
+        if let Some(run) = run {
+            labels.push(KeyValue::new(RUN, run.to_owned()));
+        }
+        if shard > 0 {
+            labels.push(KeyValue::new(SHARD, shard.to_string()));
+        }
+        Self { labels }
+    }
+
+    /// Return the pre-built labels as a slice.
+    #[must_use]
+    pub fn as_slice(&self) -> &[KeyValue] {
+        &self.labels
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
