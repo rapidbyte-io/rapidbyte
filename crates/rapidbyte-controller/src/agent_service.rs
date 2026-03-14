@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use opentelemetry::KeyValue;
 #[cfg(test)]
 use std::sync::Arc;
 #[cfg(test)]
@@ -186,6 +187,7 @@ impl AgentServiceImpl {
             return Err(Status::internal(error.to_string()));
         }
 
+        rapidbyte_metrics::instruments::controller::lease_grants().add(1, &[]);
         Ok(Some(assignment))
     }
 
@@ -263,6 +265,7 @@ impl AgentService for AgentServiceImpl {
         }
 
         tracing::info!(agent_id, "Agent registered");
+        rapidbyte_metrics::instruments::controller::active_agents().add(1, &[]);
         Ok(Response::new(RegisterAgentResponse { agent_id }))
     }
 
@@ -375,6 +378,8 @@ impl AgentService for AgentServiceImpl {
             }
         }
 
+        rapidbyte_metrics::instruments::controller::heartbeat_received()
+            .add(1, &[KeyValue::new("agent_id", req.agent_id.clone())]);
         Ok(Response::new(HeartbeatResponse { directives }))
     }
 
@@ -764,6 +769,9 @@ impl AgentService for AgentServiceImpl {
                         })),
                     },
                 );
+                rapidbyte_metrics::instruments::controller::runs_completed()
+                    .add(1, &[KeyValue::new("status", "ok")]);
+                rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
             }
             TaskOutcome::Failed => {
                 let error = req.error.as_ref();
@@ -921,6 +929,9 @@ impl AgentService for AgentServiceImpl {
                             })),
                         },
                     );
+                    rapidbyte_metrics::instruments::controller::runs_completed()
+                        .add(1, &[KeyValue::new("status", "error")]);
+                    rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
                 }
             }
             TaskOutcome::Cancelled => {
@@ -963,10 +974,14 @@ impl AgentService for AgentServiceImpl {
                         event: Some(run_event::Event::Cancelled(RunCancelled {})),
                     },
                 );
+                rapidbyte_metrics::instruments::controller::runs_completed()
+                    .add(1, &[KeyValue::new("status", "ok")]);
+                rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
             }
             TaskOutcome::Unspecified => unreachable!("invalid task outcome rejected above"),
         }
 
+        rapidbyte_metrics::instruments::controller::tasks_completed().add(1, &[]);
         Ok(Response::new(CompleteTaskResponse { acknowledged: true }))
     }
 }

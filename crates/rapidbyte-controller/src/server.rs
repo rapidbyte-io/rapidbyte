@@ -1,7 +1,7 @@
 //! gRPC server startup and wiring.
 
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tonic::transport::{Identity, Server, ServerTlsConfig as TonicServerTlsConfig};
 use tracing::info;
@@ -237,6 +237,7 @@ async fn handle_expired_lease(
         .get(&task_id)
         .cloned()
         .expect("timed-out task should exist");
+    let persist_start = Instant::now();
     let durable = match state
         .persist_timeout_records(&timed_out_run, Some(&timed_out_task))
         .await
@@ -252,6 +253,8 @@ async fn handle_expired_lease(
             false
         }
     };
+    rapidbyte_metrics::instruments::controller::state_persist_duration()
+        .record(persist_start.elapsed().as_secs_f64(), &[]);
 
     if !durable {
         rollback_background_timeout(state, previous_run, Some(previous_task)).await;
@@ -453,6 +456,8 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
                     tracing::error!(agent_id, ?error, "failed to delete reaped agent");
                 }
                 info!(agent_id, "Reaped dead agent");
+                rapidbyte_metrics::instruments::controller::heartbeat_timeouts().add(1, &[]);
+                rapidbyte_metrics::instruments::controller::active_agents().add(-1, &[]);
             }
         }
     });
@@ -470,6 +475,7 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
                 handle_expired_lease(&lease_state, previous_task).await;
             }
             sweep_reconciliation_timeouts(&lease_state, reconciliation_timeout).await;
+            rapidbyte_metrics::instruments::controller::reconciliation_sweeps().add(1, &[]);
         }
     });
 

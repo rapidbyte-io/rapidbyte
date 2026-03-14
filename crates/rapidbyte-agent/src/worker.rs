@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinSet;
@@ -14,6 +14,8 @@ use tonic::transport::{
     ServerTlsConfig as TonicServerTlsConfig,
 };
 use tracing::{error, info, warn};
+
+use opentelemetry::KeyValue;
 
 use crate::auth::request_with_bearer;
 use crate::executor::{self, TaskOutcomeKind};
@@ -317,6 +319,10 @@ async fn process_task(
     config: AgentConfig,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
+    rapidbyte_metrics::instruments::agent::tasks_received().add(1, &[]);
+    rapidbyte_metrics::instruments::agent::active_tasks().add(1, &[]);
+    let task_start = Instant::now();
+
     info!(
         task_id = task.task_id,
         run_id = task.run_id,
@@ -416,6 +422,17 @@ async fn process_task(
         preview,
         backend_run_id: 0,
     };
+
+    let status_label = match &result.outcome {
+        TaskOutcomeKind::Completed => "ok",
+        TaskOutcomeKind::Failed(_) => "error",
+        TaskOutcomeKind::Cancelled => "cancelled",
+    };
+    rapidbyte_metrics::instruments::agent::tasks_completed()
+        .add(1, &[KeyValue::new("status", status_label)]);
+    rapidbyte_metrics::instruments::agent::active_tasks().add(-1, &[]);
+    rapidbyte_metrics::instruments::agent::task_duration()
+        .record(task_start.elapsed().as_secs_f64(), &[]);
 
     let _ = report_completion_until_terminal(
         &active_leases,

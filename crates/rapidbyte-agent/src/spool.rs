@@ -104,6 +104,10 @@ impl PreviewSpool {
                 ttl: self.default_ttl,
             },
         );
+        rapidbyte_metrics::instruments::agent::previews_stored().add(1, &[]);
+        #[allow(clippy::cast_precision_loss)]
+        rapidbyte_metrics::instruments::agent::spool_entries()
+            .record(self.entries.len() as f64, &[]);
     }
 
     #[must_use]
@@ -183,6 +187,12 @@ impl PreviewSpool {
                 remove_entry_files(entry);
             }
         }
+        if count > 0 {
+            rapidbyte_metrics::instruments::agent::previews_evicted().add(count as u64, &[]);
+            #[allow(clippy::cast_precision_loss)]
+            rapidbyte_metrics::instruments::agent::spool_entries()
+                .record(self.entries.len() as f64, &[]);
+        }
         count
     }
 
@@ -201,7 +211,10 @@ impl PreviewSpool {
         let should_spill = bytes > self.spill_threshold_bytes;
         let storage = if should_spill && !batches.is_empty() {
             match write_batches_to_file(&batches) {
-                Ok(storage) => storage,
+                Ok(storage) => {
+                    rapidbyte_metrics::instruments::agent::preview_spill_to_disk().add(1, &[]);
+                    storage
+                }
                 Err(_) => StoredStreamData::Memory(batches),
             }
         } else {

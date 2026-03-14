@@ -14,6 +14,8 @@ use arrow_flight::{
 use tokio::sync::RwLock;
 use tonic::{Request, Response, Status, Streaming};
 
+use opentelemetry::KeyValue;
+
 use crate::spool::{PreviewKey, PreviewSpool};
 use crate::ticket::TicketVerifier;
 
@@ -79,6 +81,9 @@ impl FlightService for PreviewFlightService {
         &self,
         request: Request<Ticket>,
     ) -> Result<Response<Self::DoGetStream>, Status> {
+        rapidbyte_metrics::instruments::agent::flight_requests()
+            .add(1, &[KeyValue::new("method", "do_get")]);
+
         let ticket_bytes = request.into_inner().ticket;
         let payload = self
             .verifier
@@ -86,6 +91,11 @@ impl FlightService for PreviewFlightService {
             .map_err(|e| Status::unauthenticated(format!("Invalid ticket: {e}")))?;
 
         let (batches, _, _) = self.lookup_stream(&payload).await?;
+        let batch_count = batches.len() as u64;
+        rapidbyte_metrics::instruments::agent::flight_batches_served().add(
+            batch_count,
+            &[KeyValue::new("stream", payload.stream_name.clone())],
+        );
 
         if batches.is_empty() {
             let stream = tokio_stream::empty();

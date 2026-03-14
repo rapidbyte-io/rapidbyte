@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 rapidbyte-types = { path = "../rapidbyte-types" }
 rapidbyte-engine = { path = "../rapidbyte-engine" }
+rapidbyte-metrics = { path = "../rapidbyte-metrics" }
+opentelemetry = { workspace = true }
 rapidbyte-runtime = { path = "../rapidbyte-runtime" }
 rapidbyte-state = { path = "../rapidbyte-state", features = ["postgres"] }
 tonic = { workspace = true }

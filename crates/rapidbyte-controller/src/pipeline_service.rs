@@ -3,6 +3,7 @@
 use std::pin::Pin;
 use std::time::UNIX_EPOCH;
 
+use opentelemetry::KeyValue;
 use prost_types::Timestamp;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
@@ -513,6 +514,9 @@ impl PipelineService for PipelineServiceImpl {
                 return Err(Status::internal(error.to_string()));
             }
             self.state.task_notify.notify_waiters();
+            rapidbyte_metrics::instruments::controller::runs_submitted()
+                .add(1, &[KeyValue::new("status", "accepted")]);
+            rapidbyte_metrics::instruments::controller::active_runs().add(1, &[]);
         }
 
         Ok(Response::new(SubmitPipelineResponse {
