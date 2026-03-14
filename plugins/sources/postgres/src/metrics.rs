@@ -17,7 +17,7 @@ pub(crate) struct EmitState {
 }
 
 /// Emit per-batch source read counter deltas for a stream.
-pub(crate) fn emit_read_metrics(ctx: &Context, state: &mut EmitState) -> Result<(), PluginError> {
+pub(crate) fn emit_batch_counters(ctx: &Context, state: &mut EmitState) -> Result<(), PluginError> {
     let delta_records = state.total_records - state.last_emitted_records;
     let delta_bytes = state.total_bytes - state.last_emitted_bytes;
     state.last_emitted_records = state.total_records;
@@ -31,8 +31,8 @@ pub(crate) fn emit_read_metrics(ctx: &Context, state: &mut EmitState) -> Result<
     Ok(())
 }
 
-/// Emit source read timing metrics so the host can aggregate per-phase timings.
-pub(crate) fn emit_read_perf_metrics(ctx: &Context, perf: &ReadPerf) -> Result<(), PluginError> {
+/// Emit end-of-stream source timing histograms (connect, query, fetch, encode).
+pub(crate) fn emit_source_timings(ctx: &Context, perf: &ReadPerf) -> Result<(), PluginError> {
     ctx.histogram("source_connect_secs", perf.connect_secs)?;
     ctx.histogram("source_query_secs", perf.query_secs)?;
     ctx.histogram("source_fetch_secs", perf.fetch_secs)?;

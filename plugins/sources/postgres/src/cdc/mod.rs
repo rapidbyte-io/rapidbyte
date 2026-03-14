@@ -16,7 +16,7 @@ use tokio_postgres::Client;
 use rapidbyte_sdk::prelude::*;
 
 use crate::config::Config;
-use crate::metrics::{emit_read_metrics, emit_read_perf_metrics, EmitState, BATCH_SIZE};
+use crate::metrics::{emit_batch_counters, emit_source_timings, EmitState, BATCH_SIZE};
 
 use encode::{encode_cdc_batch, CdcRow, RelationInfo};
 use pgoutput::{CdcOp, PgOutputMessage, TupleData};
@@ -63,7 +63,7 @@ fn emit_batch(
 
     ctx.emit_batch(&batch)
         .map_err(|e| format!("emit_batch failed: {}", e.message))?;
-    emit_read_metrics(ctx, state).map_err(|e| format!("emit_read_metrics failed: {}", e.message))?;
+    emit_batch_counters(ctx, state).map_err(|e| format!("emit_batch_counters failed: {}", e.message))?;
 
     rows.clear();
     Ok(())
@@ -294,7 +294,7 @@ pub async fn read_cdc_changes(
         fetch_secs,
         arrow_encode_secs,
     };
-    if let Err(err) = emit_read_perf_metrics(ctx, &perf) {
+    if let Err(err) = emit_source_timings(ctx, &perf) {
         ctx.log(LogLevel::Warn, &format!("read perf metrics skipped: {err}"));
     }
 

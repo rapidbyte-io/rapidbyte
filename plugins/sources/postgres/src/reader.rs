@@ -15,7 +15,7 @@ use rapidbyte_sdk::stream::{DataErrorPolicy, PartitionStrategy};
 
 use crate::cursor::CursorTracker;
 use crate::encode;
-use crate::metrics::{emit_read_metrics, emit_read_perf_metrics, EmitState, BATCH_SIZE};
+use crate::metrics::{emit_batch_counters, emit_source_timings, EmitState, BATCH_SIZE};
 use crate::query;
 use crate::types::Column;
 
@@ -245,7 +245,7 @@ fn emit_accumulated_batch(
 
         ctx.emit_batch(&batch)
             .map_err(|e| format!("emit_batch failed: {}", e.message))?;
-        emit_read_metrics(ctx, state).map_err(|e| format!("emit_read_metrics failed: {}", e.message))?;
+        emit_batch_counters(ctx, state).map_err(|e| format!("emit_batch_counters failed: {}", e.message))?;
     }
 
     *estimated_bytes = BATCH_OVERHEAD_BYTES;
@@ -668,8 +668,8 @@ pub async fn read_stream(
         fetch_secs,
         arrow_encode_secs,
     };
-    emit_read_perf_metrics(ctx, &perf)
-        .map_err(|e| format!("emit_read_perf_metrics failed: {}", e.message))?;
+    emit_source_timings(ctx, &perf)
+        .map_err(|e| format!("emit_source_timings failed: {}", e.message))?;
 
     Ok(ReadSummary {
         records_read: state.total_records,

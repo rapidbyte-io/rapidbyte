@@ -7,7 +7,7 @@ use rapidbyte_sdk::prelude::*;
 use crate::contract::{
     async_prepare_stream_once, prepare_stream_once, schema_hint_has_shape, CheckpointConfig,
 };
-use crate::metrics::emit_write_perf_metrics;
+use crate::metrics::emit_dest_timings;
 use crate::session::{clamp_copy_flush_bytes, WriteSession};
 
 fn resolve_copy_flush_bytes(
@@ -108,7 +108,7 @@ pub async fn write_stream(
         commit_secs: result.commit_secs,
         arrow_decode_secs,
     };
-    emit_write_perf_metrics(ctx, &perf)?;
+    emit_dest_timings(ctx, &perf)?;
 
     Ok(WriteSummary {
         records_written: result.total_rows,
