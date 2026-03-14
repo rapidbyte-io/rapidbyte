@@ -112,7 +112,8 @@ pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
     let flight_svc = PreviewFlightService::new(spool.clone(), &config.signing_key);
 
     info!(addr = %flight_addr, "Starting Flight server");
-    let mut flight_server = tonic::transport::Server::builder();
+    let mut flight_server =
+        tonic::transport::Server::builder().layer(rapidbyte_metrics::grpc_layer::GrpcMetricsLayer);
     if let Some(tls) = &config.flight_tls {
         flight_server = flight_server.tls_config(TonicServerTlsConfig::new().identity(
             Identity::from_pem(tls.cert_pem.clone(), tls.key_pem.clone()),

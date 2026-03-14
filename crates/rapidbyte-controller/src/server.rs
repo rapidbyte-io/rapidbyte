@@ -495,7 +495,7 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
 
     info!(addr = %config.listen_addr, "Controller listening");
 
-    let mut server = Server::builder();
+    let mut server = Server::builder().layer(rapidbyte_metrics::grpc_layer::GrpcMetricsLayer);
     if let Some(tls) = &config.tls {
         server = server.tls_config(TonicServerTlsConfig::new().identity(Identity::from_pem(
             tls.cert_pem.clone(),
