@@ -235,7 +235,8 @@ impl HostStateBuilder {
 
     #[must_use]
     pub fn metric_run_label(mut self, label: impl Into<String>) -> Self {
-        self.metric_run_label = Some(label.into());
+        let label = label.into();
+        self.metric_run_label = if label.is_empty() { None } else { Some(label) };
         self
     }
 
