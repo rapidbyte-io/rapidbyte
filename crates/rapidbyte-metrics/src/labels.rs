@@ -14,6 +14,8 @@ pub const METHOD: &str = "method";
 pub const REASON: &str = "reason";
 pub const PLUGIN: &str = "plugin";
 pub const AGENT_ID: &str = "agent_id";
+pub const RULE: &str = "rule";
+pub const FIELD: &str = "field";
 
 static ALLOWED_KEYS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     HashSet::from([
@@ -27,6 +29,8 @@ static ALLOWED_KEYS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
         REASON,
         PLUGIN,
         AGENT_ID,
+        RULE,
+        FIELD,
     ])
 });
 
@@ -80,5 +84,15 @@ mod tests {
     fn malformed_json_returns_empty() {
         let labels = parse_bounded_labels("not json");
         assert!(labels.is_empty());
+    }
+
+    #[test]
+    fn validation_labels_rule_and_field_are_allowed() {
+        let json = r#"{"rule":"not_null","field":"email","pipeline":"sync"}"#;
+        let labels = parse_bounded_labels(json);
+        assert_eq!(labels.len(), 3);
+        assert!(labels.iter().any(|kv| kv.key.as_str() == "rule"));
+        assert!(labels.iter().any(|kv| kv.key.as_str() == "field"));
+        assert!(labels.iter().any(|kv| kv.key.as_str() == "pipeline"));
     }
 }

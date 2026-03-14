@@ -539,20 +539,19 @@ async fn execute_pipeline_once(
             },
         );
         // Construct fallback snapshot reader/provider when none are supplied.
+        // The reader must be wired to the provider so flush_and_snapshot sees data.
         let fallback_reader;
         let fallback_provider;
-        let snap_reader = if let Some(r) = snapshot_reader {
-            r
-        } else {
-            fallback_reader = rapidbyte_metrics::snapshot::SnapshotReader::new();
-            &fallback_reader
-        };
-        let meter_prov = if let Some(p) = meter_provider {
-            p
-        } else {
-            fallback_provider = opentelemetry_sdk::metrics::SdkMeterProvider::default();
-            &fallback_provider
-        };
+        let (snap_reader, meter_prov) =
+            if let (Some(r), Some(p)) = (snapshot_reader, meter_provider) {
+                (r, p)
+            } else {
+                fallback_reader = rapidbyte_metrics::snapshot::SnapshotReader::new();
+                fallback_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+                    .with_reader(fallback_reader.build_reader())
+                    .build();
+                (&fallback_reader, &fallback_provider)
+            };
 
         preserve_real_outcome_after_stream_execution(cancel_token, async move {
             if options.dry_run {

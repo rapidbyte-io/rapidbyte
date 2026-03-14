@@ -70,14 +70,34 @@ impl OtelGuard {
 ///
 /// Panics if the TCP listener cannot bind to the given address.
 pub async fn serve_prometheus(guard: std::sync::Arc<OtelGuard>, listen_addr: String) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    const MAX_CONNECTIONS: usize = 64;
+    const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
     let listener = tokio::net::TcpListener::bind(&listen_addr).await.unwrap();
+    let active = std::sync::Arc::new(AtomicUsize::new(0));
+
     loop {
         if let Ok((mut stream, _)) = listener.accept().await {
+            if active.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+                drop(stream);
+                continue;
+            }
             let guard = guard.clone();
+            let active = active.clone();
+            active.fetch_add(1, Ordering::Relaxed);
             tokio::spawn(async move {
-                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                struct ConnGuard(std::sync::Arc<AtomicUsize>);
+                impl Drop for ConnGuard {
+                    fn drop(&mut self) {
+                        self.0.fetch_sub(1, Ordering::Relaxed);
+                    }
+                }
+                let _conn_guard = ConnGuard(active);
                 let mut buf = [0u8; 1024];
-                let _ = stream.read(&mut buf).await;
+                let _ = tokio::time::timeout(READ_TIMEOUT, stream.read(&mut buf)).await;
                 let body = guard.prometheus_text();
                 let header = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\n\r\n",
