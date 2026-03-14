@@ -18,7 +18,7 @@ use rapidbyte_types::cursor::{CursorInfo, CursorType, CursorValue};
 use rapidbyte_types::envelope::DlqRecord;
 use rapidbyte_types::error::{CommitState, PluginError, ValidationResult, ValidationStatus};
 use rapidbyte_types::manifest::{Permissions, PluginManifest, ResourceLimits};
-use rapidbyte_types::metric::{ReadSummary, WriteSummary};
+use rapidbyte_types::metric::{ReadPerf, ReadSummary, WritePerf, WriteSummary};
 use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
 use rapidbyte_types::stream::{PartitionStrategy, StreamContext, StreamLimits, StreamPolicies};
 use rapidbyte_types::wire::Feature;
@@ -626,6 +626,7 @@ async fn execute_pipeline_once(
                         &snap,
                         aggregated.max_source_duration,
                         modules.source_module_load_ms,
+                        None,
                     ),
                     transform_count: config.transforms.len(),
                     transform_duration_secs: aggregated.transform_durations.iter().sum(),
@@ -933,6 +934,44 @@ fn execution_parallelism(config: &PipelineConfig, stream_ctxs: &[StreamContext])
         .unwrap_or_else(|| resolve_effective_parallelism(config, false));
 
     usize::try_from(resolved.max(1)).unwrap_or(usize::MAX)
+}
+
+fn merge_read_perf_maxima(current: &mut Option<ReadPerf>, perf: Option<&ReadPerf>) {
+    let Some(perf) = perf else {
+        return;
+    };
+    match current {
+        Some(current) => {
+            current.connect_secs = current.connect_secs.max(perf.connect_secs);
+            current.query_secs = current.query_secs.max(perf.query_secs);
+            current.fetch_secs = current.fetch_secs.max(perf.fetch_secs);
+            current.arrow_encode_secs = current.arrow_encode_secs.max(perf.arrow_encode_secs);
+        }
+        None => *current = Some(perf.clone()),
+    }
+}
+
+fn merge_write_perf_maxima(current: &mut Option<WritePerf>, perf: Option<&WritePerf>) {
+    let Some(perf) = perf else {
+        return;
+    };
+    match current {
+        Some(current) => {
+            current.connect_secs = current.connect_secs.max(perf.connect_secs);
+            current.flush_secs = current.flush_secs.max(perf.flush_secs);
+            current.commit_secs = current.commit_secs.max(perf.commit_secs);
+            current.arrow_decode_secs = current.arrow_decode_secs.max(perf.arrow_decode_secs);
+        }
+        None => *current = Some(perf.clone()),
+    }
+}
+
+fn metric_or_perf_fallback(snapshot_value: f64, fallback_value: Option<f64>) -> f64 {
+    if snapshot_value > 0.0 {
+        snapshot_value
+    } else {
+        fallback_value.unwrap_or(0.0)
+    }
 }
 
 struct CollectedTransforms {
@@ -1458,12 +1497,17 @@ async fn execute_streams(
         total_read_summary.batches_emitted += sr.read_summary.batches_emitted;
         total_read_summary.checkpoint_count += sr.read_summary.checkpoint_count;
         total_read_summary.records_skipped += sr.read_summary.records_skipped;
+        merge_read_perf_maxima(&mut total_read_summary.perf, sr.read_summary.perf.as_ref());
 
         total_write_summary.records_written += sr.write_summary.records_written;
         total_write_summary.bytes_written += sr.write_summary.bytes_written;
         total_write_summary.batches_written += sr.write_summary.batches_written;
         total_write_summary.checkpoint_count += sr.write_summary.checkpoint_count;
         total_write_summary.records_failed += sr.write_summary.records_failed;
+        merge_write_perf_maxima(
+            &mut total_write_summary.perf,
+            sr.write_summary.perf.as_ref(),
+        );
 
         source_checkpoints.extend(sr.source_checkpoints);
         dest_checkpoints.extend(sr.dest_checkpoints);
@@ -1656,22 +1700,9 @@ async fn finalize_run(
             &snap,
             aggregated.max_source_duration,
             modules.source_module_load_ms,
+            aggregated.total_read_summary.perf.as_ref(),
         ),
-        dest: DestTiming {
-            duration_secs: aggregated.max_dest_duration,
-            module_load_ms: modules.dest_module_load_ms,
-            connect_secs: snap.dest_connect_secs,
-            flush_secs: snap.dest_flush_secs,
-            commit_secs: snap.dest_commit_secs,
-            arrow_decode_secs: snap.dest_decode_secs,
-            vm_setup_secs: aggregated.max_vm_setup_secs,
-            recv_secs: aggregated.max_recv_secs,
-            recv_nanos: snap.next_batch_nanos,
-            recv_wait_nanos: snap.next_batch_wait_nanos,
-            recv_process_nanos: snap.next_batch_process_nanos,
-            decompress_nanos: snap.decompress_nanos,
-            recv_count: snap.next_batch_count,
-        },
+        dest: build_dest_timing(&snap, &aggregated, modules.dest_module_load_ms),
         transform_count: aggregated.transform_durations.len(),
         transform_duration_secs: aggregated.transform_durations.iter().sum(),
         transform_module_load_ms,
@@ -1695,17 +1726,80 @@ fn build_source_timing(
     snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
     max_source_duration: f64,
     source_module_load_ms: u64,
+    fallback_perf: Option<&ReadPerf>,
 ) -> SourceTiming {
     SourceTiming {
         duration_secs: max_source_duration,
         module_load_ms: source_module_load_ms,
-        connect_secs: snap.source_connect_secs,
-        query_secs: snap.source_query_secs,
-        fetch_secs: snap.source_fetch_secs,
-        arrow_encode_secs: snap.source_encode_secs,
+        connect_secs: metric_or_perf_fallback(
+            snap.source_connect_secs,
+            fallback_perf.map(|perf| perf.connect_secs),
+        ),
+        query_secs: metric_or_perf_fallback(
+            snap.source_query_secs,
+            fallback_perf.map(|perf| perf.query_secs),
+        ),
+        fetch_secs: metric_or_perf_fallback(
+            snap.source_fetch_secs,
+            fallback_perf.map(|perf| perf.fetch_secs),
+        ),
+        arrow_encode_secs: metric_or_perf_fallback(
+            snap.source_encode_secs,
+            fallback_perf.map(|perf| perf.arrow_encode_secs),
+        ),
         emit_nanos: snap.emit_batch_nanos,
         compress_nanos: snap.compress_nanos,
         emit_count: snap.emit_count,
+    }
+}
+
+fn build_dest_timing(
+    snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
+    aggregated: &AggregatedStreamResults,
+    dest_module_load_ms: u64,
+) -> DestTiming {
+    DestTiming {
+        duration_secs: aggregated.max_dest_duration,
+        module_load_ms: dest_module_load_ms,
+        connect_secs: metric_or_perf_fallback(
+            snap.dest_connect_secs,
+            aggregated
+                .total_write_summary
+                .perf
+                .as_ref()
+                .map(|perf| perf.connect_secs),
+        ),
+        flush_secs: metric_or_perf_fallback(
+            snap.dest_flush_secs,
+            aggregated
+                .total_write_summary
+                .perf
+                .as_ref()
+                .map(|perf| perf.flush_secs),
+        ),
+        commit_secs: metric_or_perf_fallback(
+            snap.dest_commit_secs,
+            aggregated
+                .total_write_summary
+                .perf
+                .as_ref()
+                .map(|perf| perf.commit_secs),
+        ),
+        arrow_decode_secs: metric_or_perf_fallback(
+            snap.dest_decode_secs,
+            aggregated
+                .total_write_summary
+                .perf
+                .as_ref()
+                .map(|perf| perf.arrow_decode_secs),
+        ),
+        vm_setup_secs: aggregated.max_vm_setup_secs,
+        recv_secs: aggregated.max_recv_secs,
+        recv_nanos: snap.next_batch_nanos,
+        recv_wait_nanos: snap.next_batch_wait_nanos,
+        recv_process_nanos: snap.next_batch_process_nanos,
+        decompress_nanos: snap.decompress_nanos,
+        recv_count: snap.next_batch_count,
     }
 }
 
@@ -2753,6 +2847,7 @@ mod finalize_run_state_tests {
     use rapidbyte_state::error::{Result as StateResult, StateError};
     use rapidbyte_types::checkpoint::{Checkpoint, CheckpointKind};
     use rapidbyte_types::cursor::CursorValue;
+    use rapidbyte_types::metric::{ReadPerf, WritePerf};
     use rapidbyte_types::state::CursorState;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -2913,6 +3008,43 @@ resources:
         aggregated.execution_parallelism = 12;
 
         assert_eq!(reported_parallelism(&config, &aggregated), 12);
+    }
+
+    #[test]
+    fn source_timing_falls_back_to_summary_perf_when_snapshot_is_missing() {
+        let snap = rapidbyte_metrics::snapshot::PipelineMetricsSnapshot::default();
+        let perf = ReadPerf {
+            connect_secs: 0.1,
+            query_secs: 0.2,
+            fetch_secs: 0.3,
+            arrow_encode_secs: 0.4,
+        };
+
+        let timing = build_source_timing(&snap, 1.5, 12, Some(&perf));
+
+        assert!((timing.connect_secs - 0.1).abs() < f64::EPSILON);
+        assert!((timing.query_secs - 0.2).abs() < f64::EPSILON);
+        assert!((timing.fetch_secs - 0.3).abs() < f64::EPSILON);
+        assert!((timing.arrow_encode_secs - 0.4).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn dest_timing_falls_back_to_summary_perf_when_snapshot_is_missing() {
+        let snap = rapidbyte_metrics::snapshot::PipelineMetricsSnapshot::default();
+        let mut aggregated = make_aggregated_results();
+        aggregated.total_write_summary.perf = Some(WritePerf {
+            connect_secs: 0.5,
+            flush_secs: 0.6,
+            commit_secs: 0.7,
+            arrow_decode_secs: 0.8,
+        });
+
+        let timing = build_dest_timing(&snap, &aggregated, 34);
+
+        assert!((timing.connect_secs - 0.5).abs() < f64::EPSILON);
+        assert!((timing.flush_secs - 0.6).abs() < f64::EPSILON);
+        assert!((timing.commit_secs - 0.7).abs() < f64::EPSILON);
+        assert!((timing.arrow_decode_secs - 0.8).abs() < f64::EPSILON);
     }
 
     #[tokio::test]

@@ -26,6 +26,7 @@ zstd = "0.13"
 
 [dev-dependencies]
 rapidbyte-state = { path = "../rapidbyte-state", features = ["sqlite"] }
+opentelemetry_sdk = { workspace = true }
 wasm-encoder = "0.243"
 
 [target.'cfg(unix)'.dependencies]

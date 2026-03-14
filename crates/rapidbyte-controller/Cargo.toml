@@ -35,5 +35,8 @@ rustls-native-certs = { workspace = true }
 tonic-build = { workspace = true }
 protoc-bin-vendored = { workspace = true }
 
+[dev-dependencies]
+opentelemetry_sdk = { workspace = true }
+
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

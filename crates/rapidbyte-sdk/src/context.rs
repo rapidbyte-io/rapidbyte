@@ -150,6 +150,9 @@ impl Context {
             serde_json::Value::String(self.stream_name.clone()),
         );
         for (k, v) in extra {
+            if is_reserved_metric_label(k) {
+                continue;
+            }
             map.insert((*k).to_owned(), serde_json::Value::String((*v).to_owned()));
         }
         serde_json::Value::Object(map).to_string()
@@ -171,10 +174,17 @@ impl Context {
     }
 }
 
+fn is_reserved_metric_label(label: &str) -> bool {
+    matches!(label, "pipeline" | "run" | "plugin" | "stream")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::host_ffi::test_support::{self, MetricCall};
+    use std::sync::{LazyLock, Mutex};
+
+    static METRIC_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn test_new_stores_metadata() {
@@ -280,6 +290,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_typed_metric_delegates_with_expected_labels() {
+        let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
         test_support::reset();
         let ctx = Context::new("test-plugin", "users");
         ctx.counter("records_read", 42);
@@ -318,6 +329,40 @@ mod tests {
             serde_json::from_str(labels_json).expect("labels json should parse");
         assert_eq!(
             gauge_labels,
+            serde_json::json!({
+                "plugin": "test-plugin",
+                "stream": "users",
+                "phase": "scan"
+            })
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_reserved_metric_labels_are_not_overridden() {
+        let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
+        test_support::reset();
+        let ctx = Context::new("test-plugin", "users");
+        ctx.counter_with_labels(
+            "records_read",
+            1,
+            &[
+                ("plugin", "spoofed-plugin"),
+                ("stream", "spoofed-stream"),
+                ("pipeline", "spoofed-pipeline"),
+                ("run", "spoofed-run"),
+                ("phase", "scan"),
+            ],
+        );
+
+        let calls = test_support::take_metric_calls();
+        let MetricCall::Counter { labels_json, .. } = &calls[0] else {
+            panic!("expected counter metric call");
+        };
+        let labels: serde_json::Value =
+            serde_json::from_str(labels_json).expect("labels json should parse");
+        assert_eq!(
+            labels,
             serde_json::json!({
                 "plugin": "test-plugin",
                 "stream": "users",

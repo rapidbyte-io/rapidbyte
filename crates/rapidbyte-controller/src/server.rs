@@ -267,6 +267,7 @@ async fn handle_expired_lease(
 
     if durable {
         publish_run_failed(state, &run_id, error_info, attempt).await;
+        rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
     } else {
         tracing::warn!(
             task_id = %task_id,
@@ -378,6 +379,7 @@ async fn sweep_reconciliation_timeouts(state: &ControllerState, reconciliation_t
 
         if durable {
             publish_run_failed(state, &run_id, error_info, attempt).await;
+            rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
         } else {
             tracing::warn!(run_id, "skipping reconciliation-timeout terminal publish because durable persistence failed");
         }
@@ -534,6 +536,40 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::store::test_support::FailingMetadataStore;
+    use opentelemetry::global;
+    use opentelemetry_sdk::metrics::data::Sum;
+    use opentelemetry_sdk::metrics::{
+        InMemoryMetricExporter, InMemoryMetricExporterBuilder, PeriodicReader, SdkMeterProvider,
+    };
+    use std::sync::LazyLock;
+    use tokio::sync::Mutex;
+
+    static METRIC_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn metric_test_provider() -> (SdkMeterProvider, InMemoryMetricExporter) {
+        let exporter = InMemoryMetricExporterBuilder::new().build();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        (provider, exporter)
+    }
+
+    fn active_runs_value(exporter: &InMemoryMetricExporter) -> i64 {
+        let metrics = exporter.get_finished_metrics().unwrap_or_default();
+        for resource_metrics in metrics.iter().rev() {
+            for scope_metrics in &resource_metrics.scope_metrics {
+                for metric in &scope_metrics.metrics {
+                    if metric.name != "controller.active_runs" {
+                        continue;
+                    }
+                    if let Some(sum) = metric.data.as_any().downcast_ref::<Sum<i64>>() {
+                        return sum.data_points.iter().map(|dp| dp.value).sum();
+                    }
+                }
+            }
+        }
+        0
+    }
 
     #[test]
     fn auth_is_required_by_default() {
@@ -639,6 +675,11 @@ mod tests {
 
     #[tokio::test]
     async fn handle_expired_lease_transitions_assigned_run_to_timed_out() {
+        let _guard = METRIC_TEST_LOCK.lock().await;
+        let (provider, exporter) = metric_test_provider();
+        global::set_meter_provider(provider.clone());
+        rapidbyte_metrics::instruments::controller::active_runs().add(1, &[]);
+
         let state = ControllerState::new(b"test-signing-key");
         let (run_id, _) = {
             let mut runs = state.runs.write().await;
@@ -673,6 +714,8 @@ mod tests {
             record.error_message.as_deref(),
             Some(format!("Task {task_id} lease expired (agent unresponsive)").as_str())
         );
+        let _ = provider.force_flush();
+        assert_eq!(active_runs_value(&exporter), 0);
     }
 
     #[tokio::test]
@@ -814,6 +857,11 @@ mod tests {
 
     #[tokio::test]
     async fn handle_reconciliation_timeout_fails_stale_reconciling_run() {
+        let _guard = METRIC_TEST_LOCK.lock().await;
+        let (provider, exporter) = metric_test_provider();
+        global::set_meter_provider(provider.clone());
+        rapidbyte_metrics::instruments::controller::active_runs().add(1, &[]);
+
         let state = ControllerState::new(b"test-signing-key");
         let (run_id, _) = {
             let mut runs = state.runs.write().await;
@@ -841,6 +889,8 @@ mod tests {
             .error_message
             .as_deref()
             .is_some_and(|message| message.contains("reconciliation timed out")));
+        let _ = provider.force_flush();
+        assert_eq!(active_runs_value(&exporter), 0);
     }
 
     #[tokio::test]

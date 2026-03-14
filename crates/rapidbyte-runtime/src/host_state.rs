@@ -168,6 +168,7 @@ fn map_custom_metric_error(
 
 pub(crate) struct PluginIdentity {
     pub pipeline: PipelineId,
+    pub plugin_id: String,
     pub plugin_instance_key: String,
     pub stream: StreamName,
     pub metric_run_label: Option<String>,
@@ -393,6 +394,7 @@ impl HostStateBuilder {
         Ok(ComponentHostState {
             identity: PluginIdentity {
                 pipeline: PipelineId::new(pipeline),
+                plugin_id,
                 plugin_instance_key,
                 stream: StreamName::new(stream),
                 metric_run_label: self.metric_run_label,
@@ -450,28 +452,34 @@ impl ComponentHostState {
         self.identity.stream.as_str()
     }
 
-    /// Inject the pipeline/run labels into metric labels if not already present.
+    /// Rewrite reserved scope labels to the host-authoritative values.
     fn ensure_metric_scope_labels(&self, labels: &mut Vec<opentelemetry::KeyValue>) {
-        let has_pipeline = labels
-            .iter()
-            .any(|kv| kv.key.as_str() == rapidbyte_metrics::labels::PIPELINE);
-        if !has_pipeline {
-            labels.push(opentelemetry::KeyValue::new(
-                rapidbyte_metrics::labels::PIPELINE,
-                self.identity.pipeline.as_str().to_owned(),
-            ));
-        }
-
+        labels.retain(|kv| {
+            !matches!(
+                kv.key.as_str(),
+                rapidbyte_metrics::labels::PIPELINE
+                    | rapidbyte_metrics::labels::RUN
+                    | rapidbyte_metrics::labels::PLUGIN
+                    | rapidbyte_metrics::labels::STREAM
+            )
+        });
+        labels.push(opentelemetry::KeyValue::new(
+            rapidbyte_metrics::labels::PIPELINE,
+            self.identity.pipeline.as_str().to_owned(),
+        ));
+        labels.push(opentelemetry::KeyValue::new(
+            rapidbyte_metrics::labels::PLUGIN,
+            self.identity.plugin_id.clone(),
+        ));
+        labels.push(opentelemetry::KeyValue::new(
+            rapidbyte_metrics::labels::STREAM,
+            self.identity.stream.as_str().to_owned(),
+        ));
         if let Some(run_label) = self.identity.metric_run_label.as_deref() {
-            let has_run = labels
-                .iter()
-                .any(|kv| kv.key.as_str() == rapidbyte_metrics::labels::RUN);
-            if !has_run {
-                labels.push(opentelemetry::KeyValue::new(
-                    rapidbyte_metrics::labels::RUN,
-                    run_label.to_owned(),
-                ));
-            }
+            labels.push(opentelemetry::KeyValue::new(
+                rapidbyte_metrics::labels::RUN,
+                run_label.to_owned(),
+            ));
         }
     }
 
@@ -1181,7 +1189,52 @@ fn parse_state_scope(scope: u32) -> Result<StateScope, PluginError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentelemetry::global;
+    use opentelemetry_sdk::metrics::data::Sum;
+    use opentelemetry_sdk::metrics::{
+        InMemoryMetricExporter, InMemoryMetricExporterBuilder, PeriodicReader, SdkMeterProvider,
+    };
     use rapidbyte_state::SqliteStateBackend;
+    use std::sync::LazyLock;
+
+    static METRIC_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn metric_test_provider() -> (SdkMeterProvider, InMemoryMetricExporter) {
+        let exporter = InMemoryMetricExporterBuilder::new().build();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .build();
+        (provider, exporter)
+    }
+
+    fn metric_labels(exporter: &InMemoryMetricExporter, metric_name: &str) -> serde_json::Value {
+        let metrics = exporter.get_finished_metrics().unwrap_or_default();
+        for resource_metrics in &metrics {
+            for scope_metrics in &resource_metrics.scope_metrics {
+                for metric in &scope_metrics.metrics {
+                    if metric.name != metric_name {
+                        continue;
+                    }
+                    if let Some(sum) = metric.data.as_any().downcast_ref::<Sum<u64>>() {
+                        if let Some(dp) = sum.data_points.first() {
+                            return serde_json::Value::Object(
+                                dp.attributes
+                                    .iter()
+                                    .map(|kv| {
+                                        (
+                                            kv.key.as_str().to_owned(),
+                                            serde_json::Value::String(kv.value.to_string()),
+                                        )
+                                    })
+                                    .collect(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        panic!("metric {metric_name} not found");
+    }
 
     fn test_host_state() -> ComponentHostState {
         let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
@@ -1376,5 +1429,42 @@ mod tests {
             .expect_err("overlong metric name should be rejected");
 
         assert_eq!(err.code, "INVALID_METRIC_NAME");
+    }
+
+    #[test]
+    fn reserved_metric_labels_are_rewritten_to_host_scope() {
+        let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
+        let (provider, exporter) = metric_test_provider();
+        global::set_meter_provider(provider.clone());
+
+        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let host = ComponentHostState::builder()
+            .pipeline("test-pipeline")
+            .plugin_id("postgres")
+            .stream("users")
+            .metric_run_label("run-42")
+            .state_backend(state)
+            .build()
+            .unwrap();
+
+        host.counter_add_impl(
+            "records_read".to_string(),
+            1,
+            r#"{"pipeline":"spoofed-pipeline","run":"spoofed-run","plugin":"spoofed-plugin","stream":"spoofed-stream","rule":"not_null"}"#.to_string(),
+        )
+        .unwrap();
+
+        let _ = provider.force_flush();
+        let labels = metric_labels(&exporter, "pipeline.records_read");
+        assert_eq!(
+            labels,
+            serde_json::json!({
+                "pipeline": "test-pipeline",
+                "run": "run-42",
+                "plugin": "postgres",
+                "stream": "users",
+                "rule": "not_null"
+            })
+        );
     }
 }
