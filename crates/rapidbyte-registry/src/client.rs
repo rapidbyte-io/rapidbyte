@@ -15,21 +15,12 @@ use tracing::debug;
 use crate::PluginRef;
 
 /// Configuration for connecting to an OCI registry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RegistryConfig {
     /// Use plain HTTP instead of HTTPS.
     pub insecure: bool,
     /// Optional basic-auth credentials `(username, password)`.
     pub credentials: Option<(String, String)>,
-}
-
-impl Default for RegistryConfig {
-    fn default() -> Self {
-        Self {
-            insecure: false,
-            credentials: None,
-        }
-    }
 }
 
 /// High-level OCI registry client for rapidbyte plugin artifacts.
@@ -79,7 +70,7 @@ impl RegistryClient {
     ///
     /// Returns an error on network or authentication failures.
     pub async fn list_tags(&self, plugin_ref: &PluginRef) -> Result<Vec<String>> {
-        let reference = self.to_reference(plugin_ref)?;
+        let reference = to_reference(plugin_ref)?;
         debug!(%plugin_ref, "listing tags");
 
         let response = self
@@ -97,7 +88,7 @@ impl RegistryClient {
     ///
     /// Returns an error on network, authentication, or manifest-parsing failures.
     pub async fn pull(&self, plugin_ref: &PluginRef) -> Result<ImageData> {
-        let reference = self.to_reference(plugin_ref)?;
+        let reference = to_reference(plugin_ref)?;
         debug!(%plugin_ref, "pulling artifact");
 
         let accepted_media_types = vec![
@@ -125,7 +116,7 @@ impl RegistryClient {
         &self,
         plugin_ref: &PluginRef,
     ) -> Result<(OciImageManifest, String)> {
-        let reference = self.to_reference(plugin_ref)?;
+        let reference = to_reference(plugin_ref)?;
         debug!(%plugin_ref, "pulling manifest");
 
         let (manifest, digest) = self
@@ -160,7 +151,7 @@ impl RegistryClient {
         layers: Vec<ImageLayer>,
         config: Config,
     ) -> Result<String> {
-        let reference = self.to_reference(plugin_ref)?;
+        let reference = to_reference(plugin_ref)?;
         debug!(%plugin_ref, "pushing artifact");
 
         let response: PushResponse = self
@@ -171,13 +162,13 @@ impl RegistryClient {
 
         Ok(response.manifest_url)
     }
+}
 
-    /// Convert a [`PluginRef`] to an OCI [`Reference`].
-    fn to_reference(&self, plugin_ref: &PluginRef) -> Result<Reference> {
-        let raw = plugin_ref.to_string();
-        raw.parse::<Reference>()
-            .context(format!("invalid OCI reference: {raw}"))
-    }
+/// Convert a [`PluginRef`] to an OCI [`Reference`].
+fn to_reference(plugin_ref: &PluginRef) -> Result<Reference> {
+    let raw = plugin_ref.to_string();
+    raw.parse::<Reference>()
+        .context(format!("invalid OCI reference: {raw}"))
 }
 
 #[cfg(test)]
@@ -223,11 +214,8 @@ mod tests {
 
     #[test]
     fn to_reference_roundtrips() {
-        let config = RegistryConfig::default();
-        let client = RegistryClient::new(&config).unwrap();
-
         let plugin_ref = PluginRef::parse("registry.example.com/source/postgres:1.2.0").unwrap();
-        let reference = client.to_reference(&plugin_ref).unwrap();
+        let reference = to_reference(&plugin_ref).unwrap();
 
         assert_eq!(reference.registry(), "registry.example.com");
         assert_eq!(reference.repository(), "source/postgres");
@@ -236,11 +224,8 @@ mod tests {
 
     #[test]
     fn to_reference_with_port() {
-        let config = RegistryConfig::default();
-        let client = RegistryClient::new(&config).unwrap();
-
         let plugin_ref = PluginRef::parse("localhost:5050/test/plugin:latest").unwrap();
-        let reference = client.to_reference(&plugin_ref).unwrap();
+        let reference = to_reference(&plugin_ref).unwrap();
 
         assert_eq!(reference.registry(), "localhost:5050");
         assert_eq!(reference.repository(), "test/plugin");

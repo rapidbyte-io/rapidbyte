@@ -395,7 +395,7 @@ mod tests {
         assert_eq!(listed.len(), 3);
 
         let listed_refs: Vec<String> = listed.iter().map(|e| e.plugin_ref.to_string()).collect();
-        let mut expected_refs: Vec<String> = refs.iter().map(|r| r.to_string()).collect();
+        let mut expected_refs: Vec<String> = refs.iter().map(ToString::to_string).collect();
         expected_refs.sort();
 
         assert_eq!(listed_refs, expected_refs);
