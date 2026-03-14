@@ -812,45 +812,15 @@ impl ComponentHostState {
     ) -> Result<(), PluginError> {
         let mut labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
         self.ensure_metric_scope_labels(&mut labels);
-        match name.as_str() {
-            "source_connect_secs" => {
-                rapidbyte_metrics::instruments::plugin::source_connect_duration()
-                    .record(value, &labels);
-            }
-            "source_query_secs" => {
-                rapidbyte_metrics::instruments::plugin::source_query_duration()
-                    .record(value, &labels);
-            }
-            "source_fetch_secs" => {
-                rapidbyte_metrics::instruments::plugin::source_fetch_duration()
-                    .record(value, &labels);
-            }
-            "source_arrow_encode_secs" => {
-                rapidbyte_metrics::instruments::plugin::source_encode_duration()
-                    .record(value, &labels);
-            }
-            "dest_connect_secs" => {
-                rapidbyte_metrics::instruments::plugin::dest_connect_duration()
-                    .record(value, &labels);
-            }
-            "dest_flush_secs" => {
-                rapidbyte_metrics::instruments::plugin::dest_flush_duration()
-                    .record(value, &labels);
-            }
-            "dest_commit_secs" => {
-                rapidbyte_metrics::instruments::plugin::dest_commit_duration()
-                    .record(value, &labels);
-            }
-            "dest_arrow_decode_secs" => {
-                rapidbyte_metrics::instruments::plugin::dest_decode_duration()
-                    .record(value, &labels);
-            }
-            _ => match rapidbyte_metrics::instruments::plugin::custom_histogram(&name) {
+        if let Some(hist) = builtin_plugin_histogram(name.as_str()) {
+            hist.record(value, &labels);
+        } else {
+            match rapidbyte_metrics::instruments::plugin::custom_histogram(&name) {
                 Ok(histogram) => histogram.record(value, &labels),
                 Err(err) => {
                     tracing::debug!(metric = %name, "custom histogram skipped: {err}");
                 }
-            },
+            }
         }
         Ok(())
     }
@@ -1116,6 +1086,21 @@ impl WasiView for ComponentHostState {
 }
 
 // --- Helpers ---
+
+fn builtin_plugin_histogram(name: &str) -> Option<opentelemetry::metrics::Histogram<f64>> {
+    use rapidbyte_metrics::instruments::plugin;
+    match name {
+        "source_connect_secs" => Some(plugin::source_connect_duration()),
+        "source_query_secs" => Some(plugin::source_query_duration()),
+        "source_fetch_secs" => Some(plugin::source_fetch_duration()),
+        "source_arrow_encode_secs" => Some(plugin::source_encode_duration()),
+        "dest_connect_secs" => Some(plugin::dest_connect_duration()),
+        "dest_flush_secs" => Some(plugin::dest_flush_duration()),
+        "dest_commit_secs" => Some(plugin::dest_commit_duration()),
+        "dest_arrow_decode_secs" => Some(plugin::dest_decode_duration()),
+        _ => None,
+    }
+}
 
 fn lock_mutex<'a, T>(
     mutex: &'a Mutex<T>,

@@ -471,32 +471,11 @@ fn scope_from_attrs(attrs: &[opentelemetry::KeyValue]) -> Option<(String, String
 }
 
 fn is_builtin_plugin_duration_name(name: &str) -> bool {
-    matches!(
-        name,
-        "source_connect_secs"
-            | "source_query_secs"
-            | "source_fetch_secs"
-            | "source_arrow_encode_secs"
-            | "dest_connect_secs"
-            | "dest_flush_secs"
-            | "dest_commit_secs"
-            | "dest_decode_secs"
-            | "dest_arrow_decode_secs"
-    )
+    crate::plugin_names::is_builtin_name(name)
 }
 
 fn builtin_plugin_duration_snapshot_name(name: &str) -> Option<&'static str> {
-    match name {
-        "plugin.source_connect_duration" => Some("source_connect_secs"),
-        "plugin.source_query_duration" => Some("source_query_secs"),
-        "plugin.source_fetch_duration" => Some("source_fetch_secs"),
-        "plugin.source_encode_duration" => Some("source_arrow_encode_secs"),
-        "plugin.dest_connect_duration" => Some("dest_connect_secs"),
-        "plugin.dest_flush_duration" => Some("dest_flush_secs"),
-        "plugin.dest_commit_duration" => Some("dest_commit_secs"),
-        "plugin.dest_decode_duration" => Some("dest_arrow_decode_secs"),
-        _ => None,
-    }
+    crate::plugin_names::find_by_instrument_name(name).map(|d| d.snapshot_name)
 }
 
 fn plugin_timing_series_from_attrs(attrs: &[opentelemetry::KeyValue]) -> (String, usize) {
