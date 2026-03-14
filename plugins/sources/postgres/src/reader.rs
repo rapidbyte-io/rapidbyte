@@ -668,8 +668,9 @@ pub async fn read_stream(
         fetch_secs,
         arrow_encode_secs,
     };
-    emit_source_timings(ctx, &perf)
-        .map_err(|e| format!("emit_source_timings failed: {}", e.message))?;
+    if let Err(err) = emit_source_timings(ctx, &perf) {
+        ctx.log(LogLevel::Warn, &format!("source timings skipped: {err}"));
+    }
 
     Ok(ReadSummary {
         records_read: state.total_records,

@@ -326,6 +326,7 @@ pub async fn run_pipeline(
     let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
         .with_reader(reader.build_reader())
         .build();
+    opentelemetry::global::set_meter_provider(provider.clone());
     run_pipeline_with_metrics(
         config,
         options,
