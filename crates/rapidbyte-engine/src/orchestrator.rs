@@ -1604,6 +1604,11 @@ async fn finalize_run(
     metrics_runtime: &MetricsRuntime<'_>,
 ) -> Result<PipelineResult, PipelineError> {
     if let Some(err) = aggregated.first_error {
+        // Drain the run's snapshot entry so it doesn't accumulate in the
+        // SnapshotReader's finished_run_snapshots map (memory leak in
+        // long-lived agent processes).
+        let _ = metrics_runtime.snapshot_for_run(&config.pipeline, Some(metric_run_label));
+
         let state_for_complete = state.clone();
         let run_stats = RunStats {
             records_read: aggregated.final_stats.records_read,
@@ -2880,6 +2885,35 @@ mod metrics_runtime_tests {
         assert_eq!(snapshot.emit_batch_nanos, 5_000_000);
         assert_eq!(snapshot.emit_count, 1);
         assert_eq!(global_snapshot.records_read, 7);
+    }
+
+    #[test]
+    fn snapshot_for_run_drains_entry_so_repeated_calls_return_default() {
+        let reader = SnapshotReader::new();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.build_reader())
+            .build();
+        opentelemetry::global::set_meter_provider(provider.clone());
+
+        // Record a metric tagged with a specific run label.
+        rapidbyte_metrics::instruments::pipeline::records_read().add(
+            42,
+            &[
+                KeyValue::new(rapidbyte_metrics::labels::PIPELINE, "pipe"),
+                KeyValue::new(rapidbyte_metrics::labels::RUN, "run-1"),
+            ],
+        );
+
+        // First snapshot drains the entry.
+        let snap1 = reader.flush_and_snapshot_for_run(&provider, "pipe", Some("run-1"));
+        assert_eq!(snap1.records_read, 42);
+
+        // Second call for the same run returns default (entry was removed).
+        let snap2 = reader.flush_and_snapshot_for_run(&provider, "pipe", Some("run-1"));
+        assert_eq!(
+            snap2.records_read, 0,
+            "finished_run_snapshots should not retain entries after take"
+        );
     }
 }
 
