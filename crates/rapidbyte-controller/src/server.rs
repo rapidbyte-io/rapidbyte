@@ -426,6 +426,10 @@ fn spawn_preview_cleanup_task(
 ///
 /// Returns an error if the gRPC server fails to bind or encounters a
 /// transport-level failure.
+///
+/// # Panics
+///
+/// Panics if the Prometheus metrics listener cannot bind to port 9190.
 pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
     validate_auth_config(&config)?;
     validate_signing_key_config(&config)?;

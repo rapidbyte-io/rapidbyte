@@ -51,16 +51,10 @@ pub enum Frame {
     EndStream,
 }
 
-/// Records host-side operation timings directly into OTel instruments.
-#[derive(Debug, Clone)]
+/// Records host-side operation timings directly into OpenTelemetry instruments.
+#[derive(Debug, Clone, Default)]
 pub struct HostTimings {
     labels: Vec<opentelemetry::KeyValue>,
-}
-
-impl Default for HostTimings {
-    fn default() -> Self {
-        Self { labels: Vec::new() }
-    }
 }
 
 impl HostTimings {
@@ -692,6 +686,7 @@ impl ComponentHostState {
         Ok(())
     }
 
+    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
     pub(crate) fn counter_add_impl(
         &self,
         name: String,
@@ -713,6 +708,7 @@ impl ComponentHostState {
         Ok(())
     }
 
+    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
     pub(crate) fn gauge_set_impl(
         &self,
         name: String,
@@ -724,6 +720,7 @@ impl ComponentHostState {
         Ok(())
     }
 
+    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
     pub(crate) fn histogram_record_impl(
         &self,
         name: String,

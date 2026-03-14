@@ -95,6 +95,10 @@ enum WorkerPoll<T> {
 ///
 /// Returns an error if the controller connection fails, agent registration
 /// is rejected, or the Flight server address cannot be parsed.
+///
+/// # Panics
+///
+/// Panics if the Prometheus metrics listener cannot bind to port 9191.
 #[allow(clippy::too_many_lines)]
 pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
     validate_signing_key_config(&config)?;

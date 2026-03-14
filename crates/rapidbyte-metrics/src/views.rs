@@ -2,7 +2,7 @@
 
 use opentelemetry_sdk::metrics::{Aggregation, Instrument, Stream};
 
-/// Sub-millisecond operations: compress, decompress, emit_batch, next_batch.
+/// Sub-millisecond operations: compress, decompress, `emit_batch`, `next_batch`.
 #[must_use]
 pub fn fast_duration_buckets() -> Vec<f64> {
     vec![0.000_1, 0.000_5, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0]
@@ -20,11 +20,12 @@ pub fn slow_duration_buckets() -> Vec<f64> {
     vec![0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0]
 }
 
+/// Type alias for the view callback returned by [`bucket_view`].
+pub type ViewFn = Box<dyn Fn(&Instrument) -> Option<Stream> + Send + Sync>;
+
 /// Create a view that applies custom buckets to instruments matching a name prefix.
-pub fn bucket_view(
-    prefix: &'static str,
-    buckets: Vec<f64>,
-) -> Box<dyn Fn(&Instrument) -> Option<Stream> + Send + Sync> {
+#[must_use]
+pub fn bucket_view(prefix: &'static str, buckets: Vec<f64>) -> ViewFn {
     Box::new(move |instrument: &Instrument| {
         if instrument.name.starts_with(prefix) {
             let stream = Stream::new().aggregation(Aggregation::ExplicitBucketHistogram {

@@ -39,7 +39,7 @@ fn default_filter(verbosity: Verbosity, log_level: &str) -> EnvFilter {
 /// `RUST_LOG` overrides the derived verbosity-based filter when set.
 ///
 /// When `otel_guard` is `Some`, a `tracing_opentelemetry` layer is added so
-/// that spans are exported via the OTel tracer pipeline.
+/// that spans are exported via the OpenTelemetry tracer pipeline.
 pub fn init(
     verbosity: Verbosity,
     log_level: &str,

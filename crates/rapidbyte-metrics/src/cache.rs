@@ -29,6 +29,7 @@ fn histograms() -> &'static DashMap<String, Histogram<f64>> {
 }
 
 /// Get or create a counter for the given metric name.
+#[must_use]
 pub fn custom_counter(name: &str) -> Counter<u64> {
     let owned = name.to_owned();
     counters()
@@ -38,6 +39,7 @@ pub fn custom_counter(name: &str) -> Counter<u64> {
 }
 
 /// Get or create a gauge for the given metric name.
+#[must_use]
 pub fn custom_gauge(name: &str) -> Gauge<f64> {
     let owned = name.to_owned();
     gauges()
@@ -47,6 +49,7 @@ pub fn custom_gauge(name: &str) -> Gauge<f64> {
 }
 
 /// Get or create a histogram for the given metric name.
+#[must_use]
 pub fn custom_histogram(name: &str) -> Histogram<f64> {
     let owned = name.to_owned();
     histograms()

@@ -322,10 +322,10 @@ pub async fn run_pipeline(
     run_pipeline_with_metrics(config, options, progress_tx, cancel_token, None, None).await
 }
 
-/// Run a pipeline with optional OTel metric snapshot support.
+/// Run a pipeline with optional OpenTelemetry metric snapshot support.
 ///
 /// When `snapshot_reader` and `meter_provider` are supplied, `finalize_run()` reads
-/// timing data from the OTel metric snapshot. Otherwise, timing fields are zeroed.
+/// timing data from the OpenTelemetry metric snapshot. Otherwise, timing fields are zeroed.
 ///
 /// # Errors
 ///
@@ -541,19 +541,17 @@ async fn execute_pipeline_once(
         // Construct fallback snapshot reader/provider when none are supplied.
         let fallback_reader;
         let fallback_provider;
-        let snap_reader = match snapshot_reader {
-            Some(r) => r,
-            None => {
-                fallback_reader = rapidbyte_metrics::snapshot::SnapshotReader::new();
-                &fallback_reader
-            }
+        let snap_reader = if let Some(r) = snapshot_reader {
+            r
+        } else {
+            fallback_reader = rapidbyte_metrics::snapshot::SnapshotReader::new();
+            &fallback_reader
         };
-        let meter_prov = match meter_provider {
-            Some(p) => p,
-            None => {
-                fallback_provider = opentelemetry_sdk::metrics::SdkMeterProvider::default();
-                &fallback_provider
-            }
+        let meter_prov = if let Some(p) = meter_provider {
+            p
+        } else {
+            fallback_provider = opentelemetry_sdk::metrics::SdkMeterProvider::default();
+            &fallback_provider
         };
 
         preserve_real_outcome_after_stream_execution(cancel_token, async move {

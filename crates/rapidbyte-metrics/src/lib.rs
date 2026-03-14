@@ -26,7 +26,7 @@ use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
 
-/// Guard that owns the OTel providers, snapshot reader, and flushes on drop.
+/// Guard that owns the OpenTelemetry providers, snapshot reader, and flushes on drop.
 pub struct OtelGuard {
     tracer_provider: SdkTracerProvider,
     meter_provider: SdkMeterProvider,
@@ -72,7 +72,7 @@ impl Drop for OtelGuard {
     }
 }
 
-/// Initialize OTel metrics + tracing pipeline.
+/// Initialize OpenTelemetry metrics + tracing pipeline.
 ///
 /// Sets the global meter provider so that instrument accessors in [`instruments`]
 /// work correctly. Must be called before pipeline execution.

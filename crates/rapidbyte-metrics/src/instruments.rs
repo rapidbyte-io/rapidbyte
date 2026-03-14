@@ -1,6 +1,6 @@
-//! OTel instrument accessors using OnceLock.
+//! OpenTelemetry instrument accessors using `OnceLock`.
 //!
-//! All instruments are lazily registered on first access via the OTel global meter provider.
+//! All instruments are lazily registered on first access via the global meter provider.
 //! If `metrics::init()` has not been called, instruments use the no-op global provider.
 
 use std::sync::OnceLock;
@@ -51,7 +51,7 @@ macro_rules! define_updown_i64 {
 }
 
 pub mod pipeline {
-    use super::*;
+    use super::{meter, Counter, Histogram, OnceLock};
     define_counter_u64!(records_read, "pipeline.records_read");
     define_counter_u64!(records_written, "pipeline.records_written");
     define_counter_u64!(bytes_read, "pipeline.bytes_read");
@@ -62,7 +62,7 @@ pub mod pipeline {
 }
 
 pub mod host {
-    use super::*;
+    use super::{meter, Histogram, OnceLock};
     define_histogram_f64!(emit_batch_duration, "host.emit_batch_duration");
     define_histogram_f64!(next_batch_duration, "host.next_batch_duration");
     define_histogram_f64!(next_batch_wait_duration, "host.next_batch_wait_duration");
@@ -76,7 +76,7 @@ pub mod host {
 }
 
 pub mod plugin {
-    use super::*;
+    use super::{meter, Histogram, OnceLock};
     define_histogram_f64!(source_connect_duration, "plugin.source_connect_duration");
     define_histogram_f64!(source_query_duration, "plugin.source_query_duration");
     define_histogram_f64!(source_fetch_duration, "plugin.source_fetch_duration");
@@ -91,7 +91,7 @@ pub mod plugin {
 }
 
 pub mod controller {
-    use super::*;
+    use super::{meter, Counter, Gauge, Histogram, OnceLock, UpDownCounter};
     define_updown_i64!(active_runs, "controller.active_runs");
     define_updown_i64!(active_agents, "controller.active_agents");
     define_gauge_f64!(preview_store_size, "controller.preview_store_size");
@@ -114,7 +114,7 @@ pub mod controller {
 }
 
 pub mod agent {
-    use super::*;
+    use super::{meter, Counter, Gauge, Histogram, OnceLock, UpDownCounter};
     define_updown_i64!(active_tasks, "agent.active_tasks");
     define_gauge_f64!(spool_entries, "agent.spool_entries");
     define_gauge_f64!(spool_disk_bytes, "agent.spool_disk_bytes");
@@ -132,13 +132,13 @@ pub mod agent {
 }
 
 pub mod process {
-    use super::*;
+    use super::{meter, Gauge, OnceLock};
     define_gauge_f64!(cpu_seconds, "process.cpu_seconds");
     define_gauge_f64!(peak_rss_bytes, "process.peak_rss_bytes");
 }
 
 pub mod grpc {
-    use super::*;
+    use super::{meter, Histogram, OnceLock};
     define_histogram_f64!(request_duration, "grpc.request.duration");
 }
 
