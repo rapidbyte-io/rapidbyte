@@ -1708,7 +1708,7 @@ mod tests {
 
     /// Verifies that cancelling a queued run emits `runs_completed{status=cancelled}`
     /// and decrements `active_runs`. Uses Delta temporality and `>= 1` assertions
-    /// because the global OTel meter provider is shared with concurrent tests.
+    /// because the global `OTel` meter provider is shared with concurrent tests.
     #[tokio::test]
     async fn test_cancel_queued_run_decrements_active_runs_and_records_completion() {
         use opentelemetry_sdk::metrics::data::Sum;
