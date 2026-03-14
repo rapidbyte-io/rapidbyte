@@ -463,7 +463,7 @@ async fn execute_pipeline_once(
             phase: Phase::Resolving,
         },
     );
-    let plugins = resolve_plugins(config)?;
+    let plugins = resolve_plugins(config).await?;
     if let Some(ref manifest) = plugins.source_manifest {
         validate_config_against_schema(&config.source.use_ref, &config.source.config, manifest)
             .map_err(PipelineError::Infrastructure)?;
@@ -671,10 +671,13 @@ async fn load_modules(
         "Plugin modules loaded"
     );
 
+    let registry_config = rapidbyte_registry::RegistryConfig::default();
     let mut transform_modules = Vec::with_capacity(config.transforms.len());
     for tc in &config.transforms {
-        let wasm_path = rapidbyte_runtime::resolve_plugin_path(&tc.use_ref, PluginKind::Transform)
-            .map_err(PipelineError::Infrastructure)?;
+        let wasm_path =
+            rapidbyte_runtime::resolve_plugin(&tc.use_ref, PluginKind::Transform, &registry_config)
+                .await
+                .map_err(PipelineError::Infrastructure)?;
         let manifest = load_and_validate_manifest(&wasm_path, &tc.use_ref, PluginKind::Transform)
             .map_err(PipelineError::Infrastructure)?;
         if let Some(ref m) = manifest {
@@ -1882,7 +1885,9 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
         "Checking pipeline configuration"
     );
 
-    let plugins = resolve_plugins(config).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let plugins = resolve_plugins(config)
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let source_manifest = plugins.source_manifest.as_ref().map(|_| CheckItemResult {
         ok: true,
         message: String::new(),
@@ -1953,8 +1958,14 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
         .iter()
         .map(|stream| stream.name.clone())
         .collect::<Vec<_>>();
+    let check_registry_config = rapidbyte_registry::RegistryConfig::default();
     for (index, tc) in config.transforms.iter().enumerate() {
-        let wasm_path = rapidbyte_runtime::resolve_plugin_path(&tc.use_ref, PluginKind::Transform)?;
+        let wasm_path = rapidbyte_runtime::resolve_plugin(
+            &tc.use_ref,
+            PluginKind::Transform,
+            &check_registry_config,
+        )
+        .await?;
         let manifest = load_and_validate_manifest(&wasm_path, &tc.use_ref, PluginKind::Transform)?;
         if let Some(ref m) = manifest {
             transform_configs.push(config_check_result(&tc.use_ref, &tc.config, m));
@@ -2095,7 +2106,9 @@ fn config_check_result(
 ///
 /// Returns an error if the plugin cannot be loaded, opened, or discovery fails.
 pub async fn discover_plugin(plugin_ref: &str, config: &serde_json::Value) -> Result<Catalog> {
-    let wasm_path = rapidbyte_runtime::resolve_plugin_path(plugin_ref, PluginKind::Source)?;
+    let registry_config = rapidbyte_registry::RegistryConfig::default();
+    let wasm_path =
+        rapidbyte_runtime::resolve_plugin(plugin_ref, PluginKind::Source, &registry_config).await?;
     let manifest = load_and_validate_manifest(&wasm_path, plugin_ref, PluginKind::Source)?;
     let permissions = manifest.as_ref().map(|m| m.permissions.clone());
     let (plugin_id, plugin_version) = parse_plugin_ref(plugin_ref);

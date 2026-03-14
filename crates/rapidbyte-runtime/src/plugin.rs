@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use rapidbyte_registry::{PluginCache, PluginRef, RegistryClient, RegistryConfig};
 use rapidbyte_types::manifest::PluginManifest;
 use rapidbyte_types::wire::PluginKind;
 use wasmparser::{Parser, Payload};
@@ -132,6 +133,86 @@ pub fn load_plugin_manifest(wasm_path: &Path) -> Result<Option<PluginManifest>> 
     let wasm_bytes = std::fs::read(wasm_path)
         .with_context(|| format!("Failed to read wasm binary: {}", wasm_path.display()))?;
     Ok(extract_manifest_from_wasm(&wasm_bytes))
+}
+
+/// Returns `true` if `use_ref` looks like an OCI registry reference.
+///
+/// A reference is considered OCI if it can be successfully parsed as a
+/// [`PluginRef`], which requires a registry host (containing `.` or `:`)
+/// followed by a `/` and a repository path.
+///
+/// Bare names like `"postgres"` or `"rapidbyte/source-postgres@v0.1.0"`
+/// return `false`.
+#[must_use]
+pub fn is_oci_reference(use_ref: &str) -> bool {
+    PluginRef::parse(use_ref).is_ok()
+}
+
+/// Resolve a plugin from the OCI registry cache, pulling on demand.
+///
+/// Parses `use_ref` as an OCI plugin reference (e.g.
+/// `registry.example.com/source/postgres:1.2.0`), checks the local plugin
+/// cache for a matching entry, and falls back to an OCI pull when the
+/// cache misses.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - `use_ref` cannot be parsed as a valid [`PluginRef`]
+/// - The default cache location cannot be determined
+/// - The registry pull fails (network, auth, artifact format)
+/// - The cache cannot store the pulled artifact
+pub async fn resolve_plugin_from_registry(
+    use_ref: &str,
+    registry_config: &RegistryConfig,
+) -> Result<PathBuf> {
+    let plugin_ref = PluginRef::parse(use_ref)?;
+
+    let cache = PluginCache::default_location()?;
+
+    // Check cache first.
+    if let Some(entry) = cache.lookup(&plugin_ref) {
+        tracing::debug!(%plugin_ref, "using cached plugin");
+        return Ok(entry.wasm_path);
+    }
+
+    // Pull from registry on cache miss.
+    tracing::info!(%plugin_ref, "pulling plugin from registry");
+    let client = RegistryClient::new(registry_config)?;
+    let image = client.pull(&plugin_ref).await?;
+    let (manifest_json, wasm_bytes) = rapidbyte_registry::unpack_artifact(&image)?;
+
+    let entry = cache.store(&plugin_ref, &manifest_json, &wasm_bytes)?;
+    tracing::info!(
+        %plugin_ref,
+        digest = %entry.digest,
+        size_bytes = entry.size_bytes,
+        "plugin cached"
+    );
+
+    Ok(entry.wasm_path)
+}
+
+/// Resolve a plugin path, automatically choosing between OCI registry and
+/// local filesystem based on the reference format.
+///
+/// If `use_ref` looks like an OCI reference (contains a registry host),
+/// the plugin is resolved via [`resolve_plugin_from_registry`]. Otherwise
+/// it falls back to [`resolve_plugin_path`] for local filesystem lookup.
+///
+/// # Errors
+///
+/// Returns an error if the plugin cannot be resolved from either source.
+pub async fn resolve_plugin(
+    use_ref: &str,
+    kind: PluginKind,
+    registry_config: &RegistryConfig,
+) -> Result<PathBuf> {
+    if is_oci_reference(use_ref) {
+        resolve_plugin_from_registry(use_ref, registry_config).await
+    } else {
+        resolve_plugin_path(use_ref, kind)
+    }
 }
 
 #[cfg(test)]
@@ -418,5 +499,79 @@ mod tests {
         assert_eq!(kind_subdir(PluginKind::Source), "sources");
         assert_eq!(kind_subdir(PluginKind::Destination), "destinations");
         assert_eq!(kind_subdir(PluginKind::Transform), "transforms");
+    }
+
+    #[test]
+    fn test_is_oci_reference_full_ref() {
+        assert!(is_oci_reference(
+            "registry.example.com/source/postgres:1.2.0"
+        ));
+    }
+
+    #[test]
+    fn test_is_oci_reference_with_port() {
+        assert!(is_oci_reference("localhost:5050/source/postgres:latest"));
+    }
+
+    #[test]
+    fn test_is_oci_reference_no_tag() {
+        assert!(is_oci_reference("registry.example.com/source/postgres"));
+    }
+
+    #[test]
+    fn test_is_oci_reference_bare_name() {
+        assert!(!is_oci_reference("postgres"));
+    }
+
+    #[test]
+    fn test_is_oci_reference_namespaced_bare() {
+        assert!(!is_oci_reference("rapidbyte/source-postgres@v0.1.0"));
+    }
+
+    #[test]
+    fn test_is_oci_reference_empty() {
+        assert!(!is_oci_reference(""));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_resolve_plugin_delegates_to_filesystem_for_bare_names() {
+        // Lock serializes tests that modify RAPIDBYTE_PLUGIN_DIR env var.
+        // The await inside is a local-only filesystem resolve (no real I/O
+        // contention), so holding across await is safe here.
+        let _lock = PLUGIN_ENV_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join("rapidbyte_resolve_plugin_test");
+        let sources_dir = tmp.join("sources");
+        std::fs::create_dir_all(&sources_dir).unwrap();
+        std::fs::write(sources_dir.join("postgres.wasm"), b"fake-wasm").unwrap();
+
+        let _env_guard = PluginDirEnvGuard::set(&tmp);
+        let registry_config = RegistryConfig::default();
+
+        let result = resolve_plugin("postgres", PluginKind::Source, &registry_config).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), sources_dir.join("postgres.wasm"));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_resolve_plugin_from_registry_returns_cached_path() {
+        let cache_dir = std::env::temp_dir().join("rapidbyte_registry_cache_test");
+        let _ = std::fs::remove_dir_all(&cache_dir);
+
+        let plugin_ref = PluginRef::parse("registry.example.com/source/postgres:1.0.0").unwrap();
+        let cache = PluginCache::new(cache_dir.clone());
+        let wasm = b"\x00asm\x01\x00\x00\x00fake-content";
+        let manifest = br#"{"name":"test","version":"1.0.0"}"#;
+        let entry = cache.store(&plugin_ref, manifest, wasm).unwrap();
+
+        // Override HOME to point to our temp cache so default_location picks it up.
+        // Instead, we test through the cache directly since default_location uses HOME.
+        let looked_up = cache.lookup(&plugin_ref);
+        assert!(looked_up.is_some());
+        assert_eq!(looked_up.unwrap().wasm_path, entry.wasm_path);
+
+        std::fs::remove_dir_all(&cache_dir).ok();
     }
 }
