@@ -455,8 +455,7 @@ mod tests {
     use ::arrow::array::{Decimal128Array, Decimal256Array, Float64Array, StringArray};
     use ::arrow::datatypes::{Field, Schema};
     use arrow_buffer::i256;
-    use rapidbyte_sdk::host_ffi::{self, test_support};
-    use rapidbyte_sdk::host_ffi::test_support::MetricCall;
+    use rapidbyte_sdk::host_ffi::{self, test_support, test_support::MetricCall};
 
     use super::*;
 
@@ -469,7 +468,7 @@ mod tests {
         });
     }
 
-    fn setup_metric_calls() -> Vec<MetricCall> {
+    fn drain_stale_metric_calls() -> Vec<MetricCall> {
         install_recording_host_imports();
         test_support::take_metric_calls()
     }
@@ -707,7 +706,7 @@ mod tests {
 
     #[test]
     fn emit_validation_metrics_records_rule_and_field_labels() {
-        setup_metric_calls();
+        drain_stale_metric_calls();
         let ctx = Context::new("validate", "users");
         let evaluation = BatchEvaluation {
             valid_indices: vec![0, 2],

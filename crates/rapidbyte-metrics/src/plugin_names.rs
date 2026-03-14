@@ -10,8 +10,7 @@ pub struct BuiltinDuration {
     pub plugin_name: &'static str,
     /// `OTel` instrument name (e.g. `"plugin.source_connect_duration"`).
     pub instrument_name: &'static str,
-    /// Canonical snapshot field name. Usually same as `plugin_name`,
-    /// except `"dest_arrow_decode_secs"` maps to itself for backward compat.
+    /// Canonical snapshot field name used by `record_plugin_duration_for_series`.
     pub snapshot_name: &'static str,
 }
 

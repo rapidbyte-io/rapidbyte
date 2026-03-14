@@ -3,15 +3,16 @@
 //! Call [`init`] at process start to configure the metrics and tracing pipeline.
 //! The returned [`OtelGuard`] flushes pending exports on drop.
 //!
-//! | Module       | Responsibility |
-//! |--------------|----------------|
-//! | `cache`      | DashMap instrument cache for dynamic plugin metrics |
-//! | `grpc_layer` | Tower layer for gRPC RED metrics |
-//! | `instruments`| Cached instrument accessors (pipeline, host, plugin, ...) |
-//! | `labels`     | Bounded label keys and parsing |
-//! | `snapshot`   | InMemoryMetricExporter and PipelineResult bridge |
-//! | `views`      | Histogram bucket configuration |
-//! | `plugin_names`| Built-in plugin duration metric name registry |
+//! | Module         | Responsibility |
+//! |----------------|----------------|
+//! | `cache`        | DashMap instrument cache for dynamic plugin metrics |
+//! | `grpc_layer`   | Tower layer for gRPC RED metrics |
+//! | `instruments`  | Cached instrument accessors (pipeline, host, plugin, ...) |
+//! | `labels`       | Bounded label keys and parsing |
+//! | `plugin_names` | Built-in plugin duration metric name registry |
+//! | `snapshot`     | `InMemoryMetricExporter` and `PipelineResult` bridge |
+//! | `test_support` | Shared test meter provider helpers |
+//! | `views`        | Histogram bucket configuration |
 
 #![warn(clippy::pedantic)]
 

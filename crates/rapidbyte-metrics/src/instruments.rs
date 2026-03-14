@@ -89,7 +89,7 @@ pub mod plugin {
     define_histogram_f64!(dest_commit_duration, "plugin.dest_commit_duration");
     define_histogram_f64!(dest_decode_duration, "plugin.dest_decode_duration");
 
-    // Dynamic plugin metrics from DashMap cache (Task 5 is already complete)
+    // Dynamic plugin metrics from DashMap cache
     pub use crate::cache::{custom_counter, custom_gauge, custom_histogram};
 }
 
