@@ -196,11 +196,21 @@ pub fn init(service_name: &str) -> Result<OtelGuard> {
     let otlp_enabled = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok();
 
     if otlp_enabled {
-        let otlp_exporter = opentelemetry_otlp::MetricExporter::builder()
+        match opentelemetry_otlp::MetricExporter::builder()
             .with_tonic()
-            .build()?;
-        let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(otlp_exporter).build();
-        meter_builder = meter_builder.with_reader(reader);
+            .build()
+        {
+            Ok(otlp_exporter) => {
+                let reader =
+                    opentelemetry_sdk::metrics::PeriodicReader::builder(otlp_exporter).build();
+                meter_builder = meter_builder.with_reader(reader);
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: OTLP metric exporter init failed, continuing without OTLP: {e}"
+                );
+            }
+        }
     }
 
     let meter_provider = meter_builder.build();
@@ -208,13 +218,21 @@ pub fn init(service_name: &str) -> Result<OtelGuard> {
 
     // Traces
     let tracer_provider = if otlp_enabled {
-        let otlp_span_exporter = opentelemetry_otlp::SpanExporter::builder()
+        match opentelemetry_otlp::SpanExporter::builder()
             .with_tonic()
-            .build()?;
-        SdkTracerProvider::builder()
-            .with_resource(resource)
-            .with_batch_exporter(otlp_span_exporter)
             .build()
+        {
+            Ok(otlp_span_exporter) => SdkTracerProvider::builder()
+                .with_resource(resource)
+                .with_batch_exporter(otlp_span_exporter)
+                .build(),
+            Err(e) => {
+                eprintln!(
+                    "warning: OTLP span exporter init failed, continuing without OTLP traces: {e}"
+                );
+                SdkTracerProvider::builder().with_resource(resource).build()
+            }
+        }
     } else {
         SdkTracerProvider::builder().with_resource(resource).build()
     };

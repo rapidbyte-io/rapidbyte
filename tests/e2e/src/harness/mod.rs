@@ -3,15 +3,32 @@ mod container;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use rapidbyte_engine::config::parser;
 use rapidbyte_engine::config::validator;
 use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
+use rapidbyte_metrics::snapshot::SnapshotReader;
+use opentelemetry_sdk::metrics::SdkMeterProvider;
 use tokio_postgres::NoTls;
 use tokio_util::sync::CancellationToken;
 
 static NEXT_SCHEMA_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Shared meter provider and snapshot reader for all E2E tests.
+/// Initialized once so OnceLock-cached instruments stay bound to a single provider.
+fn e2e_metrics() -> &'static (SdkMeterProvider, SnapshotReader) {
+    static INSTANCE: OnceLock<(SdkMeterProvider, SnapshotReader)> = OnceLock::new();
+    INSTANCE.get_or_init(|| {
+        let reader = SnapshotReader::new();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(reader.build_reader())
+            .build();
+        opentelemetry::global::set_meter_provider(provider.clone());
+        (provider, reader)
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct HarnessContext {
@@ -312,18 +329,14 @@ impl HarnessContext {
             parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let reader = rapidbyte_metrics::snapshot::SnapshotReader::new();
-        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
-            .with_reader(reader.build_reader())
-            .build();
-        opentelemetry::global::set_meter_provider(provider.clone());
+        let (provider, reader) = e2e_metrics();
         let outcome = rapidbyte_engine::orchestrator::run_pipeline(
             &config,
             &ExecutionOptions::default(),
             None,
             CancellationToken::new(),
-            &reader,
-            &provider,
+            reader,
+            provider,
         )
         .await
         .context("pipeline execution failed")?;
@@ -409,18 +422,14 @@ impl HarnessContext {
             parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let reader = rapidbyte_metrics::snapshot::SnapshotReader::new();
-        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
-            .with_reader(reader.build_reader())
-            .build();
-        opentelemetry::global::set_meter_provider(provider.clone());
+        let (provider, reader) = e2e_metrics();
         let outcome = rapidbyte_engine::orchestrator::run_pipeline(
             &config,
             &ExecutionOptions::default(),
             None,
             CancellationToken::new(),
-            &reader,
-            &provider,
+            reader,
+            provider,
         )
         .await
         .context("pipeline execution failed")?;
@@ -450,18 +459,14 @@ impl HarnessContext {
             parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let reader = rapidbyte_metrics::snapshot::SnapshotReader::new();
-        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
-            .with_reader(reader.build_reader())
-            .build();
-        opentelemetry::global::set_meter_provider(provider.clone());
+        let (provider, reader) = e2e_metrics();
         let outcome = rapidbyte_engine::orchestrator::run_pipeline(
             &config,
             &ExecutionOptions::default(),
             None,
             CancellationToken::new(),
-            &reader,
-            &provider,
+            reader,
+            provider,
         )
         .await
         .context("pipeline execution failed")?;
@@ -565,18 +570,14 @@ impl HarnessContext {
             parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let reader = rapidbyte_metrics::snapshot::SnapshotReader::new();
-        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
-            .with_reader(reader.build_reader())
-            .build();
-        opentelemetry::global::set_meter_provider(provider.clone());
+        let (provider, reader) = e2e_metrics();
         let outcome = rapidbyte_engine::orchestrator::run_pipeline(
             &config,
             &ExecutionOptions::default(),
             None,
             CancellationToken::new(),
-            &reader,
-            &provider,
+            reader,
+            provider,
         )
         .await
         .context("pipeline execution failed")?;
