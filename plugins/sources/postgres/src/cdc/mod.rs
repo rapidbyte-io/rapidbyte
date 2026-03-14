@@ -16,7 +16,7 @@ use tokio_postgres::Client;
 use rapidbyte_sdk::prelude::*;
 
 use crate::config::Config;
-use crate::metrics::{emit_read_metrics, EmitState, BATCH_SIZE};
+use crate::metrics::{emit_read_metrics, emit_read_perf_metrics, EmitState, BATCH_SIZE};
 
 use encode::{encode_cdc_batch, CdcRow, RelationInfo};
 use pgoutput::{CdcOp, PgOutputMessage, TupleData};
@@ -288,18 +288,22 @@ pub async fn read_cdc_changes(
     #[allow(clippy::cast_precision_loss)]
     let arrow_encode_secs = state.arrow_encode_nanos as f64 / 1e9;
 
+    let perf = ReadPerf {
+        connect_secs,
+        query_secs,
+        fetch_secs,
+        arrow_encode_secs,
+    };
+    if let Err(err) = emit_read_perf_metrics(ctx, &perf) {
+        ctx.log(LogLevel::Warn, &format!("read perf metrics skipped: {err}"));
+    }
+
     Ok(ReadSummary {
         records_read: state.total_records,
         bytes_read: state.total_bytes,
         batches_emitted: state.batches_emitted,
         checkpoint_count,
         records_skipped: 0,
-        perf: Some(ReadPerf {
-            connect_secs,
-            query_secs,
-            fetch_secs,
-            arrow_encode_secs,
-        }),
     })
 }
 

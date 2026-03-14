@@ -116,7 +116,6 @@ pub async fn write_stream(
         batches_written: result.batches_written,
         checkpoint_count: result.checkpoint_count,
         records_failed: 0,
-        perf: Some(perf),
     })
 }
 

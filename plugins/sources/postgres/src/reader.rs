@@ -677,7 +677,6 @@ pub async fn read_stream(
         batches_emitted: state.batches_emitted,
         checkpoint_count,
         records_skipped,
-        perf: Some(perf),
     })
 }
 
