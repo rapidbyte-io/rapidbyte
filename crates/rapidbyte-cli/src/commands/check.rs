@@ -19,7 +19,9 @@ use crate::Verbosity;
 pub async fn execute(pipeline_path: &Path, verbosity: Verbosity) -> Result<()> {
     let config = super::load_pipeline(pipeline_path)?;
 
-    let result = orchestrator::check_pipeline(&config).await?;
+    let result =
+        orchestrator::check_pipeline(&config, &rapidbyte_registry::RegistryConfig::default())
+            .await?;
 
     if verbosity != Verbosity::Quiet {
         if let Some(outcome) = &result.source_manifest {

@@ -337,6 +337,7 @@ impl HarnessContext {
             CancellationToken::new(),
             reader,
             provider,
+            &rapidbyte_registry::RegistryConfig::default(),
         )
         .await
         .context("pipeline execution failed")?;
@@ -430,6 +431,7 @@ impl HarnessContext {
             CancellationToken::new(),
             reader,
             provider,
+            &rapidbyte_registry::RegistryConfig::default(),
         )
         .await
         .context("pipeline execution failed")?;
@@ -467,6 +469,7 @@ impl HarnessContext {
             CancellationToken::new(),
             reader,
             provider,
+            &rapidbyte_registry::RegistryConfig::default(),
         )
         .await
         .context("pipeline execution failed")?;
@@ -578,6 +581,7 @@ impl HarnessContext {
             CancellationToken::new(),
             reader,
             provider,
+            &rapidbyte_registry::RegistryConfig::default(),
         )
         .await
         .context("pipeline execution failed")?;

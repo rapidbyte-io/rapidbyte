@@ -4434,6 +4434,7 @@ dependencies = [
  "protoc-bin-vendored",
  "rapidbyte-engine",
  "rapidbyte-metrics",
+ "rapidbyte-registry",
  "rapidbyte-runtime",
  "rapidbyte-state",
  "rapidbyte-types",

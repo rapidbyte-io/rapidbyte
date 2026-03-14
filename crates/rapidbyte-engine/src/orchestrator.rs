@@ -324,6 +324,7 @@ pub async fn run_pipeline(
     cancel_token: CancellationToken,
     snapshot_reader: &rapidbyte_metrics::snapshot::SnapshotReader,
     meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
+    registry_config: &rapidbyte_registry::RegistryConfig,
 ) -> Result<PipelineOutcome, PipelineError> {
     let max_retries = config.resources.max_retries;
     let mut attempt = 0u32;
@@ -339,6 +340,7 @@ pub async fn run_pipeline(
             &cancel_token,
             snapshot_reader,
             meter_provider,
+            registry_config,
         )
         .await;
 
@@ -448,6 +450,7 @@ async fn execute_pipeline_once(
     cancel_token: &CancellationToken,
     snapshot_reader: &rapidbyte_metrics::snapshot::SnapshotReader,
     meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
+    registry_config: &rapidbyte_registry::RegistryConfig,
 ) -> Result<PipelineOutcome, PipelineError> {
     let start = Instant::now();
     let pipeline_id = PipelineId::new(config.pipeline.clone());
@@ -463,7 +466,7 @@ async fn execute_pipeline_once(
             phase: Phase::Resolving,
         },
     );
-    let plugins = resolve_plugins(config).await?;
+    let plugins = resolve_plugins(config, registry_config).await?;
     if let Some(ref manifest) = plugins.source_manifest {
         validate_config_against_schema(&config.source.use_ref, &config.source.config, manifest)
             .map_err(PipelineError::Infrastructure)?;
@@ -1879,13 +1882,16 @@ fn collect_dry_run_frames(
 ///
 /// Returns an error if plugin resolution, module loading, or validation fails.
 #[allow(clippy::too_many_lines)]
-pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
+pub async fn check_pipeline(
+    config: &PipelineConfig,
+    registry_config: &rapidbyte_registry::RegistryConfig,
+) -> Result<CheckResult> {
     tracing::info!(
         pipeline = config.pipeline,
         "Checking pipeline configuration"
     );
 
-    let plugins = resolve_plugins(config)
+    let plugins = resolve_plugins(config, registry_config)
         .await
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let source_manifest = plugins.source_manifest.as_ref().map(|_| CheckItemResult {

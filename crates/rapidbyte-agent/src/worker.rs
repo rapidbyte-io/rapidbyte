@@ -426,6 +426,10 @@ async fn process_task(
         ctx.config.auth_token.clone(),
     ));
 
+    let registry_config = rapidbyte_registry::RegistryConfig {
+        insecure: ctx.config.registry_insecure,
+        credentials: None, // TODO: add credential support later
+    };
     let result = executor::execute_task(
         &task.pipeline_yaml_utf8,
         dry_run,
@@ -434,6 +438,7 @@ async fn process_task(
         cancel_token,
         ctx.otel_guard.snapshot_reader(),
         ctx.otel_guard.meter_provider(),
+        &registry_config,
     )
     .await;
 

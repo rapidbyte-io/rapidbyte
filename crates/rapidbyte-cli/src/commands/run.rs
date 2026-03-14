@@ -116,6 +116,7 @@ pub async fn execute(
         cancel_token,
         otel_guard.snapshot_reader(),
         otel_guard.meter_provider(),
+        &rapidbyte_registry::RegistryConfig::default(),
     )
     .await;
     let (cpu_end, peak_rss_mb) = post_pipeline_metrics();
