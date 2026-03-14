@@ -1706,11 +1706,13 @@ mod tests {
         assert_eq!(state.watchers.read().await.channel_count(), 0);
     }
 
-    /// Verifies that cancelling a queued run emits `runs_completed{status=cancelled}`
-    /// and decrements `active_runs`. Uses Delta temporality and `>= 1` assertions
-    /// because the global `OTel` meter provider is shared with concurrent tests.
+    /// Verifies that cancelling a queued run emits `runs_completed{status=cancelled}`.
+    /// The `active_runs` decrement (`pipeline_service.rs:320`) is on the same code
+    /// path immediately after `runs_completed`; it cannot be independently asserted
+    /// here because the global `OTel` `UpDownCounter` aggregates concurrent test
+    /// contributions into a single net value.
     #[tokio::test]
-    async fn test_cancel_queued_run_decrements_active_runs_and_records_completion() {
+    async fn test_cancel_queued_run_records_cancelled_completion() {
         use opentelemetry_sdk::metrics::data::Sum;
 
         let exporter = opentelemetry_sdk::metrics::InMemoryMetricExporterBuilder::new()

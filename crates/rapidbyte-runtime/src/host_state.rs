@@ -158,26 +158,6 @@ impl HostTimings {
     }
 }
 
-fn map_custom_metric_error(
-    name: &str,
-    err: &rapidbyte_metrics::cache::InstrumentCacheError,
-) -> PluginError {
-    match err {
-        rapidbyte_metrics::cache::InstrumentCacheError::MetricNameTooLong { max, .. } => {
-            PluginError::permission(
-                "INVALID_METRIC_NAME",
-                format!("metric name '{name}' exceeds max length {max}"),
-            )
-        }
-        rapidbyte_metrics::cache::InstrumentCacheError::MetricLimitExceeded { kind, max } => {
-            PluginError::permission(
-                "METRIC_NAME_LIMIT_EXCEEDED",
-                format!("custom {kind} metric limit exceeded (max {max})"),
-            )
-        }
-    }
-}
-
 // --- Inner types ---
 
 pub(crate) struct PluginIdentity {
@@ -821,7 +801,7 @@ impl ComponentHostState {
         Ok(())
     }
 
-    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
+    #[allow(clippy::unnecessary_wraps)]
     pub(crate) fn counter_add_impl(
         &self,
         name: String,
@@ -843,16 +823,17 @@ impl ComponentHostState {
             "bytes_written" => {
                 rapidbyte_metrics::instruments::pipeline::bytes_written().add(value, &labels);
             }
-            _ => {
-                rapidbyte_metrics::instruments::plugin::custom_counter(&name)
-                    .map_err(|err| map_custom_metric_error(&name, &err))?
-                    .add(value, &labels);
-            }
+            _ => match rapidbyte_metrics::instruments::plugin::custom_counter(&name) {
+                Ok(counter) => counter.add(value, &labels),
+                Err(err) => {
+                    tracing::debug!(metric = %name, "custom counter skipped: {err}");
+                }
+            },
         }
         Ok(())
     }
 
-    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
+    #[allow(clippy::unnecessary_wraps)]
     pub(crate) fn gauge_set_impl(
         &self,
         name: String,
@@ -861,13 +842,16 @@ impl ComponentHostState {
     ) -> Result<(), PluginError> {
         let mut labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
         self.ensure_metric_scope_labels(&mut labels);
-        rapidbyte_metrics::instruments::plugin::custom_gauge(&name)
-            .map_err(|err| map_custom_metric_error(&name, &err))?
-            .record(value, &labels);
+        match rapidbyte_metrics::instruments::plugin::custom_gauge(&name) {
+            Ok(gauge) => gauge.record(value, &labels),
+            Err(err) => {
+                tracing::debug!(metric = %name, "custom gauge skipped: {err}");
+            }
+        }
         Ok(())
     }
 
-    #[allow(clippy::unused_self, clippy::unnecessary_wraps)]
+    #[allow(clippy::unnecessary_wraps)]
     pub(crate) fn histogram_record_impl(
         &self,
         name: String,
@@ -933,11 +917,12 @@ impl ComponentHostState {
                 rapidbyte_metrics::instruments::plugin::dest_decode_duration()
                     .record(value, &labels);
             }
-            _ => {
-                rapidbyte_metrics::instruments::plugin::custom_histogram(&name)
-                    .map_err(|err| map_custom_metric_error(&name, &err))?
-                    .record(value, &labels);
-            }
+            _ => match rapidbyte_metrics::instruments::plugin::custom_histogram(&name) {
+                Ok(histogram) => histogram.record(value, &labels),
+                Err(err) => {
+                    tracing::debug!(metric = %name, "custom histogram skipped: {err}");
+                }
+            },
         }
         Ok(())
     }
@@ -1484,19 +1469,16 @@ mod tests {
     }
 
     #[test]
-    fn gauge_set_rejects_overlong_custom_metric_name() {
+    fn gauge_set_silently_skips_overlong_custom_metric_name() {
         let host = test_host_state();
         let name = "m".repeat(rapidbyte_metrics::cache::MAX_CUSTOM_METRIC_NAME_LEN + 1);
 
-        let err = host
-            .gauge_set_impl(name, 1.0, "{}".to_string())
-            .expect_err("overlong metric name should be rejected");
-
-        assert_eq!(err.code, "INVALID_METRIC_NAME");
+        host.gauge_set_impl(name, 1.0, "{}".to_string())
+            .expect("overlong metric name should be silently skipped, not error");
     }
 
     #[test]
-    fn rejected_custom_histogram_name_does_not_mutate_fallback_timing_snapshot() {
+    fn invalid_custom_histogram_name_is_silently_skipped_without_mutating_snapshot() {
         let snapshot = Arc::new(Mutex::new(
             rapidbyte_metrics::snapshot::PipelineMetricsSnapshot::default(),
         ));
@@ -1512,15 +1494,13 @@ mod tests {
             .build()
             .unwrap();
 
-        let err = host
-            .histogram_record_impl(
-                "m".repeat(rapidbyte_metrics::cache::MAX_CUSTOM_METRIC_NAME_LEN + 1),
-                1.0,
-                "{}".to_string(),
-            )
-            .expect_err("overlong histogram name should be rejected");
-
-        assert_eq!(err.code, "INVALID_METRIC_NAME");
+        // Overlong metric name should return Ok (silently skipped), not abort.
+        host.histogram_record_impl(
+            "m".repeat(rapidbyte_metrics::cache::MAX_CUSTOM_METRIC_NAME_LEN + 1),
+            1.0,
+            "{}".to_string(),
+        )
+        .expect("overlong histogram name should be silently skipped, not error");
 
         let raw_snapshot = snapshot.lock().unwrap().clone();
         assert_eq!(raw_snapshot.tracked_plugin_timing_series_count(), 0);
