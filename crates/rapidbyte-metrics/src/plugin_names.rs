@@ -1,14 +1,14 @@
 //! Single source of truth for built-in plugin duration metric names.
 //!
 //! Maps plugin-side histogram names (e.g. `"source_connect_secs"`) to their
-//! OTel instrument names (e.g. `"plugin.source_connect_duration"`) and
+//! `OTel` instrument names (e.g. `"plugin.source_connect_duration"`) and
 //! snapshot field names.
 
 /// A built-in plugin duration metric entry.
 pub struct BuiltinDuration {
     /// Plugin-side name (e.g. `"source_connect_secs"`).
     pub plugin_name: &'static str,
-    /// OTel instrument name (e.g. `"plugin.source_connect_duration"`).
+    /// `OTel` instrument name (e.g. `"plugin.source_connect_duration"`).
     pub instrument_name: &'static str,
     /// Canonical snapshot field name. Usually same as `plugin_name`,
     /// except `"dest_arrow_decode_secs"` maps to itself for backward compat.
@@ -65,7 +65,7 @@ pub fn find_by_plugin_name(name: &str) -> Option<&'static BuiltinDuration> {
     BUILTIN_DURATIONS.iter().find(|d| d.plugin_name == name)
 }
 
-/// Look up a built-in duration by OTel instrument name.
+/// Look up a built-in duration by `OTel` instrument name.
 #[must_use]
 pub fn find_by_instrument_name(name: &str) -> Option<&'static BuiltinDuration> {
     BUILTIN_DURATIONS.iter().find(|d| d.instrument_name == name)

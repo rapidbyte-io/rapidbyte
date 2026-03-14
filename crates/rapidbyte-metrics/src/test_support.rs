@@ -1,4 +1,4 @@
-//! Shared test utilities for OTel metric testing.
+//! Shared test utilities for `OTel` metric testing.
 
 use opentelemetry_sdk::metrics::{
     InMemoryMetricExporter, InMemoryMetricExporterBuilder, PeriodicReader, SdkMeterProvider,
