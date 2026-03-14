@@ -115,8 +115,11 @@ enum Commands {
         /// Path to pipeline YAML file
         pipeline: PathBuf,
     },
-    /// List available plugins
-    Plugins,
+    /// Manage plugins (pull, push, inspect, list, remove)
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommands,
+    },
     /// Scaffold a new plugin project
     Scaffold {
         /// Plugin name (e.g., "source-mysql", "dest-snowflake")
@@ -186,6 +189,51 @@ enum Commands {
         /// Prometheus metrics listen address (e.g. 127.0.0.1:9191)
         #[arg(long, env = "RAPIDBYTE_METRICS_LISTEN")]
         metrics_listen: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PluginCommands {
+    /// Pull a plugin from an OCI registry to local cache
+    Pull {
+        /// Plugin reference (e.g. registry.example.com/source/postgres:1.2.0)
+        plugin_ref: String,
+        /// Use HTTP instead of HTTPS (for local dev registries)
+        #[arg(long)]
+        insecure: bool,
+    },
+    /// Push a local .wasm plugin to an OCI registry
+    Push {
+        /// Plugin reference (e.g. registry.example.com/source/postgres:1.2.0)
+        plugin_ref: String,
+        /// Path to the .wasm file
+        wasm_path: PathBuf,
+        /// Use HTTP instead of HTTPS
+        #[arg(long)]
+        insecure: bool,
+    },
+    /// Inspect plugin metadata without downloading the wasm binary
+    Inspect {
+        /// Plugin reference
+        plugin_ref: String,
+        /// Use HTTP instead of HTTPS
+        #[arg(long)]
+        insecure: bool,
+    },
+    /// List available tags/versions for a plugin
+    Tags {
+        /// Plugin reference (tag is ignored)
+        plugin_ref: String,
+        /// Use HTTP instead of HTTPS
+        #[arg(long)]
+        insecure: bool,
+    },
+    /// List locally cached plugins
+    List,
+    /// Remove a plugin from the local cache
+    Remove {
+        /// Plugin reference
+        plugin_ref: String,
     },
 }
 
@@ -318,7 +366,7 @@ async fn main() -> ExitCode {
         }
         Commands::Check { pipeline } => commands::check::execute(&pipeline, verbosity).await,
         Commands::Discover { pipeline } => commands::discover::execute(&pipeline, verbosity).await,
-        Commands::Plugins => commands::plugins::execute(verbosity),
+        Commands::Plugin { command } => commands::plugin::execute(command).await,
         Commands::Scaffold { name, output } => commands::scaffold::run(&name, output.as_deref()),
         Commands::Dev => commands::dev::execute().await,
         Commands::Controller {

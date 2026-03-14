@@ -14,7 +14,7 @@ pub mod dev;
 pub mod discover;
 pub mod distributed_run;
 pub mod list_runs;
-pub mod plugins;
+pub mod plugin;
 pub mod run;
 pub mod scaffold;
 pub mod status;

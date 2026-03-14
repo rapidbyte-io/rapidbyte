@@ -4488,6 +4488,7 @@ dependencies = [
  "rapidbyte-dev",
  "rapidbyte-engine",
  "rapidbyte-metrics",
+ "rapidbyte-registry",
  "rapidbyte-runtime",
  "rapidbyte-types",
  "rustls",
