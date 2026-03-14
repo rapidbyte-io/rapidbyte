@@ -58,14 +58,11 @@ macro_rules! define_updown_i64 {
 }
 
 pub mod pipeline {
-    use super::{meter, Counter, Histogram};
+    use super::{meter, Counter};
     define_counter_u64!(records_read, "pipeline.records_read");
     define_counter_u64!(records_written, "pipeline.records_written");
     define_counter_u64!(bytes_read, "pipeline.bytes_read");
     define_counter_u64!(bytes_written, "pipeline.bytes_written");
-    define_histogram_f64!(duration, "pipeline.duration");
-    define_counter_u64!(run_total, "pipeline.run_total");
-    define_counter_u64!(run_errors, "pipeline.run_errors");
 }
 
 pub mod host {
@@ -79,7 +76,6 @@ pub mod host {
     );
     define_histogram_f64!(compress_duration, "host.compress_duration");
     define_histogram_f64!(decompress_duration, "host.decompress_duration");
-    define_histogram_f64!(module_load_duration, "host.module_load_duration");
 }
 
 pub mod plugin {
@@ -98,40 +94,29 @@ pub mod plugin {
 }
 
 pub mod controller {
-    use super::{meter, Counter, Gauge, Histogram, UpDownCounter};
+    use super::{meter, Counter, Histogram, UpDownCounter};
     define_updown_i64!(active_runs, "controller.active_runs");
     define_updown_i64!(active_agents, "controller.active_agents");
-    define_gauge_f64!(preview_store_size, "controller.preview_store_size");
     define_counter_u64!(runs_submitted, "controller.runs_submitted");
     define_counter_u64!(runs_completed, "controller.runs_completed");
-    define_counter_u64!(tasks_assigned, "controller.tasks_assigned");
     define_counter_u64!(tasks_completed, "controller.tasks_completed");
     define_counter_u64!(lease_grants, "controller.lease_grants");
-    define_counter_u64!(lease_revocations, "controller.lease_revocations");
-    define_counter_u64!(lease_renewals, "controller.lease_renewals");
     define_counter_u64!(heartbeat_received, "controller.heartbeat_received");
     define_counter_u64!(heartbeat_timeouts, "controller.heartbeat_timeouts");
     define_counter_u64!(reconciliation_sweeps, "controller.reconciliation_sweeps");
-    define_counter_u64!(
-        reconciliation_timeouts,
-        "controller.reconciliation_timeouts"
-    );
     define_histogram_f64!(state_persist_duration, "controller.state_persist_duration");
-    define_counter_u64!(state_persist_errors, "controller.state_persist_errors");
 }
 
 pub mod agent {
     use super::{meter, Counter, Gauge, Histogram, UpDownCounter};
     define_updown_i64!(active_tasks, "agent.active_tasks");
     define_gauge_f64!(spool_entries, "agent.spool_entries");
-    define_gauge_f64!(spool_disk_bytes, "agent.spool_disk_bytes");
     define_counter_u64!(tasks_received, "agent.tasks_received");
     define_counter_u64!(tasks_completed, "agent.tasks_completed");
     define_histogram_f64!(task_duration, "agent.task_duration");
     define_counter_u64!(records_processed, "agent.records_processed");
     define_counter_u64!(bytes_processed, "agent.bytes_processed");
     define_counter_u64!(flight_requests, "agent.flight_requests");
-    define_histogram_f64!(flight_request_duration, "agent.flight_request_duration");
     define_counter_u64!(flight_batches_served, "agent.flight_batches_served");
     define_counter_u64!(previews_stored, "agent.previews_stored");
     define_counter_u64!(previews_evicted, "agent.previews_evicted");

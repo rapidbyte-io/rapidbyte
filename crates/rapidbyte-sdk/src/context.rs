@@ -190,7 +190,7 @@ impl Context {
 }
 
 fn is_reserved_metric_label(label: &str) -> bool {
-    matches!(label, "pipeline" | "run" | "plugin" | "stream")
+    matches!(label, "pipeline" | "run" | "plugin" | "stream" | "shard")
 }
 
 #[cfg(test)]
