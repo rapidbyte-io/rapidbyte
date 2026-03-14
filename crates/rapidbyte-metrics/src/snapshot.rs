@@ -260,6 +260,21 @@ impl SnapshotReader {
         self.reset();
     }
 
+    /// Trigger capture of finished run snapshots from the exporter (test-only).
+    #[cfg(test)]
+    pub(crate) fn capture_for_test(&self) {
+        self.capture_finished_run_snapshots();
+    }
+
+    /// Return the number of entries in the finished run snapshots map (test-only).
+    #[cfg(test)]
+    pub(crate) fn finished_run_snapshot_count(&self) -> usize {
+        self.finished_run_snapshots
+            .lock()
+            .map(|s| s.len())
+            .unwrap_or(0)
+    }
+
     fn take_finished_run_snapshot(&self, pipeline: &str, run: &str) -> PipelineMetricsSnapshot {
         self.finished_run_snapshots
             .lock()
@@ -776,5 +791,26 @@ mod tests {
 
         assert_eq!(snap_a.records_read, 100, "run-a should see exactly 100");
         assert_eq!(snap_b.records_read, 200, "run-b should see exactly 200");
+    }
+
+    #[test]
+    fn metrics_without_run_label_do_not_create_finished_run_snapshot_entries() {
+        let (provider, reader) = crate::test_support::snapshot_test_provider();
+        let meter = provider.meter("test");
+        let counter = meter.u64_counter("pipeline.records_read").build();
+
+        // Emit metrics with pipeline label but NO run label (simulates preflight).
+        counter.add(50, &[KeyValue::new(crate::labels::PIPELINE, "pipe")]);
+
+        // Flush and capture — should not create any finished_run_snapshots entry.
+        let _ = provider.force_flush();
+        reader.capture_for_test();
+
+        // The finished_run_snapshots map should be empty since there's no RUN label.
+        assert_eq!(
+            reader.finished_run_snapshot_count(),
+            0,
+            "metrics without RUN label should not create finished_run_snapshots entries"
+        );
     }
 }
