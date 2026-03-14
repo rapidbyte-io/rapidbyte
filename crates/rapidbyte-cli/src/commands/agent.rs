@@ -18,7 +18,7 @@ pub async fn execute(
     flight_tls_cert: Option<&Path>,
     flight_tls_key: Option<&Path>,
     metrics_listen: Option<&str>,
-    otel_guard: Option<rapidbyte_metrics::OtelGuard>,
+    otel_guard: rapidbyte_metrics::OtelGuard,
 ) -> Result<()> {
     let config = build_config(
         controller,
@@ -34,8 +34,7 @@ pub async fn execute(
         flight_tls_key,
         metrics_listen,
     )?;
-    let guard = Arc::new(otel_guard.expect("agent telemetry guard is always provided by main"));
-    rapidbyte_agent::run(config, guard).await
+    rapidbyte_agent::run(config, Arc::new(otel_guard)).await
 }
 
 #[allow(clippy::too_many_arguments)]

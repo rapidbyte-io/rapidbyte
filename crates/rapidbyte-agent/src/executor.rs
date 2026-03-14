@@ -70,35 +70,6 @@ fn is_pre_commit_cancellation(error: &PipelineError) -> bool {
     }
 }
 
-/// Convenience wrapper that creates a throwaway metrics provider.
-///
-/// Use this when you do not need accurate post-run metric snapshots.
-/// For production use, prefer [`execute_task`] with the real `OtelGuard`'s
-/// snapshot reader and meter provider.
-#[allow(clippy::too_many_lines)]
-pub async fn execute_task_unmonitored(
-    pipeline_yaml: &[u8],
-    dry_run: bool,
-    limit: Option<u64>,
-    progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
-    cancel_token: CancellationToken,
-) -> TaskExecutionResult {
-    let reader = rapidbyte_metrics::snapshot::SnapshotReader::new();
-    let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
-        .with_reader(reader.build_reader())
-        .build();
-    execute_task(
-        pipeline_yaml,
-        dry_run,
-        limit,
-        progress_tx,
-        cancel_token,
-        &reader,
-        &provider,
-    )
-    .await
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_task(
     pipeline_yaml: &[u8],
@@ -379,9 +350,17 @@ destination:
 
     #[tokio::test]
     async fn test_invalid_utf8_returns_failed() {
-        let result =
-            execute_task_unmonitored(&[0xFF, 0xFE], false, None, None, CancellationToken::new())
-                .await;
+        let (reader, provider) = test_metrics_runtime();
+        let result = execute_task(
+            &[0xFF, 0xFE],
+            false,
+            None,
+            None,
+            CancellationToken::new(),
+            &reader,
+            &provider,
+        )
+        .await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Failed(_)));
         if let TaskOutcomeKind::Failed(info) = &result.outcome {
             assert_eq!(info.code, "INVALID_YAML");
@@ -391,12 +370,15 @@ destination:
 
     #[tokio::test]
     async fn test_invalid_yaml_returns_failed() {
-        let result = execute_task_unmonitored(
+        let (reader, provider) = test_metrics_runtime();
+        let result = execute_task(
             b"not: [valid: yaml",
             false,
             None,
             None,
             CancellationToken::new(),
+            &reader,
+            &provider,
         )
         .await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Failed(_)));
@@ -407,8 +389,17 @@ destination:
 
     #[tokio::test]
     async fn test_zero_metrics_on_early_failure() {
-        let result =
-            execute_task_unmonitored(&[0xFF], false, None, None, CancellationToken::new()).await;
+        let (reader, provider) = test_metrics_runtime();
+        let result = execute_task(
+            &[0xFF],
+            false,
+            None,
+            None,
+            CancellationToken::new(),
+            &reader,
+            &provider,
+        )
+        .await;
         assert_eq!(result.metrics.records_processed, 0);
         assert_eq!(result.metrics.bytes_processed, 0);
         assert!(result.metrics.elapsed_seconds.abs() < f64::EPSILON);
@@ -416,9 +407,19 @@ destination:
 
     #[tokio::test]
     async fn test_pre_cancelled_token_returns_cancelled() {
+        let (reader, provider) = test_metrics_runtime();
         let token = CancellationToken::new();
         token.cancel();
-        let result = execute_task_unmonitored(b"pipeline: test\n", false, None, None, token).await;
+        let result = execute_task(
+            b"pipeline: test\n",
+            false,
+            None,
+            None,
+            token,
+            &reader,
+            &provider,
+        )
+        .await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Cancelled));
     }
 

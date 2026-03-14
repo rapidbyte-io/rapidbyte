@@ -41,7 +41,7 @@ pub async fn execute(
     controller: Option<&str>,
     auth_token: Option<&str>,
     tls: Option<&TlsClientConfig>,
-    otel_guard: Option<&rapidbyte_metrics::OtelGuard>,
+    otel_guard: &rapidbyte_metrics::OtelGuard,
 ) -> Result<()> {
     // If controller is set, route to distributed mode
     if let Some(url) = controller {
@@ -84,25 +84,15 @@ pub async fn execute(
 
     // Run the pipeline
     let cpu_start = process_cpu_seconds();
-    let outcome = if let Some(guard) = otel_guard {
-        orchestrator::run_pipeline(
-            &config,
-            &options,
-            progress_tx,
-            CancellationToken::new(),
-            guard.snapshot_reader(),
-            guard.meter_provider(),
-        )
-        .await
-    } else {
-        orchestrator::run_pipeline_unmonitored(
-            &config,
-            &options,
-            progress_tx,
-            CancellationToken::new(),
-        )
-        .await
-    };
+    let outcome = orchestrator::run_pipeline(
+        &config,
+        &options,
+        progress_tx,
+        CancellationToken::new(),
+        otel_guard.snapshot_reader(),
+        otel_guard.meter_provider(),
+    )
+    .await;
     let (cpu_end, peak_rss_mb) = post_pipeline_metrics();
 
     // Wait for spinner to finish before printing results
