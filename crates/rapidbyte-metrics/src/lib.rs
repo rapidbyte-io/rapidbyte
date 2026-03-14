@@ -7,9 +7,9 @@
 //! |--------------|----------------|
 //! | `cache`      | DashMap instrument cache for dynamic plugin metrics |
 //! | `grpc_layer` | Tower layer for gRPC RED metrics |
-//! | `instruments`| OnceLock instrument accessors (pipeline, host, plugin, ...) |
+//! | `instruments`| Global instrument accessors (pipeline, host, plugin, ...) |
 //! | `labels`     | Bounded label keys and parsing |
-//! | `snapshot`   | InMemoryMetricReader and PipelineResult bridge |
+//! | `snapshot`   | InMemoryMetricExporter and PipelineResult bridge |
 //! | `views`      | Histogram bucket configuration |
 
 #![warn(clippy::pedantic)]
