@@ -174,6 +174,10 @@ impl SnapshotReader {
     /// The entire flush → read → reset sequence is serialized by `snapshot_lock`
     /// so that concurrent callers (e.g. parallel agent workers) cannot observe
     /// the same delta window and double-count metrics.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal snapshot lock is poisoned.
     #[must_use]
     pub fn flush_and_snapshot_for_run(
         &self,
@@ -778,16 +782,16 @@ mod tests {
         let counter = meter.u64_counter("pipeline.records_read").build();
 
         // Record distinct metrics for two concurrent runs.
-        let run_a_labels = [
+        let labels_a = [
             KeyValue::new(crate::labels::PIPELINE, "pipe"),
             KeyValue::new(crate::labels::RUN, "run-a"),
         ];
-        let run_b_labels = [
+        let labels_b = [
             KeyValue::new(crate::labels::PIPELINE, "pipe"),
             KeyValue::new(crate::labels::RUN, "run-b"),
         ];
-        counter.add(100, &run_a_labels);
-        counter.add(200, &run_b_labels);
+        counter.add(100, &labels_a);
+        counter.add(200, &labels_b);
 
         // Simulate concurrent finalization from two threads.
         let pa = provider.clone();
