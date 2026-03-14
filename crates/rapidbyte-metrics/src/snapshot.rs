@@ -126,9 +126,18 @@ impl PipelineMetricsSnapshot {
 }
 
 /// Wraps an [`InMemoryMetricExporter`] for point-in-time snapshots.
+///
+/// The snapshot lock serializes the full flush → capture → take/reset sequence
+/// so that concurrent workers sharing the same reader cannot double-count or
+/// drop metrics from the exporter's delta window.
 pub struct SnapshotReader {
     exporter: InMemoryMetricExporter,
     finished_run_snapshots: Mutex<HashMap<(String, String), PipelineMetricsSnapshot>>,
+    /// Serializes the entire snapshot extraction path (flush, read exporter,
+    /// append to map, reset exporter, take entry). Without this, two concurrent
+    /// `flush_and_snapshot_for_run` calls can both read the same exporter data
+    /// before either resets, causing double-counted metrics.
+    snapshot_lock: Mutex<()>,
 }
 
 impl SnapshotReader {
@@ -140,6 +149,7 @@ impl SnapshotReader {
                 .with_temporality(Temporality::Delta)
                 .build(),
             finished_run_snapshots: Mutex::new(HashMap::new()),
+            snapshot_lock: Mutex::new(()),
         }
     }
 
@@ -160,6 +170,10 @@ impl SnapshotReader {
     }
 
     /// Flush the meter provider and return a pipeline metrics snapshot for one run label.
+    ///
+    /// The entire flush → read → reset sequence is serialized by `snapshot_lock`
+    /// so that concurrent callers (e.g. parallel agent workers) cannot observe
+    /// the same delta window and double-count metrics.
     #[must_use]
     pub fn flush_and_snapshot_for_run(
         &self,
@@ -167,6 +181,8 @@ impl SnapshotReader {
         pipeline: &str,
         run: Option<&str>,
     ) -> PipelineMetricsSnapshot {
+        let _guard = self.snapshot_lock.lock().expect("snapshot lock poisoned");
+
         let _ = meter_provider.force_flush();
         if let Some(run) = run {
             self.capture_finished_run_snapshots();
@@ -749,5 +765,45 @@ mod tests {
 
         assert_eq!(snapshot.tracked_plugin_timing_series_count(), 0);
         assert!(snapshot.dest_decode_secs.abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn concurrent_run_scoped_snapshots_do_not_double_count() {
+        use std::sync::Arc;
+
+        let (provider, reader) = test_provider();
+        let provider = Arc::new(provider);
+        let reader = Arc::new(reader);
+        let meter = provider.meter("test");
+        let counter = meter.u64_counter("pipeline.records_read").build();
+
+        // Record distinct metrics for two concurrent runs.
+        let run_a_labels = [
+            KeyValue::new(crate::labels::PIPELINE, "pipe"),
+            KeyValue::new(crate::labels::RUN, "run-a"),
+        ];
+        let run_b_labels = [
+            KeyValue::new(crate::labels::PIPELINE, "pipe"),
+            KeyValue::new(crate::labels::RUN, "run-b"),
+        ];
+        counter.add(100, &run_a_labels);
+        counter.add(200, &run_b_labels);
+
+        // Simulate concurrent finalization from two threads.
+        let pa = provider.clone();
+        let ra = reader.clone();
+        let handle_a =
+            std::thread::spawn(move || ra.flush_and_snapshot_for_run(&pa, "pipe", Some("run-a")));
+
+        let pb = provider.clone();
+        let rb = reader.clone();
+        let handle_b =
+            std::thread::spawn(move || rb.flush_and_snapshot_for_run(&pb, "pipe", Some("run-b")));
+
+        let snap_a = handle_a.join().expect("thread a panicked");
+        let snap_b = handle_b.join().expect("thread b panicked");
+
+        assert_eq!(snap_a.records_read, 100, "run-a should see exactly 100");
+        assert_eq!(snap_b.records_read, 200, "run-b should see exactly 200");
     }
 }

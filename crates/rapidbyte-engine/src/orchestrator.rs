@@ -2853,10 +2853,16 @@ mod metrics_runtime_tests {
     use opentelemetry_sdk::metrics::SdkMeterProvider;
     use rapidbyte_metrics::snapshot::SnapshotReader;
     use rapidbyte_runtime::HostTimings;
+    use std::sync::Mutex;
     use std::time::Duration;
+
+    /// Tests in this module set the process-global meter provider and must not
+    /// run concurrently with each other.
+    static PROVIDER_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn fallback_metrics_runtime_captures_host_timings_without_overwriting_global_provider() {
+        let _guard = PROVIDER_LOCK.lock().expect("provider lock poisoned");
         let global_reader = SnapshotReader::new();
         let global_provider = SdkMeterProvider::builder()
             .with_reader(global_reader.build_reader())
@@ -2889,6 +2895,7 @@ mod metrics_runtime_tests {
 
     #[test]
     fn snapshot_for_run_drains_entry_so_repeated_calls_return_default() {
+        let _guard = PROVIDER_LOCK.lock().expect("provider lock poisoned");
         let reader = SnapshotReader::new();
         let provider = SdkMeterProvider::builder()
             .with_reader(reader.build_reader())
