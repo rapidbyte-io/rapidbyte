@@ -106,8 +106,8 @@ const fn state_scope_to_i32(scope: StateScope) -> i32 {
 
 static HOST_IMPORTS: OnceLock<Box<dyn HostImports>> = OnceLock::new();
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
-pub(crate) mod test_support {
+#[cfg(any(all(test, not(target_arch = "wasm32")), feature = "test-support"))]
+pub mod test_support {
     use super::*;
     use std::sync::Mutex;
 
