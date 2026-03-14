@@ -159,6 +159,12 @@ enum Commands {
         /// Prometheus metrics listen address (e.g. 127.0.0.1:9190)
         #[arg(long, env = "RAPIDBYTE_METRICS_LISTEN")]
         metrics_listen: Option<String>,
+        /// OCI registry URL to broadcast to agents for plugin pulls
+        #[arg(long, env = "RAPIDBYTE_REGISTRY_URL")]
+        registry_url: Option<String>,
+        /// Use HTTP instead of HTTPS for the plugin registry
+        #[arg(long)]
+        registry_insecure: bool,
     },
     /// Start an agent worker (long-running)
     Agent {
@@ -379,6 +385,8 @@ async fn main() -> ExitCode {
             tls_cert,
             tls_key,
             metrics_listen,
+            registry_url,
+            registry_insecure,
         } => {
             commands::controller::execute(
                 &listen,
@@ -391,6 +399,8 @@ async fn main() -> ExitCode {
                 tls_cert.as_deref(),
                 tls_key.as_deref(),
                 metrics_listen.as_deref(),
+                registry_url.as_deref(),
+                registry_insecure,
                 otel_guard,
             )
             .await
