@@ -55,6 +55,9 @@ pub enum Frame {
 #[derive(Debug, Clone, Default)]
 pub struct HostTimings {
     labels: Vec<opentelemetry::KeyValue>,
+    raw_snapshot: Option<
+        std::sync::Arc<std::sync::Mutex<rapidbyte_metrics::snapshot::PipelineMetricsSnapshot>>,
+    >,
 }
 
 impl HostTimings {
@@ -68,6 +71,7 @@ impl HostTimings {
                 KeyValue::new(labels::STREAM, stream.to_owned()),
                 KeyValue::new(labels::SHARD, shard.to_string()),
             ],
+            raw_snapshot: None,
         }
     }
 
@@ -80,7 +84,30 @@ impl HostTimings {
         self
     }
 
+    #[must_use]
+    pub fn with_raw_snapshot(
+        mut self,
+        snapshot: std::sync::Arc<
+            std::sync::Mutex<rapidbyte_metrics::snapshot::PipelineMetricsSnapshot>,
+        >,
+    ) -> Self {
+        self.raw_snapshot = Some(snapshot);
+        self
+    }
+
+    fn update_raw_snapshot(
+        &self,
+        update: impl FnOnce(&mut rapidbyte_metrics::snapshot::PipelineMetricsSnapshot),
+    ) {
+        if let Some(snapshot) = &self.raw_snapshot {
+            if let Ok(mut snapshot) = snapshot.lock() {
+                update(&mut snapshot);
+            }
+        }
+    }
+
     pub fn record_emit_batch(&self, duration: std::time::Duration) {
+        self.update_raw_snapshot(|snapshot| snapshot.record_emit_batch(duration));
         rapidbyte_metrics::instruments::host::emit_batch_duration()
             .record(duration.as_secs_f64(), &self.labels);
     }
@@ -91,6 +118,7 @@ impl HostTimings {
         wait: std::time::Duration,
         process: std::time::Duration,
     ) {
+        self.update_raw_snapshot(|snapshot| snapshot.record_next_batch(total, wait, process));
         rapidbyte_metrics::instruments::host::next_batch_duration()
             .record(total.as_secs_f64(), &self.labels);
         rapidbyte_metrics::instruments::host::next_batch_wait_duration()
@@ -100,13 +128,19 @@ impl HostTimings {
     }
 
     pub fn record_compress(&self, duration: std::time::Duration) {
+        self.update_raw_snapshot(|snapshot| snapshot.record_compress(duration));
         rapidbyte_metrics::instruments::host::compress_duration()
             .record(duration.as_secs_f64(), &self.labels);
     }
 
     pub fn record_decompress(&self, duration: std::time::Duration) {
+        self.update_raw_snapshot(|snapshot| snapshot.record_decompress(duration));
         rapidbyte_metrics::instruments::host::decompress_duration()
             .record(duration.as_secs_f64(), &self.labels);
+    }
+
+    pub fn record_plugin_duration(&self, name: &str, value_secs: f64) {
+        self.update_raw_snapshot(|snapshot| snapshot.record_plugin_duration(name, value_secs));
     }
 }
 
@@ -806,6 +840,9 @@ impl ComponentHostState {
     ) -> Result<(), PluginError> {
         let mut labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
         self.ensure_metric_scope_labels(&mut labels);
+        self.checkpoints
+            .timings
+            .record_plugin_duration(&name, value);
         match name.as_str() {
             "source_connect_secs" => {
                 rapidbyte_metrics::instruments::plugin::source_connect_duration()

@@ -103,6 +103,8 @@ struct StreamBuild {
 struct StreamParams {
     pipeline_name: String,
     metric_run_label: String,
+    fallback_metrics_snapshot:
+        Option<Arc<Mutex<rapidbyte_metrics::snapshot::PipelineMetricsSnapshot>>>,
     source_config: serde_json::Value,
     dest_config: serde_json::Value,
     source_plugin_id: String,
@@ -328,7 +330,8 @@ pub async fn run_pipeline(
 /// Run a pipeline with optional OpenTelemetry metric snapshot support.
 ///
 /// When `snapshot_reader` and `meter_provider` are supplied, `finalize_run()` reads
-/// timing data from the OpenTelemetry metric snapshot. Otherwise, timing fields are zeroed.
+/// timing data from the OpenTelemetry metric snapshot. Otherwise, the engine
+/// uses a per-run fallback accumulator without mutating the global meter provider.
 ///
 /// # Errors
 ///
@@ -434,28 +437,35 @@ enum MetricsRuntime<'a> {
         snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
         meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
     },
-    Owned {
-        snapshot_reader: rapidbyte_metrics::snapshot::SnapshotReader,
-        meter_provider: opentelemetry_sdk::metrics::SdkMeterProvider,
+    Fallback {
+        raw_snapshot: Arc<Mutex<rapidbyte_metrics::snapshot::PipelineMetricsSnapshot>>,
     },
 }
 
 impl MetricsRuntime<'_> {
-    fn snapshot_reader(&self) -> &rapidbyte_metrics::snapshot::SnapshotReader {
+    fn fallback_metrics_snapshot(
+        &self,
+    ) -> Option<Arc<Mutex<rapidbyte_metrics::snapshot::PipelineMetricsSnapshot>>> {
         match self {
-            Self::Borrowed {
-                snapshot_reader, ..
-            } => snapshot_reader,
-            Self::Owned {
-                snapshot_reader, ..
-            } => snapshot_reader,
+            Self::Borrowed { .. } => None,
+            Self::Fallback { raw_snapshot } => Some(raw_snapshot.clone()),
         }
     }
 
-    fn meter_provider(&self) -> &opentelemetry_sdk::metrics::SdkMeterProvider {
+    fn snapshot_for_run(
+        &self,
+        pipeline: &str,
+        run: Option<&str>,
+    ) -> rapidbyte_metrics::snapshot::PipelineMetricsSnapshot {
         match self {
-            Self::Borrowed { meter_provider, .. } => meter_provider,
-            Self::Owned { meter_provider, .. } => meter_provider,
+            Self::Borrowed {
+                snapshot_reader,
+                meter_provider,
+            } => snapshot_reader.flush_and_snapshot_for_run(meter_provider, pipeline, run),
+            Self::Fallback { raw_snapshot } => raw_snapshot
+                .lock()
+                .map(|snapshot| snapshot.clone())
+                .unwrap_or_default(),
         }
     }
 }
@@ -471,15 +481,10 @@ fn prepare_metrics_runtime<'a>(
         };
     }
 
-    let snapshot_reader = rapidbyte_metrics::snapshot::SnapshotReader::new();
-    let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
-        .with_reader(snapshot_reader.build_reader())
-        .build();
-    opentelemetry::global::set_meter_provider(meter_provider.clone());
-
-    MetricsRuntime::Owned {
-        snapshot_reader,
-        meter_provider,
+    MetricsRuntime::Fallback {
+        raw_snapshot: Arc::new(Mutex::new(
+            rapidbyte_metrics::snapshot::PipelineMetricsSnapshot::default(),
+        )),
     }
 }
 
@@ -595,6 +600,7 @@ async fn execute_pipeline_once(
             state_for_execution.clone(),
             options,
             &metric_run_label,
+            metrics_runtime.fallback_metrics_snapshot(),
             &progress_tx,
             cancel_token,
         )
@@ -611,13 +617,8 @@ async fn execute_pipeline_once(
             if options.dry_run {
                 let duration_secs = start.elapsed().as_secs_f64();
 
-                let snap = metrics_runtime
-                    .snapshot_reader()
-                    .flush_and_snapshot_for_run(
-                        metrics_runtime.meter_provider(),
-                        &config.pipeline,
-                        Some(&metric_run_label),
-                    );
+                let snap =
+                    metrics_runtime.snapshot_for_run(&config.pipeline, Some(&metric_run_label));
 
                 return Ok(PipelineOutcome::DryRun(DryRunResult {
                     streams: aggregated.dry_run_streams,
@@ -642,8 +643,7 @@ async fn execute_pipeline_once(
                 &metric_run_label,
                 &modules,
                 aggregated,
-                metrics_runtime.snapshot_reader(),
-                metrics_runtime.meter_provider(),
+                &metrics_runtime,
             )
             .await?;
             Ok(PipelineOutcome::Run(result))
@@ -998,6 +998,9 @@ async fn execute_streams(
     state: Arc<dyn StateBackend>,
     options: &ExecutionOptions,
     metric_run_label: &str,
+    fallback_metrics_snapshot: Option<
+        Arc<Mutex<rapidbyte_metrics::snapshot::PipelineMetricsSnapshot>>,
+    >,
     progress_tx: &ProgressTx,
     cancel_token: &CancellationToken,
 ) -> Result<AggregatedStreamResults, PipelineError> {
@@ -1042,6 +1045,7 @@ async fn execute_streams(
     let params = Arc::new(StreamParams {
         pipeline_name: config.pipeline.clone(),
         metric_run_label: metric_run_label.to_owned(),
+        fallback_metrics_snapshot,
         source_config: config.source.config.clone(),
         dest_config: config.destination.config.clone(),
         source_plugin_id,
@@ -1125,6 +1129,7 @@ async fn execute_streams(
                         state_dst,
                         &params.pipeline_name,
                         &params.metric_run_label,
+                        params.fallback_metrics_snapshot.clone(),
                         &params.dest_plugin_id,
                         &params.dest_plugin_version,
                         &params.dest_config,
@@ -1233,6 +1238,7 @@ async fn execute_streams(
                     state_src,
                     &params_src.pipeline_name,
                     &params_src.metric_run_label,
+                    params_src.fallback_metrics_snapshot.clone(),
                     &params_src.source_plugin_id,
                     &params_src.source_plugin_version,
                     &params_src.source_config,
@@ -1262,6 +1268,7 @@ async fn execute_streams(
                         state_t,
                         &params_t.pipeline_name,
                         &params_t.metric_run_label,
+                        params_t.fallback_metrics_snapshot.clone(),
                         &t.plugin_id,
                         &t.plugin_version,
                         i,
@@ -1347,6 +1354,7 @@ async fn execute_streams(
                         state_dst,
                         &params.pipeline_name,
                         &params.metric_run_label,
+                        params.fallback_metrics_snapshot.clone(),
                         &params.dest_plugin_id,
                         &params.dest_plugin_version,
                         &params.dest_config,
@@ -1555,8 +1563,7 @@ async fn finalize_run(
     metric_run_label: &str,
     modules: &LoadedModules,
     mut aggregated: AggregatedStreamResults,
-    snapshot_reader: &rapidbyte_metrics::snapshot::SnapshotReader,
-    meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
+    metrics_runtime: &MetricsRuntime<'_>,
 ) -> Result<PipelineResult, PipelineError> {
     if let Some(err) = aggregated.first_error {
         let state_for_complete = state.clone();
@@ -1596,11 +1603,7 @@ async fn finalize_run(
         return Err(err);
     }
 
-    let snap = snapshot_reader.flush_and_snapshot_for_run(
-        meter_provider,
-        &config.pipeline,
-        Some(metric_run_label),
-    );
+    let snap = metrics_runtime.snapshot_for_run(&config.pipeline, Some(metric_run_label));
 
     let plugin_internal_secs =
         snap.dest_connect_secs + snap.dest_flush_secs + snap.dest_commit_secs;
@@ -2705,22 +2708,42 @@ state:
 #[cfg(test)]
 mod metrics_runtime_tests {
     use super::*;
+    use opentelemetry::KeyValue;
+    use opentelemetry_sdk::metrics::SdkMeterProvider;
+    use rapidbyte_metrics::snapshot::SnapshotReader;
     use rapidbyte_runtime::HostTimings;
     use std::time::Duration;
 
     #[test]
-    fn fallback_metrics_runtime_captures_host_timings() {
+    fn fallback_metrics_runtime_captures_host_timings_without_overwriting_global_provider() {
+        let global_reader = SnapshotReader::new();
+        let global_provider = SdkMeterProvider::builder()
+            .with_reader(global_reader.build_reader())
+            .build();
+        opentelemetry::global::set_meter_provider(global_provider.clone());
+
         let metrics_runtime = prepare_metrics_runtime(None, None);
-        let timings = HostTimings::new("test-pipeline", "users", 0);
+        let timings = HostTimings::new("test-pipeline", "users", 0).with_raw_snapshot(
+            metrics_runtime
+                .fallback_metrics_snapshot()
+                .expect("fallback runtime should provide raw snapshot"),
+        );
 
         timings.record_emit_batch(Duration::from_millis(5));
+        rapidbyte_metrics::instruments::pipeline::records_read().add(
+            7,
+            &[KeyValue::new(
+                rapidbyte_metrics::labels::PIPELINE,
+                "test-pipeline",
+            )],
+        );
 
-        let snapshot = metrics_runtime
-            .snapshot_reader()
-            .flush_and_snapshot(metrics_runtime.meter_provider(), "test-pipeline");
+        let snapshot = metrics_runtime.snapshot_for_run("test-pipeline", None);
+        let global_snapshot = global_reader.flush_and_snapshot(&global_provider, "test-pipeline");
 
         assert_eq!(snapshot.emit_batch_nanos, 5_000_000);
         assert_eq!(snapshot.emit_count, 1);
+        assert_eq!(global_snapshot.records_read, 7);
     }
 }
 

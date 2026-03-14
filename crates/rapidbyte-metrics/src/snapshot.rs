@@ -1,5 +1,7 @@
 //! [`InMemoryMetricExporter`] wrapper and `PipelineResult` bridge.
 
+use std::time::Duration;
+
 use opentelemetry_sdk::metrics::data::Aggregation;
 use opentelemetry_sdk::metrics::InMemoryMetricExporter;
 use opentelemetry_sdk::metrics::InMemoryMetricExporterBuilder;
@@ -35,6 +37,58 @@ pub struct PipelineMetricsSnapshot {
     pub next_batch_process_nanos: u64,
     pub decompress_nanos: u64,
     pub next_batch_count: u64,
+}
+
+impl PipelineMetricsSnapshot {
+    fn duration_nanos(duration: Duration) -> u64 {
+        u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    pub fn record_emit_batch(&mut self, duration: Duration) {
+        self.emit_batch_nanos = self
+            .emit_batch_nanos
+            .saturating_add(Self::duration_nanos(duration));
+        self.emit_count = self.emit_count.saturating_add(1);
+    }
+
+    pub fn record_next_batch(&mut self, total: Duration, wait: Duration, process: Duration) {
+        self.next_batch_nanos = self
+            .next_batch_nanos
+            .saturating_add(Self::duration_nanos(total));
+        self.next_batch_wait_nanos = self
+            .next_batch_wait_nanos
+            .saturating_add(Self::duration_nanos(wait));
+        self.next_batch_process_nanos = self
+            .next_batch_process_nanos
+            .saturating_add(Self::duration_nanos(process));
+        self.next_batch_count = self.next_batch_count.saturating_add(1);
+    }
+
+    pub fn record_compress(&mut self, duration: Duration) {
+        self.compress_nanos = self
+            .compress_nanos
+            .saturating_add(Self::duration_nanos(duration));
+    }
+
+    pub fn record_decompress(&mut self, duration: Duration) {
+        self.decompress_nanos = self
+            .decompress_nanos
+            .saturating_add(Self::duration_nanos(duration));
+    }
+
+    pub fn record_plugin_duration(&mut self, name: &str, value_secs: f64) {
+        match name {
+            "source_connect_secs" => self.source_connect_secs += value_secs,
+            "source_query_secs" => self.source_query_secs += value_secs,
+            "source_fetch_secs" => self.source_fetch_secs += value_secs,
+            "source_arrow_encode_secs" => self.source_encode_secs += value_secs,
+            "dest_connect_secs" => self.dest_connect_secs += value_secs,
+            "dest_flush_secs" => self.dest_flush_secs += value_secs,
+            "dest_commit_secs" => self.dest_commit_secs += value_secs,
+            "dest_decode_secs" => self.dest_decode_secs += value_secs,
+            _ => {}
+        }
+    }
 }
 
 /// Wraps an [`InMemoryMetricExporter`] for point-in-time snapshots.
@@ -139,7 +193,7 @@ fn matches_metric_scope(
 ) -> bool {
     let pipeline_matches = attrs
         .iter()
-        .all(|kv| kv.key.as_str() != crate::labels::PIPELINE || kv.value.as_str() == pipeline);
+        .any(|kv| kv.key.as_str() == crate::labels::PIPELINE && kv.value.as_str() == pipeline);
 
     if !pipeline_matches {
         return false;
@@ -301,6 +355,23 @@ mod tests {
         let meter = provider.meter("test");
 
         let counter = meter.u64_counter("pipeline.records_read").build();
+        counter.add(100, &[KeyValue::new(crate::labels::PIPELINE, "pipe-a")]);
+        counter.add(200, &[KeyValue::new(crate::labels::PIPELINE, "pipe-b")]);
+
+        let snap_a = reader.flush_and_snapshot(&provider, "pipe-a");
+        assert_eq!(snap_a.records_read, 100);
+
+        let snap_b = reader.flush_and_snapshot(&provider, "pipe-b");
+        assert_eq!(snap_b.records_read, 200);
+    }
+
+    #[test]
+    fn snapshot_excludes_unlabeled_datapoints() {
+        let (provider, reader) = test_provider();
+        let meter = provider.meter("test");
+
+        let counter = meter.u64_counter("pipeline.records_read").build();
+        counter.add(50, &[]);
         counter.add(100, &[KeyValue::new(crate::labels::PIPELINE, "pipe-a")]);
         counter.add(200, &[KeyValue::new(crate::labels::PIPELINE, "pipe-b")]);
 
