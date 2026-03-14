@@ -101,6 +101,14 @@ pub async fn execute(
         PipelineOutcome::Run(result) => {
             let cpu_metrics = process_cpu_metrics(cpu_start, cpu_end, result.duration_secs);
 
+            if let Some(cpu) = &cpu_metrics {
+                rapidbyte_metrics::instruments::process::cpu_seconds().record(cpu.cpu_secs, &[]);
+            }
+            if let Some(rss) = peak_rss_mb {
+                rapidbyte_metrics::instruments::process::peak_rss_bytes()
+                    .record(rss * 1024.0 * 1024.0, &[]);
+            }
+
             // Human-readable summary to stderr
             summary::print_success(&result, &config.pipeline, verbosity);
 

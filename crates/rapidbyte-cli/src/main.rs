@@ -234,7 +234,8 @@ async fn main() -> ExitCode {
 
     let verbosity = Verbosity::from_flags(cli.quiet, cli.verbose);
 
-    logging::init(verbosity, &cli.log_level);
+    let otel_guard = rapidbyte_metrics::init("rapidbyte-cli").ok();
+    logging::init(verbosity, &cli.log_level, otel_guard.as_ref());
 
     let tls = commands::transport::TlsClientConfig {
         ca_cert_path: cli.tls_ca_cert.clone(),
