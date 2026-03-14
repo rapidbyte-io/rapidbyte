@@ -714,7 +714,7 @@ mod tests {
             failure_counts: BTreeMap::from([(("regex".to_string(), "email".to_string()), 3)]),
         };
 
-        emit_validation_metrics(&ctx, &evaluation).unwrap();
+        emit_validation_metrics(&ctx, &evaluation);
 
         let calls = test_support::take_metric_calls();
         let MetricCall::Counter {
