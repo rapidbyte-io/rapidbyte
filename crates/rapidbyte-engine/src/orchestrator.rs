@@ -620,18 +620,12 @@ async fn execute_pipeline_once(
                 let snap =
                     metrics_runtime.snapshot_for_run(&config.pipeline, Some(&metric_run_label));
 
-                return Ok(PipelineOutcome::DryRun(DryRunResult {
-                    streams: aggregated.dry_run_streams,
-                    source: build_source_timing(
-                        &snap,
-                        aggregated.max_source_duration,
-                        modules.source_module_load_ms,
-                        None,
-                    ),
-                    transform_count: config.transforms.len(),
-                    transform_duration_secs: aggregated.transform_durations.iter().sum(),
+                return Ok(PipelineOutcome::DryRun(build_dry_run_result(
+                    &snap,
+                    aggregated,
+                    modules.source_module_load_ms,
                     duration_secs,
-                }));
+                )));
             }
 
             let result = finalize_run(
@@ -1750,6 +1744,26 @@ fn build_source_timing(
         emit_nanos: snap.emit_batch_nanos,
         compress_nanos: snap.compress_nanos,
         emit_count: snap.emit_count,
+    }
+}
+
+fn build_dry_run_result(
+    snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
+    aggregated: AggregatedStreamResults,
+    source_module_load_ms: u64,
+    duration_secs: f64,
+) -> DryRunResult {
+    DryRunResult {
+        streams: aggregated.dry_run_streams,
+        source: build_source_timing(
+            snap,
+            aggregated.max_source_duration,
+            source_module_load_ms,
+            aggregated.total_read_summary.perf.as_ref(),
+        ),
+        transform_count: aggregated.transform_durations.len(),
+        transform_duration_secs: aggregated.transform_durations.iter().sum(),
+        duration_secs,
     }
 }
 
@@ -3045,6 +3059,26 @@ resources:
         assert!((timing.flush_secs - 0.6).abs() < f64::EPSILON);
         assert!((timing.commit_secs - 0.7).abs() < f64::EPSILON);
         assert!((timing.arrow_decode_secs - 0.8).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn dry_run_result_uses_summary_perf_when_snapshot_is_missing() {
+        let snap = rapidbyte_metrics::snapshot::PipelineMetricsSnapshot::default();
+        let mut aggregated = make_aggregated_results();
+        aggregated.max_source_duration = 1.5;
+        aggregated.total_read_summary.perf = Some(ReadPerf {
+            connect_secs: 0.1,
+            query_secs: 0.2,
+            fetch_secs: 0.3,
+            arrow_encode_secs: 0.4,
+        });
+
+        let result = build_dry_run_result(&snap, aggregated, 12, 3.0);
+
+        assert!((result.source.connect_secs - 0.1).abs() < f64::EPSILON);
+        assert!((result.source.query_secs - 0.2).abs() < f64::EPSILON);
+        assert!((result.source.fetch_secs - 0.3).abs() < f64::EPSILON);
+        assert!((result.source.arrow_encode_secs - 0.4).abs() < f64::EPSILON);
     }
 
     #[tokio::test]

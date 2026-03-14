@@ -1,6 +1,7 @@
 //! [`InMemoryMetricExporter`] wrapper and `PipelineResult` bridge.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use opentelemetry_sdk::metrics::data::Aggregation;
@@ -127,6 +128,7 @@ impl PipelineMetricsSnapshot {
 /// Wraps an [`InMemoryMetricExporter`] for point-in-time snapshots.
 pub struct SnapshotReader {
     exporter: InMemoryMetricExporter,
+    finished_run_snapshots: Mutex<HashMap<(String, String), PipelineMetricsSnapshot>>,
 }
 
 impl SnapshotReader {
@@ -137,6 +139,7 @@ impl SnapshotReader {
             exporter: InMemoryMetricExporterBuilder::new()
                 .with_temporality(Temporality::Delta)
                 .build(),
+            finished_run_snapshots: Mutex::new(HashMap::new()),
         }
     }
 
@@ -165,7 +168,14 @@ impl SnapshotReader {
         run: Option<&str>,
     ) -> PipelineMetricsSnapshot {
         let _ = meter_provider.force_flush();
-        self.snapshot_pipeline_result_for_run(pipeline, run)
+        if let Some(run) = run {
+            self.capture_finished_run_snapshots();
+            return self.take_finished_run_snapshot(pipeline, run);
+        }
+
+        let snapshot = self.snapshot_pipeline_result_for_run(pipeline, None);
+        self.reset();
+        snapshot
     }
 
     /// Return a pipeline metrics snapshot filtered by pipeline label.
@@ -209,6 +219,33 @@ impl SnapshotReader {
     /// Clears collected finished metrics from the in-memory snapshot exporter.
     pub fn reset(&self) {
         self.exporter.reset();
+    }
+
+    fn capture_finished_run_snapshots(&self) {
+        let metrics = self.exporter.get_finished_metrics().unwrap_or_default();
+        if metrics.is_empty() {
+            return;
+        }
+
+        let scopes = collect_finished_run_scopes(&metrics);
+        if let Ok(mut snapshots) = self.finished_run_snapshots.lock() {
+            for (pipeline, run) in scopes {
+                let entry = snapshots
+                    .entry((pipeline.clone(), run.clone()))
+                    .or_default();
+                append_snapshot_from_metrics(&metrics, &pipeline, Some(&run), entry);
+            }
+        }
+
+        self.reset();
+    }
+
+    fn take_finished_run_snapshot(&self, pipeline: &str, run: &str) -> PipelineMetricsSnapshot {
+        self.finished_run_snapshots
+            .lock()
+            .ok()
+            .and_then(|mut snapshots| snapshots.remove(&(pipeline.to_owned(), run.to_owned())))
+            .unwrap_or_default()
     }
 }
 
@@ -345,6 +382,72 @@ fn extract_metric_value(
             _ => {}
         }
     }
+}
+
+fn append_snapshot_from_metrics(
+    metrics: &[opentelemetry_sdk::metrics::data::ResourceMetrics],
+    pipeline: &str,
+    run: Option<&str>,
+    snap: &mut PipelineMetricsSnapshot,
+) {
+    for resource_metrics in metrics {
+        for scope_metrics in &resource_metrics.scope_metrics {
+            for metric in &scope_metrics.metrics {
+                extract_metric_value(&metric.name, metric.data.as_ref(), pipeline, run, snap);
+            }
+        }
+    }
+}
+
+fn collect_finished_run_scopes(
+    metrics: &[opentelemetry_sdk::metrics::data::ResourceMetrics],
+) -> Vec<(String, String)> {
+    let mut scopes: Vec<(String, String)> = Vec::new();
+
+    for resource_metrics in metrics {
+        for scope_metrics in &resource_metrics.scope_metrics {
+            for metric in &scope_metrics.metrics {
+                collect_run_scopes_from_metric(metric.data.as_ref(), &mut scopes);
+            }
+        }
+    }
+
+    scopes.sort();
+    scopes.dedup();
+    scopes
+}
+
+fn collect_run_scopes_from_metric(data: &dyn Aggregation, scopes: &mut Vec<(String, String)>) {
+    use opentelemetry_sdk::metrics::data::{Histogram, Sum};
+
+    if let Some(sum) = data.as_any().downcast_ref::<Sum<u64>>() {
+        for dp in &sum.data_points {
+            if let Some(scope) = scope_from_attrs(&dp.attributes) {
+                scopes.push(scope);
+            }
+        }
+        return;
+    }
+
+    if let Some(hist) = data.as_any().downcast_ref::<Histogram<f64>>() {
+        for dp in &hist.data_points {
+            if let Some(scope) = scope_from_attrs(&dp.attributes) {
+                scopes.push(scope);
+            }
+        }
+    }
+}
+
+fn scope_from_attrs(attrs: &[opentelemetry::KeyValue]) -> Option<(String, String)> {
+    let pipeline = attrs
+        .iter()
+        .find(|kv| kv.key.as_str() == crate::labels::PIPELINE)
+        .map(|kv| kv.value.as_str().into_owned())?;
+    let run = attrs
+        .iter()
+        .find(|kv| kv.key.as_str() == crate::labels::RUN)
+        .map(|kv| kv.value.as_str().into_owned())?;
+    Some((pipeline, run))
 }
 
 fn is_builtin_plugin_duration_name(name: &str) -> bool {
@@ -494,6 +597,21 @@ mod tests {
     }
 
     #[test]
+    fn flush_and_snapshot_clears_finished_metrics_between_runs() {
+        let (provider, reader) = test_provider();
+        let meter = provider.meter("test");
+        let labels = [KeyValue::new(crate::labels::PIPELINE, "my-pipe")];
+        let records_read = meter.u64_counter("pipeline.records_read").build();
+
+        records_read.add(10, &labels);
+        let first = reader.flush_and_snapshot(&provider, "my-pipe");
+        let second = reader.flush_and_snapshot(&provider, "my-pipe");
+
+        assert_eq!(first.records_read, 10);
+        assert_eq!(second.records_read, 0);
+    }
+
+    #[test]
     fn snapshot_uses_critical_path_max_across_shard_labeled_plugin_series() {
         let (provider, reader) = test_provider();
         let meter = provider.meter("test");
@@ -543,11 +661,12 @@ mod tests {
         let counter = meter.u64_counter("pipeline.records_read").build();
         counter.add(100, &[KeyValue::new(crate::labels::PIPELINE, "pipe-a")]);
         counter.add(200, &[KeyValue::new(crate::labels::PIPELINE, "pipe-b")]);
+        let _ = provider.force_flush();
 
-        let snap_a = reader.flush_and_snapshot(&provider, "pipe-a");
+        let snap_a = reader.snapshot_pipeline_result("pipe-a");
         assert_eq!(snap_a.records_read, 100);
 
-        let snap_b = reader.flush_and_snapshot(&provider, "pipe-b");
+        let snap_b = reader.snapshot_pipeline_result("pipe-b");
         assert_eq!(snap_b.records_read, 200);
     }
 
@@ -560,11 +679,12 @@ mod tests {
         counter.add(50, &[]);
         counter.add(100, &[KeyValue::new(crate::labels::PIPELINE, "pipe-a")]);
         counter.add(200, &[KeyValue::new(crate::labels::PIPELINE, "pipe-b")]);
+        let _ = provider.force_flush();
 
-        let snap_a = reader.flush_and_snapshot(&provider, "pipe-a");
+        let snap_a = reader.snapshot_pipeline_result("pipe-a");
         assert_eq!(snap_a.records_read, 100);
 
-        let snap_b = reader.flush_and_snapshot(&provider, "pipe-b");
+        let snap_b = reader.snapshot_pipeline_result("pipe-b");
         assert_eq!(snap_b.records_read, 200);
     }
 
