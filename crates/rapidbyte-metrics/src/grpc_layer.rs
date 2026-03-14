@@ -58,8 +58,8 @@ where
                 Err(_) => "error",
             };
             let labels = [
-                KeyValue::new("method", method),
-                KeyValue::new("status", status),
+                KeyValue::new(crate::labels::METHOD, method),
+                KeyValue::new(crate::labels::STATUS, status),
             ];
 
             instruments::grpc::request_duration().record(elapsed, &labels);

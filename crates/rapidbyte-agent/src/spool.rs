@@ -81,6 +81,12 @@ impl PreviewSpool {
         }
     }
 
+    #[allow(clippy::cast_precision_loss)]
+    fn record_spool_size(&self) {
+        rapidbyte_metrics::instruments::agent::spool_entries()
+            .record(self.entries.len() as f64, &[]);
+    }
+
     pub fn store(&mut self, key: PreviewKey, result: DryRunResult) {
         if let Some(old) = self.entries.remove(&key) {
             remove_entry_files(old);
@@ -105,9 +111,7 @@ impl PreviewSpool {
             },
         );
         rapidbyte_metrics::instruments::agent::previews_stored().add(1, &[]);
-        #[allow(clippy::cast_precision_loss)]
-        rapidbyte_metrics::instruments::agent::spool_entries()
-            .record(self.entries.len() as f64, &[]);
+        self.record_spool_size();
     }
 
     #[must_use]
@@ -189,9 +193,7 @@ impl PreviewSpool {
         }
         if count > 0 {
             rapidbyte_metrics::instruments::agent::previews_evicted().add(count as u64, &[]);
-            #[allow(clippy::cast_precision_loss)]
-            rapidbyte_metrics::instruments::agent::spool_entries()
-                .record(self.entries.len() as f64, &[]);
+            self.record_spool_size();
         }
         count
     }

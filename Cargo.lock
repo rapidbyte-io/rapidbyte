@@ -4241,6 +4241,7 @@ dependencies = [
  "prometheus",
  "rapidbyte-types",
  "serde_json",
+ "tokio",
  "tower 0.5.3",
  "tracing",
 ]

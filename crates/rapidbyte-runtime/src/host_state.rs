@@ -61,11 +61,12 @@ impl HostTimings {
     #[must_use]
     pub fn new(pipeline: &str, stream: &str, shard: usize) -> Self {
         use opentelemetry::KeyValue;
+        use rapidbyte_metrics::labels;
         Self {
             labels: vec![
-                KeyValue::new("pipeline", pipeline.to_owned()),
-                KeyValue::new("stream", stream.to_owned()),
-                KeyValue::new("shard", shard.to_string()),
+                KeyValue::new(labels::PIPELINE, pipeline.to_owned()),
+                KeyValue::new(labels::STREAM, stream.to_owned()),
+                KeyValue::new(labels::SHARD, shard.to_string()),
             ],
         }
     }

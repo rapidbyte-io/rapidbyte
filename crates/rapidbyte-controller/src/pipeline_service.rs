@@ -514,8 +514,10 @@ impl PipelineService for PipelineServiceImpl {
                 return Err(Status::internal(error.to_string()));
             }
             self.state.task_notify.notify_waiters();
-            rapidbyte_metrics::instruments::controller::runs_submitted()
-                .add(1, &[KeyValue::new("status", "accepted")]);
+            rapidbyte_metrics::instruments::controller::runs_submitted().add(
+                1,
+                &[KeyValue::new(rapidbyte_metrics::labels::STATUS, "accepted")],
+            );
             rapidbyte_metrics::instruments::controller::active_runs().add(1, &[]);
         }
 

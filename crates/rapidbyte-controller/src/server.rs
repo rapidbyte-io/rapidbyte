@@ -437,27 +437,10 @@ pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
     let otel_guard = Arc::new(rapidbyte_metrics::init("rapidbyte-controller")?);
 
     // Spawn Prometheus metrics HTTP server on port 9190
-    let metrics_guard = otel_guard.clone();
-    tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:9190").await.unwrap();
-        loop {
-            if let Ok((mut stream, _)) = listener.accept().await {
-                let guard = metrics_guard.clone();
-                tokio::spawn(async move {
-                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                    let mut buf = [0u8; 1024];
-                    let _ = stream.read(&mut buf).await;
-                    let body = guard.prometheus_text();
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\n\r\n{}",
-                        body.len(),
-                        body,
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                });
-            }
-        }
-    });
+    tokio::spawn(rapidbyte_metrics::serve_prometheus(
+        otel_guard.clone(),
+        9190,
+    ));
 
     let metadata_store = initialize_metadata_store(&config).await?;
 

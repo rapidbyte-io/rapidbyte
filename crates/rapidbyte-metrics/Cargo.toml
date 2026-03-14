@@ -11,6 +11,7 @@ opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 opentelemetry-prometheus = { workspace = true }
 prometheus = { workspace = true }
+tokio = { workspace = true }
 tracing = { workspace = true }
 dashmap = { workspace = true }
 serde_json = { workspace = true }

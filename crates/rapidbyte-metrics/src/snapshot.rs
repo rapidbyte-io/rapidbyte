@@ -55,8 +55,18 @@ impl SnapshotReader {
         PeriodicReader::builder(self.exporter.clone()).build()
     }
 
-    /// Force a collect and return a pipeline metrics snapshot,
-    /// filtered by the given pipeline label value.
+    /// Flush the meter provider and return a pipeline metrics snapshot.
+    #[must_use]
+    pub fn flush_and_snapshot(
+        &self,
+        meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
+        pipeline: &str,
+    ) -> PipelineMetricsSnapshot {
+        let _ = meter_provider.force_flush();
+        self.snapshot_pipeline_result(pipeline)
+    }
+
+    /// Return a pipeline metrics snapshot filtered by pipeline label.
     ///
     /// Note: [`InMemoryMetricExporter`] requires the [`PeriodicReader`] to have
     /// flushed. Call `meter_provider.force_flush()` before this method

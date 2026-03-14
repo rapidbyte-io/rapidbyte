@@ -378,8 +378,13 @@ impl AgentService for AgentServiceImpl {
             }
         }
 
-        rapidbyte_metrics::instruments::controller::heartbeat_received()
-            .add(1, &[KeyValue::new("agent_id", req.agent_id.clone())]);
+        rapidbyte_metrics::instruments::controller::heartbeat_received().add(
+            1,
+            &[KeyValue::new(
+                rapidbyte_metrics::labels::AGENT_ID,
+                req.agent_id.clone(),
+            )],
+        );
         Ok(Response::new(HeartbeatResponse { directives }))
     }
 
@@ -770,7 +775,7 @@ impl AgentService for AgentServiceImpl {
                     },
                 );
                 rapidbyte_metrics::instruments::controller::runs_completed()
-                    .add(1, &[KeyValue::new("status", "ok")]);
+                    .add(1, &[KeyValue::new(rapidbyte_metrics::labels::STATUS, "ok")]);
                 rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
             }
             TaskOutcome::Failed => {
@@ -929,8 +934,10 @@ impl AgentService for AgentServiceImpl {
                             })),
                         },
                     );
-                    rapidbyte_metrics::instruments::controller::runs_completed()
-                        .add(1, &[KeyValue::new("status", "error")]);
+                    rapidbyte_metrics::instruments::controller::runs_completed().add(
+                        1,
+                        &[KeyValue::new(rapidbyte_metrics::labels::STATUS, "error")],
+                    );
                     rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
                 }
             }
@@ -974,8 +981,13 @@ impl AgentService for AgentServiceImpl {
                         event: Some(run_event::Event::Cancelled(RunCancelled {})),
                     },
                 );
-                rapidbyte_metrics::instruments::controller::runs_completed()
-                    .add(1, &[KeyValue::new("status", "ok")]);
+                rapidbyte_metrics::instruments::controller::runs_completed().add(
+                    1,
+                    &[KeyValue::new(
+                        rapidbyte_metrics::labels::STATUS,
+                        "cancelled",
+                    )],
+                );
                 rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
             }
             TaskOutcome::Unspecified => unreachable!("invalid task outcome rejected above"),

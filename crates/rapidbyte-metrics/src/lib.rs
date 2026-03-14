@@ -61,6 +61,37 @@ impl OtelGuard {
     }
 }
 
+/// Spawn a Prometheus metrics HTTP server on the given port.
+///
+/// Serves the Prometheus text exposition format on every incoming TCP connection.
+/// Runs until the process exits. Intended to be called once at startup.
+///
+/// # Panics
+///
+/// Panics if the TCP listener cannot bind to the given port.
+pub async fn serve_prometheus(guard: std::sync::Arc<OtelGuard>, port: u16) {
+    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
+        .await
+        .unwrap();
+    loop {
+        if let Ok((mut stream, _)) = listener.accept().await {
+            let guard = guard.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf).await;
+                let body = guard.prometheus_text();
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\n\r\n",
+                    body.len(),
+                );
+                let _ = stream.write_all(header.as_bytes()).await;
+                let _ = stream.write_all(body.as_bytes()).await;
+            });
+        }
+    }
+}
+
 impl Drop for OtelGuard {
     fn drop(&mut self) {
         if let Err(e) = self.meter_provider.shutdown() {
@@ -100,10 +131,40 @@ pub fn init(service_name: &str) -> Result<OtelGuard> {
     let mut meter_builder = SdkMeterProvider::builder()
         .with_resource(resource.clone())
         .with_reader(prometheus_exporter)
-        .with_reader(snapshot_periodic_reader);
+        .with_reader(snapshot_periodic_reader)
+        .with_view(views::bucket_view(
+            "host.emit_batch",
+            views::fast_duration_buckets(),
+        ))
+        .with_view(views::bucket_view(
+            "host.next_batch",
+            views::fast_duration_buckets(),
+        ))
+        .with_view(views::bucket_view(
+            "host.compress",
+            views::fast_duration_buckets(),
+        ))
+        .with_view(views::bucket_view(
+            "host.decompress",
+            views::fast_duration_buckets(),
+        ))
+        .with_view(views::bucket_view(
+            "plugin.",
+            views::normal_duration_buckets(),
+        ))
+        .with_view(views::bucket_view(
+            "pipeline.duration",
+            views::slow_duration_buckets(),
+        ))
+        .with_view(views::bucket_view(
+            "agent.task_duration",
+            views::slow_duration_buckets(),
+        ));
 
-    // Optional OTLP metric exporter
-    if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
+    // Optional OTLP exporters (metrics + traces)
+    let otlp_enabled = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok();
+
+    if otlp_enabled {
         let otlp_exporter = opentelemetry_otlp::MetricExporter::builder()
             .with_tonic()
             .build()?;
@@ -115,7 +176,7 @@ pub fn init(service_name: &str) -> Result<OtelGuard> {
     opentelemetry::global::set_meter_provider(meter_provider.clone());
 
     // Traces
-    let tracer_provider = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
+    let tracer_provider = if otlp_enabled {
         let otlp_span_exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_tonic()
             .build()?;

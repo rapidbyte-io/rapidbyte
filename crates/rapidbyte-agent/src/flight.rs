@@ -81,8 +81,10 @@ impl FlightService for PreviewFlightService {
         &self,
         request: Request<Ticket>,
     ) -> Result<Response<Self::DoGetStream>, Status> {
-        rapidbyte_metrics::instruments::agent::flight_requests()
-            .add(1, &[KeyValue::new("method", "do_get")]);
+        rapidbyte_metrics::instruments::agent::flight_requests().add(
+            1,
+            &[KeyValue::new(rapidbyte_metrics::labels::METHOD, "do_get")],
+        );
 
         let ticket_bytes = request.into_inner().ticket;
         let payload = self
@@ -94,7 +96,10 @@ impl FlightService for PreviewFlightService {
         let batch_count = batches.len() as u64;
         rapidbyte_metrics::instruments::agent::flight_batches_served().add(
             batch_count,
-            &[KeyValue::new("stream", payload.stream_name.clone())],
+            &[KeyValue::new(
+                rapidbyte_metrics::labels::STREAM,
+                payload.stream_name.clone(),
+            )],
         );
 
         if batches.is_empty() {

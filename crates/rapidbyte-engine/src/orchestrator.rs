@@ -558,23 +558,15 @@ async fn execute_pipeline_once(
             if options.dry_run {
                 let duration_secs = start.elapsed().as_secs_f64();
 
-                // Flush OTel and take a snapshot for source timing
-                let _ = meter_prov.force_flush();
-                let snap = snap_reader.snapshot_pipeline_result(&config.pipeline);
+                let snap = snap_reader.flush_and_snapshot(meter_prov, &config.pipeline);
 
                 return Ok(PipelineOutcome::DryRun(DryRunResult {
                     streams: aggregated.dry_run_streams,
-                    source: SourceTiming {
-                        duration_secs: aggregated.max_source_duration,
-                        module_load_ms: modules.source_module_load_ms,
-                        connect_secs: snap.source_connect_secs,
-                        query_secs: snap.source_query_secs,
-                        fetch_secs: snap.source_fetch_secs,
-                        arrow_encode_secs: snap.source_encode_secs,
-                        emit_nanos: snap.emit_batch_nanos,
-                        compress_nanos: snap.compress_nanos,
-                        emit_count: snap.emit_count,
-                    },
+                    source: build_source_timing(
+                        &snap,
+                        aggregated.max_source_duration,
+                        modules.source_module_load_ms,
+                    ),
                     transform_count: config.transforms.len(),
                     transform_duration_secs: aggregated.transform_durations.iter().sum(),
                     duration_secs,
@@ -1537,9 +1529,7 @@ async fn finalize_run(
         return Err(err);
     }
 
-    // Flush OTel metrics and take a snapshot
-    let _ = meter_provider.force_flush();
-    let snap = snapshot_reader.snapshot_pipeline_result(&config.pipeline);
+    let snap = snapshot_reader.flush_and_snapshot(meter_provider, &config.pipeline);
 
     let plugin_internal_secs =
         snap.dest_connect_secs + snap.dest_flush_secs + snap.dest_commit_secs;
@@ -1588,17 +1578,11 @@ async fn finalize_run(
             bytes_read: aggregated.total_read_summary.bytes_read,
             bytes_written: aggregated.total_write_summary.bytes_written,
         },
-        source: SourceTiming {
-            duration_secs: aggregated.max_source_duration,
-            module_load_ms: modules.source_module_load_ms,
-            connect_secs: snap.source_connect_secs,
-            query_secs: snap.source_query_secs,
-            fetch_secs: snap.source_fetch_secs,
-            arrow_encode_secs: snap.source_encode_secs,
-            emit_nanos: snap.emit_batch_nanos,
-            compress_nanos: snap.compress_nanos,
-            emit_count: snap.emit_count,
-        },
+        source: build_source_timing(
+            &snap,
+            aggregated.max_source_duration,
+            modules.source_module_load_ms,
+        ),
         dest: DestTiming {
             duration_secs: aggregated.max_dest_duration,
             module_load_ms: modules.dest_module_load_ms,
@@ -1630,6 +1614,24 @@ fn reported_parallelism(config: &PipelineConfig, aggregated: &AggregatedStreamRe
         aggregated.execution_parallelism
     } else {
         resolve_effective_parallelism(config, false)
+    }
+}
+
+fn build_source_timing(
+    snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
+    max_source_duration: f64,
+    source_module_load_ms: u64,
+) -> SourceTiming {
+    SourceTiming {
+        duration_secs: max_source_duration,
+        module_load_ms: source_module_load_ms,
+        connect_secs: snap.source_connect_secs,
+        query_secs: snap.source_query_secs,
+        fetch_secs: snap.source_fetch_secs,
+        arrow_encode_secs: snap.source_encode_secs,
+        emit_nanos: snap.emit_batch_nanos,
+        compress_nanos: snap.compress_nanos,
+        emit_count: snap.emit_count,
     }
 }
 
