@@ -107,36 +107,51 @@ impl Context {
     }
 
     /// Add to a counter metric.
-    pub fn counter(&self, name: &str, value: u64) {
-        self.counter_with_labels(name, value, &[]);
+    pub fn counter(&self, name: &str, value: u64) -> Result<(), PluginError> {
+        self.counter_with_labels(name, value, &[])
     }
 
     /// Add to a counter metric with extra labels.
-    pub fn counter_with_labels(&self, name: &str, value: u64, labels: &[(&str, &str)]) {
+    pub fn counter_with_labels(
+        &self,
+        name: &str,
+        value: u64,
+        labels: &[(&str, &str)],
+    ) -> Result<(), PluginError> {
         let labels_json = self.merge_default_labels(labels);
-        let _ = host_ffi::counter_add(name, value, &labels_json);
+        host_ffi::counter_add(name, value, &labels_json)
     }
 
     /// Set a gauge metric.
-    pub fn gauge(&self, name: &str, value: f64) {
-        self.gauge_with_labels(name, value, &[]);
+    pub fn gauge(&self, name: &str, value: f64) -> Result<(), PluginError> {
+        self.gauge_with_labels(name, value, &[])
     }
 
     /// Set a gauge metric with extra labels.
-    pub fn gauge_with_labels(&self, name: &str, value: f64, labels: &[(&str, &str)]) {
+    pub fn gauge_with_labels(
+        &self,
+        name: &str,
+        value: f64,
+        labels: &[(&str, &str)],
+    ) -> Result<(), PluginError> {
         let labels_json = self.merge_default_labels(labels);
-        let _ = host_ffi::gauge_set(name, value, &labels_json);
+        host_ffi::gauge_set(name, value, &labels_json)
     }
 
     /// Record a histogram observation.
-    pub fn histogram(&self, name: &str, value: f64) {
-        self.histogram_with_labels(name, value, &[]);
+    pub fn histogram(&self, name: &str, value: f64) -> Result<(), PluginError> {
+        self.histogram_with_labels(name, value, &[])
     }
 
     /// Record a histogram observation with extra labels.
-    pub fn histogram_with_labels(&self, name: &str, value: f64, labels: &[(&str, &str)]) {
+    pub fn histogram_with_labels(
+        &self,
+        name: &str,
+        value: f64,
+        labels: &[(&str, &str)],
+    ) -> Result<(), PluginError> {
         let labels_json = self.merge_default_labels(labels);
-        let _ = host_ffi::histogram_record(name, value, &labels_json);
+        host_ffi::histogram_record(name, value, &labels_json)
     }
 
     fn merge_default_labels(&self, extra: &[(&str, &str)]) -> String {
@@ -293,9 +308,10 @@ mod tests {
         let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
         test_support::reset();
         let ctx = Context::new("test-plugin", "users");
-        ctx.counter("records_read", 42);
-        ctx.histogram("source_connect_secs", 0.5);
-        ctx.gauge_with_labels("rows_per_second", 1000.0, &[("phase", "scan")]);
+        ctx.counter("records_read", 42).unwrap();
+        ctx.histogram("source_connect_secs", 0.5).unwrap();
+        ctx.gauge_with_labels("rows_per_second", 1000.0, &[("phase", "scan")])
+            .unwrap();
 
         let calls = test_support::take_metric_calls();
         assert_eq!(calls.len(), 3);
@@ -353,7 +369,8 @@ mod tests {
                 ("run", "spoofed-run"),
                 ("phase", "scan"),
             ],
-        );
+        )
+        .unwrap();
 
         let calls = test_support::take_metric_calls();
         let MetricCall::Counter { labels_json, .. } = &calls[0] else {
@@ -369,6 +386,24 @@ mod tests {
                 "phase": "scan"
             })
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn test_typed_metric_methods_surface_host_failures() {
+        let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
+        test_support::reset();
+        test_support::set_metric_error(PluginError::internal(
+            "METRIC_REJECTED",
+            "metric rejected by host",
+        ));
+
+        let ctx = Context::new("test-plugin", "users");
+        let error = ctx
+            .counter("records_read", 1)
+            .expect_err("counter should return host error");
+        assert_eq!(error.code, "METRIC_REJECTED");
+        assert!(test_support::take_metric_calls().is_empty());
     }
 
     #[cfg(not(target_arch = "wasm32"))]

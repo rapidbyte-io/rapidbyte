@@ -63,7 +63,7 @@ fn emit_batch(
 
     ctx.emit_batch(&batch)
         .map_err(|e| format!("emit_batch failed: {}", e.message))?;
-    emit_read_metrics(ctx, state);
+    emit_read_metrics(ctx, state).map_err(|e| format!("emit_read_metrics failed: {}", e.message))?;
 
     rows.clear();
     Ok(())

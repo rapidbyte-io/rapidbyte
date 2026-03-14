@@ -311,22 +311,26 @@ fn evaluate_unique_rule(
     None
 }
 
-pub(crate) fn emit_validation_metrics(ctx: &Context, evaluation: &BatchEvaluation) {
+pub(crate) fn emit_validation_metrics(
+    ctx: &Context,
+    evaluation: &BatchEvaluation,
+) -> Result<(), PluginError> {
     for ((rule, field), count) in &evaluation.failure_counts {
         ctx.counter_with_labels(
             "validation_failures_total",
             *count,
             &[("rule", rule.as_str()), ("field", field.as_str())],
-        );
+        )?;
     }
     ctx.counter(
         "validation_rows_valid_total",
         evaluation.valid_indices.len() as u64,
-    );
+    )?;
     ctx.counter(
         "validation_rows_invalid_total",
         evaluation.invalid_rows.len() as u64,
-    );
+    )?;
+    Ok(())
 }
 
 fn string_value<'a>(array: &'a dyn Array, row: usize) -> Option<&'a str> {
@@ -784,7 +788,7 @@ mod tests {
             failure_counts: BTreeMap::from([(("regex".to_string(), "email".to_string()), 3)]),
         };
 
-        emit_validation_metrics(&ctx, &evaluation);
+        emit_validation_metrics(&ctx, &evaluation).unwrap();
 
         let calls = calls.lock().expect("metric calls lock poisoned").clone();
         let MetricCall::Counter {

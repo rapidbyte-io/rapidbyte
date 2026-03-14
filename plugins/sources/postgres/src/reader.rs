@@ -245,7 +245,7 @@ fn emit_accumulated_batch(
 
         ctx.emit_batch(&batch)
             .map_err(|e| format!("emit_batch failed: {}", e.message))?;
-        emit_read_metrics(ctx, state);
+        emit_read_metrics(ctx, state).map_err(|e| format!("emit_read_metrics failed: {}", e.message))?;
     }
 
     *estimated_bytes = BATCH_OVERHEAD_BYTES;
@@ -668,7 +668,8 @@ pub async fn read_stream(
         fetch_secs,
         arrow_encode_secs,
     };
-    emit_read_perf_metrics(ctx, &perf);
+    emit_read_perf_metrics(ctx, &perf)
+        .map_err(|e| format!("emit_read_perf_metrics failed: {}", e.message))?;
 
     Ok(ReadSummary {
         records_read: state.total_records,

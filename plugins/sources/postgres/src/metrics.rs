@@ -17,23 +17,25 @@ pub(crate) struct EmitState {
 }
 
 /// Emit per-batch source read counter deltas for a stream.
-pub(crate) fn emit_read_metrics(ctx: &Context, state: &mut EmitState) {
+pub(crate) fn emit_read_metrics(ctx: &Context, state: &mut EmitState) -> Result<(), PluginError> {
     let delta_records = state.total_records - state.last_emitted_records;
     let delta_bytes = state.total_bytes - state.last_emitted_bytes;
     state.last_emitted_records = state.total_records;
     state.last_emitted_bytes = state.total_bytes;
     if delta_records > 0 {
-        ctx.counter("records_read", delta_records);
+        ctx.counter("records_read", delta_records)?;
     }
     if delta_bytes > 0 {
-        ctx.counter("bytes_read", delta_bytes);
+        ctx.counter("bytes_read", delta_bytes)?;
     }
+    Ok(())
 }
 
 /// Emit source read timing metrics so the host can aggregate per-phase timings.
-pub(crate) fn emit_read_perf_metrics(ctx: &Context, perf: &ReadPerf) {
-    ctx.histogram("source_connect_secs", perf.connect_secs);
-    ctx.histogram("source_query_secs", perf.query_secs);
-    ctx.histogram("source_fetch_secs", perf.fetch_secs);
-    ctx.histogram("source_arrow_encode_secs", perf.arrow_encode_secs);
+pub(crate) fn emit_read_perf_metrics(ctx: &Context, perf: &ReadPerf) -> Result<(), PluginError> {
+    ctx.histogram("source_connect_secs", perf.connect_secs)?;
+    ctx.histogram("source_query_secs", perf.query_secs)?;
+    ctx.histogram("source_fetch_secs", perf.fetch_secs)?;
+    ctx.histogram("source_arrow_encode_secs", perf.arrow_encode_secs)?;
+    Ok(())
 }

@@ -77,7 +77,7 @@ pub async fn write_stream(
             Ok(None) => break,
             Ok(Some(decoded)) => {
                 arrow_decode_secs += decoded.decode_secs;
-                ctx.histogram("dest_arrow_decode_secs", decoded.decode_secs);
+                ctx.histogram("dest_arrow_decode_secs", decoded.decode_secs)?;
 
                 if let Err(e) = session.process_batch(&decoded.schema, &decoded.batches).await {
                     loop_error = Some(e);
@@ -108,7 +108,7 @@ pub async fn write_stream(
         commit_secs: result.commit_secs,
         arrow_decode_secs,
     };
-    emit_write_perf_metrics(ctx, &perf);
+    emit_write_perf_metrics(ctx, &perf)?;
 
     Ok(WriteSummary {
         records_written: result.total_rows,

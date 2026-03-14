@@ -37,7 +37,7 @@ pub async fn run(
             bytes_in += batch.get_array_memory_size() as u64;
 
             let evaluation = evaluate_batch(batch, config);
-            emit_validation_metrics(ctx, &evaluation);
+            emit_validation_metrics(ctx, &evaluation)?;
 
             if !evaluation.valid_indices.is_empty() {
                 let filtered = select_rows(batch, &evaluation.valid_indices)?;

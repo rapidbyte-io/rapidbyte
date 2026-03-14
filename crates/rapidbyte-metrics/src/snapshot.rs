@@ -228,10 +228,14 @@ fn extract_metric_value(
             .map(|dp| dp.value)
             .sum();
         match name {
-            "pipeline.records_read" => snap.records_read = total,
-            "pipeline.records_written" => snap.records_written = total,
-            "pipeline.bytes_read" => snap.bytes_read = total,
-            "pipeline.bytes_written" => snap.bytes_written = total,
+            "pipeline.records_read" => snap.records_read = snap.records_read.saturating_add(total),
+            "pipeline.records_written" => {
+                snap.records_written = snap.records_written.saturating_add(total);
+            }
+            "pipeline.bytes_read" => snap.bytes_read = snap.bytes_read.saturating_add(total),
+            "pipeline.bytes_written" => {
+                snap.bytes_written = snap.bytes_written.saturating_add(total);
+            }
             _ => {}
         }
         return;
@@ -252,37 +256,47 @@ fn extract_metric_value(
 
         match name {
             // Plugin source timings (seconds)
-            "plugin.source_connect_duration" => snap.source_connect_secs = total_sum,
-            "plugin.source_query_duration" => snap.source_query_secs = total_sum,
-            "plugin.source_fetch_duration" => snap.source_fetch_secs = total_sum,
-            "plugin.source_encode_duration" => snap.source_encode_secs = total_sum,
+            "plugin.source_connect_duration" => snap.source_connect_secs += total_sum,
+            "plugin.source_query_duration" => snap.source_query_secs += total_sum,
+            "plugin.source_fetch_duration" => snap.source_fetch_secs += total_sum,
+            "plugin.source_encode_duration" => snap.source_encode_secs += total_sum,
             // Plugin dest timings (seconds)
-            "plugin.dest_connect_duration" => snap.dest_connect_secs = total_sum,
-            "plugin.dest_flush_duration" => snap.dest_flush_secs = total_sum,
-            "plugin.dest_commit_duration" => snap.dest_commit_secs = total_sum,
-            "plugin.dest_decode_duration" => snap.dest_decode_secs = total_sum,
+            "plugin.dest_connect_duration" => snap.dest_connect_secs += total_sum,
+            "plugin.dest_flush_duration" => snap.dest_flush_secs += total_sum,
+            "plugin.dest_commit_duration" => snap.dest_commit_secs += total_sum,
+            "plugin.dest_decode_duration" => snap.dest_decode_secs += total_sum,
             // Host timings (seconds → nanos)
             "host.emit_batch_duration" => {
-                snap.emit_batch_nanos = (total_sum * 1e9) as u64;
-                snap.emit_count = total_count;
+                snap.emit_batch_nanos = snap
+                    .emit_batch_nanos
+                    .saturating_add((total_sum * 1e9) as u64);
+                snap.emit_count = snap.emit_count.saturating_add(total_count);
             }
             "host.next_batch_duration" => {
-                snap.next_batch_nanos = (total_sum * 1e9) as u64;
-                snap.next_batch_count = total_count;
+                snap.next_batch_nanos = snap
+                    .next_batch_nanos
+                    .saturating_add((total_sum * 1e9) as u64);
+                snap.next_batch_count = snap.next_batch_count.saturating_add(total_count);
             }
             "host.next_batch_wait_duration" => {
-                snap.next_batch_wait_nanos = (total_sum * 1e9) as u64;
+                snap.next_batch_wait_nanos = snap
+                    .next_batch_wait_nanos
+                    .saturating_add((total_sum * 1e9) as u64);
             }
             "host.next_batch_process_duration" => {
-                snap.next_batch_process_nanos = (total_sum * 1e9) as u64;
+                snap.next_batch_process_nanos = snap
+                    .next_batch_process_nanos
+                    .saturating_add((total_sum * 1e9) as u64);
             }
             "host.compress_duration" => {
-                snap.compress_nanos = (total_sum * 1e9) as u64;
+                snap.compress_nanos = snap.compress_nanos.saturating_add((total_sum * 1e9) as u64);
             }
             "host.decompress_duration" => {
-                snap.decompress_nanos = (total_sum * 1e9) as u64;
+                snap.decompress_nanos = snap
+                    .decompress_nanos
+                    .saturating_add((total_sum * 1e9) as u64);
             }
-            "pipeline.duration" => snap.pipeline_duration_secs = total_sum,
+            "pipeline.duration" => snap.pipeline_duration_secs += total_sum,
             _ => {}
         }
     }
@@ -346,6 +360,33 @@ mod tests {
         hist.record(1.5, &labels);
 
         let snap = reader.flush_and_snapshot(&provider, "my-pipe");
+        assert!((snap.source_connect_secs - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn snapshot_accumulates_counters_and_histograms_across_multiple_flushes() {
+        let (provider, reader) = test_provider();
+        let meter = provider.meter("test");
+        let labels = [
+            KeyValue::new(crate::labels::PIPELINE, "my-pipe"),
+            KeyValue::new(crate::labels::RUN, "run-1"),
+        ];
+
+        let records_read = meter.u64_counter("pipeline.records_read").build();
+        let source_connect = meter
+            .f64_histogram("plugin.source_connect_duration")
+            .build();
+
+        records_read.add(100, &labels);
+        source_connect.record(0.5, &labels);
+        let _ = provider.force_flush();
+
+        records_read.add(50, &labels);
+        source_connect.record(1.5, &labels);
+        let _ = provider.force_flush();
+
+        let snap = reader.snapshot_pipeline_result_for_run("my-pipe", Some("run-1"));
+        assert_eq!(snap.records_read, 150);
         assert!((snap.source_connect_secs - 2.0).abs() < 0.001);
     }
 

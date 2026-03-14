@@ -131,9 +131,14 @@ pub(crate) mod test_support {
     }
 
     static METRIC_CALLS: OnceLock<Mutex<Vec<MetricCall>>> = OnceLock::new();
+    static METRIC_ERROR: OnceLock<Mutex<Option<PluginError>>> = OnceLock::new();
 
     fn metric_calls() -> &'static Mutex<Vec<MetricCall>> {
         METRIC_CALLS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    fn metric_error() -> &'static Mutex<Option<PluginError>> {
+        METRIC_ERROR.get_or_init(|| Mutex::new(None))
     }
 
     pub fn reset() {
@@ -141,6 +146,18 @@ pub(crate) mod test_support {
             .lock()
             .expect("metric calls lock poisoned")
             .clear();
+        *metric_error().lock().expect("metric error lock poisoned") = None;
+    }
+
+    pub fn set_metric_error(error: PluginError) {
+        *metric_error().lock().expect("metric error lock poisoned") = Some(error);
+    }
+
+    fn take_metric_error() -> Option<PluginError> {
+        metric_error()
+            .lock()
+            .expect("metric error lock poisoned")
+            .clone()
     }
 
     pub fn take_metric_calls() -> Vec<MetricCall> {
@@ -227,6 +244,9 @@ pub(crate) mod test_support {
             value: u64,
             labels_json: &str,
         ) -> Result<(), PluginError> {
+            if let Some(error) = take_metric_error() {
+                return Err(error);
+            }
             metric_calls()
                 .lock()
                 .expect("metric calls lock poisoned")
@@ -239,6 +259,9 @@ pub(crate) mod test_support {
         }
 
         fn gauge_set(&self, name: &str, value: f64, labels_json: &str) -> Result<(), PluginError> {
+            if let Some(error) = take_metric_error() {
+                return Err(error);
+            }
             metric_calls()
                 .lock()
                 .expect("metric calls lock poisoned")
@@ -256,6 +279,9 @@ pub(crate) mod test_support {
             value: f64,
             labels_json: &str,
         ) -> Result<(), PluginError> {
+            if let Some(error) = take_metric_error() {
+                return Err(error);
+            }
             metric_calls()
                 .lock()
                 .expect("metric calls lock poisoned")

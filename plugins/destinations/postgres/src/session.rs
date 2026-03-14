@@ -256,10 +256,14 @@ impl<'a> WriteSession<'a> {
         self.stats.last_emitted_rows = self.stats.total_rows;
         self.stats.last_emitted_bytes = self.stats.total_bytes;
         if delta_rows > 0 {
-            self.ctx.counter("records_written", delta_rows);
+            self.ctx
+                .counter("records_written", delta_rows)
+                .map_err(|e| e.message.clone())?;
         }
         if delta_bytes > 0 {
-            self.ctx.counter("bytes_written", delta_bytes);
+            self.ctx
+                .counter("bytes_written", delta_bytes)
+                .map_err(|e| e.message.clone())?;
         }
 
         self.maybe_checkpoint().await?;
