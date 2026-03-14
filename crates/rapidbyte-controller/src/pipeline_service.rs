@@ -1753,22 +1753,11 @@ mod tests {
         let _ = provider.force_flush();
         let metrics = exporter.get_finished_metrics().unwrap_or_default();
 
-        let mut found_active_runs_decrement = false;
         let mut completed_cancelled: u64 = 0;
 
         for rm in &metrics {
             for sm in &rm.scope_metrics {
                 for m in &sm.metrics {
-                    if m.name == "controller.active_runs" {
-                        if let Some(sum) = m.data.as_ref().as_any().downcast_ref::<Sum<i64>>() {
-                            // With delta temporality the net includes our +1 (submit) and
-                            // -1 (cancel). Concurrent tests may add extra +1s, so we just
-                            // verify a negative data-point was recorded (the decrement).
-                            found_active_runs_decrement =
-                                sum.data_points.iter().any(|dp| dp.value < 0)
-                                    || sum.data_points.iter().map(|dp| dp.value).sum::<i64>() <= 0;
-                        }
-                    }
                     if m.name == "controller.runs_completed" {
                         if let Some(sum) = m.data.as_ref().as_any().downcast_ref::<Sum<u64>>() {
                             completed_cancelled = sum
@@ -1788,15 +1777,11 @@ mod tests {
             }
         }
 
+        // The active_runs decrement (line 320) is on the same code path as
+        // runs_completed above (line 313); verifying one proves both fire.
         assert!(
             completed_cancelled >= 1,
             "runs_completed{{status=cancelled}} should be >= 1, got {completed_cancelled}"
-        );
-        // The active_runs decrement is on the same code path as runs_completed above;
-        // if the counter recorded a cancellation the decrement also fired.
-        assert!(
-            found_active_runs_decrement || completed_cancelled >= 1,
-            "active_runs should have recorded a decrement"
         );
     }
 }
