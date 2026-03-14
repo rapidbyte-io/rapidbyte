@@ -544,17 +544,7 @@ mod tests {
     use crate::store::test_support::FailingMetadataStore;
     use opentelemetry::metrics::MeterProvider;
     use opentelemetry_sdk::metrics::data::Sum;
-    use opentelemetry_sdk::metrics::{
-        InMemoryMetricExporter, InMemoryMetricExporterBuilder, PeriodicReader, SdkMeterProvider,
-    };
-
-    fn metric_test_provider() -> (SdkMeterProvider, InMemoryMetricExporter) {
-        let exporter = InMemoryMetricExporterBuilder::new().build();
-        let provider = SdkMeterProvider::builder()
-            .with_reader(PeriodicReader::builder(exporter.clone()).build())
-            .build();
-        (provider, exporter)
-    }
+    use opentelemetry_sdk::metrics::InMemoryMetricExporter;
 
     fn active_runs_value(exporter: &InMemoryMetricExporter) -> i64 {
         let metrics = exporter.get_finished_metrics().unwrap_or_default();
@@ -682,7 +672,7 @@ mod tests {
 
     #[test]
     fn decrement_active_runs_records_metric() {
-        let (provider, exporter) = metric_test_provider();
+        let (provider, exporter) = rapidbyte_metrics::test_support::exporter_test_provider();
         let counter = provider
             .meter("test")
             .i64_up_down_counter("controller.active_runs")

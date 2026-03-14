@@ -1153,21 +1153,11 @@ mod tests {
     use super::*;
     use opentelemetry::global;
     use opentelemetry_sdk::metrics::data::{Histogram, Sum};
-    use opentelemetry_sdk::metrics::{
-        InMemoryMetricExporter, InMemoryMetricExporterBuilder, PeriodicReader, SdkMeterProvider,
-    };
+    use opentelemetry_sdk::metrics::InMemoryMetricExporter;
     use rapidbyte_state::SqliteStateBackend;
     use std::sync::LazyLock;
 
     static METRIC_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-    fn metric_test_provider() -> (SdkMeterProvider, InMemoryMetricExporter) {
-        let exporter = InMemoryMetricExporterBuilder::new().build();
-        let provider = SdkMeterProvider::builder()
-            .with_reader(PeriodicReader::builder(exporter.clone()).build())
-            .build();
-        (provider, exporter)
-    }
 
     fn metric_labels(exporter: &InMemoryMetricExporter, metric_name: &str) -> serde_json::Value {
         let metrics = exporter.get_finished_metrics().unwrap_or_default();
@@ -1421,7 +1411,7 @@ mod tests {
     #[test]
     fn reserved_metric_labels_are_rewritten_to_host_scope() {
         let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
-        let (provider, exporter) = metric_test_provider();
+        let (provider, exporter) = rapidbyte_metrics::test_support::exporter_test_provider();
         global::set_meter_provider(provider.clone());
 
         let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
@@ -1460,7 +1450,7 @@ mod tests {
     #[test]
     fn histogram_labels_include_host_shard_scope() {
         let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
-        let (provider, exporter) = metric_test_provider();
+        let (provider, exporter) = rapidbyte_metrics::test_support::exporter_test_provider();
         global::set_meter_provider(provider.clone());
 
         let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
