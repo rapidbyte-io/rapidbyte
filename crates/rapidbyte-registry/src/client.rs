@@ -21,6 +21,10 @@ pub struct RegistryConfig {
     pub insecure: bool,
     /// Optional basic-auth credentials `(username, password)`.
     pub credentials: Option<(String, String)>,
+    /// Default registry to prepend when plugin refs don't include a registry host.
+    /// E.g. `"registry.example.com"` makes `source/postgres:1.0.0` resolve to
+    /// `registry.example.com/source/postgres:1.0.0`.
+    pub default_registry: Option<String>,
 }
 
 /// High-level OCI registry client for rapidbyte plugin artifacts.
@@ -196,7 +200,7 @@ mod tests {
     fn creates_client_with_insecure_config() {
         let config = RegistryConfig {
             insecure: true,
-            credentials: None,
+            ..Default::default()
         };
         let client = RegistryClient::new(&config);
         assert!(client.is_ok());
@@ -205,8 +209,8 @@ mod tests {
     #[test]
     fn creates_client_with_basic_auth() {
         let config = RegistryConfig {
-            insecure: false,
             credentials: Some(("user".to_owned(), "pass".to_owned())),
+            ..Default::default()
         };
         let client = RegistryClient::new(&config).unwrap();
         assert_eq!(

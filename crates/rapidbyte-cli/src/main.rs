@@ -71,6 +71,14 @@ struct Cli {
     /// Suppress all output (exit code only, errors on stderr)
     #[arg(short, long, global = true)]
     quiet: bool,
+
+    /// Default OCI registry for plugin resolution (e.g. registry.example.com/plugins)
+    #[arg(long, global = true, env = "RAPIDBYTE_REGISTRY_URL")]
+    registry_url: Option<String>,
+
+    /// Use HTTP instead of HTTPS for plugin registry (for local dev registries)
+    #[arg(long, global = true, env = "RAPIDBYTE_REGISTRY_INSECURE")]
+    registry_insecure: bool,
 }
 
 #[derive(Subcommand)]
@@ -317,6 +325,12 @@ async fn main() -> ExitCode {
     };
     let tls = tls.is_configured().then_some(tls);
 
+    let registry_config = rapidbyte_registry::RegistryConfig {
+        insecure: cli.registry_insecure,
+        default_registry: cli.registry_url.clone(),
+        ..Default::default()
+    };
+
     let result = match cli.command {
         Commands::Run {
             pipeline,
@@ -333,6 +347,7 @@ async fn main() -> ExitCode {
                 cli.auth_token.as_deref(),
                 tls.as_ref(),
                 &otel_guard,
+                &registry_config,
             )
             .await
         }
@@ -370,8 +385,12 @@ async fn main() -> ExitCode {
             )
             .await
         }
-        Commands::Check { pipeline } => commands::check::execute(&pipeline, verbosity).await,
-        Commands::Discover { pipeline } => commands::discover::execute(&pipeline, verbosity).await,
+        Commands::Check { pipeline } => {
+            commands::check::execute(&pipeline, verbosity, &registry_config).await
+        }
+        Commands::Discover { pipeline } => {
+            commands::discover::execute(&pipeline, verbosity, &registry_config).await
+        }
         Commands::Plugin { command } => commands::plugin::execute(command).await,
         Commands::Scaffold { name, output } => commands::scaffold::run(&name, output.as_deref()),
         Commands::Dev => commands::dev::execute().await,

@@ -428,7 +428,8 @@ async fn process_task(
 
     let registry_config = rapidbyte_registry::RegistryConfig {
         insecure: ctx.config.registry_insecure,
-        credentials: None, // TODO: add credential support later
+        credentials: None,
+        default_registry: ctx.config.registry_url.clone(),
     };
     let result = executor::execute_task(
         &task.pipeline_yaml_utf8,

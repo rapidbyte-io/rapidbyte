@@ -210,6 +210,15 @@ pub async fn resolve_plugin(
 ) -> Result<PathBuf> {
     if is_oci_reference(use_ref) {
         resolve_plugin_from_registry(use_ref, registry_config).await
+    } else if let Some(default_registry) = &registry_config.default_registry {
+        // Prepend default registry to make a full OCI reference.
+        let full_ref = format!("{default_registry}/{use_ref}");
+        tracing::debug!(
+            use_ref,
+            full_ref,
+            "prepending default registry to plugin reference"
+        );
+        resolve_plugin_from_registry(&full_ref, registry_config).await
     } else {
         resolve_plugin_path(use_ref, kind)
     }

@@ -16,12 +16,14 @@ use crate::Verbosity;
 /// # Errors
 ///
 /// Returns `Err` if pipeline parsing, validation, or connectivity check fails.
-pub async fn execute(pipeline_path: &Path, verbosity: Verbosity) -> Result<()> {
+pub async fn execute(
+    pipeline_path: &Path,
+    verbosity: Verbosity,
+    registry_config: &rapidbyte_registry::RegistryConfig,
+) -> Result<()> {
     let config = super::load_pipeline(pipeline_path)?;
 
-    let result =
-        orchestrator::check_pipeline(&config, &rapidbyte_registry::RegistryConfig::default())
-            .await?;
+    let result = orchestrator::check_pipeline(&config, registry_config).await?;
 
     if verbosity != Verbosity::Quiet {
         if let Some(outcome) = &result.source_manifest {

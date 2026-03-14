@@ -14,14 +14,18 @@ use crate::Verbosity;
 /// # Errors
 ///
 /// Returns `Err` if pipeline parsing, validation, or schema discovery fails.
-pub async fn execute(pipeline_path: &Path, verbosity: Verbosity) -> Result<()> {
+pub async fn execute(
+    pipeline_path: &Path,
+    verbosity: Verbosity,
+    registry_config: &rapidbyte_registry::RegistryConfig,
+) -> Result<()> {
     let config = super::load_pipeline(pipeline_path)?;
 
     // Discover catalog from source plugin
     let catalog = orchestrator::discover_plugin(
         &config.source.use_ref,
         &config.source.config,
-        &rapidbyte_registry::RegistryConfig::default(),
+        registry_config,
     )
     .await?;
 

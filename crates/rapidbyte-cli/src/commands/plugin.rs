@@ -67,7 +67,7 @@ async fn pull(plugin_ref_str: &str, insecure: bool) -> Result<()> {
 
     let config = RegistryConfig {
         insecure,
-        credentials: None,
+        ..Default::default()
     };
     let client = RegistryClient::new(&config)?;
 
@@ -106,7 +106,7 @@ async fn push(plugin_ref_str: &str, wasm_path: &PathBuf, insecure: bool) -> Resu
 
     let config = RegistryConfig {
         insecure,
-        credentials: None,
+        ..Default::default()
     };
     let client = RegistryClient::new(&config)?;
 
@@ -141,7 +141,7 @@ async fn inspect(plugin_ref_str: &str, insecure: bool) -> Result<()> {
     // Pull manifest only from registry.
     let config = RegistryConfig {
         insecure,
-        credentials: None,
+        ..Default::default()
     };
     let client = RegistryClient::new(&config)?;
 
@@ -162,7 +162,7 @@ async fn tags(plugin_ref_str: &str, insecure: bool) -> Result<()> {
 
     let config = RegistryConfig {
         insecure,
-        credentials: None,
+        ..Default::default()
     };
     let client = RegistryClient::new(&config)?;
 
