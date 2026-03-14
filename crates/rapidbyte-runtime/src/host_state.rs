@@ -377,6 +377,19 @@ impl ComponentHostState {
         self.identity.stream.as_str()
     }
 
+    /// Inject the pipeline label into metric labels if not already present.
+    fn ensure_pipeline_label(&self, labels: &mut Vec<opentelemetry::KeyValue>) {
+        let has_pipeline = labels
+            .iter()
+            .any(|kv| kv.key.as_str() == rapidbyte_metrics::labels::PIPELINE);
+        if !has_pipeline {
+            labels.push(opentelemetry::KeyValue::new(
+                rapidbyte_metrics::labels::PIPELINE,
+                self.identity.pipeline.as_str().to_owned(),
+            ));
+        }
+    }
+
     fn next_checkpoint_frontier(&mut self) -> u64 {
         if let Some(checkpoint_id) = self.batch.current_checkpoint_id {
             return checkpoint_id;
@@ -694,13 +707,20 @@ impl ComponentHostState {
         value: u64,
         labels_json: String,
     ) -> Result<(), PluginError> {
-        let labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
+        let mut labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
+        self.ensure_pipeline_label(&mut labels);
         match name.as_str() {
             "records_read" => {
                 rapidbyte_metrics::instruments::pipeline::records_read().add(value, &labels);
             }
             "records_written" => {
                 rapidbyte_metrics::instruments::pipeline::records_written().add(value, &labels);
+            }
+            "bytes_read" => {
+                rapidbyte_metrics::instruments::pipeline::bytes_read().add(value, &labels);
+            }
+            "bytes_written" => {
+                rapidbyte_metrics::instruments::pipeline::bytes_written().add(value, &labels);
             }
             _ => {
                 rapidbyte_metrics::instruments::plugin::custom_counter(&name).add(value, &labels);
@@ -728,7 +748,8 @@ impl ComponentHostState {
         value: f64,
         labels_json: String,
     ) -> Result<(), PluginError> {
-        let labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
+        let mut labels = rapidbyte_metrics::labels::parse_bounded_labels(&labels_json);
+        self.ensure_pipeline_label(&mut labels);
         match name.as_str() {
             "source_connect_secs" => {
                 rapidbyte_metrics::instruments::plugin::source_connect_duration()

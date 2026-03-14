@@ -201,6 +201,7 @@ async fn distributed_submit_and_complete() {
             allow_insecure_default_signing_key: false,
             controller_tls: None,
             flight_tls: None,
+            metrics_listen: None,
         };
         rapidbyte_agent::run(config)
             .await

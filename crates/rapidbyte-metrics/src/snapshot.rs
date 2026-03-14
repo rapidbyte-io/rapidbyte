@@ -95,19 +95,34 @@ impl Default for SnapshotReader {
     }
 }
 
+/// Check whether a data point's attributes contain a matching pipeline label.
+fn has_pipeline_attr(attrs: &[opentelemetry::KeyValue], pipeline: &str) -> bool {
+    // If no pipeline label is present, include the data point (host/global instruments).
+    // If present, it must match the requested pipeline.
+    attrs
+        .iter()
+        .all(|kv| kv.key.as_str() != crate::labels::PIPELINE || kv.value.as_str() == pipeline)
+}
+
 /// Extract a metric value into the snapshot struct by matching instrument name.
+/// Only data points matching the requested pipeline are included.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn extract_metric_value(
     name: &str,
     data: &dyn Aggregation,
-    _pipeline: &str,
+    pipeline: &str,
     snap: &mut PipelineMetricsSnapshot,
 ) {
     use opentelemetry_sdk::metrics::data::{Histogram, Sum};
 
     // Counter instruments produce Sum<u64>
     if let Some(sum) = data.as_any().downcast_ref::<Sum<u64>>() {
-        let total: u64 = sum.data_points.iter().map(|dp| dp.value).sum();
+        let total: u64 = sum
+            .data_points
+            .iter()
+            .filter(|dp| has_pipeline_attr(&dp.attributes, pipeline))
+            .map(|dp| dp.value)
+            .sum();
         match name {
             "pipeline.records_read" => snap.records_read = total,
             "pipeline.records_written" => snap.records_written = total,
@@ -120,8 +135,16 @@ fn extract_metric_value(
 
     // Duration instruments produce Histogram<f64> (values in seconds)
     if let Some(hist) = data.as_any().downcast_ref::<Histogram<f64>>() {
-        let total_sum: f64 = hist.data_points.iter().map(|dp| dp.sum).sum();
-        let total_count: u64 = hist.data_points.iter().map(|dp| dp.count).sum();
+        let filtered = hist
+            .data_points
+            .iter()
+            .filter(|dp| has_pipeline_attr(&dp.attributes, pipeline));
+        let mut total_sum: f64 = 0.0;
+        let mut total_count: u64 = 0;
+        for dp in filtered {
+            total_sum += dp.sum;
+            total_count += dp.count;
+        }
 
         match name {
             // Plugin source timings (seconds)
@@ -164,6 +187,20 @@ fn extract_metric_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentelemetry::metrics::MeterProvider;
+    use opentelemetry::KeyValue;
+    use opentelemetry_sdk::metrics::SdkMeterProvider;
+    use opentelemetry_sdk::Resource;
+
+    /// Create a test meter provider wired to a snapshot reader.
+    fn test_provider() -> (SdkMeterProvider, SnapshotReader) {
+        let reader = SnapshotReader::new();
+        let provider = SdkMeterProvider::builder()
+            .with_resource(Resource::builder().with_service_name("test").build())
+            .with_reader(reader.build_reader())
+            .build();
+        (provider, reader)
+    }
 
     #[test]
     fn snapshot_returns_default_when_no_metrics_recorded() {
@@ -171,5 +208,71 @@ mod tests {
         let result = reader.snapshot_pipeline_result("test-pipeline");
         assert_eq!(result.records_read, 0);
         assert_eq!(result.records_written, 0);
+    }
+
+    #[test]
+    fn snapshot_extracts_counter_values() {
+        let (provider, reader) = test_provider();
+        let meter = provider.meter("test");
+
+        let records_read = meter.u64_counter("pipeline.records_read").build();
+        let bytes_read = meter.u64_counter("pipeline.bytes_read").build();
+        let labels = [KeyValue::new(crate::labels::PIPELINE, "my-pipe")];
+
+        records_read.add(100, &labels);
+        records_read.add(50, &labels);
+        bytes_read.add(4096, &labels);
+
+        let snap = reader.flush_and_snapshot(&provider, "my-pipe");
+        assert_eq!(snap.records_read, 150);
+        assert_eq!(snap.bytes_read, 4096);
+    }
+
+    #[test]
+    fn snapshot_extracts_histogram_values() {
+        let (provider, reader) = test_provider();
+        let meter = provider.meter("test");
+
+        let hist = meter
+            .f64_histogram("plugin.source_connect_duration")
+            .build();
+        let labels = [KeyValue::new(crate::labels::PIPELINE, "my-pipe")];
+
+        hist.record(0.5, &labels);
+        hist.record(1.5, &labels);
+
+        let snap = reader.flush_and_snapshot(&provider, "my-pipe");
+        assert!((snap.source_connect_secs - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn snapshot_filters_by_pipeline_label() {
+        let (provider, reader) = test_provider();
+        let meter = provider.meter("test");
+
+        let counter = meter.u64_counter("pipeline.records_read").build();
+        counter.add(100, &[KeyValue::new(crate::labels::PIPELINE, "pipe-a")]);
+        counter.add(200, &[KeyValue::new(crate::labels::PIPELINE, "pipe-b")]);
+
+        let snap_a = reader.flush_and_snapshot(&provider, "pipe-a");
+        assert_eq!(snap_a.records_read, 100);
+
+        let snap_b = reader.flush_and_snapshot(&provider, "pipe-b");
+        assert_eq!(snap_b.records_read, 200);
+    }
+
+    #[test]
+    fn snapshot_host_timing_converts_seconds_to_nanos() {
+        let (provider, reader) = test_provider();
+        let meter = provider.meter("test");
+
+        let hist = meter.f64_histogram("host.emit_batch_duration").build();
+        let labels = [KeyValue::new(crate::labels::PIPELINE, "my-pipe")];
+        hist.record(0.001, &labels); // 1ms
+        hist.record(0.002, &labels); // 2ms
+
+        let snap = reader.flush_and_snapshot(&provider, "my-pipe");
+        assert_eq!(snap.emit_batch_nanos, 3_000_000); // 3ms in nanos
+        assert_eq!(snap.emit_count, 2);
     }
 }

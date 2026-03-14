@@ -16,6 +16,7 @@ pub async fn execute(
     controller_tls_domain: Option<&str>,
     flight_tls_cert: Option<&Path>,
     flight_tls_key: Option<&Path>,
+    metrics_listen: Option<&str>,
 ) -> Result<()> {
     let config = build_config(
         controller,
@@ -29,6 +30,7 @@ pub async fn execute(
         controller_tls_domain,
         flight_tls_cert,
         flight_tls_key,
+        metrics_listen,
     )?;
     rapidbyte_agent::run(config).await
 }
@@ -46,6 +48,7 @@ fn build_config(
     controller_tls_domain: Option<&str>,
     flight_tls_cert: Option<&Path>,
     flight_tls_key: Option<&Path>,
+    metrics_listen: Option<&str>,
 ) -> Result<rapidbyte_agent::AgentConfig> {
     let mut config = rapidbyte_agent::AgentConfig {
         controller_url: controller.into(),
@@ -85,6 +88,7 @@ fn build_config(
         (None, None) => {}
         _ => anyhow::bail!("agent TLS requires both --flight-tls-cert and --flight-tls-key"),
     }
+    config.metrics_listen = metrics_listen.map(str::to_owned);
     Ok(config)
 }
 
@@ -115,6 +119,7 @@ mod tests {
             Some("controller.example"),
             Some(cert_path.as_path()),
             Some(key_path.as_path()),
+            None,
         )
         .unwrap();
 
@@ -151,6 +156,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .err()
         .unwrap();
@@ -167,6 +173,7 @@ mod tests {
             1,
             None,
             true,
+            None,
             None,
             None,
             None,

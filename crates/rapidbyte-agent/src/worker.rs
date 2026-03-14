@@ -55,6 +55,9 @@ pub struct AgentConfig {
     pub allow_insecure_default_signing_key: bool,
     pub controller_tls: Option<ClientTlsConfig>,
     pub flight_tls: Option<ServerTlsConfig>,
+    /// Optional Prometheus metrics listen address (e.g. `127.0.0.1:9191`).
+    /// Prometheus endpoint is only started when this is set.
+    pub metrics_listen: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -72,6 +75,7 @@ impl Default for AgentConfig {
             allow_insecure_default_signing_key: false,
             controller_tls: None,
             flight_tls: None,
+            metrics_listen: None,
         }
     }
 }
@@ -98,18 +102,20 @@ enum WorkerPoll<T> {
 ///
 /// # Panics
 ///
-/// Panics if the Prometheus metrics listener cannot bind to port 9191.
+/// Panics if the Prometheus metrics listener cannot bind to the configured address.
 #[allow(clippy::too_many_lines)]
 pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
     validate_signing_key_config(&config)?;
 
     let otel_guard = Arc::new(rapidbyte_metrics::init("rapidbyte-agent")?);
 
-    // Spawn Prometheus metrics HTTP server on port 9191
-    tokio::spawn(rapidbyte_metrics::serve_prometheus(
-        otel_guard.clone(),
-        9191,
-    ));
+    if let Some(ref metrics_addr) = config.metrics_listen {
+        info!("Prometheus metrics endpoint at {metrics_addr}");
+        tokio::spawn(rapidbyte_metrics::serve_prometheus(
+            otel_guard.clone(),
+            metrics_addr.clone(),
+        ));
+    }
 
     // Bind Flight first so startup fails fast before the agent registers
     // itself as preview-capable.

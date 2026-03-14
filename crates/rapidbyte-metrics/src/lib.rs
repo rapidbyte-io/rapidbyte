@@ -61,18 +61,16 @@ impl OtelGuard {
     }
 }
 
-/// Spawn a Prometheus metrics HTTP server on the given port.
+/// Spawn a Prometheus metrics HTTP server on the given address.
 ///
 /// Serves the Prometheus text exposition format on every incoming TCP connection.
 /// Runs until the process exits. Intended to be called once at startup.
 ///
 /// # Panics
 ///
-/// Panics if the TCP listener cannot bind to the given port.
-pub async fn serve_prometheus(guard: std::sync::Arc<OtelGuard>, port: u16) {
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port))
-        .await
-        .unwrap();
+/// Panics if the TCP listener cannot bind to the given address.
+pub async fn serve_prometheus(guard: std::sync::Arc<OtelGuard>, listen_addr: String) {
+    let listener = tokio::net::TcpListener::bind(&listen_addr).await.unwrap();
     loop {
         if let Ok((mut stream, _)) = listener.accept().await {
             let guard = guard.clone();

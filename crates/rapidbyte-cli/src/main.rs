@@ -153,6 +153,9 @@ enum Commands {
         /// PEM private key for TLS server mode
         #[arg(long)]
         tls_key: Option<PathBuf>,
+        /// Prometheus metrics listen address (e.g. 127.0.0.1:9190)
+        #[arg(long, env = "RAPIDBYTE_METRICS_LISTEN")]
+        metrics_listen: Option<String>,
     },
     /// Start an agent worker (long-running)
     Agent {
@@ -180,6 +183,9 @@ enum Commands {
         /// PEM private key for the agent Flight server
         #[arg(long)]
         flight_tls_key: Option<PathBuf>,
+        /// Prometheus metrics listen address (e.g. 127.0.0.1:9191)
+        #[arg(long, env = "RAPIDBYTE_METRICS_LISTEN")]
+        metrics_listen: Option<String>,
     },
 }
 
@@ -310,6 +316,7 @@ async fn main() -> ExitCode {
             reconciliation_timeout_seconds,
             tls_cert,
             tls_key,
+            metrics_listen,
         } => {
             commands::controller::execute(
                 &listen,
@@ -321,6 +328,7 @@ async fn main() -> ExitCode {
                 reconciliation_timeout_seconds.map(std::time::Duration::from_secs),
                 tls_cert.as_deref(),
                 tls_key.as_deref(),
+                metrics_listen.as_deref(),
             )
             .await
         }
@@ -333,6 +341,7 @@ async fn main() -> ExitCode {
             allow_insecure_signing_key,
             flight_tls_cert,
             flight_tls_key,
+            metrics_listen,
         } => {
             commands::agent::execute(
                 &controller,
@@ -346,6 +355,7 @@ async fn main() -> ExitCode {
                 cli.tls_domain.as_deref(),
                 flight_tls_cert.as_deref(),
                 flight_tls_key.as_deref(),
+                metrics_listen.as_deref(),
             )
             .await
         }

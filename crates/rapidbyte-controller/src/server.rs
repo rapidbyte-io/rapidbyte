@@ -42,6 +42,9 @@ pub struct ControllerConfig {
     /// Explicit escape hatch for the built-in development preview signing key.
     pub allow_insecure_default_signing_key: bool,
     pub tls: Option<ServerTlsConfig>,
+    /// Optional Prometheus metrics listen address (e.g. `127.0.0.1:9190`).
+    /// Prometheus endpoint is only started when this is set.
+    pub metrics_listen: Option<String>,
 }
 
 /// Default signing key used when no explicit key is configured.
@@ -64,6 +67,7 @@ impl Default for ControllerConfig {
             allow_unauthenticated: false,
             allow_insecure_default_signing_key: false,
             tls: None,
+            metrics_listen: None,
         }
     }
 }
@@ -429,18 +433,20 @@ fn spawn_preview_cleanup_task(
 ///
 /// # Panics
 ///
-/// Panics if the Prometheus metrics listener cannot bind to port 9190.
+/// Panics if the Prometheus metrics listener cannot bind to the configured address.
 pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
     validate_auth_config(&config)?;
     validate_signing_key_config(&config)?;
 
     let otel_guard = Arc::new(rapidbyte_metrics::init("rapidbyte-controller")?);
 
-    // Spawn Prometheus metrics HTTP server on port 9190
-    tokio::spawn(rapidbyte_metrics::serve_prometheus(
-        otel_guard.clone(),
-        9190,
-    ));
+    if let Some(ref metrics_addr) = config.metrics_listen {
+        tracing::info!("Prometheus metrics endpoint at {metrics_addr}");
+        tokio::spawn(rapidbyte_metrics::serve_prometheus(
+            otel_guard.clone(),
+            metrics_addr.clone(),
+        ));
+    }
 
     let metadata_store = initialize_metadata_store(&config).await?;
 
