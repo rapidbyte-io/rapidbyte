@@ -408,7 +408,7 @@ fn execute_real_postgres_pipeline(
     let _distributed_processes = distributed_runtime
         .as_ref()
         .map(|runtime| {
-            start_distributed_runtime(root, scenario, runtime, rapidbyte_bin, &temp_root)
+            start_distributed_runtime(root, scenario, runtime, env, rapidbyte_bin, &temp_root)
         })
         .transpose()?;
     let bench_json = invoke_rapidbyte_run(
@@ -508,6 +508,7 @@ fn start_distributed_runtime(
     repo_root: &Path,
     scenario: &ScenarioManifest,
     runtime: &DistributedRuntimeProfile,
+    env: &PostgresBenchmarkEnvironment,
     rapidbyte_bin: Option<&Path>,
     temp_root: &Path,
 ) -> Result<DistributedRuntimeProcesses> {
@@ -530,6 +531,11 @@ fn start_distributed_runtime(
     let agent_flight_addr = socket_addr_from_url(&runtime.agent_flight_url)
         .with_context(|| format!("invalid agent_flight_url {}", runtime.agent_flight_url))?;
 
+    let metadata_url = format!(
+        "postgresql://{}:{}@{}:{}/{}",
+        env.source.user, env.source.password, env.source.host, env.source.port, env.source.database
+    );
+
     let mut controller = Command::new(&binary_path)
         .current_dir(repo_root)
         .env(
@@ -547,6 +553,8 @@ fn start_distributed_runtime(
             &controller_addr,
             "--signing-key",
             runtime.signing_key.as_str(),
+            "--metadata-database-url",
+            &metadata_url,
         ])
         .stdout(Stdio::from(controller_log.try_clone()?))
         .stderr(Stdio::from(controller_log))
