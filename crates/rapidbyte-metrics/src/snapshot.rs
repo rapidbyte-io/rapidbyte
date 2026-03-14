@@ -518,18 +518,6 @@ mod tests {
     use super::*;
     use opentelemetry::metrics::MeterProvider;
     use opentelemetry::KeyValue;
-    use opentelemetry_sdk::metrics::SdkMeterProvider;
-    use opentelemetry_sdk::Resource;
-
-    /// Create a test meter provider wired to a snapshot reader.
-    fn test_provider() -> (SdkMeterProvider, SnapshotReader) {
-        let reader = SnapshotReader::new();
-        let provider = SdkMeterProvider::builder()
-            .with_resource(Resource::builder().with_service_name("test").build())
-            .with_reader(reader.build_reader())
-            .build();
-        (provider, reader)
-    }
 
     #[test]
     fn snapshot_returns_default_when_no_metrics_recorded() {
@@ -541,7 +529,7 @@ mod tests {
 
     #[test]
     fn snapshot_extracts_counter_values() {
-        let (provider, reader) = test_provider();
+        let (provider, reader) = crate::test_support::snapshot_test_provider();
         let meter = provider.meter("test");
 
         let records_read = meter.u64_counter("pipeline.records_read").build();
@@ -559,7 +547,7 @@ mod tests {
 
     #[test]
     fn snapshot_uses_cumulative_plugin_histogram_totals_per_series() {
-        let (provider, reader) = test_provider();
+        let (provider, reader) = crate::test_support::snapshot_test_provider();
         let meter = provider.meter("test");
 
         let hist = meter.f64_histogram("plugin.dest_decode_duration").build();
@@ -584,7 +572,7 @@ mod tests {
 
     #[test]
     fn snapshot_accumulates_histogram_totals_per_series_across_multiple_flushes() {
-        let (provider, reader) = test_provider();
+        let (provider, reader) = crate::test_support::snapshot_test_provider();
         let meter = provider.meter("test");
         let users_labels = [
             KeyValue::new(crate::labels::PIPELINE, "my-pipe"),
@@ -618,7 +606,7 @@ mod tests {
 
     #[test]
     fn flush_and_snapshot_clears_finished_metrics_between_runs() {
-        let (provider, reader) = test_provider();
+        let (provider, reader) = crate::test_support::snapshot_test_provider();
         let meter = provider.meter("test");
         let labels = [KeyValue::new(crate::labels::PIPELINE, "my-pipe")];
         let records_read = meter.u64_counter("pipeline.records_read").build();
@@ -633,7 +621,7 @@ mod tests {
 
     #[test]
     fn snapshot_uses_critical_path_max_across_shard_labeled_plugin_series() {
-        let (provider, reader) = test_provider();
+        let (provider, reader) = crate::test_support::snapshot_test_provider();
         let meter = provider.meter("test");
         let hist = meter
             .f64_histogram("plugin.source_connect_duration")
@@ -675,7 +663,7 @@ mod tests {
 
     #[test]
     fn snapshot_filters_by_pipeline_label() {
-        let (provider, reader) = test_provider();
+        let (provider, reader) = crate::test_support::snapshot_test_provider();
         let meter = provider.meter("test");
 
         let counter = meter.u64_counter("pipeline.records_read").build();
@@ -692,7 +680,7 @@ mod tests {
 
     #[test]
     fn snapshot_excludes_unlabeled_datapoints() {
-        let (provider, reader) = test_provider();
+        let (provider, reader) = crate::test_support::snapshot_test_provider();
         let meter = provider.meter("test");
 
         let counter = meter.u64_counter("pipeline.records_read").build();
@@ -710,7 +698,7 @@ mod tests {
 
     #[test]
     fn snapshot_host_timing_converts_seconds_to_nanos() {
-        let (provider, reader) = test_provider();
+        let (provider, reader) = crate::test_support::snapshot_test_provider();
         let meter = provider.meter("test");
 
         let hist = meter.f64_histogram("host.emit_batch_duration").build();
@@ -725,7 +713,7 @@ mod tests {
 
     #[test]
     fn snapshot_can_filter_metrics_by_run_label() {
-        let (provider, reader) = test_provider();
+        let (provider, reader) = crate::test_support::snapshot_test_provider();
         let meter = provider.meter("test");
         let hist = meter
             .f64_histogram("plugin.source_connect_duration")
@@ -775,7 +763,7 @@ mod tests {
     fn concurrent_run_scoped_snapshots_do_not_double_count() {
         use std::sync::Arc;
 
-        let (provider, reader) = test_provider();
+        let (provider, reader) = crate::test_support::snapshot_test_provider();
         let provider = Arc::new(provider);
         let reader = Arc::new(reader);
         let meter = provider.meter("test");

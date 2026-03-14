@@ -7,7 +7,7 @@
 //! |--------------|----------------|
 //! | `cache`      | DashMap instrument cache for dynamic plugin metrics |
 //! | `grpc_layer` | Tower layer for gRPC RED metrics |
-//! | `instruments`| Global instrument accessors (pipeline, host, plugin, ...) |
+//! | `instruments`| Cached instrument accessors (pipeline, host, plugin, ...) |
 //! | `labels`     | Bounded label keys and parsing |
 //! | `snapshot`   | InMemoryMetricExporter and PipelineResult bridge |
 //! | `views`      | Histogram bucket configuration |
@@ -19,6 +19,7 @@ pub mod grpc_layer;
 pub mod instruments;
 pub mod labels;
 pub mod snapshot;
+pub mod test_support;
 pub mod views;
 
 use anyhow::Result;

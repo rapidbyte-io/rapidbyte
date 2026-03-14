@@ -1,7 +1,8 @@
 //! OpenTelemetry instrument accessors.
 //!
-//! Instruments are resolved from the current global meter provider on each call.
-//! This keeps late-installed fallback providers observable during pipeline runs.
+//! Instruments are resolved from the global meter provider on first access and
+//! cached in `OnceLock` statics. The provider must be installed (via `init()`)
+//! before any instrument is accessed.
 
 use opentelemetry::global;
 use opentelemetry::metrics::{Counter, Gauge, Histogram, UpDownCounter};
@@ -15,7 +16,10 @@ fn meter() -> opentelemetry::metrics::Meter {
 macro_rules! define_counter_u64 {
     ($name:ident, $metric_name:expr) => {
         pub fn $name() -> Counter<u64> {
-            meter().u64_counter($metric_name).build()
+            static INSTANCE: std::sync::OnceLock<Counter<u64>> = std::sync::OnceLock::new();
+            INSTANCE
+                .get_or_init(|| meter().u64_counter($metric_name).build())
+                .clone()
         }
     };
 }
@@ -23,7 +27,10 @@ macro_rules! define_counter_u64 {
 macro_rules! define_histogram_f64 {
     ($name:ident, $metric_name:expr) => {
         pub fn $name() -> Histogram<f64> {
-            meter().f64_histogram($metric_name).build()
+            static INSTANCE: std::sync::OnceLock<Histogram<f64>> = std::sync::OnceLock::new();
+            INSTANCE
+                .get_or_init(|| meter().f64_histogram($metric_name).build())
+                .clone()
         }
     };
 }
@@ -31,7 +38,10 @@ macro_rules! define_histogram_f64 {
 macro_rules! define_gauge_f64 {
     ($name:ident, $metric_name:expr) => {
         pub fn $name() -> Gauge<f64> {
-            meter().f64_gauge($metric_name).build()
+            static INSTANCE: std::sync::OnceLock<Gauge<f64>> = std::sync::OnceLock::new();
+            INSTANCE
+                .get_or_init(|| meter().f64_gauge($metric_name).build())
+                .clone()
         }
     };
 }
@@ -39,7 +49,10 @@ macro_rules! define_gauge_f64 {
 macro_rules! define_updown_i64 {
     ($name:ident, $metric_name:expr) => {
         pub fn $name() -> UpDownCounter<i64> {
-            meter().i64_up_down_counter($metric_name).build()
+            static INSTANCE: std::sync::OnceLock<UpDownCounter<i64>> = std::sync::OnceLock::new();
+            INSTANCE
+                .get_or_init(|| meter().i64_up_down_counter($metric_name).build())
+                .clone()
         }
     };
 }
@@ -139,41 +152,17 @@ pub mod grpc {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snapshot::SnapshotReader;
-    use opentelemetry::KeyValue;
-    use opentelemetry_sdk::metrics::SdkMeterProvider;
-
-    fn test_provider() -> (SdkMeterProvider, SnapshotReader) {
-        let reader = SnapshotReader::new();
-        let provider = SdkMeterProvider::builder()
-            .with_reader(reader.build_reader())
-            .build();
-        (provider, reader)
-    }
 
     #[test]
-    fn pipeline_instruments_follow_the_current_global_provider() {
-        let labels = [KeyValue::new(crate::labels::PIPELINE, "pipe")];
+    fn pipeline_instrument_accessors_return_valid_instruments() {
+        let (provider, _reader) = crate::test_support::snapshot_test_provider();
+        opentelemetry::global::set_meter_provider(provider);
 
-        let (provider_a, reader_a) = test_provider();
-        opentelemetry::global::set_meter_provider(provider_a.clone());
-        pipeline::records_read().add(1, &labels);
-
-        let (provider_b, reader_b) = test_provider();
-        opentelemetry::global::set_meter_provider(provider_b.clone());
-        pipeline::records_read().add(2, &labels);
-
-        assert_eq!(
-            reader_a
-                .flush_and_snapshot(&provider_a, "pipe")
-                .records_read,
-            1
-        );
-        assert_eq!(
-            reader_b
-                .flush_and_snapshot(&provider_b, "pipe")
-                .records_read,
-            2
-        );
+        // Verify accessors return usable instruments (no panic)
+        pipeline::records_read().add(1, &[]);
+        pipeline::records_written().add(1, &[]);
+        pipeline::bytes_read().add(1, &[]);
+        pipeline::bytes_written().add(1, &[]);
+        host::emit_batch_duration().record(0.1, &[]);
     }
 }
