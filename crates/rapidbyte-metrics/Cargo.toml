@@ -14,6 +14,8 @@ prometheus = { workspace = true }
 tracing = { workspace = true }
 dashmap = { workspace = true }
 serde_json = { workspace = true }
+http = { workspace = true }
+tower = { workspace = true }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
