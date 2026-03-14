@@ -223,21 +223,44 @@ pub async fn run(
     });
     tokio::pin!(worker_pool);
 
-    // Main coordinator loop with graceful shutdown
-    let shutdown = tokio::signal::ctrl_c();
-    tokio::pin!(shutdown);
+    // Main coordinator loop with graceful shutdown.
+    // Handle both SIGINT (Ctrl-C) and SIGTERM (container orchestrators).
+    let signal_token = shutdown_token.clone();
+    tokio::spawn(async move {
+        let sigint = tokio::signal::ctrl_c();
 
-    let pool_result = tokio::select! {
-        _ = &mut shutdown => {
-            info!("Shutdown signal received, stopping agent...");
-            shutdown_token.cancel();
-            worker_pool.await
+        #[cfg(unix)]
+        {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut sigterm) => {
+                    tokio::select! {
+                        result = sigint => {
+                            if result.is_ok() { info!("SIGINT received, stopping agent..."); }
+                        }
+                        _ = sigterm.recv() => { info!("SIGTERM received, stopping agent..."); }
+                    }
+                }
+                Err(e) => {
+                    warn!("failed to install SIGTERM handler: {e}; falling back to SIGINT only");
+                    if sigint.await.is_ok() {
+                        info!("SIGINT received, stopping agent...");
+                    }
+                }
+            }
         }
-        result = &mut worker_pool => {
-            shutdown_token.cancel();
-            result
+
+        #[cfg(not(unix))]
+        {
+            if sigint.await.is_ok() {
+                info!("SIGINT received, stopping agent...");
+            }
         }
-    };
+
+        signal_token.cancel();
+    });
+
+    let pool_result = worker_pool.await;
+    shutdown_token.cancel();
 
     let _ = heartbeat_handle.await;
     pool_result?;
