@@ -87,20 +87,26 @@ pub async fn execute(
     let cancel_token = CancellationToken::new();
     let sigint_token = cancel_token.clone();
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        tracing::info!("Interrupt received, cancelling pipeline...");
-        sigint_token.cancel();
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {
+                tracing::info!("Interrupt received, cancelling pipeline...");
+                sigint_token.cancel();
+            }
+            Err(e) => tracing::warn!("failed to listen for Ctrl-C: {e}"),
+        }
     });
     #[cfg(unix)]
     {
         let sigterm_token = cancel_token.clone();
         tokio::spawn(async move {
-            let mut sigterm =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("failed to install SIGTERM handler");
-            sigterm.recv().await;
-            tracing::info!("SIGTERM received, cancelling pipeline...");
-            sigterm_token.cancel();
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut sigterm) => {
+                    sigterm.recv().await;
+                    tracing::info!("SIGTERM received, cancelling pipeline...");
+                    sigterm_token.cancel();
+                }
+                Err(e) => tracing::warn!("failed to install SIGTERM handler: {e}"),
+            }
         });
     }
     let outcome = orchestrator::run_pipeline(

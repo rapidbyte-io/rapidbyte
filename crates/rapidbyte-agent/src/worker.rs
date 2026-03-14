@@ -111,9 +111,6 @@ enum WorkerPoll<T> {
 /// Returns an error if the controller connection fails, agent registration
 /// is rejected, or the Flight server address cannot be parsed.
 ///
-/// # Panics
-///
-/// Panics if the SIGTERM signal handler cannot be installed (Unix only).
 #[allow(clippy::too_many_lines)]
 pub async fn run(
     config: AgentConfig,
@@ -234,19 +231,29 @@ pub async fn run(
 
         #[cfg(unix)]
         {
-            let mut sigterm =
-                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                    .expect("failed to install SIGTERM handler");
-            tokio::select! {
-                _ = sigint => { info!("SIGINT received, stopping agent..."); }
-                _ = sigterm.recv() => { info!("SIGTERM received, stopping agent..."); }
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut sigterm) => {
+                    tokio::select! {
+                        result = sigint => {
+                            if result.is_ok() { info!("SIGINT received, stopping agent..."); }
+                        }
+                        _ = sigterm.recv() => { info!("SIGTERM received, stopping agent..."); }
+                    }
+                }
+                Err(e) => {
+                    warn!("failed to install SIGTERM handler: {e}; falling back to SIGINT only");
+                    if sigint.await.is_ok() {
+                        info!("SIGINT received, stopping agent...");
+                    }
+                }
             }
         }
 
         #[cfg(not(unix))]
         {
-            let _ = sigint.await;
-            info!("SIGINT received, stopping agent...");
+            if sigint.await.is_ok() {
+                info!("SIGINT received, stopping agent...");
+            }
         }
 
         signal_token.cancel();
