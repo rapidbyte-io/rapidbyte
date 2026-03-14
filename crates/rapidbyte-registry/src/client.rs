@@ -97,6 +97,9 @@ impl RegistryClient {
             oci_client::manifest::IMAGE_LAYER_MEDIA_TYPE,
             oci_client::manifest::IMAGE_LAYER_GZIP_MEDIA_TYPE,
             oci_client::manifest::WASM_LAYER_MEDIA_TYPE,
+            crate::artifact::MEDIA_TYPE_CONFIG,
+            crate::artifact::MEDIA_TYPE_MANIFEST_LAYER,
+            crate::artifact::MEDIA_TYPE_WASM_LAYER,
         ];
 
         self.inner
