@@ -112,10 +112,11 @@ enum WorkerPoll<T> {
 /// is rejected, or the Flight server address cannot be parsed.
 ///
 #[allow(clippy::too_many_lines)]
-pub async fn run(config: AgentConfig) -> anyhow::Result<()> {
+pub async fn run(
+    config: AgentConfig,
+    otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
+) -> anyhow::Result<()> {
     validate_signing_key_config(&config)?;
-
-    let otel_guard = Arc::new(rapidbyte_metrics::init("rapidbyte-agent")?);
 
     if let Some(ref metrics_addr) = config.metrics_listen {
         info!("Prometheus metrics endpoint at {metrics_addr}");
@@ -952,13 +953,18 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let err = run(AgentConfig {
-            controller_url: "http://127.0.0.1:1".into(),
-            flight_listen: addr.to_string(),
-            flight_advertise: addr.to_string(),
-            signing_key: b"test-signing-key".to_vec(),
-            ..Default::default()
-        })
+        let guard =
+            Arc::new(rapidbyte_metrics::init("test-agent").expect("otel init should succeed"));
+        let err = run(
+            AgentConfig {
+                controller_url: "http://127.0.0.1:1".into(),
+                flight_listen: addr.to_string(),
+                flight_advertise: addr.to_string(),
+                signing_key: b"test-signing-key".to_vec(),
+                ..Default::default()
+            },
+            guard,
+        )
         .await
         .unwrap_err();
 
@@ -974,14 +980,19 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let err = run(AgentConfig {
-            controller_url: "http://127.0.0.1:1".into(),
-            flight_listen: "127.0.0.1:0".into(),
-            flight_advertise: "127.0.0.1:0".into(),
-            metrics_listen: Some(addr.to_string()),
-            signing_key: b"test-signing-key".to_vec(),
-            ..Default::default()
-        })
+        let guard =
+            Arc::new(rapidbyte_metrics::init("test-agent").expect("otel init should succeed"));
+        let err = run(
+            AgentConfig {
+                controller_url: "http://127.0.0.1:1".into(),
+                flight_listen: "127.0.0.1:0".into(),
+                flight_advertise: "127.0.0.1:0".into(),
+                metrics_listen: Some(addr.to_string()),
+                signing_key: b"test-signing-key".to_vec(),
+                ..Default::default()
+            },
+            guard,
+        )
         .await
         .unwrap_err();
 

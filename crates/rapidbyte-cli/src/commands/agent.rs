@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use std::path::Path;
+use std::sync::Arc;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn execute(
@@ -17,6 +18,7 @@ pub async fn execute(
     flight_tls_cert: Option<&Path>,
     flight_tls_key: Option<&Path>,
     metrics_listen: Option<&str>,
+    otel_guard: Option<rapidbyte_metrics::OtelGuard>,
 ) -> Result<()> {
     let config = build_config(
         controller,
@@ -32,7 +34,9 @@ pub async fn execute(
         flight_tls_key,
         metrics_listen,
     )?;
-    rapidbyte_agent::run(config).await
+    let guard =
+        Arc::new(otel_guard.ok_or_else(|| anyhow::anyhow!("telemetry initialization failed"))?);
+    rapidbyte_agent::run(config, guard).await
 }
 
 #[allow(clippy::too_many_arguments)]

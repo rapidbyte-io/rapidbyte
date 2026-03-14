@@ -240,7 +240,12 @@ async fn main() -> ExitCode {
 
     let verbosity = Verbosity::from_flags(cli.quiet, cli.verbose);
 
-    let otel_guard = rapidbyte_metrics::init("rapidbyte-cli").ok();
+    let service_name = match &cli.command {
+        Commands::Controller { .. } => "rapidbyte-controller",
+        Commands::Agent { .. } => "rapidbyte-agent",
+        _ => "rapidbyte-cli",
+    };
+    let otel_guard = rapidbyte_metrics::init(service_name).ok();
     logging::init(verbosity, &cli.log_level, otel_guard.as_ref());
 
     let tls = commands::transport::TlsClientConfig {
@@ -329,6 +334,7 @@ async fn main() -> ExitCode {
                 tls_cert.as_deref(),
                 tls_key.as_deref(),
                 metrics_listen.as_deref(),
+                otel_guard,
             )
             .await
         }
@@ -356,6 +362,7 @@ async fn main() -> ExitCode {
                 flight_tls_cert.as_deref(),
                 flight_tls_key.as_deref(),
                 metrics_listen.as_deref(),
+                otel_guard,
             )
             .await
         }

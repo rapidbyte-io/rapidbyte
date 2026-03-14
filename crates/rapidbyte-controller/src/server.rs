@@ -438,11 +438,12 @@ fn spawn_preview_cleanup_task(
 /// Returns an error if the gRPC server fails to bind or encounters a
 /// transport-level failure.
 ///
-pub async fn run(config: ControllerConfig) -> anyhow::Result<()> {
+pub async fn run(
+    config: ControllerConfig,
+    otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
+) -> anyhow::Result<()> {
     validate_auth_config(&config)?;
     validate_signing_key_config(&config)?;
-
-    let otel_guard = Arc::new(rapidbyte_metrics::init("rapidbyte-controller")?);
 
     if let Some(ref metrics_addr) = config.metrics_listen {
         tracing::info!("Prometheus metrics endpoint at {metrics_addr}");
@@ -658,12 +659,17 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
 
-        let err = run(ControllerConfig {
-            auth_tokens: vec!["secret".into()],
-            signing_key: b"test-signing-key".to_vec(),
-            metrics_listen: Some(addr.to_string()),
-            ..Default::default()
-        })
+        let guard =
+            Arc::new(rapidbyte_metrics::init("test-controller").expect("otel init should succeed"));
+        let err = run(
+            ControllerConfig {
+                auth_tokens: vec!["secret".into()],
+                signing_key: b"test-signing-key".to_vec(),
+                metrics_listen: Some(addr.to_string()),
+                ..Default::default()
+            },
+            guard,
+        )
         .await
         .unwrap_err();
 

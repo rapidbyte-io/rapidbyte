@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[allow(clippy::too_many_arguments)]
@@ -16,6 +17,7 @@ pub async fn execute(
     tls_cert: Option<&Path>,
     tls_key: Option<&Path>,
     metrics_listen: Option<&str>,
+    otel_guard: Option<rapidbyte_metrics::OtelGuard>,
 ) -> Result<()> {
     let config = build_config(
         listen,
@@ -29,7 +31,9 @@ pub async fn execute(
         tls_key,
         metrics_listen,
     )?;
-    rapidbyte_controller::run(config).await
+    let guard =
+        Arc::new(otel_guard.ok_or_else(|| anyhow::anyhow!("telemetry initialization failed"))?);
+    rapidbyte_controller::run(config, guard).await
 }
 
 #[allow(clippy::too_many_arguments)]
