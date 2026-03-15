@@ -1,6 +1,6 @@
 //! Plugin management subcommands (pull, push, inspect, tags, list, remove, search).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use rapidbyte_registry::{artifact, PluginCache, PluginRef, RegistryClient, RegistryConfig};
@@ -51,6 +51,7 @@ pub async fn execute(command: crate::PluginCommands, global_config: &RegistryCon
             )
             .await
         }
+        crate::PluginCommands::Keygen { output } => keygen(&output),
     }
 }
 
@@ -344,5 +345,37 @@ async fn search(
     }
 
     eprintln!("\n{} plugin(s) found", results.len());
+    Ok(())
+}
+
+fn keygen(output_dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(output_dir).with_context(|| {
+        format!(
+            "failed to create output directory: {}",
+            output_dir.display()
+        )
+    })?;
+
+    let (private_pem, public_pem) = rapidbyte_registry::signing::generate_keypair_pem();
+
+    let private_path = output_dir.join("signing-key.pem");
+    let public_path = output_dir.join("signing-key.pub");
+
+    std::fs::write(&private_path, &private_pem)
+        .with_context(|| format!("failed to write private key: {}", private_path.display()))?;
+    std::fs::write(&public_path, &public_pem)
+        .with_context(|| format!("failed to write public key: {}", public_path.display()))?;
+
+    // Restrict private key permissions on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&private_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    eprintln!("Generated Ed25519 signing keypair:");
+    eprintln!("  Private key: {}", private_path.display());
+    eprintln!("  Public key:  {}", public_path.display());
+    eprintln!("\nShare the public key with consumers. Keep the private key secret.");
     Ok(())
 }

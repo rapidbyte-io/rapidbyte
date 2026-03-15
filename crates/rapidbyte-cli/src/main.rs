@@ -264,6 +264,12 @@ pub(crate) enum PluginCommands {
         #[arg(long)]
         insecure: bool,
     },
+    /// Generate an Ed25519 signing keypair for plugin signing
+    Keygen {
+        /// Output directory for key files (default: current directory)
+        #[arg(long, default_value = ".")]
+        output: PathBuf,
+    },
 }
 
 /// Resolve controller URL from config file (`~/.rapidbyte/config.yaml`).
