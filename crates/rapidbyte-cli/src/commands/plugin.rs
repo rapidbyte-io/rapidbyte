@@ -1,4 +1,4 @@
-//! Plugin management subcommands (pull, push, inspect, tags, list, remove).
+//! Plugin management subcommands (pull, push, inspect, tags, list, remove, search).
 
 use std::path::PathBuf;
 
@@ -31,6 +31,20 @@ pub async fn execute(command: crate::PluginCommands) -> Result<()> {
         } => tags(&plugin_ref, insecure).await,
         crate::PluginCommands::List => list(),
         crate::PluginCommands::Remove { plugin_ref } => remove(&plugin_ref),
+        crate::PluginCommands::Search {
+            query,
+            plugin_type,
+            registry,
+            insecure,
+        } => {
+            search(
+                &query,
+                plugin_type.as_deref(),
+                registry.as_deref(),
+                insecure,
+            )
+            .await
+        }
     }
 }
 
@@ -273,5 +287,55 @@ fn remove(plugin_ref_str: &str) -> Result<()> {
         bail!("Plugin not found in cache: {plugin_ref}");
     }
 
+    Ok(())
+}
+
+async fn search(
+    query: &str,
+    plugin_type: Option<&str>,
+    registry: Option<&str>,
+    insecure: bool,
+) -> Result<()> {
+    let registry = registry.context(
+        "registry is required for search. Use --registry or set --registry-url globally",
+    )?;
+    let registry = rapidbyte_registry::normalize_registry_url(registry);
+
+    let config = RegistryConfig {
+        insecure,
+        ..Default::default()
+    };
+    let client = RegistryClient::new(&config)?;
+
+    eprintln!("Searching {registry}...");
+    let index = client
+        .pull_index(&registry)
+        .await?
+        .context("no plugin index found in this registry (push a plugin first)")?;
+
+    let results = index.search(query, plugin_type);
+
+    if results.is_empty() {
+        eprintln!("No plugins found");
+        return Ok(());
+    }
+
+    println!(
+        "{:<40} {:<14} {:<10} DESCRIPTION",
+        "REPOSITORY", "TYPE", "LATEST"
+    );
+    for entry in &results {
+        let desc = if entry.description.len() > 50 {
+            format!("{}...", &entry.description[..47])
+        } else {
+            entry.description.clone()
+        };
+        println!(
+            "{:<40} {:<14} {:<10} {}",
+            entry.repository, entry.plugin_type, entry.latest, desc
+        );
+    }
+
+    eprintln!("\n{} plugin(s) found", results.len());
     Ok(())
 }

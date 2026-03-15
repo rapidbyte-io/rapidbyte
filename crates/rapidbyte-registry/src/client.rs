@@ -189,9 +189,8 @@ impl RegistryClient {
 
         debug!(%index_ref, "pulling plugin index");
 
-        let image = match self.pull(&index_ref).await {
-            Ok(data) => data,
-            Err(_) => return Ok(None),
+        let Ok(image) = self.pull(&index_ref).await else {
+            return Ok(None);
         };
 
         let layer = image

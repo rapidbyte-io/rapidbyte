@@ -249,6 +249,21 @@ pub(crate) enum PluginCommands {
         /// Plugin reference
         plugin_ref: String,
     },
+    /// Search for plugins in a registry
+    Search {
+        /// Search query (matches name, description, repository)
+        #[arg(default_value = "")]
+        query: String,
+        /// Filter by plugin type (source, destination, transform)
+        #[arg(long, short = 't')]
+        plugin_type: Option<String>,
+        /// Registry to search (required if --registry-url not set globally)
+        #[arg(long)]
+        registry: Option<String>,
+        /// Use HTTP instead of HTTPS
+        #[arg(long)]
+        insecure: bool,
+    },
 }
 
 /// Resolve controller URL from config file (`~/.rapidbyte/config.yaml`).
