@@ -228,7 +228,7 @@ pub async fn resolve_plugin(
     } else if let Some(default_registry) = &registry_config.default_registry {
         // Prepend default registry to make a full OCI reference.
         // Convert @version to :tag if present (legacy format normalization).
-        let normalized = if let Some((name, version)) = use_ref.split_once('@') {
+        let qualified_ref = if let Some((name, version)) = use_ref.split_once('@') {
             let version = version.strip_prefix('v').unwrap_or(version);
             format!("{default_registry}/{name}:{version}")
         } else {
@@ -236,10 +236,10 @@ pub async fn resolve_plugin(
         };
         tracing::debug!(
             use_ref,
-            full_ref = %normalized,
+            qualified_ref,
             "prepending default registry to plugin reference"
         );
-        resolve_plugin_from_registry(&normalized, registry_config).await
+        resolve_plugin_from_registry(&qualified_ref, registry_config).await
     } else {
         resolve_plugin_path(use_ref, kind)
     }
