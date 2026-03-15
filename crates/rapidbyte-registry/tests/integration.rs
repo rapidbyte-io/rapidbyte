@@ -41,7 +41,7 @@ async fn push_and_pull_roundtrip() {
     let wasm_bytes = b"fake-wasm-binary-for-roundtrip-test".to_vec();
 
     // Pack and push
-    let packed = artifact::pack_artifact(&manifest_json, &wasm_bytes);
+    let packed = artifact::pack_artifact(&manifest_json, &wasm_bytes, None);
     client
         .push(&plugin_ref, packed.layers, packed.config)
         .await
@@ -64,7 +64,7 @@ async fn list_tags_returns_pushed_versions() {
     let manifest = test_manifest_json();
     for tag in ["1.0.0", "1.1.0"] {
         let plugin_ref = PluginRef::parse(&format!("localhost:5050/test/tags-list:{tag}")).unwrap();
-        let packed = artifact::pack_artifact(&manifest, b"wasm");
+        let packed = artifact::pack_artifact(&manifest, b"wasm", None);
         client
             .push(&plugin_ref, packed.layers, packed.config)
             .await
@@ -89,7 +89,7 @@ async fn pull_and_cache_end_to_end() {
     let wasm_bytes = b"cached-wasm-content-for-e2e".to_vec();
 
     // Push
-    let packed = artifact::pack_artifact(&manifest_json, &wasm_bytes);
+    let packed = artifact::pack_artifact(&manifest_json, &wasm_bytes, None);
     client
         .push(&plugin_ref, packed.layers, packed.config)
         .await
@@ -131,7 +131,7 @@ async fn inspect_pulls_manifest_only() {
 
     // Push first
     let manifest_json = test_manifest_json();
-    let packed = artifact::pack_artifact(&manifest_json, b"inspect-wasm");
+    let packed = artifact::pack_artifact(&manifest_json, b"inspect-wasm", None);
     client
         .push(&plugin_ref, packed.layers, packed.config)
         .await
@@ -154,7 +154,7 @@ async fn index_push_pull_and_search_roundtrip() {
 
     // Push a plugin first
     let plugin_ref = PluginRef::parse("localhost:5050/test/index-search:0.2.0").unwrap();
-    let packed = artifact::pack_artifact(&test_manifest_json(), b"index-search-wasm");
+    let packed = artifact::pack_artifact(&test_manifest_json(), b"index-search-wasm", None);
     client
         .push(&plugin_ref, packed.layers, packed.config)
         .await

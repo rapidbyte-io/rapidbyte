@@ -463,16 +463,29 @@ async fn process_task(
         trusted_key_pems: ctx.config.trusted_key_pems.clone(),
         ..Default::default()
     };
-    let result = executor::execute_task(executor::TaskConfig {
-        pipeline_yaml: &task.pipeline_yaml_utf8,
-        dry_run,
-        limit,
-        progress_tx: Some(progress_tx),
-        cancel_token,
-        snapshot_reader: ctx.otel_guard.snapshot_reader(),
-        meter_provider: ctx.otel_guard.meter_provider(),
-        registry_config: &registry_config,
-    })
+    let result = executor::execute_task(
+        executor::TaskConfig {
+            pipeline_yaml: &task.pipeline_yaml_utf8,
+            dry_run,
+            limit,
+            progress_tx: Some(progress_tx),
+            cancel_token,
+            snapshot_reader: ctx.otel_guard.snapshot_reader(),
+            meter_provider: ctx.otel_guard.meter_provider(),
+            registry_config: &registry_config,
+        },
+        |config, options, progress_tx, cancel_token, metrics_runtime, registry_config| {
+            Box::pin(rapidbyte_engine::orchestrator::run_pipeline(
+                config,
+                options,
+                progress_tx,
+                cancel_token,
+                metrics_runtime.snapshot_reader,
+                metrics_runtime.meter_provider,
+                registry_config,
+            ))
+        },
+    )
     .await;
 
     let _ = progress_handle.await;

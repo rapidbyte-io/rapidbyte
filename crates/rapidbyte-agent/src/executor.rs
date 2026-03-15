@@ -7,7 +7,7 @@ use rapidbyte_engine::config::parser;
 use rapidbyte_engine::config::validator;
 use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_engine::progress::ProgressEvent;
-use rapidbyte_engine::{orchestrator, PipelineError};
+use rapidbyte_engine::PipelineError;
 use rapidbyte_types::prelude::CommitState;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -16,9 +16,9 @@ type PipelineRunFuture<'a> =
     Pin<Box<dyn Future<Output = Result<PipelineOutcome, PipelineError>> + Send + 'a>>;
 
 #[derive(Clone, Copy)]
-struct MetricsRuntime<'a> {
-    snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
-    meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
+pub struct MetricsRuntime<'a> {
+    pub snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
+    pub meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
 }
 
 /// Consolidated parameters for [`execute_task`].
@@ -82,45 +82,8 @@ fn is_pre_commit_cancellation(error: &PipelineError) -> bool {
     }
 }
 
-pub async fn execute_task(task: TaskConfig<'_>) -> TaskExecutionResult {
-    let metrics_runtime = MetricsRuntime {
-        snapshot_reader: task.snapshot_reader,
-        meter_provider: task.meter_provider,
-    };
-    execute_task_with_runner(
-        task.pipeline_yaml,
-        task.dry_run,
-        task.limit,
-        task.progress_tx,
-        task.cancel_token,
-        metrics_runtime,
-        task.registry_config,
-        |config, options, progress_tx, cancel_token, metrics_runtime, registry_config| {
-            Box::pin(orchestrator::run_pipeline(
-                config,
-                options,
-                progress_tx,
-                cancel_token,
-                metrics_runtime.snapshot_reader,
-                metrics_runtime.meter_provider,
-                registry_config,
-            ))
-        },
-    )
-    .await
-}
-
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-async fn execute_task_with_runner<R>(
-    pipeline_yaml: &[u8],
-    dry_run: bool,
-    limit: Option<u64>,
-    progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
-    cancel_token: CancellationToken,
-    metrics_runtime: MetricsRuntime<'_>,
-    registry_config: &rapidbyte_registry::RegistryConfig,
-    run_pipeline: R,
-) -> TaskExecutionResult
+#[allow(clippy::too_many_lines)]
+pub async fn execute_task<R>(task: TaskConfig<'_>, run_pipeline: R) -> TaskExecutionResult
 where
     R: for<'a> FnOnce(
         &'a rapidbyte_engine::config::types::PipelineConfig,
@@ -131,6 +94,16 @@ where
         &'a rapidbyte_registry::RegistryConfig,
     ) -> PipelineRunFuture<'a>,
 {
+    let pipeline_yaml = task.pipeline_yaml;
+    let dry_run = task.dry_run;
+    let limit = task.limit;
+    let progress_tx = task.progress_tx;
+    let cancel_token = task.cancel_token;
+    let metrics_runtime = MetricsRuntime {
+        snapshot_reader: task.snapshot_reader,
+        meter_provider: task.meter_provider,
+    };
+    let registry_config = task.registry_config;
     // Check for early cancellation before doing any work
     if cancel_token.is_cancelled() {
         return TaskExecutionResult {
@@ -356,19 +329,33 @@ destination:
         })
     }
 
+    fn noop_runner() -> impl for<'a> FnOnce(
+        &'a rapidbyte_engine::config::types::PipelineConfig,
+        &'a ExecutionOptions,
+        Option<mpsc::UnboundedSender<ProgressEvent>>,
+        CancellationToken,
+        MetricsRuntime<'a>,
+        &'a rapidbyte_registry::RegistryConfig,
+    ) -> PipelineRunFuture<'a> {
+        |_, _, _, _, _, _| Box::pin(async { Ok(completed_outcome()) })
+    }
+
     #[tokio::test]
     async fn test_invalid_utf8_returns_failed() {
         let (reader, provider) = test_metrics_runtime();
-        let result = execute_task(TaskConfig {
-            pipeline_yaml: &[0xFF, 0xFE],
-            dry_run: false,
-            limit: None,
-            progress_tx: None,
-            cancel_token: CancellationToken::new(),
-            snapshot_reader: &reader,
-            meter_provider: &provider,
-            registry_config: &rapidbyte_registry::RegistryConfig::default(),
-        })
+        let result = execute_task(
+            TaskConfig {
+                pipeline_yaml: &[0xFF, 0xFE],
+                dry_run: false,
+                limit: None,
+                progress_tx: None,
+                cancel_token: CancellationToken::new(),
+                snapshot_reader: &reader,
+                meter_provider: &provider,
+                registry_config: &rapidbyte_registry::RegistryConfig::default(),
+            },
+            noop_runner(),
+        )
         .await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Failed(_)));
         if let TaskOutcomeKind::Failed(info) = &result.outcome {
@@ -380,16 +367,19 @@ destination:
     #[tokio::test]
     async fn test_invalid_yaml_returns_failed() {
         let (reader, provider) = test_metrics_runtime();
-        let result = execute_task(TaskConfig {
-            pipeline_yaml: b"not: [valid: yaml",
-            dry_run: false,
-            limit: None,
-            progress_tx: None,
-            cancel_token: CancellationToken::new(),
-            snapshot_reader: &reader,
-            meter_provider: &provider,
-            registry_config: &rapidbyte_registry::RegistryConfig::default(),
-        })
+        let result = execute_task(
+            TaskConfig {
+                pipeline_yaml: b"not: [valid: yaml",
+                dry_run: false,
+                limit: None,
+                progress_tx: None,
+                cancel_token: CancellationToken::new(),
+                snapshot_reader: &reader,
+                meter_provider: &provider,
+                registry_config: &rapidbyte_registry::RegistryConfig::default(),
+            },
+            noop_runner(),
+        )
         .await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Failed(_)));
         if let TaskOutcomeKind::Failed(info) = &result.outcome {
@@ -400,16 +390,19 @@ destination:
     #[tokio::test]
     async fn test_zero_metrics_on_early_failure() {
         let (reader, provider) = test_metrics_runtime();
-        let result = execute_task(TaskConfig {
-            pipeline_yaml: &[0xFF],
-            dry_run: false,
-            limit: None,
-            progress_tx: None,
-            cancel_token: CancellationToken::new(),
-            snapshot_reader: &reader,
-            meter_provider: &provider,
-            registry_config: &rapidbyte_registry::RegistryConfig::default(),
-        })
+        let result = execute_task(
+            TaskConfig {
+                pipeline_yaml: &[0xFF],
+                dry_run: false,
+                limit: None,
+                progress_tx: None,
+                cancel_token: CancellationToken::new(),
+                snapshot_reader: &reader,
+                meter_provider: &provider,
+                registry_config: &rapidbyte_registry::RegistryConfig::default(),
+            },
+            noop_runner(),
+        )
         .await;
         assert_eq!(result.metrics.records_processed, 0);
         assert_eq!(result.metrics.bytes_processed, 0);
@@ -421,16 +414,19 @@ destination:
         let (reader, provider) = test_metrics_runtime();
         let token = CancellationToken::new();
         token.cancel();
-        let result = execute_task(TaskConfig {
-            pipeline_yaml: b"pipeline: test\n",
-            dry_run: false,
-            limit: None,
-            progress_tx: None,
-            cancel_token: token,
-            snapshot_reader: &reader,
-            meter_provider: &provider,
-            registry_config: &rapidbyte_registry::RegistryConfig::default(),
-        })
+        let result = execute_task(
+            TaskConfig {
+                pipeline_yaml: b"pipeline: test\n",
+                dry_run: false,
+                limit: None,
+                progress_tx: None,
+                cancel_token: token,
+                snapshot_reader: &reader,
+                meter_provider: &provider,
+                registry_config: &rapidbyte_registry::RegistryConfig::default(),
+            },
+            noop_runner(),
+        )
         .await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Cancelled));
     }
@@ -447,17 +443,17 @@ destination:
             let release = release.clone();
             tokio::spawn(async move {
                 let (reader, provider) = test_metrics_runtime();
-                execute_task_with_runner(
-                    valid_yaml(),
-                    false,
-                    None,
-                    None,
-                    token,
-                    MetricsRuntime {
+                execute_task(
+                    TaskConfig {
+                        pipeline_yaml: valid_yaml(),
+                        dry_run: false,
+                        limit: None,
+                        progress_tx: None,
+                        cancel_token: token,
                         snapshot_reader: &reader,
                         meter_provider: &provider,
+                        registry_config: &rapidbyte_registry::RegistryConfig::default(),
                     },
-                    &rapidbyte_registry::RegistryConfig::default(),
                     move |_, _, _, _cancel_token, _metrics_runtime, _registry_config| {
                         let started = started.clone();
                         let release = release.clone();
@@ -492,23 +488,18 @@ destination:
             let started = started.clone();
             tokio::spawn(async move {
                 let (reader, provider) = test_metrics_runtime();
-                execute_task_with_runner(
-                    valid_yaml(),
-                    false,
-                    None,
-                    None,
-                    token,
-                    MetricsRuntime {
+                execute_task(
+                    TaskConfig {
+                        pipeline_yaml: valid_yaml(),
+                        dry_run: false,
+                        limit: None,
+                        progress_tx: None,
+                        cancel_token: token,
                         snapshot_reader: &reader,
                         meter_provider: &provider,
+                        registry_config: &rapidbyte_registry::RegistryConfig::default(),
                     },
-                    &rapidbyte_registry::RegistryConfig::default(),
-                    move |_,
-                          _,
-                          _,
-                          cancel_token: CancellationToken,
-                          _metrics_runtime: MetricsRuntime<'_>,
-                          _registry_config: &rapidbyte_registry::RegistryConfig| {
+                    move |_, _, _, cancel_token, _metrics_runtime, _registry_config| {
                         let started = started.clone();
                         Box::pin(async move {
                             let mut cancelled = PluginError::internal(
@@ -550,17 +541,17 @@ destination:
             let release = release.clone();
             tokio::spawn(async move {
                 let (reader, provider) = test_metrics_runtime();
-                execute_task_with_runner(
-                    valid_yaml(),
-                    false,
-                    None,
-                    None,
-                    token,
-                    MetricsRuntime {
+                execute_task(
+                    TaskConfig {
+                        pipeline_yaml: valid_yaml(),
+                        dry_run: false,
+                        limit: None,
+                        progress_tx: None,
+                        cancel_token: token,
                         snapshot_reader: &reader,
                         meter_provider: &provider,
+                        registry_config: &rapidbyte_registry::RegistryConfig::default(),
                     },
-                    &rapidbyte_registry::RegistryConfig::default(),
                     move |_, _, _, _cancel_token, _metrics_runtime, _registry_config| {
                         let started_destination = started_destination.clone();
                         let release = release.clone();
@@ -598,33 +589,21 @@ destination:
 
     #[tokio::test]
     async fn execute_task_forwards_snapshot_provider_to_runner() {
-        let snapshot_reader = SnapshotReader::new();
-        let meter_provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
-            .with_reader(snapshot_reader.build_reader())
-            .build();
-
-        let result = execute_task_with_runner(
-            valid_yaml(),
-            false,
-            None,
-            None,
-            CancellationToken::new(),
-            MetricsRuntime {
-                snapshot_reader: &snapshot_reader,
-                meter_provider: &meter_provider,
+        let (reader, provider) = test_metrics_runtime();
+        let result = execute_task(
+            TaskConfig {
+                pipeline_yaml: valid_yaml(),
+                dry_run: false,
+                limit: None,
+                progress_tx: None,
+                cancel_token: CancellationToken::new(),
+                snapshot_reader: &reader,
+                meter_provider: &provider,
+                registry_config: &rapidbyte_registry::RegistryConfig::default(),
             },
-            &rapidbyte_registry::RegistryConfig::default(),
-            |_config,
-             _options,
-             _progress_tx,
-             _cancel_token: CancellationToken,
-             _metrics_runtime: MetricsRuntime<'_>,
-             _registry_config: &rapidbyte_registry::RegistryConfig| {
-                Box::pin(async move { Ok(completed_outcome()) })
-            },
+            noop_runner(),
         )
         .await;
-
         assert!(matches!(result.outcome, TaskOutcomeKind::Completed));
     }
 }

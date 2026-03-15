@@ -197,7 +197,7 @@ async fn push(
         None
     };
 
-    let packed = artifact::pack_artifact_signed(&manifest_json, &wasm_bytes, signing_key.as_ref());
+    let packed = artifact::pack_artifact(&manifest_json, &wasm_bytes, signing_key.as_ref());
 
     let config = RegistryConfig {
         insecure,
