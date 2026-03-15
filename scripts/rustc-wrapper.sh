@@ -41,18 +41,9 @@ if [[ "$is_wasm_wasip2_target" -eq 0 ]]; then
   done
 fi
 
-# Strip target-cpu=native in two cases:
-# 1. WASM builds — the flag is invalid for wasm32-wasip2.
-# 2. CI environments — runners have heterogeneous CPUs, so cached artifacts
-#    compiled with "native" on one runner can SIGILL on another.
-strip_target_cpu=0
+# Guard wasm builds from user-global target-cpu=native flags
+# (e.g. from ~/.cargo/config.toml) which are invalid for wasm32-wasip2.
 if [[ "$is_wasm_wasip2_target" -eq 1 ]]; then
-  strip_target_cpu=1
-elif [[ "${CI:-}" == "true" ]]; then
-  strip_target_cpu=1
-fi
-
-if [[ "$strip_target_cpu" -eq 1 ]]; then
   sanitized=()
   skip_next=0
   args=("$@")
