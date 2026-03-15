@@ -41,27 +41,46 @@ impl PreviewFlightService {
         &self,
         payload: &crate::ticket::TicketPayload,
     ) -> Result<(Vec<arrow::record_batch::RecordBatch>, u64, u64), Status> {
-        let spool = self.spool.read().await;
         let key = PreviewKey {
             run_id: payload.run_id.clone(),
             task_id: payload.task_id.clone(),
             lease_epoch: payload.lease_epoch,
         };
-        let dry_run = spool
-            .get(&key)
-            .ok_or_else(|| Status::not_found("Preview not found or expired"))?;
-        dry_run
-            .streams
-            .iter()
-            .find(|stream| stream.stream_name == payload.stream_name)
-            .map(|stream| {
-                (
-                    stream.batches.clone(),
-                    stream.total_rows,
-                    stream.total_bytes,
-                )
-            })
-            .ok_or_else(|| Status::not_found("Preview stream not found"))
+        let stream_name = payload.stream_name.clone();
+
+        // Copy metadata + storage descriptor out of the spool under lock,
+        // then drop the lock before doing any file I/O.
+        let stream_data = {
+            let spool = self.spool.read().await;
+            spool
+                .lookup_stream(&key, &stream_name)
+                .ok_or_else(|| Status::not_found("Preview not found or expired"))?
+        };
+
+        // For file-backed previews, load Arrow IPC on a blocking thread
+        // to avoid stalling the Tokio runtime.
+        match stream_data.storage {
+            crate::spool::StreamStorage::Memory(batches) => {
+                Ok((batches, stream_data.total_rows, stream_data.total_bytes))
+            }
+            crate::spool::StreamStorage::File(path) => {
+                let batches = tokio::task::spawn_blocking(move || {
+                    let file = std::fs::File::open(&path).map_err(|e| {
+                        Status::internal(format!("Failed to open preview file: {e}"))
+                    })?;
+                    let reader =
+                        arrow::ipc::reader::StreamReader::try_new(file, None).map_err(|e| {
+                            Status::internal(format!("Failed to read preview IPC: {e}"))
+                        })?;
+                    reader.collect::<Result<Vec<_>, _>>().map_err(|e| {
+                        Status::internal(format!("Failed to decode preview batch: {e}"))
+                    })
+                })
+                .await
+                .map_err(|e| Status::internal(format!("Preview load task failed: {e}")))??;
+                Ok((batches, stream_data.total_rows, stream_data.total_bytes))
+            }
+        }
     }
 }
 

@@ -56,6 +56,25 @@ enum StoredStreamData {
     },
 }
 
+/// Cloneable storage descriptor returned by [`PreviewSpool::lookup_stream`].
+///
+/// Callers use this to load batches outside the spool lock — file-backed
+/// previews should be loaded via `spawn_blocking` to avoid stalling the
+/// async runtime.
+pub struct StreamLookup {
+    pub total_rows: u64,
+    pub total_bytes: u64,
+    pub storage: StreamStorage,
+}
+
+/// Where the preview data lives.
+pub enum StreamStorage {
+    /// Batches are in memory (cheap clone).
+    Memory(Vec<RecordBatch>),
+    /// Batches are serialized to an Arrow IPC file at `path`.
+    File(PathBuf),
+}
+
 #[derive(Clone)]
 pub struct PreviewListing {
     pub key: PreviewKey,
@@ -112,6 +131,30 @@ impl PreviewSpool {
         );
         rapidbyte_metrics::instruments::agent::previews_stored().add(1, &[]);
         self.record_spool_size();
+    }
+
+    /// Look up a single stream's storage descriptor without loading file
+    /// contents.  Callers should drop the spool lock before performing
+    /// file I/O on the returned [`StreamStorage::File`] path.
+    #[must_use]
+    pub fn lookup_stream(&self, key: &PreviewKey, stream_name: &str) -> Option<StreamLookup> {
+        let entry = self.entries.get(key)?;
+        if entry.created_at.elapsed() >= entry.ttl {
+            return None;
+        }
+        let stored = entry
+            .streams
+            .iter()
+            .find(|s| s.stream_name == stream_name)?;
+        let storage = match &stored.storage {
+            StoredStreamData::Memory(batches) => StreamStorage::Memory(batches.clone()),
+            StoredStreamData::File { path, .. } => StreamStorage::File(path.clone()),
+        };
+        Some(StreamLookup {
+            total_rows: stored.total_rows,
+            total_bytes: stored.total_bytes,
+            storage,
+        })
     }
 
     #[must_use]
