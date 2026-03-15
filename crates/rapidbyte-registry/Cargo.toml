@@ -15,6 +15,7 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 oci-client = { workspace = true }
 chrono = { workspace = true }
+semver = "1"
 ed25519-dalek = { workspace = true }
 rand = { workspace = true }
 

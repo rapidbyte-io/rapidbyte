@@ -13,79 +13,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Parsed version for comparison. Pre-release versions sort below their
-/// release counterpart (e.g. `1.0.0-beta` < `1.0.0`), and pre-release
-/// suffixes are compared lexicographically (e.g. `beta.2` < `beta.10`
-/// is handled by padding numeric segments).
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedVersion {
-    major: u64,
-    minor: u64,
-    patch: u64,
-    /// `true` for release versions, `false` for pre-release.
-    is_release: bool,
-    /// Pre-release identifier (e.g. `"beta.2"`). Empty for releases.
-    /// Used to distinguish between different pre-releases at the same version.
-    prerelease: String,
-}
-
-impl PartialOrd for ParsedVersion {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for ParsedVersion {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Compare major.minor.patch first, then is_release (true > false),
-        // then pre-release identifiers per semver rules.
-        (self.major, self.minor, self.patch, self.is_release)
-            .cmp(&(other.major, other.minor, other.patch, other.is_release))
-            .then_with(|| compare_prerelease(&self.prerelease, &other.prerelease))
-    }
-}
-
-/// Compare pre-release identifiers per semver rules: split by `.`,
-/// compare numeric segments numerically, string segments lexicographically.
-fn compare_prerelease(a: &str, b: &str) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    let a_parts: Vec<&str> = a.split('.').collect();
-    let b_parts: Vec<&str> = b.split('.').collect();
-    for (pa, pb) in a_parts.iter().zip(b_parts.iter()) {
-        let ord = match (pa.parse::<u64>(), pb.parse::<u64>()) {
-            (Ok(na), Ok(nb)) => na.cmp(&nb),
-            _ => pa.cmp(pb),
-        };
-        if ord != Ordering::Equal {
-            return ord;
-        }
-    }
-    a_parts.len().cmp(&b_parts.len())
-}
-
-/// Try to parse a version string for comparison.
-fn semver_parse(version: &str) -> Option<ParsedVersion> {
-    let v = version.strip_prefix('v').unwrap_or(version);
-    // Split core version from pre-release at the first '-'
-    let (core, prerelease) = match v.split_once('-') {
-        Some((c, pre)) => (c, pre.to_owned()),
-        None => (v, String::new()),
-    };
-    let parts: Vec<&str> = core.split('.').collect();
-    if parts.len() == 3 {
-        let major = parts[0].parse().ok()?;
-        let minor = parts[1].parse().ok()?;
-        let patch = parts[2].parse().ok()?;
-        Some(ParsedVersion {
-            major,
-            minor,
-            patch,
-            is_release: prerelease.is_empty(),
-            prerelease,
-        })
-    } else {
-        None
-    }
+/// Parse a version tag as semver, stripping a leading `v` if present.
+fn parse_semver(tag: &str) -> Option<semver::Version> {
+    semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()
 }
 
 // ── Well-known index location ─────────────────────────────────────────────────
@@ -172,7 +102,7 @@ impl PluginIndex {
             // (prevents non-semver tags like "nightly" from replacing "2.0.0").
             // If both are non-semver, always update (chronological ordering).
             let should_update_latest =
-                match (semver_parse(&existing.latest), semver_parse(&entry.latest)) {
+                match (parse_semver(&existing.latest), parse_semver(&entry.latest)) {
                     (Some(current), Some(new)) => new > current,
                     (Some(_), None) => false, // don't overwrite semver with non-semver
                     // semver replaces non-semver; both non-semver: last write wins
@@ -627,20 +557,50 @@ mod tests {
     }
 
     #[test]
-    fn semver_parse_rejects_four_segment_versions() {
-        assert!(semver_parse("1.2.3.4").is_none());
+    fn parse_semver_rejects_four_segment_versions() {
+        assert!(parse_semver("1.2.3.4").is_none());
     }
 
     #[test]
-    fn semver_parse_rejects_two_segment_versions() {
-        assert!(semver_parse("1.2").is_none());
+    fn parse_semver_rejects_two_segment_versions() {
+        assert!(parse_semver("1.2").is_none());
     }
 
     #[test]
-    fn semver_parse_accepts_valid_versions() {
-        assert!(semver_parse("1.0.0").is_some());
-        assert!(semver_parse("1.0.0-beta").is_some());
-        assert!(semver_parse("v2.1.3").is_some());
+    fn parse_semver_accepts_valid_versions() {
+        assert!(parse_semver("1.0.0").is_some());
+        assert!(parse_semver("1.0.0-beta").is_some());
+        assert!(parse_semver("v2.1.3").is_some());
+        assert!(parse_semver("1.0.0+build.5").is_some());
+    }
+
+    #[test]
+    fn build_metadata_ignored_for_comparison() {
+        let mut idx = PluginIndex::new();
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            "source",
+            "1.0.0+build.1",
+            &["1.0.0+build.1"],
+        ));
+        assert_eq!(idx.plugins[0].latest, "1.0.0+build.1");
+
+        // 1.0.1 > 1.0.0 regardless of build metadata
+        idx.upsert(make_entry("p", "P", "d", "source", "1.0.1", &["1.0.1"]));
+        assert_eq!(idx.plugins[0].latest, "1.0.1");
+
+        // 1.0.0+build.99 should NOT regress from 1.0.1 (build metadata ignored)
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            "source",
+            "1.0.0+build.99",
+            &["1.0.0+build.99"],
+        ));
+        assert_eq!(idx.plugins[0].latest, "1.0.1");
     }
 
     #[test]
