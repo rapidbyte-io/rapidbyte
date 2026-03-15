@@ -130,23 +130,26 @@ where
         }
     };
 
-    let config =
-        match parser::parse_pipeline(yaml_str, &rapidbyte_engine::SecretProviders::new()).await {
-            Ok(c) => c,
-            Err(e) => {
-                return TaskExecutionResult {
-                    outcome: TaskOutcomeKind::Failed(TaskErrorInfo {
-                        code: "PARSE_FAILED".into(),
-                        message: format!("{e:#}"),
-                        retryable: false,
-                        safe_to_retry: false,
-                        commit_state: CommitState::BeforeCommit,
-                    }),
-                    metrics: TaskMetrics::zero(),
-                    dry_run_result: None,
-                };
-            }
-        };
+    // The agent receives pre-resolved YAML from the controller (all
+    // ${vault:...} and ${ENV_VAR} patterns already substituted). Use
+    // parse_resolved to avoid re-expanding patterns that appear inside
+    // secret values.
+    let config = match parser::parse_resolved(yaml_str) {
+        Ok(c) => c,
+        Err(e) => {
+            return TaskExecutionResult {
+                outcome: TaskOutcomeKind::Failed(TaskErrorInfo {
+                    code: "PARSE_FAILED".into(),
+                    message: format!("{e:#}"),
+                    retryable: false,
+                    safe_to_retry: false,
+                    commit_state: CommitState::BeforeCommit,
+                }),
+                metrics: TaskMetrics::zero(),
+                dry_run_result: None,
+            };
+        }
+    };
 
     if let Err(e) = validator::validate_pipeline(&config) {
         return TaskExecutionResult {

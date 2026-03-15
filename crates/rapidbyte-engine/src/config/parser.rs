@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rapidbyte_secrets::SecretProviders;
 use regex::Regex;
 
@@ -127,6 +127,19 @@ pub async fn substitute_variables(input: &str, secrets: &SecretProviders) -> Res
     }
 
     Ok(apply_replacements(input, replacements))
+}
+
+/// Parse pre-resolved pipeline YAML without any variable substitution.
+///
+/// Used by the agent for YAML received from the controller, which has
+/// already resolved all `${...}` references. No env vars or secrets
+/// are expanded — the YAML is parsed as-is.
+///
+/// # Errors
+///
+/// Returns an error if the YAML is invalid.
+pub fn parse_resolved(yaml_str: &str) -> Result<PipelineConfig> {
+    serde_yaml::from_str(yaml_str).context("Failed to parse pipeline YAML")
 }
 
 /// Parse a pipeline YAML string, resolving all variable references.
