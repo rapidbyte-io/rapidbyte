@@ -14,6 +14,25 @@ use chrono::{DateTime, Utc};
 use rapidbyte_types::wire::PluginKind;
 use serde::{Deserialize, Serialize};
 
+/// Deserialize `PluginKind` with a fallback for unknown/legacy values.
+///
+/// Existing index entries may contain free-form strings (e.g. `"unknown"`)
+/// that predate the typed enum. Rather than failing the entire index
+/// deserialization, fall back to `PluginKind::Transform` for unrecognized
+/// values.
+fn deserialize_plugin_kind<'de, D>(deserializer: D) -> Result<PluginKind, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    match s.as_str() {
+        "source" => Ok(PluginKind::Source),
+        "destination" => Ok(PluginKind::Destination),
+        // "transform" and any unknown/legacy values default to Transform.
+        _ => Ok(PluginKind::Transform),
+    }
+}
+
 // ── Well-known index location ─────────────────────────────────────────────────
 
 /// Well-known OCI repository used to store the plugin index.
@@ -34,6 +53,7 @@ pub struct PluginIndexEntry {
     /// Short description shown in search results.
     pub description: String,
     /// Plugin category.
+    #[serde(deserialize_with = "deserialize_plugin_kind")]
     pub plugin_type: PluginKind,
     /// Latest published version tag.
     pub latest: String,
@@ -753,5 +773,41 @@ mod tests {
             &["3.0.0"],
         ));
         assert_eq!(idx.plugins[0].latest, "3.0.0");
+    }
+
+    #[test]
+    fn deserialize_legacy_index_with_unknown_plugin_type() {
+        let json = r#"{
+            "schema_version": 1,
+            "plugins": [{
+                "repository": "test/legacy",
+                "name": "Legacy Plugin",
+                "description": "Has a non-standard plugin_type",
+                "plugin_type": "unknown",
+                "latest": "1.0.0",
+                "versions": ["1.0.0"],
+                "updated_at": "2026-01-01T00:00:00Z"
+            }]
+        }"#;
+        let index: PluginIndex = serde_json::from_str(json)
+            .expect("index with legacy plugin_type should still deserialize");
+        assert_eq!(index.plugins.len(), 1);
+        assert_eq!(index.plugins[0].plugin_type, PluginKind::Transform);
+    }
+
+    #[test]
+    fn deserialize_index_with_standard_plugin_types() {
+        let json = r#"{
+            "schema_version": 1,
+            "plugins": [
+                {"repository":"a","name":"A","description":"","plugin_type":"source","latest":"1.0.0","versions":["1.0.0"],"updated_at":"2026-01-01T00:00:00Z"},
+                {"repository":"b","name":"B","description":"","plugin_type":"destination","latest":"1.0.0","versions":["1.0.0"],"updated_at":"2026-01-01T00:00:00Z"},
+                {"repository":"c","name":"C","description":"","plugin_type":"transform","latest":"1.0.0","versions":["1.0.0"],"updated_at":"2026-01-01T00:00:00Z"}
+            ]
+        }"#;
+        let index: PluginIndex = serde_json::from_str(json).unwrap();
+        assert_eq!(index.plugins[0].plugin_type, PluginKind::Source);
+        assert_eq!(index.plugins[1].plugin_type, PluginKind::Destination);
+        assert_eq!(index.plugins[2].plugin_type, PluginKind::Transform);
     }
 }

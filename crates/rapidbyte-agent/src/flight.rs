@@ -74,7 +74,14 @@ impl PreviewFlightService {
                 })
                 .await
                 .map_err(|e| Status::internal(format!("Preview load task failed: {e}")))?
-                .map_err(|e| Status::internal(format!("Failed to load preview: {e}")))?;
+                .map_err(|e: std::io::Error| {
+                    // File deleted by concurrent eviction → preview is gone.
+                    if e.kind() == std::io::ErrorKind::NotFound {
+                        Status::not_found("Preview expired during load")
+                    } else {
+                        Status::internal(format!("Failed to load preview: {e}"))
+                    }
+                })?;
                 Ok((batches, stream_data.total_rows, stream_data.total_bytes))
             }
         }
