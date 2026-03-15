@@ -11,6 +11,14 @@ use crate::config::types::PipelineConfig;
 static ENV_VAR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").expect("valid env var regex"));
 
+static VAULT_REF_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$\{vault:([^#\}]+)#([^}]+)\}").expect("valid vault ref regex"));
+
+/// Returns `true` if `input` contains any `${vault:...}` references.
+fn contains_vault_refs(input: &str) -> bool {
+    VAULT_REF_RE.is_match(input)
+}
+
 /// Substitute `${VAR_NAME}` patterns with environment variable values.
 ///
 /// # Errors
@@ -45,6 +53,11 @@ pub fn substitute_env_vars(input: &str) -> Result<String> {
 ///
 /// Returns an error if env var substitution fails or the YAML is invalid.
 pub fn parse_pipeline_str(yaml_str: &str) -> Result<PipelineConfig> {
+    if contains_vault_refs(yaml_str) {
+        anyhow::bail!(
+            "pipeline contains ${{vault:...}} references but no Vault client is configured"
+        );
+    }
     let substituted = substitute_env_vars(yaml_str)?;
     let config: PipelineConfig =
         serde_yaml::from_str(&substituted).context("Failed to parse pipeline YAML")?;
@@ -147,6 +160,40 @@ destination:
         let yaml = "this is not: [valid: yaml: {{{}}}";
         let result = parse_pipeline_str(yaml);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sync_parser_rejects_vault_refs() {
+        let yaml = r#"
+version: "1.0"
+pipeline: test
+source:
+  use: postgres
+  config:
+    password: ${vault:secret/postgres#password}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: postgres
+  config:
+    host: localhost
+  write_mode: append
+"#;
+        let result = parse_pipeline_str(yaml);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Vault client"),
+            "should mention Vault client"
+        );
+    }
+
+    #[test]
+    fn test_vault_ref_regex_matches() {
+        assert!(contains_vault_refs("${vault:secret/pg#password}"));
+        assert!(contains_vault_refs("host: ${vault:secret/data/pg#host}"));
+        assert!(!contains_vault_refs("${NORMAL_ENV_VAR}"));
+        assert!(!contains_vault_refs("no refs here"));
     }
 
     #[test]
