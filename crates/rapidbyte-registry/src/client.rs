@@ -192,15 +192,7 @@ impl RegistryClient {
         let image = match self.pull(&index_ref).await {
             Ok(data) => data,
             Err(err) => {
-                let msg = format!("{err:#}");
-                // Treat "not found" / "manifest unknown" as index-not-yet-created.
-                // Propagate all other errors (auth, network, transport).
-                if msg.contains("not found")
-                    || msg.contains("MANIFEST_UNKNOWN")
-                    || msg.contains("manifest unknown")
-                    || msg.contains("404")
-                    || msg.contains("NAME_UNKNOWN")
-                {
+                if is_not_found_error(&err) {
                     debug!("index not found in registry, treating as empty");
                     return Ok(None);
                 }
@@ -265,6 +257,19 @@ fn to_reference(plugin_ref: &PluginRef) -> Result<Reference> {
         .context(format!("invalid OCI reference: {raw}"))
 }
 
+/// Check if an error indicates the resource was not found (vs auth/network failures).
+///
+/// Used by [`RegistryClient::pull_index`] to distinguish "index doesn't exist yet"
+/// from real errors that should be propagated.
+fn is_not_found_error(err: &anyhow::Error) -> bool {
+    let msg = format!("{err:#}");
+    msg.contains("not found")
+        || msg.contains("MANIFEST_UNKNOWN")
+        || msg.contains("manifest unknown")
+        || msg.contains("404")
+        || msg.contains("NAME_UNKNOWN")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,5 +329,36 @@ mod tests {
         assert_eq!(reference.registry(), "localhost:5050");
         assert_eq!(reference.repository(), "test/plugin");
         assert_eq!(reference.tag().unwrap(), "latest");
+    }
+
+    #[test]
+    fn not_found_errors_are_classified_correctly() {
+        let cases = [
+            "manifest not found",
+            "MANIFEST_UNKNOWN: manifest unknown",
+            "HTTP 404: not found",
+            "NAME_UNKNOWN: repository does not exist",
+        ];
+        for msg in cases {
+            let err = anyhow::anyhow!("{msg}");
+            assert!(is_not_found_error(&err), "expected not-found for: {msg}");
+        }
+    }
+
+    #[test]
+    fn auth_and_network_errors_are_not_classified_as_not_found() {
+        let cases = [
+            "unauthorized: authentication required",
+            "connection refused",
+            "timeout: request timed out",
+            "TLS handshake failed",
+        ];
+        for msg in cases {
+            let err = anyhow::anyhow!("{msg}");
+            assert!(
+                !is_not_found_error(&err),
+                "expected propagated error for: {msg}"
+            );
+        }
     }
 }

@@ -323,8 +323,9 @@ async fn search(
         "REPOSITORY", "TYPE", "LATEST"
     );
     for entry in &results {
-        let desc = if entry.description.len() > 50 {
-            format!("{}...", &entry.description[..47])
+        let desc = if entry.description.chars().count() > 50 {
+            let truncated: String = entry.description.chars().take(47).collect();
+            format!("{truncated}...")
         } else {
             entry.description.clone()
         };
