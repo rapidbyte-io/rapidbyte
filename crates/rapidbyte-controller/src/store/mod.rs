@@ -1472,7 +1472,6 @@ pub mod test_support {
 
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, SystemTime};
 
     use async_trait::async_trait;
 
