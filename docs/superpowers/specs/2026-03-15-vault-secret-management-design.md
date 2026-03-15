@@ -48,14 +48,12 @@ To prevent this, YAML parse errors after secret resolution must not include the 
 
 ### New Crate: `rapidbyte-vault`
 
-Minimal Vault KV v2 client. Read-only, no caching, no write operations.
+Thin wrapper around the `vaultrs` crate, providing a simplified API for pipeline secret resolution.
 
 ```
 crates/rapidbyte-vault/
   src/
-    lib.rs        — VaultClient, VaultConfig
-    auth.rs       — token + AppRole authentication
-    kv.rs         — KV v2 read_secret(path) -> HashMap<String, String>
+    lib.rs        — VaultClient, VaultConfig, public API
 ```
 
 **Types:**
@@ -73,20 +71,18 @@ pub enum VaultAuth {
 
 impl VaultClient {
     pub async fn new(config: VaultConfig) -> Result<Self>;
-    pub async fn read_secret(&self, path: &str) -> Result<HashMap<String, String>>;
+    pub async fn read_secret(&self, mount: &str, path: &str, key: &str) -> Result<String>;
 }
 ```
 
-- `new()` authenticates immediately (AppRole exchanges role_id/secret_id for a token)
-- `read_secret(path)` accepts logical paths (e.g. `secret/postgres`), injects `/data/` for the KV v2 HTTP API, returns `data.data` map
-- AppRole token renewal: re-authenticate on 403/expiry (simple retry, not a background task)
-- Uses `reqwest` (already a workspace dependency)
+- Uses the `vaultrs` crate which handles KV v2 API paths, token management, and HTTP transport
+- `new()` creates the `vaultrs::client::VaultClient` with settings; for AppRole, authenticates immediately
+- `read_secret(mount, path, key)` calls `vaultrs::kv2::read()` and extracts the requested key
 - No `Debug` derive on config types — contains secrets
+- The `vaultrs` client uses `reqwest` internally (already in the dependency tree via `oci-client`)
 
 **Timeouts and failure behavior:**
-- Connect timeout: 5 seconds
-- Read timeout: 10 seconds
-- Max retries per read: 2 (with re-auth on 403)
+- Connect/read timeouts configured via `vaultrs` client settings
 - Resolution is atomic: all `${vault:...}` paths in a YAML must resolve successfully or the entire substitution fails. No partial resolution.
 - Vault down at startup: fail fast with a clear error message
 
@@ -166,7 +162,7 @@ Kubernetes auth can be added later. Operators on K8s can bridge with ESO injecti
 ### Dependency Graph
 
 ```
-rapidbyte-vault (new, leaf — reqwest only, no internal deps)
+rapidbyte-vault (new, leaf — wraps vaultrs, no internal deps)
   ├── engine → vault (for parse_pipeline)
   └── cli → vault (for VaultClient construction + passing to engine)
 ```
