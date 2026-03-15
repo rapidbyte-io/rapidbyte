@@ -345,8 +345,15 @@ pub async fn resolve_plugin(
             return resolve_plugin_from_registry(&qualified_ref, registry_config).await;
         }
 
-        // No local plugin and no registry configured.
-        resolve_plugin_path(use_ref, kind)
+        // No registry configured — use local filesystem unless verify mode.
+        if allow_local {
+            resolve_plugin_path(use_ref, kind)
+        } else {
+            anyhow::bail!(
+                "trust policy is 'verify' but no registry is configured; \
+                 cannot verify signature for bare plugin ref '{use_ref}'"
+            )
+        }
     }
 }
 
@@ -767,5 +774,20 @@ mod tests {
     fn qualify_bare_ref_with_registry_port() {
         let result = qualify_bare_ref("postgres", PluginKind::Source, "localhost:5050");
         assert_eq!(result, "localhost:5050/source/postgres");
+    }
+
+    #[tokio::test]
+    async fn verify_mode_rejects_bare_ref_without_registry() {
+        let config = RegistryConfig {
+            trust_policy: rapidbyte_registry::TrustPolicy::Verify,
+            ..Default::default()
+        };
+        let result = resolve_plugin("postgres", PluginKind::Source, &config).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("trust policy is 'verify'"),
+            "expected verify-mode rejection, got: {msg}"
+        );
     }
 }

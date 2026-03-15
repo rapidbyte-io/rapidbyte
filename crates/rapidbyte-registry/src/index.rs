@@ -38,26 +38,44 @@ impl PartialOrd for ParsedVersion {
 impl Ord for ParsedVersion {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Compare major.minor.patch first, then is_release (true > false),
-        // then pre-release identifier for pre-release vs pre-release.
+        // then pre-release identifiers per semver rules.
         (self.major, self.minor, self.patch, self.is_release)
             .cmp(&(other.major, other.minor, other.patch, other.is_release))
-            .then_with(|| self.prerelease.cmp(&other.prerelease))
+            .then_with(|| compare_prerelease(&self.prerelease, &other.prerelease))
     }
+}
+
+/// Compare pre-release identifiers per semver rules: split by `.`,
+/// compare numeric segments numerically, string segments lexicographically.
+fn compare_prerelease(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let a_parts: Vec<&str> = a.split('.').collect();
+    let b_parts: Vec<&str> = b.split('.').collect();
+    for (pa, pb) in a_parts.iter().zip(b_parts.iter()) {
+        let ord = match (pa.parse::<u64>(), pb.parse::<u64>()) {
+            (Ok(na), Ok(nb)) => na.cmp(&nb),
+            _ => pa.cmp(pb),
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    a_parts.len().cmp(&b_parts.len())
 }
 
 /// Try to parse a version string for comparison.
 fn semver_parse(version: &str) -> Option<ParsedVersion> {
     let v = version.strip_prefix('v').unwrap_or(version);
-    let parts: Vec<&str> = v.split('.').collect();
+    // Split core version from pre-release at the first '-'
+    let (core, prerelease) = match v.split_once('-') {
+        Some((c, pre)) => (c, pre.to_owned()),
+        None => (v, String::new()),
+    };
+    let parts: Vec<&str> = core.split('.').collect();
     if parts.len() >= 3 {
         let major = parts[0].parse().ok()?;
         let minor = parts[1].parse().ok()?;
-        let (patch_str, prerelease) = if let Some((p, pre)) = parts[2].split_once('-') {
-            (p, pre.to_owned())
-        } else {
-            (parts[2], String::new())
-        };
-        let patch = patch_str.parse().ok()?;
+        let patch = parts[2].parse().ok()?;
         Some(ParsedVersion {
             major,
             minor,
@@ -548,5 +566,42 @@ mod tests {
             &["1.0.0-rc"],
         ));
         assert_eq!(idx.plugins[0].latest, "1.0.0-rc");
+    }
+
+    #[test]
+    fn upsert_numeric_prerelease_ordering() {
+        let mut idx = PluginIndex::new();
+
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            "source",
+            "1.0.0-beta.2",
+            &["1.0.0-beta.2"],
+        ));
+        assert_eq!(idx.plugins[0].latest, "1.0.0-beta.2");
+
+        // beta.10 > beta.2 numerically (not lexicographically)
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            "source",
+            "1.0.0-beta.10",
+            &["1.0.0-beta.10"],
+        ));
+        assert_eq!(idx.plugins[0].latest, "1.0.0-beta.10");
+
+        // beta.3 should NOT regress from beta.10
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            "source",
+            "1.0.0-beta.3",
+            &["1.0.0-beta.3"],
+        ));
+        assert_eq!(idx.plugins[0].latest, "1.0.0-beta.10");
     }
 }
