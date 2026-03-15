@@ -551,9 +551,9 @@ async fn process_task(
     };
 
     let status_label = match &result.outcome {
-        TaskOutcomeKind::Completed => "ok",
-        TaskOutcomeKind::Failed(_) => "error",
-        TaskOutcomeKind::Cancelled => "cancelled",
+        TaskOutcomeKind::Completed => rapidbyte_metrics::labels::STATUS_OK,
+        TaskOutcomeKind::Failed(_) => rapidbyte_metrics::labels::STATUS_ERROR,
+        TaskOutcomeKind::Cancelled => rapidbyte_metrics::labels::STATUS_CANCELLED,
     };
     rapidbyte_metrics::instruments::agent::tasks_completed().add(
         1,
