@@ -72,7 +72,7 @@ fn semver_parse(version: &str) -> Option<ParsedVersion> {
         None => (v, String::new()),
     };
     let parts: Vec<&str> = core.split('.').collect();
-    if parts.len() >= 3 {
+    if parts.len() == 3 {
         let major = parts[0].parse().ok()?;
         let minor = parts[1].parse().ok()?;
         let patch = parts[2].parse().ok()?;
@@ -603,5 +603,39 @@ mod tests {
             &["1.0.0-beta.3"],
         ));
         assert_eq!(idx.plugins[0].latest, "1.0.0-beta.10");
+    }
+
+    #[test]
+    fn non_semver_versions_always_advance_latest() {
+        let mut idx = PluginIndex::new();
+
+        // 4-segment version is not semver — should always update
+        idx.upsert(make_entry("p", "P", "d", "source", "1.2.3.4", &["1.2.3.4"]));
+        assert_eq!(idx.plugins[0].latest, "1.2.3.4");
+
+        // Pushing a 2-segment version (also not semver) should still update
+        idx.upsert(make_entry("p", "P", "d", "source", "1.2", &["1.2"]));
+        assert_eq!(idx.plugins[0].latest, "1.2");
+
+        // Pushing a valid semver after non-semver should update
+        idx.upsert(make_entry("p", "P", "d", "source", "2.0.0", &["2.0.0"]));
+        assert_eq!(idx.plugins[0].latest, "2.0.0");
+    }
+
+    #[test]
+    fn semver_parse_rejects_four_segment_versions() {
+        assert!(semver_parse("1.2.3.4").is_none());
+    }
+
+    #[test]
+    fn semver_parse_rejects_two_segment_versions() {
+        assert!(semver_parse("1.2").is_none());
+    }
+
+    #[test]
+    fn semver_parse_accepts_valid_versions() {
+        assert!(semver_parse("1.0.0").is_some());
+        assert!(semver_parse("1.0.0-beta").is_some());
+        assert!(semver_parse("v2.1.3").is_some());
     }
 }
