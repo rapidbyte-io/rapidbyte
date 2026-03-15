@@ -115,6 +115,13 @@ impl PluginCache {
         fs::write(&config_path, &config_json)
             .with_context(|| format!("failed to write {}", config_path.display()))?;
 
+        // Store the original ref so list() can reconstruct it accurately
+        // (the filesystem path has sanitized ':' → '_').
+        let ref_path = dir.join("ref.json");
+        let ref_json = serde_json::to_vec(plugin_ref).context("failed to serialize plugin ref")?;
+        fs::write(&ref_path, &ref_json)
+            .with_context(|| format!("failed to write {}", ref_path.display()))?;
+
         #[allow(clippy::cast_possible_truncation)]
         let size_bytes = wasm_bytes.len() as u64;
 
@@ -233,27 +240,12 @@ impl PluginCache {
 
     /// Reconstruct a `CacheEntry` from a leaf directory path relative to the
     /// cache root.
-    fn entry_from_dir(root: &Path, dir: &Path) -> Option<CacheEntry> {
-        let rel = dir.strip_prefix(root).ok()?;
-        let components: Vec<&str> = rel
-            .components()
-            .filter_map(|c| c.as_os_str().to_str())
-            .collect();
-
-        // At minimum: registry / repo-part / tag  (3 components).
-        if components.len() < 3 {
-            return None;
-        }
-
-        let registry = components[0].to_owned();
-        let tag = components[components.len() - 1].to_owned();
-        let repository = components[1..components.len() - 1].join("/");
-
-        let plugin_ref = PluginRef {
-            registry,
-            repository,
-            tag,
-        };
+    fn entry_from_dir(_root: &Path, dir: &Path) -> Option<CacheEntry> {
+        // Read the stored ref (preferred — preserves original registry with ':').
+        let ref_path = dir.join("ref.json");
+        let plugin_ref: PluginRef = fs::read(&ref_path)
+            .ok()
+            .and_then(|data| serde_json::from_slice(&data).ok())?;
 
         let wasm_path = dir.join("plugin.wasm");
         let digest_path = dir.join("sha256");
@@ -569,5 +561,32 @@ mod tests {
             loaded_config.wasm_sha256, looked_up.digest,
             "tampered config digest should not match cached wasm digest"
         );
+    }
+
+    #[test]
+    fn port_registry_roundtrips_through_store_list_remove() {
+        let tmp = tempdir().unwrap();
+        let cache = PluginCache::new(tmp.path().to_path_buf());
+        let pref = PluginRef::parse("localhost:5050/source/postgres:1.0.0").unwrap();
+        let wasm = dummy_wasm();
+
+        // Store
+        cache
+            .store(&pref, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
+            .unwrap();
+
+        // Lookup preserves original ref
+        let entry = cache.lookup(&pref).expect("should find cached entry");
+        assert_eq!(entry.plugin_ref, pref);
+        assert_eq!(entry.plugin_ref.registry, "localhost:5050");
+
+        // List preserves original ref (not sanitized localhost_5050)
+        let listed = cache.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].plugin_ref.registry, "localhost:5050");
+
+        // Remove works with the original ref
+        assert!(cache.remove(&pref).unwrap());
+        assert!(cache.lookup(&pref).is_none());
     }
 }
