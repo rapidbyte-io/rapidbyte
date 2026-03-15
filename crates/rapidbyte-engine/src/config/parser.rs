@@ -22,9 +22,37 @@ static SECRET_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\$\{([a-z]+):([^#\}]+)#([^}]+)\}").expect("valid secret ref regex")
 });
 
+/// Matches `${prefix:...}` patterns that are NOT well-formed secret refs
+/// (e.g. missing `#key`). Used to reject malformed references.
+static MALFORMED_REF_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$\{([a-z]+):[^}]*\}").expect("valid malformed ref regex"));
+
 /// Returns `true` if `input` contains any `${prefix:...}` secret references.
 pub fn contains_secret_refs(input: &str) -> bool {
     SECRET_REF_RE.is_match(input)
+}
+
+/// Check for malformed `${prefix:...}` patterns (e.g. missing `#key`).
+///
+/// # Errors
+///
+/// Returns an error listing all malformed references found.
+pub fn reject_malformed_refs(input: &str) -> Result<()> {
+    let mut malformed = Vec::new();
+    for cap in MALFORMED_REF_RE.captures_iter(input) {
+        let full = &cap[0];
+        // If the well-formed regex doesn't match this, it's malformed.
+        if !SECRET_REF_RE.is_match(full) {
+            malformed.push(full.to_string());
+        }
+    }
+    if !malformed.is_empty() {
+        anyhow::bail!(
+            "malformed secret reference(s) (expected ${{prefix:path#key}}): {}",
+            malformed.join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// Collected match with byte range for positional replacement.
@@ -153,6 +181,9 @@ pub fn parse_resolved(yaml_str: &str) -> Result<PipelineConfig> {
 /// Returns an error if variable substitution, YAML parsing, or
 /// validation fails.
 pub async fn parse_pipeline(yaml_str: &str, secrets: &SecretProviders) -> Result<PipelineConfig> {
+    // Reject malformed secret references (e.g. ${vault:path} without #key).
+    reject_malformed_refs(yaml_str)?;
+
     // Reject secret refs when no providers are configured.
     if secrets.is_empty() && contains_secret_refs(yaml_str) {
         anyhow::bail!(
@@ -301,6 +332,20 @@ destination:
         assert!(contains_secret_refs("${aws:arn:something#key}"));
         assert!(!contains_secret_refs("${NORMAL_ENV_VAR}"));
         assert!(!contains_secret_refs("no refs here"));
+    }
+
+    #[test]
+    fn malformed_secret_refs_are_rejected() {
+        // Missing #key
+        assert!(reject_malformed_refs("${vault:secret/pg}").is_err());
+        // Missing path
+        assert!(reject_malformed_refs("${vault:}").is_err());
+        // Well-formed ref should pass
+        assert!(reject_malformed_refs("${vault:secret/pg#password}").is_ok());
+        // Normal env var should pass
+        assert!(reject_malformed_refs("${ENV_VAR}").is_ok());
+        // No refs should pass
+        assert!(reject_malformed_refs("plain text").is_ok());
     }
 
     #[tokio::test]

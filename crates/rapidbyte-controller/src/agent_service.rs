@@ -463,13 +463,23 @@ impl AgentService for AgentServiceImpl {
                 Err(e) => {
                     if e.code() == tonic::Code::Unavailable {
                         // Transient error (Vault unreachable, timeout).
-                        // Leave the task Assigned — it will return to Pending
-                        // when the lease expires, allowing automatic retry.
+                        // Release the task back to Pending for retry.
                         tracing::warn!(
                             task_id,
-                            "transient secret resolution failure, \
-                             task will retry after lease expiry: {e}"
+                            "transient secret resolution failure, requeueing: {e}"
                         );
+                        let mut tasks = self.state.tasks.write().await;
+                        if let Err(release_err) = tasks.release_assignment(&task_id, lease_epoch) {
+                            tracing::error!(task_id, "failed to release task: {release_err}");
+                        }
+                        drop(tasks);
+
+                        let mut runs = self.state.runs.write().await;
+                        if let Some(record) = runs.get_run_mut(&run_id) {
+                            record.state = InternalRunState::Pending;
+                        }
+                        drop(runs);
+
                         return Ok(Response::new(PollTaskResponse {
                             result: Some(poll_task_response::Result::NoTask(NoTask {})),
                         }));
@@ -581,13 +591,23 @@ impl AgentService for AgentServiceImpl {
                 Err(e) => {
                     if e.code() == tonic::Code::Unavailable {
                         // Transient error (Vault unreachable, timeout).
-                        // Leave the task Assigned — it will return to Pending
-                        // when the lease expires, allowing automatic retry.
+                        // Release the task back to Pending for retry.
                         tracing::warn!(
                             task_id,
-                            "transient secret resolution failure, \
-                             task will retry after lease expiry: {e}"
+                            "transient secret resolution failure, requeueing: {e}"
                         );
+                        let mut tasks = self.state.tasks.write().await;
+                        if let Err(release_err) = tasks.release_assignment(&task_id, lease_epoch) {
+                            tracing::error!(task_id, "failed to release task: {release_err}");
+                        }
+                        drop(tasks);
+
+                        let mut runs = self.state.runs.write().await;
+                        if let Some(record) = runs.get_run_mut(&run_id) {
+                            record.state = InternalRunState::Pending;
+                        }
+                        drop(runs);
+
                         return Ok(Response::new(PollTaskResponse {
                             result: Some(poll_task_response::Result::NoTask(NoTask {})),
                         }));
@@ -3840,27 +3860,25 @@ mod tests {
             "expected NoTask after transient failure"
         );
 
-        // Task should be back in Pending (not Failed) for retry.
+        // Task should be back in Pending for retry.
         let tasks = state.tasks.read().await;
         let task = tasks
             .all_tasks()
             .into_iter()
             .find(|t| t.run_id == run_id)
             .expect("task should exist");
-        assert!(
-            task.state == crate::scheduler::TaskState::Pending
-                || task.state == crate::scheduler::TaskState::Assigned,
-            "task should be Pending or Assigned for retry, got {:?}",
-            task.state
+        assert_eq!(
+            task.state,
+            crate::scheduler::TaskState::Pending,
+            "task should be Pending for retry"
         );
         drop(tasks);
 
-        // Run may stay Assigned if Assigned→Pending transition isn't allowed.
         let runs = state.runs.read().await;
-        let run_state = runs.get_run(&run_id).unwrap().state;
-        assert!(
-            run_state == InternalRunState::Pending || run_state == InternalRunState::Assigned,
-            "run should be retryable, got {run_state:?}"
+        assert_eq!(
+            runs.get_run(&run_id).unwrap().state,
+            InternalRunState::Pending,
+            "run should be Pending for retry"
         );
     }
 
