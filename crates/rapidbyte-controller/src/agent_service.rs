@@ -1203,9 +1203,27 @@ async fn make_task_response(
     // by the agent's environment.
     let yaml_str = std::str::from_utf8(&assignment.pipeline_yaml)
         .map_err(|e| Status::internal(format!("pipeline YAML is not valid UTF-8: {e}")))?;
+    let had_secrets = rapidbyte_engine::config::parser::contains_secret_refs(yaml_str);
     let resolved = rapidbyte_engine::config::parser::substitute_variables(yaml_str, secrets)
         .await
         .map_err(|e| Status::internal(format!("failed to resolve variables: {e}")))?;
+
+    // Validate the resolved YAML parses correctly. If secrets were involved,
+    // redact the error to prevent plaintext secrets from leaking in error
+    // messages to the agent.
+    if let Err(e) = serde_yaml::from_str::<serde_yaml::Value>(&resolved) {
+        let msg = if had_secrets {
+            format!(
+                "pipeline YAML invalid after secret resolution (source redacted): line {}, column {}",
+                e.location().map_or(0, |l| l.line()),
+                e.location().map_or(0, |l| l.column()),
+            )
+        } else {
+            format!("pipeline YAML invalid after variable resolution: {e}")
+        };
+        return Err(Status::internal(msg));
+    }
+
     let pipeline_yaml = resolved.into_bytes();
 
     Ok(PollTaskResponse {

@@ -83,12 +83,22 @@ impl SecretProvider for VaultProvider {
             .split_once('/')
             .with_context(|| format!("invalid Vault path '{path}': expected mount/path format"))?;
 
-        let data: HashMap<String, String> = vaultrs::kv2::read(&self.client, mount, secret_path)
-            .await
-            .with_context(|| format!("failed to read Vault secret at {path}"))?;
+        // Deserialize as Value to handle mixed types (string, number, bool).
+        let data: HashMap<String, serde_json::Value> =
+            vaultrs::kv2::read(&self.client, mount, secret_path)
+                .await
+                .with_context(|| format!("failed to read Vault secret at {path}"))?;
 
-        data.get(key)
-            .cloned()
-            .with_context(|| format!("key '{key}' not found in Vault secret {path}"))
+        let value = data
+            .get(key)
+            .with_context(|| format!("key '{key}' not found in Vault secret {path}"))?;
+
+        // Convert to string: strings stay as-is, numbers/bools use their
+        // JSON representation, null becomes empty string.
+        match value {
+            serde_json::Value::String(s) => Ok(s.clone()),
+            serde_json::Value::Null => Ok(String::new()),
+            other => Ok(other.to_string()),
+        }
     }
 }
