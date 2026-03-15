@@ -499,7 +499,7 @@ async fn process_task(
                 message: info.message.clone(),
                 retryable: info.retryable,
                 safe_to_retry: info.safe_to_retry,
-                commit_state: info.commit_state.clone(),
+                commit_state: info.commit_state.as_str().to_owned(),
             }),
         ),
         TaskOutcomeKind::Cancelled => (TaskOutcome::Cancelled as i32, None),

@@ -155,6 +155,18 @@ pub enum CommitState {
     AfterCommitConfirmed,
 }
 
+impl CommitState {
+    /// Wire-format string matching the serde `snake_case` convention.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::BeforeCommit => "before_commit",
+            Self::AfterCommitUnknown => "after_commit_unknown",
+            Self::AfterCommitConfirmed => "after_commit_confirmed",
+        }
+    }
+}
+
 /// Validation check outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
