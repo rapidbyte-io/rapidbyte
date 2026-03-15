@@ -12,16 +12,18 @@ Plugin configs contain credentials (database passwords, API keys) that are eithe
 
 ### Reference Syntax
 
-Extend the existing `${...}` substitution to support Vault KV v2 paths:
+Extend the existing `${...}` substitution to support Vault KV v2 logical paths:
 
 ```yaml
 source:
   config:
-    host: ${PG_HOST}                                  # env var (unchanged)
-    password: ${vault:secret/data/postgres#password}   # Vault KV v2
+    host: ${PG_HOST}                                # env var (unchanged)
+    password: ${vault:secret/postgres#password}      # Vault KV v2
 ```
 
-Format: `${vault:PATH#KEY}` where `PATH` is the Vault secret path and `KEY` selects a field from the secret's data map. `#KEY` is required.
+Format: `${vault:MOUNT/PATH#KEY}` where `MOUNT/PATH` is the **logical** Vault path (matching `vault kv get` convention) and `KEY` selects a field from the secret's data map. `#KEY` is required.
+
+The client automatically injects the `/data/` segment for the KV v2 HTTP API — users write `secret/postgres`, not `secret/data/postgres`. This matches the `vault kv get` CLI behavior and avoids a common misconfiguration.
 
 Unresolved references (missing env var, Vault path not found, key absent) are hard errors — same as today.
 
@@ -29,13 +31,20 @@ Unresolved references (missing env var, Vault path not found, key absent) are ha
 
 **Local mode** (`rapidbyte run pipeline.yaml`): The CLI process authenticates to Vault and resolves `${vault:...}` references before parsing the YAML.
 
-**Distributed mode** (`rapidbyte run --controller`): The controller authenticates to Vault and resolves `${vault:...}` references before dispatching the resolved YAML to agents over the existing mTLS gRPC channel. Agents never contact Vault. The controller never persists resolved secrets — they exist in memory only for the duration of the resolve-and-dispatch call.
+**Distributed mode** (`rapidbyte run --controller`): The controller stores **unresolved** pipeline YAML in its task queue (metadata store). When an agent polls for a task, the controller resolves `${vault:...}` references at dispatch time and sends the resolved YAML over the existing mTLS gRPC channel. The unresolved YAML is what persists in the database — resolved secrets never touch disk.
 
 Security properties:
-- Transit encryption via existing TLS on controller-agent gRPC
-- No secret persistence in controller metadata store
-- No secrets in tracing/logs (opaque config blobs)
-- Vault audit log records which paths the controller accessed
+- Resolved secrets exist in controller memory only during the dispatch call
+- No secret persistence in controller metadata store (task records contain unresolved YAML)
+- Transit encryption via existing TLS on controller↔agent gRPC
+- No secrets in tracing/logs — after resolution, YAML parse errors are redacted (see Error Redaction)
+- Vault audit log records which paths the controller accessed and when
+
+### Error Redaction
+
+After Vault substitution, the resolved YAML string may contain plaintext secrets. If YAML parsing then fails (syntax error, schema mismatch), the `serde_yaml` error message could include a snippet containing secrets.
+
+To prevent this, YAML parse errors after secret resolution must not include the raw YAML source. The parser wraps the error with a generic message: `"pipeline YAML parsing failed after secret resolution (source redacted)"`. The original error's structural information (line/column) is preserved, but the source snippet is stripped.
 
 ### New Crate: `rapidbyte-vault`
 
@@ -68,28 +77,36 @@ impl VaultClient {
 }
 ```
 
-- `new()` authenticates immediately (AppRole exchanges credentials for a token)
-- `read_secret()` calls `GET /v1/{path}`, returns `data.data` map
-- AppRole token renewal: re-authenticate on expiry (simple retry)
+- `new()` authenticates immediately (AppRole exchanges role_id/secret_id for a token)
+- `read_secret(path)` accepts logical paths (e.g. `secret/postgres`), injects `/data/` for the KV v2 HTTP API, returns `data.data` map
+- AppRole token renewal: re-authenticate on 403/expiry (simple retry, not a background task)
 - Uses `reqwest` (already a workspace dependency)
 - No `Debug` derive on config types — contains secrets
+
+**Timeouts and failure behavior:**
+- Connect timeout: 5 seconds
+- Read timeout: 10 seconds
+- Max retries per read: 2 (with re-auth on 403)
+- Resolution is atomic: all `${vault:...}` paths in a YAML must resolve successfully or the entire substitution fails. No partial resolution.
+- Vault down at startup: fail fast with a clear error message
 
 ### Integration Points
 
 **Config parser (`parser.rs`):**
 
-`substitute_env_vars()` becomes:
+Two parser functions coexist:
 
 ```rust
-pub async fn substitute_variables(
-    yaml: &str,
-    vault: Option<&VaultClient>,
-) -> Result<String>
+// Sync — errors if ${vault:...} references are present
+pub fn parse_pipeline_str(yaml: &str) -> Result<PipelineConfig>
+
+// Async — resolves both ${ENV_VAR} and ${vault:...}
+pub async fn parse_pipeline(yaml: &str, vault: Option<&VaultClient>) -> Result<PipelineConfig>
 ```
 
-Single regex pass matches both `${WORD}` (env var) and `${vault:PATH#KEY}` (Vault). Unique Vault paths are batched — each path fetched once even if referenced multiple times. No Vault dependency when no `${vault:...}` references exist.
+`parse_pipeline_str()` is unchanged for callers that don't need Vault (tests, benchmarks, autotune). If it encounters `${vault:...}` references, it returns a clear error: `"pipeline contains Vault references but no Vault client is configured"`.
 
-`parse_pipeline_str()` becomes `parse_pipeline()` (async).
+`parse_pipeline()` is the new async entrypoint. Single regex pass matches both `${WORD}` (env var) and `${vault:MOUNT/PATH#KEY}` (Vault). Unique Vault paths are batched — each path fetched once even if referenced multiple times.
 
 **CLI (`main.rs`):**
 
@@ -99,11 +116,13 @@ New global flags:
 - `--vault-role-id` / `VAULT_ROLE_ID`
 - `--vault-secret-id` / `VAULT_SECRET_ID`
 
-VaultClient constructed only when Vault is configured. Pipelines without `${vault:...}` references never touch Vault.
+VaultClient constructed only when Vault flags/env vars are set. Pipelines without `${vault:...}` references never touch Vault.
+
+`rapidbyte check` with Vault references but no Vault configured errors with: `"pipeline contains ${vault:...} references; provide --vault-addr to validate"`.
 
 **Controller task dispatch:**
 
-Controller constructs a `VaultClient` at startup (if configured) and reuses it. Before dispatching a task to an agent, the controller resolves `${vault:...}` in the pipeline YAML. The resolved YAML is what agents receive — no Vault awareness needed in the agent crate.
+Controller constructs a `VaultClient` at startup (if configured) and reuses it. Resolution happens at dispatch time (when agent polls), not at enqueue time. The task record in the metadata store always contains unresolved YAML.
 
 **What doesn't change:**
 - Plugin code — receives opaque JSON config
@@ -127,12 +146,12 @@ vault:
     - IPC_LOCK
 ```
 
-**`just dev-up`** gains a `vault-seed` step after `docker compose up -d --wait` that writes test secrets (e.g. `secret/data/postgres` with `password=postgres`).
+**`just dev-up`** gains a `vault-seed` step after `docker compose up -d --wait` that writes test secrets (e.g. `secret/postgres` with `password=postgres`).
 
 ### Testing
 
-- **Unit tests** (`rapidbyte-vault`): mock HTTP responses, test token auth, AppRole exchange, KV read, error cases (path not found, key missing, auth failure)
-- **Unit tests** (`parser.rs`): mock `VaultClient`, test mixed `${ENV_VAR}` + `${vault:...}` substitution, missing refs fail hard, duplicate paths fetched once
+- **Unit tests** (`rapidbyte-vault`): mock HTTP responses, test token auth, AppRole exchange, KV read, error cases (path not found, key missing, auth failure, timeout)
+- **Unit tests** (`parser.rs`): test `parse_pipeline_str` rejects `${vault:...}` references; test `parse_pipeline` with mock `VaultClient` for mixed `${ENV_VAR}` + `${vault:...}` substitution, missing refs fail hard, duplicate paths fetched once, error redaction after resolution
 - **Integration test** (`--ignored`): real Vault from dev-up, seed secret, resolve pipeline YAML, verify values
 
 ### Vault Auth Methods
@@ -147,9 +166,15 @@ Kubernetes auth can be added later. Operators on K8s can bridge with ESO injecti
 ### Dependency Graph
 
 ```
-rapidbyte-vault (new, leaf — no internal deps)
-  ├── engine → vault (for parser substitution)
-  └── cli → vault (for VaultClient construction)
+rapidbyte-vault (new, leaf — reqwest only, no internal deps)
+  ├── engine → vault (for parse_pipeline)
+  └── cli → vault (for VaultClient construction + passing to engine)
 ```
 
-Agent and controller crates do not depend on `rapidbyte-vault`. The controller uses it indirectly through engine's parser.
+The controller depends on `engine`, so it transitively gains the `vault` dependency. This is intentional — the controller uses `engine::parse_pipeline()` to resolve secrets at dispatch time. The agent crate has no Vault dependency (direct or transitive).
+
+### Future Extensions (Not In Scope)
+
+- **KV v2 version pinning**: pin `${vault:secret/postgres@3#password}` to a specific secret version
+- **Kubernetes auth method**: exchange K8s service account JWT for Vault token
+- **Secret rotation notifications**: Vault watches that trigger pipeline re-resolution
