@@ -178,9 +178,10 @@ fn plugin_kind_from_manifest(
         rapidbyte_types::wire::PluginKind::Source
     } else if manifest.roles.destination.is_some() {
         rapidbyte_types::wire::PluginKind::Destination
-    } else {
-        // Default to Transform for plugins without source/destination roles.
+    } else if manifest.roles.transform.is_some() {
         rapidbyte_types::wire::PluginKind::Transform
+    } else {
+        rapidbyte_types::wire::PluginKind::Unknown
     }
 }
 
