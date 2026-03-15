@@ -26,6 +26,12 @@ pub const MEDIA_TYPE_MANIFEST_LAYER: &str = "application/vnd.rapidbyte.plugin.ma
 /// Media type for the WASM binary layer (layer 1).
 pub const MEDIA_TYPE_WASM_LAYER: &str = "application/vnd.rapidbyte.plugin.wasm";
 
+/// Media type for the index artifact config.
+pub const MEDIA_TYPE_INDEX_CONFIG: &str = "application/vnd.rapidbyte.index.config.v1+json";
+
+/// Media type for the index data layer.
+pub const MEDIA_TYPE_INDEX_LAYER: &str = "application/vnd.rapidbyte.index.v1+json";
+
 // ── Config blob ───────────────────────────────────────────────────────────────
 
 /// The config blob stored in an OCI artifact's config descriptor.

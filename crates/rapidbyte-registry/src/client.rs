@@ -104,6 +104,8 @@ impl RegistryClient {
             crate::artifact::MEDIA_TYPE_CONFIG,
             crate::artifact::MEDIA_TYPE_MANIFEST_LAYER,
             crate::artifact::MEDIA_TYPE_WASM_LAYER,
+            crate::artifact::MEDIA_TYPE_INDEX_CONFIG,
+            crate::artifact::MEDIA_TYPE_INDEX_LAYER,
         ];
 
         self.inner
@@ -168,6 +170,77 @@ impl RegistryClient {
             .context("failed to push artifact")?;
 
         Ok(response.manifest_url)
+    }
+
+    /// Pull the plugin index from `<registry>/rapidbyte-index:latest`.
+    ///
+    /// Returns `None` if the index does not exist yet (any pull error is
+    /// treated as "index not available").
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the JSON in the index layer is malformed.
+    pub async fn pull_index(&self, registry: &str) -> Result<Option<crate::index::PluginIndex>> {
+        let index_ref = PluginRef {
+            registry: registry.to_owned(),
+            repository: crate::index::INDEX_REPOSITORY.to_owned(),
+            tag: crate::index::INDEX_TAG.to_owned(),
+        };
+
+        debug!(%index_ref, "pulling plugin index");
+
+        let image = match self.pull(&index_ref).await {
+            Ok(data) => data,
+            Err(_) => return Ok(None),
+        };
+
+        let layer = image
+            .layers
+            .into_iter()
+            .find(|l| l.media_type == crate::artifact::MEDIA_TYPE_INDEX_LAYER)
+            .context("index artifact is missing the index data layer")?;
+
+        let index: crate::index::PluginIndex =
+            serde_json::from_slice(&layer.data).context("failed to deserialize plugin index")?;
+
+        Ok(Some(index))
+    }
+
+    /// Push an updated plugin index to `<registry>/rapidbyte-index:latest`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on serialization, network, authentication, or push failures.
+    pub async fn push_index(
+        &self,
+        registry: &str,
+        index: &crate::index::PluginIndex,
+    ) -> Result<()> {
+        let index_ref = PluginRef {
+            registry: registry.to_owned(),
+            repository: crate::index::INDEX_REPOSITORY.to_owned(),
+            tag: crate::index::INDEX_TAG.to_owned(),
+        };
+
+        debug!(%index_ref, "pushing plugin index");
+
+        let index_bytes = serde_json::to_vec(index).context("failed to serialize plugin index")?;
+
+        let layer = ImageLayer::new(
+            index_bytes,
+            crate::artifact::MEDIA_TYPE_INDEX_LAYER.to_owned(),
+            None,
+        );
+
+        let config = Config::new(
+            b"{}".to_vec(),
+            crate::artifact::MEDIA_TYPE_INDEX_CONFIG.to_owned(),
+            None,
+        );
+
+        self.push(&index_ref, vec![layer], config).await?;
+
+        Ok(())
     }
 }
 
