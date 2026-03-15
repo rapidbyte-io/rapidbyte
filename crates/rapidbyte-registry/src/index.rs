@@ -11,6 +11,7 @@
 //! | [`PluginIndexEntry`] | Metadata for a single plugin repository           |
 
 use chrono::{DateTime, Utc};
+use rapidbyte_types::wire::PluginKind;
 use serde::{Deserialize, Serialize};
 
 // ── Well-known index location ─────────────────────────────────────────────────
@@ -32,8 +33,8 @@ pub struct PluginIndexEntry {
     pub name: String,
     /// Short description shown in search results.
     pub description: String,
-    /// Plugin category: `"source"`, `"destination"`, or `"transform"`.
-    pub plugin_type: String,
+    /// Plugin category.
+    pub plugin_type: PluginKind,
     /// Latest published version tag.
     pub latest: String,
     /// All known version tags in the order they were upserted.
@@ -129,7 +130,7 @@ impl PluginIndex {
     pub fn search<'a>(
         &'a self,
         query: &str,
-        plugin_type: Option<&str>,
+        plugin_type: Option<PluginKind>,
     ) -> Vec<&'a PluginIndexEntry> {
         let needle = query.to_lowercase();
 
@@ -182,7 +183,7 @@ mod tests {
         repository: &str,
         name: &str,
         description: &str,
-        plugin_type: &str,
+        plugin_type: PluginKind,
         latest: &str,
         versions: &[&str],
     ) -> PluginIndexEntry {
@@ -190,7 +191,7 @@ mod tests {
             repository: repository.to_owned(),
             name: name.to_owned(),
             description: description.to_owned(),
-            plugin_type: plugin_type.to_owned(),
+            plugin_type,
             latest: latest.to_owned(),
             versions: versions.iter().map(|v| (*v).to_owned()).collect(),
             author: None,
@@ -217,7 +218,7 @@ mod tests {
             "source/postgres",
             "Postgres Source",
             "Read rows from Postgres",
-            "source",
+            PluginKind::Source,
             "1.0.0",
             &["1.0.0"],
         );
@@ -238,7 +239,7 @@ mod tests {
             "source/postgres",
             "Postgres Source",
             "Read rows from Postgres",
-            "source",
+            PluginKind::Source,
             "1.0.0",
             &["1.0.0"],
         ));
@@ -248,7 +249,7 @@ mod tests {
             repository: "source/postgres".to_owned(),
             name: "Postgres Source".to_owned(),
             description: "Read rows from Postgres (updated)".to_owned(),
-            plugin_type: "source".to_owned(),
+            plugin_type: PluginKind::Source,
             latest: "2.0.0".to_owned(),
             versions: vec!["2.0.0".to_owned()],
             author: Some("alice".to_owned()),
@@ -275,7 +276,7 @@ mod tests {
             "source/postgres",
             "Postgres Source",
             "desc",
-            "source",
+            PluginKind::Source,
             "1.0.0",
             &["1.0.0"],
         ));
@@ -285,7 +286,7 @@ mod tests {
             "source/postgres",
             "Postgres Source",
             "desc",
-            "source",
+            PluginKind::Source,
             "1.0.0",
             &["1.0.0"],
         ));
@@ -305,7 +306,7 @@ mod tests {
             "source/postgres",
             "Postgres Source",
             "Read rows from Postgres",
-            "source",
+            PluginKind::Source,
             "1.0.0",
             &["1.0.0"],
         ));
@@ -313,7 +314,7 @@ mod tests {
             "destination/s3",
             "S3 Destination",
             "Write Parquet files to S3",
-            "destination",
+            PluginKind::Destination,
             "1.0.0",
             &["1.0.0"],
         ));
@@ -321,7 +322,7 @@ mod tests {
             "transform/sql",
             "SQL Transform",
             "Run arbitrary SQL over Arrow batches",
-            "transform",
+            PluginKind::Transform,
             "1.0.0",
             &["1.0.0"],
         ));
@@ -356,7 +357,7 @@ mod tests {
     #[test]
     fn search_filters_by_type() {
         let idx = populated_index();
-        let results = idx.search("", Some("destination"));
+        let results = idx.search("", Some(PluginKind::Destination));
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].repository, "destination/s3");
     }
@@ -397,7 +398,7 @@ mod tests {
             "source/postgres",
             "Postgres",
             "desc",
-            "source",
+            PluginKind::Source,
             "2.0.0",
             &["2.0.0"],
         ));
@@ -408,7 +409,7 @@ mod tests {
             "source/postgres",
             "Postgres",
             "desc",
-            "source",
+            PluginKind::Source,
             "1.0.0",
             &["1.0.0"],
         ));
@@ -425,14 +426,21 @@ mod tests {
             "p",
             "P",
             "d",
-            "source",
+            PluginKind::Source,
             "1.0.0-beta",
             &["1.0.0-beta"],
         ));
         assert_eq!(idx.plugins[0].latest, "1.0.0-beta");
 
         // Release 1.0.0 should advance latest past 1.0.0-beta
-        idx.upsert(make_entry("p", "P", "d", "source", "1.0.0", &["1.0.0"]));
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            PluginKind::Source,
+            "1.0.0",
+            &["1.0.0"],
+        ));
         assert_eq!(idx.plugins[0].latest, "1.0.0");
     }
 
@@ -440,7 +448,14 @@ mod tests {
     fn upsert_does_not_regress_release_to_prerelease() {
         let mut idx = PluginIndex::new();
 
-        idx.upsert(make_entry("p", "P", "d", "source", "1.0.0", &["1.0.0"]));
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            PluginKind::Source,
+            "1.0.0",
+            &["1.0.0"],
+        ));
 
         // Pushing 1.0.1-rc1 should NOT regress latest back to a pre-release
         // at the same or lower version
@@ -448,7 +463,7 @@ mod tests {
             "p",
             "P",
             "d",
-            "source",
+            PluginKind::Source,
             "1.0.0-rc1",
             &["1.0.0-rc1"],
         ));
@@ -459,14 +474,21 @@ mod tests {
     fn upsert_advances_latest_for_newer_prerelease() {
         let mut idx = PluginIndex::new();
 
-        idx.upsert(make_entry("p", "P", "d", "source", "1.0.0", &["1.0.0"]));
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            PluginKind::Source,
+            "1.0.0",
+            &["1.0.0"],
+        ));
 
         // 2.0.0-beta is a higher major version, should advance
         idx.upsert(make_entry(
             "p",
             "P",
             "d",
-            "source",
+            PluginKind::Source,
             "2.0.0-beta",
             &["2.0.0-beta"],
         ));
@@ -481,7 +503,7 @@ mod tests {
             "p",
             "P",
             "d",
-            "source",
+            PluginKind::Source,
             "1.0.0-beta",
             &["1.0.0-beta"],
         ));
@@ -492,7 +514,7 @@ mod tests {
             "p",
             "P",
             "d",
-            "source",
+            PluginKind::Source,
             "1.0.0-rc",
             &["1.0.0-rc"],
         ));
@@ -507,7 +529,7 @@ mod tests {
             "p",
             "P",
             "d",
-            "source",
+            PluginKind::Source,
             "1.0.0-beta.2",
             &["1.0.0-beta.2"],
         ));
@@ -518,7 +540,7 @@ mod tests {
             "p",
             "P",
             "d",
-            "source",
+            PluginKind::Source,
             "1.0.0-beta.10",
             &["1.0.0-beta.10"],
         ));
@@ -529,7 +551,7 @@ mod tests {
             "p",
             "P",
             "d",
-            "source",
+            PluginKind::Source,
             "1.0.0-beta.3",
             &["1.0.0-beta.3"],
         ));
@@ -541,15 +563,36 @@ mod tests {
         let mut idx = PluginIndex::new();
 
         // 4-segment version is not semver — should always update
-        idx.upsert(make_entry("p", "P", "d", "source", "1.2.3.4", &["1.2.3.4"]));
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            PluginKind::Source,
+            "1.2.3.4",
+            &["1.2.3.4"],
+        ));
         assert_eq!(idx.plugins[0].latest, "1.2.3.4");
 
         // Pushing a 2-segment version (also not semver) should still update
-        idx.upsert(make_entry("p", "P", "d", "source", "1.2", &["1.2"]));
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            PluginKind::Source,
+            "1.2",
+            &["1.2"],
+        ));
         assert_eq!(idx.plugins[0].latest, "1.2");
 
         // Pushing a valid semver after non-semver should update
-        idx.upsert(make_entry("p", "P", "d", "source", "2.0.0", &["2.0.0"]));
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            PluginKind::Source,
+            "2.0.0",
+            &["2.0.0"],
+        ));
         assert_eq!(idx.plugins[0].latest, "2.0.0");
     }
 
@@ -572,23 +615,58 @@ mod tests {
         let mut idx = PluginIndex::new();
 
         // v-prefixed tag treated as valid semver
-        idx.upsert(make_entry("p", "P", "d", "source", "v1.0.0", &["v1.0.0"]));
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            PluginKind::Source,
+            "v1.0.0",
+            &["v1.0.0"],
+        ));
         assert_eq!(idx.plugins[0].latest, "v1.0.0");
 
         // v2.0.0 > v1.0.0 even with prefix
-        idx.upsert(make_entry("p", "P", "d", "source", "v2.0.0", &["v2.0.0"]));
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            PluginKind::Source,
+            "v2.0.0",
+            &["v2.0.0"],
+        ));
         assert_eq!(idx.plugins[0].latest, "v2.0.0");
 
         // v1.5.0 should NOT regress from v2.0.0
-        idx.upsert(make_entry("p", "P", "d", "source", "v1.5.0", &["v1.5.0"]));
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            PluginKind::Source,
+            "v1.5.0",
+            &["v1.5.0"],
+        ));
         assert_eq!(idx.plugins[0].latest, "v2.0.0");
 
         // Mixed: non-prefixed 3.0.0 advances past v2.0.0
-        idx.upsert(make_entry("p", "P", "d", "source", "3.0.0", &["3.0.0"]));
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            PluginKind::Source,
+            "3.0.0",
+            &["3.0.0"],
+        ));
         assert_eq!(idx.plugins[0].latest, "3.0.0");
 
         // v2.5.0 should NOT regress from 3.0.0
-        idx.upsert(make_entry("p", "P", "d", "source", "v2.5.0", &["v2.5.0"]));
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            PluginKind::Source,
+            "v2.5.0",
+            &["v2.5.0"],
+        ));
         assert_eq!(idx.plugins[0].latest, "3.0.0");
     }
 
@@ -599,14 +677,21 @@ mod tests {
             "p",
             "P",
             "d",
-            "source",
+            PluginKind::Source,
             "1.0.0+build.1",
             &["1.0.0+build.1"],
         ));
         assert_eq!(idx.plugins[0].latest, "1.0.0+build.1");
 
         // 1.0.1 > 1.0.0 regardless of build metadata
-        idx.upsert(make_entry("p", "P", "d", "source", "1.0.1", &["1.0.1"]));
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            PluginKind::Source,
+            "1.0.1",
+            &["1.0.1"],
+        ));
         assert_eq!(idx.plugins[0].latest, "1.0.1");
 
         // 1.0.0+build.99 should NOT regress from 1.0.1 (build metadata ignored)
@@ -614,7 +699,7 @@ mod tests {
             "p",
             "P",
             "d",
-            "source",
+            PluginKind::Source,
             "1.0.0+build.99",
             &["1.0.0+build.99"],
         ));
@@ -626,19 +711,47 @@ mod tests {
         let mut idx = PluginIndex::new();
 
         // Start with valid semver
-        idx.upsert(make_entry("p", "P", "d", "source", "2.0.0", &["2.0.0"]));
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            PluginKind::Source,
+            "2.0.0",
+            &["2.0.0"],
+        ));
         assert_eq!(idx.plugins[0].latest, "2.0.0");
 
         // Push non-semver tag — should NOT overwrite
-        idx.upsert(make_entry("p", "P", "d", "source", "nightly", &["nightly"]));
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            PluginKind::Source,
+            "nightly",
+            &["nightly"],
+        ));
         assert_eq!(idx.plugins[0].latest, "2.0.0");
 
         // Push 4-segment non-semver — should NOT overwrite
-        idx.upsert(make_entry("p", "P", "d", "source", "1.2.3.4", &["1.2.3.4"]));
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            PluginKind::Source,
+            "1.2.3.4",
+            &["1.2.3.4"],
+        ));
         assert_eq!(idx.plugins[0].latest, "2.0.0");
 
         // But valid higher semver SHOULD overwrite
-        idx.upsert(make_entry("p", "P", "d", "source", "3.0.0", &["3.0.0"]));
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            PluginKind::Source,
+            "3.0.0",
+            &["3.0.0"],
+        ));
         assert_eq!(idx.plugins[0].latest, "3.0.0");
     }
 }

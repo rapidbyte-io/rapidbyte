@@ -66,6 +66,16 @@ pub enum PluginKind {
     Transform,
 }
 
+impl std::fmt::Display for PluginKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Source => "source",
+            Self::Destination => "destination",
+            Self::Transform => "transform",
+        })
+    }
+}
+
 /// Capability flag declared by a plugin.
 ///
 /// Used in both runtime [`PluginInfo`] and manifest capability declarations.

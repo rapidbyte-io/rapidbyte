@@ -9,6 +9,7 @@ use rapidbyte_registry::artifact::{self, unpack_artifact};
 use rapidbyte_registry::cache::PluginCache;
 use rapidbyte_registry::client::{RegistryClient, RegistryConfig};
 use rapidbyte_registry::PluginRef;
+use rapidbyte_types::wire::PluginKind;
 
 fn insecure_config() -> RegistryConfig {
     RegistryConfig {
@@ -171,7 +172,7 @@ async fn index_push_pull_and_search_roundtrip() {
         repository: "test/index-search".to_owned(),
         name: "Index Search Test".to_owned(),
         description: "A plugin for testing index search".to_owned(),
-        plugin_type: "source".to_owned(),
+        plugin_type: PluginKind::Source,
         latest: "0.2.0".to_owned(),
         versions: vec!["0.2.0".to_owned()],
         author: Some("test-author".to_owned()),
@@ -197,12 +198,12 @@ async fn index_push_pull_and_search_roundtrip() {
     assert_eq!(results[0].repository, "test/index-search");
 
     // Search by type filter
-    let source_results = pulled.search("", Some("source"));
+    let source_results = pulled.search("", Some(PluginKind::Source));
     assert!(source_results
         .iter()
         .any(|e| e.repository == "test/index-search"));
 
-    let dest_results = pulled.search("", Some("destination"));
+    let dest_results = pulled.search("", Some(PluginKind::Destination));
     assert!(!dest_results
         .iter()
         .any(|e| e.repository == "test/index-search"));
@@ -225,7 +226,7 @@ async fn index_upsert_adds_version_without_duplicating() {
         repository: "test/versioned".to_owned(),
         name: "Versioned Plugin".to_owned(),
         description: "Tests version accumulation".to_owned(),
-        plugin_type: "transform".to_owned(),
+        plugin_type: PluginKind::Transform,
         latest: "1.0.0".to_owned(),
         versions: vec!["1.0.0".to_owned()],
         author: None,
@@ -238,7 +239,7 @@ async fn index_upsert_adds_version_without_duplicating() {
         repository: "test/versioned".to_owned(),
         name: "Versioned Plugin".to_owned(),
         description: "Tests version accumulation".to_owned(),
-        plugin_type: "transform".to_owned(),
+        plugin_type: PluginKind::Transform,
         latest: "1.1.0".to_owned(),
         versions: vec!["1.1.0".to_owned()],
         author: None,

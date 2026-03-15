@@ -4724,6 +4724,7 @@ dependencies = [
  "hex",
  "oci-client",
  "rand 0.8.5",
+ "rapidbyte-types",
  "semver",
  "serde",
  "serde_json",
