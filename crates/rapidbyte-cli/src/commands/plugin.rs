@@ -93,6 +93,14 @@ async fn pull(plugin_ref_str: &str, insecure: bool, global_config: &RegistryConf
 
     // Check cache first.
     if let Some(entry) = cache.lookup(&plugin_ref) {
+        // Re-verify trust on cache hits so policy/key changes take effect.
+        if let Some(config) = cache.load_artifact_config(&plugin_ref) {
+            check_trust(
+                &config,
+                global_config.trust_policy,
+                &global_config.trusted_key_paths,
+            )?;
+        }
         eprintln!(
             "Plugin {plugin_ref} already cached ({})",
             format_size(entry.size_bytes),
@@ -119,7 +127,12 @@ async fn pull(plugin_ref_str: &str, insecure: bool, global_config: &RegistryConf
     )?;
 
     let entry = cache
-        .store(&plugin_ref, &unpacked.manifest_json, &unpacked.wasm_bytes)
+        .store_with_config(
+            &plugin_ref,
+            &unpacked.manifest_json,
+            &unpacked.wasm_bytes,
+            Some(&unpacked.config),
+        )
         .context("Failed to store plugin in cache")?;
 
     eprintln!(

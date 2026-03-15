@@ -79,6 +79,22 @@ impl PluginCache {
         manifest_json: &[u8],
         wasm_bytes: &[u8],
     ) -> Result<CacheEntry> {
+        self.store_with_config(plugin_ref, manifest_json, wasm_bytes, None)
+    }
+
+    /// Store a plugin artifact with its artifact config (including signature).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cache directory cannot be created or files cannot
+    /// be written.
+    pub fn store_with_config(
+        &self,
+        plugin_ref: &PluginRef,
+        manifest_json: &[u8],
+        wasm_bytes: &[u8],
+        artifact_config: Option<&crate::artifact::PluginArtifactConfig>,
+    ) -> Result<CacheEntry> {
         let dir = self.entry_dir(plugin_ref);
         fs::create_dir_all(&dir)
             .with_context(|| format!("failed to create cache directory: {}", dir.display()))?;
@@ -96,6 +112,14 @@ impl PluginCache {
         fs::write(&digest_path, &digest)
             .with_context(|| format!("failed to write {}", digest_path.display()))?;
 
+        if let Some(config) = artifact_config {
+            let config_path = dir.join("artifact_config.json");
+            let config_json =
+                serde_json::to_vec(config).context("failed to serialize artifact config")?;
+            fs::write(&config_path, &config_json)
+                .with_context(|| format!("failed to write {}", config_path.display()))?;
+        }
+
         #[allow(clippy::cast_possible_truncation)]
         let size_bytes = wasm_bytes.len() as u64;
 
@@ -106,6 +130,20 @@ impl PluginCache {
             digest,
             size_bytes,
         })
+    }
+
+    /// Load the artifact config (including signature) for a cached plugin.
+    ///
+    /// Returns `None` if no `artifact_config.json` exists in the cache entry
+    /// (e.g. cached before signing was added).
+    #[must_use]
+    pub fn load_artifact_config(
+        &self,
+        plugin_ref: &PluginRef,
+    ) -> Option<crate::artifact::PluginArtifactConfig> {
+        let config_path = self.entry_dir(plugin_ref).join("artifact_config.json");
+        let data = fs::read(&config_path).ok()?;
+        serde_json::from_slice(&data).ok()
     }
 
     /// Look up a cached plugin by reference.

@@ -365,8 +365,13 @@ async fn main() -> ExitCode {
     };
     let tls = tls.is_configured().then_some(tls);
 
-    let trust_policy =
-        rapidbyte_registry::TrustPolicy::from_str_name(&cli.trust_policy).unwrap_or_default();
+    let trust_policy = match rapidbyte_registry::TrustPolicy::from_str_name(&cli.trust_policy) {
+        Ok(policy) => policy,
+        Err(e) => {
+            eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
+            return ExitCode::FAILURE;
+        }
+    };
     let registry_config = rapidbyte_registry::RegistryConfig {
         insecure: cli.registry_insecure,
         default_registry: cli

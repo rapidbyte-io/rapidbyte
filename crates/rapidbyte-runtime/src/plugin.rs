@@ -188,6 +188,10 @@ pub async fn resolve_plugin_from_registry(
     // Check cache first.
     if let Some(entry) = cache.lookup(&plugin_ref) {
         tracing::debug!(%plugin_ref, "using cached plugin");
+        // Re-verify trust on cache hits so policy/key changes take effect.
+        if let Some(config) = cache.load_artifact_config(&plugin_ref) {
+            verify_trust(&config, registry_config)?;
+        }
         return Ok(entry.wasm_path);
     }
 
@@ -200,7 +204,12 @@ pub async fn resolve_plugin_from_registry(
     // Verify signature against trust policy
     verify_trust(&unpacked.config, registry_config)?;
 
-    let entry = cache.store(&plugin_ref, &unpacked.manifest_json, &unpacked.wasm_bytes)?;
+    let entry = cache.store_with_config(
+        &plugin_ref,
+        &unpacked.manifest_json,
+        &unpacked.wasm_bytes,
+        Some(&unpacked.config),
+    )?;
     tracing::info!(
         %plugin_ref,
         digest = %entry.digest,
