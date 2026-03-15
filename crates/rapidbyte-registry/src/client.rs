@@ -16,7 +16,11 @@ use crate::trust::TrustPolicy;
 use crate::PluginRef;
 
 /// Configuration for connecting to an OCI registry.
-#[derive(Debug, Clone, Default)]
+///
+/// `Debug` is manually implemented to redact `credentials` and
+/// `trusted_key_pems`, preventing accidental secret leakage in logs,
+/// panics, or debug dumps.
+#[derive(Clone, Default)]
 pub struct RegistryConfig {
     /// Use plain HTTP instead of HTTPS.
     pub insecure: bool,
@@ -33,6 +37,25 @@ pub struct RegistryConfig {
     /// Trusted Ed25519 public keys as PEM strings (alternative to file paths).
     /// Used by agents that receive keys inline from the controller.
     pub trusted_key_pems: Vec<String>,
+}
+
+impl std::fmt::Debug for RegistryConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegistryConfig")
+            .field("insecure", &self.insecure)
+            .field(
+                "credentials",
+                &self.credentials.as_ref().map(|(u, _)| (u, "[REDACTED]")),
+            )
+            .field("default_registry", &self.default_registry)
+            .field("trust_policy", &self.trust_policy)
+            .field("trusted_key_paths", &self.trusted_key_paths)
+            .field(
+                "trusted_key_pems",
+                &format_args!("[{} keys]", self.trusted_key_pems.len()),
+            )
+            .finish()
+    }
 }
 
 /// High-level OCI registry client for rapidbyte plugin artifacts.
