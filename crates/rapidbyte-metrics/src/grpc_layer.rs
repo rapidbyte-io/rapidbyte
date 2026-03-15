@@ -56,7 +56,7 @@ where
             let elapsed = start.elapsed().as_secs_f64();
             let status = match &result {
                 Ok(response) => grpc_status_label(response),
-                Err(_) => "error",
+                Err(_) => crate::labels::STATUS_ERROR,
             };
             let labels = [
                 KeyValue::new(crate::labels::METHOD, method),
@@ -88,10 +88,10 @@ fn grpc_status_label<Body>(response: &http::Response<Body>) -> &'static str {
     }
 }
 
-const fn grpc_code_label(code: Code) -> &'static str {
+fn grpc_code_label(code: Code) -> &'static str {
     match code {
-        Code::Ok => "ok",
-        Code::Cancelled => "cancelled",
+        Code::Ok => crate::labels::STATUS_OK,
+        Code::Cancelled => crate::labels::STATUS_CANCELLED,
         Code::Unknown => "unknown",
         Code::InvalidArgument => "invalid_argument",
         Code::DeadlineExceeded => "deadline_exceeded",

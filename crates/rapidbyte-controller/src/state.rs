@@ -11,7 +11,7 @@ use crate::preview::{PreviewStore, TicketSigner};
 use crate::registry::AgentRegistry;
 use crate::run_state::RunStore;
 use crate::scheduler::{TaskQueue, TaskState};
-use crate::store::{DurableMetadataStore, MetadataSnapshot, MetadataStore};
+use crate::store::{DurableMetadataStore, MetadataSnapshot, MetadataStore, PreviewData};
 use crate::watcher::RunWatchers;
 
 /// Shared state container for the controller.
@@ -221,11 +221,13 @@ impl ControllerState {
             .upsert_preview(
                 &preview.run_id,
                 &preview.task_id,
-                &preview.flight_endpoint,
-                preview.ticket.as_ref(),
-                &preview.streams,
-                preview_created_at(preview.created_at),
-                preview.ttl,
+                &PreviewData {
+                    flight_endpoint: &preview.flight_endpoint,
+                    ticket: preview.ticket.as_ref(),
+                    streams: &preview.streams,
+                    created_at: preview_created_at(preview.created_at),
+                    ttl: preview.ttl,
+                },
             )
             .await
     }

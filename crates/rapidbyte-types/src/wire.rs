@@ -64,6 +64,20 @@ pub enum PluginKind {
     Destination,
     /// Transforms data in-flight between source and destination.
     Transform,
+    /// Unrecognized plugin kind (e.g. from a newer index format).
+    #[serde(other)]
+    Unknown,
+}
+
+impl std::fmt::Display for PluginKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Source => "source",
+            Self::Destination => "destination",
+            Self::Transform => "transform",
+            Self::Unknown => "unknown",
+        })
+    }
 }
 
 /// Capability flag declared by a plugin.

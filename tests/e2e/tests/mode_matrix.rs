@@ -1,3 +1,4 @@
+use rapidbyte_e2e::harness::PipelinePolicies;
 use rstest::rstest;
 
 #[rstest]
@@ -23,11 +24,33 @@ async fn full_refresh_write_mode_matrix(#[case] write_mode: &str) {
             .expect("source seed should succeed");
 
         context
-            .run_pipeline(&schemas, "full_refresh", write_mode, &state_path)
+            .run_pipeline(
+                &schemas,
+                &state_path,
+                &PipelinePolicies {
+                    sync_mode: "full_refresh",
+                    write_mode,
+                    compression: None,
+                    on_data_error: None,
+                    schema_evolution_block: None,
+                    autotune: None,
+                },
+            )
             .await
             .expect("first run should succeed");
         context
-            .run_pipeline(&schemas, "full_refresh", write_mode, &state_path)
+            .run_pipeline(
+                &schemas,
+                &state_path,
+                &PipelinePolicies {
+                    sync_mode: "full_refresh",
+                    write_mode,
+                    compression: None,
+                    on_data_error: None,
+                    schema_evolution_block: None,
+                    autotune: None,
+                },
+            )
             .await
             .expect("second run should succeed");
 
@@ -69,7 +92,18 @@ async fn incremental_sync_only_appends_new_rows_on_second_run() {
             .expect("source seed should succeed");
 
         let first = context
-            .run_pipeline(&schemas, "incremental", "append", &state_path)
+            .run_pipeline(
+                &schemas,
+                &state_path,
+                &PipelinePolicies {
+                    sync_mode: "incremental",
+                    write_mode: "append",
+                    compression: None,
+                    on_data_error: None,
+                    schema_evolution_block: None,
+                    autotune: None,
+                },
+            )
             .await
             .expect("incremental first run should succeed");
         assert_eq!(first.records_read, 6);
@@ -80,7 +114,18 @@ async fn incremental_sync_only_appends_new_rows_on_second_run() {
             .expect("source mutation should succeed");
 
         let second = context
-            .run_pipeline(&schemas, "incremental", "append", &state_path)
+            .run_pipeline(
+                &schemas,
+                &state_path,
+                &PipelinePolicies {
+                    sync_mode: "incremental",
+                    write_mode: "append",
+                    compression: None,
+                    on_data_error: None,
+                    schema_evolution_block: None,
+                    autotune: None,
+                },
+            )
             .await
             .expect("incremental second run should succeed");
         assert!(second.records_read < first.records_read);
@@ -123,12 +168,17 @@ async fn full_refresh_compression_matrix(#[case] compression: Option<&str>) {
             .expect("source seed should succeed");
 
         context
-            .run_pipeline_with_compression(
+            .run_pipeline(
                 &schemas,
-                "full_refresh",
-                "replace",
                 &state_path,
-                compression,
+                &PipelinePolicies {
+                    sync_mode: "full_refresh",
+                    write_mode: "replace",
+                    compression,
+                    on_data_error: None,
+                    schema_evolution_block: None,
+                    autotune: None,
+                },
             )
             .await
             .expect("compressed pipeline run should succeed");

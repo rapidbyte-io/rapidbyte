@@ -54,12 +54,15 @@ pub async fn execute(command: crate::PluginCommands, global_config: &RegistryCon
             let effective_registry = registry
                 .as_deref()
                 .or(global_config.default_registry.as_deref());
-            search(
-                &query,
-                plugin_type.as_deref(),
-                effective_registry,
-                effective_insecure(insecure),
-            )
+            {
+                let kind = plugin_type.as_deref().map(parse_plugin_kind).transpose()?;
+                search(
+                    &query,
+                    kind,
+                    effective_registry,
+                    effective_insecure(insecure),
+                )
+            }
             .await
         }
         crate::PluginCommands::Keygen { output } => keygen(&output),
@@ -159,15 +162,26 @@ async fn pull(plugin_ref_str: &str, insecure: bool, global_config: &RegistryConf
     Ok(())
 }
 
-fn plugin_type_from_manifest(manifest: &rapidbyte_types::manifest::PluginManifest) -> &'static str {
+fn parse_plugin_kind(s: &str) -> Result<rapidbyte_types::wire::PluginKind> {
+    match s {
+        "source" => Ok(rapidbyte_types::wire::PluginKind::Source),
+        "destination" => Ok(rapidbyte_types::wire::PluginKind::Destination),
+        "transform" => Ok(rapidbyte_types::wire::PluginKind::Transform),
+        _ => bail!("invalid plugin type: {s} (expected source, destination, or transform)"),
+    }
+}
+
+fn plugin_kind_from_manifest(
+    manifest: &rapidbyte_types::manifest::PluginManifest,
+) -> rapidbyte_types::wire::PluginKind {
     if manifest.roles.source.is_some() {
-        "source"
+        rapidbyte_types::wire::PluginKind::Source
     } else if manifest.roles.destination.is_some() {
-        "destination"
+        rapidbyte_types::wire::PluginKind::Destination
     } else if manifest.roles.transform.is_some() {
-        "transform"
+        rapidbyte_types::wire::PluginKind::Transform
     } else {
-        "unknown"
+        rapidbyte_types::wire::PluginKind::Unknown
     }
 }
 
@@ -231,7 +245,7 @@ async fn push(
         repository: plugin_ref.repository.clone(),
         name: manifest.name.clone(),
         description: manifest.description.clone(),
-        plugin_type: plugin_type_from_manifest(&manifest).to_owned(),
+        plugin_type: plugin_kind_from_manifest(&manifest),
         latest: plugin_ref.tag.clone(),
         versions: vec![plugin_ref.tag.clone()],
         author: manifest.author.clone(),
@@ -369,7 +383,7 @@ fn remove(plugin_ref_str: &str) -> Result<()> {
 
 async fn search(
     query: &str,
-    plugin_type: Option<&str>,
+    plugin_type: Option<rapidbyte_types::wire::PluginKind>,
     registry: Option<&str>,
     insecure: bool,
 ) -> Result<()> {

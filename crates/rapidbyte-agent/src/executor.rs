@@ -51,7 +51,7 @@ pub struct TaskErrorInfo {
     pub message: String,
     pub retryable: bool,
     pub safe_to_retry: bool,
-    pub commit_state: String,
+    pub commit_state: CommitState,
 }
 
 pub struct TaskMetrics {
@@ -122,7 +122,7 @@ where
                     message: format!("Pipeline YAML is not valid UTF-8: {e}"),
                     retryable: false,
                     safe_to_retry: false,
-                    commit_state: "before_commit".into(),
+                    commit_state: CommitState::BeforeCommit,
                 }),
                 metrics: TaskMetrics::zero(),
                 dry_run_result: None,
@@ -139,7 +139,7 @@ where
                     message: format!("{e:#}"),
                     retryable: false,
                     safe_to_retry: false,
-                    commit_state: "before_commit".into(),
+                    commit_state: CommitState::BeforeCommit,
                 }),
                 metrics: TaskMetrics::zero(),
                 dry_run_result: None,
@@ -154,7 +154,7 @@ where
                 message: format!("{e:#}"),
                 retryable: false,
                 safe_to_retry: false,
-                commit_state: "before_commit".into(),
+                commit_state: CommitState::BeforeCommit,
             }),
             metrics: TaskMetrics::zero(),
             dry_run_result: None,
@@ -237,24 +237,14 @@ where
                     message: pe.message.clone(),
                     retryable: pe.retryable,
                     safe_to_retry: pe.safe_to_retry,
-                    commit_state: pe.commit_state.map_or_else(
-                        || "before_commit".into(),
-                        |cs| {
-                            match cs {
-                                CommitState::BeforeCommit => "before_commit",
-                                CommitState::AfterCommitUnknown => "after_commit_unknown",
-                                CommitState::AfterCommitConfirmed => "after_commit_confirmed",
-                            }
-                            .into()
-                        },
-                    ),
+                    commit_state: pe.commit_state.unwrap_or(CommitState::BeforeCommit),
                 },
                 PipelineError::Infrastructure(e) => TaskErrorInfo {
                     code: "INFRASTRUCTURE".into(),
                     message: format!("{e:#}"),
                     retryable: false,
                     safe_to_retry: false,
-                    commit_state: "before_commit".into(),
+                    commit_state: CommitState::BeforeCommit,
                 },
             };
             TaskExecutionResult {
@@ -581,7 +571,7 @@ destination:
             TaskOutcomeKind::Failed(info) => {
                 assert_eq!(info.code, "WRITE_FAILED");
                 assert!(!info.safe_to_retry);
-                assert_eq!(info.commit_state, "after_commit_unknown");
+                assert_eq!(info.commit_state, CommitState::AfterCommitUnknown);
             }
             _ => panic!("expected real post-commit failure outcome"),
         }

@@ -499,7 +499,7 @@ async fn process_task(
                 message: info.message.clone(),
                 retryable: info.retryable,
                 safe_to_retry: info.safe_to_retry,
-                commit_state: info.commit_state.clone(),
+                commit_state: info.commit_state.as_str().to_owned(),
             }),
         ),
         TaskOutcomeKind::Cancelled => (TaskOutcome::Cancelled as i32, None),
@@ -551,9 +551,9 @@ async fn process_task(
     };
 
     let status_label = match &result.outcome {
-        TaskOutcomeKind::Completed => "ok",
-        TaskOutcomeKind::Failed(_) => "error",
-        TaskOutcomeKind::Cancelled => "cancelled",
+        TaskOutcomeKind::Completed => rapidbyte_metrics::labels::STATUS_OK,
+        TaskOutcomeKind::Failed(_) => rapidbyte_metrics::labels::STATUS_ERROR,
+        TaskOutcomeKind::Cancelled => rapidbyte_metrics::labels::STATUS_CANCELLED,
     };
     rapidbyte_metrics::instruments::agent::tasks_completed().add(
         1,

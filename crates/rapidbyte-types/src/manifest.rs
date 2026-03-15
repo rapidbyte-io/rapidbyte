@@ -145,6 +145,7 @@ impl PluginManifest {
             PluginKind::Source => self.roles.source.is_some(),
             PluginKind::Destination => self.roles.destination.is_some(),
             PluginKind::Transform => self.roles.transform.is_some(),
+            PluginKind::Unknown => false,
         }
     }
 

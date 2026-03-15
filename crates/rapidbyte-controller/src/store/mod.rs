@@ -35,6 +35,14 @@ pub struct MetadataSnapshot {
     pub max_lease_epoch: u64,
 }
 
+pub struct PreviewData<'a> {
+    pub flight_endpoint: &'a str,
+    pub ticket: &'a [u8],
+    pub streams: &'a [PreviewStreamEntry],
+    pub created_at: SystemTime,
+    pub ttl: Duration,
+}
+
 #[derive(Clone)]
 pub struct MetadataStore {
     client: Arc<Mutex<Client>>,
@@ -152,16 +160,11 @@ pub trait DurableMetadataStore: Send + Sync {
         run: &RunRecord,
         task: Option<&TaskRecord>,
     ) -> anyhow::Result<()>;
-    #[allow(clippy::too_many_arguments)]
     async fn upsert_preview(
         &self,
         run_id: &str,
         task_id: &str,
-        flight_endpoint: &str,
-        ticket: &[u8],
-        streams: &[PreviewStreamEntry],
-        created_at: SystemTime,
-        ttl: Duration,
+        preview: &PreviewData<'_>,
     ) -> anyhow::Result<()>;
     async fn upsert_agent(&self, agent: &AgentRecord) -> anyhow::Result<()>;
     async fn delete_agent(&self, agent_id: &str) -> anyhow::Result<()>;
@@ -394,20 +397,16 @@ impl MetadataStore {
     /// # Errors
     ///
     /// Returns an error if the database write fails.
-    #[allow(clippy::too_many_arguments)]
     pub async fn upsert_preview(
         &self,
         run_id: &str,
         task_id: &str,
-        flight_endpoint: &str,
-        ticket: &[u8],
-        streams: &[PreviewStreamEntry],
-        created_at: SystemTime,
-        ttl: Duration,
+        preview: &PreviewData<'_>,
     ) -> anyhow::Result<()> {
-        let expires_at = to_datetime(created_at + ttl);
+        let expires_at = to_datetime(preview.created_at + preview.ttl);
         let streams_json = serde_json::to_value(
-            streams
+            preview
+                .streams
                 .iter()
                 .map(|stream| {
                     serde_json::json!({
@@ -435,10 +434,10 @@ impl MetadataStore {
                 &[
                     &run_id,
                     &task_id,
-                    &flight_endpoint,
-                    &ticket,
+                    &preview.flight_endpoint,
+                    &preview.ticket,
                     &streams_json,
-                    &to_datetime(created_at),
+                    &to_datetime(preview.created_at),
                     &expires_at,
                 ],
             )
@@ -542,23 +541,9 @@ impl DurableMetadataStore for MetadataStore {
         &self,
         run_id: &str,
         task_id: &str,
-        flight_endpoint: &str,
-        ticket: &[u8],
-        streams: &[PreviewStreamEntry],
-        created_at: SystemTime,
-        ttl: Duration,
+        preview: &PreviewData<'_>,
     ) -> anyhow::Result<()> {
-        Self::upsert_preview(
-            self,
-            run_id,
-            task_id,
-            flight_endpoint,
-            ticket,
-            streams,
-            created_at,
-            ttl,
-        )
-        .await
+        Self::upsert_preview(self, run_id, task_id, preview).await
     }
 
     async fn upsert_agent(&self, agent: &AgentRecord) -> anyhow::Result<()> {
@@ -1114,15 +1099,17 @@ mod tests {
             .upsert_preview(
                 "run-1",
                 "task-1",
-                "localhost:9091",
-                b"ticket",
-                &[PreviewStreamEntry {
-                    stream: "users".into(),
-                    rows: 3,
-                    ticket: bytes::Bytes::from_static(b"users-ticket"),
-                }],
-                now,
-                Duration::from_secs(60),
+                &PreviewData {
+                    flight_endpoint: "localhost:9091",
+                    ticket: b"ticket",
+                    streams: &[PreviewStreamEntry {
+                        stream: "users".into(),
+                        rows: 3,
+                        ticket: bytes::Bytes::from_static(b"users-ticket"),
+                    }],
+                    created_at: now,
+                    ttl: Duration::from_secs(60),
+                },
             )
             .await
             .expect("preview upsert should succeed");
@@ -1435,11 +1422,13 @@ mod tests {
             .upsert_preview(
                 "run-expired-preview",
                 "task-expired-preview",
-                "localhost:9091",
-                b"ticket",
-                &[],
-                created_at,
-                Duration::from_secs(60),
+                &PreviewData {
+                    flight_endpoint: "localhost:9091",
+                    ticket: b"ticket",
+                    streams: &[],
+                    created_at,
+                    ttl: Duration::from_secs(60),
+                },
             )
             .await
             .expect("expired preview insert should succeed");
@@ -1483,12 +1472,10 @@ pub mod test_support {
 
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, SystemTime};
 
     use async_trait::async_trait;
 
-    use super::DurableMetadataStore;
-    use crate::preview::PreviewStreamEntry;
+    use super::{DurableMetadataStore, PreviewData};
     use crate::registry::AgentRecord;
     use crate::run_state::RunRecord;
     use crate::scheduler::TaskRecord;
@@ -1715,11 +1702,7 @@ pub mod test_support {
             &self,
             _run_id: &str,
             _task_id: &str,
-            _flight_endpoint: &str,
-            _ticket: &[u8],
-            _streams: &[PreviewStreamEntry],
-            _created_at: SystemTime,
-            _ttl: Duration,
+            _preview: &PreviewData<'_>,
         ) -> anyhow::Result<()> {
             let mut failures = self.failures.lock().unwrap();
             failures.preview_upsert_calls += 1;

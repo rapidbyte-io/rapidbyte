@@ -18,6 +18,15 @@ pub const AGENT_ID: &str = "agent_id";
 pub const RULE: &str = "rule";
 pub const FIELD: &str = "field";
 
+// ── Status label values ─────────────────────────────────────────────────────
+
+/// Metric status value for successful operations.
+pub const STATUS_OK: &str = "ok";
+/// Metric status value for failed operations.
+pub const STATUS_ERROR: &str = "error";
+/// Metric status value for cancelled operations.
+pub const STATUS_CANCELLED: &str = "cancelled";
+
 static ALLOWED_KEYS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
     HashSet::from([
         PIPELINE,

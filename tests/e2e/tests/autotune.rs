@@ -1,4 +1,4 @@
-use rapidbyte_e2e::harness::AutotuneOptions;
+use rapidbyte_e2e::harness::{AutotuneOptions, PipelinePolicies};
 
 #[tokio::test]
 async fn output_equivalence_with_autotune_enabled_and_disabled() {
@@ -30,12 +30,17 @@ async fn output_equivalence_with_autotune_enabled_and_disabled() {
             .expect("source seed should succeed");
 
         context
-            .run_pipeline_with_autotune(
+            .run_pipeline(
                 &enabled_schemas,
-                "full_refresh",
-                "replace",
                 &enabled_state,
-                None,
+                &PipelinePolicies {
+                    sync_mode: "full_refresh",
+                    write_mode: "replace",
+                    compression: None,
+                    on_data_error: None,
+                    schema_evolution_block: None,
+                    autotune: None,
+                },
             )
             .await
             .expect("default autotune run should succeed");
@@ -45,12 +50,17 @@ async fn output_equivalence_with_autotune_enabled_and_disabled() {
             ..AutotuneOptions::default()
         };
         context
-            .run_pipeline_with_autotune(
+            .run_pipeline(
                 &disabled_schemas,
-                "full_refresh",
-                "replace",
                 &disabled_state,
-                Some(&autotune_disabled),
+                &PipelinePolicies {
+                    sync_mode: "full_refresh",
+                    write_mode: "replace",
+                    compression: None,
+                    on_data_error: None,
+                    schema_evolution_block: None,
+                    autotune: Some(&autotune_disabled),
+                },
             )
             .await
             .expect("autotune-disabled run should succeed");
@@ -134,12 +144,17 @@ async fn manual_autotune_pins_run_successfully() {
         };
 
         let summary = context
-            .run_pipeline_with_autotune(
+            .run_pipeline(
                 &schemas,
-                "full_refresh",
-                "replace",
                 &state_path,
-                Some(&pinned),
+                &PipelinePolicies {
+                    sync_mode: "full_refresh",
+                    write_mode: "replace",
+                    compression: None,
+                    on_data_error: None,
+                    schema_evolution_block: None,
+                    autotune: Some(&pinned),
+                },
             )
             .await
             .expect("pinned autotune run should succeed");

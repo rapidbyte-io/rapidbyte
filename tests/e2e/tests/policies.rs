@@ -1,3 +1,4 @@
+use rapidbyte_e2e::harness::PipelinePolicies;
 use rstest::rstest;
 
 #[rstest]
@@ -23,14 +24,17 @@ async fn on_data_error_policy_matrix_accepts_all_enums(#[case] on_data_error: &s
             .expect("source seed should succeed");
 
         context
-            .run_pipeline_with_policies(
+            .run_pipeline(
                 &schemas,
-                "full_refresh",
-                "append",
                 &state_path,
-                None,
-                Some(on_data_error),
-                None,
+                &PipelinePolicies {
+                    sync_mode: "full_refresh",
+                    write_mode: "append",
+                    compression: None,
+                    on_data_error: Some(on_data_error),
+                    schema_evolution_block: None,
+                    autotune: None,
+                },
             )
             .await
             .expect("policy-configured pipeline should succeed");
@@ -69,14 +73,17 @@ async fn schema_evolution_new_column_fail_rejects_source_drift() {
             .expect("source seed should succeed");
 
         context
-            .run_pipeline_with_policies(
+            .run_pipeline(
                 &schemas,
-                "full_refresh",
-                "append",
                 &state_path,
-                None,
-                None,
-                None,
+                &PipelinePolicies {
+                    sync_mode: "full_refresh",
+                    write_mode: "append",
+                    compression: None,
+                    on_data_error: None,
+                    schema_evolution_block: None,
+                    autotune: None,
+                },
             )
             .await
             .expect("baseline pipeline should succeed");
@@ -87,14 +94,17 @@ async fn schema_evolution_new_column_fail_rejects_source_drift() {
             .expect("source schema drift mutation should succeed");
 
         let err = context
-            .run_pipeline_with_policies(
+            .run_pipeline(
                 &schemas,
-                "full_refresh",
-                "append",
                 &state_path,
-                None,
-                None,
-                Some("    new_column: fail"),
+                &PipelinePolicies {
+                    sync_mode: "full_refresh",
+                    write_mode: "append",
+                    compression: None,
+                    on_data_error: None,
+                    schema_evolution_block: Some("    new_column: fail"),
+                    autotune: None,
+                },
             )
             .await
             .expect_err("schema evolution fail policy should reject new source column");

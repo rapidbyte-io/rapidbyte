@@ -432,7 +432,10 @@ use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;
 
 /// Connection config deserialized from pipeline YAML.
-#[derive(Debug, Clone, Deserialize, ConfigSchema)]
+///
+/// Debug is deliberately not derived to prevent accidental password
+/// leakage in logs and panic output.
+#[derive(Clone, Deserialize, ConfigSchema)]
 pub struct Config {
     /// Hostname
     pub host: String,
