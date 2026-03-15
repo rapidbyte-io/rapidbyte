@@ -189,8 +189,23 @@ impl RegistryClient {
 
         debug!(%index_ref, "pulling plugin index");
 
-        let Ok(image) = self.pull(&index_ref).await else {
-            return Ok(None);
+        let image = match self.pull(&index_ref).await {
+            Ok(data) => data,
+            Err(err) => {
+                let msg = format!("{err:#}");
+                // Treat "not found" / "manifest unknown" as index-not-yet-created.
+                // Propagate all other errors (auth, network, transport).
+                if msg.contains("not found")
+                    || msg.contains("MANIFEST_UNKNOWN")
+                    || msg.contains("manifest unknown")
+                    || msg.contains("404")
+                    || msg.contains("NAME_UNKNOWN")
+                {
+                    debug!("index not found in registry, treating as empty");
+                    return Ok(None);
+                }
+                return Err(err).context("failed to pull plugin index");
+            }
         };
 
         let layer = image

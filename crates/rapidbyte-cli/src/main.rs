@@ -410,7 +410,7 @@ async fn main() -> ExitCode {
         Commands::Discover { pipeline } => {
             commands::discover::execute(&pipeline, verbosity, &registry_config).await
         }
-        Commands::Plugin { command } => commands::plugin::execute(command).await,
+        Commands::Plugin { command } => commands::plugin::execute(command, &registry_config).await,
         Commands::Scaffold { name, output } => commands::scaffold::run(&name, output.as_deref()),
         Commands::Dev => commands::dev::execute().await,
         Commands::Controller {

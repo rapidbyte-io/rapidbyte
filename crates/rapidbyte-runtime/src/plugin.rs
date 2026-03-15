@@ -232,12 +232,19 @@ pub async fn resolve_plugin(
         }
 
         // Fall back to registry with default_registry prefix if configured.
+        // Include the plugin kind as a path segment so bare "postgres" resolves
+        // to e.g. "registry/source/postgres" or "registry/dest/postgres".
         if let Some(default_registry) = &registry_config.default_registry {
+            let kind_prefix = match kind {
+                PluginKind::Source => "source",
+                PluginKind::Destination => "dest",
+                PluginKind::Transform => "transform",
+            };
             let qualified_ref = if let Some((name, version)) = use_ref.split_once('@') {
                 let version = version.strip_prefix('v').unwrap_or(version);
-                format!("{default_registry}/{name}:{version}")
+                format!("{default_registry}/{kind_prefix}/{name}:{version}")
             } else {
-                format!("{default_registry}/{use_ref}")
+                format!("{default_registry}/{kind_prefix}/{use_ref}")
             };
             tracing::debug!(
                 use_ref,
