@@ -608,6 +608,44 @@ mod tests {
     }
 
     #[test]
+    fn release_assignment_returns_task_to_pending() {
+        let (mut q, gen) = make_queue_and_gen();
+        q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
+
+        let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
+        assert_eq!(
+            q.get(&assignment.task_id).unwrap().state,
+            TaskState::Assigned
+        );
+
+        // No pending tasks after assignment.
+        assert!(q.peek_pending().is_none());
+
+        q.release_assignment(&assignment.task_id, assignment.lease_epoch)
+            .unwrap();
+
+        let task = q.get(&assignment.task_id).unwrap();
+        assert_eq!(task.state, TaskState::Pending);
+        assert!(task.lease.is_none());
+        assert!(task.assigned_agent_id.is_none());
+
+        // Task is back in the pending queue — can be polled again.
+        assert!(q.peek_pending().is_some());
+        let re_assignment = q.poll("agent-2", Duration::from_secs(60), &gen).unwrap();
+        assert_eq!(re_assignment.task_id, assignment.task_id);
+    }
+
+    #[test]
+    fn release_assignment_rejects_wrong_epoch() {
+        let (mut q, gen) = make_queue_and_gen();
+        q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
+
+        let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
+        let result = q.release_assignment(&assignment.task_id, assignment.lease_epoch + 999);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn renew_lease_extends_expiry() {
         let (mut q, gen) = make_queue_and_gen();
         q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);

@@ -10,7 +10,6 @@ rapidbyte-metrics = { path = "../rapidbyte-metrics" }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 rapidbyte-registry = { path = "../rapidbyte-registry" }
-rapidbyte-secrets = { path = "../rapidbyte-secrets" }
 rapidbyte-runtime = { path = "../rapidbyte-runtime" }
 rapidbyte-state = { path = "../rapidbyte-state", features = ["postgres"] }
 tonic = { workspace = true }

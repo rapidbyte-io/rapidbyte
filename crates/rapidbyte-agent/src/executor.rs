@@ -131,7 +131,7 @@ where
     };
 
     let config =
-        match parser::parse_pipeline(yaml_str, &rapidbyte_secrets::SecretProviders::new()).await {
+        match parser::parse_pipeline(yaml_str, &rapidbyte_engine::SecretProviders::new()).await {
             Ok(c) => c,
             Err(e) => {
                 return TaskExecutionResult {
