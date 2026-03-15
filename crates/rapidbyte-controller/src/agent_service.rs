@@ -1247,22 +1247,27 @@ async fn make_task_response(
     // by the agent's environment.
     let yaml_str = std::str::from_utf8(&assignment.pipeline_yaml)
         .map_err(|e| Status::internal(format!("pipeline YAML is not valid UTF-8: {e}")))?;
+    // Reject malformed secret references (e.g. ${vault:path} without #key).
+    rapidbyte_engine::config::parser::reject_malformed_refs(yaml_str)
+        .map_err(|e| Status::internal(format!("{e}")))?;
     let had_secrets = rapidbyte_engine::config::parser::contains_secret_refs(yaml_str);
     let resolved = rapidbyte_engine::config::parser::substitute_variables(yaml_str, secrets)
         .await
         .map_err(|e| {
             let msg = format!("failed to resolve variables: {e}");
-            // Classify: missing env vars and missing keys are config errors (permanent).
-            // Connection/network failures from secret providers are transient.
+            // Default to permanent failure (Internal). Only classify known
+            // transient network errors as Unavailable for retry. This is
+            // safer: unknown errors (auth, permissions, bad tokens) fail
+            // permanently rather than retrying forever.
             let err_str = format!("{e:#}");
-            if err_str.contains("Missing environment variable")
-                || err_str.contains("not found")
-                || err_str.contains("no secret provider registered")
-                || err_str.contains("invalid Vault path")
+            if err_str.contains("connection refused")
+                || err_str.contains("timed out")
+                || err_str.contains("temporarily unavailable")
+                || err_str.contains("503")
             {
-                Status::internal(msg)
-            } else {
                 Status::unavailable(msg)
+            } else {
+                Status::internal(msg)
             }
         })?;
 
