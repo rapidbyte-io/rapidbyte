@@ -360,17 +360,25 @@ async fn build_secret_providers(
 
     if let Some(addr) = vault_addr {
         let auth = if let Some(token) = vault_token {
-            rapidbyte_secrets::VaultAuth::Token(token.to_owned())
+            Some(rapidbyte_secrets::VaultAuth::Token(token.to_owned()))
         } else if let (Some(role_id), Some(secret_id)) = (vault_role_id, vault_secret_id) {
-            rapidbyte_secrets::VaultAuth::AppRole {
+            Some(rapidbyte_secrets::VaultAuth::AppRole {
                 role_id: role_id.to_owned(),
                 secret_id: secret_id.to_owned(),
-            }
+            })
         } else {
-            anyhow::bail!(
-                "--vault-addr is set but no authentication provided; \
-                 set --vault-token or --vault-role-id + --vault-secret-id"
+            // VAULT_ADDR set but no auth — skip registration.
+            // If a pipeline has ${vault:...} refs, the parser will
+            // error with "no secret provider registered for prefix 'vault'".
+            tracing::debug!(
+                "VAULT_ADDR is set but no Vault auth configured; \
+                 vault provider not registered"
             );
+            None
+        };
+
+        let Some(auth) = auth else {
+            return Ok(providers);
         };
 
         let vault = rapidbyte_secrets::VaultProvider::new(rapidbyte_secrets::VaultConfig {

@@ -480,11 +480,26 @@ impl AgentService for AgentServiceImpl {
 
                     let mut runs = self.state.runs.write().await;
                     let _ = runs.transition(&run_id, InternalRunState::Failed);
+                    if let Some(record) = runs.get_run_mut(&run_id) {
+                        let error_msg = format!("SECRET_RESOLUTION_FAILED: {}", e.message());
+                        record.error_code = Some("SECRET_RESOLUTION_FAILED".into());
+                        record.error_message = Some(error_msg);
+                        record.error_retryable = Some(false);
+                        record.error_safe_to_retry = Some(false);
+                        record.error_commit_state = Some("before_commit".into());
+                    }
                     let failed_run = runs.get_run(&run_id).cloned();
                     drop(runs);
 
                     if let (Some(task), Some(run)) = (failed_task, failed_run) {
-                        let _ = self.state.persist_assignment_records(&run, &task).await;
+                        if let Err(persist_err) =
+                            self.state.persist_assignment_records(&run, &task).await
+                        {
+                            tracing::error!(
+                                task_id,
+                                "failed to persist secret-resolution failure: {persist_err}"
+                            );
+                        }
                     }
 
                     // Publish terminal event so watch clients see the failure.
@@ -571,11 +586,26 @@ impl AgentService for AgentServiceImpl {
 
                     let mut runs = self.state.runs.write().await;
                     let _ = runs.transition(&run_id, InternalRunState::Failed);
+                    if let Some(record) = runs.get_run_mut(&run_id) {
+                        let error_msg = format!("SECRET_RESOLUTION_FAILED: {}", e.message());
+                        record.error_code = Some("SECRET_RESOLUTION_FAILED".into());
+                        record.error_message = Some(error_msg);
+                        record.error_retryable = Some(false);
+                        record.error_safe_to_retry = Some(false);
+                        record.error_commit_state = Some("before_commit".into());
+                    }
                     let failed_run = runs.get_run(&run_id).cloned();
                     drop(runs);
 
                     if let (Some(task), Some(run)) = (failed_task, failed_run) {
-                        let _ = self.state.persist_assignment_records(&run, &task).await;
+                        if let Err(persist_err) =
+                            self.state.persist_assignment_records(&run, &task).await
+                        {
+                            tracing::error!(
+                                task_id,
+                                "failed to persist secret-resolution failure: {persist_err}"
+                            );
+                        }
                     }
 
                     // Publish terminal event so watch clients see the failure.
