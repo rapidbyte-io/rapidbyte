@@ -95,11 +95,10 @@ async fn pull(plugin_ref_str: &str, insecure: bool) -> Result<()> {
     eprintln!("Pulling {plugin_ref}...");
     let image = client.pull(&plugin_ref).await?;
 
-    let (manifest_json, wasm_bytes) =
-        artifact::unpack_artifact(&image).context("Failed to unpack plugin artifact")?;
+    let unpacked = artifact::unpack_artifact(&image).context("Failed to unpack plugin artifact")?;
 
     let entry = cache
-        .store(&plugin_ref, &manifest_json, &wasm_bytes)
+        .store(&plugin_ref, &unpacked.manifest_json, &unpacked.wasm_bytes)
         .context("Failed to store plugin in cache")?;
 
     eprintln!(

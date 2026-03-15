@@ -49,10 +49,10 @@ async fn push_and_pull_roundtrip() {
 
     // Pull and unpack
     let image = client.pull(&plugin_ref).await.expect("pull should succeed");
-    let (pulled_manifest, pulled_wasm) = unpack_artifact(&image).expect("unpack should succeed");
+    let unpacked = unpack_artifact(&image).expect("unpack should succeed");
 
-    assert_eq!(pulled_manifest, manifest_json);
-    assert_eq!(pulled_wasm, wasm_bytes);
+    assert_eq!(unpacked.manifest_json, manifest_json);
+    assert_eq!(unpacked.wasm_bytes, wasm_bytes);
 }
 
 #[tokio::test]
@@ -97,13 +97,13 @@ async fn pull_and_cache_end_to_end() {
 
     // Pull
     let image = client.pull(&plugin_ref).await.unwrap();
-    let (pulled_manifest, pulled_wasm) = unpack_artifact(&image).unwrap();
+    let unpacked = unpack_artifact(&image).unwrap();
 
     // Store in cache
     let tmp = tempfile::tempdir().unwrap();
     let cache = PluginCache::new(tmp.path().to_path_buf());
     let entry = cache
-        .store(&plugin_ref, &pulled_manifest, &pulled_wasm)
+        .store(&plugin_ref, &unpacked.manifest_json, &unpacked.wasm_bytes)
         .unwrap();
 
     assert!(entry.wasm_path.exists());

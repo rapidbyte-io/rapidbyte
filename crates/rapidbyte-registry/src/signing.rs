@@ -212,7 +212,7 @@ mod tests {
         let sig = sign_digest(&digest, &sk_a);
 
         // Should succeed — key A is in the list.
-        let trusted = vec![vk_b.clone(), vk_a, vk_c.clone()];
+        let trusted = vec![vk_b, vk_a, vk_c];
         verify_against_any(&trusted, &digest, &sig)
             .expect("should verify when matching key is present");
 

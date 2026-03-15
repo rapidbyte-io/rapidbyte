@@ -435,6 +435,7 @@ async fn process_task(
             .as_deref()
             .filter(|s| !s.trim().is_empty())
             .map(rapidbyte_registry::normalize_registry_url),
+        ..Default::default()
     };
     let result = executor::execute_task(
         &task.pipeline_yaml_utf8,

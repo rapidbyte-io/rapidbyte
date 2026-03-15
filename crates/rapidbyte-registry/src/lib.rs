@@ -23,8 +23,8 @@ pub mod trust;
 pub mod verify;
 
 pub use artifact::{
-    pack_artifact, unpack_artifact, PackedArtifact, PluginArtifactConfig, MEDIA_TYPE_CONFIG,
-    MEDIA_TYPE_MANIFEST_LAYER, MEDIA_TYPE_WASM_LAYER,
+    pack_artifact, pack_artifact_signed, unpack_artifact, PackedArtifact, PluginArtifactConfig,
+    UnpackedArtifact, MEDIA_TYPE_CONFIG, MEDIA_TYPE_MANIFEST_LAYER, MEDIA_TYPE_WASM_LAYER,
 };
 pub use cache::{CacheEntry, PluginCache};
 pub use client::{RegistryClient, RegistryConfig};

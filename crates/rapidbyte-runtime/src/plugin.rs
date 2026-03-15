@@ -195,9 +195,9 @@ pub async fn resolve_plugin_from_registry(
     tracing::info!(%plugin_ref, "pulling plugin from registry");
     let client = RegistryClient::new(registry_config)?;
     let image = client.pull(&plugin_ref).await?;
-    let (manifest_json, wasm_bytes) = rapidbyte_registry::unpack_artifact(&image)?;
+    let unpacked = rapidbyte_registry::unpack_artifact(&image)?;
 
-    let entry = cache.store(&plugin_ref, &manifest_json, &wasm_bytes)?;
+    let entry = cache.store(&plugin_ref, &unpacked.manifest_json, &unpacked.wasm_bytes)?;
     tracing::info!(
         %plugin_ref,
         digest = %entry.digest,

@@ -37,11 +37,30 @@ pub const MEDIA_TYPE_INDEX_LAYER: &str = "application/vnd.rapidbyte.index.v1+jso
 /// The config blob stored in an OCI artifact's config descriptor.
 ///
 /// Contains a digest of the WASM binary so callers can verify integrity
-/// independently of layer-level OCI digests.
+/// independently of layer-level OCI digests, and an optional Ed25519
+/// signature over that digest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginArtifactConfig {
     /// SHA-256 hex digest of the WASM binary (layer 1).
     pub wasm_sha256: String,
+    /// Optional Ed25519 signature (hex-encoded) over `wasm_sha256`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+}
+
+/// Result of unpacking an OCI plugin artifact.
+///
+/// Replaces the previous tuple return so callers can access the parsed
+/// [`PluginArtifactConfig`] (including any signature) without re-parsing
+/// the config blob.
+#[derive(Debug, Clone)]
+pub struct UnpackedArtifact {
+    /// The plugin manifest JSON (layer 0).
+    pub manifest_json: Vec<u8>,
+    /// The WASM binary (layer 1).
+    pub wasm_bytes: Vec<u8>,
+    /// The parsed config blob, including the optional signature.
+    pub config: PluginArtifactConfig,
 }
 
 // ── Packed artifact ───────────────────────────────────────────────────────────
@@ -61,18 +80,43 @@ pub struct PackedArtifact {
 
 /// Pack a plugin manifest and WASM binary into an OCI [`PackedArtifact`].
 ///
-/// The WASM digest is computed and stored in the config blob so that
-/// [`unpack_artifact`] can verify it on the other side.
+/// This is a convenience wrapper around [`pack_artifact_signed`] that
+/// produces an unsigned artifact.
 ///
 /// # Panics
 ///
-/// Panics if [`PluginArtifactConfig`] cannot be serialized to JSON, which
-/// should never happen in practice as the type contains only a `String` field.
+/// Panics if [`PluginArtifactConfig`] cannot be serialized to JSON.
 #[must_use]
 pub fn pack_artifact(manifest_json: &[u8], wasm_bytes: &[u8]) -> PackedArtifact {
+    pack_artifact_signed(manifest_json, wasm_bytes, None)
+}
+
+/// Pack a plugin manifest and WASM binary into an OCI [`PackedArtifact`],
+/// optionally signing the WASM digest with an Ed25519 key.
+///
+/// When `signing_key` is `Some`, the hex-encoded WASM SHA-256 digest is
+/// signed and the resulting signature is stored in the config blob.
+/// [`unpack_artifact`] will surface this signature in the returned
+/// [`UnpackedArtifact::config`] so callers can verify it against a
+/// trusted public key.
+///
+/// # Panics
+///
+/// Panics if [`PluginArtifactConfig`] cannot be serialized to JSON.
+#[must_use]
+pub fn pack_artifact_signed(
+    manifest_json: &[u8],
+    wasm_bytes: &[u8],
+    signing_key: Option<&ed25519_dalek::SigningKey>,
+) -> PackedArtifact {
     let wasm_sha256 = sha256_hex(wasm_bytes);
 
-    let artifact_config = PluginArtifactConfig { wasm_sha256 };
+    let signature = signing_key.map(|sk| crate::signing::sign_digest(&wasm_sha256, sk));
+
+    let artifact_config = PluginArtifactConfig {
+        wasm_sha256,
+        signature,
+    };
     let config_bytes = serde_json::to_vec(&artifact_config)
         .expect("PluginArtifactConfig serialization is infallible");
 
@@ -91,18 +135,23 @@ pub fn pack_artifact(manifest_json: &[u8], wasm_bytes: &[u8]) -> PackedArtifact 
     }
 }
 
-/// Unpack a pulled OCI [`ImageData`] into `(manifest_json, wasm_bytes)`.
+/// Unpack a pulled OCI [`ImageData`] into an [`UnpackedArtifact`].
 ///
 /// Validation performed:
 /// - Layer 0 must have media type [`MEDIA_TYPE_MANIFEST_LAYER`].
 /// - Layer 1 must have media type [`MEDIA_TYPE_WASM_LAYER`].
 /// - The WASM digest is verified against the value stored in the config blob.
 ///
+/// The parsed [`PluginArtifactConfig`] — including any optional signature —
+/// is returned in [`UnpackedArtifact::config`] so callers can perform
+/// additional verification (e.g. checking the signature against a trusted
+/// public key).
+///
 /// # Errors
 ///
 /// Returns an error if any required layer is missing, has the wrong media type,
 /// or if the WASM digest does not match the config blob.
-pub fn unpack_artifact(image: &ImageData) -> Result<(Vec<u8>, Vec<u8>)> {
+pub fn unpack_artifact(image: &ImageData) -> Result<UnpackedArtifact> {
     // ── manifest layer (index 0) ──────────────────────────────────────────────
     let manifest_layer = image
         .layers
@@ -149,7 +198,11 @@ pub fn unpack_artifact(image: &ImageData) -> Result<(Vec<u8>, Vec<u8>)> {
     verify_sha256(&wasm_layer.data, &artifact_config.wasm_sha256)
         .context("WASM layer digest mismatch")?;
 
-    Ok((manifest_layer.data.to_vec(), wasm_layer.data.to_vec()))
+    Ok(UnpackedArtifact {
+        manifest_json: manifest_layer.data.to_vec(),
+        wasm_bytes: wasm_layer.data.to_vec(),
+        config: artifact_config,
+    })
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -188,10 +241,40 @@ mod tests {
         let packed = pack_artifact(&manifest, &wasm);
         let image = image_data_from_packed(packed);
 
-        let (got_manifest, got_wasm) = unpack_artifact(&image).expect("unpack must succeed");
+        let unpacked = unpack_artifact(&image).expect("unpack must succeed");
 
-        assert_eq!(got_manifest, manifest);
-        assert_eq!(got_wasm, wasm);
+        assert_eq!(unpacked.manifest_json, manifest);
+        assert_eq!(unpacked.wasm_bytes, wasm);
+        assert!(
+            unpacked.config.signature.is_none(),
+            "unsigned artifact should have no signature"
+        );
+    }
+
+    #[test]
+    fn pack_signed_then_unpack_roundtrip() {
+        let (sk_pem, pk_pem) = crate::signing::generate_keypair_pem();
+        let sk = crate::signing::load_signing_key_pem(&sk_pem).unwrap();
+        let vk = crate::signing::load_verifying_key_pem(&pk_pem).unwrap();
+
+        let manifest = dummy_manifest();
+        let wasm = dummy_wasm();
+        let packed = pack_artifact_signed(&manifest, &wasm, Some(&sk));
+
+        let image = image_data_from_packed(packed);
+        let unpacked = unpack_artifact(&image).expect("unpack must succeed");
+
+        assert_eq!(unpacked.manifest_json, manifest);
+        assert_eq!(unpacked.wasm_bytes, wasm);
+
+        let sig = unpacked
+            .config
+            .signature
+            .as_deref()
+            .expect("signed artifact must have a signature");
+
+        crate::signing::verify_signature(&unpacked.config.wasm_sha256, sig, &vk)
+            .expect("signature must verify against the public key");
     }
 
     #[test]
@@ -223,6 +306,7 @@ mod tests {
         let wasm_layer = ImageLayer::new(wasm.clone(), MEDIA_TYPE_WASM_LAYER.to_owned(), None);
         let config_blob = serde_json::to_vec(&PluginArtifactConfig {
             wasm_sha256: sha256_hex(&wasm),
+            signature: None,
         })
         .unwrap();
         let config = Config::new(config_blob, MEDIA_TYPE_CONFIG.to_owned(), None);
@@ -254,6 +338,7 @@ mod tests {
         // Config blob with a placeholder digest (won't be reached).
         let config_blob = serde_json::to_vec(&PluginArtifactConfig {
             wasm_sha256: "0".repeat(64),
+            signature: None,
         })
         .unwrap();
         let config = Config::new(config_blob, MEDIA_TYPE_CONFIG.to_owned(), None);
@@ -313,6 +398,7 @@ mod tests {
         let wasm_layer = ImageLayer::new(wasm.clone(), MEDIA_TYPE_WASM_LAYER.to_owned(), None);
         let config_blob = serde_json::to_vec(&PluginArtifactConfig {
             wasm_sha256: sha256_hex(&wasm),
+            signature: None,
         })
         .unwrap();
         let config = Config::new(config_blob, MEDIA_TYPE_CONFIG.to_owned(), None);
