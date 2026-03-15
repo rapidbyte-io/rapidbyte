@@ -455,7 +455,9 @@ impl AgentService for AgentServiceImpl {
             poll_barrier.wait().await;
         }
         if let Some(assignment) = self.try_claim_task(&req.agent_id, max_tasks).await? {
-            return Ok(Response::new(make_task_response(assignment)));
+            return Ok(Response::new(
+                make_task_response(assignment, &self.state.secrets).await?,
+            ));
         }
 
         // Long-poll: wait for notification or timeout
@@ -482,7 +484,9 @@ impl AgentService for AgentServiceImpl {
         }
         drop(tasks);
         if let Some(assignment) = self.try_claim_task(&req.agent_id, max_tasks).await? {
-            return Ok(Response::new(make_task_response(assignment)));
+            return Ok(Response::new(
+                make_task_response(assignment, &self.state.secrets).await?,
+            ));
         }
 
         Ok(Response::new(PollTaskResponse {
@@ -1035,21 +1039,37 @@ impl AgentService for AgentServiceImpl {
     }
 }
 
-fn make_task_response(assignment: crate::scheduler::TaskAssignment) -> PollTaskResponse {
-    PollTaskResponse {
+async fn make_task_response(
+    assignment: crate::scheduler::TaskAssignment,
+    secrets: &rapidbyte_secrets::SecretProviders,
+) -> Result<PollTaskResponse, Status> {
+    // Resolve secret references at dispatch time so the task record
+    // in the metadata store always contains unresolved YAML.
+    let pipeline_yaml = if secrets.is_empty() {
+        assignment.pipeline_yaml
+    } else {
+        let yaml_str = std::str::from_utf8(&assignment.pipeline_yaml)
+            .map_err(|e| Status::internal(format!("pipeline YAML is not valid UTF-8: {e}")))?;
+        let resolved = rapidbyte_engine::config::parser::substitute_variables(yaml_str, secrets)
+            .await
+            .map_err(|e| Status::internal(format!("failed to resolve secrets: {e}")))?;
+        resolved.into_bytes()
+    };
+
+    Ok(PollTaskResponse {
         result: Some(poll_task_response::Result::Task(TaskAssignment {
             task_id: assignment.task_id,
             run_id: assignment.run_id,
             attempt: assignment.attempt,
             lease_epoch: assignment.lease_epoch,
             lease_expires_at: None,
-            pipeline_yaml_utf8: assignment.pipeline_yaml,
+            pipeline_yaml_utf8: pipeline_yaml,
             execution: Some(ExecutionOptions {
                 dry_run: assignment.dry_run,
                 limit: assignment.limit,
             }),
         })),
-    }
+    })
 }
 
 #[cfg(test)]

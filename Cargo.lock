@@ -4695,6 +4695,7 @@ dependencies = [
  "protoc-bin-vendored",
  "rapidbyte-engine",
  "rapidbyte-metrics",
+ "rapidbyte-secrets",
  "rapidbyte-types",
  "rustls",
  "rustls-native-certs",
