@@ -75,6 +75,115 @@ pub fn parse_pipeline(path: &Path) -> Result<PipelineConfig> {
     parse_pipeline_str(&content)
 }
 
+// ── Vault-aware async parsing ────────────────────────────────────────────────
+
+/// Substitute both `${ENV_VAR}` and `${vault:mount/path#key}` references.
+///
+/// Env vars are resolved from the process environment. Vault references
+/// are resolved via the provided [`rapidbyte_vault::VaultClient`]. Each
+/// unique Vault path is fetched once even if referenced multiple times.
+///
+/// # Errors
+///
+/// Returns an error if any env var is missing or any Vault read fails.
+/// Resolution is atomic — all references must resolve or the entire
+/// substitution fails.
+#[cfg(feature = "vault")]
+pub async fn substitute_variables(
+    input: &str,
+    vault: Option<&rapidbyte_vault::VaultClient>,
+) -> Result<String> {
+    let mut vault_values: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    let mut vault_errors = Vec::new();
+
+    if let Some(client) = vault {
+        let mut seen = std::collections::HashSet::new();
+        for cap in VAULT_REF_RE.captures_iter(input) {
+            let full_match = cap[0].to_string();
+            if seen.insert(full_match.clone()) {
+                let mount_path = &cap[1];
+                let key = &cap[2];
+                let (mount, path) = mount_path.split_once('/').unwrap_or((mount_path, ""));
+                match client.read_secret(mount, path, key).await {
+                    Ok(val) => {
+                        vault_values.insert(full_match, val);
+                    }
+                    Err(e) => {
+                        vault_errors.push(format!("vault:{mount_path}#{key}: {e}"));
+                    }
+                }
+            }
+        }
+    } else if contains_vault_refs(input) {
+        anyhow::bail!(
+            "pipeline contains ${{vault:...}} references but no Vault client is configured"
+        );
+    }
+
+    if !vault_errors.is_empty() {
+        anyhow::bail!(
+            "Failed to resolve Vault secret(s):\n  {}",
+            vault_errors.join("\n  ")
+        );
+    }
+
+    // Replace vault refs first, then env vars.
+    let mut result = input.to_string();
+    for (pattern, value) in &vault_values {
+        result = result.replace(pattern, value);
+    }
+
+    let mut env_errors = Vec::new();
+    let after_vault = result.clone();
+    for cap in ENV_VAR_RE.captures_iter(&after_vault) {
+        let var_name = &cap[1];
+        match std::env::var(var_name) {
+            Ok(val) => {
+                result = result.replace(&cap[0], &val);
+            }
+            Err(_) => {
+                env_errors.push(var_name.to_string());
+            }
+        }
+    }
+
+    if !env_errors.is_empty() {
+        anyhow::bail!("Missing environment variable(s): {}", env_errors.join(", "));
+    }
+
+    Ok(result)
+}
+
+/// Parse a pipeline YAML string, resolving both env vars and Vault secrets.
+///
+/// After secret resolution, YAML parse errors are redacted to prevent
+/// secret leakage in error messages.
+///
+/// # Errors
+///
+/// Returns an error if variable substitution fails or YAML is invalid.
+#[cfg(feature = "vault")]
+pub async fn parse_pipeline_with_vault(
+    yaml_str: &str,
+    vault: Option<&rapidbyte_vault::VaultClient>,
+) -> Result<PipelineConfig> {
+    let has_secrets = vault.is_some() && contains_vault_refs(yaml_str);
+    let substituted = substitute_variables(yaml_str, vault).await?;
+    serde_yaml::from_str(&substituted).map_err(|e| {
+        if has_secrets {
+            anyhow::anyhow!(
+                "pipeline YAML parsing failed after secret resolution \
+                 (source redacted): line {}, column {}",
+                e.location().map_or(0, |l| l.line()),
+                e.location().map_or(0, |l| l.column()),
+            )
+        } else {
+            anyhow::anyhow!(e).context("Failed to parse pipeline YAML")
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

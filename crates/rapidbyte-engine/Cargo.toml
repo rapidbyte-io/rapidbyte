@@ -23,6 +23,10 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 regex = "1"
 jsonschema = "0.28"
+rapidbyte-vault = { path = "../rapidbyte-vault", optional = true }
+
+[features]
+vault = ["dep:rapidbyte-vault"]
 
 [dev-dependencies]
 bytes = "1"
