@@ -11,24 +11,27 @@ use rapidbyte_registry::{artifact, PluginCache, PluginRef, RegistryClient, Regis
 ///
 /// Returns `Err` on network, cache, or I/O failures.
 pub async fn execute(command: crate::PluginCommands, global_config: &RegistryConfig) -> Result<()> {
+    // Per-subcommand --insecure is OR'd with global --registry-insecure.
+    let effective_insecure = |local: bool| local || global_config.insecure;
+
     match command {
         crate::PluginCommands::Pull {
             plugin_ref,
             insecure,
-        } => pull(&plugin_ref, insecure).await,
+        } => pull(&plugin_ref, effective_insecure(insecure)).await,
         crate::PluginCommands::Push {
             plugin_ref,
             wasm_path,
             insecure,
-        } => push(&plugin_ref, &wasm_path, insecure).await,
+        } => push(&plugin_ref, &wasm_path, effective_insecure(insecure)).await,
         crate::PluginCommands::Inspect {
             plugin_ref,
             insecure,
-        } => inspect(&plugin_ref, insecure).await,
+        } => inspect(&plugin_ref, effective_insecure(insecure)).await,
         crate::PluginCommands::Tags {
             plugin_ref,
             insecure,
-        } => tags(&plugin_ref, insecure).await,
+        } => tags(&plugin_ref, effective_insecure(insecure)).await,
         crate::PluginCommands::List => list(),
         crate::PluginCommands::Remove { plugin_ref } => remove(&plugin_ref),
         crate::PluginCommands::Search {
@@ -37,11 +40,16 @@ pub async fn execute(command: crate::PluginCommands, global_config: &RegistryCon
             registry,
             insecure,
         } => {
-            // Use explicit --registry flag, fall back to global --registry-url.
             let effective_registry = registry
                 .as_deref()
                 .or(global_config.default_registry.as_deref());
-            search(&query, plugin_type.as_deref(), effective_registry, insecure).await
+            search(
+                &query,
+                plugin_type.as_deref(),
+                effective_registry,
+                effective_insecure(insecure),
+            )
+            .await
         }
     }
 }

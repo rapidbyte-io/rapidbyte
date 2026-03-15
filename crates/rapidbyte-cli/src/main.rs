@@ -426,6 +426,11 @@ async fn main() -> ExitCode {
             registry_url,
             registry_insecure,
         } => {
+            // Controller-subcommand registry flags override global ones.
+            let ctrl_registry_url = registry_url
+                .as_deref()
+                .or(registry_config.default_registry.as_deref());
+            let ctrl_registry_insecure = registry_insecure || registry_config.insecure;
             commands::controller::execute(
                 &listen,
                 metadata_database_url.as_deref(),
@@ -437,8 +442,8 @@ async fn main() -> ExitCode {
                 tls_cert.as_deref(),
                 tls_key.as_deref(),
                 metrics_listen.as_deref(),
-                registry_url.as_deref(),
-                registry_insecure,
+                ctrl_registry_url,
+                ctrl_registry_insecure,
                 otel_guard,
             )
             .await
