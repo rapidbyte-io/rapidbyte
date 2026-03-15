@@ -255,6 +255,50 @@ impl TaskQueue {
         Ok(())
     }
 
+    /// Release an assigned task back to pending.
+    ///
+    /// Used when the controller fails to prepare the task for dispatch (e.g.
+    /// secret resolution failure). Unlike [`reject_assignment`] which cancels,
+    /// this returns the task to the pending queue for retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task does not exist, is not in the `Assigned`
+    /// state, or the lease epoch does not match.
+    pub fn release_assignment(
+        &mut self,
+        task_id: &str,
+        lease_epoch: u64,
+    ) -> Result<(), SchedulerError> {
+        let record = self
+            .tasks
+            .get_mut(task_id)
+            .ok_or_else(|| SchedulerError::UnknownTask(task_id.to_string()))?;
+
+        if record.state != TaskState::Assigned {
+            return Err(SchedulerError::InvalidState(
+                task_id.to_string(),
+                TaskState::Assigned,
+            ));
+        }
+
+        match &record.lease {
+            Some(lease) if lease.is_valid(lease_epoch) => {}
+            _ => {
+                return Err(SchedulerError::InvalidState(
+                    task_id.to_string(),
+                    TaskState::Assigned,
+                ));
+            }
+        }
+
+        record.state = TaskState::Pending;
+        record.lease = None;
+        record.assigned_agent_id = None;
+        self.pending.push_back(task_id.to_string());
+        Ok(())
+    }
+
     /// Cancel a task.
     /// If pending, removes it from the queue. If running/assigned, marks it cancelled.
     ///

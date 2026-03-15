@@ -456,6 +456,7 @@ impl AgentService for AgentServiceImpl {
         }
         if let Some(assignment) = self.try_claim_task(&req.agent_id, max_tasks).await? {
             let task_id = assignment.task_id.clone();
+            let run_id = assignment.run_id.clone();
             let lease_epoch = assignment.lease_epoch;
             match make_task_response(assignment, &self.state.secrets).await {
                 Ok(resp) => return Ok(Response::new(resp)),
@@ -466,7 +467,20 @@ impl AgentService for AgentServiceImpl {
                         "secret resolution failed during dispatch, releasing lease: {e}"
                     );
                     let mut tasks = self.state.tasks.write().await;
-                    let _ = tasks.reject_assignment(&task_id, lease_epoch);
+                    let _ = tasks.release_assignment(&task_id, lease_epoch);
+                    let released_task = tasks.get(&task_id).cloned();
+                    drop(tasks);
+
+                    // Revert run state back to Pending.
+                    let mut runs = self.state.runs.write().await;
+                    let _ = runs.transition(&run_id, InternalRunState::Pending);
+                    let released_run = runs.get_run(&run_id).cloned();
+                    drop(runs);
+
+                    // Persist corrected state.
+                    if let (Some(task), Some(run)) = (released_task, released_run) {
+                        let _ = self.state.persist_assignment_records(&run, &task).await;
+                    }
                     return Err(e);
                 }
             }
@@ -497,6 +511,7 @@ impl AgentService for AgentServiceImpl {
         drop(tasks);
         if let Some(assignment) = self.try_claim_task(&req.agent_id, max_tasks).await? {
             let task_id = assignment.task_id.clone();
+            let run_id = assignment.run_id.clone();
             let lease_epoch = assignment.lease_epoch;
             match make_task_response(assignment, &self.state.secrets).await {
                 Ok(resp) => return Ok(Response::new(resp)),
@@ -507,7 +522,20 @@ impl AgentService for AgentServiceImpl {
                         "secret resolution failed during dispatch, releasing lease: {e}"
                     );
                     let mut tasks = self.state.tasks.write().await;
-                    let _ = tasks.reject_assignment(&task_id, lease_epoch);
+                    let _ = tasks.release_assignment(&task_id, lease_epoch);
+                    let released_task = tasks.get(&task_id).cloned();
+                    drop(tasks);
+
+                    // Revert run state back to Pending.
+                    let mut runs = self.state.runs.write().await;
+                    let _ = runs.transition(&run_id, InternalRunState::Pending);
+                    let released_run = runs.get_run(&run_id).cloned();
+                    drop(runs);
+
+                    // Persist corrected state.
+                    if let (Some(task), Some(run)) = (released_task, released_run) {
+                        let _ = self.state.persist_assignment_records(&run, &task).await;
+                    }
                     return Err(e);
                 }
             }

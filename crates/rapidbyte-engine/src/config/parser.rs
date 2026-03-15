@@ -4,7 +4,7 @@
 //! - `${ENV_VAR}` — resolved from the process environment
 //! - `${prefix:path#key}` — resolved via a registered [`SecretProvider`]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use anyhow::Result;
@@ -27,6 +27,27 @@ pub fn contains_secret_refs(input: &str) -> bool {
     SECRET_REF_RE.is_match(input)
 }
 
+/// Collected match with byte range for positional replacement.
+struct MatchReplacement {
+    start: usize,
+    end: usize,
+    value: String,
+}
+
+/// Apply positional replacements right-to-left so indices stay valid.
+///
+/// This avoids global `String::replace` which would expand patterns
+/// that appear inside replacement values (e.g. a secret value
+/// containing `${HOST}` should NOT be expanded as an env var).
+fn apply_replacements(input: &str, mut replacements: Vec<MatchReplacement>) -> String {
+    replacements.sort_by(|a, b| b.start.cmp(&a.start));
+    let mut result = input.to_string();
+    for r in replacements {
+        result.replace_range(r.start..r.end, &r.value);
+    }
+    result
+}
+
 /// Resolve only `${prefix:path#key}` secret references, leaving `${ENV_VAR}`
 /// patterns untouched.
 ///
@@ -37,40 +58,45 @@ pub fn contains_secret_refs(input: &str) -> bool {
 ///
 /// Returns an error if a secret provider prefix has no registered provider
 /// or a secret read fails.
+#[allow(clippy::missing_panics_doc)] // regex group 0 always exists
 pub async fn substitute_secrets(input: &str, secrets: &SecretProviders) -> Result<String> {
-    let mut secret_values: HashMap<String, String> = HashMap::new();
-    let mut secret_errors = Vec::new();
+    let mut replacements = Vec::new();
+    let mut errors = Vec::new();
+    let mut resolved: HashMap<String, String> = HashMap::new();
 
-    let mut seen = HashSet::new();
     for cap in SECRET_REF_RE.captures_iter(input) {
-        let full_match = cap[0].to_string();
-        if seen.insert(full_match.clone()) {
-            let prefix = &cap[1];
-            let path = &cap[2];
-            let key = &cap[3];
+        let m = cap.get(0).unwrap();
+        let full_match = m.as_str().to_string();
+        let prefix = &cap[1];
+        let path = &cap[2];
+        let key = &cap[3];
+
+        let value = if let Some(cached) = resolved.get(&full_match) {
+            cached.clone()
+        } else {
             match secrets.resolve(prefix, path, key).await {
                 Ok(val) => {
-                    secret_values.insert(full_match, val);
+                    resolved.insert(full_match, val.clone());
+                    val
                 }
                 Err(e) => {
-                    secret_errors.push(format!("{prefix}:{path}#{key}: {e}"));
+                    errors.push(format!("{prefix}:{path}#{key}: {e}"));
+                    continue;
                 }
             }
-        }
+        };
+        replacements.push(MatchReplacement {
+            start: m.start(),
+            end: m.end(),
+            value,
+        });
     }
 
-    if !secret_errors.is_empty() {
-        anyhow::bail!(
-            "Failed to resolve secret(s):\n  {}",
-            secret_errors.join("\n  ")
-        );
+    if !errors.is_empty() {
+        anyhow::bail!("Failed to resolve secret(s):\n  {}", errors.join("\n  "));
     }
 
-    let mut result = input.to_string();
-    for (pattern, value) in &secret_values {
-        result = result.replace(pattern, value);
-    }
-    Ok(result)
+    Ok(apply_replacements(input, replacements))
 }
 
 /// Substitute all `${...}` references: env vars and secret provider refs.
@@ -79,31 +105,47 @@ pub async fn substitute_secrets(input: &str, secrets: &SecretProviders) -> Resul
 /// Resolution is atomic — all references must resolve or the entire
 /// substitution fails.
 ///
+/// Replacement is positional — secret values containing `${...}` are
+/// never expanded as env vars.
+///
 /// # Errors
 ///
 /// Returns an error if any env var is missing, a secret provider prefix
 /// has no registered provider, or a secret read fails.
+#[allow(clippy::missing_panics_doc)] // regex group 0 always exists
 pub async fn substitute_variables(input: &str, secrets: &SecretProviders) -> Result<String> {
-    let mut secret_values: HashMap<String, String> = HashMap::new();
+    let mut replacements = Vec::new();
+    let mut secret_cache: HashMap<String, String> = HashMap::new();
     let mut secret_errors = Vec::new();
+    let mut env_errors = Vec::new();
 
-    // Resolve secret refs
-    let mut seen = HashSet::new();
+    // Collect secret ref replacements.
     for cap in SECRET_REF_RE.captures_iter(input) {
-        let full_match = cap[0].to_string();
-        if seen.insert(full_match.clone()) {
-            let prefix = &cap[1];
-            let path = &cap[2];
-            let key = &cap[3];
+        let m = cap.get(0).unwrap();
+        let full_match = m.as_str().to_string();
+        let prefix = &cap[1];
+        let path = &cap[2];
+        let key = &cap[3];
+
+        let value = if let Some(cached) = secret_cache.get(&full_match) {
+            cached.clone()
+        } else {
             match secrets.resolve(prefix, path, key).await {
                 Ok(val) => {
-                    secret_values.insert(full_match, val);
+                    secret_cache.insert(full_match, val.clone());
+                    val
                 }
                 Err(e) => {
                     secret_errors.push(format!("{prefix}:{path}#{key}: {e}"));
+                    continue;
                 }
             }
-        }
+        };
+        replacements.push(MatchReplacement {
+            start: m.start(),
+            end: m.end(),
+            value,
+        });
     }
 
     if !secret_errors.is_empty() {
@@ -113,22 +155,20 @@ pub async fn substitute_variables(input: &str, secrets: &SecretProviders) -> Res
         );
     }
 
-    // Collect env var replacements from the ORIGINAL input (before secret
-    // substitution) so that secret values containing ${...} are treated as
-    // opaque and not expanded.
-    let mut env_values: HashMap<String, String> = HashMap::new();
-    let mut env_errors = Vec::new();
+    // Collect env var replacements (from original input positions).
     for cap in ENV_VAR_RE.captures_iter(input) {
-        let full_match = cap[0].to_string();
+        let m = cap.get(0).unwrap();
         let var_name = &cap[1];
-        if let std::collections::hash_map::Entry::Vacant(entry) = env_values.entry(full_match) {
-            match std::env::var(var_name) {
-                Ok(val) => {
-                    entry.insert(val);
-                }
-                Err(_) => {
-                    env_errors.push(var_name.to_string());
-                }
+        match std::env::var(var_name) {
+            Ok(val) => {
+                replacements.push(MatchReplacement {
+                    start: m.start(),
+                    end: m.end(),
+                    value: val,
+                });
+            }
+            Err(_) => {
+                env_errors.push(var_name.to_string());
             }
         }
     }
@@ -137,16 +177,7 @@ pub async fn substitute_variables(input: &str, secrets: &SecretProviders) -> Res
         anyhow::bail!("Missing environment variable(s): {}", env_errors.join(", "));
     }
 
-    // Apply all replacements to the original input.
-    let mut result = input.to_string();
-    for (pattern, value) in &secret_values {
-        result = result.replace(pattern, value);
-    }
-    for (pattern, value) in &env_values {
-        result = result.replace(pattern, value);
-    }
-
-    Ok(result)
+    Ok(apply_replacements(input, replacements))
 }
 
 /// Parse a pipeline YAML string, resolving all variable references.
@@ -312,7 +343,8 @@ destination:
 
     #[tokio::test]
     async fn secret_values_with_dollar_braces_are_opaque() {
-        // A secret value that looks like an env var should NOT be expanded.
+        // A secret value that looks like an env var should NOT be expanded,
+        // even when the same env var pattern appears elsewhere in the YAML.
         use std::sync::Arc;
 
         struct FakeProvider;
@@ -320,16 +352,24 @@ destination:
         #[async_trait::async_trait]
         impl rapidbyte_secrets::SecretProvider for FakeProvider {
             async fn read_secret(&self, _path: &str, _key: &str) -> anyhow::Result<String> {
-                // Return a value that looks like an env var reference
-                Ok("${SHOULD_NOT_EXPAND}".to_owned())
+                // Return a value that contains ${RB_OPAQUE_HOST} — same pattern
+                // as an env var that exists in the original YAML.
+                Ok("${RB_OPAQUE_HOST}".to_owned())
             }
         }
+
+        std::env::set_var("RB_OPAQUE_HOST", "real-host");
 
         let mut secrets = SecretProviders::new();
         secrets.register("vault", Arc::new(FakeProvider));
 
-        let input = "password: ${vault:secret/test#key}";
+        // Both ${RB_OPAQUE_HOST} (env) and ${vault:...} (secret) are present.
+        // The env var should expand to "real-host" but the secret value
+        // "${RB_OPAQUE_HOST}" should be preserved literally.
+        let input = "host: ${RB_OPAQUE_HOST}\npassword: ${vault:secret/test#key}";
         let result = substitute_variables(input, &secrets).await.unwrap();
-        assert_eq!(result, "password: ${SHOULD_NOT_EXPAND}");
+        assert_eq!(result, "host: real-host\npassword: ${RB_OPAQUE_HOST}");
+
+        std::env::remove_var("RB_OPAQUE_HOST");
     }
 }
