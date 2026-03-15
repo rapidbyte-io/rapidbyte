@@ -486,6 +486,33 @@ impl AgentService for AgentServiceImpl {
                     if let (Some(task), Some(run)) = (failed_task, failed_run) {
                         let _ = self.state.persist_assignment_records(&run, &task).await;
                     }
+
+                    // Publish terminal event so watch clients see the failure.
+                    self.state.watchers.write().await.publish_terminal(
+                        &run_id,
+                        RunEvent {
+                            run_id: run_id.clone(),
+                            event: Some(run_event::Event::Failed(RunFailed {
+                                error: Some(crate::proto::rapidbyte::v1::TaskError {
+                                    code: "SECRET_RESOLUTION_FAILED".into(),
+                                    message: e.message().to_owned(),
+                                    retryable: false,
+                                    safe_to_retry: false,
+                                    commit_state: "before_commit".into(),
+                                }),
+                                attempt: 1,
+                            })),
+                        },
+                    );
+                    rapidbyte_metrics::instruments::controller::runs_completed().add(
+                        1,
+                        &[KeyValue::new(
+                            rapidbyte_metrics::labels::STATUS,
+                            rapidbyte_metrics::labels::STATUS_ERROR,
+                        )],
+                    );
+                    rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
+
                     // Return NoTask instead of a gRPC error so the agent
                     // keeps polling. The task/run are already marked Failed.
                     return Ok(Response::new(PollTaskResponse {
@@ -550,6 +577,33 @@ impl AgentService for AgentServiceImpl {
                     if let (Some(task), Some(run)) = (failed_task, failed_run) {
                         let _ = self.state.persist_assignment_records(&run, &task).await;
                     }
+
+                    // Publish terminal event so watch clients see the failure.
+                    self.state.watchers.write().await.publish_terminal(
+                        &run_id,
+                        RunEvent {
+                            run_id: run_id.clone(),
+                            event: Some(run_event::Event::Failed(RunFailed {
+                                error: Some(crate::proto::rapidbyte::v1::TaskError {
+                                    code: "SECRET_RESOLUTION_FAILED".into(),
+                                    message: e.message().to_owned(),
+                                    retryable: false,
+                                    safe_to_retry: false,
+                                    commit_state: "before_commit".into(),
+                                }),
+                                attempt: 1,
+                            })),
+                        },
+                    );
+                    rapidbyte_metrics::instruments::controller::runs_completed().add(
+                        1,
+                        &[KeyValue::new(
+                            rapidbyte_metrics::labels::STATUS,
+                            rapidbyte_metrics::labels::STATUS_ERROR,
+                        )],
+                    );
+                    rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
+
                     // Return NoTask instead of a gRPC error so the agent
                     // keeps polling. The task/run are already marked Failed.
                     return Ok(Response::new(PollTaskResponse {
