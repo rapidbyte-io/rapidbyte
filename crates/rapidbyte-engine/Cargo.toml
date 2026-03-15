@@ -26,6 +26,7 @@ jsonschema = "0.28"
 rapidbyte-secrets = { path = "../rapidbyte-secrets" }
 
 [dev-dependencies]
+async-trait = { workspace = true }
 bytes = "1"
 tempfile = "3"
 criterion = { workspace = true }

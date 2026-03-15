@@ -455,9 +455,21 @@ impl AgentService for AgentServiceImpl {
             poll_barrier.wait().await;
         }
         if let Some(assignment) = self.try_claim_task(&req.agent_id, max_tasks).await? {
-            return Ok(Response::new(
-                make_task_response(assignment, &self.state.secrets).await?,
-            ));
+            let task_id = assignment.task_id.clone();
+            let lease_epoch = assignment.lease_epoch;
+            match make_task_response(assignment, &self.state.secrets).await {
+                Ok(resp) => return Ok(Response::new(resp)),
+                Err(e) => {
+                    // Release the lease so the task returns to pending.
+                    tracing::error!(
+                        task_id,
+                        "secret resolution failed during dispatch, releasing lease: {e}"
+                    );
+                    let mut tasks = self.state.tasks.write().await;
+                    let _ = tasks.reject_assignment(&task_id, lease_epoch);
+                    return Err(e);
+                }
+            }
         }
 
         // Long-poll: wait for notification or timeout
@@ -484,9 +496,21 @@ impl AgentService for AgentServiceImpl {
         }
         drop(tasks);
         if let Some(assignment) = self.try_claim_task(&req.agent_id, max_tasks).await? {
-            return Ok(Response::new(
-                make_task_response(assignment, &self.state.secrets).await?,
-            ));
+            let task_id = assignment.task_id.clone();
+            let lease_epoch = assignment.lease_epoch;
+            match make_task_response(assignment, &self.state.secrets).await {
+                Ok(resp) => return Ok(Response::new(resp)),
+                Err(e) => {
+                    // Release the lease so the task returns to pending.
+                    tracing::error!(
+                        task_id,
+                        "secret resolution failed during dispatch, releasing lease: {e}"
+                    );
+                    let mut tasks = self.state.tasks.write().await;
+                    let _ = tasks.reject_assignment(&task_id, lease_epoch);
+                    return Err(e);
+                }
+            }
         }
 
         Ok(Response::new(PollTaskResponse {

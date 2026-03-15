@@ -113,29 +113,37 @@ pub async fn substitute_variables(input: &str, secrets: &SecretProviders) -> Res
         );
     }
 
-    // Replace secret refs first, then env vars.
-    let mut result = input.to_string();
-    for (pattern, value) in &secret_values {
-        result = result.replace(pattern, value);
-    }
-
-    // Resolve env vars
+    // Collect env var replacements from the ORIGINAL input (before secret
+    // substitution) so that secret values containing ${...} are treated as
+    // opaque and not expanded.
+    let mut env_values: HashMap<String, String> = HashMap::new();
     let mut env_errors = Vec::new();
-    let snapshot = result.clone();
-    for cap in ENV_VAR_RE.captures_iter(&snapshot) {
+    for cap in ENV_VAR_RE.captures_iter(input) {
+        let full_match = cap[0].to_string();
         let var_name = &cap[1];
-        match std::env::var(var_name) {
-            Ok(val) => {
-                result = result.replace(&cap[0], &val);
-            }
-            Err(_) => {
-                env_errors.push(var_name.to_string());
+        if let std::collections::hash_map::Entry::Vacant(entry) = env_values.entry(full_match) {
+            match std::env::var(var_name) {
+                Ok(val) => {
+                    entry.insert(val);
+                }
+                Err(_) => {
+                    env_errors.push(var_name.to_string());
+                }
             }
         }
     }
 
     if !env_errors.is_empty() {
         anyhow::bail!("Missing environment variable(s): {}", env_errors.join(", "));
+    }
+
+    // Apply all replacements to the original input.
+    let mut result = input.to_string();
+    for (pattern, value) in &secret_values {
+        result = result.replace(pattern, value);
+    }
+    for (pattern, value) in &env_values {
+        result = result.replace(pattern, value);
     }
 
     Ok(result)
@@ -300,5 +308,28 @@ destination:
         assert!(contains_secret_refs("${aws:arn:something#key}"));
         assert!(!contains_secret_refs("${NORMAL_ENV_VAR}"));
         assert!(!contains_secret_refs("no refs here"));
+    }
+
+    #[tokio::test]
+    async fn secret_values_with_dollar_braces_are_opaque() {
+        // A secret value that looks like an env var should NOT be expanded.
+        use std::sync::Arc;
+
+        struct FakeProvider;
+
+        #[async_trait::async_trait]
+        impl rapidbyte_secrets::SecretProvider for FakeProvider {
+            async fn read_secret(&self, _path: &str, _key: &str) -> anyhow::Result<String> {
+                // Return a value that looks like an env var reference
+                Ok("${SHOULD_NOT_EXPAND}".to_owned())
+            }
+        }
+
+        let mut secrets = SecretProviders::new();
+        secrets.register("vault", Arc::new(FakeProvider));
+
+        let input = "password: ${vault:secret/test#key}";
+        let result = substitute_variables(input, &secrets).await.unwrap();
+        assert_eq!(result, "password: ${SHOULD_NOT_EXPAND}");
     }
 }
