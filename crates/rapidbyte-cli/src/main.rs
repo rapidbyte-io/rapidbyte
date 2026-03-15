@@ -71,6 +71,14 @@ struct Cli {
     /// Suppress all output (exit code only, errors on stderr)
     #[arg(short, long, global = true)]
     quiet: bool,
+
+    /// Default OCI registry for plugin resolution (e.g. registry.example.com/plugins)
+    #[arg(long, global = true, env = "RAPIDBYTE_REGISTRY_URL")]
+    registry_url: Option<String>,
+
+    /// Use HTTP instead of HTTPS for plugin registry (for local dev registries)
+    #[arg(long, global = true, env = "RAPIDBYTE_REGISTRY_INSECURE")]
+    registry_insecure: bool,
 }
 
 #[derive(Subcommand)]
@@ -115,8 +123,11 @@ enum Commands {
         /// Path to pipeline YAML file
         pipeline: PathBuf,
     },
-    /// List available plugins
-    Plugins,
+    /// Manage plugins (pull, push, inspect, list, remove)
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommands,
+    },
     /// Scaffold a new plugin project
     Scaffold {
         /// Plugin name (e.g., "source-mysql", "dest-snowflake")
@@ -156,6 +167,12 @@ enum Commands {
         /// Prometheus metrics listen address (e.g. 127.0.0.1:9190)
         #[arg(long, env = "RAPIDBYTE_METRICS_LISTEN")]
         metrics_listen: Option<String>,
+        /// OCI registry URL to broadcast to agents for plugin pulls
+        #[arg(long, env = "RAPIDBYTE_REGISTRY_URL")]
+        registry_url: Option<String>,
+        /// Use HTTP instead of HTTPS for the plugin registry
+        #[arg(long)]
+        registry_insecure: bool,
     },
     /// Start an agent worker (long-running)
     Agent {
@@ -186,6 +203,51 @@ enum Commands {
         /// Prometheus metrics listen address (e.g. 127.0.0.1:9191)
         #[arg(long, env = "RAPIDBYTE_METRICS_LISTEN")]
         metrics_listen: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PluginCommands {
+    /// Pull a plugin from an OCI registry to local cache
+    Pull {
+        /// Plugin reference (e.g. registry.example.com/source/postgres:1.2.0)
+        plugin_ref: String,
+        /// Use HTTP instead of HTTPS (for local dev registries)
+        #[arg(long)]
+        insecure: bool,
+    },
+    /// Push a local .wasm plugin to an OCI registry
+    Push {
+        /// Plugin reference (e.g. registry.example.com/source/postgres:1.2.0)
+        plugin_ref: String,
+        /// Path to the .wasm file
+        wasm_path: PathBuf,
+        /// Use HTTP instead of HTTPS
+        #[arg(long)]
+        insecure: bool,
+    },
+    /// Inspect plugin metadata without downloading the wasm binary
+    Inspect {
+        /// Plugin reference
+        plugin_ref: String,
+        /// Use HTTP instead of HTTPS
+        #[arg(long)]
+        insecure: bool,
+    },
+    /// List available tags/versions for a plugin
+    Tags {
+        /// Plugin reference (tag is ignored)
+        plugin_ref: String,
+        /// Use HTTP instead of HTTPS
+        #[arg(long)]
+        insecure: bool,
+    },
+    /// List locally cached plugins
+    List,
+    /// Remove a plugin from the local cache
+    Remove {
+        /// Plugin reference
+        plugin_ref: String,
     },
 }
 
@@ -263,6 +325,12 @@ async fn main() -> ExitCode {
     };
     let tls = tls.is_configured().then_some(tls);
 
+    let registry_config = rapidbyte_registry::RegistryConfig {
+        insecure: cli.registry_insecure,
+        default_registry: cli.registry_url.clone(),
+        ..Default::default()
+    };
+
     let result = match cli.command {
         Commands::Run {
             pipeline,
@@ -279,6 +347,7 @@ async fn main() -> ExitCode {
                 cli.auth_token.as_deref(),
                 tls.as_ref(),
                 &otel_guard,
+                &registry_config,
             )
             .await
         }
@@ -316,9 +385,13 @@ async fn main() -> ExitCode {
             )
             .await
         }
-        Commands::Check { pipeline } => commands::check::execute(&pipeline, verbosity).await,
-        Commands::Discover { pipeline } => commands::discover::execute(&pipeline, verbosity).await,
-        Commands::Plugins => commands::plugins::execute(verbosity),
+        Commands::Check { pipeline } => {
+            commands::check::execute(&pipeline, verbosity, &registry_config).await
+        }
+        Commands::Discover { pipeline } => {
+            commands::discover::execute(&pipeline, verbosity, &registry_config).await
+        }
+        Commands::Plugin { command } => commands::plugin::execute(command).await,
         Commands::Scaffold { name, output } => commands::scaffold::run(&name, output.as_deref()),
         Commands::Dev => commands::dev::execute().await,
         Commands::Controller {
@@ -331,6 +404,8 @@ async fn main() -> ExitCode {
             tls_cert,
             tls_key,
             metrics_listen,
+            registry_url,
+            registry_insecure,
         } => {
             commands::controller::execute(
                 &listen,
@@ -343,6 +418,8 @@ async fn main() -> ExitCode {
                 tls_cert.as_deref(),
                 tls_key.as_deref(),
                 metrics_listen.as_deref(),
+                registry_url.as_deref(),
+                registry_insecure,
                 otel_guard,
             )
             .await

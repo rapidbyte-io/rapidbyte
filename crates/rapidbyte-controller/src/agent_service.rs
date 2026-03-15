@@ -25,6 +25,8 @@ const LEASE_TTL: Duration = Duration::from_secs(300);
 
 pub struct AgentServiceImpl {
     state: ControllerState,
+    registry_url: String,
+    registry_insecure: bool,
     #[cfg(test)]
     poll_barrier: Option<Arc<Barrier>>,
 }
@@ -34,6 +36,23 @@ impl AgentServiceImpl {
     pub fn new(state: ControllerState) -> Self {
         Self {
             state,
+            registry_url: String::new(),
+            registry_insecure: false,
+            #[cfg(test)]
+            poll_barrier: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_registry_config(
+        state: ControllerState,
+        registry_url: String,
+        registry_insecure: bool,
+    ) -> Self {
+        Self {
+            state,
+            registry_url,
+            registry_insecure,
             #[cfg(test)]
             poll_barrier: None,
         }
@@ -43,6 +62,8 @@ impl AgentServiceImpl {
     fn with_poll_barrier(state: ControllerState, poll_barrier: Arc<Barrier>) -> Self {
         Self {
             state,
+            registry_url: String::new(),
+            registry_insecure: false,
             poll_barrier: Some(poll_barrier),
         }
     }
@@ -266,7 +287,11 @@ impl AgentService for AgentServiceImpl {
 
         tracing::info!(agent_id, "Agent registered");
         rapidbyte_metrics::instruments::controller::active_agents().add(1, &[]);
-        Ok(Response::new(RegisterAgentResponse { agent_id }))
+        Ok(Response::new(RegisterAgentResponse {
+            agent_id,
+            registry_url: self.registry_url.clone(),
+            registry_insecure: self.registry_insecure,
+        }))
     }
 
     async fn heartbeat(

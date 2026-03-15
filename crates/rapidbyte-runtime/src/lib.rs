@@ -42,8 +42,8 @@ pub use engine::{create_component_linker, HasStoreLimits, LoadedComponent, WasmR
 pub use frame::FrameTable;
 pub use host_state::{ComponentHostState, Frame, HostTimings};
 pub use plugin::{
-    extract_manifest_from_wasm, load_plugin_manifest, parse_plugin_ref, plugin_search_dirs,
-    resolve_plugin_path,
+    extract_manifest_from_wasm, is_oci_reference, load_plugin_manifest, parse_plugin_ref,
+    plugin_search_dirs, resolve_plugin, resolve_plugin_from_registry, resolve_plugin_path,
 };
 pub use sandbox::{resolve_min_limit, SandboxOverrides};
 

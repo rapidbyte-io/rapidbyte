@@ -58,6 +58,11 @@ pub struct AgentConfig {
     /// Optional Prometheus metrics listen address (e.g. `127.0.0.1:9191`).
     /// Prometheus endpoint is only started when this is set.
     pub metrics_listen: Option<String>,
+    /// OCI registry URL for plugin pulls, received from the controller on registration.
+    /// Empty means no registry is configured; plugins are resolved locally.
+    pub registry_url: Option<String>,
+    /// Use HTTP instead of HTTPS when pulling from the registry.
+    pub registry_insecure: bool,
 }
 
 impl Default for AgentConfig {
@@ -76,6 +81,8 @@ impl Default for AgentConfig {
             controller_tls: None,
             flight_tls: None,
             metrics_listen: None,
+            registry_url: None,
+            registry_insecure: false,
         }
     }
 }
@@ -173,8 +180,22 @@ pub async fn run(
             .map_err(|_| anyhow::anyhow!("Invalid bearer token"))?,
         )
         .await?;
-    let agent_id = resp.into_inner().agent_id;
-    info!(agent_id, "Registered with controller");
+    let registration = resp.into_inner();
+    let agent_id = registration.agent_id;
+    // Apply registry config from controller if provided
+    let mut config = config;
+    if registration.registry_url.is_empty() {
+        info!(agent_id, "Registered with controller");
+    } else {
+        info!(
+            agent_id,
+            registry_url = registration.registry_url,
+            registry_insecure = registration.registry_insecure,
+            "Registered with controller (registry configured)"
+        );
+        config.registry_url = Some(registration.registry_url);
+        config.registry_insecure = registration.registry_insecure;
+    }
 
     // Active lease tracking shared between worker and heartbeat
     let active_leases: ActiveLeaseMap = Arc::new(RwLock::new(HashMap::new()));
@@ -405,6 +426,11 @@ async fn process_task(
         ctx.config.auth_token.clone(),
     ));
 
+    let registry_config = rapidbyte_registry::RegistryConfig {
+        insecure: ctx.config.registry_insecure,
+        credentials: None,
+        default_registry: ctx.config.registry_url.clone(),
+    };
     let result = executor::execute_task(
         &task.pipeline_yaml_utf8,
         dry_run,
@@ -413,6 +439,7 @@ async fn process_task(
         cancel_token,
         ctx.otel_guard.snapshot_reader(),
         ctx.otel_guard.meter_provider(),
+        &registry_config,
     )
     .await;
 

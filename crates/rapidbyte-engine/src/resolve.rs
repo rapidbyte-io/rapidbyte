@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use rapidbyte_registry::RegistryConfig;
 use rapidbyte_runtime::{resolve_min_limit, SandboxOverrides};
 use rapidbyte_state::{SqliteStateBackend, StateBackend};
 use rapidbyte_types::manifest::{Permissions, PluginManifest};
@@ -24,18 +25,32 @@ pub struct ResolvedPlugins {
 
 /// Resolve source and destination plugin paths, load manifests, and extract permissions.
 ///
+/// Uses the registry-aware resolver: OCI references (e.g.
+/// `registry.example.com/source/postgres:1.2.0`) are resolved via cache/pull,
+/// while bare names fall back to local filesystem search.
+///
 /// # Errors
 ///
 /// Returns `PipelineError::Infrastructure` if plugin paths cannot be resolved
 /// or manifests fail validation.
-pub fn resolve_plugins(config: &PipelineConfig) -> Result<ResolvedPlugins, PipelineError> {
-    let source_wasm =
-        rapidbyte_runtime::resolve_plugin_path(&config.source.use_ref, PluginKind::Source)
-            .map_err(PipelineError::Infrastructure)?;
-    let dest_wasm = rapidbyte_runtime::resolve_plugin_path(
+pub async fn resolve_plugins(
+    config: &PipelineConfig,
+    registry_config: &RegistryConfig,
+) -> Result<ResolvedPlugins, PipelineError> {
+    let source_wasm = rapidbyte_runtime::resolve_plugin(
+        &config.source.use_ref,
+        PluginKind::Source,
+        registry_config,
+    )
+    .await
+    .map_err(PipelineError::Infrastructure)?;
+
+    let dest_wasm = rapidbyte_runtime::resolve_plugin(
         &config.destination.use_ref,
         PluginKind::Destination,
+        registry_config,
     )
+    .await
     .map_err(PipelineError::Infrastructure)?;
 
     let source_manifest =

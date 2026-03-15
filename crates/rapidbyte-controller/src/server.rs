@@ -46,6 +46,11 @@ pub struct ControllerConfig {
     /// Optional Prometheus metrics listen address (e.g. `127.0.0.1:9190`).
     /// Prometheus endpoint is only started when this is set.
     pub metrics_listen: Option<String>,
+    /// OCI registry URL broadcast to agents on registration (e.g. `registry.example.com`).
+    /// Empty or `None` means no registry is configured.
+    pub registry_url: Option<String>,
+    /// Use HTTP instead of HTTPS when agents pull from the registry.
+    pub registry_insecure: bool,
 }
 
 /// Default signing key used when no explicit key is configured.
@@ -69,6 +74,8 @@ impl Default for ControllerConfig {
             allow_insecure_default_signing_key: false,
             tls: None,
             metrics_listen: None,
+            registry_url: None,
+            registry_insecure: false,
         }
     }
 }
@@ -517,7 +524,14 @@ pub async fn run(
         PipelineServiceImpl::new(state.clone()),
         auth.clone(),
     );
-    let agent_svc = AgentServiceServer::with_interceptor(AgentServiceImpl::new(state), auth);
+    let agent_svc = AgentServiceServer::with_interceptor(
+        AgentServiceImpl::with_registry_config(
+            state,
+            config.registry_url.clone().unwrap_or_default(),
+            config.registry_insecure,
+        ),
+        auth,
+    );
 
     info!(addr = %config.listen_addr, "Controller listening");
 
