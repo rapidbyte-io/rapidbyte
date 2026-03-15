@@ -13,17 +13,51 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Try to parse a version string as (major, minor, patch) for comparison.
-fn semver_parse(version: &str) -> Option<(u64, u64, u64)> {
+/// Parsed version for comparison. Pre-release versions sort below their
+/// release counterpart (e.g. `1.0.0-beta` < `1.0.0`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    /// `true` for release versions, `false` for pre-release (has `-suffix`).
+    /// Releases sort higher than pre-releases at the same (major, minor, patch).
+    is_release: bool,
+}
+
+impl PartialOrd for ParsedVersion {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ParsedVersion {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.major, self.minor, self.patch, self.is_release).cmp(&(
+            other.major,
+            other.minor,
+            other.patch,
+            other.is_release,
+        ))
+    }
+}
+
+/// Try to parse a version string for comparison.
+fn semver_parse(version: &str) -> Option<ParsedVersion> {
     let v = version.strip_prefix('v').unwrap_or(version);
     let parts: Vec<&str> = v.split('.').collect();
     if parts.len() >= 3 {
         let major = parts[0].parse().ok()?;
         let minor = parts[1].parse().ok()?;
-        // Strip pre-release suffix (e.g. "0-beta") for the patch number
+        let has_prerelease = parts[2].contains('-');
         let patch_str = parts[2].split('-').next().unwrap_or(parts[2]);
         let patch = patch_str.parse().ok()?;
-        Some((major, minor, patch))
+        Some(ParsedVersion {
+            major,
+            minor,
+            patch,
+            is_release: !has_prerelease,
+        })
     } else {
         None
     }
@@ -425,5 +459,61 @@ mod tests {
         assert_eq!(idx.plugins[0].latest, "2.0.0");
         assert!(idx.plugins[0].versions.contains(&"1.0.0".to_owned()));
         assert!(idx.plugins[0].versions.contains(&"2.0.0".to_owned()));
+    }
+
+    #[test]
+    fn upsert_advances_latest_from_prerelease_to_release() {
+        let mut idx = PluginIndex::new();
+
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            "source",
+            "1.0.0-beta",
+            &["1.0.0-beta"],
+        ));
+        assert_eq!(idx.plugins[0].latest, "1.0.0-beta");
+
+        // Release 1.0.0 should advance latest past 1.0.0-beta
+        idx.upsert(make_entry("p", "P", "d", "source", "1.0.0", &["1.0.0"]));
+        assert_eq!(idx.plugins[0].latest, "1.0.0");
+    }
+
+    #[test]
+    fn upsert_does_not_regress_release_to_prerelease() {
+        let mut idx = PluginIndex::new();
+
+        idx.upsert(make_entry("p", "P", "d", "source", "1.0.0", &["1.0.0"]));
+
+        // Pushing 1.0.1-rc1 should NOT regress latest back to a pre-release
+        // at the same or lower version
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            "source",
+            "1.0.0-rc1",
+            &["1.0.0-rc1"],
+        ));
+        assert_eq!(idx.plugins[0].latest, "1.0.0");
+    }
+
+    #[test]
+    fn upsert_advances_latest_for_newer_prerelease() {
+        let mut idx = PluginIndex::new();
+
+        idx.upsert(make_entry("p", "P", "d", "source", "1.0.0", &["1.0.0"]));
+
+        // 2.0.0-beta is a higher major version, should advance
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            "source",
+            "2.0.0-beta",
+            &["2.0.0-beta"],
+        ));
+        assert_eq!(idx.plugins[0].latest, "2.0.0-beta");
     }
 }
