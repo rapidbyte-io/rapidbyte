@@ -197,6 +197,9 @@ pub async fn resolve_plugin_from_registry(
     let image = client.pull(&plugin_ref).await?;
     let unpacked = rapidbyte_registry::unpack_artifact(&image)?;
 
+    // Verify signature against trust policy
+    verify_trust(&unpacked.config, registry_config)?;
+
     let entry = cache.store(&plugin_ref, &unpacked.manifest_json, &unpacked.wasm_bytes)?;
     tracing::info!(
         %plugin_ref,
@@ -206,6 +209,62 @@ pub async fn resolve_plugin_from_registry(
     );
 
     Ok(entry.wasm_path)
+}
+
+/// Verify a pulled plugin artifact against the configured trust policy.
+///
+/// - [`TrustPolicy::Skip`]: always passes without loading any keys.
+/// - [`TrustPolicy::Warn`]: logs a warning on unsigned or invalid-signature
+///   artifacts but does not fail.
+/// - [`TrustPolicy::Verify`]: returns an error if the artifact is unsigned or
+///   if the signature cannot be verified against any trusted key.
+fn verify_trust(
+    config: &rapidbyte_registry::PluginArtifactConfig,
+    registry_config: &rapidbyte_registry::RegistryConfig,
+) -> Result<()> {
+    use rapidbyte_registry::TrustPolicy;
+
+    match registry_config.trust_policy {
+        TrustPolicy::Skip => Ok(()),
+        TrustPolicy::Warn | TrustPolicy::Verify => {
+            let keys: Vec<_> = registry_config
+                .trusted_key_paths
+                .iter()
+                .map(|p| rapidbyte_registry::signing::load_verifying_key_file(p))
+                .collect::<Result<Vec<_>>>()?;
+
+            match &config.signature {
+                None => {
+                    let msg = "plugin is unsigned";
+                    if registry_config.trust_policy == TrustPolicy::Verify {
+                        anyhow::bail!("{msg} and trust policy is 'verify'");
+                    }
+                    tracing::warn!("{msg}");
+                    Ok(())
+                }
+                Some(sig) => {
+                    match rapidbyte_registry::signing::verify_against_any(
+                        &keys,
+                        &config.wasm_sha256,
+                        sig,
+                    ) {
+                        Ok(()) => {
+                            tracing::info!("plugin signature verified");
+                            Ok(())
+                        }
+                        Err(err) => {
+                            if registry_config.trust_policy == TrustPolicy::Verify {
+                                Err(err).context("plugin signature verification failed")
+                            } else {
+                                tracing::warn!("plugin signature invalid: {err}");
+                                Ok(())
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Resolve a plugin path, automatically choosing between OCI registry and
