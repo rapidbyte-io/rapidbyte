@@ -244,16 +244,28 @@ impl PluginCache {
         let wasm_path = dir.join("plugin.wasm");
         let digest_path = dir.join("sha256");
 
-        let digest = fs::read_to_string(&digest_path).ok()?;
-        let digest = digest.trim().to_owned();
+        let stored_digest = fs::read_to_string(&digest_path).ok()?;
+        let stored_digest = stored_digest.trim().to_owned();
 
-        let size_bytes = fs::metadata(&wasm_path).ok()?.len();
+        let wasm_bytes = fs::read(&wasm_path).ok()?;
+        let actual_digest = sha256_hex(&wasm_bytes);
+
+        if actual_digest != stored_digest {
+            tracing::warn!(
+                plugin_ref = %plugin_ref,
+                "skipping corrupt cache entry during list",
+            );
+            return None;
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let size_bytes = wasm_bytes.len() as u64;
 
         Some(CacheEntry {
             plugin_ref,
             wasm_path,
             manifest_path: dir.join("manifest.json"),
-            digest,
+            digest: actual_digest,
             size_bytes,
         })
     }
@@ -501,31 +513,33 @@ mod tests {
     }
 
     #[test]
-    fn list_returns_entries_with_corrupt_digest() {
+    fn list_skips_corrupt_entries() {
         let tmp = tempdir().unwrap();
         let cache = PluginCache::new(tmp.path().to_path_buf());
 
-        let ref_a = test_ref("1.0.0");
-        let ref_b = test_ref("2.0.0");
+        let good_ref = test_ref("1.0.0");
+        let bad_ref = test_ref("2.0.0");
 
         let wasm = dummy_wasm();
         cache
-            .store(&ref_a, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
+            .store(&good_ref, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
             .unwrap();
         let wasm = dummy_wasm();
-        let entry_b = cache
-            .store(&ref_b, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
+        let bad_entry = cache
+            .store(&bad_ref, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
             .unwrap();
 
         // Corrupt the digest of the second entry.
-        let bad_digest = "0000000000000000000000000000000000000000000000000000000000000000";
-        let digest_path = entry_b.wasm_path.parent().unwrap().join("sha256");
-        fs::write(digest_path, bad_digest).unwrap();
+        let digest_path = bad_entry.wasm_path.parent().unwrap().join("sha256");
+        fs::write(
+            digest_path,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
+        .unwrap();
 
-        // Both entries returned; the caller is responsible for verifying
-        // against artifact_config.
         let entries = cache.list().unwrap();
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].plugin_ref, good_ref);
     }
 
     #[test]
