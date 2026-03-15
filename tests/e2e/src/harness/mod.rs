@@ -8,6 +8,7 @@ use std::sync::OnceLock;
 use anyhow::{Context, Result};
 use rapidbyte_engine::config::parser;
 use rapidbyte_engine::config::validator;
+use rapidbyte_secrets::SecretProviders;
 use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_metrics::snapshot::SnapshotReader;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
@@ -264,7 +265,9 @@ impl HarnessContext {
         );
 
         let config =
-            parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
+            parser::parse_pipeline(&pipeline_yaml, &SecretProviders::new())
+                .await
+                .context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
         let (provider, reader) = e2e_metrics();
@@ -358,7 +361,9 @@ impl HarnessContext {
         let pipeline_yaml = render_transform_yaml(self, schemas, query, state_db_path);
 
         let config =
-            parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
+            parser::parse_pipeline(&pipeline_yaml, &SecretProviders::new())
+                .await
+                .context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
         let (provider, reader) = e2e_metrics();
@@ -396,7 +401,9 @@ impl HarnessContext {
             render_validate_transform_yaml(self, schemas, rules_yaml, on_data_error, state_db_path);
 
         let config =
-            parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
+            parser::parse_pipeline(&pipeline_yaml, &SecretProviders::new())
+                .await
+                .context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
         let (provider, reader) = e2e_metrics();
@@ -508,7 +515,9 @@ impl HarnessContext {
         let pipeline_yaml = render_cdc_yaml(self, schemas, &slot, &publication, state_db_path);
 
         let config =
-            parser::parse_pipeline_str(&pipeline_yaml).context("failed to parse pipeline")?;
+            parser::parse_pipeline(&pipeline_yaml, &SecretProviders::new())
+                .await
+                .context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
         let (provider, reader) = e2e_metrics();

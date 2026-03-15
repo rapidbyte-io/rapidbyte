@@ -350,17 +350,21 @@ fn resolve_controller_url(
     )
 }
 
-async fn build_secret_providers(cli: &Cli) -> anyhow::Result<rapidbyte_secrets::SecretProviders> {
+async fn build_secret_providers(
+    vault_addr: Option<&str>,
+    vault_token: Option<&str>,
+    vault_role_id: Option<&str>,
+    vault_secret_id: Option<&str>,
+) -> anyhow::Result<rapidbyte_secrets::SecretProviders> {
     let mut providers = rapidbyte_secrets::SecretProviders::new();
 
-    if let Some(addr) = &cli.vault_addr {
-        let auth = if let Some(token) = &cli.vault_token {
-            rapidbyte_secrets::VaultAuth::Token(token.clone())
-        } else if let (Some(role_id), Some(secret_id)) = (&cli.vault_role_id, &cli.vault_secret_id)
-        {
+    if let Some(addr) = vault_addr {
+        let auth = if let Some(token) = vault_token {
+            rapidbyte_secrets::VaultAuth::Token(token.to_owned())
+        } else if let (Some(role_id), Some(secret_id)) = (vault_role_id, vault_secret_id) {
             rapidbyte_secrets::VaultAuth::AppRole {
-                role_id: role_id.clone(),
-                secret_id: secret_id.clone(),
+                role_id: role_id.to_owned(),
+                secret_id: secret_id.to_owned(),
             }
         } else {
             anyhow::bail!(
@@ -370,7 +374,7 @@ async fn build_secret_providers(cli: &Cli) -> anyhow::Result<rapidbyte_secrets::
         };
 
         let vault = rapidbyte_secrets::VaultProvider::new(rapidbyte_secrets::VaultConfig {
-            address: addr.clone(),
+            address: addr.to_owned(),
             auth,
         })
         .await?;
@@ -429,20 +433,26 @@ async fn main() -> ExitCode {
         ..Default::default()
     };
 
-    let secrets = match build_secret_providers(&cli).await {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
-            return ExitCode::FAILURE;
-        }
-    };
-
     let result = match cli.command {
         Commands::Run {
             pipeline,
             dry_run,
             limit,
         } => {
+            let secrets = match build_secret_providers(
+                cli.vault_addr.as_deref(),
+                cli.vault_token.as_deref(),
+                cli.vault_role_id.as_deref(),
+                cli.vault_secret_id.as_deref(),
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
+                    return ExitCode::FAILURE;
+                }
+            };
             let controller_url = resolve_controller_url(cli.controller.clone(), false);
             commands::run::execute(
                 &pipeline,
@@ -493,9 +503,37 @@ async fn main() -> ExitCode {
             .await
         }
         Commands::Check { pipeline } => {
+            let secrets = match build_secret_providers(
+                cli.vault_addr.as_deref(),
+                cli.vault_token.as_deref(),
+                cli.vault_role_id.as_deref(),
+                cli.vault_secret_id.as_deref(),
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
+                    return ExitCode::FAILURE;
+                }
+            };
             commands::check::execute(&pipeline, verbosity, &registry_config, &secrets).await
         }
         Commands::Discover { pipeline } => {
+            let secrets = match build_secret_providers(
+                cli.vault_addr.as_deref(),
+                cli.vault_token.as_deref(),
+                cli.vault_role_id.as_deref(),
+                cli.vault_secret_id.as_deref(),
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
+                    return ExitCode::FAILURE;
+                }
+            };
             commands::discover::execute(&pipeline, verbosity, &registry_config, &secrets).await
         }
         Commands::Plugin { command } => commands::plugin::execute(command, &registry_config).await,
@@ -535,6 +573,20 @@ async fn main() -> ExitCode {
                 &cli.trust_policy,
                 cli.trust_key.clone(),
                 otel_guard,
+                match build_secret_providers(
+                    cli.vault_addr.as_deref(),
+                    cli.vault_token.as_deref(),
+                    cli.vault_role_id.as_deref(),
+                    cli.vault_secret_id.as_deref(),
+                )
+                .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
+                        return ExitCode::FAILURE;
+                    }
+                },
             )
             .await
         }

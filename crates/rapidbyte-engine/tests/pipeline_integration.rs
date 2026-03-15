@@ -57,7 +57,8 @@ async fn test_parse_and_validate_fixture_pipeline() {
         .unwrap()
         .join("tests/fixtures/pipelines/simple_pg_to_pg.yaml");
 
-    let config = parser::parse_pipeline(&fixture_path, &SecretProviders::new())
+    let yaml = std::fs::read_to_string(&fixture_path).expect("Failed to read fixture");
+    let config = parser::parse_pipeline(&yaml, &SecretProviders::new())
         .await
         .expect("Failed to parse fixture pipeline");
 
@@ -91,7 +92,8 @@ async fn test_parse_and_validate_invalid_fixture() {
         .unwrap()
         .join("tests/fixtures/pipelines/invalid_pipeline.yaml");
 
-    let result = parser::parse_pipeline(&fixture_path, &SecretProviders::new()).await;
+    let yaml = std::fs::read_to_string(&fixture_path).unwrap_or_default();
+    let result = parser::parse_pipeline(&yaml, &SecretProviders::new()).await;
     assert!(
         result.is_err(),
         "Invalid pipeline should fail at parse-time"

@@ -28,7 +28,9 @@ pub mod watch;
 ///
 /// Returns `Err` if parsing or validation fails.
 pub async fn load_pipeline(path: &Path, secrets: &SecretProviders) -> Result<PipelineConfig> {
-    let config = parser::parse_pipeline(path, secrets)
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read pipeline file: {}", path.display()))?;
+    let config = parser::parse_pipeline(&content, secrets)
         .await
         .with_context(|| format!("Failed to parse pipeline: {}", path.display()))?;
     validator::validate_pipeline(&config)?;

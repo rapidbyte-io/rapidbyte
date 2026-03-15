@@ -214,7 +214,7 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::parser::parse_pipeline_str;
+    use crate::config::parser::parse_pipeline;
     use rapidbyte_secrets::SecretProviders;
 
     fn valid_yaml() -> &'static str {
@@ -238,7 +238,7 @@ destination:
 
     #[tokio::test]
     async fn test_valid_pipeline_passes() {
-        let config = parse_pipeline_str(valid_yaml(), &SecretProviders::new())
+        let config = parse_pipeline(valid_yaml(), &SecretProviders::new())
             .await
             .unwrap();
         assert!(validate_pipeline(&config).is_ok());
@@ -247,7 +247,7 @@ destination:
     #[tokio::test]
     async fn test_wrong_version_fails() {
         let yaml = valid_yaml().replace("\"1.0\"", "\"2.0\"");
-        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+        let config = parse_pipeline(&yaml, &SecretProviders::new())
             .await
             .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
@@ -257,7 +257,7 @@ destination:
     #[tokio::test]
     async fn test_empty_pipeline_name_fails() {
         let yaml = valid_yaml().replace("test_pipeline", "");
-        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+        let config = parse_pipeline(&yaml, &SecretProviders::new())
             .await
             .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
@@ -267,7 +267,7 @@ destination:
     #[tokio::test]
     async fn test_incremental_without_cursor_fails() {
         let yaml = valid_yaml().replace("full_refresh", "incremental");
-        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+        let config = parse_pipeline(&yaml, &SecretProviders::new())
             .await
             .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
@@ -277,7 +277,7 @@ destination:
     #[tokio::test]
     async fn test_upsert_without_primary_key_fails() {
         let yaml = valid_yaml().replace("append", "upsert");
-        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+        let config = parse_pipeline(&yaml, &SecretProviders::new())
             .await
             .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
@@ -304,9 +304,7 @@ destination:
 resources:
   max_inflight_batches: 0
 "#;
-        let config = parse_pipeline_str(yaml, &SecretProviders::new())
-            .await
-            .unwrap();
+        let config = parse_pipeline(yaml, &SecretProviders::new()).await.unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("max_inflight_batches"));
     }
@@ -331,9 +329,7 @@ destination:
 resources:
   parallelism: 0
 "#;
-        let config = parse_pipeline_str(yaml, &SecretProviders::new())
-            .await
-            .unwrap();
+        let config = parse_pipeline(yaml, &SecretProviders::new()).await.unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("parallelism"));
     }
@@ -344,7 +340,7 @@ resources:
             "{}\nresources:\n  parallelism: auto\n",
             valid_yaml().trim_end()
         );
-        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+        let config = parse_pipeline(&yaml, &SecretProviders::new())
             .await
             .unwrap();
         assert!(validate_pipeline(&config).is_ok());
@@ -356,7 +352,7 @@ resources:
             "{}\nresources:\n  parallelism: 1\n",
             valid_yaml().trim_end()
         );
-        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+        let config = parse_pipeline(&yaml, &SecretProviders::new())
             .await
             .unwrap();
         assert!(validate_pipeline(&config).is_ok());
@@ -368,7 +364,7 @@ resources:
             "{}\nresources:\n  autotune:\n    pin_parallelism: 0\n",
             valid_yaml().trim_end()
         );
-        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+        let config = parse_pipeline(&yaml, &SecretProviders::new())
             .await
             .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
@@ -381,7 +377,7 @@ resources:
             "{}\nresources:\n  autotune:\n    pin_copy_flush_bytes: 1024\n",
             valid_yaml().trim_end()
         );
-        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+        let config = parse_pipeline(&yaml, &SecretProviders::new())
             .await
             .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
@@ -394,7 +390,7 @@ resources:
             "{}\nresources:\n  autotune:\n    pin_copy_flush_bytes: 8388608\n",
             valid_yaml().trim_end()
         );
-        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+        let config = parse_pipeline(&yaml, &SecretProviders::new())
             .await
             .unwrap();
         assert!(validate_pipeline(&config).is_ok());
@@ -419,9 +415,7 @@ destination:
   write_mode: upsert
   primary_key: [id]
 "#;
-        let config = parse_pipeline_str(yaml, &SecretProviders::new())
-            .await
-            .unwrap();
+        let config = parse_pipeline(yaml, &SecretProviders::new()).await.unwrap();
         assert!(validate_pipeline(&config).is_ok());
     }
 
@@ -444,9 +438,7 @@ destination:
     host: localhost
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml, &SecretProviders::new())
-            .await
-            .unwrap();
+        let config = parse_pipeline(yaml, &SecretProviders::new()).await.unwrap();
         assert!(validate_pipeline(&config).is_ok());
     }
 
@@ -469,9 +461,7 @@ destination:
     host: localhost
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml, &SecretProviders::new())
-            .await
-            .unwrap();
+        let config = parse_pipeline(yaml, &SecretProviders::new()).await.unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("sets tie_breaker_field but is not incremental"));
     }
@@ -496,9 +486,7 @@ destination:
     host: localhost
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml, &SecretProviders::new())
-            .await
-            .unwrap();
+        let config = parse_pipeline(yaml, &SecretProviders::new()).await.unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("tie_breaker_field must differ from cursor_field"));
     }
@@ -524,9 +512,7 @@ destination:
     host: localhost
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml, &SecretProviders::new())
-            .await
-            .unwrap();
+        let config = parse_pipeline(yaml, &SecretProviders::new()).await.unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("columns must include tie_breaker_field 'id'"));
     }
@@ -551,9 +537,7 @@ destination:
     host: localhost
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml, &SecretProviders::new())
-            .await
-            .unwrap();
+        let config = parse_pipeline(yaml, &SecretProviders::new()).await.unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("sets partition_key but is not full_refresh"));
     }
@@ -576,9 +560,7 @@ destination:
     host: localhost
   write_mode: replace
 "#;
-        let config = parse_pipeline_str(yaml, &SecretProviders::new())
-            .await
-            .unwrap();
+        let config = parse_pipeline(yaml, &SecretProviders::new()).await.unwrap();
         assert!(validate_pipeline(&config).is_ok());
     }
 
@@ -604,9 +586,7 @@ destination:
   config: {}
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml, &SecretProviders::new())
-            .await
-            .unwrap();
+        let config = parse_pipeline(yaml, &SecretProviders::new()).await.unwrap();
         assert!(validate_pipeline(&config).is_ok());
     }
 
@@ -629,9 +609,7 @@ destination:
   config: {}
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml, &SecretProviders::new())
-            .await
-            .unwrap();
+        let config = parse_pipeline(yaml, &SecretProviders::new()).await.unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("Invalid host pattern"));
     }
@@ -654,9 +632,7 @@ destination:
   config: {}
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml, &SecretProviders::new())
-            .await
-            .unwrap();
+        let config = parse_pipeline(yaml, &SecretProviders::new()).await.unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("max_memory"));
     }
@@ -679,9 +655,7 @@ destination:
   config: {}
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml, &SecretProviders::new())
-            .await
-            .unwrap();
+        let config = parse_pipeline(yaml, &SecretProviders::new()).await.unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("timeout_seconds"));
     }

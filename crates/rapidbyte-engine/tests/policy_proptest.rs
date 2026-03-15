@@ -43,7 +43,7 @@ state:
 "#
         );
 
-        let config = tokio::runtime::Runtime::new().unwrap().block_on(parser::parse_pipeline_str(&yaml, &SecretProviders::new())).expect("generated yaml must parse");
+        let config = tokio::runtime::Runtime::new().unwrap().block_on(parser::parse_pipeline(&yaml, &SecretProviders::new())).expect("generated yaml must parse");
         let result = validator::validate_pipeline(&config);
 
         if pk_len == 0 {
@@ -91,7 +91,7 @@ state:
 "#
         );
 
-        let config = tokio::runtime::Runtime::new().unwrap().block_on(parser::parse_pipeline_str(&yaml, &SecretProviders::new())).expect("generated yaml must parse");
+        let config = tokio::runtime::Runtime::new().unwrap().block_on(parser::parse_pipeline(&yaml, &SecretProviders::new())).expect("generated yaml must parse");
         let result = validator::validate_pipeline(&config);
 
         if has_cursor {

@@ -135,7 +135,7 @@ mod tests {
     use std::fs;
 
     use rapidbyte_engine::config::{
-        parser::parse_pipeline_str,
+        parser::parse_pipeline,
         types::{PipelineWriteMode, StateBackendKind},
     };
     use rapidbyte_secrets::SecretProviders;
@@ -157,7 +157,7 @@ mod tests {
         let yaml = render_pipeline_yaml(&scenario).expect("render pipeline yaml");
         let parsed = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(parse_pipeline_str(&yaml, &SecretProviders::new()))
+            .block_on(parse_pipeline(&yaml, &SecretProviders::new()))
             .expect("rendered yaml must parse");
 
         assert_eq!(parsed.pipeline, "benchmark_pg_dest_insert");
@@ -176,7 +176,7 @@ mod tests {
         let yaml = render_pipeline_yaml(&scenario).expect("render pipeline yaml");
         let parsed = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(parse_pipeline_str(&yaml, &SecretProviders::new()))
+            .block_on(parse_pipeline(&yaml, &SecretProviders::new()))
             .expect("rendered yaml must parse");
 
         assert_eq!(parsed.destination.config["load_method"], "copy");
@@ -194,7 +194,7 @@ mod tests {
         let yaml = fs::read_to_string(&rendered.path).expect("read rendered pipeline");
         let parsed = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(parse_pipeline_str(&yaml, &SecretProviders::new()))
+            .block_on(parse_pipeline(&yaml, &SecretProviders::new()))
             .expect("rendered yaml must parse");
 
         assert!(rendered.path.starts_with(&temp_root));
@@ -217,7 +217,7 @@ mod tests {
         let yaml = fs::read_to_string(&rendered.path).expect("read rendered pipeline");
         let parsed = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(parse_pipeline_str(&yaml, &SecretProviders::new()))
+            .block_on(parse_pipeline(&yaml, &SecretProviders::new()))
             .expect("rendered yaml must parse");
 
         let connection = parsed
@@ -240,7 +240,7 @@ mod tests {
         let yaml = fs::read_to_string(&rendered.path).expect("read rendered pipeline");
         let parsed = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(parse_pipeline_str(&yaml, &SecretProviders::new()))
+            .block_on(parse_pipeline(&yaml, &SecretProviders::new()))
             .expect("rendered yaml must parse");
 
         assert_eq!(parsed.state.backend, StateBackendKind::Postgres);
@@ -279,7 +279,7 @@ mod tests {
             render_pipeline_yaml_for_environment(&scenario, &resolved).expect("render pipeline");
         let parsed = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(parse_pipeline_str(&yaml, &SecretProviders::new()))
+            .block_on(parse_pipeline(&yaml, &SecretProviders::new()))
             .expect("rendered yaml must parse");
 
         assert_eq!(parsed.source.config["host"], "source-db");
@@ -321,7 +321,7 @@ mod tests {
         let yaml = render_pipeline_yaml(&scenario).expect("render pipeline yaml");
         let parsed = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(parse_pipeline_str(&yaml, &SecretProviders::new()))
+            .block_on(parse_pipeline(&yaml, &SecretProviders::new()))
             .expect("rendered yaml must parse");
 
         assert_eq!(parsed.transforms.len(), 1);

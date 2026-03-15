@@ -5,10 +5,9 @@
 //! - `${prefix:path#key}` — resolved via a registered [`SecretProvider`]
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::sync::LazyLock;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rapidbyte_secrets::SecretProviders;
 use regex::Regex;
 
@@ -106,10 +105,7 @@ pub async fn substitute_variables(input: &str, secrets: &SecretProviders) -> Res
 ///
 /// Returns an error if variable substitution, YAML parsing, or
 /// validation fails.
-pub async fn parse_pipeline_str(
-    yaml_str: &str,
-    secrets: &SecretProviders,
-) -> Result<PipelineConfig> {
+pub async fn parse_pipeline(yaml_str: &str, secrets: &SecretProviders) -> Result<PipelineConfig> {
     // Reject secret refs when no providers are configured.
     if secrets.is_empty() && contains_secret_refs(yaml_str) {
         anyhow::bail!(
@@ -134,18 +130,6 @@ pub async fn parse_pipeline_str(
             anyhow::anyhow!(e).context("Failed to parse pipeline YAML")
         }
     })
-}
-
-/// Parse a pipeline YAML file, resolving all variable references.
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be read, variable substitution
-/// fails, or the YAML is invalid.
-pub async fn parse_pipeline(path: &Path, secrets: &SecretProviders) -> Result<PipelineConfig> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read pipeline file: {}", path.display()))?;
-    parse_pipeline_str(&content, secrets).await
 }
 
 #[cfg(test)]
@@ -226,7 +210,7 @@ destination:
     host: localhost
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml, &empty_secrets()).await.unwrap();
+        let config = parse_pipeline(yaml, &empty_secrets()).await.unwrap();
         assert_eq!(config.source.config["host"], "localhost");
         assert_eq!(config.source.config["password"], "secret");
         assert_eq!(config.pipeline, "test");
@@ -237,7 +221,7 @@ destination:
     #[tokio::test]
     async fn parse_invalid_yaml_errors() {
         let yaml = "this is not: [valid: yaml: {{{}}}";
-        let result = parse_pipeline_str(yaml, &empty_secrets()).await;
+        let result = parse_pipeline(yaml, &empty_secrets()).await;
         assert!(result.is_err());
     }
 
@@ -259,7 +243,7 @@ destination:
     host: localhost
   write_mode: append
 "#;
-        let result = parse_pipeline_str(yaml, &empty_secrets()).await;
+        let result = parse_pipeline(yaml, &empty_secrets()).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("secret provider"));
     }
@@ -270,16 +254,5 @@ destination:
         assert!(contains_secret_refs("${aws:arn:something#key}"));
         assert!(!contains_secret_refs("${NORMAL_ENV_VAR}"));
         assert!(!contains_secret_refs("no refs here"));
-    }
-
-    #[tokio::test]
-    async fn parse_pipeline_file_not_found() {
-        let result =
-            parse_pipeline(Path::new("/nonexistent/pipeline.yaml"), &empty_secrets()).await;
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to read pipeline file"));
     }
 }

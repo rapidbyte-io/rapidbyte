@@ -123,7 +123,7 @@ fn spawn_controller(
         };
         let guard =
             Arc::new(rapidbyte_metrics::init("test-controller").expect("otel init should succeed"));
-        rapidbyte_controller::run(config, guard)
+        rapidbyte_controller::run(config, guard, rapidbyte_secrets::SecretProviders::new())
             .await
             .expect("controller should stay running");
     })

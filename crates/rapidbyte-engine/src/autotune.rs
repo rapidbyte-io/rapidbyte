@@ -65,7 +65,7 @@ pub fn resolve_stream_autotune(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::parser::parse_pipeline_str;
+    use crate::config::parser::parse_pipeline;
     use rapidbyte_secrets::SecretProviders;
 
     fn base_pipeline_yaml() -> &'static str {
@@ -91,7 +91,7 @@ destination:
             "{}\nresources:\n  autotune:\n    pin_parallelism: 8\n",
             base_pipeline_yaml().trim_end()
         );
-        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+        let config = parse_pipeline(&yaml, &SecretProviders::new())
             .await
             .unwrap();
 
@@ -105,7 +105,7 @@ destination:
             "{}\nresources:\n  autotune:\n    pin_source_partition_mode: range\n",
             base_pipeline_yaml().trim_end()
         );
-        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+        let config = parse_pipeline(&yaml, &SecretProviders::new())
             .await
             .unwrap();
 
@@ -119,7 +119,7 @@ destination:
             "{}\nresources:\n  autotune:\n    pin_copy_flush_bytes: 999999999\n",
             base_pipeline_yaml().trim_end()
         );
-        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+        let config = parse_pipeline(&yaml, &SecretProviders::new())
             .await
             .unwrap();
 
