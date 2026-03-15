@@ -324,6 +324,7 @@ pub async fn run_pipeline(
     cancel_token: CancellationToken,
     snapshot_reader: &rapidbyte_metrics::snapshot::SnapshotReader,
     meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
+    registry_config: &rapidbyte_registry::RegistryConfig,
 ) -> Result<PipelineOutcome, PipelineError> {
     let max_retries = config.resources.max_retries;
     let mut attempt = 0u32;
@@ -339,6 +340,7 @@ pub async fn run_pipeline(
             &cancel_token,
             snapshot_reader,
             meter_provider,
+            registry_config,
         )
         .await;
 
@@ -448,6 +450,7 @@ async fn execute_pipeline_once(
     cancel_token: &CancellationToken,
     snapshot_reader: &rapidbyte_metrics::snapshot::SnapshotReader,
     meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
+    registry_config: &rapidbyte_registry::RegistryConfig,
 ) -> Result<PipelineOutcome, PipelineError> {
     let start = Instant::now();
     let pipeline_id = PipelineId::new(config.pipeline.clone());
@@ -463,7 +466,7 @@ async fn execute_pipeline_once(
             phase: Phase::Resolving,
         },
     );
-    let plugins = resolve_plugins(config)?;
+    let plugins = resolve_plugins(config, registry_config).await?;
     if let Some(ref manifest) = plugins.source_manifest {
         validate_config_against_schema(&config.source.use_ref, &config.source.config, manifest)
             .map_err(PipelineError::Infrastructure)?;
@@ -517,7 +520,7 @@ async fn execute_pipeline_once(
                 phase: Phase::Loading,
             },
         );
-        let modules = load_modules(config, &plugins).await?;
+        let modules = load_modules(config, &plugins, registry_config).await?;
         let config_for_build = config.clone();
         let state_for_build = state_for_execution.clone();
         let max_records = options.limit;
@@ -622,6 +625,7 @@ async fn execute_pipeline_once(
 async fn load_modules(
     config: &PipelineConfig,
     plugins: &ResolvedPlugins,
+    registry_config: &rapidbyte_registry::RegistryConfig,
 ) -> Result<LoadedModules, PipelineError> {
     let runtime = Arc::new(WasmRuntime::new().map_err(PipelineError::Infrastructure)?);
     tracing::info!(
@@ -673,8 +677,10 @@ async fn load_modules(
 
     let mut transform_modules = Vec::with_capacity(config.transforms.len());
     for tc in &config.transforms {
-        let wasm_path = rapidbyte_runtime::resolve_plugin_path(&tc.use_ref, PluginKind::Transform)
-            .map_err(PipelineError::Infrastructure)?;
+        let wasm_path =
+            rapidbyte_runtime::resolve_plugin(&tc.use_ref, PluginKind::Transform, registry_config)
+                .await
+                .map_err(PipelineError::Infrastructure)?;
         let manifest = load_and_validate_manifest(&wasm_path, &tc.use_ref, PluginKind::Transform)
             .map_err(PipelineError::Infrastructure)?;
         if let Some(ref m) = manifest {
@@ -1876,13 +1882,18 @@ fn collect_dry_run_frames(
 ///
 /// Returns an error if plugin resolution, module loading, or validation fails.
 #[allow(clippy::too_many_lines)]
-pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
+pub async fn check_pipeline(
+    config: &PipelineConfig,
+    registry_config: &rapidbyte_registry::RegistryConfig,
+) -> Result<CheckResult> {
     tracing::info!(
         pipeline = config.pipeline,
         "Checking pipeline configuration"
     );
 
-    let plugins = resolve_plugins(config).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let plugins = resolve_plugins(config, registry_config)
+        .await
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let source_manifest = plugins.source_manifest.as_ref().map(|_| CheckItemResult {
         ok: true,
         message: String::new(),
@@ -1954,7 +1965,9 @@ pub async fn check_pipeline(config: &PipelineConfig) -> Result<CheckResult> {
         .map(|stream| stream.name.clone())
         .collect::<Vec<_>>();
     for (index, tc) in config.transforms.iter().enumerate() {
-        let wasm_path = rapidbyte_runtime::resolve_plugin_path(&tc.use_ref, PluginKind::Transform)?;
+        let wasm_path =
+            rapidbyte_runtime::resolve_plugin(&tc.use_ref, PluginKind::Transform, registry_config)
+                .await?;
         let manifest = load_and_validate_manifest(&wasm_path, &tc.use_ref, PluginKind::Transform)?;
         if let Some(ref m) = manifest {
             transform_configs.push(config_check_result(&tc.use_ref, &tc.config, m));
@@ -2094,8 +2107,13 @@ fn config_check_result(
 /// # Errors
 ///
 /// Returns an error if the plugin cannot be loaded, opened, or discovery fails.
-pub async fn discover_plugin(plugin_ref: &str, config: &serde_json::Value) -> Result<Catalog> {
-    let wasm_path = rapidbyte_runtime::resolve_plugin_path(plugin_ref, PluginKind::Source)?;
+pub async fn discover_plugin(
+    plugin_ref: &str,
+    config: &serde_json::Value,
+    registry_config: &rapidbyte_registry::RegistryConfig,
+) -> Result<Catalog> {
+    let wasm_path =
+        rapidbyte_runtime::resolve_plugin(plugin_ref, PluginKind::Source, registry_config).await?;
     let manifest = load_and_validate_manifest(&wasm_path, plugin_ref, PluginKind::Source)?;
     let permissions = manifest.as_ref().map(|m| m.permissions.clone());
     let (plugin_id, plugin_version) = parse_plugin_ref(plugin_ref);

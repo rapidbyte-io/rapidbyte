@@ -58,6 +58,15 @@ pub struct AgentConfig {
     /// Optional Prometheus metrics listen address (e.g. `127.0.0.1:9191`).
     /// Prometheus endpoint is only started when this is set.
     pub metrics_listen: Option<String>,
+    /// OCI registry URL for plugin pulls, received from the controller on registration.
+    /// Empty means no registry is configured; plugins are resolved locally.
+    pub registry_url: Option<String>,
+    /// Use HTTP instead of HTTPS when pulling from the registry.
+    pub registry_insecure: bool,
+    /// Plugin signature trust policy, received from the controller on registration.
+    pub trust_policy: String,
+    /// Trusted Ed25519 public key PEM contents, received from the controller on registration.
+    pub trusted_key_pems: Vec<String>,
 }
 
 impl Default for AgentConfig {
@@ -76,6 +85,10 @@ impl Default for AgentConfig {
             controller_tls: None,
             flight_tls: None,
             metrics_listen: None,
+            registry_url: None,
+            registry_insecure: false,
+            trust_policy: "skip".to_owned(),
+            trusted_key_pems: Vec::new(),
         }
     }
 }
@@ -173,8 +186,31 @@ pub async fn run(
             .map_err(|_| anyhow::anyhow!("Invalid bearer token"))?,
         )
         .await?;
-    let agent_id = resp.into_inner().agent_id;
-    info!(agent_id, "Registered with controller");
+    let registration = resp.into_inner();
+    let agent_id = registration.agent_id;
+    // Controller response is authoritative for registry and trust config.
+    // Empty values explicitly mean "not configured" and override any local settings.
+    let mut config = config;
+    if registration.registry_url.is_empty() {
+        config.registry_url = None;
+        config.registry_insecure = false;
+        info!(agent_id, "Registered with controller");
+    } else {
+        info!(
+            agent_id,
+            registry_url = registration.registry_url,
+            registry_insecure = registration.registry_insecure,
+            "Registered with controller (registry configured)"
+        );
+        config.registry_url = Some(registration.registry_url);
+        config.registry_insecure = registration.registry_insecure;
+    }
+    config.trust_policy = if registration.trust_policy.is_empty() {
+        "skip".to_owned()
+    } else {
+        registration.trust_policy
+    };
+    config.trusted_key_pems = registration.trusted_key_pems;
 
     // Active lease tracking shared between worker and heartbeat
     let active_leases: ActiveLeaseMap = Arc::new(RwLock::new(HashMap::new()));
@@ -405,6 +441,32 @@ async fn process_task(
         ctx.config.auth_token.clone(),
     ));
 
+    let trust_policy = if ctx.config.trust_policy.is_empty() {
+        rapidbyte_registry::TrustPolicy::Skip
+    } else if let Ok(p) = rapidbyte_registry::TrustPolicy::from_str_name(&ctx.config.trust_policy) {
+        p
+    } else {
+        // Invalid policy defaults to Verify (most restrictive) so the task
+        // fails safely on plugin resolution rather than crashing the worker.
+        tracing::error!(
+            policy = %ctx.config.trust_policy,
+            "invalid trust policy from controller, defaulting to 'verify'"
+        );
+        rapidbyte_registry::TrustPolicy::Verify
+    };
+    let registry_config = rapidbyte_registry::RegistryConfig {
+        insecure: ctx.config.registry_insecure,
+        credentials: None,
+        default_registry: ctx
+            .config
+            .registry_url
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(rapidbyte_registry::normalize_registry_url),
+        trust_policy,
+        trusted_key_pems: ctx.config.trusted_key_pems.clone(),
+        ..Default::default()
+    };
     let result = executor::execute_task(
         &task.pipeline_yaml_utf8,
         dry_run,
@@ -413,6 +475,7 @@ async fn process_task(
         cancel_token,
         ctx.otel_guard.snapshot_reader(),
         ctx.otel_guard.meter_provider(),
+        &registry_config,
     )
     .await;
 

@@ -46,6 +46,15 @@ pub struct ControllerConfig {
     /// Optional Prometheus metrics listen address (e.g. `127.0.0.1:9190`).
     /// Prometheus endpoint is only started when this is set.
     pub metrics_listen: Option<String>,
+    /// OCI registry URL broadcast to agents on registration (e.g. `registry.example.com`).
+    /// Empty or `None` means no registry is configured.
+    pub registry_url: Option<String>,
+    /// Use HTTP instead of HTTPS when agents pull from the registry.
+    pub registry_insecure: bool,
+    /// Plugin signature trust policy broadcast to agents: "skip", "warn", or "verify".
+    pub trust_policy: String,
+    /// Paths to trusted Ed25519 public key PEM files. Contents are read and sent to agents.
+    pub trusted_key_paths: Vec<std::path::PathBuf>,
 }
 
 /// Default signing key used when no explicit key is configured.
@@ -69,6 +78,10 @@ impl Default for ControllerConfig {
             allow_insecure_default_signing_key: false,
             tls: None,
             metrics_listen: None,
+            registry_url: None,
+            registry_insecure: false,
+            trust_policy: "skip".to_owned(),
+            trusted_key_paths: Vec::new(),
         }
     }
 }
@@ -517,7 +530,25 @@ pub async fn run(
         PipelineServiceImpl::new(state.clone()),
         auth.clone(),
     );
-    let agent_svc = AgentServiceServer::with_interceptor(AgentServiceImpl::new(state), auth);
+    // Read trusted key PEM contents from files
+    let mut trusted_key_pems: Vec<String> = Vec::new();
+    for path in &config.trusted_key_paths {
+        let pem = std::fs::read_to_string(path).map_err(|e| {
+            anyhow::anyhow!("Failed to read trusted key file {}: {e}", path.display())
+        })?;
+        trusted_key_pems.push(pem);
+    }
+
+    let agent_svc = AgentServiceServer::with_interceptor(
+        AgentServiceImpl::with_trust_config(
+            state,
+            config.registry_url.clone().unwrap_or_default(),
+            config.registry_insecure,
+            config.trust_policy.clone(),
+            trusted_key_pems,
+        ),
+        auth,
+    );
 
     info!(addr = %config.listen_addr, "Controller listening");
 

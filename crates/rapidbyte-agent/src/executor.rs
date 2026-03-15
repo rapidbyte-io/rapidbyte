@@ -79,6 +79,7 @@ pub async fn execute_task(
     cancel_token: CancellationToken,
     snapshot_reader: &rapidbyte_metrics::snapshot::SnapshotReader,
     meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
+    registry_config: &rapidbyte_registry::RegistryConfig,
 ) -> TaskExecutionResult {
     let metrics_runtime = MetricsRuntime {
         snapshot_reader,
@@ -91,7 +92,8 @@ pub async fn execute_task(
         progress_tx,
         cancel_token,
         metrics_runtime,
-        |config, options, progress_tx, cancel_token, metrics_runtime| {
+        registry_config,
+        |config, options, progress_tx, cancel_token, metrics_runtime, registry_config| {
             Box::pin(orchestrator::run_pipeline(
                 config,
                 options,
@@ -99,13 +101,14 @@ pub async fn execute_task(
                 cancel_token,
                 metrics_runtime.snapshot_reader,
                 metrics_runtime.meter_provider,
+                registry_config,
             ))
         },
     )
     .await
 }
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn execute_task_with_runner<R>(
     pipeline_yaml: &[u8],
     dry_run: bool,
@@ -113,6 +116,7 @@ async fn execute_task_with_runner<R>(
     progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
     cancel_token: CancellationToken,
     metrics_runtime: MetricsRuntime<'_>,
+    registry_config: &rapidbyte_registry::RegistryConfig,
     run_pipeline: R,
 ) -> TaskExecutionResult
 where
@@ -122,6 +126,7 @@ where
         Option<mpsc::UnboundedSender<ProgressEvent>>,
         CancellationToken,
         MetricsRuntime<'a>,
+        &'a rapidbyte_registry::RegistryConfig,
     ) -> PipelineRunFuture<'a>,
 {
     // Check for early cancellation before doing any work
@@ -207,6 +212,7 @@ where
         progress_tx,
         cancel_token.clone(),
         metrics_runtime,
+        registry_config,
     )
     .await;
 
@@ -359,6 +365,7 @@ destination:
             CancellationToken::new(),
             &reader,
             &provider,
+            &rapidbyte_registry::RegistryConfig::default(),
         )
         .await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Failed(_)));
@@ -379,6 +386,7 @@ destination:
             CancellationToken::new(),
             &reader,
             &provider,
+            &rapidbyte_registry::RegistryConfig::default(),
         )
         .await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Failed(_)));
@@ -398,6 +406,7 @@ destination:
             CancellationToken::new(),
             &reader,
             &provider,
+            &rapidbyte_registry::RegistryConfig::default(),
         )
         .await;
         assert_eq!(result.metrics.records_processed, 0);
@@ -418,6 +427,7 @@ destination:
             token,
             &reader,
             &provider,
+            &rapidbyte_registry::RegistryConfig::default(),
         )
         .await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Cancelled));
@@ -445,7 +455,8 @@ destination:
                         snapshot_reader: &reader,
                         meter_provider: &provider,
                     },
-                    move |_, _, _, _cancel_token, _metrics_runtime| {
+                    &rapidbyte_registry::RegistryConfig::default(),
+                    move |_, _, _, _cancel_token, _metrics_runtime, _registry_config| {
                         let started = started.clone();
                         let release = release.clone();
                         Box::pin(async move {
@@ -489,11 +500,13 @@ destination:
                         snapshot_reader: &reader,
                         meter_provider: &provider,
                     },
+                    &rapidbyte_registry::RegistryConfig::default(),
                     move |_,
                           _,
                           _,
                           cancel_token: CancellationToken,
-                          _metrics_runtime: MetricsRuntime<'_>| {
+                          _metrics_runtime: MetricsRuntime<'_>,
+                          _registry_config: &rapidbyte_registry::RegistryConfig| {
                         let started = started.clone();
                         Box::pin(async move {
                             let mut cancelled = PluginError::internal(
@@ -545,7 +558,8 @@ destination:
                         snapshot_reader: &reader,
                         meter_provider: &provider,
                     },
-                    move |_, _, _, _cancel_token, _metrics_runtime| {
+                    &rapidbyte_registry::RegistryConfig::default(),
+                    move |_, _, _, _cancel_token, _metrics_runtime, _registry_config| {
                         let started_destination = started_destination.clone();
                         let release = release.clone();
                         Box::pin(async move {
@@ -597,11 +611,13 @@ destination:
                 snapshot_reader: &snapshot_reader,
                 meter_provider: &meter_provider,
             },
+            &rapidbyte_registry::RegistryConfig::default(),
             |_config,
              _options,
              _progress_tx,
              _cancel_token: CancellationToken,
-             _metrics_runtime: MetricsRuntime<'_>| {
+             _metrics_runtime: MetricsRuntime<'_>,
+             _registry_config: &rapidbyte_registry::RegistryConfig| {
                 Box::pin(async move { Ok(completed_outcome()) })
             },
         )

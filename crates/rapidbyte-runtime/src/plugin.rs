@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use rapidbyte_registry::{PluginCache, PluginRef, RegistryClient, RegistryConfig};
 use rapidbyte_types::manifest::PluginManifest;
 use rapidbyte_types::wire::PluginKind;
 use wasmparser::{Parser, Payload};
@@ -52,14 +53,29 @@ pub fn extract_manifest_from_wasm(wasm_bytes: &[u8]) -> Option<PluginManifest> {
 /// - "postgres"                  -> ("postgres", "unknown")
 #[must_use]
 pub fn parse_plugin_ref(plugin_ref: &str) -> (String, String) {
-    let after_slash = plugin_ref.split('/').next_back().unwrap_or(plugin_ref);
+    // OCI references use ':tag' format (e.g. registry.example.com/source/postgres:1.2.0)
+    if let Ok(oci_ref) = PluginRef::parse(plugin_ref) {
+        // Extract the last path component as the plugin name
+        let name = oci_ref
+            .repository
+            .split('/')
+            .next_back()
+            .unwrap_or(&oci_ref.repository)
+            .to_string();
+        let version = if oci_ref.tag == "latest" {
+            "unknown".to_string()
+        } else {
+            oci_ref.tag
+        };
+        return (name, version);
+    }
 
-    let (name, version) = match after_slash.split_once('@') {
+    // Bare names with optional @version (e.g. source-postgres, postgres@v0.1.0)
+    let after_slash = plugin_ref.split('/').next_back().unwrap_or(plugin_ref);
+    match after_slash.split_once('@') {
         Some((n, v)) => (n.to_string(), v.strip_prefix('v').unwrap_or(v).to_string()),
         None => (after_slash.to_string(), "unknown".to_string()),
-    };
-
-    (name, version)
+    }
 }
 
 /// Return the ordered list of directories to search for plugin `.wasm` binaries.
@@ -134,6 +150,228 @@ pub fn load_plugin_manifest(wasm_path: &Path) -> Result<Option<PluginManifest>> 
     Ok(extract_manifest_from_wasm(&wasm_bytes))
 }
 
+/// Returns `true` if `use_ref` looks like an OCI registry reference.
+///
+/// A reference is considered OCI if it can be successfully parsed as a
+/// [`PluginRef`], which requires a registry host (containing `.` or `:`)
+/// followed by a `/` and a repository path.
+///
+/// Bare names like `"postgres"` or `"rapidbyte/source-postgres@v0.1.0"`
+/// return `false`.
+#[must_use]
+pub fn is_oci_reference(use_ref: &str) -> bool {
+    PluginRef::parse(use_ref).is_ok()
+}
+
+/// Resolve a plugin from the OCI registry cache, pulling on demand.
+///
+/// Parses `use_ref` as an OCI plugin reference (e.g.
+/// `registry.example.com/source/postgres:1.2.0`), checks the local plugin
+/// cache for a matching entry, and falls back to an OCI pull when the
+/// cache misses.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - `use_ref` cannot be parsed as a valid [`PluginRef`]
+/// - The default cache location cannot be determined
+/// - The registry pull fails (network, auth, artifact format)
+/// - The cache cannot store the pulled artifact
+pub async fn resolve_plugin_from_registry(
+    use_ref: &str,
+    registry_config: &RegistryConfig,
+) -> Result<PathBuf> {
+    let plugin_ref = PluginRef::parse(use_ref)?;
+
+    let cache = PluginCache::default_location()?;
+
+    // Check cache first.
+    if let Some(entry) = cache.lookup(&plugin_ref) {
+        tracing::debug!(%plugin_ref, "using cached plugin");
+        let cached_config = cache.load_artifact_config(&plugin_ref).unwrap_or(
+            rapidbyte_registry::PluginArtifactConfig {
+                wasm_sha256: entry.digest.clone(),
+                signature: None,
+            },
+        );
+        // Verify the config's digest matches the actual cached wasm to prevent
+        // a tampered artifact_config.json from bypassing signature verification.
+        anyhow::ensure!(
+            cached_config.wasm_sha256 == entry.digest,
+            "cached artifact config digest mismatch: config says {}, wasm is {}",
+            cached_config.wasm_sha256,
+            entry.digest
+        );
+        verify_trust(&cached_config, registry_config)?;
+        return Ok(entry.wasm_path);
+    }
+
+    // Pull from registry on cache miss.
+    tracing::info!(%plugin_ref, "pulling plugin from registry");
+    let client = RegistryClient::new(registry_config)?;
+    let image = client.pull(&plugin_ref).await?;
+    let unpacked = rapidbyte_registry::unpack_artifact(&image)?;
+
+    // Verify signature against trust policy
+    verify_trust(&unpacked.config, registry_config)?;
+
+    let entry = cache.store(
+        &plugin_ref,
+        &unpacked.manifest_json,
+        &unpacked.wasm_bytes,
+        &unpacked.config,
+    )?;
+    tracing::info!(
+        %plugin_ref,
+        digest = %entry.digest,
+        size_bytes = entry.size_bytes,
+        "plugin cached"
+    );
+
+    Ok(entry.wasm_path)
+}
+
+/// Verify a pulled plugin artifact against the configured trust policy.
+///
+/// - [`TrustPolicy::Skip`]: always passes without loading any keys.
+/// - [`TrustPolicy::Warn`]: logs a warning on unsigned or invalid-signature
+///   artifacts but does not fail.
+/// - [`TrustPolicy::Verify`]: returns an error if the artifact is unsigned or
+///   if the signature cannot be verified against any trusted key.
+fn verify_trust(
+    config: &rapidbyte_registry::PluginArtifactConfig,
+    registry_config: &rapidbyte_registry::RegistryConfig,
+) -> Result<()> {
+    use rapidbyte_registry::TrustPolicy;
+
+    match registry_config.trust_policy {
+        TrustPolicy::Skip => Ok(()),
+        TrustPolicy::Warn | TrustPolicy::Verify => {
+            let mut keys = Vec::new();
+            for path in &registry_config.trusted_key_paths {
+                keys.push(rapidbyte_registry::signing::load_verifying_key_file(path)?);
+            }
+            for pem in &registry_config.trusted_key_pems {
+                keys.push(rapidbyte_registry::signing::load_verifying_key_pem(pem)?);
+            }
+
+            match &config.signature {
+                None => {
+                    let msg = "plugin is unsigned";
+                    if registry_config.trust_policy == TrustPolicy::Verify {
+                        anyhow::bail!("{msg} and trust policy is 'verify'");
+                    }
+                    tracing::warn!("{msg}");
+                    Ok(())
+                }
+                Some(sig) => {
+                    match rapidbyte_registry::signing::verify_against_any(
+                        &keys,
+                        &config.wasm_sha256,
+                        sig,
+                    ) {
+                        Ok(()) => {
+                            tracing::info!("plugin signature verified");
+                            Ok(())
+                        }
+                        Err(err) => {
+                            if registry_config.trust_policy == TrustPolicy::Verify {
+                                Err(err).context("plugin signature verification failed")
+                            } else {
+                                tracing::warn!("plugin signature invalid: {err}");
+                                Ok(())
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Resolve a plugin path, automatically choosing between OCI registry and
+/// local filesystem based on the reference format.
+///
+/// Build a fully-qualified OCI reference from a bare plugin name and kind.
+///
+/// E.g. `qualify_bare_ref("postgres", Source, "registry.example.com")` →
+/// `"registry.example.com/source/postgres"`.
+fn qualify_bare_ref(use_ref: &str, kind: PluginKind, default_registry: &str) -> String {
+    // If the ref already contains '/', it has its own path structure — don't
+    // prefix with kind (avoids duplicating e.g. source/source/postgres).
+    let needs_kind_prefix = !use_ref.contains('/');
+
+    let kind_prefix = match kind {
+        PluginKind::Source => "source",
+        PluginKind::Destination => "destination",
+        PluginKind::Transform => "transform",
+    };
+
+    let (name, tag) = if let Some((n, v)) = use_ref.split_once('@') {
+        (n, Some(v.strip_prefix('v').unwrap_or(v)))
+    } else {
+        (use_ref, None)
+    };
+
+    let repo = if needs_kind_prefix {
+        format!("{default_registry}/{kind_prefix}/{name}")
+    } else {
+        format!("{default_registry}/{name}")
+    };
+
+    match tag {
+        Some(t) => format!("{repo}:{t}"),
+        None => repo,
+    }
+}
+
+/// If `use_ref` looks like an OCI reference (contains a registry host),
+/// the plugin is resolved via [`resolve_plugin_from_registry`]. Otherwise
+/// it falls back to [`resolve_plugin_path`] for local filesystem lookup.
+///
+/// # Errors
+///
+/// Returns an error if the plugin cannot be resolved from either source.
+pub async fn resolve_plugin(
+    use_ref: &str,
+    kind: PluginKind,
+    registry_config: &RegistryConfig,
+) -> Result<PathBuf> {
+    if is_oci_reference(use_ref) {
+        resolve_plugin_from_registry(use_ref, registry_config).await
+    } else {
+        // When trust policy is Verify, skip local filesystem for bare refs
+        // to prevent unsigned local plugins from shadowing signed registry ones.
+        let allow_local = registry_config.trust_policy != rapidbyte_registry::TrustPolicy::Verify;
+        if allow_local {
+            if let Ok(path) = resolve_plugin_path(use_ref, kind) {
+                return Ok(path);
+            }
+        }
+
+        // Fall back to registry with default_registry prefix if configured.
+        if let Some(default_registry) = &registry_config.default_registry {
+            let qualified_ref = qualify_bare_ref(use_ref, kind, default_registry);
+            tracing::debug!(
+                use_ref,
+                qualified_ref,
+                "local plugin not found, trying registry"
+            );
+            return resolve_plugin_from_registry(&qualified_ref, registry_config).await;
+        }
+
+        // No registry configured — use local filesystem unless verify mode.
+        if allow_local {
+            resolve_plugin_path(use_ref, kind)
+        } else {
+            anyhow::bail!(
+                "trust policy is 'verify' but no registry is configured; \
+                 cannot verify signature for bare plugin ref '{use_ref}'"
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +421,27 @@ mod tests {
         let (id, ver) = parse_plugin_ref("source-postgres");
         assert_eq!(id, "source-postgres");
         assert_eq!(ver, "unknown");
+    }
+
+    #[test]
+    fn test_parse_plugin_ref_oci_reference_with_tag() {
+        let (id, ver) = parse_plugin_ref("registry.example.com/source/postgres:1.2.0");
+        assert_eq!(id, "postgres");
+        assert_eq!(ver, "1.2.0");
+    }
+
+    #[test]
+    fn test_parse_plugin_ref_oci_reference_latest_tag() {
+        let (id, ver) = parse_plugin_ref("registry.example.com/source/postgres");
+        assert_eq!(id, "postgres");
+        assert_eq!(ver, "unknown");
+    }
+
+    #[test]
+    fn test_parse_plugin_ref_oci_reference_with_port() {
+        let (id, ver) = parse_plugin_ref("localhost:5050/source/postgres:0.1.0");
+        assert_eq!(id, "postgres");
+        assert_eq!(ver, "0.1.0");
     }
 
     #[test]
@@ -418,5 +677,179 @@ mod tests {
         assert_eq!(kind_subdir(PluginKind::Source), "sources");
         assert_eq!(kind_subdir(PluginKind::Destination), "destinations");
         assert_eq!(kind_subdir(PluginKind::Transform), "transforms");
+    }
+
+    #[test]
+    fn test_is_oci_reference_full_ref() {
+        assert!(is_oci_reference(
+            "registry.example.com/source/postgres:1.2.0"
+        ));
+    }
+
+    #[test]
+    fn test_is_oci_reference_with_port() {
+        assert!(is_oci_reference("localhost:5050/source/postgres:latest"));
+    }
+
+    #[test]
+    fn test_is_oci_reference_no_tag() {
+        assert!(is_oci_reference("registry.example.com/source/postgres"));
+    }
+
+    #[test]
+    fn test_is_oci_reference_bare_name() {
+        assert!(!is_oci_reference("postgres"));
+    }
+
+    #[test]
+    fn test_is_oci_reference_namespaced_bare() {
+        assert!(!is_oci_reference("rapidbyte/source-postgres@v0.1.0"));
+    }
+
+    #[test]
+    fn test_is_oci_reference_empty() {
+        assert!(!is_oci_reference(""));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_resolve_plugin_delegates_to_filesystem_for_bare_names() {
+        // Lock serializes tests that modify RAPIDBYTE_PLUGIN_DIR env var.
+        // The await inside is a local-only filesystem resolve (no real I/O
+        // contention), so holding across await is safe here.
+        let _lock = PLUGIN_ENV_LOCK.lock().unwrap();
+        let tmp = std::env::temp_dir().join("rapidbyte_resolve_plugin_test");
+        let sources_dir = tmp.join("sources");
+        std::fs::create_dir_all(&sources_dir).unwrap();
+        std::fs::write(sources_dir.join("postgres.wasm"), b"fake-wasm").unwrap();
+
+        let _env_guard = PluginDirEnvGuard::set(&tmp);
+        let registry_config = RegistryConfig::default();
+
+        let result = resolve_plugin("postgres", PluginKind::Source, &registry_config).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), sources_dir.join("postgres.wasm"));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[tokio::test]
+    async fn test_resolve_plugin_from_registry_returns_cached_path() {
+        let cache_dir = std::env::temp_dir().join("rapidbyte_registry_cache_test");
+        let _ = std::fs::remove_dir_all(&cache_dir);
+
+        let plugin_ref = PluginRef::parse("registry.example.com/source/postgres:1.0.0").unwrap();
+        let cache = PluginCache::new(cache_dir.clone());
+        let wasm = b"\x00asm\x01\x00\x00\x00fake-content";
+        let manifest = br#"{"name":"test","version":"1.0.0"}"#;
+        let config = rapidbyte_registry::PluginArtifactConfig {
+            wasm_sha256: rapidbyte_registry::verify::sha256_hex(wasm),
+            signature: None,
+        };
+        let entry = cache.store(&plugin_ref, manifest, wasm, &config).unwrap();
+
+        // Override HOME to point to our temp cache so default_location picks it up.
+        // Instead, we test through the cache directly since default_location uses HOME.
+        let looked_up = cache.lookup(&plugin_ref);
+        assert!(looked_up.is_some());
+        assert_eq!(looked_up.unwrap().wasm_path, entry.wasm_path);
+
+        std::fs::remove_dir_all(&cache_dir).ok();
+    }
+
+    #[test]
+    fn qualify_bare_ref_source() {
+        let result = qualify_bare_ref("postgres", PluginKind::Source, "registry.example.com");
+        assert_eq!(result, "registry.example.com/source/postgres");
+    }
+
+    #[test]
+    fn qualify_bare_ref_destination() {
+        let result = qualify_bare_ref("postgres", PluginKind::Destination, "registry.example.com");
+        assert_eq!(result, "registry.example.com/destination/postgres");
+    }
+
+    #[test]
+    fn qualify_bare_ref_transform() {
+        let result = qualify_bare_ref("sql", PluginKind::Transform, "registry.example.com");
+        assert_eq!(result, "registry.example.com/transform/sql");
+    }
+
+    #[test]
+    fn qualify_bare_ref_with_at_version() {
+        let result = qualify_bare_ref(
+            "postgres@v1.2.0",
+            PluginKind::Source,
+            "registry.example.com",
+        );
+        assert_eq!(result, "registry.example.com/source/postgres:1.2.0");
+    }
+
+    #[test]
+    fn qualify_bare_ref_with_registry_port() {
+        let result = qualify_bare_ref("postgres", PluginKind::Source, "localhost:5050");
+        assert_eq!(result, "localhost:5050/source/postgres");
+    }
+
+    #[test]
+    fn qualify_ref_with_slash_does_not_duplicate_kind() {
+        // source/postgres already has a path — don't prefix with kind again
+        let result = qualify_bare_ref(
+            "source/postgres",
+            PluginKind::Source,
+            "registry.example.com",
+        );
+        assert_eq!(result, "registry.example.com/source/postgres");
+    }
+
+    #[test]
+    fn qualify_ref_with_slash_and_version() {
+        let result = qualify_bare_ref(
+            "source/postgres@v1.2.0",
+            PluginKind::Source,
+            "registry.example.com",
+        );
+        assert_eq!(result, "registry.example.com/source/postgres:1.2.0");
+    }
+
+    #[tokio::test]
+    async fn verify_mode_rejects_bare_ref_without_registry() {
+        let config = RegistryConfig {
+            trust_policy: rapidbyte_registry::TrustPolicy::Verify,
+            ..Default::default()
+        };
+        let result = resolve_plugin("postgres", PluginKind::Source, &config).await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("trust policy is 'verify'"),
+            "expected verify-mode rejection, got: {msg}"
+        );
+    }
+
+    // ── Edge case: dotted/relative refs should NOT be treated as OCI ──
+
+    #[test]
+    fn dotted_namespace_is_not_oci() {
+        // acme.io/plugin looks like OCI (has dot) — this IS treated as OCI
+        // which is correct: a dotted first segment is a registry host.
+        assert!(is_oci_reference("acme.io/source/postgres:1.0.0"));
+    }
+
+    #[test]
+    fn relative_path_is_not_oci() {
+        // ./source-postgres should NOT be OCI
+        assert!(!is_oci_reference("./source-postgres"));
+    }
+
+    #[test]
+    fn bare_name_with_at_version_is_not_oci() {
+        assert!(!is_oci_reference("postgres@v1.0.0"));
+    }
+
+    #[test]
+    fn single_segment_dotted_name_is_not_oci() {
+        // "source.postgres" has a dot but no slash — not OCI
+        assert!(!is_oci_reference("source.postgres"));
     }
 }

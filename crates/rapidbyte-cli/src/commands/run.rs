@@ -42,6 +42,7 @@ pub async fn execute(
     auth_token: Option<&str>,
     tls: Option<&TlsClientConfig>,
     otel_guard: &rapidbyte_metrics::OtelGuard,
+    registry_config: &rapidbyte_registry::RegistryConfig,
 ) -> Result<()> {
     // If controller is set, route to distributed mode
     if let Some(url) = controller {
@@ -116,6 +117,7 @@ pub async fn execute(
         cancel_token,
         otel_guard.snapshot_reader(),
         otel_guard.meter_provider(),
+        registry_config,
     )
     .await;
     let (cpu_end, peak_rss_mb) = post_pipeline_metrics();

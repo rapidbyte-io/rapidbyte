@@ -20,6 +20,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 
 rapidbyte-engine = { path = "../../crates/rapidbyte-engine" }
 rapidbyte-metrics = { path = "../../crates/rapidbyte-metrics" }
+rapidbyte-registry = { path = "../../crates/rapidbyte-registry" }
 opentelemetry = { version = "0.28" }
 opentelemetry_sdk = { version = "0.28" }
 

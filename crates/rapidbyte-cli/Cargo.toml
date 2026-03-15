@@ -13,6 +13,7 @@ rapidbyte-controller = { path = "../rapidbyte-controller" }
 rapidbyte-metrics = { path = "../rapidbyte-metrics" }
 rapidbyte-dev = { path = "../rapidbyte-dev" }
 rapidbyte-engine = { path = "../rapidbyte-engine" }
+rapidbyte-registry = { path = "../rapidbyte-registry" }
 rapidbyte-runtime = { path = "../rapidbyte-runtime" }
 rapidbyte-types = { path = "../rapidbyte-types" }
 tokio = { workspace = true }
@@ -34,6 +35,7 @@ tokio-stream = { workspace = true }
 libc = "0.2"
 indicatif = { workspace = true }
 console = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

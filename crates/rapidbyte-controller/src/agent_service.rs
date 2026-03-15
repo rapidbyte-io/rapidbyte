@@ -25,6 +25,10 @@ const LEASE_TTL: Duration = Duration::from_secs(300);
 
 pub struct AgentServiceImpl {
     state: ControllerState,
+    registry_url: String,
+    registry_insecure: bool,
+    trust_policy: String,
+    trusted_key_pems: Vec<String>,
     #[cfg(test)]
     poll_barrier: Option<Arc<Barrier>>,
 }
@@ -34,6 +38,46 @@ impl AgentServiceImpl {
     pub fn new(state: ControllerState) -> Self {
         Self {
             state,
+            registry_url: String::new(),
+            registry_insecure: false,
+            trust_policy: "skip".to_owned(),
+            trusted_key_pems: Vec::new(),
+            #[cfg(test)]
+            poll_barrier: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_registry_config(
+        state: ControllerState,
+        registry_url: String,
+        registry_insecure: bool,
+    ) -> Self {
+        Self {
+            state,
+            registry_url,
+            registry_insecure,
+            trust_policy: "skip".to_owned(),
+            trusted_key_pems: Vec::new(),
+            #[cfg(test)]
+            poll_barrier: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_trust_config(
+        state: ControllerState,
+        registry_url: String,
+        registry_insecure: bool,
+        trust_policy: String,
+        trusted_key_pems: Vec<String>,
+    ) -> Self {
+        Self {
+            state,
+            registry_url,
+            registry_insecure,
+            trust_policy,
+            trusted_key_pems,
             #[cfg(test)]
             poll_barrier: None,
         }
@@ -43,6 +87,10 @@ impl AgentServiceImpl {
     fn with_poll_barrier(state: ControllerState, poll_barrier: Arc<Barrier>) -> Self {
         Self {
             state,
+            registry_url: String::new(),
+            registry_insecure: false,
+            trust_policy: "skip".to_owned(),
+            trusted_key_pems: Vec::new(),
             poll_barrier: Some(poll_barrier),
         }
     }
@@ -266,7 +314,13 @@ impl AgentService for AgentServiceImpl {
 
         tracing::info!(agent_id, "Agent registered");
         rapidbyte_metrics::instruments::controller::active_agents().add(1, &[]);
-        Ok(Response::new(RegisterAgentResponse { agent_id }))
+        Ok(Response::new(RegisterAgentResponse {
+            agent_id,
+            registry_url: self.registry_url.clone(),
+            registry_insecure: self.registry_insecure,
+            trust_policy: self.trust_policy.clone(),
+            trusted_key_pems: self.trusted_key_pems.clone(),
+        }))
     }
 
     async fn heartbeat(

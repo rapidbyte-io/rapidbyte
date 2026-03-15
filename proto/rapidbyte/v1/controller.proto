@@ -135,6 +135,10 @@ message RegisterAgentRequest {
 
 message RegisterAgentResponse {
   string agent_id = 1;              // Controller-assigned UUID v4
+  string registry_url = 2;          // OCI registry URL for plugin pulls (empty = not configured)
+  bool registry_insecure = 3;       // Use HTTP instead of HTTPS for registry
+  string trust_policy = 4;          // Plugin signature policy: "skip", "warn", or "verify"
+  repeated string trusted_key_pems = 5; // Ed25519 public key PEM contents for verification
 }
 
 message PollTaskRequest {

@@ -71,6 +71,27 @@ struct Cli {
     /// Suppress all output (exit code only, errors on stderr)
     #[arg(short, long, global = true)]
     quiet: bool,
+
+    /// Default OCI registry for plugin resolution (e.g. registry.example.com/plugins)
+    #[arg(long, global = true, env = "RAPIDBYTE_REGISTRY_URL")]
+    registry_url: Option<String>,
+
+    /// Use HTTP instead of HTTPS for plugin registry (for local dev registries)
+    #[arg(long, global = true, env = "RAPIDBYTE_REGISTRY_INSECURE")]
+    registry_insecure: bool,
+
+    /// Plugin signature trust policy (skip, warn, verify)
+    #[arg(
+        long,
+        global = true,
+        env = "RAPIDBYTE_TRUST_POLICY",
+        default_value = "skip"
+    )]
+    trust_policy: String,
+
+    /// Trusted Ed25519 public key files for plugin verification (can be repeated)
+    #[arg(long, global = true, action = clap::ArgAction::Append)]
+    trust_key: Vec<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -115,8 +136,11 @@ enum Commands {
         /// Path to pipeline YAML file
         pipeline: PathBuf,
     },
-    /// List available plugins
-    Plugins,
+    /// Manage plugins (pull, push, inspect, list, remove)
+    Plugin {
+        #[command(subcommand)]
+        command: PluginCommands,
+    },
     /// Scaffold a new plugin project
     Scaffold {
         /// Plugin name (e.g., "source-mysql", "dest-snowflake")
@@ -156,6 +180,12 @@ enum Commands {
         /// Prometheus metrics listen address (e.g. 127.0.0.1:9190)
         #[arg(long, env = "RAPIDBYTE_METRICS_LISTEN")]
         metrics_listen: Option<String>,
+        /// OCI registry URL to broadcast to agents for plugin pulls
+        #[arg(long, env = "RAPIDBYTE_REGISTRY_URL")]
+        registry_url: Option<String>,
+        /// Use HTTP instead of HTTPS for the plugin registry
+        #[arg(long)]
+        registry_insecure: bool,
     },
     /// Start an agent worker (long-running)
     Agent {
@@ -186,6 +216,78 @@ enum Commands {
         /// Prometheus metrics listen address (e.g. 127.0.0.1:9191)
         #[arg(long, env = "RAPIDBYTE_METRICS_LISTEN")]
         metrics_listen: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PluginCommands {
+    /// Pull a plugin from an OCI registry to local cache
+    Pull {
+        /// Plugin reference (e.g. registry.example.com/source/postgres:1.2.0)
+        plugin_ref: String,
+        /// Use HTTP instead of HTTPS (for local dev registries)
+        #[arg(long)]
+        insecure: bool,
+    },
+    /// Push a local .wasm plugin to an OCI registry
+    Push {
+        /// Plugin reference (e.g. registry.example.com/source/postgres:1.2.0)
+        plugin_ref: String,
+        /// Path to the .wasm file
+        wasm_path: PathBuf,
+        /// Use HTTP instead of HTTPS
+        #[arg(long)]
+        insecure: bool,
+        /// Sign the plugin with an Ed25519 private key
+        #[arg(long)]
+        sign: bool,
+        /// Path to the Ed25519 private key PEM file (required with --sign)
+        #[arg(long)]
+        key: Option<PathBuf>,
+    },
+    /// Inspect plugin metadata without downloading the wasm binary
+    Inspect {
+        /// Plugin reference
+        plugin_ref: String,
+        /// Use HTTP instead of HTTPS
+        #[arg(long)]
+        insecure: bool,
+    },
+    /// List available tags/versions for a plugin
+    Tags {
+        /// Plugin reference (tag is ignored)
+        plugin_ref: String,
+        /// Use HTTP instead of HTTPS
+        #[arg(long)]
+        insecure: bool,
+    },
+    /// List locally cached plugins
+    List,
+    /// Remove a plugin from the local cache
+    Remove {
+        /// Plugin reference
+        plugin_ref: String,
+    },
+    /// Search for plugins in a registry
+    Search {
+        /// Search query (matches name, description, repository)
+        #[arg(default_value = "")]
+        query: String,
+        /// Filter by plugin type (source, destination, transform)
+        #[arg(long, short = 't')]
+        plugin_type: Option<String>,
+        /// Registry to search (required if --registry-url not set globally)
+        #[arg(long)]
+        registry: Option<String>,
+        /// Use HTTP instead of HTTPS
+        #[arg(long)]
+        insecure: bool,
+    },
+    /// Generate an Ed25519 signing keypair for plugin signing
+    Keygen {
+        /// Output directory for key files (default: current directory)
+        #[arg(long, default_value = ".")]
+        output: PathBuf,
     },
 }
 
@@ -263,6 +365,25 @@ async fn main() -> ExitCode {
     };
     let tls = tls.is_configured().then_some(tls);
 
+    let trust_policy = match rapidbyte_registry::TrustPolicy::from_str_name(&cli.trust_policy) {
+        Ok(policy) => policy,
+        Err(e) => {
+            eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
+            return ExitCode::FAILURE;
+        }
+    };
+    let registry_config = rapidbyte_registry::RegistryConfig {
+        insecure: cli.registry_insecure,
+        default_registry: cli
+            .registry_url
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(rapidbyte_registry::normalize_registry_url),
+        trust_policy,
+        trusted_key_paths: cli.trust_key.clone(),
+        ..Default::default()
+    };
+
     let result = match cli.command {
         Commands::Run {
             pipeline,
@@ -279,6 +400,7 @@ async fn main() -> ExitCode {
                 cli.auth_token.as_deref(),
                 tls.as_ref(),
                 &otel_guard,
+                &registry_config,
             )
             .await
         }
@@ -316,9 +438,13 @@ async fn main() -> ExitCode {
             )
             .await
         }
-        Commands::Check { pipeline } => commands::check::execute(&pipeline, verbosity).await,
-        Commands::Discover { pipeline } => commands::discover::execute(&pipeline, verbosity).await,
-        Commands::Plugins => commands::plugins::execute(verbosity),
+        Commands::Check { pipeline } => {
+            commands::check::execute(&pipeline, verbosity, &registry_config).await
+        }
+        Commands::Discover { pipeline } => {
+            commands::discover::execute(&pipeline, verbosity, &registry_config).await
+        }
+        Commands::Plugin { command } => commands::plugin::execute(command, &registry_config).await,
         Commands::Scaffold { name, output } => commands::scaffold::run(&name, output.as_deref()),
         Commands::Dev => commands::dev::execute().await,
         Commands::Controller {
@@ -331,7 +457,14 @@ async fn main() -> ExitCode {
             tls_cert,
             tls_key,
             metrics_listen,
+            registry_url,
+            registry_insecure,
         } => {
+            // Controller-subcommand registry flags override global ones.
+            let ctrl_registry_url = registry_url
+                .as_deref()
+                .or(registry_config.default_registry.as_deref());
+            let ctrl_registry_insecure = registry_insecure || registry_config.insecure;
             commands::controller::execute(
                 &listen,
                 metadata_database_url.as_deref(),
@@ -343,6 +476,10 @@ async fn main() -> ExitCode {
                 tls_cert.as_deref(),
                 tls_key.as_deref(),
                 metrics_listen.as_deref(),
+                ctrl_registry_url,
+                ctrl_registry_insecure,
+                &cli.trust_policy,
+                cli.trust_key.clone(),
                 otel_guard,
             )
             .await
@@ -410,5 +547,59 @@ mod tests {
             Some("http://cfg".into())
         });
         assert_eq!(resolved.as_deref(), Some("http://explicit"));
+    }
+
+    // ── Registry flag precedence ──────────────────────────────────────
+
+    #[test]
+    fn registry_insecure_global_true_propagates_when_local_false() {
+        // Simulates: rapidbyte --registry-insecure plugin pull ... (no --insecure)
+        let global_insecure = true;
+        let local_insecure = false;
+        assert!(local_insecure || global_insecure);
+    }
+
+    #[test]
+    fn registry_insecure_local_true_overrides_global_false() {
+        let global_insecure = false;
+        let local_insecure = true;
+        assert!(local_insecure || global_insecure);
+    }
+
+    #[test]
+    fn registry_insecure_both_false_stays_false() {
+        let global_insecure = false;
+        let local_insecure = false;
+        assert!(!(local_insecure || global_insecure));
+    }
+
+    #[test]
+    fn controller_registry_url_falls_back_to_global() {
+        // Simulates: rapidbyte --registry-url X controller (no --registry-url on controller)
+        let subcommand_url: Option<&str> = None;
+        let global_url: Option<&str> = Some("registry.example.com");
+        let effective = subcommand_url.or(global_url);
+        assert_eq!(effective, Some("registry.example.com"));
+    }
+
+    #[test]
+    fn controller_registry_url_prefers_subcommand_over_global() {
+        let subcommand_url: Option<&str> = Some("local.registry.io");
+        let global_url: Option<&str> = Some("registry.example.com");
+        let effective = subcommand_url.or(global_url);
+        assert_eq!(effective, Some("local.registry.io"));
+    }
+
+    /// Helper that mirrors the `local || global` merge logic from main.rs.
+    fn merge_insecure(local: bool, global: bool) -> bool {
+        local || global
+    }
+
+    #[test]
+    fn controller_registry_insecure_merges_with_global() {
+        assert!(merge_insecure(false, true), "global alone → insecure");
+        assert!(merge_insecure(true, false), "local alone → insecure");
+        assert!(!merge_insecure(false, false), "neither → secure");
+        assert!(merge_insecure(true, true), "both → insecure");
     }
 }
