@@ -486,7 +486,11 @@ impl AgentService for AgentServiceImpl {
                     if let (Some(task), Some(run)) = (failed_task, failed_run) {
                         let _ = self.state.persist_assignment_records(&run, &task).await;
                     }
-                    return Err(e);
+                    // Return NoTask instead of a gRPC error so the agent
+                    // keeps polling. The task/run are already marked Failed.
+                    return Ok(Response::new(PollTaskResponse {
+                        result: Some(poll_task_response::Result::NoTask(NoTask {})),
+                    }));
                 }
             }
         }
@@ -546,7 +550,11 @@ impl AgentService for AgentServiceImpl {
                     if let (Some(task), Some(run)) = (failed_task, failed_run) {
                         let _ = self.state.persist_assignment_records(&run, &task).await;
                     }
-                    return Err(e);
+                    // Return NoTask instead of a gRPC error so the agent
+                    // keeps polling. The task/run are already marked Failed.
+                    return Ok(Response::new(PollTaskResponse {
+                        result: Some(poll_task_response::Result::NoTask(NoTask {})),
+                    }));
                 }
             }
         }
