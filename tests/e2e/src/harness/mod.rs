@@ -69,6 +69,15 @@ pub struct AutotuneOptions {
     pub pin_copy_flush_bytes: Option<u64>,
 }
 
+pub struct PipelinePolicies<'a> {
+    pub sync_mode: &'a str,
+    pub write_mode: &'a str,
+    pub compression: Option<&'a str>,
+    pub on_data_error: Option<&'a str>,
+    pub schema_evolution_block: Option<&'a str>,
+    pub autotune: Option<&'a AutotuneOptions>,
+}
+
 pub async fn bootstrap() -> Result<HarnessContext> {
     let postgres_port = container::shared_postgres_port()?;
     let plugin_dir = plugins::prepare_plugin_dir()?;
@@ -221,108 +230,37 @@ impl HarnessContext {
     pub async fn run_full_refresh_pipeline(&self, schemas: &SchemaPair) -> Result<RunSummary> {
         let state_file =
             tempfile::NamedTempFile::new().context("failed to create state db file")?;
-        self.run_pipeline(schemas, "full_refresh", "append", state_file.path())
-            .await
+        self.run_pipeline(
+            schemas,
+            state_file.path(),
+            &PipelinePolicies {
+                sync_mode: "full_refresh",
+                write_mode: "append",
+                compression: None,
+                on_data_error: None,
+                schema_evolution_block: None,
+                autotune: None,
+            },
+        )
+        .await
     }
 
     pub async fn run_pipeline(
         &self,
         schemas: &SchemaPair,
-        sync_mode: &str,
-        write_mode: &str,
         state_db_path: &std::path::Path,
-    ) -> Result<RunSummary> {
-        self.run_pipeline_with_compression(schemas, sync_mode, write_mode, state_db_path, None)
-            .await
-    }
-
-    pub async fn run_pipeline_with_autotune(
-        &self,
-        schemas: &SchemaPair,
-        sync_mode: &str,
-        write_mode: &str,
-        state_db_path: &std::path::Path,
-        autotune: Option<&AutotuneOptions>,
-    ) -> Result<RunSummary> {
-        self.run_pipeline_with_policies_and_autotune(
-            schemas,
-            sync_mode,
-            write_mode,
-            state_db_path,
-            None,
-            None,
-            None,
-            autotune,
-        )
-        .await
-    }
-
-    pub async fn run_pipeline_with_compression(
-        &self,
-        schemas: &SchemaPair,
-        sync_mode: &str,
-        write_mode: &str,
-        state_db_path: &std::path::Path,
-        compression: Option<&str>,
-    ) -> Result<RunSummary> {
-        self.run_pipeline_with_policies(
-            schemas,
-            sync_mode,
-            write_mode,
-            state_db_path,
-            compression,
-            None,
-            None,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn run_pipeline_with_policies(
-        &self,
-        schemas: &SchemaPair,
-        sync_mode: &str,
-        write_mode: &str,
-        state_db_path: &std::path::Path,
-        compression: Option<&str>,
-        on_data_error: Option<&str>,
-        schema_evolution_block: Option<&str>,
-    ) -> Result<RunSummary> {
-        self.run_pipeline_with_policies_and_autotune(
-            schemas,
-            sync_mode,
-            write_mode,
-            state_db_path,
-            compression,
-            on_data_error,
-            schema_evolution_block,
-            None,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn run_pipeline_with_policies_and_autotune(
-        &self,
-        schemas: &SchemaPair,
-        sync_mode: &str,
-        write_mode: &str,
-        state_db_path: &std::path::Path,
-        compression: Option<&str>,
-        on_data_error: Option<&str>,
-        schema_evolution_block: Option<&str>,
-        autotune: Option<&AutotuneOptions>,
+        policies: &PipelinePolicies<'_>,
     ) -> Result<RunSummary> {
         let pipeline_yaml = render_pipeline_yaml(
             self,
             schemas,
-            sync_mode,
-            write_mode,
+            policies.sync_mode,
+            policies.write_mode,
             state_db_path,
-            compression,
-            on_data_error,
-            schema_evolution_block,
-            autotune,
+            policies.compression,
+            policies.on_data_error,
+            policies.schema_evolution_block,
+            policies.autotune,
         );
 
         let config =
