@@ -477,8 +477,26 @@ impl AgentService for AgentServiceImpl {
                         let mut runs = self.state.runs.write().await;
                         if let Some(record) = runs.get_run_mut(&run_id) {
                             record.state = InternalRunState::Pending;
+                            record.current_task = None;
                         }
+                        let released_run = runs.get_run(&run_id).cloned();
                         drop(runs);
+
+                        // Persist rollback so restarts see consistent state.
+                        let released_task = {
+                            let tasks = self.state.tasks.read().await;
+                            tasks.get(&task_id).cloned()
+                        };
+                        if let (Some(task), Some(run)) = (released_task, released_run) {
+                            if let Err(persist_err) =
+                                self.state.persist_assignment_records(&run, &task).await
+                            {
+                                tracing::error!(
+                                    task_id,
+                                    "failed to persist transient rollback: {persist_err}"
+                                );
+                            }
+                        }
 
                         return Ok(Response::new(PollTaskResponse {
                             result: Some(poll_task_response::Result::NoTask(NoTask {})),
@@ -605,8 +623,26 @@ impl AgentService for AgentServiceImpl {
                         let mut runs = self.state.runs.write().await;
                         if let Some(record) = runs.get_run_mut(&run_id) {
                             record.state = InternalRunState::Pending;
+                            record.current_task = None;
                         }
+                        let released_run = runs.get_run(&run_id).cloned();
                         drop(runs);
+
+                        // Persist rollback so restarts see consistent state.
+                        let released_task = {
+                            let tasks = self.state.tasks.read().await;
+                            tasks.get(&task_id).cloned()
+                        };
+                        if let (Some(task), Some(run)) = (released_task, released_run) {
+                            if let Err(persist_err) =
+                                self.state.persist_assignment_records(&run, &task).await
+                            {
+                                tracing::error!(
+                                    task_id,
+                                    "failed to persist transient rollback: {persist_err}"
+                                );
+                            }
+                        }
 
                         return Ok(Response::new(PollTaskResponse {
                             result: Some(poll_task_response::Result::NoTask(NoTask {})),
