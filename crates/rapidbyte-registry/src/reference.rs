@@ -86,6 +86,19 @@ impl PluginRef {
     }
 }
 
+/// Normalize a registry URL for use as `default_registry`.
+///
+/// Strips `https://` / `http://` schemes and trailing slashes so that
+/// `https://registry.example.com/plugins/` becomes `registry.example.com/plugins`.
+#[must_use]
+pub fn normalize_registry_url(url: &str) -> String {
+    let stripped = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    stripped.trim_end_matches('/').to_owned()
+}
+
 impl fmt::Display for PluginRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}:{}", self.registry, self.repository, self.tag)
@@ -181,6 +194,46 @@ mod tests {
     fn reject_path_traversal_in_tag() {
         let err = PluginRef::parse("registry.example.com/source/pg:../../etc").unwrap_err();
         assert!(err.to_string().contains(".."));
+    }
+
+    #[test]
+    fn normalize_strips_https_scheme() {
+        assert_eq!(
+            normalize_registry_url("https://registry.example.com/plugins"),
+            "registry.example.com/plugins"
+        );
+    }
+
+    #[test]
+    fn normalize_strips_http_scheme() {
+        assert_eq!(
+            normalize_registry_url("http://localhost:5050"),
+            "localhost:5050"
+        );
+    }
+
+    #[test]
+    fn normalize_strips_trailing_slashes() {
+        assert_eq!(
+            normalize_registry_url("registry.example.com/plugins/"),
+            "registry.example.com/plugins"
+        );
+    }
+
+    #[test]
+    fn normalize_strips_scheme_and_trailing_slash() {
+        assert_eq!(
+            normalize_registry_url("https://registry.example.com/"),
+            "registry.example.com"
+        );
+    }
+
+    #[test]
+    fn normalize_leaves_bare_host_unchanged() {
+        assert_eq!(
+            normalize_registry_url("registry.example.com"),
+            "registry.example.com"
+        );
     }
 
     #[test]

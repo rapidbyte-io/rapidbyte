@@ -21,4 +21,4 @@ pub use artifact::{
 };
 pub use cache::{CacheEntry, PluginCache};
 pub use client::{RegistryClient, RegistryConfig};
-pub use reference::PluginRef;
+pub use reference::{normalize_registry_url, PluginRef};

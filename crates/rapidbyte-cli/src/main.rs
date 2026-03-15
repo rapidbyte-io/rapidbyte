@@ -331,7 +331,7 @@ async fn main() -> ExitCode {
             .registry_url
             .as_deref()
             .filter(|s| !s.trim().is_empty())
-            .map(str::to_owned),
+            .map(rapidbyte_registry::normalize_registry_url),
         ..Default::default()
     };
 
