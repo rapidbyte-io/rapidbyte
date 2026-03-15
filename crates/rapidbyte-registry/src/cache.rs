@@ -60,8 +60,10 @@ impl PluginCache {
 
     /// Return the directory path for a given plugin reference.
     fn entry_dir(&self, plugin_ref: &PluginRef) -> PathBuf {
+        // Sanitize ':' in registry (e.g. localhost:5050) for Windows path compat.
+        let safe_registry = plugin_ref.registry.replace(':', "_");
         self.root
-            .join(&plugin_ref.registry)
+            .join(safe_registry)
             .join(&plugin_ref.repository)
             .join(&plugin_ref.tag)
     }

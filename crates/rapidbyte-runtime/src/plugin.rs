@@ -297,16 +297,31 @@ fn verify_trust(
 /// E.g. `qualify_bare_ref("postgres", Source, "registry.example.com")` →
 /// `"registry.example.com/source/postgres"`.
 fn qualify_bare_ref(use_ref: &str, kind: PluginKind, default_registry: &str) -> String {
+    // If the ref already contains '/', it has its own path structure — don't
+    // prefix with kind (avoids duplicating e.g. source/source/postgres).
+    let needs_kind_prefix = !use_ref.contains('/');
+
     let kind_prefix = match kind {
         PluginKind::Source => "source",
         PluginKind::Destination => "destination",
         PluginKind::Transform => "transform",
     };
-    if let Some((name, version)) = use_ref.split_once('@') {
-        let version = version.strip_prefix('v').unwrap_or(version);
-        format!("{default_registry}/{kind_prefix}/{name}:{version}")
+
+    let (name, tag) = if let Some((n, v)) = use_ref.split_once('@') {
+        (n, Some(v.strip_prefix('v').unwrap_or(v)))
     } else {
-        format!("{default_registry}/{kind_prefix}/{use_ref}")
+        (use_ref, None)
+    };
+
+    let repo = if needs_kind_prefix {
+        format!("{default_registry}/{kind_prefix}/{name}")
+    } else {
+        format!("{default_registry}/{name}")
+    };
+
+    match tag {
+        Some(t) => format!("{repo}:{t}"),
+        None => repo,
     }
 }
 
@@ -774,6 +789,27 @@ mod tests {
     fn qualify_bare_ref_with_registry_port() {
         let result = qualify_bare_ref("postgres", PluginKind::Source, "localhost:5050");
         assert_eq!(result, "localhost:5050/source/postgres");
+    }
+
+    #[test]
+    fn qualify_ref_with_slash_does_not_duplicate_kind() {
+        // source/postgres already has a path — don't prefix with kind again
+        let result = qualify_bare_ref(
+            "source/postgres",
+            PluginKind::Source,
+            "registry.example.com",
+        );
+        assert_eq!(result, "registry.example.com/source/postgres");
+    }
+
+    #[test]
+    fn qualify_ref_with_slash_and_version() {
+        let result = qualify_bare_ref(
+            "source/postgres@v1.2.0",
+            PluginKind::Source,
+            "registry.example.com",
+        );
+        assert_eq!(result, "registry.example.com/source/postgres:1.2.0");
     }
 
     #[tokio::test]
