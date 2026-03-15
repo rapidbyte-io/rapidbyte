@@ -429,7 +429,12 @@ async fn process_task(
     let registry_config = rapidbyte_registry::RegistryConfig {
         insecure: ctx.config.registry_insecure,
         credentials: None,
-        default_registry: ctx.config.registry_url.clone(),
+        default_registry: ctx
+            .config
+            .registry_url
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_owned),
     };
     let result = executor::execute_task(
         &task.pipeline_yaml_utf8,

@@ -327,7 +327,11 @@ async fn main() -> ExitCode {
 
     let registry_config = rapidbyte_registry::RegistryConfig {
         insecure: cli.registry_insecure,
-        default_registry: cli.registry_url.clone(),
+        default_registry: cli
+            .registry_url
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_owned),
         ..Default::default()
     };
 

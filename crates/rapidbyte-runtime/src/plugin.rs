@@ -225,22 +225,29 @@ pub async fn resolve_plugin(
 ) -> Result<PathBuf> {
     if is_oci_reference(use_ref) {
         resolve_plugin_from_registry(use_ref, registry_config).await
-    } else if let Some(default_registry) = &registry_config.default_registry {
-        // Prepend default registry to make a full OCI reference.
-        // Convert @version to :tag if present (legacy format normalization).
-        let qualified_ref = if let Some((name, version)) = use_ref.split_once('@') {
-            let version = version.strip_prefix('v').unwrap_or(version);
-            format!("{default_registry}/{name}:{version}")
-        } else {
-            format!("{default_registry}/{use_ref}")
-        };
-        tracing::debug!(
-            use_ref,
-            qualified_ref,
-            "prepending default registry to plugin reference"
-        );
-        resolve_plugin_from_registry(&qualified_ref, registry_config).await
     } else {
+        // Try local filesystem first — works offline and for dev builds.
+        if let Ok(path) = resolve_plugin_path(use_ref, kind) {
+            return Ok(path);
+        }
+
+        // Fall back to registry with default_registry prefix if configured.
+        if let Some(default_registry) = &registry_config.default_registry {
+            let qualified_ref = if let Some((name, version)) = use_ref.split_once('@') {
+                let version = version.strip_prefix('v').unwrap_or(version);
+                format!("{default_registry}/{name}:{version}")
+            } else {
+                format!("{default_registry}/{use_ref}")
+            };
+            tracing::debug!(
+                use_ref,
+                qualified_ref,
+                "local plugin not found, trying registry"
+            );
+            return resolve_plugin_from_registry(&qualified_ref, registry_config).await;
+        }
+
+        // No local plugin and no registry configured.
         resolve_plugin_path(use_ref, kind)
     }
 }
