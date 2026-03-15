@@ -3685,4 +3685,95 @@ mod tests {
             InternalRunState::Cancelling
         );
     }
+
+    #[tokio::test]
+    async fn secret_resolution_failure_fails_task_and_returns_no_task() {
+        // Register a secret provider that always fails.
+        struct FailingProvider;
+
+        #[async_trait::async_trait]
+        impl rapidbyte_secrets::SecretProvider for FailingProvider {
+            async fn read_secret(&self, _path: &str, _key: &str) -> anyhow::Result<String> {
+                anyhow::bail!("vault unreachable")
+            }
+        }
+
+        let state = test_state();
+
+        // Register the failing provider on the controller state.
+        let mut providers = rapidbyte_secrets::SecretProviders::new();
+        providers.register("vault", std::sync::Arc::new(FailingProvider));
+        // Safety: we're in a test; replace the empty providers with our failing one.
+        let state = ControllerState {
+            secrets: std::sync::Arc::new(providers),
+            ..state
+        };
+
+        // Submit a pipeline with vault refs.
+        let svc = crate::pipeline_service::PipelineServiceImpl::new(state.clone());
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\nsource:\n  config:\n    password: ${vault:secret/db#password}\n";
+        let run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: Some(ExecutionOptions {
+                    dry_run: false,
+                    limit: None,
+                }),
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        // Register an agent.
+        let agent_svc = AgentServiceImpl::new(state.clone());
+        let agent_resp = agent_svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 1,
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Poll — should return NoTask (not error) after failing the task.
+        let poll_resp = agent_svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_resp.agent_id,
+                wait_seconds: 0,
+            }))
+            .await
+            .expect("poll_task should not return gRPC error");
+
+        let result = poll_resp.into_inner().result.unwrap();
+        assert!(
+            matches!(result, poll_task_response::Result::NoTask(_)),
+            "expected NoTask after secret resolution failure, got task assignment"
+        );
+
+        // Verify task is Failed.
+        let tasks = state.tasks.read().await;
+        let task = tasks
+            .all_tasks()
+            .into_iter()
+            .find(|t| t.run_id == run_id)
+            .expect("task should exist");
+        assert_eq!(
+            task.state,
+            crate::scheduler::TaskState::Failed,
+            "task should be permanently failed"
+        );
+
+        // Verify run is Failed.
+        let runs = state.runs.read().await;
+        assert_eq!(
+            runs.get_run(&run_id).unwrap().state,
+            InternalRunState::Failed,
+            "run should be permanently failed"
+        );
+    }
 }
