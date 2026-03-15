@@ -92,7 +92,7 @@ async fn test_parse_and_validate_invalid_fixture() {
         .unwrap()
         .join("tests/fixtures/pipelines/invalid_pipeline.yaml");
 
-    let yaml = std::fs::read_to_string(&fixture_path).unwrap_or_default();
+    let yaml = std::fs::read_to_string(&fixture_path).expect("fixture file must exist");
     let result = parser::parse_pipeline(&yaml, &SecretProviders::new()).await;
     assert!(
         result.is_err(),

@@ -27,6 +27,52 @@ pub fn contains_secret_refs(input: &str) -> bool {
     SECRET_REF_RE.is_match(input)
 }
 
+/// Resolve only `${prefix:path#key}` secret references, leaving `${ENV_VAR}`
+/// patterns untouched.
+///
+/// Used by the controller to resolve secrets at dispatch time without
+/// touching env vars (which should be resolved on the agent).
+///
+/// # Errors
+///
+/// Returns an error if a secret provider prefix has no registered provider
+/// or a secret read fails.
+pub async fn substitute_secrets(input: &str, secrets: &SecretProviders) -> Result<String> {
+    let mut secret_values: HashMap<String, String> = HashMap::new();
+    let mut secret_errors = Vec::new();
+
+    let mut seen = HashSet::new();
+    for cap in SECRET_REF_RE.captures_iter(input) {
+        let full_match = cap[0].to_string();
+        if seen.insert(full_match.clone()) {
+            let prefix = &cap[1];
+            let path = &cap[2];
+            let key = &cap[3];
+            match secrets.resolve(prefix, path, key).await {
+                Ok(val) => {
+                    secret_values.insert(full_match, val);
+                }
+                Err(e) => {
+                    secret_errors.push(format!("{prefix}:{path}#{key}: {e}"));
+                }
+            }
+        }
+    }
+
+    if !secret_errors.is_empty() {
+        anyhow::bail!(
+            "Failed to resolve secret(s):\n  {}",
+            secret_errors.join("\n  ")
+        );
+    }
+
+    let mut result = input.to_string();
+    for (pattern, value) in &secret_values {
+        result = result.replace(pattern, value);
+    }
+    Ok(result)
+}
+
 /// Substitute all `${...}` references: env vars and secret provider refs.
 ///
 /// Each unique secret path is fetched once even if referenced multiple times.

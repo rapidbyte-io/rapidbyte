@@ -439,21 +439,27 @@ async fn main() -> ExitCode {
             dry_run,
             limit,
         } => {
-            let secrets = match build_secret_providers(
-                cli.vault_addr.as_deref(),
-                cli.vault_token.as_deref(),
-                cli.vault_role_id.as_deref(),
-                cli.vault_secret_id.as_deref(),
-            )
-            .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
-                    return ExitCode::FAILURE;
-                }
-            };
             let controller_url = resolve_controller_url(cli.controller.clone(), false);
+            // Only build secret providers for local mode — distributed mode
+            // delegates secret resolution to the controller.
+            let secrets = if controller_url.is_none() {
+                match build_secret_providers(
+                    cli.vault_addr.as_deref(),
+                    cli.vault_token.as_deref(),
+                    cli.vault_role_id.as_deref(),
+                    cli.vault_secret_id.as_deref(),
+                )
+                .await
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                rapidbyte_secrets::SecretProviders::new()
+            };
             commands::run::execute(
                 &pipeline,
                 dry_run,
