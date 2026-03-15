@@ -168,11 +168,15 @@ impl PluginIndex {
             existing.updated_at = entry.updated_at;
 
             // Only advance `latest` if the new version is semver-greater.
-            // Fall back to always updating if either version isn't valid semver.
+            // If current is valid semver but new is not, don't overwrite
+            // (prevents non-semver tags like "nightly" from replacing "2.0.0").
+            // If both are non-semver, always update (chronological ordering).
             let should_update_latest =
                 match (semver_parse(&existing.latest), semver_parse(&entry.latest)) {
                     (Some(current), Some(new)) => new > current,
-                    _ => true,
+                    (Some(_), None) => false, // don't overwrite semver with non-semver
+                    // semver replaces non-semver; both non-semver: last write wins
+                    (None, _) => true,
                 };
             if should_update_latest {
                 existing.latest = entry.latest;
@@ -637,5 +641,26 @@ mod tests {
         assert!(semver_parse("1.0.0").is_some());
         assert!(semver_parse("1.0.0-beta").is_some());
         assert!(semver_parse("v2.1.3").is_some());
+    }
+
+    #[test]
+    fn non_semver_tag_does_not_overwrite_semver_latest() {
+        let mut idx = PluginIndex::new();
+
+        // Start with valid semver
+        idx.upsert(make_entry("p", "P", "d", "source", "2.0.0", &["2.0.0"]));
+        assert_eq!(idx.plugins[0].latest, "2.0.0");
+
+        // Push non-semver tag — should NOT overwrite
+        idx.upsert(make_entry("p", "P", "d", "source", "nightly", &["nightly"]));
+        assert_eq!(idx.plugins[0].latest, "2.0.0");
+
+        // Push 4-segment non-semver — should NOT overwrite
+        idx.upsert(make_entry("p", "P", "d", "source", "1.2.3.4", &["1.2.3.4"]));
+        assert_eq!(idx.plugins[0].latest, "2.0.0");
+
+        // But valid higher semver SHOULD overwrite
+        idx.upsert(make_entry("p", "P", "d", "source", "3.0.0", &["3.0.0"]));
+        assert_eq!(idx.plugins[0].latest, "3.0.0");
     }
 }
