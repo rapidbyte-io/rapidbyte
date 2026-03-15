@@ -70,11 +70,15 @@ pub fn parse_trusted_keys(
 /// Accepts pre-parsed `trusted_keys` (from [`parse_trusted_keys`]) so
 /// callers can parse keys once and verify multiple artifacts.
 ///
-/// - [`TrustPolicy::Skip`]: always passes without checking keys.
-/// - [`TrustPolicy::Warn`]: logs a warning on unsigned or invalid-signature
-///   artifacts but does not fail.
-/// - [`TrustPolicy::Verify`]: returns an error if the artifact is unsigned or
-///   if the signature cannot be verified against any trusted key.
+/// - [`TrustPolicy::Skip`]: returns `Ok(None)`.
+/// - [`TrustPolicy::Warn`]: returns `Ok(Some(warning))` on unsigned or
+///   invalid-signature artifacts so the caller can surface the warning
+///   to the user (e.g. via `eprintln!`). The warning is **not** emitted
+///   via `tracing` because the default CLI log filter suppresses it.
+/// - [`TrustPolicy::Verify`]: returns `Err` if the artifact is unsigned
+///   or if the signature cannot be verified against any trusted key.
+///
+/// On success with a valid signature, returns `Ok(None)`.
 ///
 /// # Errors
 ///
@@ -84,30 +88,24 @@ pub fn verify_artifact_trust(
     config: &crate::artifact::PluginArtifactConfig,
     trust_policy: TrustPolicy,
     trusted_keys: &[VerifyingKey],
-) -> Result<()> {
+) -> Result<Option<String>> {
     match trust_policy {
-        TrustPolicy::Skip => Ok(()),
+        TrustPolicy::Skip => Ok(None),
         TrustPolicy::Warn | TrustPolicy::Verify => match &config.signature {
             None => {
-                let msg = "plugin is unsigned";
                 if trust_policy == TrustPolicy::Verify {
-                    anyhow::bail!("{msg} and trust policy is 'verify'");
+                    anyhow::bail!("plugin is unsigned and trust policy is 'verify'");
                 }
-                tracing::warn!("{msg}");
-                Ok(())
+                Ok(Some("warning: plugin is unsigned".to_owned()))
             }
             Some(sig) => {
                 match crate::signing::verify_against_any(trusted_keys, &config.wasm_sha256, sig) {
-                    Ok(()) => {
-                        tracing::info!("plugin signature verified");
-                        Ok(())
-                    }
+                    Ok(()) => Ok(None),
                     Err(err) => {
                         if trust_policy == TrustPolicy::Verify {
                             Err(err).context("plugin signature verification failed")
                         } else {
-                            tracing::warn!("plugin signature invalid: {err}");
-                            Ok(())
+                            Ok(Some(format!("warning: plugin signature invalid: {err}")))
                         }
                     }
                 }
@@ -191,8 +189,8 @@ mod tests {
             wasm_sha256: "deadbeef".to_owned(),
             signature: Some("not-a-real-signature".to_owned()),
         };
-        // Skip policy should succeed even with no keys and an invalid signature.
-        verify_artifact_trust(&config, TrustPolicy::Skip, &[]).unwrap();
+        let result = verify_artifact_trust(&config, TrustPolicy::Skip, &[]).unwrap();
+        assert!(result.is_none(), "skip should return no warning");
     }
 
     #[test]
@@ -201,6 +199,51 @@ mod tests {
             wasm_sha256: "deadbeef".to_owned(),
             signature: None,
         };
-        verify_artifact_trust(&config, TrustPolicy::Skip, &[]).unwrap();
+        let result = verify_artifact_trust(&config, TrustPolicy::Skip, &[]).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn warn_policy_returns_warning_for_unsigned() {
+        let config = crate::artifact::PluginArtifactConfig {
+            wasm_sha256: "deadbeef".to_owned(),
+            signature: None,
+        };
+        let warning = verify_artifact_trust(&config, TrustPolicy::Warn, &[])
+            .unwrap()
+            .expect("warn policy should return a warning for unsigned artifact");
+        assert!(warning.contains("unsigned"), "got: {warning}");
+    }
+
+    #[test]
+    fn warn_policy_returns_warning_for_invalid_signature() {
+        let (_, pub_pem) = crate::signing::generate_keypair_pem();
+        let vk = crate::signing::load_verifying_key_pem(&pub_pem).unwrap();
+        let config = crate::artifact::PluginArtifactConfig {
+            wasm_sha256: hex::encode(b"some-digest"),
+            signature: Some("ab".repeat(64)), // wrong signature
+        };
+        let warning = verify_artifact_trust(&config, TrustPolicy::Warn, &[vk])
+            .unwrap()
+            .expect("warn policy should return a warning for invalid signature");
+        assert!(warning.contains("invalid"), "got: {warning}");
+    }
+
+    #[test]
+    fn warn_policy_returns_none_for_valid_signature() {
+        let (priv_pem, pub_pem) = crate::signing::generate_keypair_pem();
+        let sk = crate::signing::load_signing_key_pem(&priv_pem).unwrap();
+        let vk = crate::signing::load_verifying_key_pem(&pub_pem).unwrap();
+        let digest = hex::encode(b"payload");
+        let sig = crate::signing::sign_digest(&digest, &sk);
+        let config = crate::artifact::PluginArtifactConfig {
+            wasm_sha256: digest,
+            signature: Some(sig),
+        };
+        let result = verify_artifact_trust(&config, TrustPolicy::Warn, &[vk]).unwrap();
+        assert!(
+            result.is_none(),
+            "valid signature should produce no warning"
+        );
     }
 }

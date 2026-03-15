@@ -206,11 +206,13 @@ pub async fn resolve_plugin_from_registry(
             cached_config.wasm_sha256,
             entry.digest
         );
-        rapidbyte_registry::verify_artifact_trust(
+        if let Some(warning) = rapidbyte_registry::verify_artifact_trust(
             &cached_config,
             registry_config.trust_policy,
             &trusted_keys,
-        )?;
+        )? {
+            tracing::warn!(%plugin_ref, "{warning}");
+        }
         return Ok(entry.wasm_path);
     }
 
@@ -221,11 +223,13 @@ pub async fn resolve_plugin_from_registry(
     let unpacked = rapidbyte_registry::unpack_artifact(&image)?;
 
     // Verify signature against trust policy
-    rapidbyte_registry::verify_artifact_trust(
+    if let Some(warning) = rapidbyte_registry::verify_artifact_trust(
         &unpacked.config,
         registry_config.trust_policy,
         &trusted_keys,
-    )?;
+    )? {
+        tracing::warn!(%plugin_ref, "{warning}");
+    }
 
     let entry = cache.store(
         &plugin_ref,

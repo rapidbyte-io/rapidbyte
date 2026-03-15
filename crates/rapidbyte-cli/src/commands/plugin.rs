@@ -106,11 +106,13 @@ async fn pull(plugin_ref_str: &str, insecure: bool, global_config: &RegistryConf
             );
         }
         let trusted_keys = rapidbyte_registry::parse_trusted_keys(global_config)?;
-        rapidbyte_registry::verify_artifact_trust(
+        if let Some(warning) = rapidbyte_registry::verify_artifact_trust(
             &cached_config,
             global_config.trust_policy,
             &trusted_keys,
-        )?;
+        )? {
+            eprintln!("{warning}");
+        }
         eprintln!(
             "Plugin {plugin_ref} already cached ({})",
             format_size(entry.size_bytes),
@@ -131,11 +133,13 @@ async fn pull(plugin_ref_str: &str, insecure: bool, global_config: &RegistryConf
 
     // Verify plugin signature against trust policy before caching.
     let trusted_keys = rapidbyte_registry::parse_trusted_keys(global_config)?;
-    rapidbyte_registry::verify_artifact_trust(
+    if let Some(warning) = rapidbyte_registry::verify_artifact_trust(
         &unpacked.config,
         global_config.trust_policy,
         &trusted_keys,
-    )?;
+    )? {
+        eprintln!("{warning}");
+    }
 
     let entry = cache
         .store(
