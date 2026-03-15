@@ -534,4 +534,38 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].plugin_ref, good_ref);
     }
+
+    #[test]
+    fn tampered_artifact_config_detected_by_digest_mismatch() {
+        let tmp = tempdir().unwrap();
+        let cache = PluginCache::new(tmp.path().to_path_buf());
+        let pref = test_ref("1.0.0");
+
+        let wasm = dummy_wasm();
+        let entry = cache
+            .store(&pref, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
+            .unwrap();
+
+        // Tamper the artifact_config.json to have a different wasm_sha256
+        let config_path = entry
+            .wasm_path
+            .parent()
+            .unwrap()
+            .join("artifact_config.json");
+        let tampered_config = crate::artifact::PluginArtifactConfig {
+            wasm_sha256: "aaaa".repeat(16),
+            signature: Some("fake-signature".to_owned()),
+        };
+        fs::write(&config_path, serde_json::to_vec(&tampered_config).unwrap()).unwrap();
+
+        // Cache lookup still succeeds (digest file matches wasm)
+        let looked_up = cache.lookup(&pref).expect("entry should exist");
+
+        // But loading the artifact config shows the tampered digest
+        let loaded_config = cache.load_artifact_config(&pref).unwrap();
+        assert_ne!(
+            loaded_config.wasm_sha256, looked_up.digest,
+            "tampered config digest should not match cached wasm digest"
+        );
+    }
 }

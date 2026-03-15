@@ -93,8 +93,6 @@ async fn pull(plugin_ref_str: &str, insecure: bool, global_config: &RegistryConf
 
     // Check cache first.
     if let Some(entry) = cache.lookup(&plugin_ref) {
-        // Re-verify trust on cache hits so policy/key changes take effect.
-        // Missing artifact_config.json (corrupt cache entry) is treated as unsigned.
         let cached_config =
             cache
                 .load_artifact_config(&plugin_ref)
@@ -102,6 +100,14 @@ async fn pull(plugin_ref_str: &str, insecure: bool, global_config: &RegistryConf
                     wasm_sha256: entry.digest.clone(),
                     signature: None,
                 });
+        // Verify the config's digest matches the actual cached wasm.
+        if cached_config.wasm_sha256 != entry.digest {
+            bail!(
+                "cached artifact config digest mismatch: config says {}, wasm is {}",
+                cached_config.wasm_sha256,
+                entry.digest
+            );
+        }
         check_trust(
             &cached_config,
             global_config.trust_policy,

@@ -188,13 +188,19 @@ pub async fn resolve_plugin_from_registry(
     // Check cache first.
     if let Some(entry) = cache.lookup(&plugin_ref) {
         tracing::debug!(%plugin_ref, "using cached plugin");
-        // Re-verify trust on cache hits so policy/key changes take effect.
-        // Missing artifact_config.json (corrupt cache entry) is treated as unsigned.
         let cached_config = cache.load_artifact_config(&plugin_ref).unwrap_or(
             rapidbyte_registry::PluginArtifactConfig {
                 wasm_sha256: entry.digest.clone(),
                 signature: None,
             },
+        );
+        // Verify the config's digest matches the actual cached wasm to prevent
+        // a tampered artifact_config.json from bypassing signature verification.
+        anyhow::ensure!(
+            cached_config.wasm_sha256 == entry.digest,
+            "cached artifact config digest mismatch: config says {}, wasm is {}",
+            cached_config.wasm_sha256,
+            entry.digest
         );
         verify_trust(&cached_config, registry_config)?;
         return Ok(entry.wasm_path);
