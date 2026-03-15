@@ -76,3 +76,5 @@ tracing-opentelemetry = "0.29"
 dashmap = "6"
 oci-client = "0.16"
 http = "1"
+ed25519-dalek = { version = "2", features = ["pem", "pkcs8", "rand_core"] }
+rand = "0.8"

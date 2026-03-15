@@ -12,6 +12,7 @@ use oci_client::secrets::RegistryAuth;
 use oci_client::{Client as OciClient, Reference};
 use tracing::debug;
 
+use crate::trust::TrustPolicy;
 use crate::PluginRef;
 
 /// Configuration for connecting to an OCI registry.
@@ -25,6 +26,10 @@ pub struct RegistryConfig {
     /// E.g. `"registry.example.com"` makes `source/postgres:1.0.0` resolve to
     /// `registry.example.com/source/postgres:1.0.0`.
     pub default_registry: Option<String>,
+    /// Signature verification policy.
+    pub trust_policy: TrustPolicy,
+    /// Paths to trusted Ed25519 public key PEM files.
+    pub trusted_key_paths: Vec<std::path::PathBuf>,
 }
 
 /// High-level OCI registry client for rapidbyte plugin artifacts.
