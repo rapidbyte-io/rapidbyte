@@ -48,23 +48,6 @@ impl AgentServiceImpl {
     }
 
     #[must_use]
-    pub fn with_registry_config(
-        state: ControllerState,
-        registry_url: String,
-        registry_insecure: bool,
-    ) -> Self {
-        Self {
-            state,
-            registry_url,
-            registry_insecure,
-            trust_policy: "skip".to_owned(),
-            trusted_key_pems: Vec::new(),
-            #[cfg(test)]
-            poll_barrier: None,
-        }
-    }
-
-    #[must_use]
     pub fn with_trust_config(
         state: ControllerState,
         registry_url: String,

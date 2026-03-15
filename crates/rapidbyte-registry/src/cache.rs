@@ -68,13 +68,6 @@ impl PluginCache {
             .join(&plugin_ref.tag)
     }
 
-    /// Store a plugin in the cache, computing its SHA-256 digest.
-    ///
-    /// Overwrites any existing cache entry for the same reference.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the cache directory cannot be created or files cannot be written.
     /// Store a plugin artifact in the cache.
     ///
     /// The `artifact_config` contains the wasm digest and optional signature.

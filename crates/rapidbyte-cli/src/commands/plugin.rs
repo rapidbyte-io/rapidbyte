@@ -3,10 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use rapidbyte_registry::{
-    artifact, PluginArtifactConfig, PluginCache, PluginRef, RegistryClient, RegistryConfig,
-    TrustPolicy,
-};
+use rapidbyte_registry::{artifact, PluginCache, PluginRef, RegistryClient, RegistryConfig};
 
 /// Execute a plugin subcommand.
 ///
@@ -108,7 +105,7 @@ async fn pull(plugin_ref_str: &str, insecure: bool, global_config: &RegistryConf
                 entry.digest
             );
         }
-        check_trust(&cached_config, global_config.trust_policy, global_config)?;
+        rapidbyte_registry::verify_artifact_trust(&cached_config, global_config)?;
         eprintln!(
             "Plugin {plugin_ref} already cached ({})",
             format_size(entry.size_bytes),
@@ -128,7 +125,7 @@ async fn pull(plugin_ref_str: &str, insecure: bool, global_config: &RegistryConf
     let unpacked = artifact::unpack_artifact(&image).context("Failed to unpack plugin artifact")?;
 
     // Verify plugin signature against trust policy before caching.
-    check_trust(&unpacked.config, global_config.trust_policy, global_config)?;
+    rapidbyte_registry::verify_artifact_trust(&unpacked.config, global_config)?;
 
     let entry = cache
         .store(
@@ -437,58 +434,4 @@ fn keygen(output_dir: &Path) -> Result<()> {
     eprintln!("  Public key:  {}", public_path.display());
     eprintln!("\nShare the public key with consumers. Keep the private key secret.");
     Ok(())
-}
-
-/// Verify a pulled plugin artifact against the configured trust policy.
-///
-/// - `Skip`: no verification, always succeeds.
-/// - `Warn`: logs warnings for unsigned or invalid signatures but succeeds.
-/// - `Verify`: rejects unsigned plugins or invalid signatures with an error.
-fn check_trust(
-    config: &PluginArtifactConfig,
-    trust_policy: TrustPolicy,
-    registry_config: &RegistryConfig,
-) -> Result<()> {
-    match trust_policy {
-        TrustPolicy::Skip => Ok(()),
-        TrustPolicy::Warn | TrustPolicy::Verify => {
-            let mut keys = Vec::new();
-            for path in &registry_config.trusted_key_paths {
-                keys.push(rapidbyte_registry::signing::load_verifying_key_file(path)?);
-            }
-            for pem in &registry_config.trusted_key_pems {
-                keys.push(rapidbyte_registry::signing::load_verifying_key_pem(pem)?);
-            }
-
-            match &config.signature {
-                None => {
-                    if trust_policy == TrustPolicy::Verify {
-                        bail!("plugin is unsigned and trust policy is 'verify'");
-                    }
-                    eprintln!("warning: plugin is unsigned");
-                    Ok(())
-                }
-                Some(sig) => {
-                    match rapidbyte_registry::signing::verify_against_any(
-                        &keys,
-                        &config.wasm_sha256,
-                        sig,
-                    ) {
-                        Ok(()) => {
-                            eprintln!("Plugin signature verified");
-                            Ok(())
-                        }
-                        Err(err) => {
-                            if trust_policy == TrustPolicy::Verify {
-                                Err(err).context("plugin signature verification failed")
-                            } else {
-                                eprintln!("warning: plugin signature invalid: {err}");
-                                Ok(())
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 }

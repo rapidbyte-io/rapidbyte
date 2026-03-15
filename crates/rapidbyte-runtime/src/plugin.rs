@@ -231,67 +231,13 @@ pub async fn resolve_plugin_from_registry(
     Ok(entry.wasm_path)
 }
 
-/// Verify a pulled plugin artifact against the configured trust policy.
-///
-/// - [`TrustPolicy::Skip`]: always passes without loading any keys.
-/// - [`TrustPolicy::Warn`]: logs a warning on unsigned or invalid-signature
-///   artifacts but does not fail.
-/// - [`TrustPolicy::Verify`]: returns an error if the artifact is unsigned or
-///   if the signature cannot be verified against any trusted key.
 fn verify_trust(
     config: &rapidbyte_registry::PluginArtifactConfig,
     registry_config: &rapidbyte_registry::RegistryConfig,
 ) -> Result<()> {
-    use rapidbyte_registry::TrustPolicy;
-
-    match registry_config.trust_policy {
-        TrustPolicy::Skip => Ok(()),
-        TrustPolicy::Warn | TrustPolicy::Verify => {
-            let mut keys = Vec::new();
-            for path in &registry_config.trusted_key_paths {
-                keys.push(rapidbyte_registry::signing::load_verifying_key_file(path)?);
-            }
-            for pem in &registry_config.trusted_key_pems {
-                keys.push(rapidbyte_registry::signing::load_verifying_key_pem(pem)?);
-            }
-
-            match &config.signature {
-                None => {
-                    let msg = "plugin is unsigned";
-                    if registry_config.trust_policy == TrustPolicy::Verify {
-                        anyhow::bail!("{msg} and trust policy is 'verify'");
-                    }
-                    tracing::warn!("{msg}");
-                    Ok(())
-                }
-                Some(sig) => {
-                    match rapidbyte_registry::signing::verify_against_any(
-                        &keys,
-                        &config.wasm_sha256,
-                        sig,
-                    ) {
-                        Ok(()) => {
-                            tracing::info!("plugin signature verified");
-                            Ok(())
-                        }
-                        Err(err) => {
-                            if registry_config.trust_policy == TrustPolicy::Verify {
-                                Err(err).context("plugin signature verification failed")
-                            } else {
-                                tracing::warn!("plugin signature invalid: {err}");
-                                Ok(())
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    rapidbyte_registry::verify_artifact_trust(config, registry_config)
 }
 
-/// Resolve a plugin path, automatically choosing between OCI registry and
-/// local filesystem based on the reference format.
-///
 /// Build a fully-qualified OCI reference from a bare plugin name and kind.
 ///
 /// E.g. `qualify_bare_ref("postgres", Source, "registry.example.com")` →

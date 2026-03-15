@@ -30,4 +30,4 @@ pub use cache::{CacheEntry, PluginCache};
 pub use client::{RegistryClient, RegistryConfig};
 pub use index::{PluginIndex, PluginIndexEntry, INDEX_REPOSITORY, INDEX_TAG};
 pub use reference::{normalize_registry_url, PluginRef};
-pub use trust::TrustPolicy;
+pub use trust::{verify_artifact_trust, TrustPolicy};
