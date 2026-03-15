@@ -94,7 +94,7 @@ async fn pull(plugin_ref_str: &str, insecure: bool, global_config: &RegistryConf
     // Check cache first.
     if let Some(entry) = cache.lookup(&plugin_ref) {
         // Re-verify trust on cache hits so policy/key changes take effect.
-        // Missing artifact_config.json (legacy cache) is treated as unsigned.
+        // Missing artifact_config.json (corrupt cache entry) is treated as unsigned.
         let cached_config =
             cache
                 .load_artifact_config(&plugin_ref)
@@ -133,11 +133,11 @@ async fn pull(plugin_ref_str: &str, insecure: bool, global_config: &RegistryConf
     )?;
 
     let entry = cache
-        .store_with_config(
+        .store(
             &plugin_ref,
             &unpacked.manifest_json,
             &unpacked.wasm_bytes,
-            Some(&unpacked.config),
+            &unpacked.config,
         )
         .context("Failed to store plugin in cache")?;
 

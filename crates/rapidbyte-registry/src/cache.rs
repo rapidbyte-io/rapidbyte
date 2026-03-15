@@ -73,27 +73,22 @@ impl PluginCache {
     /// # Errors
     ///
     /// Returns an error if the cache directory cannot be created or files cannot be written.
-    pub fn store(
-        &self,
-        plugin_ref: &PluginRef,
-        manifest_json: &[u8],
-        wasm_bytes: &[u8],
-    ) -> Result<CacheEntry> {
-        self.store_with_config(plugin_ref, manifest_json, wasm_bytes, None)
-    }
-
-    /// Store a plugin artifact with its artifact config (including signature).
+    /// Store a plugin artifact in the cache.
+    ///
+    /// The `artifact_config` contains the wasm digest and optional signature.
+    /// It is always persisted as `artifact_config.json` so trust verification
+    /// works on cache hits.
     ///
     /// # Errors
     ///
     /// Returns an error if the cache directory cannot be created or files cannot
     /// be written.
-    pub fn store_with_config(
+    pub fn store(
         &self,
         plugin_ref: &PluginRef,
         manifest_json: &[u8],
         wasm_bytes: &[u8],
-        artifact_config: Option<&crate::artifact::PluginArtifactConfig>,
+        artifact_config: &crate::artifact::PluginArtifactConfig,
     ) -> Result<CacheEntry> {
         let dir = self.entry_dir(plugin_ref);
         fs::create_dir_all(&dir)
@@ -112,13 +107,11 @@ impl PluginCache {
         fs::write(&digest_path, &digest)
             .with_context(|| format!("failed to write {}", digest_path.display()))?;
 
-        if let Some(config) = artifact_config {
-            let config_path = dir.join("artifact_config.json");
-            let config_json =
-                serde_json::to_vec(config).context("failed to serialize artifact config")?;
-            fs::write(&config_path, &config_json)
-                .with_context(|| format!("failed to write {}", config_path.display()))?;
-        }
+        let config_path = dir.join("artifact_config.json");
+        let config_json =
+            serde_json::to_vec(artifact_config).context("failed to serialize artifact config")?;
+        fs::write(&config_path, &config_json)
+            .with_context(|| format!("failed to write {}", config_path.display()))?;
 
         #[allow(clippy::cast_possible_truncation)]
         let size_bytes = wasm_bytes.len() as u64;
@@ -134,8 +127,7 @@ impl PluginCache {
 
     /// Load the artifact config (including signature) for a cached plugin.
     ///
-    /// Returns `None` if no `artifact_config.json` exists in the cache entry
-    /// (e.g. cached before signing was added).
+    /// Returns `None` if the cache entry is corrupt or missing the config file.
     #[must_use]
     pub fn load_artifact_config(
         &self,
@@ -353,6 +345,13 @@ mod tests {
         b"\x00asm\x01\x00\x00\x00fake-wasm-content".to_vec()
     }
 
+    fn unsigned_config(wasm: &[u8]) -> crate::artifact::PluginArtifactConfig {
+        crate::artifact::PluginArtifactConfig {
+            wasm_sha256: crate::verify::sha256_hex(wasm),
+            signature: None,
+        }
+    }
+
     #[test]
     fn store_and_lookup_roundtrip() {
         let tmp = tempdir().unwrap();
@@ -361,7 +360,9 @@ mod tests {
         let wasm = dummy_wasm();
         let manifest = dummy_manifest();
 
-        let stored = cache.store(&pref, &manifest, &wasm).unwrap();
+        let stored = cache
+            .store(&pref, &manifest, &wasm, &unsigned_config(&wasm))
+            .unwrap();
         assert_eq!(stored.plugin_ref, pref);
         assert_eq!(stored.size_bytes, wasm.len() as u64);
         assert_eq!(stored.digest, sha256_hex(&wasm));
@@ -397,8 +398,12 @@ mod tests {
         let wasm_v2 = b"wasm-v2".to_vec();
         let manifest = dummy_manifest();
 
-        let _first = cache.store(&pref, &manifest, &wasm_v1).unwrap();
-        let second = cache.store(&pref, &manifest, &wasm_v2).unwrap();
+        let _first = cache
+            .store(&pref, &manifest, &wasm_v1, &unsigned_config(&wasm_v1))
+            .unwrap();
+        let second = cache
+            .store(&pref, &manifest, &wasm_v2, &unsigned_config(&wasm_v2))
+            .unwrap();
 
         let entry = cache.lookup(&pref).expect("entry should exist");
         assert_eq!(entry.digest, sha256_hex(&wasm_v2));
@@ -423,7 +428,10 @@ mod tests {
         ];
 
         for r in &refs {
-            cache.store(r, &manifest, &dummy_wasm()).unwrap();
+            let wasm = dummy_wasm();
+            cache
+                .store(r, &manifest, &wasm, &unsigned_config(&wasm))
+                .unwrap();
         }
 
         let mut listed = cache.list().unwrap();
@@ -445,8 +453,9 @@ mod tests {
         let cache = PluginCache::new(tmp.path().to_path_buf());
         let pref = test_ref("1.0.0");
 
+        let wasm = dummy_wasm();
         cache
-            .store(&pref, &dummy_manifest(), &dummy_wasm())
+            .store(&pref, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
             .unwrap();
         assert!(cache.lookup(&pref).is_some());
 
@@ -471,8 +480,9 @@ mod tests {
         let cache = PluginCache::new(tmp.path().to_path_buf());
         let pref = test_ref("1.0.0");
 
+        let wasm = dummy_wasm();
         let entry = cache
-            .store(&pref, &dummy_manifest(), &dummy_wasm())
+            .store(&pref, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
             .unwrap();
 
         // Corrupt the digest file.
@@ -503,11 +513,13 @@ mod tests {
         let good_ref = test_ref("1.0.0");
         let bad_ref = test_ref("2.0.0");
 
+        let wasm = dummy_wasm();
         cache
-            .store(&good_ref, &dummy_manifest(), &dummy_wasm())
+            .store(&good_ref, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
             .unwrap();
+        let wasm = dummy_wasm();
         let bad_entry = cache
-            .store(&bad_ref, &dummy_manifest(), &dummy_wasm())
+            .store(&bad_ref, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
             .unwrap();
 
         // Corrupt the digest of the second entry.

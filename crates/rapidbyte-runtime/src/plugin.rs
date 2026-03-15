@@ -189,7 +189,7 @@ pub async fn resolve_plugin_from_registry(
     if let Some(entry) = cache.lookup(&plugin_ref) {
         tracing::debug!(%plugin_ref, "using cached plugin");
         // Re-verify trust on cache hits so policy/key changes take effect.
-        // Missing artifact_config.json (legacy cache) is treated as unsigned.
+        // Missing artifact_config.json (corrupt cache entry) is treated as unsigned.
         let cached_config = cache.load_artifact_config(&plugin_ref).unwrap_or(
             rapidbyte_registry::PluginArtifactConfig {
                 wasm_sha256: entry.digest.clone(),
@@ -209,11 +209,11 @@ pub async fn resolve_plugin_from_registry(
     // Verify signature against trust policy
     verify_trust(&unpacked.config, registry_config)?;
 
-    let entry = cache.store_with_config(
+    let entry = cache.store(
         &plugin_ref,
         &unpacked.manifest_json,
         &unpacked.wasm_bytes,
-        Some(&unpacked.config),
+        &unpacked.config,
     )?;
     tracing::info!(
         %plugin_ref,
@@ -710,7 +710,11 @@ mod tests {
         let cache = PluginCache::new(cache_dir.clone());
         let wasm = b"\x00asm\x01\x00\x00\x00fake-content";
         let manifest = br#"{"name":"test","version":"1.0.0"}"#;
-        let entry = cache.store(&plugin_ref, manifest, wasm).unwrap();
+        let config = rapidbyte_registry::PluginArtifactConfig {
+            wasm_sha256: rapidbyte_registry::verify::sha256_hex(wasm),
+            signature: None,
+        };
+        let entry = cache.store(&plugin_ref, manifest, wasm, &config).unwrap();
 
         // Override HOME to point to our temp cache so default_location picks it up.
         // Instead, we test through the cache directly since default_location uses HOME.

@@ -8,7 +8,7 @@
 use rapidbyte_registry::artifact::{self, unpack_artifact};
 use rapidbyte_registry::cache::PluginCache;
 use rapidbyte_registry::client::{RegistryClient, RegistryConfig};
-use rapidbyte_registry::PluginRef;
+use rapidbyte_registry::{PluginArtifactConfig, PluginRef};
 
 fn insecure_config() -> RegistryConfig {
     RegistryConfig {
@@ -102,8 +102,17 @@ async fn pull_and_cache_end_to_end() {
     // Store in cache
     let tmp = tempfile::tempdir().unwrap();
     let cache = PluginCache::new(tmp.path().to_path_buf());
+    let config = PluginArtifactConfig {
+        wasm_sha256: rapidbyte_registry::verify::sha256_hex(&unpacked.wasm_bytes),
+        signature: None,
+    };
     let entry = cache
-        .store(&plugin_ref, &unpacked.manifest_json, &unpacked.wasm_bytes)
+        .store(
+            &plugin_ref,
+            &unpacked.manifest_json,
+            &unpacked.wasm_bytes,
+            &config,
+        )
         .unwrap();
 
     assert!(entry.wasm_path.exists());
