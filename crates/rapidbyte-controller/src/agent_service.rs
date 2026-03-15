@@ -461,24 +461,29 @@ impl AgentService for AgentServiceImpl {
             match make_task_response(assignment, &self.state.secrets).await {
                 Ok(resp) => return Ok(Response::new(resp)),
                 Err(e) => {
-                    // Release the lease so the task returns to pending.
+                    // Fail the task permanently — secret resolution failures
+                    // are config errors, not transient issues. Returning to
+                    // Pending would create an infinite retry loop.
                     tracing::error!(
                         task_id,
-                        "secret resolution failed during dispatch, releasing lease: {e}"
+                        "secret resolution failed during dispatch, failing task: {e}"
                     );
                     let mut tasks = self.state.tasks.write().await;
-                    let _ = tasks.release_assignment(&task_id, lease_epoch);
-                    let released_task = tasks.get(&task_id).cloned();
+                    let _ = tasks.complete(
+                        &task_id,
+                        &req.agent_id,
+                        lease_epoch,
+                        TerminalTaskOutcome::Failed,
+                    );
+                    let failed_task = tasks.get(&task_id).cloned();
                     drop(tasks);
 
-                    // Revert run state back to Pending.
                     let mut runs = self.state.runs.write().await;
-                    let _ = runs.transition(&run_id, InternalRunState::Pending);
-                    let released_run = runs.get_run(&run_id).cloned();
+                    let _ = runs.transition(&run_id, InternalRunState::Failed);
+                    let failed_run = runs.get_run(&run_id).cloned();
                     drop(runs);
 
-                    // Persist corrected state.
-                    if let (Some(task), Some(run)) = (released_task, released_run) {
+                    if let (Some(task), Some(run)) = (failed_task, failed_run) {
                         let _ = self.state.persist_assignment_records(&run, &task).await;
                     }
                     return Err(e);
@@ -516,24 +521,29 @@ impl AgentService for AgentServiceImpl {
             match make_task_response(assignment, &self.state.secrets).await {
                 Ok(resp) => return Ok(Response::new(resp)),
                 Err(e) => {
-                    // Release the lease so the task returns to pending.
+                    // Fail the task permanently — secret resolution failures
+                    // are config errors, not transient issues. Returning to
+                    // Pending would create an infinite retry loop.
                     tracing::error!(
                         task_id,
-                        "secret resolution failed during dispatch, releasing lease: {e}"
+                        "secret resolution failed during dispatch, failing task: {e}"
                     );
                     let mut tasks = self.state.tasks.write().await;
-                    let _ = tasks.release_assignment(&task_id, lease_epoch);
-                    let released_task = tasks.get(&task_id).cloned();
+                    let _ = tasks.complete(
+                        &task_id,
+                        &req.agent_id,
+                        lease_epoch,
+                        TerminalTaskOutcome::Failed,
+                    );
+                    let failed_task = tasks.get(&task_id).cloned();
                     drop(tasks);
 
-                    // Revert run state back to Pending.
                     let mut runs = self.state.runs.write().await;
-                    let _ = runs.transition(&run_id, InternalRunState::Pending);
-                    let released_run = runs.get_run(&run_id).cloned();
+                    let _ = runs.transition(&run_id, InternalRunState::Failed);
+                    let failed_run = runs.get_run(&run_id).cloned();
                     drop(runs);
 
-                    // Persist corrected state.
-                    if let (Some(task), Some(run)) = (released_task, released_run) {
+                    if let (Some(task), Some(run)) = (failed_task, failed_run) {
                         let _ = self.state.persist_assignment_records(&run, &task).await;
                     }
                     return Err(e);
