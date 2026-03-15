@@ -141,3 +141,124 @@ async fn inspect_pulls_manifest_only() {
     assert!(!digest.is_empty());
     assert!(!manifest.layers.is_empty());
 }
+
+#[tokio::test]
+#[ignore]
+async fn index_push_pull_and_search_roundtrip() {
+    let client = RegistryClient::new(&insecure_config()).unwrap();
+
+    // Push a plugin first
+    let plugin_ref = PluginRef::parse("localhost:5050/test/index-search:0.2.0").unwrap();
+    let packed = artifact::pack_artifact(&test_manifest_json(), b"index-search-wasm");
+    client
+        .push(&plugin_ref, packed.layers, packed.config)
+        .await
+        .unwrap();
+
+    // Build and push an index
+    let mut index = client
+        .pull_index("localhost:5050")
+        .await
+        .unwrap()
+        .unwrap_or_default();
+
+    index.upsert(rapidbyte_registry::PluginIndexEntry {
+        repository: "test/index-search".to_owned(),
+        name: "Index Search Test".to_owned(),
+        description: "A plugin for testing index search".to_owned(),
+        plugin_type: "source".to_owned(),
+        latest: "0.2.0".to_owned(),
+        versions: vec!["0.2.0".to_owned()],
+        author: Some("test-author".to_owned()),
+        license: None,
+        updated_at: chrono::Utc::now(),
+    });
+
+    client.push_index("localhost:5050", &index).await.unwrap();
+
+    // Pull the index back and search
+    let pulled = client
+        .pull_index("localhost:5050")
+        .await
+        .unwrap()
+        .expect("index should exist after push");
+
+    // Search by description
+    let results = pulled.search("testing index", None);
+    assert!(
+        !results.is_empty(),
+        "should find plugin by description search"
+    );
+    assert_eq!(results[0].repository, "test/index-search");
+
+    // Search by type filter
+    let source_results = pulled.search("", Some("source"));
+    assert!(source_results
+        .iter()
+        .any(|e| e.repository == "test/index-search"));
+
+    let dest_results = pulled.search("", Some("destination"));
+    assert!(!dest_results
+        .iter()
+        .any(|e| e.repository == "test/index-search"));
+}
+
+#[tokio::test]
+#[ignore]
+async fn index_upsert_adds_version_without_duplicating() {
+    let client = RegistryClient::new(&insecure_config()).unwrap();
+
+    // Start fresh or with existing index
+    let mut index = client
+        .pull_index("localhost:5050")
+        .await
+        .unwrap()
+        .unwrap_or_default();
+
+    // Push version 1.0.0
+    index.upsert(rapidbyte_registry::PluginIndexEntry {
+        repository: "test/versioned".to_owned(),
+        name: "Versioned Plugin".to_owned(),
+        description: "Tests version accumulation".to_owned(),
+        plugin_type: "transform".to_owned(),
+        latest: "1.0.0".to_owned(),
+        versions: vec!["1.0.0".to_owned()],
+        author: None,
+        license: None,
+        updated_at: chrono::Utc::now(),
+    });
+
+    // Push version 1.1.0
+    index.upsert(rapidbyte_registry::PluginIndexEntry {
+        repository: "test/versioned".to_owned(),
+        name: "Versioned Plugin".to_owned(),
+        description: "Tests version accumulation".to_owned(),
+        plugin_type: "transform".to_owned(),
+        latest: "1.1.0".to_owned(),
+        versions: vec!["1.1.0".to_owned()],
+        author: None,
+        license: None,
+        updated_at: chrono::Utc::now(),
+    });
+
+    client.push_index("localhost:5050", &index).await.unwrap();
+
+    // Pull back and verify
+    let pulled = client
+        .pull_index("localhost:5050")
+        .await
+        .unwrap()
+        .expect("index should exist");
+
+    let entry = pulled
+        .search("versioned", None)
+        .into_iter()
+        .find(|e| e.repository == "test/versioned")
+        .expect("should find versioned plugin");
+
+    assert_eq!(entry.latest, "1.1.0");
+    assert!(entry.versions.contains(&"1.0.0".to_owned()));
+    assert!(entry.versions.contains(&"1.1.0".to_owned()));
+    // No duplicates
+    assert_eq!(entry.versions.iter().filter(|v| *v == "1.0.0").count(), 1);
+}
