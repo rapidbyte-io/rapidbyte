@@ -3,7 +3,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use rapidbyte_registry::{artifact, PluginCache, PluginRef, RegistryClient, RegistryConfig};
+use rapidbyte_registry::{
+    artifact, PluginArtifactConfig, PluginCache, PluginRef, RegistryClient, RegistryConfig,
+    TrustPolicy,
+};
 
 /// Execute a plugin subcommand.
 ///
@@ -18,12 +21,23 @@ pub async fn execute(command: crate::PluginCommands, global_config: &RegistryCon
         crate::PluginCommands::Pull {
             plugin_ref,
             insecure,
-        } => pull(&plugin_ref, effective_insecure(insecure)).await,
+        } => pull(&plugin_ref, effective_insecure(insecure), global_config).await,
         crate::PluginCommands::Push {
             plugin_ref,
             wasm_path,
             insecure,
-        } => push(&plugin_ref, &wasm_path, effective_insecure(insecure)).await,
+            sign,
+            key,
+        } => {
+            push(
+                &plugin_ref,
+                &wasm_path,
+                effective_insecure(insecure),
+                sign,
+                key.as_deref(),
+            )
+            .await
+        }
         crate::PluginCommands::Inspect {
             plugin_ref,
             insecure,
@@ -73,7 +87,7 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-async fn pull(plugin_ref_str: &str, insecure: bool) -> Result<()> {
+async fn pull(plugin_ref_str: &str, insecure: bool, global_config: &RegistryConfig) -> Result<()> {
     let plugin_ref = PluginRef::parse(plugin_ref_str).context("Invalid plugin reference")?;
     let cache = PluginCache::default_location()?;
 
@@ -96,6 +110,13 @@ async fn pull(plugin_ref_str: &str, insecure: bool) -> Result<()> {
     let image = client.pull(&plugin_ref).await?;
 
     let unpacked = artifact::unpack_artifact(&image).context("Failed to unpack plugin artifact")?;
+
+    // Verify plugin signature against trust policy before caching.
+    check_trust(
+        &unpacked.config,
+        global_config.trust_policy,
+        &global_config.trusted_key_paths,
+    )?;
 
     let entry = cache
         .store(&plugin_ref, &unpacked.manifest_json, &unpacked.wasm_bytes)
@@ -122,7 +143,13 @@ fn plugin_type_from_manifest(manifest: &rapidbyte_types::manifest::PluginManifes
     }
 }
 
-async fn push(plugin_ref_str: &str, wasm_path: &PathBuf, insecure: bool) -> Result<()> {
+async fn push(
+    plugin_ref_str: &str,
+    wasm_path: &PathBuf,
+    insecure: bool,
+    sign: bool,
+    key: Option<&Path>,
+) -> Result<()> {
     let plugin_ref = PluginRef::parse(plugin_ref_str).context("Invalid plugin reference")?;
 
     let wasm_bytes = std::fs::read(wasm_path)
@@ -134,7 +161,19 @@ async fn push(plugin_ref_str: &str, wasm_path: &PathBuf, insecure: bool) -> Resu
     let manifest_json =
         serde_json::to_vec_pretty(&manifest).context("Failed to serialize plugin manifest")?;
 
-    let packed = artifact::pack_artifact(&manifest_json, &wasm_bytes);
+    let signing_key = if sign {
+        let key_path = key.context("--key is required when --sign is used")?;
+        let pem = std::fs::read_to_string(key_path)
+            .with_context(|| format!("failed to read signing key: {}", key_path.display()))?;
+        Some(
+            rapidbyte_registry::signing::load_signing_key_pem(&pem)
+                .context("failed to parse signing key")?,
+        )
+    } else {
+        None
+    };
+
+    let packed = artifact::pack_artifact_signed(&manifest_json, &wasm_bytes, signing_key.as_ref());
 
     let config = RegistryConfig {
         insecure,
@@ -147,7 +186,11 @@ async fn push(plugin_ref_str: &str, wasm_path: &PathBuf, insecure: bool) -> Resu
         .push(&plugin_ref, packed.layers, packed.config)
         .await?;
 
-    eprintln!("Pushed {plugin_ref} ({url})");
+    if sign {
+        eprintln!("Pushed {plugin_ref} (signed) ({url})");
+    } else {
+        eprintln!("Pushed {plugin_ref} ({url})");
+    }
 
     // Update the registry index
     eprintln!("Updating registry index...");
@@ -377,4 +420,55 @@ fn keygen(output_dir: &Path) -> Result<()> {
     eprintln!("  Public key:  {}", public_path.display());
     eprintln!("\nShare the public key with consumers. Keep the private key secret.");
     Ok(())
+}
+
+/// Verify a pulled plugin artifact against the configured trust policy.
+///
+/// - `Skip`: no verification, always succeeds.
+/// - `Warn`: logs warnings for unsigned or invalid signatures but succeeds.
+/// - `Verify`: rejects unsigned plugins or invalid signatures with an error.
+fn check_trust(
+    config: &PluginArtifactConfig,
+    trust_policy: TrustPolicy,
+    trusted_key_paths: &[PathBuf],
+) -> Result<()> {
+    match trust_policy {
+        TrustPolicy::Skip => Ok(()),
+        TrustPolicy::Warn | TrustPolicy::Verify => {
+            let keys: Vec<_> = trusted_key_paths
+                .iter()
+                .map(|p| rapidbyte_registry::signing::load_verifying_key_file(p))
+                .collect::<Result<Vec<_>>>()?;
+
+            match &config.signature {
+                None => {
+                    if trust_policy == TrustPolicy::Verify {
+                        bail!("plugin is unsigned and trust policy is 'verify'");
+                    }
+                    eprintln!("warning: plugin is unsigned");
+                    Ok(())
+                }
+                Some(sig) => {
+                    match rapidbyte_registry::signing::verify_against_any(
+                        &keys,
+                        &config.wasm_sha256,
+                        sig,
+                    ) {
+                        Ok(()) => {
+                            eprintln!("Plugin signature verified");
+                            Ok(())
+                        }
+                        Err(err) => {
+                            if trust_policy == TrustPolicy::Verify {
+                                Err(err).context("plugin signature verification failed")
+                            } else {
+                                eprintln!("warning: plugin signature invalid: {err}");
+                                Ok(())
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

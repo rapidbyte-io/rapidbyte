@@ -79,6 +79,19 @@ struct Cli {
     /// Use HTTP instead of HTTPS for plugin registry (for local dev registries)
     #[arg(long, global = true, env = "RAPIDBYTE_REGISTRY_INSECURE")]
     registry_insecure: bool,
+
+    /// Plugin signature trust policy (skip, warn, verify)
+    #[arg(
+        long,
+        global = true,
+        env = "RAPIDBYTE_TRUST_POLICY",
+        default_value = "skip"
+    )]
+    trust_policy: String,
+
+    /// Trusted Ed25519 public key files for plugin verification (can be repeated)
+    #[arg(long, global = true, action = clap::ArgAction::Append)]
+    trust_key: Vec<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -225,6 +238,12 @@ pub(crate) enum PluginCommands {
         /// Use HTTP instead of HTTPS
         #[arg(long)]
         insecure: bool,
+        /// Sign the plugin with an Ed25519 private key
+        #[arg(long)]
+        sign: bool,
+        /// Path to the Ed25519 private key PEM file (required with --sign)
+        #[arg(long)]
+        key: Option<PathBuf>,
     },
     /// Inspect plugin metadata without downloading the wasm binary
     Inspect {
@@ -346,6 +365,8 @@ async fn main() -> ExitCode {
     };
     let tls = tls.is_configured().then_some(tls);
 
+    let trust_policy =
+        rapidbyte_registry::TrustPolicy::from_str_name(&cli.trust_policy).unwrap_or_default();
     let registry_config = rapidbyte_registry::RegistryConfig {
         insecure: cli.registry_insecure,
         default_registry: cli
@@ -353,6 +374,8 @@ async fn main() -> ExitCode {
             .as_deref()
             .filter(|s| !s.trim().is_empty())
             .map(rapidbyte_registry::normalize_registry_url),
+        trust_policy,
+        trusted_key_paths: cli.trust_key.clone(),
         ..Default::default()
     };
 
