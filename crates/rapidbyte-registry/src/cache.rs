@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::reference::PluginRef;
+use crate::verify::sha256_hex;
 
 /// A cached plugin entry on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +92,7 @@ impl PluginCache {
         let manifest_path = dir.join("manifest.json");
         let digest_path = dir.join("sha256");
 
-        let digest = crate::verify::sha256_hex(wasm_bytes);
+        let digest = sha256_hex(wasm_bytes);
 
         fs::write(&wasm_path, wasm_bytes)
             .with_context(|| format!("failed to write {}", wasm_path.display()))?;
@@ -140,9 +141,9 @@ impl PluginCache {
 
     /// Look up a cached plugin by reference.
     ///
-    /// Returns `None` if the entry does not exist or if the on-disk digest does
-    /// not match the WASM file (indicating corruption). A warning is logged on
-    /// digest mismatch.
+    /// Returns `None` if the entry does not exist or if the WASM file's
+    /// SHA-256 does not match the stored sidecar digest (indicating
+    /// corruption or tampering).
     #[must_use]
     pub fn lookup(&self, plugin_ref: &PluginRef) -> Option<CacheEntry> {
         let dir = self.entry_dir(plugin_ref);
@@ -155,16 +156,32 @@ impl PluginCache {
             return None;
         }
 
-        let digest = fs::read_to_string(&digest_path).ok()?;
-        let digest = digest.trim().to_owned();
+        let stored_digest = fs::read_to_string(&digest_path).ok()?;
+        let stored_digest = stored_digest.trim().to_owned();
 
-        let size_bytes = fs::metadata(&wasm_path).ok()?.len();
+        // Verify the WASM binary matches the stored digest to detect
+        // on-disk tampering before the binary is loaded for execution.
+        let wasm_bytes = fs::read(&wasm_path).ok()?;
+        let actual_digest = sha256_hex(&wasm_bytes);
+
+        if actual_digest != stored_digest {
+            tracing::warn!(
+                plugin_ref = %plugin_ref,
+                expected = %stored_digest,
+                actual = %actual_digest,
+                "cache digest mismatch — treating as miss",
+            );
+            return None;
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let size_bytes = wasm_bytes.len() as u64;
 
         Some(CacheEntry {
             plugin_ref: plugin_ref.clone(),
             wasm_path,
             manifest_path,
-            digest,
+            digest: actual_digest,
             size_bytes,
         })
     }
@@ -435,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_digest_returns_entry_with_stored_digest() {
+    fn corrupt_digest_treated_as_miss() {
         let tmp = tempdir().unwrap();
         let cache = PluginCache::new(tmp.path().to_path_buf());
         let pref = test_ref("1.0.0");
@@ -445,15 +462,34 @@ mod tests {
             .store(&pref, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
             .unwrap();
 
-        // Corrupt the digest file.
-        let bad_digest = "badc0ffee00000000000000000000000000000000000000000000000000bad";
+        // Corrupt the digest file so it no longer matches the WASM.
         let digest_path = entry.wasm_path.parent().unwrap().join("sha256");
-        fs::write(&digest_path, bad_digest).unwrap();
+        fs::write(
+            &digest_path,
+            "badc0ffee00000000000000000000000000000000000000000000000000bad",
+        )
+        .unwrap();
 
-        // Lookup trusts the sidecar; the caller detects the mismatch
-        // via artifact_config cross-check.
-        let looked_up = cache.lookup(&pref).expect("entry should still be returned");
-        assert_eq!(looked_up.digest, bad_digest);
+        // lookup() verifies WASM against the sidecar — mismatch → miss.
+        assert!(cache.lookup(&pref).is_none());
+    }
+
+    #[test]
+    fn tampered_wasm_treated_as_miss() {
+        let tmp = tempdir().unwrap();
+        let cache = PluginCache::new(tmp.path().to_path_buf());
+        let pref = test_ref("1.0.0");
+
+        let wasm = dummy_wasm();
+        let entry = cache
+            .store(&pref, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
+            .unwrap();
+
+        // Tamper the WASM binary while leaving the digest untouched.
+        fs::write(&entry.wasm_path, b"tampered-wasm-content").unwrap();
+
+        // lookup() re-hashes the WASM — mismatch → miss.
+        assert!(cache.lookup(&pref).is_none());
     }
 
     #[test]

@@ -186,6 +186,7 @@ pub async fn resolve_plugin_from_registry(
     let cache = PluginCache::default_location()?;
 
     // Parse trusted keys once for both cache-hit and pull paths.
+    // Returns empty for Skip policy to avoid failing on bad key files.
     let trusted_keys = rapidbyte_registry::parse_trusted_keys(registry_config)?;
 
     // Check cache first.
