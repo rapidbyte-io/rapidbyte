@@ -188,9 +188,12 @@ pub async fn run(
         .await?;
     let registration = resp.into_inner();
     let agent_id = registration.agent_id;
-    // Apply registry config from controller if provided
+    // Controller response is authoritative for registry and trust config.
+    // Empty values explicitly mean "not configured" and override any local settings.
     let mut config = config;
     if registration.registry_url.is_empty() {
+        config.registry_url = None;
+        config.registry_insecure = false;
         info!(agent_id, "Registered with controller");
     } else {
         info!(
@@ -202,13 +205,12 @@ pub async fn run(
         config.registry_url = Some(registration.registry_url);
         config.registry_insecure = registration.registry_insecure;
     }
-    // Apply trust policy from controller if provided
-    if !registration.trust_policy.is_empty() {
-        config.trust_policy = registration.trust_policy;
-    }
-    if !registration.trusted_key_pems.is_empty() {
-        config.trusted_key_pems = registration.trusted_key_pems;
-    }
+    config.trust_policy = if registration.trust_policy.is_empty() {
+        "skip".to_owned()
+    } else {
+        registration.trust_policy
+    };
+    config.trusted_key_pems = registration.trusted_key_pems;
 
     // Active lease tracking shared between worker and heartbeat
     let active_leases: ActiveLeaseMap = Arc::new(RwLock::new(HashMap::new()));
@@ -439,6 +441,19 @@ async fn process_task(
         ctx.config.auth_token.clone(),
     ));
 
+    let trust_policy = if ctx.config.trust_policy.is_empty() {
+        rapidbyte_registry::TrustPolicy::Skip
+    } else if let Ok(p) = rapidbyte_registry::TrustPolicy::from_str_name(&ctx.config.trust_policy) {
+        p
+    } else {
+        // Invalid policy defaults to Verify (most restrictive) so the task
+        // fails safely on plugin resolution rather than crashing the worker.
+        tracing::error!(
+            policy = %ctx.config.trust_policy,
+            "invalid trust policy from controller, defaulting to 'verify'"
+        );
+        rapidbyte_registry::TrustPolicy::Verify
+    };
     let registry_config = rapidbyte_registry::RegistryConfig {
         insecure: ctx.config.registry_insecure,
         credentials: None,
@@ -448,8 +463,7 @@ async fn process_task(
             .as_deref()
             .filter(|s| !s.trim().is_empty())
             .map(rapidbyte_registry::normalize_registry_url),
-        trust_policy: rapidbyte_registry::TrustPolicy::from_str_name(&ctx.config.trust_policy)
-            .unwrap_or_default(),
+        trust_policy,
         trusted_key_pems: ctx.config.trusted_key_pems.clone(),
         ..Default::default()
     };
