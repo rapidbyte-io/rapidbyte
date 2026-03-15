@@ -790,4 +790,30 @@ mod tests {
             "expected verify-mode rejection, got: {msg}"
         );
     }
+
+    // ── Edge case: dotted/relative refs should NOT be treated as OCI ──
+
+    #[test]
+    fn dotted_namespace_is_not_oci() {
+        // acme.io/plugin looks like OCI (has dot) — this IS treated as OCI
+        // which is correct: a dotted first segment is a registry host.
+        assert!(is_oci_reference("acme.io/source/postgres:1.0.0"));
+    }
+
+    #[test]
+    fn relative_path_is_not_oci() {
+        // ./source-postgres should NOT be OCI
+        assert!(!is_oci_reference("./source-postgres"));
+    }
+
+    #[test]
+    fn bare_name_with_at_version_is_not_oci() {
+        assert!(!is_oci_reference("postgres@v1.0.0"));
+    }
+
+    #[test]
+    fn single_segment_dotted_name_is_not_oci() {
+        // "source.postgres" has a dot but no slash — not OCI
+        assert!(!is_oci_reference("source.postgres"));
+    }
 }

@@ -40,9 +40,12 @@ impl PluginRef {
         let registry = &base[..slash];
         let repository = &base[slash + 1..];
 
-        // Registry must look like a host (contains '.', ':', or is 'localhost')
+        // Registry must look like a host (contains '.', ':', or is 'localhost').
+        // Reject single-char or relative-path segments like '.' or '..'.
         anyhow::ensure!(
-            registry.contains('.') || registry.contains(':') || registry == "localhost",
+            (registry.contains('.') || registry.contains(':') || registry == "localhost")
+                && registry.len() >= 2
+                && registry != "..",
             "plugin reference must start with a registry host \
              (e.g. registry.example.com/source/postgres:1.0.0), got: {input}"
         );
