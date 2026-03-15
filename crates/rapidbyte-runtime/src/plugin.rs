@@ -211,6 +211,24 @@ pub async fn resolve_plugin_from_registry(
 /// Resolve a plugin path, automatically choosing between OCI registry and
 /// local filesystem based on the reference format.
 ///
+/// Build a fully-qualified OCI reference from a bare plugin name and kind.
+///
+/// E.g. `qualify_bare_ref("postgres", Source, "registry.example.com")` →
+/// `"registry.example.com/source/postgres"`.
+fn qualify_bare_ref(use_ref: &str, kind: PluginKind, default_registry: &str) -> String {
+    let kind_prefix = match kind {
+        PluginKind::Source => "source",
+        PluginKind::Destination => "destination",
+        PluginKind::Transform => "transform",
+    };
+    if let Some((name, version)) = use_ref.split_once('@') {
+        let version = version.strip_prefix('v').unwrap_or(version);
+        format!("{default_registry}/{kind_prefix}/{name}:{version}")
+    } else {
+        format!("{default_registry}/{kind_prefix}/{use_ref}")
+    }
+}
+
 /// If `use_ref` looks like an OCI reference (contains a registry host),
 /// the plugin is resolved via [`resolve_plugin_from_registry`]. Otherwise
 /// it falls back to [`resolve_plugin_path`] for local filesystem lookup.
@@ -232,20 +250,8 @@ pub async fn resolve_plugin(
         }
 
         // Fall back to registry with default_registry prefix if configured.
-        // Include the plugin kind as a path segment so bare "postgres" resolves
-        // to e.g. "registry/source/postgres" or "registry/dest/postgres".
         if let Some(default_registry) = &registry_config.default_registry {
-            let kind_prefix = match kind {
-                PluginKind::Source => "source",
-                PluginKind::Destination => "dest",
-                PluginKind::Transform => "transform",
-            };
-            let qualified_ref = if let Some((name, version)) = use_ref.split_once('@') {
-                let version = version.strip_prefix('v').unwrap_or(version);
-                format!("{default_registry}/{kind_prefix}/{name}:{version}")
-            } else {
-                format!("{default_registry}/{kind_prefix}/{use_ref}")
-            };
+            let qualified_ref = qualify_bare_ref(use_ref, kind, default_registry);
             tracing::debug!(
                 use_ref,
                 qualified_ref,
@@ -638,5 +644,39 @@ mod tests {
         assert_eq!(looked_up.unwrap().wasm_path, entry.wasm_path);
 
         std::fs::remove_dir_all(&cache_dir).ok();
+    }
+
+    #[test]
+    fn qualify_bare_ref_source() {
+        let result = qualify_bare_ref("postgres", PluginKind::Source, "registry.example.com");
+        assert_eq!(result, "registry.example.com/source/postgres");
+    }
+
+    #[test]
+    fn qualify_bare_ref_destination() {
+        let result = qualify_bare_ref("postgres", PluginKind::Destination, "registry.example.com");
+        assert_eq!(result, "registry.example.com/destination/postgres");
+    }
+
+    #[test]
+    fn qualify_bare_ref_transform() {
+        let result = qualify_bare_ref("sql", PluginKind::Transform, "registry.example.com");
+        assert_eq!(result, "registry.example.com/transform/sql");
+    }
+
+    #[test]
+    fn qualify_bare_ref_with_at_version() {
+        let result = qualify_bare_ref(
+            "postgres@v1.2.0",
+            PluginKind::Source,
+            "registry.example.com",
+        );
+        assert_eq!(result, "registry.example.com/source/postgres:1.2.0");
+    }
+
+    #[test]
+    fn qualify_bare_ref_with_registry_port() {
+        let result = qualify_bare_ref("postgres", PluginKind::Source, "localhost:5050");
+        assert_eq!(result, "localhost:5050/source/postgres");
     }
 }
