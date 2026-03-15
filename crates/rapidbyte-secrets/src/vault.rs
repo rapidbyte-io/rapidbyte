@@ -1,11 +1,10 @@
-//! Vault secret resolution for pipeline configs.
-//!
-//! Wraps the `vaultrs` crate to provide a simplified API for reading
-//! KV v2 secrets referenced in pipeline YAML via `${vault:mount/path#key}`.
+//! HashiCorp Vault KV v2 secret provider.
 
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
+
+use crate::SecretProvider;
 
 /// Vault connection and authentication configuration.
 ///
@@ -25,13 +24,16 @@ pub enum VaultAuth {
     AppRole { role_id: String, secret_id: String },
 }
 
-/// A configured Vault client for reading KV v2 secrets.
-pub struct VaultClient {
+/// Vault KV v2 secret provider.
+///
+/// Reads secrets from a HashiCorp Vault server. Path format in pipeline
+/// YAML: `${vault:mount/path#key}` (e.g. `${vault:secret/postgres#password}`).
+pub struct VaultProvider {
     client: vaultrs::client::VaultClient,
 }
 
-impl VaultClient {
-    /// Create a new Vault client and authenticate.
+impl VaultProvider {
+    /// Create a new Vault provider and authenticate.
     ///
     /// For [`VaultAuth::Token`], the token is set directly.
     /// For [`VaultAuth::AppRole`], the client exchanges role_id/secret_id
@@ -48,9 +50,7 @@ impl VaultClient {
             VaultAuth::Token(token) => {
                 settings.token(token);
             }
-            VaultAuth::AppRole { .. } => {
-                // Token will be set after AppRole login below.
-            }
+            VaultAuth::AppRole { .. } => {}
         }
 
         let client = vaultrs::client::VaultClient::new(
@@ -58,13 +58,13 @@ impl VaultClient {
         )
         .context("failed to create Vault client")?;
 
-        let client = Self { client };
+        let provider = Self { client };
 
         if let VaultAuth::AppRole { role_id, secret_id } = &config.auth {
-            client.approle_login(role_id, secret_id).await?;
+            provider.approle_login(role_id, secret_id).await?;
         }
 
-        Ok(client)
+        Ok(provider)
     }
 
     async fn approle_login(&self, role_id: &str, secret_id: &str) -> Result<()> {
@@ -73,26 +73,22 @@ impl VaultClient {
             .context("Vault AppRole authentication failed")?;
         Ok(())
     }
+}
 
-    /// Read a single field from a KV v2 secret.
-    ///
-    /// # Arguments
-    ///
-    /// * `mount` — KV v2 mount point (e.g. `"secret"`)
-    /// * `path` — Secret path within the mount (e.g. `"postgres"`)
-    /// * `key` — Field name within the secret data (e.g. `"password"`)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the path does not exist, the key is not found
-    /// in the secret data, or Vault is unreachable.
-    pub async fn read_secret(&self, mount: &str, path: &str, key: &str) -> Result<String> {
-        let data: HashMap<String, String> = vaultrs::kv2::read(&self.client, mount, path)
+#[async_trait::async_trait]
+impl SecretProvider for VaultProvider {
+    async fn read_secret(&self, path: &str, key: &str) -> Result<String> {
+        // Split mount from path: "secret/postgres" → mount="secret", path="postgres"
+        let (mount, secret_path) = path
+            .split_once('/')
+            .with_context(|| format!("invalid Vault path '{path}': expected mount/path format"))?;
+
+        let data: HashMap<String, String> = vaultrs::kv2::read(&self.client, mount, secret_path)
             .await
-            .with_context(|| format!("failed to read Vault secret at {mount}/{path}"))?;
+            .with_context(|| format!("failed to read Vault secret at {path}"))?;
 
         data.get(key)
             .cloned()
-            .with_context(|| format!("key '{key}' not found in Vault secret {mount}/{path}"))
+            .with_context(|| format!("key '{key}' not found in Vault secret {path}"))
     }
 }

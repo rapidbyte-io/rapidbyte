@@ -18,8 +18,9 @@ pub async fn execute(
     pipeline_path: &Path,
     verbosity: Verbosity,
     registry_config: &rapidbyte_registry::RegistryConfig,
+    secrets: &rapidbyte_secrets::SecretProviders,
 ) -> Result<()> {
-    let config = super::load_pipeline(pipeline_path)?;
+    let config = super::load_pipeline(pipeline_path, secrets).await?;
 
     // Discover catalog from source plugin
     let catalog = orchestrator::discover_plugin(

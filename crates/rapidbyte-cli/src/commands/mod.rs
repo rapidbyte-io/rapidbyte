@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 
 use rapidbyte_engine::config::types::PipelineConfig;
 use rapidbyte_engine::config::{parser, validator};
+use rapidbyte_secrets::SecretProviders;
 
 pub mod agent;
 pub mod check;
@@ -26,8 +27,9 @@ pub mod watch;
 /// # Errors
 ///
 /// Returns `Err` if parsing or validation fails.
-pub fn load_pipeline(path: &Path) -> Result<PipelineConfig> {
-    let config = parser::parse_pipeline(path)
+pub async fn load_pipeline(path: &Path, secrets: &SecretProviders) -> Result<PipelineConfig> {
+    let config = parser::parse_pipeline(path, secrets)
+        .await
         .with_context(|| format!("Failed to parse pipeline: {}", path.display()))?;
     validator::validate_pipeline(&config)?;
     Ok(config)

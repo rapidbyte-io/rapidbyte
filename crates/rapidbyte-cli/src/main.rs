@@ -92,6 +92,22 @@ struct Cli {
     /// Trusted Ed25519 public key files for plugin verification (can be repeated)
     #[arg(long, global = true, action = clap::ArgAction::Append)]
     trust_key: Vec<PathBuf>,
+
+    /// Vault server address for secret resolution
+    #[arg(long, global = true, env = "VAULT_ADDR")]
+    vault_addr: Option<String>,
+
+    /// Vault authentication token
+    #[arg(long, global = true, env = "VAULT_TOKEN")]
+    vault_token: Option<String>,
+
+    /// Vault `AppRole` role ID
+    #[arg(long, global = true, env = "VAULT_ROLE_ID")]
+    vault_role_id: Option<String>,
+
+    /// Vault `AppRole` secret ID
+    #[arg(long, global = true, env = "VAULT_SECRET_ID")]
+    vault_secret_id: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -334,6 +350,37 @@ fn resolve_controller_url(
     )
 }
 
+async fn build_secret_providers(cli: &Cli) -> anyhow::Result<rapidbyte_secrets::SecretProviders> {
+    let mut providers = rapidbyte_secrets::SecretProviders::new();
+
+    if let Some(addr) = &cli.vault_addr {
+        let auth = if let Some(token) = &cli.vault_token {
+            rapidbyte_secrets::VaultAuth::Token(token.clone())
+        } else if let (Some(role_id), Some(secret_id)) = (&cli.vault_role_id, &cli.vault_secret_id)
+        {
+            rapidbyte_secrets::VaultAuth::AppRole {
+                role_id: role_id.clone(),
+                secret_id: secret_id.clone(),
+            }
+        } else {
+            anyhow::bail!(
+                "--vault-addr is set but no authentication provided; \
+                 set --vault-token or --vault-role-id + --vault-secret-id"
+            );
+        };
+
+        let vault = rapidbyte_secrets::VaultProvider::new(rapidbyte_secrets::VaultConfig {
+            address: addr.clone(),
+            auth,
+        })
+        .await?;
+
+        providers.register("vault", std::sync::Arc::new(vault));
+    }
+
+    Ok(providers)
+}
+
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> ExitCode {
@@ -382,6 +429,14 @@ async fn main() -> ExitCode {
         ..Default::default()
     };
 
+    let secrets = match build_secret_providers(&cli).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
+            return ExitCode::FAILURE;
+        }
+    };
+
     let result = match cli.command {
         Commands::Run {
             pipeline,
@@ -399,6 +454,7 @@ async fn main() -> ExitCode {
                 tls.as_ref(),
                 &otel_guard,
                 &registry_config,
+                &secrets,
             )
             .await
         }
@@ -437,10 +493,10 @@ async fn main() -> ExitCode {
             .await
         }
         Commands::Check { pipeline } => {
-            commands::check::execute(&pipeline, verbosity, &registry_config).await
+            commands::check::execute(&pipeline, verbosity, &registry_config, &secrets).await
         }
         Commands::Discover { pipeline } => {
-            commands::discover::execute(&pipeline, verbosity, &registry_config).await
+            commands::discover::execute(&pipeline, verbosity, &registry_config, &secrets).await
         }
         Commands::Plugin { command } => commands::plugin::execute(command, &registry_config).await,
         Commands::Scaffold { name, output } => commands::scaffold::run(&name, output.as_deref()),

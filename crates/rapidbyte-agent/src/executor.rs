@@ -130,7 +130,12 @@ where
         }
     };
 
-    let config = match parser::parse_pipeline_str(yaml_str) {
+    let config = match parser::parse_pipeline_str(
+        yaml_str,
+        &rapidbyte_secrets::SecretProviders::new(),
+    )
+    .await
+    {
         Ok(c) => c,
         Err(e) => {
             return TaskExecutionResult {

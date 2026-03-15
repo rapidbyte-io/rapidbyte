@@ -43,6 +43,7 @@ pub async fn execute(
     tls: Option<&TlsClientConfig>,
     otel_guard: &rapidbyte_metrics::OtelGuard,
     registry_config: &rapidbyte_registry::RegistryConfig,
+    secrets: &rapidbyte_secrets::SecretProviders,
 ) -> Result<()> {
     // If controller is set, route to distributed mode
     if let Some(url) = controller {
@@ -58,7 +59,7 @@ pub async fn execute(
         .await;
     }
 
-    let config = super::load_pipeline(pipeline_path)?;
+    let config = super::load_pipeline(pipeline_path, secrets).await?;
 
     // Build execution options (--limit implies --dry-run)
     let dry_run = dry_run || limit.is_some();

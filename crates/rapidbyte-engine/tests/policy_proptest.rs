@@ -1,6 +1,7 @@
 use proptest::prelude::*;
 use rapidbyte_engine::config::parser;
 use rapidbyte_engine::config::validator;
+use rapidbyte_secrets::SecretProviders;
 
 proptest! {
     #[test]
@@ -42,7 +43,7 @@ state:
 "#
         );
 
-        let config = parser::parse_pipeline_str(&yaml).expect("generated yaml must parse");
+        let config = tokio::runtime::Runtime::new().unwrap().block_on(parser::parse_pipeline_str(&yaml, &SecretProviders::new())).expect("generated yaml must parse");
         let result = validator::validate_pipeline(&config);
 
         if pk_len == 0 {
@@ -90,7 +91,7 @@ state:
 "#
         );
 
-        let config = parser::parse_pipeline_str(&yaml).expect("generated yaml must parse");
+        let config = tokio::runtime::Runtime::new().unwrap().block_on(parser::parse_pipeline_str(&yaml, &SecretProviders::new())).expect("generated yaml must parse");
         let result = validator::validate_pipeline(&config);
 
         if has_cursor {

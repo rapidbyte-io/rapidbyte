@@ -6,6 +6,7 @@
 use rapidbyte_engine::config::parser;
 use rapidbyte_engine::config::types::{PipelineWriteMode, StateBackendKind};
 use rapidbyte_engine::config::validator;
+use rapidbyte_secrets::SecretProviders;
 use rapidbyte_state::{SqliteStateBackend, StateBackend};
 use rapidbyte_types::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
 use std::sync::{LazyLock, Mutex};
@@ -41,8 +42,8 @@ impl Drop for PluginDirEnvGuard {
 }
 
 /// Test parsing and validating a well-formed pipeline YAML fixture.
-#[test]
-fn test_parse_and_validate_fixture_pipeline() {
+#[tokio::test]
+async fn test_parse_and_validate_fixture_pipeline() {
     // Set required env vars for the fixture
     std::env::set_var("TEST_SOURCE_PG_HOST", "localhost");
     std::env::set_var("TEST_SOURCE_PG_PORT", "5432");
@@ -56,7 +57,9 @@ fn test_parse_and_validate_fixture_pipeline() {
         .unwrap()
         .join("tests/fixtures/pipelines/simple_pg_to_pg.yaml");
 
-    let config = parser::parse_pipeline(&fixture_path).expect("Failed to parse fixture pipeline");
+    let config = parser::parse_pipeline(&fixture_path, &SecretProviders::new())
+        .await
+        .expect("Failed to parse fixture pipeline");
 
     assert_eq!(config.pipeline, "test_pg_to_pg");
     assert_eq!(config.source.use_ref, "postgres");
@@ -79,8 +82,8 @@ fn test_parse_and_validate_fixture_pipeline() {
 }
 
 /// Test that an invalid pipeline fixture fails validation.
-#[test]
-fn test_parse_and_validate_invalid_fixture() {
+#[tokio::test]
+async fn test_parse_and_validate_invalid_fixture() {
     let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -88,7 +91,7 @@ fn test_parse_and_validate_invalid_fixture() {
         .unwrap()
         .join("tests/fixtures/pipelines/invalid_pipeline.yaml");
 
-    let result = parser::parse_pipeline(&fixture_path);
+    let result = parser::parse_pipeline(&fixture_path, &SecretProviders::new()).await;
     assert!(
         result.is_err(),
         "Invalid pipeline should fail at parse-time"

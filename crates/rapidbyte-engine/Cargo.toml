@@ -23,16 +23,14 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 regex = "1"
 jsonschema = "0.28"
-rapidbyte-vault = { path = "../rapidbyte-vault", optional = true }
-
-[features]
-vault = ["dep:rapidbyte-vault"]
+rapidbyte-secrets = { path = "../rapidbyte-secrets" }
 
 [dev-dependencies]
 bytes = "1"
 tempfile = "3"
 criterion = { workspace = true }
 proptest = "1"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [[bench]]
 name = "arrow_codec"

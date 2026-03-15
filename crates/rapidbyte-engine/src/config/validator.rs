@@ -215,6 +215,7 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
 mod tests {
     use super::*;
     use crate::config::parser::parse_pipeline_str;
+    use rapidbyte_secrets::SecretProviders;
 
     fn valid_yaml() -> &'static str {
         r#"
@@ -235,46 +236,56 @@ destination:
 "#
     }
 
-    #[test]
-    fn test_valid_pipeline_passes() {
-        let config = parse_pipeline_str(valid_yaml()).unwrap();
+    #[tokio::test]
+    async fn test_valid_pipeline_passes() {
+        let config = parse_pipeline_str(valid_yaml(), &SecretProviders::new())
+            .await
+            .unwrap();
         assert!(validate_pipeline(&config).is_ok());
     }
 
-    #[test]
-    fn test_wrong_version_fails() {
+    #[tokio::test]
+    async fn test_wrong_version_fails() {
         let yaml = valid_yaml().replace("\"1.0\"", "\"2.0\"");
-        let config = parse_pipeline_str(&yaml).unwrap();
+        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("Unsupported pipeline version"));
     }
 
-    #[test]
-    fn test_empty_pipeline_name_fails() {
+    #[tokio::test]
+    async fn test_empty_pipeline_name_fails() {
         let yaml = valid_yaml().replace("test_pipeline", "");
-        let config = parse_pipeline_str(&yaml).unwrap();
+        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("Pipeline name must not be empty"));
     }
 
-    #[test]
-    fn test_incremental_without_cursor_fails() {
+    #[tokio::test]
+    async fn test_incremental_without_cursor_fails() {
         let yaml = valid_yaml().replace("full_refresh", "incremental");
-        let config = parse_pipeline_str(&yaml).unwrap();
+        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("no cursor_field"));
     }
 
-    #[test]
-    fn test_upsert_without_primary_key_fails() {
+    #[tokio::test]
+    async fn test_upsert_without_primary_key_fails() {
         let yaml = valid_yaml().replace("append", "upsert");
-        let config = parse_pipeline_str(&yaml).unwrap();
+        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("requires at least one primary_key"));
     }
 
-    #[test]
-    fn test_max_inflight_batches_zero_fails() {
+    #[tokio::test]
+    async fn test_max_inflight_batches_zero_fails() {
         let yaml = r#"
 version: "1.0"
 pipeline: test_pipeline
@@ -293,13 +304,15 @@ destination:
 resources:
   max_inflight_batches: 0
 "#;
-        let config = parse_pipeline_str(yaml).unwrap();
+        let config = parse_pipeline_str(yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("max_inflight_batches"));
     }
 
-    #[test]
-    fn test_parallelism_zero_fails() {
+    #[tokio::test]
+    async fn test_parallelism_zero_fails() {
         let yaml = r#"
 version: "1.0"
 pipeline: test_pipeline
@@ -318,65 +331,77 @@ destination:
 resources:
   parallelism: 0
 "#;
-        let config = parse_pipeline_str(yaml).unwrap();
+        let config = parse_pipeline_str(yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("parallelism"));
     }
 
-    #[test]
-    fn test_parallelism_auto_passes() {
+    #[tokio::test]
+    async fn test_parallelism_auto_passes() {
         let yaml = format!(
             "{}\nresources:\n  parallelism: auto\n",
             valid_yaml().trim_end()
         );
-        let config = parse_pipeline_str(&yaml).unwrap();
+        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         assert!(validate_pipeline(&config).is_ok());
     }
 
-    #[test]
-    fn test_parallelism_manual_one_passes() {
+    #[tokio::test]
+    async fn test_parallelism_manual_one_passes() {
         let yaml = format!(
             "{}\nresources:\n  parallelism: 1\n",
             valid_yaml().trim_end()
         );
-        let config = parse_pipeline_str(&yaml).unwrap();
+        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         assert!(validate_pipeline(&config).is_ok());
     }
 
-    #[test]
-    fn test_autotune_pin_parallelism_zero_fails() {
+    #[tokio::test]
+    async fn test_autotune_pin_parallelism_zero_fails() {
         let yaml = format!(
             "{}\nresources:\n  autotune:\n    pin_parallelism: 0\n",
             valid_yaml().trim_end()
         );
-        let config = parse_pipeline_str(&yaml).unwrap();
+        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("autotune.pin_parallelism"));
     }
 
-    #[test]
-    fn test_autotune_pin_copy_flush_bytes_below_min_fails() {
+    #[tokio::test]
+    async fn test_autotune_pin_copy_flush_bytes_below_min_fails() {
         let yaml = format!(
             "{}\nresources:\n  autotune:\n    pin_copy_flush_bytes: 1024\n",
             valid_yaml().trim_end()
         );
-        let config = parse_pipeline_str(&yaml).unwrap();
+        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("autotune.pin_copy_flush_bytes"));
     }
 
-    #[test]
-    fn test_autotune_pin_copy_flush_bytes_in_range_passes() {
+    #[tokio::test]
+    async fn test_autotune_pin_copy_flush_bytes_in_range_passes() {
         let yaml = format!(
             "{}\nresources:\n  autotune:\n    pin_copy_flush_bytes: 8388608\n",
             valid_yaml().trim_end()
         );
-        let config = parse_pipeline_str(&yaml).unwrap();
+        let config = parse_pipeline_str(&yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         assert!(validate_pipeline(&config).is_ok());
     }
 
-    #[test]
-    fn test_upsert_with_primary_key_passes() {
+    #[tokio::test]
+    async fn test_upsert_with_primary_key_passes() {
         let yaml = r#"
 version: "1.0"
 pipeline: test_upsert
@@ -394,12 +419,14 @@ destination:
   write_mode: upsert
   primary_key: [id]
 "#;
-        let config = parse_pipeline_str(yaml).unwrap();
+        let config = parse_pipeline_str(yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         assert!(validate_pipeline(&config).is_ok());
     }
 
-    #[test]
-    fn test_incremental_with_cursor_passes() {
+    #[tokio::test]
+    async fn test_incremental_with_cursor_passes() {
         let yaml = r#"
 version: "1.0"
 pipeline: test_incr
@@ -417,12 +444,14 @@ destination:
     host: localhost
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml).unwrap();
+        let config = parse_pipeline_str(yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         assert!(validate_pipeline(&config).is_ok());
     }
 
-    #[test]
-    fn test_tie_breaker_requires_incremental_sync() {
+    #[tokio::test]
+    async fn test_tie_breaker_requires_incremental_sync() {
         let yaml = r#"
 version: "1.0"
 pipeline: test_tie_breaker_full_refresh
@@ -440,13 +469,15 @@ destination:
     host: localhost
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml).unwrap();
+        let config = parse_pipeline_str(yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("sets tie_breaker_field but is not incremental"));
     }
 
-    #[test]
-    fn test_tie_breaker_must_differ_from_cursor_field() {
+    #[tokio::test]
+    async fn test_tie_breaker_must_differ_from_cursor_field() {
         let yaml = r#"
 version: "1.0"
 pipeline: test_tie_breaker_same_field
@@ -465,13 +496,15 @@ destination:
     host: localhost
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml).unwrap();
+        let config = parse_pipeline_str(yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("tie_breaker_field must differ from cursor_field"));
     }
 
-    #[test]
-    fn test_columns_must_include_tie_breaker_field() {
+    #[tokio::test]
+    async fn test_columns_must_include_tie_breaker_field() {
         let yaml = r#"
 version: "1.0"
 pipeline: test_tie_breaker_projection
@@ -491,13 +524,15 @@ destination:
     host: localhost
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml).unwrap();
+        let config = parse_pipeline_str(yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("columns must include tie_breaker_field 'id'"));
     }
 
-    #[test]
-    fn test_partition_key_requires_full_refresh() {
+    #[tokio::test]
+    async fn test_partition_key_requires_full_refresh() {
         let yaml = r#"
 version: "1.0"
 pipeline: test_partition_key_incremental
@@ -516,13 +551,15 @@ destination:
     host: localhost
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml).unwrap();
+        let config = parse_pipeline_str(yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("sets partition_key but is not full_refresh"));
     }
 
-    #[test]
-    fn test_replace_write_mode_passes() {
+    #[tokio::test]
+    async fn test_replace_write_mode_passes() {
         let yaml = r#"
 version: "1.0"
 pipeline: test_replace
@@ -539,12 +576,14 @@ destination:
     host: localhost
   write_mode: replace
 "#;
-        let config = parse_pipeline_str(yaml).unwrap();
+        let config = parse_pipeline_str(yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         assert!(validate_pipeline(&config).is_ok());
     }
 
-    #[test]
-    fn test_valid_pipeline_permissions_passes() {
+    #[tokio::test]
+    async fn test_valid_pipeline_permissions_passes() {
         let yaml = r#"
 version: "1.0"
 pipeline: test
@@ -565,12 +604,14 @@ destination:
   config: {}
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml).unwrap();
+        let config = parse_pipeline_str(yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         assert!(validate_pipeline(&config).is_ok());
     }
 
-    #[test]
-    fn test_nested_wildcard_host_fails() {
+    #[tokio::test]
+    async fn test_nested_wildcard_host_fails() {
         let yaml = r#"
 version: "1.0"
 pipeline: test
@@ -588,13 +629,15 @@ destination:
   config: {}
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml).unwrap();
+        let config = parse_pipeline_str(yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("Invalid host pattern"));
     }
 
-    #[test]
-    fn test_invalid_max_memory_fails() {
+    #[tokio::test]
+    async fn test_invalid_max_memory_fails() {
         let yaml = r#"
 version: "1.0"
 pipeline: test
@@ -611,13 +654,15 @@ destination:
   config: {}
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml).unwrap();
+        let config = parse_pipeline_str(yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("max_memory"));
     }
 
-    #[test]
-    fn test_zero_timeout_fails() {
+    #[tokio::test]
+    async fn test_zero_timeout_fails() {
         let yaml = r#"
 version: "1.0"
 pipeline: test
@@ -634,7 +679,9 @@ destination:
   config: {}
   write_mode: append
 "#;
-        let config = parse_pipeline_str(yaml).unwrap();
+        let config = parse_pipeline_str(yaml, &SecretProviders::new())
+            .await
+            .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
         assert!(err.contains("timeout_seconds"));
     }
