@@ -53,14 +53,29 @@ pub fn extract_manifest_from_wasm(wasm_bytes: &[u8]) -> Option<PluginManifest> {
 /// - "postgres"                  -> ("postgres", "unknown")
 #[must_use]
 pub fn parse_plugin_ref(plugin_ref: &str) -> (String, String) {
-    let after_slash = plugin_ref.split('/').next_back().unwrap_or(plugin_ref);
+    // OCI references use ':tag' format (e.g. registry.example.com/source/postgres:1.2.0)
+    if let Ok(oci_ref) = PluginRef::parse(plugin_ref) {
+        // Extract the last path component as the plugin name
+        let name = oci_ref
+            .repository
+            .split('/')
+            .next_back()
+            .unwrap_or(&oci_ref.repository)
+            .to_string();
+        let version = if oci_ref.tag == "latest" {
+            "unknown".to_string()
+        } else {
+            oci_ref.tag
+        };
+        return (name, version);
+    }
 
-    let (name, version) = match after_slash.split_once('@') {
+    // Bare names with optional @version (e.g. source-postgres, postgres@v0.1.0)
+    let after_slash = plugin_ref.split('/').next_back().unwrap_or(plugin_ref);
+    match after_slash.split_once('@') {
         Some((n, v)) => (n.to_string(), v.strip_prefix('v').unwrap_or(v).to_string()),
         None => (after_slash.to_string(), "unknown".to_string()),
-    };
-
-    (name, version)
+    }
 }
 
 /// Return the ordered list of directories to search for plugin `.wasm` binaries.
@@ -212,13 +227,19 @@ pub async fn resolve_plugin(
         resolve_plugin_from_registry(use_ref, registry_config).await
     } else if let Some(default_registry) = &registry_config.default_registry {
         // Prepend default registry to make a full OCI reference.
-        let full_ref = format!("{default_registry}/{use_ref}");
+        // Convert @version to :tag if present (legacy format normalization).
+        let normalized = if let Some((name, version)) = use_ref.split_once('@') {
+            let version = version.strip_prefix('v').unwrap_or(version);
+            format!("{default_registry}/{name}:{version}")
+        } else {
+            format!("{default_registry}/{use_ref}")
+        };
         tracing::debug!(
             use_ref,
-            full_ref,
+            full_ref = %normalized,
             "prepending default registry to plugin reference"
         );
-        resolve_plugin_from_registry(&full_ref, registry_config).await
+        resolve_plugin_from_registry(&normalized, registry_config).await
     } else {
         resolve_plugin_path(use_ref, kind)
     }
@@ -273,6 +294,27 @@ mod tests {
         let (id, ver) = parse_plugin_ref("source-postgres");
         assert_eq!(id, "source-postgres");
         assert_eq!(ver, "unknown");
+    }
+
+    #[test]
+    fn test_parse_plugin_ref_oci_reference_with_tag() {
+        let (id, ver) = parse_plugin_ref("registry.example.com/source/postgres:1.2.0");
+        assert_eq!(id, "postgres");
+        assert_eq!(ver, "1.2.0");
+    }
+
+    #[test]
+    fn test_parse_plugin_ref_oci_reference_latest_tag() {
+        let (id, ver) = parse_plugin_ref("registry.example.com/source/postgres");
+        assert_eq!(id, "postgres");
+        assert_eq!(ver, "unknown");
+    }
+
+    #[test]
+    fn test_parse_plugin_ref_oci_reference_with_port() {
+        let (id, ver) = parse_plugin_ref("localhost:5050/source/postgres:0.1.0");
+        assert_eq!(id, "postgres");
+        assert_eq!(ver, "0.1.0");
     }
 
     #[test]
