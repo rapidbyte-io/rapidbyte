@@ -65,19 +65,16 @@ impl PreviewFlightService {
             }
             crate::spool::StreamStorage::File(path) => {
                 let batches = tokio::task::spawn_blocking(move || {
-                    let file = std::fs::File::open(&path).map_err(|e| {
-                        Status::internal(format!("Failed to open preview file: {e}"))
-                    })?;
-                    let reader =
-                        arrow::ipc::reader::StreamReader::try_new(file, None).map_err(|e| {
-                            Status::internal(format!("Failed to read preview IPC: {e}"))
-                        })?;
-                    reader.collect::<Result<Vec<_>, _>>().map_err(|e| {
-                        Status::internal(format!("Failed to decode preview batch: {e}"))
-                    })
+                    let file = std::fs::File::open(&path)?;
+                    let reader = arrow::ipc::reader::StreamReader::try_new(file, None)
+                        .map_err(std::io::Error::other)?;
+                    reader
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(std::io::Error::other)
                 })
                 .await
-                .map_err(|e| Status::internal(format!("Preview load task failed: {e}")))??;
+                .map_err(|e| Status::internal(format!("Preview load task failed: {e}")))?
+                .map_err(|e| Status::internal(format!("Failed to load preview: {e}")))?;
                 Ok((batches, stream_data.total_rows, stream_data.total_bytes))
             }
         }
