@@ -568,6 +568,31 @@ mod tests {
     }
 
     #[test]
+    fn upsert_handles_v_prefixed_tags() {
+        let mut idx = PluginIndex::new();
+
+        // v-prefixed tag treated as valid semver
+        idx.upsert(make_entry("p", "P", "d", "source", "v1.0.0", &["v1.0.0"]));
+        assert_eq!(idx.plugins[0].latest, "v1.0.0");
+
+        // v2.0.0 > v1.0.0 even with prefix
+        idx.upsert(make_entry("p", "P", "d", "source", "v2.0.0", &["v2.0.0"]));
+        assert_eq!(idx.plugins[0].latest, "v2.0.0");
+
+        // v1.5.0 should NOT regress from v2.0.0
+        idx.upsert(make_entry("p", "P", "d", "source", "v1.5.0", &["v1.5.0"]));
+        assert_eq!(idx.plugins[0].latest, "v2.0.0");
+
+        // Mixed: non-prefixed 3.0.0 advances past v2.0.0
+        idx.upsert(make_entry("p", "P", "d", "source", "3.0.0", &["3.0.0"]));
+        assert_eq!(idx.plugins[0].latest, "3.0.0");
+
+        // v2.5.0 should NOT regress from 3.0.0
+        idx.upsert(make_entry("p", "P", "d", "source", "v2.5.0", &["v2.5.0"]));
+        assert_eq!(idx.plugins[0].latest, "3.0.0");
+    }
+
+    #[test]
     fn build_metadata_ignored_for_comparison() {
         let mut idx = PluginIndex::new();
         idx.upsert(make_entry(
