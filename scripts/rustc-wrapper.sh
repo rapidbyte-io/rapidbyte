@@ -41,7 +41,8 @@ if [[ "$is_wasm_wasip2_target" -eq 0 ]]; then
   done
 fi
 
-# Guard wasm builds from user-global target-cpu=native flags.
+# Guard wasm builds from user-global target-cpu=native flags
+# (e.g. from ~/.cargo/config.toml) which are invalid for wasm32-wasip2.
 if [[ "$is_wasm_wasip2_target" -eq 1 ]]; then
   sanitized=()
   skip_next=0

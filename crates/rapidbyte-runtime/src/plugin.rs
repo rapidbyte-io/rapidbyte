@@ -185,6 +185,10 @@ pub async fn resolve_plugin_from_registry(
 
     let cache = PluginCache::default_location()?;
 
+    // Parse trusted keys once for both cache-hit and pull paths.
+    // Returns empty for Skip policy to avoid failing on bad key files.
+    let trusted_keys = rapidbyte_registry::parse_trusted_keys(registry_config)?;
+
     // Check cache first.
     if let Some(entry) = cache.lookup(&plugin_ref) {
         tracing::debug!(%plugin_ref, "using cached plugin");
@@ -202,7 +206,13 @@ pub async fn resolve_plugin_from_registry(
             cached_config.wasm_sha256,
             entry.digest
         );
-        verify_trust(&cached_config, registry_config)?;
+        if let Some(warning) = rapidbyte_registry::verify_artifact_trust(
+            &cached_config,
+            registry_config.trust_policy,
+            &trusted_keys,
+        )? {
+            tracing::warn!(%plugin_ref, "{warning}");
+        }
         return Ok(entry.wasm_path);
     }
 
@@ -213,7 +223,13 @@ pub async fn resolve_plugin_from_registry(
     let unpacked = rapidbyte_registry::unpack_artifact(&image)?;
 
     // Verify signature against trust policy
-    verify_trust(&unpacked.config, registry_config)?;
+    if let Some(warning) = rapidbyte_registry::verify_artifact_trust(
+        &unpacked.config,
+        registry_config.trust_policy,
+        &trusted_keys,
+    )? {
+        tracing::warn!(%plugin_ref, "{warning}");
+    }
 
     let entry = cache.store(
         &plugin_ref,
@@ -231,67 +247,6 @@ pub async fn resolve_plugin_from_registry(
     Ok(entry.wasm_path)
 }
 
-/// Verify a pulled plugin artifact against the configured trust policy.
-///
-/// - [`TrustPolicy::Skip`]: always passes without loading any keys.
-/// - [`TrustPolicy::Warn`]: logs a warning on unsigned or invalid-signature
-///   artifacts but does not fail.
-/// - [`TrustPolicy::Verify`]: returns an error if the artifact is unsigned or
-///   if the signature cannot be verified against any trusted key.
-fn verify_trust(
-    config: &rapidbyte_registry::PluginArtifactConfig,
-    registry_config: &rapidbyte_registry::RegistryConfig,
-) -> Result<()> {
-    use rapidbyte_registry::TrustPolicy;
-
-    match registry_config.trust_policy {
-        TrustPolicy::Skip => Ok(()),
-        TrustPolicy::Warn | TrustPolicy::Verify => {
-            let mut keys = Vec::new();
-            for path in &registry_config.trusted_key_paths {
-                keys.push(rapidbyte_registry::signing::load_verifying_key_file(path)?);
-            }
-            for pem in &registry_config.trusted_key_pems {
-                keys.push(rapidbyte_registry::signing::load_verifying_key_pem(pem)?);
-            }
-
-            match &config.signature {
-                None => {
-                    let msg = "plugin is unsigned";
-                    if registry_config.trust_policy == TrustPolicy::Verify {
-                        anyhow::bail!("{msg} and trust policy is 'verify'");
-                    }
-                    tracing::warn!("{msg}");
-                    Ok(())
-                }
-                Some(sig) => {
-                    match rapidbyte_registry::signing::verify_against_any(
-                        &keys,
-                        &config.wasm_sha256,
-                        sig,
-                    ) {
-                        Ok(()) => {
-                            tracing::info!("plugin signature verified");
-                            Ok(())
-                        }
-                        Err(err) => {
-                            if registry_config.trust_policy == TrustPolicy::Verify {
-                                Err(err).context("plugin signature verification failed")
-                            } else {
-                                tracing::warn!("plugin signature invalid: {err}");
-                                Ok(())
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Resolve a plugin path, automatically choosing between OCI registry and
-/// local filesystem based on the reference format.
-///
 /// Build a fully-qualified OCI reference from a bare plugin name and kind.
 ///
 /// E.g. `qualify_bare_ref("postgres", Source, "registry.example.com")` →

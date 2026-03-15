@@ -13,7 +13,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use tracing::warn;
 
 use crate::reference::PluginRef;
 use crate::verify::sha256_hex;
@@ -68,13 +67,6 @@ impl PluginCache {
             .join(&plugin_ref.tag)
     }
 
-    /// Store a plugin in the cache, computing its SHA-256 digest.
-    ///
-    /// Overwrites any existing cache entry for the same reference.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the cache directory cannot be created or files cannot be written.
     /// Store a plugin artifact in the cache.
     ///
     /// The `artifact_config` contains the wasm digest and optional signature.
@@ -149,9 +141,9 @@ impl PluginCache {
 
     /// Look up a cached plugin by reference.
     ///
-    /// Returns `None` if the entry does not exist or if the on-disk digest does
-    /// not match the WASM file (indicating corruption). A warning is logged on
-    /// digest mismatch.
+    /// Returns `None` if the entry does not exist or if the WASM file's
+    /// SHA-256 does not match the stored sidecar digest (indicating
+    /// corruption or tampering).
     #[must_use]
     pub fn lookup(&self, plugin_ref: &PluginRef) -> Option<CacheEntry> {
         let dir = self.entry_dir(plugin_ref);
@@ -167,11 +159,13 @@ impl PluginCache {
         let stored_digest = fs::read_to_string(&digest_path).ok()?;
         let stored_digest = stored_digest.trim().to_owned();
 
+        // Verify the WASM binary matches the stored digest to detect
+        // on-disk tampering before the binary is loaded for execution.
         let wasm_bytes = fs::read(&wasm_path).ok()?;
         let actual_digest = sha256_hex(&wasm_bytes);
 
         if actual_digest != stored_digest {
-            warn!(
+            tracing::warn!(
                 plugin_ref = %plugin_ref,
                 expected = %stored_digest,
                 actual = %actual_digest,
@@ -257,7 +251,7 @@ impl PluginCache {
         let actual_digest = sha256_hex(&wasm_bytes);
 
         if actual_digest != stored_digest {
-            warn!(
+            tracing::warn!(
                 plugin_ref = %plugin_ref,
                 "skipping corrupt cache entry during list",
             );
@@ -321,6 +315,7 @@ impl PluginCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::verify::sha256_hex;
     use tempfile::tempdir;
 
     fn test_ref(tag: &str) -> PluginRef {
@@ -479,7 +474,7 @@ mod tests {
             .store(&pref, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
             .unwrap();
 
-        // Corrupt the digest file.
+        // Corrupt the digest file so it no longer matches the WASM.
         let digest_path = entry.wasm_path.parent().unwrap().join("sha256");
         fs::write(
             &digest_path,
@@ -487,7 +482,25 @@ mod tests {
         )
         .unwrap();
 
-        // Lookup should return None due to digest mismatch.
+        // lookup() verifies WASM against the sidecar — mismatch → miss.
+        assert!(cache.lookup(&pref).is_none());
+    }
+
+    #[test]
+    fn tampered_wasm_treated_as_miss() {
+        let tmp = tempdir().unwrap();
+        let cache = PluginCache::new(tmp.path().to_path_buf());
+        let pref = test_ref("1.0.0");
+
+        let wasm = dummy_wasm();
+        let entry = cache
+            .store(&pref, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
+            .unwrap();
+
+        // Tamper the WASM binary while leaving the digest untouched.
+        fs::write(&entry.wasm_path, b"tampered-wasm-content").unwrap();
+
+        // lookup() re-hashes the WASM — mismatch → miss.
         assert!(cache.lookup(&pref).is_none());
     }
 

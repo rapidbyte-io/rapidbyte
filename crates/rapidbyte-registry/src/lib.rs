@@ -23,11 +23,11 @@ pub mod trust;
 pub mod verify;
 
 pub use artifact::{
-    pack_artifact, pack_artifact_signed, unpack_artifact, PackedArtifact, PluginArtifactConfig,
-    UnpackedArtifact, MEDIA_TYPE_CONFIG, MEDIA_TYPE_MANIFEST_LAYER, MEDIA_TYPE_WASM_LAYER,
+    pack_artifact, unpack_artifact, PackedArtifact, PluginArtifactConfig, UnpackedArtifact,
+    MEDIA_TYPE_CONFIG, MEDIA_TYPE_MANIFEST_LAYER, MEDIA_TYPE_WASM_LAYER,
 };
 pub use cache::{CacheEntry, PluginCache};
 pub use client::{RegistryClient, RegistryConfig};
 pub use index::{PluginIndex, PluginIndexEntry, INDEX_REPOSITORY, INDEX_TAG};
-pub use reference::{normalize_registry_url, PluginRef};
-pub use trust::TrustPolicy;
+pub use reference::{normalize_registry_url, normalize_registry_url_option, PluginRef};
+pub use trust::{parse_trusted_keys, verify_artifact_trust, TrustPolicy};

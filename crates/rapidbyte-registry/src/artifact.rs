@@ -78,19 +78,6 @@ pub struct PackedArtifact {
 
 // ── pack / unpack ─────────────────────────────────────────────────────────────
 
-/// Pack a plugin manifest and WASM binary into an OCI [`PackedArtifact`].
-///
-/// This is a convenience wrapper around [`pack_artifact_signed`] that
-/// produces an unsigned artifact.
-///
-/// # Panics
-///
-/// Panics if [`PluginArtifactConfig`] cannot be serialized to JSON.
-#[must_use]
-pub fn pack_artifact(manifest_json: &[u8], wasm_bytes: &[u8]) -> PackedArtifact {
-    pack_artifact_signed(manifest_json, wasm_bytes, None)
-}
-
 /// Pack a plugin manifest and WASM binary into an OCI [`PackedArtifact`],
 /// optionally signing the WASM digest with an Ed25519 key.
 ///
@@ -104,7 +91,7 @@ pub fn pack_artifact(manifest_json: &[u8], wasm_bytes: &[u8]) -> PackedArtifact 
 ///
 /// Panics if [`PluginArtifactConfig`] cannot be serialized to JSON.
 #[must_use]
-pub fn pack_artifact_signed(
+pub fn pack_artifact(
     manifest_json: &[u8],
     wasm_bytes: &[u8],
     signing_key: Option<&ed25519_dalek::SigningKey>,
@@ -238,7 +225,7 @@ mod tests {
         let manifest = dummy_manifest();
         let wasm = dummy_wasm();
 
-        let packed = pack_artifact(&manifest, &wasm);
+        let packed = pack_artifact(&manifest, &wasm, None);
         let image = image_data_from_packed(packed);
 
         let unpacked = unpack_artifact(&image).expect("unpack must succeed");
@@ -259,7 +246,7 @@ mod tests {
 
         let manifest = dummy_manifest();
         let wasm = dummy_wasm();
-        let packed = pack_artifact_signed(&manifest, &wasm, Some(&sk));
+        let packed = pack_artifact(&manifest, &wasm, Some(&sk));
 
         let image = image_data_from_packed(packed);
         let unpacked = unpack_artifact(&image).expect("unpack must succeed");
@@ -279,7 +266,7 @@ mod tests {
 
     #[test]
     fn packed_artifact_has_correct_layer_media_types() {
-        let packed = pack_artifact(&dummy_manifest(), &dummy_wasm());
+        let packed = pack_artifact(&dummy_manifest(), &dummy_wasm(), None);
 
         assert_eq!(packed.layers.len(), 2);
         assert_eq!(packed.layers[0].media_type, MEDIA_TYPE_MANIFEST_LAYER);
@@ -290,7 +277,7 @@ mod tests {
     #[test]
     fn packed_config_contains_correct_wasm_digest() {
         let wasm = dummy_wasm();
-        let packed = pack_artifact(&dummy_manifest(), &wasm);
+        let packed = pack_artifact(&dummy_manifest(), &wasm, None);
 
         let config: PluginArtifactConfig = serde_json::from_slice(&packed.config.data).unwrap();
 
@@ -365,7 +352,7 @@ mod tests {
         let wasm = dummy_wasm();
 
         // Pack normally…
-        let packed = pack_artifact(&manifest, &wasm);
+        let packed = pack_artifact(&manifest, &wasm, None);
 
         // …then tamper with the WASM layer data, keeping layers structure intact.
         let tampered_wasm = b"tampered-wasm-content".to_vec();
