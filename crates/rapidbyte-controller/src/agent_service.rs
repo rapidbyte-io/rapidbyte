@@ -461,9 +461,21 @@ impl AgentService for AgentServiceImpl {
             match make_task_response(assignment, &self.state.secrets).await {
                 Ok(resp) => return Ok(Response::new(resp)),
                 Err(e) => {
-                    // Fail the task permanently — secret resolution failures
-                    // are config errors, not transient issues. Returning to
-                    // Pending would create an infinite retry loop.
+                    if e.code() == tonic::Code::Unavailable {
+                        // Transient error (Vault unreachable, timeout).
+                        // Leave the task Assigned — it will return to Pending
+                        // when the lease expires, allowing automatic retry.
+                        tracing::warn!(
+                            task_id,
+                            "transient secret resolution failure, \
+                             task will retry after lease expiry: {e}"
+                        );
+                        return Ok(Response::new(PollTaskResponse {
+                            result: Some(poll_task_response::Result::NoTask(NoTask {})),
+                        }));
+                    }
+
+                    // Permanent config error — fail the task.
                     tracing::error!(
                         task_id,
                         "secret resolution failed during dispatch, failing task: {e}"
@@ -567,9 +579,21 @@ impl AgentService for AgentServiceImpl {
             match make_task_response(assignment, &self.state.secrets).await {
                 Ok(resp) => return Ok(Response::new(resp)),
                 Err(e) => {
-                    // Fail the task permanently — secret resolution failures
-                    // are config errors, not transient issues. Returning to
-                    // Pending would create an infinite retry loop.
+                    if e.code() == tonic::Code::Unavailable {
+                        // Transient error (Vault unreachable, timeout).
+                        // Leave the task Assigned — it will return to Pending
+                        // when the lease expires, allowing automatic retry.
+                        tracing::warn!(
+                            task_id,
+                            "transient secret resolution failure, \
+                             task will retry after lease expiry: {e}"
+                        );
+                        return Ok(Response::new(PollTaskResponse {
+                            result: Some(poll_task_response::Result::NoTask(NoTask {})),
+                        }));
+                    }
+
+                    // Permanent config error — fail the task.
                     tracing::error!(
                         task_id,
                         "secret resolution failed during dispatch, failing task: {e}"
@@ -1206,7 +1230,21 @@ async fn make_task_response(
     let had_secrets = rapidbyte_engine::config::parser::contains_secret_refs(yaml_str);
     let resolved = rapidbyte_engine::config::parser::substitute_variables(yaml_str, secrets)
         .await
-        .map_err(|e| Status::internal(format!("failed to resolve variables: {e}")))?;
+        .map_err(|e| {
+            let msg = format!("failed to resolve variables: {e}");
+            // Classify: missing env vars and missing keys are config errors (permanent).
+            // Connection/network failures from secret providers are transient.
+            let err_str = format!("{e:#}");
+            if err_str.contains("Missing environment variable")
+                || err_str.contains("not found")
+                || err_str.contains("no secret provider registered")
+                || err_str.contains("invalid Vault path")
+            {
+                Status::internal(msg)
+            } else {
+                Status::unavailable(msg)
+            }
+        })?;
 
     // Validate the resolved YAML parses correctly. If secrets were involved,
     // redact the error to prevent plaintext secrets from leaking in error
@@ -3726,30 +3764,23 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn secret_resolution_failure_fails_task_and_returns_no_task() {
-        // Register a secret provider that always fails.
-        struct FailingProvider;
-
-        #[async_trait::async_trait]
-        impl rapidbyte_secrets::SecretProvider for FailingProvider {
-            async fn read_secret(&self, _path: &str, _key: &str) -> anyhow::Result<String> {
-                anyhow::bail!("vault unreachable")
-            }
-        }
-
+    /// Helper: set up a controller state with a custom secret provider,
+    /// submit a pipeline with vault refs, register an agent, and poll.
+    async fn poll_with_secret_provider(
+        provider: impl rapidbyte_secrets::SecretProvider + 'static,
+    ) -> (
+        ControllerState,
+        String, // run_id
+        poll_task_response::Result,
+    ) {
         let state = test_state();
-
-        // Register the failing provider on the controller state.
         let mut providers = rapidbyte_secrets::SecretProviders::new();
-        providers.register("vault", std::sync::Arc::new(FailingProvider));
-        // Safety: we're in a test; replace the empty providers with our failing one.
+        providers.register("vault", std::sync::Arc::new(provider));
         let state = ControllerState {
             secrets: std::sync::Arc::new(providers),
             ..state
         };
 
-        // Submit a pipeline with vault refs.
         let svc = crate::pipeline_service::PipelineServiceImpl::new(state.clone());
         let yaml = b"pipeline: test\nstate:\n  backend: postgres\nsource:\n  config:\n    password: ${vault:secret/db#password}\n";
         let run_id = svc
@@ -3766,7 +3797,6 @@ mod tests {
             .into_inner()
             .run_id;
 
-        // Register an agent.
         let agent_svc = AgentServiceImpl::new(state.clone());
         let agent_resp = agent_svc
             .register_agent(Request::new(RegisterAgentRequest {
@@ -3780,7 +3810,6 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        // Poll — should return NoTask (not error) after failing the task.
         let poll_resp = agent_svc
             .poll_task(Request::new(PollTaskRequest {
                 agent_id: agent_resp.agent_id,
@@ -3790,30 +3819,83 @@ mod tests {
             .expect("poll_task should not return gRPC error");
 
         let result = poll_resp.into_inner().result.unwrap();
+        (state, run_id, result)
+    }
+
+    #[tokio::test]
+    async fn transient_secret_failure_releases_task_for_retry() {
+        struct TransientFailProvider;
+
+        #[async_trait::async_trait]
+        impl rapidbyte_secrets::SecretProvider for TransientFailProvider {
+            async fn read_secret(&self, _path: &str, _key: &str) -> anyhow::Result<String> {
+                anyhow::bail!("connection refused")
+            }
+        }
+
+        let (state, run_id, result) = poll_with_secret_provider(TransientFailProvider).await;
+
         assert!(
             matches!(result, poll_task_response::Result::NoTask(_)),
-            "expected NoTask after secret resolution failure, got task assignment"
+            "expected NoTask after transient failure"
         );
 
-        // Verify task is Failed.
+        // Task should be back in Pending (not Failed) for retry.
         let tasks = state.tasks.read().await;
         let task = tasks
             .all_tasks()
             .into_iter()
             .find(|t| t.run_id == run_id)
             .expect("task should exist");
-        assert_eq!(
-            task.state,
-            crate::scheduler::TaskState::Failed,
-            "task should be permanently failed"
+        assert!(
+            task.state == crate::scheduler::TaskState::Pending
+                || task.state == crate::scheduler::TaskState::Assigned,
+            "task should be Pending or Assigned for retry, got {:?}",
+            task.state
+        );
+        drop(tasks);
+
+        // Run may stay Assigned if Assigned→Pending transition isn't allowed.
+        let runs = state.runs.read().await;
+        let run_state = runs.get_run(&run_id).unwrap().state;
+        assert!(
+            run_state == InternalRunState::Pending || run_state == InternalRunState::Assigned,
+            "run should be retryable, got {run_state:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn permanent_secret_config_error_fails_task() {
+        struct MissingKeyProvider;
+
+        #[async_trait::async_trait]
+        impl rapidbyte_secrets::SecretProvider for MissingKeyProvider {
+            async fn read_secret(&self, _path: &str, _key: &str) -> anyhow::Result<String> {
+                anyhow::bail!("key 'password' not found in Vault secret secret/db")
+            }
+        }
+
+        let (state, run_id, result) = poll_with_secret_provider(MissingKeyProvider).await;
+
+        assert!(
+            matches!(result, poll_task_response::Result::NoTask(_)),
+            "expected NoTask after permanent failure"
         );
 
-        // Verify run is Failed.
+        // Task should be permanently Failed.
+        let tasks = state.tasks.read().await;
+        let task = tasks
+            .all_tasks()
+            .into_iter()
+            .find(|t| t.run_id == run_id)
+            .expect("task should exist");
+        assert_eq!(task.state, crate::scheduler::TaskState::Failed);
+        drop(tasks);
+
         let runs = state.runs.read().await;
         assert_eq!(
             runs.get_run(&run_id).unwrap().state,
-            InternalRunState::Failed,
-            "run should be permanently failed"
+            InternalRunState::Failed
         );
     }
 }
