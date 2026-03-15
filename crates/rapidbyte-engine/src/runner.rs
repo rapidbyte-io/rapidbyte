@@ -93,33 +93,49 @@ fn handle_close_result<E, F>(
     }
 }
 
+/// Shared context for running a plugin stream (source, destination, or
+/// transform).  Built once per stream by the orchestrator and passed to
+/// each runner function.
+pub struct StreamRunContext<'a> {
+    pub module: &'a LoadedComponent,
+    pub state_backend: Arc<dyn StateBackend>,
+    pub pipeline_name: &'a str,
+    pub metric_run_label: &'a str,
+    pub plugin_id: &'a str,
+    pub plugin_version: &'a str,
+    pub stream_ctx: &'a StreamContext,
+    pub permissions: Option<&'a Permissions>,
+    pub compression: Option<CompressionCodec>,
+    pub overrides: Option<&'a SandboxOverrides>,
+}
+
 /// Run a source plugin for a single stream.
 ///
 /// # Errors
 ///
 /// Returns an error if the component cannot be instantiated, opened, run, or
 /// closed cleanly for the given stream.
-#[allow(
-    clippy::too_many_arguments,
-    clippy::too_many_lines,
-    clippy::needless_pass_by_value
-)]
+#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 pub fn run_source_stream(
-    module: &LoadedComponent,
+    ctx: &StreamRunContext<'_>,
     sender: mpsc::SyncSender<Frame>,
-    state_backend: Arc<dyn StateBackend>,
-    pipeline_name: &str,
-    metric_run_label: &str,
-    plugin_id: &str,
-    plugin_version: &str,
     source_config: &serde_json::Value,
-    stream_ctx: &StreamContext,
     stats: Arc<Mutex<RunStats>>,
-    permissions: Option<&Permissions>,
-    compression: Option<CompressionCodec>,
-    overrides: Option<&SandboxOverrides>,
     on_emit: Option<Arc<dyn Fn(u64) + Send + Sync>>,
 ) -> Result<SourceRunResult, PipelineError> {
+    let StreamRunContext {
+        module,
+        ref state_backend,
+        pipeline_name,
+        metric_run_label,
+        plugin_id,
+        plugin_version,
+        stream_ctx,
+        permissions,
+        compression,
+        overrides,
+    } = *ctx;
+
     let phase_start = Instant::now();
 
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
@@ -133,7 +149,7 @@ pub fn run_source_stream(
         .plugin_instance_key(plugin_instance_key("source", plugin_id, stream_ctx, None))
         .stream(stream_ctx.stream_name.clone())
         .metric_run_label(metric_run_label)
-        .state_backend(state_backend)
+        .state_backend(state_backend.clone())
         .sender(sender.clone())
         .source_checkpoints(source_checkpoints.clone())
         .timings(host_timings)
@@ -267,27 +283,27 @@ pub fn run_source_stream(
 ///
 /// Returns an error if the component cannot be instantiated, opened, consume
 /// all input frames, or close cleanly for the given stream.
-#[allow(
-    clippy::too_many_arguments,
-    clippy::too_many_lines,
-    clippy::needless_pass_by_value
-)]
+#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 pub fn run_destination_stream(
-    module: &LoadedComponent,
+    ctx: &StreamRunContext<'_>,
     receiver: mpsc::Receiver<Frame>,
     dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
-    state_backend: Arc<dyn StateBackend>,
-    pipeline_name: &str,
-    metric_run_label: &str,
-    plugin_id: &str,
-    plugin_version: &str,
     dest_config: &serde_json::Value,
-    stream_ctx: &StreamContext,
     stats: Arc<Mutex<RunStats>>,
-    permissions: Option<&Permissions>,
-    compression: Option<CompressionCodec>,
-    overrides: Option<&SandboxOverrides>,
 ) -> Result<DestRunResult, PipelineError> {
+    let StreamRunContext {
+        module,
+        ref state_backend,
+        pipeline_name,
+        metric_run_label,
+        plugin_id,
+        plugin_version,
+        stream_ctx,
+        permissions,
+        compression,
+        overrides,
+    } = *ctx;
+
     let phase_start = Instant::now();
     let vm_setup_start = Instant::now();
 
@@ -307,7 +323,7 @@ pub fn run_destination_stream(
         ))
         .stream(stream_ctx.stream_name.clone())
         .metric_run_label(metric_run_label)
-        .state_backend(state_backend)
+        .state_backend(state_backend.clone())
         .receiver(receiver)
         .dest_checkpoints(dest_checkpoints.clone())
         .dlq_records(dlq_records.clone())
@@ -446,28 +462,28 @@ pub fn run_destination_stream(
 ///
 /// Returns an error if the component cannot be instantiated, opened, consume
 /// input frames, emit output frames, or close cleanly for the given stream.
-#[allow(
-    clippy::too_many_arguments,
-    clippy::needless_pass_by_value,
-    clippy::too_many_lines
-)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 pub fn run_transform_stream(
-    module: &LoadedComponent,
+    ctx: &StreamRunContext<'_>,
     receiver: mpsc::Receiver<Frame>,
     sender: mpsc::SyncSender<Frame>,
     dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
-    state_backend: Arc<dyn StateBackend>,
-    pipeline_name: &str,
-    metric_run_label: &str,
-    plugin_id: &str,
-    plugin_version: &str,
     transform_index: usize,
     transform_config: &serde_json::Value,
-    stream_ctx: &StreamContext,
-    permissions: Option<&Permissions>,
-    compression: Option<CompressionCodec>,
-    overrides: Option<&SandboxOverrides>,
 ) -> Result<TransformRunResult, PipelineError> {
+    let StreamRunContext {
+        module,
+        ref state_backend,
+        pipeline_name,
+        metric_run_label,
+        plugin_id,
+        plugin_version,
+        stream_ctx,
+        permissions,
+        compression,
+        overrides,
+    } = *ctx;
+
     let phase_start = Instant::now();
 
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
@@ -487,7 +503,7 @@ pub fn run_transform_stream(
         ))
         .stream(stream_ctx.stream_name.clone())
         .metric_run_label(metric_run_label)
-        .state_backend(state_backend)
+        .state_backend(state_backend.clone())
         .sender(sender.clone())
         .receiver(receiver)
         .dlq_records(dlq_records)

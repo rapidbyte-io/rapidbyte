@@ -40,7 +40,7 @@ use crate::result::{
 };
 use crate::runner::{
     run_destination_stream, run_discover, run_source_stream, run_transform_stream, validate_plugin,
-    TransformRunResult,
+    StreamRunContext, TransformRunResult,
 };
 
 async fn run_blocking_infrastructure_task<T, F>(
@@ -1080,21 +1080,24 @@ async fn execute_streams(
                 // Empty run label so preflight metrics are unscoped and don't
                 // accumulate in the SnapshotReader's finished_run_snapshots map.
                 let preflight_result = tokio::task::spawn_blocking(move || {
+                    let ctx = StreamRunContext {
+                        module: &dest_module,
+                        state_backend: state_dst,
+                        pipeline_name: &params.pipeline_name,
+                        metric_run_label: "",
+                        plugin_id: &params.dest_plugin_id,
+                        plugin_version: &params.dest_plugin_version,
+                        stream_ctx: &stream_ctx,
+                        permissions: params.dest_permissions.as_ref(),
+                        compression: params.compression,
+                        overrides: params.dest_overrides.as_ref(),
+                    };
                     run_destination_stream(
-                        &dest_module,
+                        &ctx,
                         rx,
                         Arc::new(Mutex::new(Vec::new())),
-                        state_dst,
-                        &params.pipeline_name,
-                        "",
-                        &params.dest_plugin_id,
-                        &params.dest_plugin_version,
                         &params.dest_config,
-                        &stream_ctx,
                         Arc::new(Mutex::new(RunStats::default())),
-                        params.dest_permissions.as_ref(),
-                        params.compression,
-                        params.dest_overrides.as_ref(),
                     )
                 })
                 .await
@@ -1189,20 +1192,23 @@ async fn execute_streams(
 
             let params_src = params.clone();
             let src_handle = tokio::task::spawn_blocking(move || {
+                let ctx = StreamRunContext {
+                    module: &source_module,
+                    state_backend: state_src,
+                    pipeline_name: &params_src.pipeline_name,
+                    metric_run_label: &params_src.metric_run_label,
+                    plugin_id: &params_src.source_plugin_id,
+                    plugin_version: &params_src.source_plugin_version,
+                    stream_ctx: &stream_ctx_for_src,
+                    permissions: params_src.source_permissions.as_ref(),
+                    compression: params_src.compression,
+                    overrides: params_src.source_overrides.as_ref(),
+                };
                 run_source_stream(
-                    &source_module,
+                    &ctx,
                     source_tx,
-                    state_src,
-                    &params_src.pipeline_name,
-                    &params_src.metric_run_label,
-                    &params_src.source_plugin_id,
-                    &params_src.source_plugin_version,
                     &params_src.source_config,
-                    &stream_ctx_for_src,
                     stats_src,
-                    params_src.source_permissions.as_ref(),
-                    params_src.compression,
-                    params_src.source_overrides.as_ref(),
                     on_emit,
                 )
             });
@@ -1216,23 +1222,19 @@ async fn execute_streams(
                 let stream_ctx_t = stream_ctx.clone();
                 let params_t = params.clone();
                 let t_handle = tokio::task::spawn_blocking(move || {
-                    run_transform_stream(
-                        &t.module,
-                        rx,
-                        tx,
-                        dlq_records_t,
-                        state_t,
-                        &params_t.pipeline_name,
-                        &params_t.metric_run_label,
-                        &t.plugin_id,
-                        &t.plugin_version,
-                        i,
-                        &t.config,
-                        &stream_ctx_t,
-                        t.permissions.as_ref(),
-                        params_t.compression,
-                        params_t.transform_overrides.get(i).and_then(Option::as_ref),
-                    )
+                    let ctx = StreamRunContext {
+                        module: &t.module,
+                        state_backend: state_t,
+                        pipeline_name: &params_t.pipeline_name,
+                        metric_run_label: &params_t.metric_run_label,
+                        plugin_id: &t.plugin_id,
+                        plugin_version: &t.plugin_version,
+                        stream_ctx: &stream_ctx_t,
+                        permissions: t.permissions.as_ref(),
+                        compression: params_t.compression,
+                        overrides: params_t.transform_overrides.get(i).and_then(Option::as_ref),
+                    };
+                    run_transform_stream(&ctx, rx, tx, dlq_records_t, i, &t.config)
                 });
                 transform_handles.push((i, t_handle));
             }
@@ -1301,21 +1303,24 @@ async fn execute_streams(
             } else {
                 // Normal mode: run destination plugin
                 let dst_handle = tokio::task::spawn_blocking(move || {
+                    let ctx = StreamRunContext {
+                        module: &dest_module,
+                        state_backend: state_dst,
+                        pipeline_name: &params.pipeline_name,
+                        metric_run_label: &params.metric_run_label,
+                        plugin_id: &params.dest_plugin_id,
+                        plugin_version: &params.dest_plugin_version,
+                        stream_ctx: &stream_ctx_for_dst,
+                        permissions: params.dest_permissions.as_ref(),
+                        compression: params.compression,
+                        overrides: params.dest_overrides.as_ref(),
+                    };
                     run_destination_stream(
-                        &dest_module,
+                        &ctx,
                         dest_rx,
                         run_dlq_records,
-                        state_dst,
-                        &params.pipeline_name,
-                        &params.metric_run_label,
-                        &params.dest_plugin_id,
-                        &params.dest_plugin_version,
                         &params.dest_config,
-                        &stream_ctx_for_dst,
                         stats_dst,
-                        params.dest_permissions.as_ref(),
-                        params.compression,
-                        params.dest_overrides.as_ref(),
                     )
                 });
 

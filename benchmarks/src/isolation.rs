@@ -7,7 +7,9 @@ use arrow::datatypes::{DataType, Field, Schema};
 use bytes::Bytes;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use rapidbyte_engine::arrow::record_batch_to_ipc;
-use rapidbyte_engine::runner::{run_destination_stream, run_source_stream, run_transform_stream};
+use rapidbyte_engine::runner::{
+    run_destination_stream, run_source_stream, run_transform_stream, StreamRunContext,
+};
 use rapidbyte_metrics::snapshot::SnapshotReader;
 use rapidbyte_runtime::{
     load_plugin_manifest, parse_plugin_ref, resolve_plugin_path, Frame, WasmRuntime,
@@ -81,22 +83,19 @@ pub fn execute_source_benchmark(
             }
         }
     });
-    let result = run_source_stream(
-        &module,
-        sender,
-        state,
-        "benchmark-source",
-        "benchmark-source-run",
-        &plugin_id,
-        &plugin_version,
-        &config,
-        &stream_ctx,
-        stats,
-        permissions.as_ref(),
-        None,
-        None,
-        None,
-    )?;
+    let ctx = StreamRunContext {
+        module: &module,
+        state_backend: state,
+        pipeline_name: "benchmark-source",
+        metric_run_label: "benchmark-source-run",
+        plugin_id: &plugin_id,
+        plugin_version: &plugin_version,
+        stream_ctx: &stream_ctx,
+        permissions: permissions.as_ref(),
+        compression: None,
+        overrides: None,
+    };
+    let result = run_source_stream(&ctx, sender, &config, stats, None)?;
     let _ = drain.join();
     let otel_snap = bench_reader.flush_and_snapshot_for_run(
         &bench_provider,
@@ -185,22 +184,19 @@ pub fn execute_destination_benchmark(
     opentelemetry::global::set_meter_provider(bench_provider.clone());
     let (sender, receiver) = mpsc::sync_channel(destination_input_channel_capacity(batches.len()));
     send_input_batches(sender, &batches)?;
-    let result = run_destination_stream(
-        &module,
-        receiver,
-        dlq_records,
-        state,
-        "benchmark-destination",
-        "benchmark-destination-run",
-        &plugin_id,
-        &plugin_version,
-        &config,
-        &stream_ctx,
-        stats,
-        permissions.as_ref(),
-        None,
-        None,
-    )?;
+    let ctx = StreamRunContext {
+        module: &module,
+        state_backend: state,
+        pipeline_name: "benchmark-destination",
+        metric_run_label: "benchmark-destination-run",
+        plugin_id: &plugin_id,
+        plugin_version: &plugin_version,
+        stream_ctx: &stream_ctx,
+        permissions: permissions.as_ref(),
+        compression: None,
+        overrides: None,
+    };
+    let result = run_destination_stream(&ctx, receiver, dlq_records, &config, stats)?;
     let otel_snap = bench_reader.flush_and_snapshot_for_run(
         &bench_provider,
         "benchmark-destination",
@@ -301,22 +297,26 @@ pub fn execute_transform_benchmark(
         let module = runtime.load_module(&wasm_path)?;
         transform_module_load_ms.push(load_start.elapsed().as_millis() as u64);
         let (plugin_id, plugin_version) = parse_plugin_ref(&connector.plugin);
+        let transform_config = serde_json::to_value(config.config)?;
+        let ctx = StreamRunContext {
+            module: &module,
+            state_backend: state.clone(),
+            pipeline_name: "benchmark-transform",
+            metric_run_label: "benchmark-transform-run",
+            plugin_id: &plugin_id,
+            plugin_version: &plugin_version,
+            stream_ctx: &stream_ctx,
+            permissions: permissions.as_ref(),
+            compression: None,
+            overrides: None,
+        };
         let summary = run_transform_stream(
-            &module,
+            &ctx,
             incoming,
             sender,
             dlq_records.clone(),
-            state.clone(),
-            "benchmark-transform",
-            "benchmark-transform-run",
-            &plugin_id,
-            &plugin_version,
             index,
-            &serde_json::to_value(config.config)?,
-            &stream_ctx,
-            permissions.as_ref(),
-            None,
-            None,
+            &transform_config,
         )?;
         transform_duration_secs += summary.duration_secs;
         last_summary = Some(summary.summary);
