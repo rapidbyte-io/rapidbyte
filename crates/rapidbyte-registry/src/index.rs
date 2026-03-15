@@ -13,11 +13,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Parse a version tag as semver, stripping a leading `v` if present.
-fn parse_semver(tag: &str) -> Option<semver::Version> {
-    semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()
-}
-
 // ── Well-known index location ─────────────────────────────────────────────────
 
 /// Well-known OCI repository used to store the plugin index.
@@ -101,8 +96,10 @@ impl PluginIndex {
             // If current is valid semver but new is not, don't overwrite
             // (prevents non-semver tags like "nightly" from replacing "2.0.0").
             // If both are non-semver, always update (chronological ordering).
+            let try_semver =
+                |tag: &str| semver::Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok();
             let should_update_latest =
-                match (parse_semver(&existing.latest), parse_semver(&entry.latest)) {
+                match (try_semver(&existing.latest), try_semver(&entry.latest)) {
                     (Some(current), Some(new)) => new > current,
                     (Some(_), None) => false, // don't overwrite semver with non-semver
                     // semver replaces non-semver; both non-semver: last write wins
@@ -557,21 +554,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_semver_rejects_four_segment_versions() {
-        assert!(parse_semver("1.2.3.4").is_none());
+    fn semver_rejects_non_standard_versions() {
+        assert!(semver::Version::parse("1.2.3.4").is_err());
+        assert!(semver::Version::parse("1.2").is_err());
     }
 
     #[test]
-    fn parse_semver_rejects_two_segment_versions() {
-        assert!(parse_semver("1.2").is_none());
-    }
-
-    #[test]
-    fn parse_semver_accepts_valid_versions() {
-        assert!(parse_semver("1.0.0").is_some());
-        assert!(parse_semver("1.0.0-beta").is_some());
-        assert!(parse_semver("v2.1.3").is_some());
-        assert!(parse_semver("1.0.0+build.5").is_some());
+    fn semver_accepts_valid_versions() {
+        assert!(semver::Version::parse("1.0.0").is_ok());
+        assert!(semver::Version::parse("1.0.0-beta").is_ok());
+        assert!(semver::Version::parse("2.1.3").is_ok());
+        assert!(semver::Version::parse("1.0.0+build.5").is_ok());
     }
 
     #[test]

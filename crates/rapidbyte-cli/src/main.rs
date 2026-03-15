@@ -374,11 +374,9 @@ async fn main() -> ExitCode {
     };
     let registry_config = rapidbyte_registry::RegistryConfig {
         insecure: cli.registry_insecure,
-        default_registry: cli
-            .registry_url
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .map(rapidbyte_registry::normalize_registry_url),
+        default_registry: rapidbyte_registry::normalize_registry_url_option(
+            cli.registry_url.as_deref(),
+        ),
         trust_policy,
         trusted_key_paths: cli.trust_key.clone(),
         ..Default::default()
@@ -550,28 +548,6 @@ mod tests {
     }
 
     // ── Registry flag precedence ──────────────────────────────────────
-
-    #[test]
-    fn registry_insecure_global_true_propagates_when_local_false() {
-        // Simulates: rapidbyte --registry-insecure plugin pull ... (no --insecure)
-        let global_insecure = true;
-        let local_insecure = false;
-        assert!(local_insecure || global_insecure);
-    }
-
-    #[test]
-    fn registry_insecure_local_true_overrides_global_false() {
-        let global_insecure = false;
-        let local_insecure = true;
-        assert!(local_insecure || global_insecure);
-    }
-
-    #[test]
-    fn registry_insecure_both_false_stays_false() {
-        let global_insecure = false;
-        let local_insecure = false;
-        assert!(!(local_insecure || global_insecure));
-    }
 
     #[test]
     fn controller_registry_url_falls_back_to_global() {

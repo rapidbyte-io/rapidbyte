@@ -21,6 +21,18 @@ struct MetricsRuntime<'a> {
     meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
 }
 
+/// Consolidated parameters for [`execute_task`].
+pub struct TaskConfig<'a> {
+    pub pipeline_yaml: &'a [u8],
+    pub dry_run: bool,
+    pub limit: Option<u64>,
+    pub progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
+    pub cancel_token: CancellationToken,
+    pub snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
+    pub meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
+    pub registry_config: &'a rapidbyte_registry::RegistryConfig,
+}
+
 /// Result of executing a task on the agent.
 pub struct TaskExecutionResult {
     pub outcome: TaskOutcomeKind,
@@ -70,29 +82,19 @@ fn is_pre_commit_cancellation(error: &PipelineError) -> bool {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn execute_task(
-    pipeline_yaml: &[u8],
-    dry_run: bool,
-    limit: Option<u64>,
-    progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
-    cancel_token: CancellationToken,
-    snapshot_reader: &rapidbyte_metrics::snapshot::SnapshotReader,
-    meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
-    registry_config: &rapidbyte_registry::RegistryConfig,
-) -> TaskExecutionResult {
+pub async fn execute_task(task: TaskConfig<'_>) -> TaskExecutionResult {
     let metrics_runtime = MetricsRuntime {
-        snapshot_reader,
-        meter_provider,
+        snapshot_reader: task.snapshot_reader,
+        meter_provider: task.meter_provider,
     };
     execute_task_with_runner(
-        pipeline_yaml,
-        dry_run,
-        limit,
-        progress_tx,
-        cancel_token,
+        task.pipeline_yaml,
+        task.dry_run,
+        task.limit,
+        task.progress_tx,
+        task.cancel_token,
         metrics_runtime,
-        registry_config,
+        task.registry_config,
         |config, options, progress_tx, cancel_token, metrics_runtime, registry_config| {
             Box::pin(orchestrator::run_pipeline(
                 config,
@@ -357,16 +359,16 @@ destination:
     #[tokio::test]
     async fn test_invalid_utf8_returns_failed() {
         let (reader, provider) = test_metrics_runtime();
-        let result = execute_task(
-            &[0xFF, 0xFE],
-            false,
-            None,
-            None,
-            CancellationToken::new(),
-            &reader,
-            &provider,
-            &rapidbyte_registry::RegistryConfig::default(),
-        )
+        let result = execute_task(TaskConfig {
+            pipeline_yaml: &[0xFF, 0xFE],
+            dry_run: false,
+            limit: None,
+            progress_tx: None,
+            cancel_token: CancellationToken::new(),
+            snapshot_reader: &reader,
+            meter_provider: &provider,
+            registry_config: &rapidbyte_registry::RegistryConfig::default(),
+        })
         .await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Failed(_)));
         if let TaskOutcomeKind::Failed(info) = &result.outcome {
@@ -378,16 +380,16 @@ destination:
     #[tokio::test]
     async fn test_invalid_yaml_returns_failed() {
         let (reader, provider) = test_metrics_runtime();
-        let result = execute_task(
-            b"not: [valid: yaml",
-            false,
-            None,
-            None,
-            CancellationToken::new(),
-            &reader,
-            &provider,
-            &rapidbyte_registry::RegistryConfig::default(),
-        )
+        let result = execute_task(TaskConfig {
+            pipeline_yaml: b"not: [valid: yaml",
+            dry_run: false,
+            limit: None,
+            progress_tx: None,
+            cancel_token: CancellationToken::new(),
+            snapshot_reader: &reader,
+            meter_provider: &provider,
+            registry_config: &rapidbyte_registry::RegistryConfig::default(),
+        })
         .await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Failed(_)));
         if let TaskOutcomeKind::Failed(info) = &result.outcome {
@@ -398,16 +400,16 @@ destination:
     #[tokio::test]
     async fn test_zero_metrics_on_early_failure() {
         let (reader, provider) = test_metrics_runtime();
-        let result = execute_task(
-            &[0xFF],
-            false,
-            None,
-            None,
-            CancellationToken::new(),
-            &reader,
-            &provider,
-            &rapidbyte_registry::RegistryConfig::default(),
-        )
+        let result = execute_task(TaskConfig {
+            pipeline_yaml: &[0xFF],
+            dry_run: false,
+            limit: None,
+            progress_tx: None,
+            cancel_token: CancellationToken::new(),
+            snapshot_reader: &reader,
+            meter_provider: &provider,
+            registry_config: &rapidbyte_registry::RegistryConfig::default(),
+        })
         .await;
         assert_eq!(result.metrics.records_processed, 0);
         assert_eq!(result.metrics.bytes_processed, 0);
@@ -419,16 +421,16 @@ destination:
         let (reader, provider) = test_metrics_runtime();
         let token = CancellationToken::new();
         token.cancel();
-        let result = execute_task(
-            b"pipeline: test\n",
-            false,
-            None,
-            None,
-            token,
-            &reader,
-            &provider,
-            &rapidbyte_registry::RegistryConfig::default(),
-        )
+        let result = execute_task(TaskConfig {
+            pipeline_yaml: b"pipeline: test\n",
+            dry_run: false,
+            limit: None,
+            progress_tx: None,
+            cancel_token: token,
+            snapshot_reader: &reader,
+            meter_provider: &provider,
+            registry_config: &rapidbyte_registry::RegistryConfig::default(),
+        })
         .await;
         assert!(matches!(result.outcome, TaskOutcomeKind::Cancelled));
     }

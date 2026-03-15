@@ -29,5 +29,5 @@ pub use artifact::{
 pub use cache::{CacheEntry, PluginCache};
 pub use client::{RegistryClient, RegistryConfig};
 pub use index::{PluginIndex, PluginIndexEntry, INDEX_REPOSITORY, INDEX_TAG};
-pub use reference::{normalize_registry_url, PluginRef};
-pub use trust::{verify_artifact_trust, TrustPolicy};
+pub use reference::{normalize_registry_url, normalize_registry_url_option, PluginRef};
+pub use trust::{parse_trusted_keys, verify_artifact_trust, TrustPolicy};

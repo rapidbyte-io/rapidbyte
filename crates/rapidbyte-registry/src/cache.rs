@@ -13,10 +13,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use tracing::warn;
 
 use crate::reference::PluginRef;
-use crate::verify::sha256_hex;
 
 /// A cached plugin entry on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,7 +91,7 @@ impl PluginCache {
         let manifest_path = dir.join("manifest.json");
         let digest_path = dir.join("sha256");
 
-        let digest = sha256_hex(wasm_bytes);
+        let digest = crate::verify::sha256_hex(wasm_bytes);
 
         fs::write(&wasm_path, wasm_bytes)
             .with_context(|| format!("failed to write {}", wasm_path.display()))?;
@@ -157,30 +155,16 @@ impl PluginCache {
             return None;
         }
 
-        let stored_digest = fs::read_to_string(&digest_path).ok()?;
-        let stored_digest = stored_digest.trim().to_owned();
+        let digest = fs::read_to_string(&digest_path).ok()?;
+        let digest = digest.trim().to_owned();
 
-        let wasm_bytes = fs::read(&wasm_path).ok()?;
-        let actual_digest = sha256_hex(&wasm_bytes);
-
-        if actual_digest != stored_digest {
-            warn!(
-                plugin_ref = %plugin_ref,
-                expected = %stored_digest,
-                actual = %actual_digest,
-                "cache digest mismatch — treating as miss",
-            );
-            return None;
-        }
-
-        #[allow(clippy::cast_possible_truncation)]
-        let size_bytes = wasm_bytes.len() as u64;
+        let size_bytes = fs::metadata(&wasm_path).ok()?.len();
 
         Some(CacheEntry {
             plugin_ref: plugin_ref.clone(),
             wasm_path,
             manifest_path,
-            digest: actual_digest,
+            digest,
             size_bytes,
         })
     }
@@ -243,28 +227,16 @@ impl PluginCache {
         let wasm_path = dir.join("plugin.wasm");
         let digest_path = dir.join("sha256");
 
-        let stored_digest = fs::read_to_string(&digest_path).ok()?;
-        let stored_digest = stored_digest.trim().to_owned();
+        let digest = fs::read_to_string(&digest_path).ok()?;
+        let digest = digest.trim().to_owned();
 
-        let wasm_bytes = fs::read(&wasm_path).ok()?;
-        let actual_digest = sha256_hex(&wasm_bytes);
-
-        if actual_digest != stored_digest {
-            warn!(
-                plugin_ref = %plugin_ref,
-                "skipping corrupt cache entry during list",
-            );
-            return None;
-        }
-
-        #[allow(clippy::cast_possible_truncation)]
-        let size_bytes = wasm_bytes.len() as u64;
+        let size_bytes = fs::metadata(&wasm_path).ok()?.len();
 
         Some(CacheEntry {
             plugin_ref,
             wasm_path,
             manifest_path: dir.join("manifest.json"),
-            digest: actual_digest,
+            digest,
             size_bytes,
         })
     }
@@ -314,6 +286,7 @@ impl PluginCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::verify::sha256_hex;
     use tempfile::tempdir;
 
     fn test_ref(tag: &str) -> PluginRef {
@@ -462,7 +435,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_digest_treated_as_miss() {
+    fn corrupt_digest_returns_entry_with_stored_digest() {
         let tmp = tempdir().unwrap();
         let cache = PluginCache::new(tmp.path().to_path_buf());
         let pref = test_ref("1.0.0");
@@ -473,15 +446,14 @@ mod tests {
             .unwrap();
 
         // Corrupt the digest file.
+        let bad_digest = "badc0ffee00000000000000000000000000000000000000000000000000bad";
         let digest_path = entry.wasm_path.parent().unwrap().join("sha256");
-        fs::write(
-            &digest_path,
-            "badc0ffee00000000000000000000000000000000000000000000000000bad",
-        )
-        .unwrap();
+        fs::write(&digest_path, bad_digest).unwrap();
 
-        // Lookup should return None due to digest mismatch.
-        assert!(cache.lookup(&pref).is_none());
+        // Lookup trusts the sidecar; the caller detects the mismatch
+        // via artifact_config cross-check.
+        let looked_up = cache.lookup(&pref).expect("entry should still be returned");
+        assert_eq!(looked_up.digest, bad_digest);
     }
 
     #[test]
@@ -493,33 +465,31 @@ mod tests {
     }
 
     #[test]
-    fn list_skips_corrupt_entries() {
+    fn list_returns_entries_with_corrupt_digest() {
         let tmp = tempdir().unwrap();
         let cache = PluginCache::new(tmp.path().to_path_buf());
 
-        let good_ref = test_ref("1.0.0");
-        let bad_ref = test_ref("2.0.0");
+        let ref_a = test_ref("1.0.0");
+        let ref_b = test_ref("2.0.0");
 
         let wasm = dummy_wasm();
         cache
-            .store(&good_ref, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
+            .store(&ref_a, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
             .unwrap();
         let wasm = dummy_wasm();
-        let bad_entry = cache
-            .store(&bad_ref, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
+        let entry_b = cache
+            .store(&ref_b, &dummy_manifest(), &wasm, &unsigned_config(&wasm))
             .unwrap();
 
         // Corrupt the digest of the second entry.
-        let digest_path = bad_entry.wasm_path.parent().unwrap().join("sha256");
-        fs::write(
-            digest_path,
-            "0000000000000000000000000000000000000000000000000000000000000000",
-        )
-        .unwrap();
+        let bad_digest = "0000000000000000000000000000000000000000000000000000000000000000";
+        let digest_path = entry_b.wasm_path.parent().unwrap().join("sha256");
+        fs::write(digest_path, bad_digest).unwrap();
 
+        // Both entries returned; the caller is responsible for verifying
+        // against artifact_config.
         let entries = cache.list().unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].plugin_ref, good_ref);
+        assert_eq!(entries.len(), 2);
     }
 
     #[test]

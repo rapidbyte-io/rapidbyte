@@ -102,6 +102,17 @@ pub fn normalize_registry_url(url: &str) -> String {
     stripped.trim_end_matches('/').to_owned()
 }
 
+/// Normalize an optional registry URL, filtering out blank/empty values.
+///
+/// Combines the common `filter(not_blank) + map(normalize)` pattern used
+/// when building [`crate::client::RegistryConfig`] from CLI flags or
+/// controller responses.
+#[must_use]
+pub fn normalize_registry_url_option(url: Option<&str>) -> Option<String> {
+    url.filter(|s| !s.trim().is_empty())
+        .map(normalize_registry_url)
+}
+
 impl fmt::Display for PluginRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}:{}", self.registry, self.repository, self.tag)

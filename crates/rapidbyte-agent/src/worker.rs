@@ -456,27 +456,23 @@ async fn process_task(
     };
     let registry_config = rapidbyte_registry::RegistryConfig {
         insecure: ctx.config.registry_insecure,
-        credentials: None,
-        default_registry: ctx
-            .config
-            .registry_url
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .map(rapidbyte_registry::normalize_registry_url),
+        default_registry: rapidbyte_registry::normalize_registry_url_option(
+            ctx.config.registry_url.as_deref(),
+        ),
         trust_policy,
         trusted_key_pems: ctx.config.trusted_key_pems.clone(),
         ..Default::default()
     };
-    let result = executor::execute_task(
-        &task.pipeline_yaml_utf8,
+    let result = executor::execute_task(executor::TaskConfig {
+        pipeline_yaml: &task.pipeline_yaml_utf8,
         dry_run,
         limit,
-        Some(progress_tx),
+        progress_tx: Some(progress_tx),
         cancel_token,
-        ctx.otel_guard.snapshot_reader(),
-        ctx.otel_guard.meter_provider(),
-        &registry_config,
-    )
+        snapshot_reader: ctx.otel_guard.snapshot_reader(),
+        meter_provider: ctx.otel_guard.meter_provider(),
+        registry_config: &registry_config,
+    })
     .await;
 
     let _ = progress_handle.await;

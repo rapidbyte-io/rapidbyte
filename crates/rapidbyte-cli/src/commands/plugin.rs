@@ -105,7 +105,12 @@ async fn pull(plugin_ref_str: &str, insecure: bool, global_config: &RegistryConf
                 entry.digest
             );
         }
-        rapidbyte_registry::verify_artifact_trust(&cached_config, global_config)?;
+        let trusted_keys = rapidbyte_registry::parse_trusted_keys(global_config)?;
+        rapidbyte_registry::verify_artifact_trust(
+            &cached_config,
+            global_config.trust_policy,
+            &trusted_keys,
+        )?;
         eprintln!(
             "Plugin {plugin_ref} already cached ({})",
             format_size(entry.size_bytes),
@@ -125,7 +130,12 @@ async fn pull(plugin_ref_str: &str, insecure: bool, global_config: &RegistryConf
     let unpacked = artifact::unpack_artifact(&image).context("Failed to unpack plugin artifact")?;
 
     // Verify plugin signature against trust policy before caching.
-    rapidbyte_registry::verify_artifact_trust(&unpacked.config, global_config)?;
+    let trusted_keys = rapidbyte_registry::parse_trusted_keys(global_config)?;
+    rapidbyte_registry::verify_artifact_trust(
+        &unpacked.config,
+        global_config.trust_policy,
+        &trusted_keys,
+    )?;
 
     let entry = cache
         .store(

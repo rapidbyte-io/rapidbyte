@@ -185,6 +185,9 @@ pub async fn resolve_plugin_from_registry(
 
     let cache = PluginCache::default_location()?;
 
+    // Parse trusted keys once for both cache-hit and pull paths.
+    let trusted_keys = rapidbyte_registry::parse_trusted_keys(registry_config)?;
+
     // Check cache first.
     if let Some(entry) = cache.lookup(&plugin_ref) {
         tracing::debug!(%plugin_ref, "using cached plugin");
@@ -202,7 +205,11 @@ pub async fn resolve_plugin_from_registry(
             cached_config.wasm_sha256,
             entry.digest
         );
-        verify_trust(&cached_config, registry_config)?;
+        rapidbyte_registry::verify_artifact_trust(
+            &cached_config,
+            registry_config.trust_policy,
+            &trusted_keys,
+        )?;
         return Ok(entry.wasm_path);
     }
 
@@ -213,7 +220,11 @@ pub async fn resolve_plugin_from_registry(
     let unpacked = rapidbyte_registry::unpack_artifact(&image)?;
 
     // Verify signature against trust policy
-    verify_trust(&unpacked.config, registry_config)?;
+    rapidbyte_registry::verify_artifact_trust(
+        &unpacked.config,
+        registry_config.trust_policy,
+        &trusted_keys,
+    )?;
 
     let entry = cache.store(
         &plugin_ref,
@@ -229,13 +240,6 @@ pub async fn resolve_plugin_from_registry(
     );
 
     Ok(entry.wasm_path)
-}
-
-fn verify_trust(
-    config: &rapidbyte_registry::PluginArtifactConfig,
-    registry_config: &rapidbyte_registry::RegistryConfig,
-) -> Result<()> {
-    rapidbyte_registry::verify_artifact_trust(config, registry_config)
 }
 
 /// Build a fully-qualified OCI reference from a bare plugin name and kind.
