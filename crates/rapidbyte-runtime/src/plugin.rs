@@ -325,9 +325,13 @@ pub async fn resolve_plugin(
     if is_oci_reference(use_ref) {
         resolve_plugin_from_registry(use_ref, registry_config).await
     } else {
-        // Try local filesystem first — works offline and for dev builds.
-        if let Ok(path) = resolve_plugin_path(use_ref, kind) {
-            return Ok(path);
+        // When trust policy is Verify, skip local filesystem for bare refs
+        // to prevent unsigned local plugins from shadowing signed registry ones.
+        let allow_local = registry_config.trust_policy != rapidbyte_registry::TrustPolicy::Verify;
+        if allow_local {
+            if let Ok(path) = resolve_plugin_path(use_ref, kind) {
+                return Ok(path);
+            }
         }
 
         // Fall back to registry with default_registry prefix if configured.

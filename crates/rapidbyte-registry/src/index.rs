@@ -14,15 +14,19 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Parsed version for comparison. Pre-release versions sort below their
-/// release counterpart (e.g. `1.0.0-beta` < `1.0.0`).
+/// release counterpart (e.g. `1.0.0-beta` < `1.0.0`), and pre-release
+/// suffixes are compared lexicographically (e.g. `beta.2` < `beta.10`
+/// is handled by padding numeric segments).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedVersion {
     major: u64,
     minor: u64,
     patch: u64,
-    /// `true` for release versions, `false` for pre-release (has `-suffix`).
-    /// Releases sort higher than pre-releases at the same (major, minor, patch).
+    /// `true` for release versions, `false` for pre-release.
     is_release: bool,
+    /// Pre-release identifier (e.g. `"beta.2"`). Empty for releases.
+    /// Used to distinguish between different pre-releases at the same version.
+    prerelease: String,
 }
 
 impl PartialOrd for ParsedVersion {
@@ -33,12 +37,11 @@ impl PartialOrd for ParsedVersion {
 
 impl Ord for ParsedVersion {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        (self.major, self.minor, self.patch, self.is_release).cmp(&(
-            other.major,
-            other.minor,
-            other.patch,
-            other.is_release,
-        ))
+        // Compare major.minor.patch first, then is_release (true > false),
+        // then pre-release identifier for pre-release vs pre-release.
+        (self.major, self.minor, self.patch, self.is_release)
+            .cmp(&(other.major, other.minor, other.patch, other.is_release))
+            .then_with(|| self.prerelease.cmp(&other.prerelease))
     }
 }
 
@@ -49,14 +52,18 @@ fn semver_parse(version: &str) -> Option<ParsedVersion> {
     if parts.len() >= 3 {
         let major = parts[0].parse().ok()?;
         let minor = parts[1].parse().ok()?;
-        let has_prerelease = parts[2].contains('-');
-        let patch_str = parts[2].split('-').next().unwrap_or(parts[2]);
+        let (patch_str, prerelease) = if let Some((p, pre)) = parts[2].split_once('-') {
+            (p, pre.to_owned())
+        } else {
+            (parts[2], String::new())
+        };
         let patch = patch_str.parse().ok()?;
         Some(ParsedVersion {
             major,
             minor,
             patch,
-            is_release: !has_prerelease,
+            is_release: prerelease.is_empty(),
+            prerelease,
         })
     } else {
         None
@@ -515,5 +522,31 @@ mod tests {
             &["2.0.0-beta"],
         ));
         assert_eq!(idx.plugins[0].latest, "2.0.0-beta");
+    }
+
+    #[test]
+    fn upsert_advances_prerelease_to_later_prerelease() {
+        let mut idx = PluginIndex::new();
+
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            "source",
+            "1.0.0-beta",
+            &["1.0.0-beta"],
+        ));
+        assert_eq!(idx.plugins[0].latest, "1.0.0-beta");
+
+        // rc > beta lexicographically
+        idx.upsert(make_entry(
+            "p",
+            "P",
+            "d",
+            "source",
+            "1.0.0-rc",
+            &["1.0.0-rc"],
+        ));
+        assert_eq!(idx.plugins[0].latest, "1.0.0-rc");
     }
 }
