@@ -90,6 +90,18 @@ async fn pull(plugin_ref_str: &str, insecure: bool) -> Result<()> {
     Ok(())
 }
 
+fn plugin_type_from_manifest(manifest: &rapidbyte_types::manifest::PluginManifest) -> &'static str {
+    if manifest.roles.source.is_some() {
+        "source"
+    } else if manifest.roles.destination.is_some() {
+        "destination"
+    } else if manifest.roles.transform.is_some() {
+        "transform"
+    } else {
+        "unknown"
+    }
+}
+
 async fn push(plugin_ref_str: &str, wasm_path: &PathBuf, insecure: bool) -> Result<()> {
     let plugin_ref = PluginRef::parse(plugin_ref_str).context("Invalid plugin reference")?;
 
@@ -116,6 +128,28 @@ async fn push(plugin_ref_str: &str, wasm_path: &PathBuf, insecure: bool) -> Resu
         .await?;
 
     eprintln!("Pushed {plugin_ref} ({url})");
+
+    // Update the registry index
+    eprintln!("Updating registry index...");
+    let mut index = client
+        .pull_index(&plugin_ref.registry)
+        .await?
+        .unwrap_or_default();
+
+    index.upsert(rapidbyte_registry::PluginIndexEntry {
+        repository: plugin_ref.repository.clone(),
+        name: manifest.name.clone(),
+        description: manifest.description.clone(),
+        plugin_type: plugin_type_from_manifest(&manifest).to_owned(),
+        latest: plugin_ref.tag.clone(),
+        versions: vec![plugin_ref.tag.clone()],
+        author: manifest.author.clone(),
+        license: manifest.license.clone(),
+        updated_at: chrono::Utc::now(),
+    });
+
+    client.push_index(&plugin_ref.registry, &index).await?;
+    eprintln!("Index updated");
 
     Ok(())
 }
