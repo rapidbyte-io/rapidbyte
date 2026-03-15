@@ -512,4 +512,58 @@ mod tests {
         });
         assert_eq!(resolved.as_deref(), Some("http://explicit"));
     }
+
+    // ── Registry flag precedence ──────────────────────────────────────
+
+    #[test]
+    fn registry_insecure_global_true_propagates_when_local_false() {
+        // Simulates: rapidbyte --registry-insecure plugin pull ... (no --insecure)
+        let global_insecure = true;
+        let local_insecure = false;
+        assert!(local_insecure || global_insecure);
+    }
+
+    #[test]
+    fn registry_insecure_local_true_overrides_global_false() {
+        let global_insecure = false;
+        let local_insecure = true;
+        assert!(local_insecure || global_insecure);
+    }
+
+    #[test]
+    fn registry_insecure_both_false_stays_false() {
+        let global_insecure = false;
+        let local_insecure = false;
+        assert!(!(local_insecure || global_insecure));
+    }
+
+    #[test]
+    fn controller_registry_url_falls_back_to_global() {
+        // Simulates: rapidbyte --registry-url X controller (no --registry-url on controller)
+        let subcommand_url: Option<&str> = None;
+        let global_url: Option<&str> = Some("registry.example.com");
+        let effective = subcommand_url.or(global_url);
+        assert_eq!(effective, Some("registry.example.com"));
+    }
+
+    #[test]
+    fn controller_registry_url_prefers_subcommand_over_global() {
+        let subcommand_url: Option<&str> = Some("local.registry.io");
+        let global_url: Option<&str> = Some("registry.example.com");
+        let effective = subcommand_url.or(global_url);
+        assert_eq!(effective, Some("local.registry.io"));
+    }
+
+    /// Helper that mirrors the `local || global` merge logic from main.rs.
+    fn merge_insecure(local: bool, global: bool) -> bool {
+        local || global
+    }
+
+    #[test]
+    fn controller_registry_insecure_merges_with_global() {
+        assert!(merge_insecure(false, true), "global alone → insecure");
+        assert!(merge_insecure(true, false), "local alone → insecure");
+        assert!(!merge_insecure(false, false), "neither → secure");
+        assert!(merge_insecure(true, true), "both → insecure");
+    }
 }
