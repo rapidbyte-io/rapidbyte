@@ -108,11 +108,7 @@ async fn pull(plugin_ref_str: &str, insecure: bool, global_config: &RegistryConf
                 entry.digest
             );
         }
-        check_trust(
-            &cached_config,
-            global_config.trust_policy,
-            &global_config.trusted_key_paths,
-        )?;
+        check_trust(&cached_config, global_config.trust_policy, global_config)?;
         eprintln!(
             "Plugin {plugin_ref} already cached ({})",
             format_size(entry.size_bytes),
@@ -132,11 +128,7 @@ async fn pull(plugin_ref_str: &str, insecure: bool, global_config: &RegistryConf
     let unpacked = artifact::unpack_artifact(&image).context("Failed to unpack plugin artifact")?;
 
     // Verify plugin signature against trust policy before caching.
-    check_trust(
-        &unpacked.config,
-        global_config.trust_policy,
-        &global_config.trusted_key_paths,
-    )?;
+    check_trust(&unpacked.config, global_config.trust_policy, global_config)?;
 
     let entry = cache
         .store(
@@ -455,15 +447,18 @@ fn keygen(output_dir: &Path) -> Result<()> {
 fn check_trust(
     config: &PluginArtifactConfig,
     trust_policy: TrustPolicy,
-    trusted_key_paths: &[PathBuf],
+    registry_config: &RegistryConfig,
 ) -> Result<()> {
     match trust_policy {
         TrustPolicy::Skip => Ok(()),
         TrustPolicy::Warn | TrustPolicy::Verify => {
-            let keys: Vec<_> = trusted_key_paths
-                .iter()
-                .map(|p| rapidbyte_registry::signing::load_verifying_key_file(p))
-                .collect::<Result<Vec<_>>>()?;
+            let mut keys = Vec::new();
+            for path in &registry_config.trusted_key_paths {
+                keys.push(rapidbyte_registry::signing::load_verifying_key_file(path)?);
+            }
+            for pem in &registry_config.trusted_key_pems {
+                keys.push(rapidbyte_registry::signing::load_verifying_key_pem(pem)?);
+            }
 
             match &config.signature {
                 None => {

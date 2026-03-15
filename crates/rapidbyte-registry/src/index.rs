@@ -13,6 +13,22 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Try to parse a version string as (major, minor, patch) for comparison.
+fn semver_parse(version: &str) -> Option<(u64, u64, u64)> {
+    let v = version.strip_prefix('v').unwrap_or(version);
+    let parts: Vec<&str> = v.split('.').collect();
+    if parts.len() >= 3 {
+        let major = parts[0].parse().ok()?;
+        let minor = parts[1].parse().ok()?;
+        // Strip pre-release suffix (e.g. "0-beta") for the patch number
+        let patch_str = parts[2].split('-').next().unwrap_or(parts[2]);
+        let patch = patch_str.parse().ok()?;
+        Some((major, minor, patch))
+    } else {
+        None
+    }
+}
+
 // ── Well-known index location ─────────────────────────────────────────────────
 
 /// Well-known OCI repository used to store the plugin index.
@@ -88,10 +104,20 @@ impl PluginIndex {
             existing.name = entry.name;
             existing.description = entry.description;
             existing.plugin_type = entry.plugin_type;
-            existing.latest = entry.latest;
             existing.author = entry.author;
             existing.license = entry.license;
             existing.updated_at = entry.updated_at;
+
+            // Only advance `latest` if the new version is semver-greater.
+            // Fall back to always updating if either version isn't valid semver.
+            let should_update_latest =
+                match (semver_parse(&existing.latest), semver_parse(&entry.latest)) {
+                    (Some(current), Some(new)) => new > current,
+                    _ => true,
+                };
+            if should_update_latest {
+                existing.latest = entry.latest;
+            }
 
             // Merge versions without duplicates, preserving insertion order.
             for version in entry.versions {
@@ -370,5 +396,34 @@ mod tests {
             assert_eq!(a.versions, b.versions);
             assert_eq!(a.updated_at, b.updated_at);
         }
+    }
+
+    #[test]
+    fn upsert_does_not_regress_latest_on_older_push() {
+        let mut idx = PluginIndex::new();
+
+        // Push 2.0.0 first
+        idx.upsert(make_entry(
+            "source/postgres",
+            "Postgres",
+            "desc",
+            "source",
+            "2.0.0",
+            &["2.0.0"],
+        ));
+        assert_eq!(idx.plugins[0].latest, "2.0.0");
+
+        // Push 1.0.0 after — latest should stay at 2.0.0
+        idx.upsert(make_entry(
+            "source/postgres",
+            "Postgres",
+            "desc",
+            "source",
+            "1.0.0",
+            &["1.0.0"],
+        ));
+        assert_eq!(idx.plugins[0].latest, "2.0.0");
+        assert!(idx.plugins[0].versions.contains(&"1.0.0".to_owned()));
+        assert!(idx.plugins[0].versions.contains(&"2.0.0".to_owned()));
     }
 }
