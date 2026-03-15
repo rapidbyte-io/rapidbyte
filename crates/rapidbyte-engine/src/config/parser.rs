@@ -48,57 +48,6 @@ fn apply_replacements(input: &str, mut replacements: Vec<MatchReplacement>) -> S
     result
 }
 
-/// Resolve only `${prefix:path#key}` secret references, leaving `${ENV_VAR}`
-/// patterns untouched.
-///
-/// Used by the controller to resolve secrets at dispatch time without
-/// touching env vars (which should be resolved on the agent).
-///
-/// # Errors
-///
-/// Returns an error if a secret provider prefix has no registered provider
-/// or a secret read fails.
-#[allow(clippy::missing_panics_doc)] // regex group 0 always exists
-pub async fn substitute_secrets(input: &str, secrets: &SecretProviders) -> Result<String> {
-    let mut replacements = Vec::new();
-    let mut errors = Vec::new();
-    let mut resolved: HashMap<String, String> = HashMap::new();
-
-    for cap in SECRET_REF_RE.captures_iter(input) {
-        let m = cap.get(0).unwrap();
-        let full_match = m.as_str().to_string();
-        let prefix = &cap[1];
-        let path = &cap[2];
-        let key = &cap[3];
-
-        let value = if let Some(cached) = resolved.get(&full_match) {
-            cached.clone()
-        } else {
-            match secrets.resolve(prefix, path, key).await {
-                Ok(val) => {
-                    resolved.insert(full_match, val.clone());
-                    val
-                }
-                Err(e) => {
-                    errors.push(format!("{prefix}:{path}#{key}: {e}"));
-                    continue;
-                }
-            }
-        };
-        replacements.push(MatchReplacement {
-            start: m.start(),
-            end: m.end(),
-            value,
-        });
-    }
-
-    if !errors.is_empty() {
-        anyhow::bail!("Failed to resolve secret(s):\n  {}", errors.join("\n  "));
-    }
-
-    Ok(apply_replacements(input, replacements))
-}
-
 /// Substitute all `${...}` references: env vars and secret provider refs.
 ///
 /// Each unique secret path is fetched once even if referenced multiple times.

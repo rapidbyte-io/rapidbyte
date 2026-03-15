@@ -1197,24 +1197,16 @@ async fn make_task_response(
     assignment: crate::scheduler::TaskAssignment,
     secrets: &rapidbyte_secrets::SecretProviders,
 ) -> Result<PollTaskResponse, Status> {
-    // Resolve secret references at dispatch time so the task record
-    // in the metadata store always contains unresolved YAML.
-    // Resolve only secret references (${vault:...}), leaving ${ENV_VAR}
-    // patterns for the agent to resolve in its own environment.
-    let pipeline_yaml = if secrets.is_empty() {
-        assignment.pipeline_yaml
-    } else {
-        let yaml_str = std::str::from_utf8(&assignment.pipeline_yaml)
-            .map_err(|e| Status::internal(format!("pipeline YAML is not valid UTF-8: {e}")))?;
-        if rapidbyte_engine::config::parser::contains_secret_refs(yaml_str) {
-            let resolved = rapidbyte_engine::config::parser::substitute_secrets(yaml_str, secrets)
-                .await
-                .map_err(|e| Status::internal(format!("failed to resolve secrets: {e}")))?;
-            resolved.into_bytes()
-        } else {
-            assignment.pipeline_yaml
-        }
-    };
+    // Resolve ALL variable references (secrets + env vars) at dispatch
+    // time. The agent receives fully-resolved YAML with no ${...} patterns.
+    // This prevents secret values containing ${...} from being re-expanded
+    // by the agent's environment.
+    let yaml_str = std::str::from_utf8(&assignment.pipeline_yaml)
+        .map_err(|e| Status::internal(format!("pipeline YAML is not valid UTF-8: {e}")))?;
+    let resolved = rapidbyte_engine::config::parser::substitute_variables(yaml_str, secrets)
+        .await
+        .map_err(|e| Status::internal(format!("failed to resolve variables: {e}")))?;
+    let pipeline_yaml = resolved.into_bytes();
 
     Ok(PollTaskResponse {
         result: Some(poll_task_response::Result::Task(TaskAssignment {
