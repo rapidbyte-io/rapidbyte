@@ -40,9 +40,9 @@ impl PluginRef {
         let registry = &base[..slash];
         let repository = &base[slash + 1..];
 
-        // Registry must look like a host (contains '.' or ':' for port)
+        // Registry must look like a host (contains '.', ':', or is 'localhost')
         anyhow::ensure!(
-            registry.contains('.') || registry.contains(':'),
+            registry.contains('.') || registry.contains(':') || registry == "localhost",
             "plugin reference must start with a registry host \
              (e.g. registry.example.com/source/postgres:1.0.0), got: {input}"
         );
@@ -50,6 +50,7 @@ impl PluginRef {
             !repository.is_empty(),
             "repository path cannot be empty: {input}"
         );
+        anyhow::ensure!(!tag.is_empty(), "tag cannot be empty: {input}");
 
         // Reject path traversal and unsafe characters in all components.
         for (label, value) in [
@@ -154,6 +155,20 @@ mod tests {
     fn reject_registry_only_no_repo() {
         let err = PluginRef::parse("registry.example.com/").unwrap_err();
         assert!(err.to_string().contains("repository path cannot be empty"));
+    }
+
+    #[test]
+    fn reject_empty_tag() {
+        let err = PluginRef::parse("registry.example.com/source/postgres:").unwrap_err();
+        assert!(err.to_string().contains("tag cannot be empty"));
+    }
+
+    #[test]
+    fn accept_localhost_without_port() {
+        let r = PluginRef::parse("localhost/source/postgres:1.0.0").unwrap();
+        assert_eq!(r.registry, "localhost");
+        assert_eq!(r.repository, "source/postgres");
+        assert_eq!(r.tag, "1.0.0");
     }
 
     #[test]
