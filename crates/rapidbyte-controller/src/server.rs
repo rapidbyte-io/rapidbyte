@@ -51,6 +51,10 @@ pub struct ControllerConfig {
     pub registry_url: Option<String>,
     /// Use HTTP instead of HTTPS when agents pull from the registry.
     pub registry_insecure: bool,
+    /// Plugin signature trust policy broadcast to agents: "skip", "warn", or "verify".
+    pub trust_policy: String,
+    /// Paths to trusted Ed25519 public key PEM files. Contents are read and sent to agents.
+    pub trusted_key_paths: Vec<std::path::PathBuf>,
 }
 
 /// Default signing key used when no explicit key is configured.
@@ -76,6 +80,8 @@ impl Default for ControllerConfig {
             metrics_listen: None,
             registry_url: None,
             registry_insecure: false,
+            trust_policy: "skip".to_owned(),
+            trusted_key_paths: Vec::new(),
         }
     }
 }
@@ -524,11 +530,22 @@ pub async fn run(
         PipelineServiceImpl::new(state.clone()),
         auth.clone(),
     );
+    // Read trusted key PEM contents from files
+    let mut trusted_key_pems: Vec<String> = Vec::new();
+    for path in &config.trusted_key_paths {
+        let pem = std::fs::read_to_string(path).map_err(|e| {
+            anyhow::anyhow!("Failed to read trusted key file {}: {e}", path.display())
+        })?;
+        trusted_key_pems.push(pem);
+    }
+
     let agent_svc = AgentServiceServer::with_interceptor(
-        AgentServiceImpl::with_registry_config(
+        AgentServiceImpl::with_trust_config(
             state,
             config.registry_url.clone().unwrap_or_default(),
             config.registry_insecure,
+            config.trust_policy.clone(),
+            trusted_key_pems,
         ),
         auth,
     );

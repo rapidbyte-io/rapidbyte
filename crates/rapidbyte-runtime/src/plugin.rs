@@ -189,9 +189,14 @@ pub async fn resolve_plugin_from_registry(
     if let Some(entry) = cache.lookup(&plugin_ref) {
         tracing::debug!(%plugin_ref, "using cached plugin");
         // Re-verify trust on cache hits so policy/key changes take effect.
-        if let Some(config) = cache.load_artifact_config(&plugin_ref) {
-            verify_trust(&config, registry_config)?;
-        }
+        // Missing artifact_config.json (legacy cache) is treated as unsigned.
+        let cached_config = cache.load_artifact_config(&plugin_ref).unwrap_or(
+            rapidbyte_registry::PluginArtifactConfig {
+                wasm_sha256: entry.digest.clone(),
+                signature: None,
+            },
+        );
+        verify_trust(&cached_config, registry_config)?;
         return Ok(entry.wasm_path);
     }
 
@@ -236,11 +241,13 @@ fn verify_trust(
     match registry_config.trust_policy {
         TrustPolicy::Skip => Ok(()),
         TrustPolicy::Warn | TrustPolicy::Verify => {
-            let keys: Vec<_> = registry_config
-                .trusted_key_paths
-                .iter()
-                .map(|p| rapidbyte_registry::signing::load_verifying_key_file(p))
-                .collect::<Result<Vec<_>>>()?;
+            let mut keys = Vec::new();
+            for path in &registry_config.trusted_key_paths {
+                keys.push(rapidbyte_registry::signing::load_verifying_key_file(path)?);
+            }
+            for pem in &registry_config.trusted_key_pems {
+                keys.push(rapidbyte_registry::signing::load_verifying_key_pem(pem)?);
+            }
 
             match &config.signature {
                 None => {

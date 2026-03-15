@@ -478,6 +478,8 @@ async fn main() -> ExitCode {
                 metrics_listen.as_deref(),
                 ctrl_registry_url,
                 ctrl_registry_insecure,
+                &cli.trust_policy,
+                cli.trust_key.clone(),
                 otel_guard,
             )
             .await

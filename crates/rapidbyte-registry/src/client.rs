@@ -30,6 +30,9 @@ pub struct RegistryConfig {
     pub trust_policy: TrustPolicy,
     /// Paths to trusted Ed25519 public key PEM files.
     pub trusted_key_paths: Vec<std::path::PathBuf>,
+    /// Trusted Ed25519 public keys as PEM strings (alternative to file paths).
+    /// Used by agents that receive keys inline from the controller.
+    pub trusted_key_pems: Vec<String>,
 }
 
 /// High-level OCI registry client for rapidbyte plugin artifacts.

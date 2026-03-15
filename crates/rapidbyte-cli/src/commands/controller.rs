@@ -19,6 +19,8 @@ pub async fn execute(
     metrics_listen: Option<&str>,
     registry_url: Option<&str>,
     registry_insecure: bool,
+    trust_policy: &str,
+    trusted_key_paths: Vec<std::path::PathBuf>,
     otel_guard: rapidbyte_metrics::OtelGuard,
 ) -> Result<()> {
     let config = build_config(
@@ -34,6 +36,8 @@ pub async fn execute(
         metrics_listen,
         registry_url,
         registry_insecure,
+        trust_policy,
+        trusted_key_paths,
     )?;
     rapidbyte_controller::run(config, Arc::new(otel_guard)).await
 }
@@ -52,6 +56,8 @@ fn build_config(
     metrics_listen: Option<&str>,
     registry_url: Option<&str>,
     registry_insecure: bool,
+    trust_policy: &str,
+    trusted_key_paths: Vec<std::path::PathBuf>,
 ) -> Result<rapidbyte_controller::ControllerConfig> {
     fn validate_auth_token(token: &str) -> Result<()> {
         if token.trim().is_empty() {
@@ -105,6 +111,8 @@ fn build_config(
     config.metrics_listen = metrics_listen.map(str::to_owned);
     config.registry_url = registry_url.map(str::to_owned);
     config.registry_insecure = registry_insecure;
+    trust_policy.clone_into(&mut config.trust_policy);
+    config.trusted_key_paths = trusted_key_paths;
     match (tls_cert, tls_key) {
         (Some(cert), Some(key)) => {
             config.tls = Some(rapidbyte_controller::ServerTlsConfig {
@@ -138,6 +146,8 @@ mod tests {
             None,
             None,
             false,
+            "skip",
+            vec![],
         )
         .unwrap();
         assert_eq!(config.auth_tokens, vec!["secret".to_string()]);
@@ -159,6 +169,8 @@ mod tests {
             None,
             None,
             false,
+            "skip",
+            vec![],
         )
         .err()
         .unwrap();
@@ -180,6 +192,8 @@ mod tests {
             None,
             None,
             false,
+            "skip",
+            vec![],
         )
         .unwrap();
         assert!(config.auth_tokens.is_empty());
@@ -201,6 +215,8 @@ mod tests {
             None,
             None,
             false,
+            "skip",
+            vec![],
         )
         .err()
         .unwrap();
@@ -222,6 +238,8 @@ mod tests {
             None,
             None,
             false,
+            "skip",
+            vec![],
         )
         .err()
         .unwrap();
@@ -243,6 +261,8 @@ mod tests {
             None,
             None,
             false,
+            "skip",
+            vec![],
         )
         .err()
         .unwrap();
@@ -266,6 +286,8 @@ mod tests {
             None,
             None,
             false,
+            "skip",
+            vec![],
         )
         .unwrap();
         assert!(config.allow_insecure_default_signing_key);
@@ -286,6 +308,8 @@ mod tests {
             None,
             None,
             false,
+            "skip",
+            vec![],
         )
         .err()
         .unwrap();
@@ -315,6 +339,8 @@ mod tests {
             None,
             None,
             false,
+            "skip",
+            vec![],
         )
         .unwrap();
 
@@ -337,6 +363,8 @@ mod tests {
             None,
             None,
             false,
+            "skip",
+            vec![],
         )
         .err()
         .unwrap();
@@ -360,6 +388,8 @@ mod tests {
             None,
             None,
             false,
+            "skip",
+            vec![],
         )
         .unwrap();
         assert_eq!(config.reconciliation_timeout, Duration::from_secs(42));
@@ -380,6 +410,8 @@ mod tests {
             None,
             Some("registry.example.com"),
             true,
+            "skip",
+            vec![],
         )
         .unwrap();
         assert_eq!(config.registry_url.as_deref(), Some("registry.example.com"));

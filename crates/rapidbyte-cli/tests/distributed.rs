@@ -207,6 +207,8 @@ async fn distributed_submit_and_complete() {
             metrics_listen: None,
             registry_url: None,
             registry_insecure: false,
+            trust_policy: "skip".to_owned(),
+            trusted_key_pems: vec![],
         };
         let guard =
             Arc::new(rapidbyte_metrics::init("test-agent").expect("otel init should succeed"));

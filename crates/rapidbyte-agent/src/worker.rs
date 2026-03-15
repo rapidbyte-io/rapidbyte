@@ -63,6 +63,10 @@ pub struct AgentConfig {
     pub registry_url: Option<String>,
     /// Use HTTP instead of HTTPS when pulling from the registry.
     pub registry_insecure: bool,
+    /// Plugin signature trust policy, received from the controller on registration.
+    pub trust_policy: String,
+    /// Trusted Ed25519 public key PEM contents, received from the controller on registration.
+    pub trusted_key_pems: Vec<String>,
 }
 
 impl Default for AgentConfig {
@@ -83,6 +87,8 @@ impl Default for AgentConfig {
             metrics_listen: None,
             registry_url: None,
             registry_insecure: false,
+            trust_policy: "skip".to_owned(),
+            trusted_key_pems: Vec::new(),
         }
     }
 }
@@ -195,6 +201,13 @@ pub async fn run(
         );
         config.registry_url = Some(registration.registry_url);
         config.registry_insecure = registration.registry_insecure;
+    }
+    // Apply trust policy from controller if provided
+    if !registration.trust_policy.is_empty() {
+        config.trust_policy = registration.trust_policy;
+    }
+    if !registration.trusted_key_pems.is_empty() {
+        config.trusted_key_pems = registration.trusted_key_pems;
     }
 
     // Active lease tracking shared between worker and heartbeat
@@ -435,6 +448,9 @@ async fn process_task(
             .as_deref()
             .filter(|s| !s.trim().is_empty())
             .map(rapidbyte_registry::normalize_registry_url),
+        trust_policy: rapidbyte_registry::TrustPolicy::from_str_name(&ctx.config.trust_policy)
+            .unwrap_or_default(),
+        trusted_key_pems: ctx.config.trusted_key_pems.clone(),
         ..Default::default()
     };
     let result = executor::execute_task(
