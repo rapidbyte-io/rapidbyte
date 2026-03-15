@@ -14,25 +14,6 @@ use chrono::{DateTime, Utc};
 use rapidbyte_types::wire::PluginKind;
 use serde::{Deserialize, Serialize};
 
-/// Deserialize `PluginKind` with a fallback for unknown/legacy values.
-///
-/// Existing index entries may contain free-form strings (e.g. `"unknown"`)
-/// that predate the typed enum. Rather than failing the entire index
-/// deserialization, fall back to `PluginKind::Transform` for unrecognized
-/// values.
-fn deserialize_plugin_kind<'de, D>(deserializer: D) -> Result<PluginKind, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s = String::deserialize(deserializer)?;
-    match s.as_str() {
-        "source" => Ok(PluginKind::Source),
-        "destination" => Ok(PluginKind::Destination),
-        // "transform" and any unknown/legacy values default to Transform.
-        _ => Ok(PluginKind::Transform),
-    }
-}
-
 // ── Well-known index location ─────────────────────────────────────────────────
 
 /// Well-known OCI repository used to store the plugin index.
@@ -53,7 +34,6 @@ pub struct PluginIndexEntry {
     /// Short description shown in search results.
     pub description: String,
     /// Plugin category.
-    #[serde(deserialize_with = "deserialize_plugin_kind")]
     pub plugin_type: PluginKind,
     /// Latest published version tag.
     pub latest: String,
@@ -792,7 +772,7 @@ mod tests {
         let index: PluginIndex = serde_json::from_str(json)
             .expect("index with legacy plugin_type should still deserialize");
         assert_eq!(index.plugins.len(), 1);
-        assert_eq!(index.plugins[0].plugin_type, PluginKind::Transform);
+        assert_eq!(index.plugins[0].plugin_type, PluginKind::Unknown);
     }
 
     #[test]

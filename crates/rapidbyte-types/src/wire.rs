@@ -64,6 +64,9 @@ pub enum PluginKind {
     Destination,
     /// Transforms data in-flight between source and destination.
     Transform,
+    /// Unrecognized plugin kind (e.g. from a newer index format).
+    #[serde(other)]
+    Unknown,
 }
 
 impl std::fmt::Display for PluginKind {
@@ -72,6 +75,7 @@ impl std::fmt::Display for PluginKind {
             Self::Source => "source",
             Self::Destination => "destination",
             Self::Transform => "transform",
+            Self::Unknown => "unknown",
         })
     }
 }

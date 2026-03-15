@@ -616,6 +616,7 @@ pub fn run_transform_stream(
 ///
 /// Returns an error if the component cannot be loaded, opened, validated,
 /// or if the plugin reports an invalid configuration.
+#[allow(clippy::too_many_lines)]
 pub fn validate_plugin(
     wasm_path: &std::path::Path,
     kind: PluginKind,
@@ -731,6 +732,9 @@ pub fn validate_plugin(
                 .map_err(|e| anyhow::anyhow!(e.to_string()));
             let _ = iface.call_close(&mut store, session);
             result
+        }
+        PluginKind::Unknown => {
+            anyhow::bail!("cannot validate plugin with unknown kind")
         }
     }
 }

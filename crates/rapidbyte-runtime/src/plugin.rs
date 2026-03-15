@@ -101,6 +101,7 @@ fn kind_subdir(kind: PluginKind) -> &'static str {
         PluginKind::Source => "sources",
         PluginKind::Destination => "destinations",
         PluginKind::Transform => "transforms",
+        PluginKind::Unknown => "plugins",
     }
 }
 
@@ -260,6 +261,7 @@ fn qualify_bare_ref(use_ref: &str, kind: PluginKind, default_registry: &str) -> 
         PluginKind::Source => "source",
         PluginKind::Destination => "destination",
         PluginKind::Transform => "transform",
+        PluginKind::Unknown => "plugin",
     };
 
     let (name, tag) = if let Some((n, v)) = use_ref.split_once('@') {
