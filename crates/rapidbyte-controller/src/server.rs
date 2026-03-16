@@ -5,13 +5,13 @@ use std::sync::Arc;
 use tonic::transport::{Identity, Server, ServerTlsConfig as TonicServerTlsConfig};
 use tracing::info;
 
-use crate::agent_service::AgentServiceImpl;
 use crate::background;
 use crate::config::{initialize_metadata_store, validate, ControllerConfig, DEFAULT_SIGNING_KEY};
 use crate::middleware::BearerAuthInterceptor;
 use crate::pipeline_service::PipelineServiceImpl;
 use crate::proto::rapidbyte::v1::agent_service_server::AgentServiceServer;
 use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineServiceServer;
+use crate::services::agent::AgentHandler;
 use crate::state::ControllerState;
 
 /// Start the controller gRPC server.
@@ -81,7 +81,7 @@ pub async fn run(
     }
 
     let agent_svc = AgentServiceServer::with_interceptor(
-        AgentServiceImpl::with_trust_config(
+        AgentHandler::with_trust_config(
             state,
             config.registry_url.clone().unwrap_or_default(),
             config.registry_insecure,

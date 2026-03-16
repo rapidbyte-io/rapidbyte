@@ -852,7 +852,7 @@ mod tests {
         assert!(pending.completed_at.is_none());
         assert!(pending.current_task.is_none());
 
-        let agent_svc = crate::agent_service::AgentServiceImpl::new(state.clone());
+        let agent_svc = crate::services::agent::AgentHandler::new(state.clone());
         let agent_id = agent_svc
             .register_agent(Request::new(RegisterAgentRequest {
                 max_tasks: 1,

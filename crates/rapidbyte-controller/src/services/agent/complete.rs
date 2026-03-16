@@ -549,8 +549,8 @@ async fn prepare_retry_if_allowed(
     true
 }
 
-/// Test-only re-export of [`prepare_retry_if_allowed`] so that existing tests
-/// in `agent_service.rs` can call it via `AgentServiceImpl`.
+/// Test-only re-export of [`prepare_retry_if_allowed`] so that tests
+/// in `services/agent/mod.rs` can call it via `AgentHandler`.
 #[cfg(test)]
 pub(crate) async fn prepare_retry_if_allowed_for_test(
     state: &ControllerState,
