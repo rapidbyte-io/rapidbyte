@@ -1118,50 +1118,116 @@ mod tests {
     // per-test provider.
 
     #[tokio::test]
-    async fn concurrent_idempotent_submit_is_rejected_while_in_flight() {
+    async fn concurrent_idempotent_submit_races_are_serialized() {
+        use std::sync::Arc;
+        use tokio::sync::Barrier;
+
         let state = test_state();
+        let svc = Arc::new(PipelineHandler::new(state.clone()));
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+        let barrier = Arc::new(Barrier::new(2));
 
-        // Simulate an in-flight submission by inserting a key into pending set.
-        state
-            .pending_idempotency_keys
-            .write()
+        // Launch two concurrent submissions with the same idempotency key.
+        let svc1 = Arc::clone(&svc);
+        let barrier1 = Arc::clone(&barrier);
+        let yaml1 = yaml.to_vec();
+        let handle1 = tokio::spawn(async move {
+            barrier1.wait().await;
+            svc1.submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml1,
+                execution: None,
+                idempotency_key: "race-key".into(),
+            }))
             .await
-            .insert("inflight-key".into());
+        });
 
+        let svc2 = Arc::clone(&svc);
+        let barrier2 = Arc::clone(&barrier);
+        let yaml2 = yaml.to_vec();
+        let handle2 = tokio::spawn(async move {
+            barrier2.wait().await;
+            svc2.submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml2,
+                execution: None,
+                idempotency_key: "race-key".into(),
+            }))
+            .await
+        });
+
+        let (r1, r2) = tokio::join!(handle1, handle2);
+        let r1 = r1.unwrap();
+        let r2 = r2.unwrap();
+
+        // Exactly one should succeed, the other should get ABORTED.
+        let (ok, aborted) = match (&r1, &r2) {
+            (Ok(_), Err(e)) => (r1.unwrap().into_inner().run_id, e),
+            (Err(e), Ok(_)) => (r2.unwrap().into_inner().run_id, e),
+            (Ok(a), Ok(b)) => {
+                // Both succeeded: one created, one deduped — both valid.
+                assert_eq!(a.get_ref().run_id, b.get_ref().run_id);
+                // Pending key must be cleared.
+                assert!(state.pending_idempotency_keys.read().await.is_empty());
+                return;
+            }
+            (Err(e1), Err(e2)) => panic!("both failed: {e1}, {e2}"),
+        };
+
+        assert_eq!(aborted.code(), tonic::Code::Aborted);
+        assert!(!ok.is_empty());
+
+        // Pending key must be cleared after the winner finishes.
+        assert!(
+            state.pending_idempotency_keys.read().await.is_empty(),
+            "pending key should be cleared after completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn dedup_does_not_clear_inflight_pending_key() {
+        let state = test_state();
         let svc = PipelineHandler::new(state.clone());
         let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
 
-        let err = svc
+        // First submission succeeds, creating the run and clearing pending.
+        let first = svc
             .submit_pipeline(Request::new(SubmitPipelineRequest {
                 pipeline_yaml_utf8: yaml.to_vec(),
                 execution: None,
-                idempotency_key: "inflight-key".into(),
-            }))
-            .await
-            .expect_err("should reject concurrent idempotent submit");
-
-        assert_eq!(err.code(), tonic::Code::Aborted);
-        assert!(err.message().contains("already in progress"));
-
-        // After the "in-flight" submission completes, remove from pending.
-        state
-            .pending_idempotency_keys
-            .write()
-            .await
-            .remove("inflight-key");
-
-        // Now the same key should succeed (creates a new run).
-        let resp = svc
-            .submit_pipeline(Request::new(SubmitPipelineRequest {
-                pipeline_yaml_utf8: yaml.to_vec(),
-                execution: None,
-                idempotency_key: "inflight-key".into(),
+                idempotency_key: "dedup-key".into(),
             }))
             .await
             .unwrap()
             .into_inner();
 
-        assert!(!resp.run_id.is_empty());
+        // Simulate another request in-flight with a different key.
+        state
+            .pending_idempotency_keys
+            .write()
+            .await
+            .insert("other-key".into());
+
+        // Second submission with the same key deduplicates (is_new=false).
+        let second = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: "dedup-key".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(first.run_id, second.run_id);
+
+        // The OTHER pending key must still be there — dedup must not clear it.
+        assert!(
+            state
+                .pending_idempotency_keys
+                .read()
+                .await
+                .contains("other-key"),
+            "dedup path must not clear other pending keys"
+        );
     }
 
     #[tokio::test]

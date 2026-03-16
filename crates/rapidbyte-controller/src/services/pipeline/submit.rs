@@ -47,25 +47,21 @@ pub(crate) async fn handle_submit(
     };
 
     // Guard against concurrent submissions with the same idempotency key.
-    // The pending set covers the window between in-memory create_run and
-    // durable persistence — without it, a duplicate could observe the
-    // idempotency index entry before the run+task are durably persisted.
-    if let Some(key) = &idempotency_key {
-        let pending = handler.state.pending_idempotency_keys.read().await;
-        if pending.contains(key) {
+    // Atomic check-and-insert: a single write lock ensures no TOCTOU race
+    // between checking membership and inserting. `owns_pending_key` tracks
+    // whether THIS request inserted the key, so only the inserter clears it.
+    let owns_pending_key = if let Some(key) = &idempotency_key {
+        let mut pending = handler.state.pending_idempotency_keys.write().await;
+        if !pending.insert(key.clone()) {
+            // Key was already present — another request is persisting.
             return Err(Status::aborted(
                 "A submission with this idempotency key is already in progress. Retry shortly.",
             ));
         }
-    }
-    if let Some(key) = &idempotency_key {
-        handler
-            .state
-            .pending_idempotency_keys
-            .write()
-            .await
-            .insert(key.clone());
-    }
+        true
+    } else {
+        false
+    };
 
     let run_id = uuid::Uuid::new_v4().to_string();
 
@@ -115,14 +111,7 @@ pub(crate) async fn handle_submit(
             .await
         {
             rollback_new_submission(handler, &actual_run_id, &task_id).await;
-            if let Some(key) = &idempotency_key {
-                handler
-                    .state
-                    .pending_idempotency_keys
-                    .write()
-                    .await
-                    .remove(key);
-            }
+            release_pending_key(handler, idempotency_key.as_ref(), owns_pending_key).await;
             return Err(Status::internal(error.to_string()));
         }
         handler.state.task_notify.notify_waiters();
@@ -133,19 +122,29 @@ pub(crate) async fn handle_submit(
         rapidbyte_metrics::instruments::controller::active_runs().add(1, &[]);
     }
 
-    // Persistence succeeded (or deduped) — release the pending guard.
-    if let Some(key) = &idempotency_key {
-        handler
-            .state
-            .pending_idempotency_keys
-            .write()
-            .await
-            .remove(key);
-    }
+    // Persistence succeeded (or deduped) — only the inserter releases the guard.
+    release_pending_key(handler, idempotency_key.as_ref(), owns_pending_key).await;
 
     Ok(Response::new(SubmitPipelineResponse {
         run_id: actual_run_id,
     }))
+}
+
+async fn release_pending_key(
+    handler: &super::PipelineHandler,
+    idempotency_key: Option<&String>,
+    owns_pending_key: bool,
+) {
+    if owns_pending_key {
+        if let Some(key) = idempotency_key {
+            handler
+                .state
+                .pending_idempotency_keys
+                .write()
+                .await
+                .remove(key);
+        }
+    }
 }
 
 async fn rollback_new_submission(handler: &super::PipelineHandler, run_id: &str, task_id: &str) {
