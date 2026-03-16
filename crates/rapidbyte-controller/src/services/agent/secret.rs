@@ -3,7 +3,7 @@
 use tonic::Status;
 
 use crate::proto::rapidbyte::v1::{poll_task_response, NoTask, PollTaskResponse};
-use crate::run_state::{RunError, RunState as InternalRunState};
+use crate::run_state::{RunError, RunState};
 use crate::scheduler::TerminalTaskOutcome;
 
 use super::ERROR_CODE_SECRET_RESOLUTION;
@@ -55,8 +55,8 @@ async fn requeue_on_transient_failure(
     );
 
     // Snapshot the pre-modification state so we can rollback on persist failure.
-    let previous_task = state.tasks.read().await.get(task_id).cloned();
-    let previous_run = state.runs.read().await.get_run(run_id).cloned();
+    let snapshot_task = state.tasks.read().await.get(task_id).cloned();
+    let snapshot_run = state.runs.read().await.get_run(run_id).cloned();
 
     // Release the task assignment. If the lease expired during secret
     // resolution, the background sweep owns cleanup — bail and let it.
@@ -77,7 +77,7 @@ async fn requeue_on_transient_failure(
     let released_run = {
         let mut runs = state.runs.write().await;
         if let Some(record) = runs.get_run_mut(run_id) {
-            record.state = InternalRunState::Pending;
+            record.state = RunState::Pending;
             record.current_task = None;
         }
         runs.get_run(run_id).cloned()
@@ -91,7 +91,7 @@ async fn requeue_on_transient_failure(
                 "failed to persist transient rollback, restoring previous state: {persist_err}"
             );
             // Restore in-memory state to match what is durably persisted.
-            if let (Some(prev_task), Some(prev_run)) = (previous_task, previous_run) {
+            if let (Some(prev_task), Some(prev_run)) = (snapshot_task, snapshot_run) {
                 super::poll::rollback_assignment(state, prev_run, prev_task).await;
             }
             return Err(Status::internal(format!(
@@ -125,8 +125,8 @@ async fn fail_on_permanent_error(
     );
 
     // Snapshot the pre-modification state so we can rollback on persist failure.
-    let previous_task = state.tasks.read().await.get(task_id).cloned();
-    let previous_run = state.runs.read().await.get_run(run_id).cloned();
+    let snapshot_task = state.tasks.read().await.get(task_id).cloned();
+    let snapshot_run = state.runs.read().await.get_run(run_id).cloned();
 
     // Complete the task as Failed. If the lease expired during secret
     // resolution, `complete` returns None — the background sweep owns
@@ -148,7 +148,7 @@ async fn fail_on_permanent_error(
     drop(tasks);
 
     let mut runs = state.runs.write().await;
-    let _ = runs.transition(run_id, InternalRunState::Failed);
+    let _ = runs.transition(run_id, RunState::Failed);
     if let Some(record) = runs.get_run_mut(run_id) {
         record.error = Some(RunError {
             code: ERROR_CODE_SECRET_RESOLUTION.into(),
@@ -169,7 +169,7 @@ async fn fail_on_permanent_error(
                 task_id,
                 "failed to persist secret-resolution failure, restoring previous state: {persist_err}"
             );
-            if let (Some(prev_task), Some(prev_run)) = (previous_task, previous_run) {
+            if let (Some(prev_task), Some(prev_run)) = (snapshot_task, snapshot_run) {
                 super::poll::rollback_assignment(state, prev_run, prev_task).await;
             }
             return Err(Status::internal(format!(

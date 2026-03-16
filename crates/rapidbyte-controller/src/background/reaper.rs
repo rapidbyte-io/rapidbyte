@@ -6,6 +6,7 @@ use tracing::info;
 
 use crate::state::ControllerState;
 
+#[must_use]
 pub fn spawn_reaper(
     state: ControllerState,
     interval: Duration,

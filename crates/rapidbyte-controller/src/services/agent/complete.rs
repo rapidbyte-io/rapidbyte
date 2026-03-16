@@ -5,7 +5,7 @@ use std::time::Duration;
 use tonic::{Response, Status};
 
 use crate::proto::rapidbyte::v1::{CompleteTaskRequest, CompleteTaskResponse, TaskOutcome};
-use crate::run_state::{RunError, RunMetrics, RunState as InternalRunState};
+use crate::run_state::{RunError, RunMetrics, RunState};
 use crate::scheduler::TerminalTaskOutcome;
 use crate::state::ControllerState;
 
@@ -30,7 +30,7 @@ pub(crate) async fn handle_complete(
         TaskOutcome::Unspecified => unreachable!("invalid task outcome rejected above"),
     };
 
-    let (previous_task, previous_run) = state.snapshot_task_and_run(&req.task_id).await?;
+    let (snapshot_task, snapshot_run) = state.snapshot_task_and_run(&req.task_id).await?;
 
     let (run_id, attempt) = {
         let mut tasks = state.tasks.write().await;
@@ -63,8 +63,8 @@ pub(crate) async fn handle_complete(
         rollback_completion_state(
             state,
             &run_id,
-            previous_task.clone(),
-            previous_run.clone(),
+            snapshot_task.clone(),
+            snapshot_run.clone(),
             None,
             None,
         )
@@ -80,8 +80,8 @@ pub(crate) async fn handle_complete(
                 &req,
                 &run_id,
                 attempt,
-                &previous_task,
-                &previous_run,
+                &snapshot_task,
+                &snapshot_run,
             )
             .await?;
         }
@@ -91,13 +91,13 @@ pub(crate) async fn handle_complete(
                 &req,
                 &run_id,
                 attempt,
-                &previous_task,
-                &previous_run,
+                &snapshot_task,
+                &snapshot_run,
             )
             .await?;
         }
         TaskOutcome::Cancelled => {
-            handle_cancelled(handler, &req, &run_id, &previous_task, &previous_run).await?;
+            handle_cancelled(handler, &req, &run_id, &snapshot_task, &snapshot_run).await?;
         }
         TaskOutcome::Unspecified => unreachable!("invalid task outcome rejected above"),
     }
@@ -112,21 +112,21 @@ async fn handle_completed(
     req: &CompleteTaskRequest,
     run_id: &str,
     _attempt: u32,
-    previous_task: &crate::scheduler::TaskRecord,
-    previous_run: &crate::run_state::RunRecord,
+    snapshot_task: &crate::scheduler::TaskRecord,
+    snapshot_run: &crate::run_state::RunRecord,
 ) -> Result<(), Status> {
     let state = &handler.state;
     let has_preview = req.preview.is_some();
-    let previous_preview = { state.previews.read().await.get(run_id).cloned() };
+    let snapshot_preview = { state.previews.read().await.get(run_id).cloned() };
     {
         let mut runs = state.runs.write().await;
         runs.ensure_running(run_id);
         // Dry-run tasks with preview data pass through PreviewReady
         // so clients can discover previews via GetRun/ListRuns.
         if has_preview {
-            let _ = runs.transition(run_id, InternalRunState::PreviewReady);
+            let _ = runs.transition(run_id, RunState::PreviewReady);
         }
-        let _ = runs.transition(run_id, InternalRunState::Completed);
+        let _ = runs.transition(run_id, RunState::Completed);
         if let Some(record) = runs.get_run_mut(run_id) {
             let metrics = req.metrics.as_ref();
             record.metrics = RunMetrics {
@@ -186,13 +186,13 @@ async fn handle_completed(
     };
     if let Some(preview) = new_preview.as_ref() {
         if let Err(error) = state.persist_preview_record(preview).await {
-            let rollback_error = state.persist_task_record(previous_task).await.err();
+            let rollback_error = state.persist_task_record(snapshot_task).await.err();
             rollback_completion_state(
                 state,
                 run_id,
-                previous_task.clone(),
-                previous_run.clone(),
-                previous_preview,
+                snapshot_task.clone(),
+                snapshot_run.clone(),
+                snapshot_preview,
                 None,
             )
             .await;
@@ -213,18 +213,18 @@ async fn handle_completed(
         .cloned()
         .ok_or_else(|| Status::not_found(format!("unknown run: {run_id}")))?;
     if let Err(error) = state.persist_run_record(&completed_run).await {
-        let task_rollback_error = state.persist_task_record(previous_task).await.err();
+        let task_rollback_error = state.persist_task_record(snapshot_task).await.err();
         let preview_rollback_error = if new_preview.is_some() {
-            rollback_preview_durable(state, run_id, previous_preview.as_ref()).await
+            rollback_preview_durable(state, run_id, snapshot_preview.as_ref()).await
         } else {
             None
         };
         rollback_completion_state(
             state,
             run_id,
-            previous_task.clone(),
-            previous_run.clone(),
-            previous_preview,
+            snapshot_task.clone(),
+            snapshot_run.clone(),
+            snapshot_preview,
             None,
         )
         .await;
@@ -272,8 +272,8 @@ async fn handle_failed(
     req: &CompleteTaskRequest,
     run_id: &str,
     attempt: u32,
-    previous_task: &crate::scheduler::TaskRecord,
-    previous_run: &crate::run_state::RunRecord,
+    snapshot_task: &crate::scheduler::TaskRecord,
+    snapshot_run: &crate::run_state::RunRecord,
 ) -> Result<(), Status> {
     let state = &handler.state;
     let error = req.error.as_ref();
@@ -285,7 +285,7 @@ async fn handle_failed(
         .read()
         .await
         .get_run(run_id)
-        .is_some_and(|run| run.state == InternalRunState::Cancelling);
+        .is_some_and(|run| run.state == RunState::Cancelling);
 
     // Retry safety policy: only auto-requeue if safe_to_retry AND retryable
     // AND the commit state is explicitly before_commit.
@@ -312,12 +312,12 @@ async fn handle_failed(
             .cloned()
             .ok_or_else(|| Status::not_found(format!("unknown task: {next_task_id}")))?;
         if let Err(error) = state.persist_task_record(&next_task).await {
-            let rollback_error = state.persist_task_record(previous_task).await.err();
+            let rollback_error = state.persist_task_record(snapshot_task).await.err();
             rollback_completion_state(
                 state,
                 run_id,
-                previous_task.clone(),
-                previous_run.clone(),
+                snapshot_task.clone(),
+                snapshot_run.clone(),
                 None,
                 Some(&next_task_id),
             )
@@ -338,13 +338,13 @@ async fn handle_failed(
             .cloned()
             .ok_or_else(|| Status::not_found(format!("unknown run: {run_id}")))?;
         if let Err(error) = state.persist_run_record(&retried_run).await {
-            let task_rollback_error = state.persist_task_record(previous_task).await.err();
+            let task_rollback_error = state.persist_task_record(snapshot_task).await.err();
             let next_task_rollback_error = state.delete_task(&next_task_id).await.err();
             rollback_completion_state(
                 state,
                 run_id,
-                previous_task.clone(),
-                previous_run.clone(),
+                snapshot_task.clone(),
+                snapshot_run.clone(),
                 None,
                 Some(&next_task_id),
             )
@@ -375,7 +375,7 @@ async fn handle_failed(
         {
             let mut runs = state.runs.write().await;
             runs.ensure_running(run_id);
-            let _ = runs.transition(run_id, InternalRunState::Failed);
+            let _ = runs.transition(run_id, RunState::Failed);
             if let Some(record) = runs.get_run_mut(run_id) {
                 record.error = error.map(|e| RunError {
                     code: e.code.clone(),
@@ -394,12 +394,12 @@ async fn handle_failed(
             .cloned()
             .ok_or_else(|| Status::not_found(format!("unknown run: {run_id}")))?;
         if let Err(error) = state.persist_run_record(&failed_run).await {
-            let rollback_error = state.persist_task_record(previous_task).await.err();
+            let rollback_error = state.persist_task_record(snapshot_task).await.err();
             rollback_completion_state(
                 state,
                 run_id,
-                previous_task.clone(),
-                previous_run.clone(),
+                snapshot_task.clone(),
+                snapshot_run.clone(),
                 None,
                 None,
             )
@@ -437,15 +437,15 @@ async fn handle_cancelled(
     handler: &super::AgentHandler,
     req: &CompleteTaskRequest,
     run_id: &str,
-    previous_task: &crate::scheduler::TaskRecord,
-    previous_run: &crate::run_state::RunRecord,
+    snapshot_task: &crate::scheduler::TaskRecord,
+    snapshot_run: &crate::run_state::RunRecord,
 ) -> Result<(), Status> {
     let state = &handler.state;
 
     {
         let mut runs = state.runs.write().await;
         runs.ensure_running(run_id);
-        let _ = runs.transition(run_id, InternalRunState::Cancelled);
+        let _ = runs.transition(run_id, RunState::Cancelled);
     }
     let cancelled_run = state
         .runs
@@ -455,12 +455,12 @@ async fn handle_cancelled(
         .cloned()
         .ok_or_else(|| Status::not_found(format!("unknown run: {run_id}")))?;
     if let Err(error) = state.persist_run_record(&cancelled_run).await {
-        let rollback_error = state.persist_task_record(previous_task).await.err();
+        let rollback_error = state.persist_task_record(snapshot_task).await.err();
         rollback_completion_state(
             state,
             run_id,
-            previous_task.clone(),
-            previous_run.clone(),
+            snapshot_task.clone(),
+            snapshot_run.clone(),
             None,
             None,
         )
@@ -483,9 +483,9 @@ async fn handle_cancelled(
 async fn rollback_completion_state(
     state: &ControllerState,
     run_id: &str,
-    previous_task: crate::scheduler::TaskRecord,
-    previous_run: crate::run_state::RunRecord,
-    previous_preview: Option<crate::preview::PreviewEntry>,
+    snapshot_task: crate::scheduler::TaskRecord,
+    snapshot_run: crate::run_state::RunRecord,
+    snapshot_preview: Option<crate::preview::PreviewEntry>,
     next_task_id: Option<&str>,
 ) {
     {
@@ -493,17 +493,17 @@ async fn rollback_completion_state(
         if let Some(next_task_id) = next_task_id {
             let _ = tasks.remove_task(next_task_id);
         }
-        tasks.restore_task(previous_task);
+        tasks.restore_task(snapshot_task);
     }
     {
         let mut runs = state.runs.write().await;
-        runs.restore_run(previous_run);
+        runs.restore_run(snapshot_run);
     }
     {
         let mut previews = state.previews.write().await;
         let _ = previews.remove(run_id);
-        if let Some(previous_preview) = previous_preview {
-            previews.restore(previous_preview);
+        if let Some(snapshot_preview) = snapshot_preview {
+            previews.restore(snapshot_preview);
         }
     }
 }
@@ -511,10 +511,10 @@ async fn rollback_completion_state(
 async fn rollback_preview_durable(
     state: &ControllerState,
     run_id: &str,
-    previous_preview: Option<&crate::preview::PreviewEntry>,
+    snapshot_preview: Option<&crate::preview::PreviewEntry>,
 ) -> Option<anyhow::Error> {
-    match previous_preview {
-        Some(previous_preview) => state.persist_preview_record(previous_preview).await.err(),
+    match snapshot_preview {
+        Some(snapshot_preview) => state.persist_preview_record(snapshot_preview).await.err(),
         None => state.delete_preview(run_id).await.err(),
     }
 }
@@ -536,12 +536,12 @@ async fn prepare_retry_if_allowed(
     let mut runs = state.runs.write().await;
     if runs
         .get_run(run_id)
-        .is_some_and(|run| run.state == InternalRunState::Cancelling)
+        .is_some_and(|run| run.state == RunState::Cancelling)
     {
         return false;
     }
 
-    let _ = runs.transition(run_id, InternalRunState::Failed);
+    let _ = runs.transition(run_id, RunState::Failed);
     if let Some(record) = runs.get_run_mut(run_id) {
         record.attempt += 1;
     }

@@ -367,6 +367,7 @@ impl ControllerState {
 /// # Errors
 /// Returns `Status::FailedPrecondition` if the lease epoch is stale,
 /// or `Status::PermissionDenied` if the agent doesn't own the lease.
+#[allow(clippy::result_large_err)]
 pub fn validate_lease(
     task: &crate::scheduler::TaskRecord,
     agent_id: &str,

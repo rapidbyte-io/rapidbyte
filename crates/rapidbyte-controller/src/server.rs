@@ -54,17 +54,18 @@ pub async fn run(
         ControllerState::from_metadata_store(&config.auth.signing_key, metadata_store).await?;
     let state = state.with_secrets(secrets);
 
-    background::spawn_reaper(
+    let _reaper = background::spawn_reaper(
         state.clone(),
         config.timers.agent_reap_interval,
         config.timers.agent_reap_timeout,
     );
-    background::spawn_lease_sweep(
+    let _lease_sweep = background::spawn_lease_sweep(
         state.clone(),
         config.timers.lease_check_interval,
         config.timers.reconciliation_timeout,
     );
-    background::spawn_preview_cleanup(state.clone(), config.timers.preview_cleanup_interval);
+    let _preview_cleanup =
+        background::spawn_preview_cleanup(state.clone(), config.timers.preview_cleanup_interval);
 
     let auth = BearerAuthInterceptor::new(config.auth.tokens.clone());
 

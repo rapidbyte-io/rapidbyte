@@ -6,7 +6,7 @@ use tonic::{Response, Status};
 use crate::proto::rapidbyte::v1::{
     agent_directive, AgentDirective, CancelTask, HeartbeatRequest, HeartbeatResponse,
 };
-use crate::run_state::RunState as InternalRunState;
+use crate::run_state::RunState;
 use crate::scheduler::TaskRecord;
 use crate::state::ControllerState;
 
@@ -36,7 +36,7 @@ pub(crate) async fn handle_heartbeat(
         let mut renewed = Vec::new();
         let mut tasks = state.tasks.write().await;
         for active_lease in &req.active_leases {
-            let previous_task = tasks.get(&active_lease.task_id).cloned();
+            let snapshot_task = tasks.get(&active_lease.task_id).cloned();
             if tasks.renew_lease(
                 &active_lease.task_id,
                 &req.agent_id,
@@ -48,7 +48,7 @@ pub(crate) async fn handle_heartbeat(
                     .cloned()
                     .expect("renewed task should still exist");
                 renewed.push((
-                    previous_task.expect("renewed task should have previous snapshot"),
+                    snapshot_task.expect("renewed task should have previous snapshot"),
                     renewed_task,
                 ));
             }
@@ -56,14 +56,14 @@ pub(crate) async fn handle_heartbeat(
         drop(tasks);
 
         let mut persisted_previous = Vec::new();
-        for (previous_task, renewed_task) in &renewed {
+        for (snapshot_task, renewed_task) in &renewed {
             if let Err(error) = state.persist_task_record(renewed_task).await {
                 let rollback_error = if persisted_previous.is_empty() {
                     None
                 } else {
                     let mut first_error = None;
-                    for previous_task in &persisted_previous {
-                        if let Err(rollback_error) = state.persist_task_record(previous_task).await
+                    for snapshot_task in &persisted_previous {
+                        if let Err(rollback_error) = state.persist_task_record(snapshot_task).await
                         {
                             if first_error.is_none() {
                                 first_error = Some(rollback_error);
@@ -72,11 +72,11 @@ pub(crate) async fn handle_heartbeat(
                     }
                     first_error
                 };
-                let previous_tasks = renewed
+                let snapshot_tasks = renewed
                     .into_iter()
-                    .map(|(previous_task, _)| previous_task)
+                    .map(|(snapshot_task, _)| snapshot_task)
                     .collect();
-                rollback_renewed_tasks(state, previous_tasks).await;
+                rollback_renewed_tasks(state, snapshot_tasks).await;
                 return Err(Status::internal(match rollback_error {
                     Some(rollback_error) => format!(
                         "{error}; durable rollback for renewed leases also failed: {rollback_error}"
@@ -84,7 +84,7 @@ pub(crate) async fn handle_heartbeat(
                     None => error.to_string(),
                 }));
             }
-            persisted_previous.push(previous_task.clone());
+            persisted_previous.push(snapshot_task.clone());
         }
     }
 
@@ -106,7 +106,7 @@ pub(crate) async fn handle_heartbeat(
                 }
 
                 if let Some(run) = runs.get_run(&task.run_id) {
-                    if run.state == InternalRunState::Cancelling {
+                    if run.state == RunState::Cancelling {
                         directives.push(AgentDirective {
                             directive: Some(agent_directive::Directive::CancelTask(CancelTask {
                                 task_id: active_lease.task_id.clone(),
@@ -129,9 +129,9 @@ pub(crate) async fn handle_heartbeat(
     Ok(Response::new(HeartbeatResponse { directives }))
 }
 
-async fn rollback_renewed_tasks(state: &ControllerState, previous_tasks: Vec<TaskRecord>) {
+async fn rollback_renewed_tasks(state: &ControllerState, snapshot_tasks: Vec<TaskRecord>) {
     let mut tasks = state.tasks.write().await;
-    for previous_task in previous_tasks {
-        tasks.restore_task(previous_task);
+    for snapshot_task in snapshot_tasks {
+        tasks.restore_task(snapshot_task);
     }
 }

@@ -30,6 +30,7 @@ async fn cleanup_expired_previews(state: &ControllerState) -> usize {
     succeeded.len()
 }
 
+#[must_use]
 pub fn spawn_preview_cleanup(
     state: ControllerState,
     interval_duration: Duration,

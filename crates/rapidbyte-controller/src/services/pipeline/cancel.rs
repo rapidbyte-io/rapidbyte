@@ -3,7 +3,7 @@
 use tonic::{Response, Status};
 
 use crate::proto::rapidbyte::v1::{CancelRunRequest, CancelRunResponse};
-use crate::run_state::RunState as InternalRunState;
+use crate::run_state::RunState;
 
 pub(crate) async fn handle_cancel(
     handler: &super::PipelineHandler,
@@ -30,14 +30,14 @@ pub(crate) async fn handle_cancel(
 async fn cancel_run_for_state(
     handler: &super::PipelineHandler,
     run_id: &str,
-    snapshot_state: InternalRunState,
+    snapshot_state: RunState,
 ) -> Result<CancelRunResponse, Status> {
     match snapshot_state {
-        InternalRunState::Pending => cancel_queued_run(handler, run_id, snapshot_state).await,
-        InternalRunState::Assigned | InternalRunState::Reconciling | InternalRunState::Running => {
+        RunState::Pending => cancel_queued_run(handler, run_id, snapshot_state).await,
+        RunState::Assigned | RunState::Reconciling | RunState::Running => {
             cancel_inflight_run(handler, run_id, snapshot_state).await
         }
-        InternalRunState::Cancelling => Ok(CancelRunResponse {
+        RunState::Cancelling => Ok(CancelRunResponse {
             accepted: true,
             message: "Run is already being cancelled".into(),
         }),
@@ -55,9 +55,9 @@ async fn cancel_run_for_state(
 async fn cancel_queued_run(
     handler: &super::PipelineHandler,
     run_id: &str,
-    snapshot_state: InternalRunState,
+    snapshot_state: RunState,
 ) -> Result<CancelRunResponse, Status> {
-    let previous_run = {
+    let snapshot_run = {
         handler
             .state
             .runs
@@ -68,14 +68,14 @@ async fn cancel_queued_run(
             .ok_or_else(|| Status::not_found(format!("Run {run_id} not found")))?
     };
     if let Some(response) =
-        transition_or_retry(handler, run_id, snapshot_state, InternalRunState::Cancelled).await?
+        transition_or_retry(handler, run_id, snapshot_state, RunState::Cancelled).await?
     {
         return Ok(response);
     }
-    let (previous_task, cancelled_task) = cancel_latest_task(handler, run_id).await;
+    let (snapshot_task, cancelled_task) = cancel_latest_task(handler, run_id).await;
     if let Some(cancelled_task) = cancelled_task.as_ref() {
         if let Err(error) = handler.state.persist_task_record(cancelled_task).await {
-            rollback_queued_cancel(handler, previous_run, previous_task).await;
+            rollback_queued_cancel(handler, snapshot_run, snapshot_task).await;
             return Err(Status::internal(error.to_string()));
         }
     }
@@ -88,14 +88,14 @@ async fn cancel_queued_run(
         .cloned()
         .ok_or_else(|| Status::not_found(format!("Run {run_id} not found")))?;
     if let Err(error) = handler.state.persist_run_record(&cancelled_run).await {
-        if let Some(previous_task_record) = previous_task.clone() {
-            let rollback_task_id = previous_task_record.task_id.clone();
+        if let Some(snapshot_task_record) = snapshot_task.clone() {
+            let rollback_task_id = snapshot_task_record.task_id.clone();
             let rollback_error = handler
                 .state
-                .persist_task_record(&previous_task_record)
+                .persist_task_record(&snapshot_task_record)
                 .await
                 .err();
-            rollback_queued_cancel(handler, previous_run, Some(previous_task_record)).await;
+            rollback_queued_cancel(handler, snapshot_run, Some(snapshot_task_record)).await;
             return Err(Status::internal(match rollback_error {
                 Some(rollback_error) => {
                     format!(
@@ -105,7 +105,7 @@ async fn cancel_queued_run(
                 None => error.to_string(),
             }));
         }
-        rollback_queued_cancel(handler, previous_run, None).await;
+        rollback_queued_cancel(handler, snapshot_run, None).await;
         return Err(Status::internal(error.to_string()));
     }
     crate::terminal::finalize_terminal(
@@ -127,15 +127,10 @@ async fn cancel_queued_run(
 async fn cancel_inflight_run(
     handler: &super::PipelineHandler,
     run_id: &str,
-    snapshot_state: InternalRunState,
+    snapshot_state: RunState,
 ) -> Result<CancelRunResponse, Status> {
-    if let Some(response) = transition_or_retry(
-        handler,
-        run_id,
-        snapshot_state,
-        InternalRunState::Cancelling,
-    )
-    .await?
+    if let Some(response) =
+        transition_or_retry(handler, run_id, snapshot_state, RunState::Cancelling).await?
     {
         return Ok(response);
     }
@@ -146,7 +141,7 @@ async fn cancel_inflight_run(
         .map_err(|error| Status::internal(error.to_string()))?;
 
     let label = match snapshot_state {
-        InternalRunState::Assigned => "Assigned",
+        RunState::Assigned => "Assigned",
         _ => "Running",
     };
     Ok(CancelRunResponse {
@@ -158,8 +153,8 @@ async fn cancel_inflight_run(
 async fn transition_or_retry(
     handler: &super::PipelineHandler,
     run_id: &str,
-    snapshot_state: InternalRunState,
-    target_state: InternalRunState,
+    snapshot_state: RunState,
+    target_state: RunState,
 ) -> Result<Option<CancelRunResponse>, Status> {
     let actual_state = {
         let mut runs = handler.state.runs.write().await;
@@ -195,24 +190,24 @@ async fn cancel_latest_task(
 ) {
     let mut tasks = handler.state.tasks.write().await;
     if let Some(task) = tasks.find_by_run_id(run_id) {
-        let previous_task = task.clone();
-        let task_id = previous_task.task_id.clone();
+        let snapshot_task = task.clone();
+        let task_id = snapshot_task.task_id.clone();
         let _ = tasks.cancel(&task_id);
         let cancelled_task = tasks.get(&task_id).cloned();
-        return (Some(previous_task), cancelled_task);
+        return (Some(snapshot_task), cancelled_task);
     }
     (None, None)
 }
 
 async fn rollback_queued_cancel(
     handler: &super::PipelineHandler,
-    previous_run: crate::run_state::RunRecord,
-    previous_task: Option<crate::scheduler::TaskRecord>,
+    snapshot_run: crate::run_state::RunRecord,
+    snapshot_task: Option<crate::scheduler::TaskRecord>,
 ) {
-    if let Some(previous_task) = previous_task {
+    if let Some(snapshot_task) = snapshot_task {
         let mut tasks = handler.state.tasks.write().await;
-        tasks.restore_task(previous_task);
+        tasks.restore_task(snapshot_task);
     }
     let mut runs = handler.state.runs.write().await;
-    runs.restore_run(previous_run);
+    runs.restore_run(snapshot_run);
 }

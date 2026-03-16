@@ -85,12 +85,12 @@ mod tests {
         agent_service_server::AgentService as _, ExecutionOptions, PollTaskRequest,
         RegisterAgentRequest,
     };
-    use crate::run_state::RunState as InternalRunState;
+    use crate::run_state::RunState;
     use crate::scheduler::TaskState;
     use crate::store::test_support::FailingMetadataStore;
     use tokio_stream::StreamExt;
 
-    use crate::proto::rapidbyte::v1::{run_event, RunState};
+    use crate::proto::rapidbyte::v1::{run_event, RunState as ProtoRunState};
 
     #[tokio::test]
     async fn test_submit_pipeline_returns_run_id() {
@@ -230,7 +230,7 @@ mod tests {
             .into_inner();
 
         assert_eq!(resp.run_id, run_id);
-        assert_eq!(resp.state, RunState::Pending as i32);
+        assert_eq!(resp.state, ProtoRunState::Pending as i32);
         assert_eq!(resp.pipeline_name, "mytest");
     }
 
@@ -394,7 +394,7 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert_eq!(get_resp.state, RunState::Cancelled as i32);
+        assert_eq!(get_resp.state, ProtoRunState::Cancelled as i32);
     }
 
     #[tokio::test]
@@ -433,10 +433,7 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::Internal);
 
         let runs = state.runs.read().await;
-        assert_eq!(
-            runs.get_run(&run_id).unwrap().state,
-            InternalRunState::Pending
-        );
+        assert_eq!(runs.get_run(&run_id).unwrap().state, RunState::Pending);
         drop(runs);
 
         let tasks = state.tasks.read().await;
@@ -448,7 +445,7 @@ mod tests {
                 .persisted_run(&run_id)
                 .expect("durable run should exist")
                 .state,
-            InternalRunState::Pending
+            RunState::Pending
         );
         assert_eq!(
             store
@@ -495,10 +492,7 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::Internal);
 
         let runs = state.runs.read().await;
-        assert_eq!(
-            runs.get_run(&run_id).unwrap().state,
-            InternalRunState::Pending
-        );
+        assert_eq!(runs.get_run(&run_id).unwrap().state, RunState::Pending);
         drop(runs);
 
         let tasks = state.tasks.read().await;
@@ -510,7 +504,7 @@ mod tests {
                 .persisted_run(&run_id)
                 .expect("durable run should exist")
                 .state,
-            InternalRunState::Pending
+            RunState::Pending
         );
         assert_eq!(
             store
@@ -541,11 +535,9 @@ mod tests {
         // Manually transition to Completed
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
-            runs.transition(&run_id, InternalRunState::Running).unwrap();
-            runs.transition(&run_id, InternalRunState::Completed)
-                .unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
+            runs.transition(&run_id, RunState::Running).unwrap();
+            runs.transition(&run_id, RunState::Completed).unwrap();
         }
 
         let resp = svc
@@ -582,8 +574,7 @@ mod tests {
             );
             let task = task.expect("expected assigned task");
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
             runs.set_current_task(
                 &run_id,
                 task.task_id.clone(),
@@ -606,10 +597,7 @@ mod tests {
         assert!(resp.message.contains("heartbeat"));
 
         let runs = state.runs.read().await;
-        assert_eq!(
-            runs.get_run(&run_id).unwrap().state,
-            InternalRunState::Cancelling
-        );
+        assert_eq!(runs.get_run(&run_id).unwrap().state, RunState::Cancelling);
         drop(runs);
 
         let tasks = state.tasks.read().await;
@@ -637,10 +625,8 @@ mod tests {
 
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
-            runs.transition(&run_id, InternalRunState::Reconciling)
-                .unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
+            runs.transition(&run_id, RunState::Reconciling).unwrap();
         }
 
         let resp = svc
@@ -655,7 +641,7 @@ mod tests {
         assert!(resp.message.contains("heartbeat"));
         assert_eq!(
             state.runs.read().await.get_run(&run_id).unwrap().state,
-            InternalRunState::Cancelling
+            RunState::Cancelling
         );
     }
 
@@ -678,11 +664,9 @@ mod tests {
 
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
-            runs.transition(&run_id, InternalRunState::Running).unwrap();
-            runs.transition(&run_id, InternalRunState::Completed)
-                .unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
+            runs.transition(&run_id, RunState::Running).unwrap();
+            runs.transition(&run_id, RunState::Completed).unwrap();
         }
 
         // Test the cancel handler through the public cancel_run RPC.
@@ -718,11 +702,9 @@ mod tests {
 
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
-            runs.transition(&run_id, InternalRunState::Running).unwrap();
-            runs.transition(&run_id, InternalRunState::Completed)
-                .unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
+            runs.transition(&run_id, RunState::Running).unwrap();
+            runs.transition(&run_id, RunState::Completed).unwrap();
             if let Some(record) = runs.get_run_mut(&run_id) {
                 record.metrics.total_records = 11;
             }
@@ -764,10 +746,8 @@ mod tests {
 
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
-            runs.transition(&run_id, InternalRunState::Reconciling)
-                .unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
+            runs.transition(&run_id, RunState::Reconciling).unwrap();
         }
 
         let resp = svc
@@ -776,7 +756,7 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        assert_eq!(resp.state, RunState::Reconciling as i32);
+        assert_eq!(resp.state, ProtoRunState::Reconciling as i32);
     }
 
     #[tokio::test]
@@ -798,10 +778,8 @@ mod tests {
 
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
-            runs.transition(&run_id, InternalRunState::Reconciling)
-                .unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
+            runs.transition(&run_id, RunState::Reconciling).unwrap();
         }
 
         let resp = svc
@@ -818,7 +796,7 @@ mod tests {
             .into_iter()
             .find(|run| run.run_id == run_id)
             .unwrap();
-        assert_eq!(run.state, RunState::Reconciling as i32);
+        assert_eq!(run.state, ProtoRunState::Reconciling as i32);
     }
 
     #[tokio::test]
@@ -851,20 +829,19 @@ mod tests {
 
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&reconciling_run_id, InternalRunState::Assigned)
+            runs.transition(&reconciling_run_id, RunState::Assigned)
                 .unwrap();
-            runs.transition(&reconciling_run_id, InternalRunState::Reconciling)
+            runs.transition(&reconciling_run_id, RunState::Reconciling)
                 .unwrap();
-            runs.transition(&running_run_id, InternalRunState::Assigned)
+            runs.transition(&running_run_id, RunState::Assigned)
                 .unwrap();
-            runs.transition(&running_run_id, InternalRunState::Running)
-                .unwrap();
+            runs.transition(&running_run_id, RunState::Running).unwrap();
         }
 
         let resp = svc
             .list_runs(Request::new(ListRunsRequest {
                 limit: 20,
-                filter_state: Some(RunState::Reconciling as i32),
+                filter_state: Some(ProtoRunState::Reconciling as i32),
             }))
             .await
             .unwrap()
@@ -872,7 +849,7 @@ mod tests {
 
         assert_eq!(resp.runs.len(), 1);
         assert_eq!(resp.runs[0].run_id, reconciling_run_id);
-        assert_eq!(resp.runs[0].state, RunState::Reconciling as i32);
+        assert_eq!(resp.runs[0].state, ProtoRunState::Reconciling as i32);
     }
 
     #[tokio::test]
@@ -894,10 +871,8 @@ mod tests {
 
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
-            runs.transition(&run_id, InternalRunState::TimedOut)
-                .unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
+            runs.transition(&run_id, RunState::TimedOut).unwrap();
             runs.get_run_mut(&run_id).unwrap().error = Some(crate::run_state::RunError {
                 code: String::new(),
                 message: "Task task-1 lease expired (agent unresponsive)".into(),
@@ -913,7 +888,7 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        assert_eq!(resp.state, RunState::Failed as i32);
+        assert_eq!(resp.state, ProtoRunState::Failed as i32);
         let error = resp
             .last_error
             .expect("timed out runs expose recovery error");
@@ -939,10 +914,9 @@ mod tests {
 
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
-            runs.transition(&run_id, InternalRunState::Running).unwrap();
-            runs.transition(&run_id, InternalRunState::Failed).unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
+            runs.transition(&run_id, RunState::Running).unwrap();
+            runs.transition(&run_id, RunState::Failed).unwrap();
             let run = runs.get_run_mut(&run_id).unwrap();
             run.error = Some(crate::run_state::RunError {
                 code: "TEST_EXECUTION_FAILED".into(),
@@ -959,7 +933,7 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        assert_eq!(resp.state, RunState::Failed as i32);
+        assert_eq!(resp.state, ProtoRunState::Failed as i32);
         let error = resp
             .last_error
             .expect("failed runs expose execution error metadata");
@@ -998,22 +972,19 @@ mod tests {
 
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&recovery_failed_run_id, InternalRunState::Assigned)
+            runs.transition(&recovery_failed_run_id, RunState::Assigned)
                 .unwrap();
-            runs.transition(&recovery_failed_run_id, InternalRunState::RecoveryFailed)
+            runs.transition(&recovery_failed_run_id, RunState::RecoveryFailed)
                 .unwrap();
-            runs.transition(&failed_run_id, InternalRunState::Assigned)
-                .unwrap();
-            runs.transition(&failed_run_id, InternalRunState::Running)
-                .unwrap();
-            runs.transition(&failed_run_id, InternalRunState::Failed)
-                .unwrap();
+            runs.transition(&failed_run_id, RunState::Assigned).unwrap();
+            runs.transition(&failed_run_id, RunState::Running).unwrap();
+            runs.transition(&failed_run_id, RunState::Failed).unwrap();
         }
 
         let resp = svc
             .list_runs(Request::new(ListRunsRequest {
                 limit: 20,
-                filter_state: Some(RunState::RecoveryFailed as i32),
+                filter_state: Some(ProtoRunState::RecoveryFailed as i32),
             }))
             .await
             .unwrap()
@@ -1021,7 +992,7 @@ mod tests {
 
         assert_eq!(resp.runs.len(), 1);
         assert_eq!(resp.runs[0].run_id, recovery_failed_run_id);
-        assert_eq!(resp.runs[0].state, RunState::RecoveryFailed as i32);
+        assert_eq!(resp.runs[0].state, ProtoRunState::RecoveryFailed as i32);
     }
 
     #[tokio::test]
@@ -1043,10 +1014,8 @@ mod tests {
 
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
-            runs.transition(&run_id, InternalRunState::Reconciling)
-                .unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
+            runs.transition(&run_id, RunState::Reconciling).unwrap();
         }
 
         let response = svc
@@ -1064,7 +1033,7 @@ mod tests {
 
         match event.event {
             Some(run_event::Event::Status(status)) => {
-                assert_eq!(status.state, RunState::Reconciling as i32);
+                assert_eq!(status.state, ProtoRunState::Reconciling as i32);
                 assert!(status.message.contains("waiting to reconcile"));
             }
             other => panic!("expected reconciling status event, got {other:?}"),
@@ -1090,10 +1059,8 @@ mod tests {
 
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
-            runs.transition(&run_id, InternalRunState::RecoveryFailed)
-                .unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
+            runs.transition(&run_id, RunState::RecoveryFailed).unwrap();
             runs.get_run_mut(&run_id).unwrap().error = Some(crate::run_state::RunError {
                 code: String::new(),
                 message: "Run recovery reconciliation timed out after controller restart".into(),

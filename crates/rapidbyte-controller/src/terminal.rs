@@ -9,7 +9,7 @@ use opentelemetry::KeyValue;
 use crate::proto::rapidbyte::v1::{
     run_event, RunCancelled, RunCompleted, RunEvent, RunFailed, TaskError,
 };
-use crate::run_state::{RunError, RunMetrics, RunState as InternalRunState};
+use crate::run_state::{RunError, RunMetrics, RunState};
 use crate::state::ControllerState;
 
 /// Describes how a run reached its terminal state.
@@ -34,13 +34,13 @@ pub enum TerminalOutcome {
 
 impl TerminalOutcome {
     /// The internal run state this outcome maps to.
-    fn target_state(&self) -> InternalRunState {
+    fn target_state(&self) -> RunState {
         match self {
-            Self::Completed { .. } => InternalRunState::Completed,
-            Self::Failed { .. } => InternalRunState::Failed,
-            Self::Cancelled => InternalRunState::Cancelled,
-            Self::TimedOut { .. } => InternalRunState::TimedOut,
-            Self::RecoveryFailed { .. } => InternalRunState::RecoveryFailed,
+            Self::Completed { .. } => RunState::Completed,
+            Self::Failed { .. } => RunState::Failed,
+            Self::Cancelled => RunState::Cancelled,
+            Self::TimedOut { .. } => RunState::TimedOut,
+            Self::RecoveryFailed { .. } => RunState::RecoveryFailed,
         }
     }
 
@@ -158,7 +158,7 @@ pub async fn finalize_terminal(state: &ControllerState, run_id: &str, outcome: T
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::run_state::RunState as InternalRunState;
+    use crate::run_state::RunState;
 
     #[tokio::test]
     async fn finalize_completed_transitions_and_publishes() {
@@ -166,8 +166,8 @@ mod tests {
         let run_id = {
             let mut runs = state.runs.write().await;
             let (id, _) = runs.create_run("run-1".into(), "pipe".into(), None);
-            runs.transition(&id, InternalRunState::Assigned).unwrap();
-            runs.transition(&id, InternalRunState::Running).unwrap();
+            runs.transition(&id, RunState::Assigned).unwrap();
+            runs.transition(&id, RunState::Running).unwrap();
             id
         };
         let mut rx = state.watchers.write().await.subscribe(&run_id);
@@ -183,7 +183,7 @@ mod tests {
         // Assert state transitioned
         let runs = state.runs.read().await;
         let record = runs.get_run(&run_id).unwrap();
-        assert_eq!(record.state, InternalRunState::Completed);
+        assert_eq!(record.state, RunState::Completed);
         assert_eq!(record.metrics.total_records, 42);
         assert_eq!(record.metrics.total_bytes, 1024);
         drop(runs);
@@ -206,8 +206,8 @@ mod tests {
         let run_id = {
             let mut runs = state.runs.write().await;
             let (id, _) = runs.create_run("run-1".into(), "pipe".into(), None);
-            runs.transition(&id, InternalRunState::Assigned).unwrap();
-            runs.transition(&id, InternalRunState::Running).unwrap();
+            runs.transition(&id, RunState::Assigned).unwrap();
+            runs.transition(&id, RunState::Running).unwrap();
             id
         };
         let mut rx = state.watchers.write().await.subscribe(&run_id);
@@ -231,7 +231,7 @@ mod tests {
 
         let runs = state.runs.read().await;
         let record = runs.get_run(&run_id).unwrap();
-        assert_eq!(record.state, InternalRunState::Failed);
+        assert_eq!(record.state, RunState::Failed);
         let err = record.error.as_ref().expect("error should be set");
         assert_eq!(err.code, "PLUGIN_CRASH");
         assert_eq!(err.message, "segfault in source");
@@ -255,8 +255,8 @@ mod tests {
         let run_id = {
             let mut runs = state.runs.write().await;
             let (id, _) = runs.create_run("run-1".into(), "pipe".into(), None);
-            runs.transition(&id, InternalRunState::Assigned).unwrap();
-            runs.transition(&id, InternalRunState::Running).unwrap();
+            runs.transition(&id, RunState::Assigned).unwrap();
+            runs.transition(&id, RunState::Running).unwrap();
             id
         };
         let mut rx = state.watchers.write().await.subscribe(&run_id);
@@ -265,7 +265,7 @@ mod tests {
 
         let runs = state.runs.read().await;
         let record = runs.get_run(&run_id).unwrap();
-        assert_eq!(record.state, InternalRunState::Cancelled);
+        assert_eq!(record.state, RunState::Cancelled);
         drop(runs);
 
         // Assert terminal event was published

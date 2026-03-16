@@ -9,12 +9,10 @@ use tonic::{Response, Status};
 
 use crate::proto::rapidbyte::v1::{
     run_event, GetRunRequest, GetRunResponse, ListRunsRequest, ListRunsResponse, PreviewAccess,
-    PreviewState, RunCancelled, RunCompleted, RunEvent, RunFailed, RunState, RunStatus, RunSummary,
-    StreamPreview, TaskError, TaskRef, WatchRunRequest,
+    PreviewState, RunCancelled, RunCompleted, RunEvent, RunFailed, RunState as ProtoRunState,
+    RunStatus, RunSummary, StreamPreview, TaskError, TaskRef, WatchRunRequest,
 };
-use crate::run_state::{
-    RunState as InternalRunState, ERROR_CODE_LEASE_EXPIRED, ERROR_CODE_RECOVERY_TIMEOUT,
-};
+use crate::run_state::{RunState, ERROR_CODE_LEASE_EXPIRED, ERROR_CODE_RECOVERY_TIMEOUT};
 
 use super::convert::to_proto_state;
 
@@ -212,8 +210,8 @@ fn terminal_error_for_run(record: &crate::run_state::RunRecord) -> Option<TaskEr
     let error = record.error.as_ref();
     let message = error.map(|e| e.message.clone())?;
     let (code, retryable, safe_to_retry) = match record.state {
-        InternalRunState::RecoveryFailed => (ERROR_CODE_RECOVERY_TIMEOUT.into(), false, false),
-        InternalRunState::TimedOut => (ERROR_CODE_LEASE_EXPIRED.into(), true, true),
+        RunState::RecoveryFailed => (ERROR_CODE_RECOVERY_TIMEOUT.into(), false, false),
+        RunState::TimedOut => (ERROR_CODE_LEASE_EXPIRED.into(), true, true),
         _ => (
             error.map_or_else(String::new, |e| e.code.clone()),
             error.is_some_and(|e| e.retryable),
@@ -233,13 +231,13 @@ fn terminal_error_for_run(record: &crate::run_state::RunRecord) -> Option<TaskEr
 /// using real data from the run record instead of placeholder values.
 fn terminal_event_for_run(record: &crate::run_state::RunRecord) -> RunEvent {
     let event = match record.state {
-        InternalRunState::Completed => run_event::Event::Completed(RunCompleted {
+        RunState::Completed => run_event::Event::Completed(RunCompleted {
             total_records: record.metrics.total_records,
             total_bytes: record.metrics.total_bytes,
             elapsed_seconds: record.metrics.elapsed_seconds,
             cursors_advanced: record.metrics.cursors_advanced,
         }),
-        InternalRunState::Cancelled => run_event::Event::Cancelled(RunCancelled {}),
+        RunState::Cancelled => run_event::Event::Cancelled(RunCancelled {}),
         _ => run_event::Event::Failed(RunFailed {
             error: terminal_error_for_run(record),
             attempt: record.attempt,
@@ -253,10 +251,10 @@ fn terminal_event_for_run(record: &crate::run_state::RunRecord) -> RunEvent {
 
 fn status_event_for_run(record: &crate::run_state::RunRecord) -> Option<RunEvent> {
     match record.state {
-        InternalRunState::Reconciling => Some(RunEvent {
+        RunState::Reconciling => Some(RunEvent {
             run_id: record.run_id.clone(),
             event: Some(run_event::Event::Status(RunStatus {
-                state: RunState::Reconciling.into(),
+                state: ProtoRunState::Reconciling.into(),
                 message: "Controller restarted while this run was in flight; waiting to reconcile the active lease.".into(),
             })),
         }),
@@ -276,20 +274,17 @@ fn to_timestamp(time: std::time::SystemTime) -> Timestamp {
 /// `RUNNING` maps to both `Running` and `Cancelling` (externally both appear as `RUNNING`).
 /// `FAILED` includes normal failure plus ordinary lease timeouts.
 /// `RECOVERY_FAILED` is reserved for reconciliation-specific terminal failure.
-fn from_proto_states(v: i32) -> Option<Vec<InternalRunState>> {
-    match RunState::try_from(v) {
-        Ok(RunState::Pending) => Some(vec![InternalRunState::Pending]),
-        Ok(RunState::Assigned) => Some(vec![InternalRunState::Assigned]),
-        Ok(RunState::Running) => Some(vec![
-            InternalRunState::Running,
-            InternalRunState::Cancelling,
-        ]),
-        Ok(RunState::Reconciling) => Some(vec![InternalRunState::Reconciling]),
-        Ok(RunState::PreviewReady) => Some(vec![InternalRunState::PreviewReady]),
-        Ok(RunState::Completed) => Some(vec![InternalRunState::Completed]),
-        Ok(RunState::Failed) => Some(vec![InternalRunState::Failed, InternalRunState::TimedOut]),
-        Ok(RunState::RecoveryFailed) => Some(vec![InternalRunState::RecoveryFailed]),
-        Ok(RunState::Cancelled) => Some(vec![InternalRunState::Cancelled]),
+fn from_proto_states(v: i32) -> Option<Vec<RunState>> {
+    match ProtoRunState::try_from(v) {
+        Ok(ProtoRunState::Pending) => Some(vec![RunState::Pending]),
+        Ok(ProtoRunState::Assigned) => Some(vec![RunState::Assigned]),
+        Ok(ProtoRunState::Running) => Some(vec![RunState::Running, RunState::Cancelling]),
+        Ok(ProtoRunState::Reconciling) => Some(vec![RunState::Reconciling]),
+        Ok(ProtoRunState::PreviewReady) => Some(vec![RunState::PreviewReady]),
+        Ok(ProtoRunState::Completed) => Some(vec![RunState::Completed]),
+        Ok(ProtoRunState::Failed) => Some(vec![RunState::Failed, RunState::TimedOut]),
+        Ok(ProtoRunState::RecoveryFailed) => Some(vec![RunState::RecoveryFailed]),
+        Ok(ProtoRunState::Cancelled) => Some(vec![RunState::Cancelled]),
         _ => None,
     }
 }

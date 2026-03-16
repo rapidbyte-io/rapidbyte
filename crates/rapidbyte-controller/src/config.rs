@@ -104,6 +104,10 @@ impl Default for ControllerConfig {
 }
 
 /// Validate the controller configuration.
+///
+/// # Errors
+///
+/// Returns an error if the auth or signing key configuration is invalid.
 pub fn validate(config: &ControllerConfig) -> anyhow::Result<()> {
     validate_auth_config(config)?;
     validate_signing_key_config(config)?;

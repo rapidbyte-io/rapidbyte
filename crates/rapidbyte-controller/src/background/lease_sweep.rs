@@ -4,34 +4,32 @@ use std::time::{Duration, Instant};
 
 use tracing::info;
 
-use crate::run_state::{
-    RunError, RunState as InternalRunState, ERROR_CODE_LEASE_EXPIRED, ERROR_CODE_RECOVERY_TIMEOUT,
-};
+use crate::run_state::{RunError, RunState, ERROR_CODE_LEASE_EXPIRED, ERROR_CODE_RECOVERY_TIMEOUT};
 use crate::state::ControllerState;
 
 async fn rollback_background_timeout(
     state: &ControllerState,
-    previous_run: crate::run_state::RunRecord,
-    previous_task: Option<crate::scheduler::TaskRecord>,
+    snapshot_run: crate::run_state::RunRecord,
+    snapshot_task: Option<crate::scheduler::TaskRecord>,
 ) {
     {
         let mut runs = state.runs.write().await;
-        runs.restore_run(previous_run);
+        runs.restore_run(snapshot_run);
     }
-    if let Some(previous_task) = previous_task {
+    if let Some(snapshot_task) = snapshot_task {
         let mut tasks = state.tasks.write().await;
-        tasks.restore_task(previous_task);
+        tasks.restore_task(snapshot_task);
     }
 }
 
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn handle_expired_lease(
     state: &ControllerState,
-    previous_task: crate::scheduler::TaskRecord,
+    snapshot_task: crate::scheduler::TaskRecord,
 ) {
-    let task_id = previous_task.task_id.clone();
-    let run_id = previous_task.run_id.clone();
-    let previous_run = state
+    let task_id = snapshot_task.task_id.clone();
+    let run_id = snapshot_task.run_id.clone();
+    let snapshot_run = state
         .runs
         .read()
         .await
@@ -42,17 +40,17 @@ pub(crate) async fn handle_expired_lease(
         let mut runs = state.runs.write().await;
         let target_state = if runs
             .get_run(&run_id)
-            .is_some_and(|record| record.state == InternalRunState::Reconciling)
+            .is_some_and(|record| record.state == RunState::Reconciling)
         {
-            InternalRunState::RecoveryFailed
+            RunState::RecoveryFailed
         } else {
-            InternalRunState::TimedOut
+            RunState::TimedOut
         };
 
         if let Ok(()) = runs.transition(&run_id, target_state) {
             let record = runs.get_run_mut(&run_id);
             if let Some(r) = record {
-                let error_info = if target_state == InternalRunState::RecoveryFailed {
+                let error_info = if target_state == RunState::RecoveryFailed {
                     RunError {
                         code: ERROR_CODE_RECOVERY_TIMEOUT.into(),
                         message: format!(
@@ -126,11 +124,11 @@ pub(crate) async fn handle_expired_lease(
         .record(persist_start.elapsed().as_secs_f64(), &[]);
 
     if !durable {
-        rollback_background_timeout(state, previous_run, Some(previous_task)).await;
+        rollback_background_timeout(state, snapshot_run, Some(snapshot_task)).await;
     }
 
     if durable {
-        let outcome = if target_state == InternalRunState::RecoveryFailed {
+        let outcome = if target_state == RunState::RecoveryFailed {
             crate::terminal::TerminalOutcome::RecoveryFailed {
                 error: error_info,
                 attempt,
@@ -159,7 +157,7 @@ pub(crate) async fn sweep_reconciliation_timeouts(
     let now = std::time::SystemTime::now();
     let stale_run_ids = {
         let runs = state.runs.read().await;
-        runs.list_runs(Some(&[InternalRunState::Reconciling]))
+        runs.list_runs(Some(&[RunState::Reconciling]))
             .into_iter()
             .filter(|run| {
                 run.recovery_started_at
@@ -171,18 +169,18 @@ pub(crate) async fn sweep_reconciliation_timeouts(
     };
 
     for run_id in stale_run_ids {
-        let previous_run = state
+        let snapshot_run = state
             .runs
             .read()
             .await
             .get_run(&run_id)
             .cloned()
             .expect("reconciling run should exist");
-        let task_id = previous_run
+        let task_id = snapshot_run
             .current_task
             .as_ref()
             .map(|task| task.task_id.clone());
-        let previous_task = if let Some(task_id) = task_id.as_deref() {
+        let snapshot_task = if let Some(task_id) = task_id.as_deref() {
             state.tasks.read().await.get(task_id).cloned()
         } else {
             None
@@ -200,14 +198,11 @@ pub(crate) async fn sweep_reconciliation_timeouts(
             let Some(run) = runs.get_run(&run_id) else {
                 continue;
             };
-            if run.state != InternalRunState::Reconciling {
+            if run.state != RunState::Reconciling {
                 continue;
             }
             let attempt = run.attempt;
-            if runs
-                .transition(&run_id, InternalRunState::RecoveryFailed)
-                .is_err()
-            {
+            if runs.transition(&run_id, RunState::RecoveryFailed).is_err() {
                 continue;
             }
             if let Some(run) = runs.get_run_mut(&run_id) {
@@ -252,7 +247,7 @@ pub(crate) async fn sweep_reconciliation_timeouts(
         };
 
         if !durable {
-            rollback_background_timeout(state, previous_run, previous_task).await;
+            rollback_background_timeout(state, snapshot_run, snapshot_task).await;
         }
 
         if durable {
@@ -271,6 +266,7 @@ pub(crate) async fn sweep_reconciliation_timeouts(
     }
 }
 
+#[must_use]
 pub fn spawn_lease_sweep(
     state: ControllerState,
     lease_check_interval: Duration,
@@ -281,9 +277,9 @@ pub fn spawn_lease_sweep(
         loop {
             interval.tick().await;
             let expired = state.tasks.write().await.expire_leases();
-            for previous_task in expired {
-                info!(task_id = %previous_task.task_id, run_id = %previous_task.run_id, "Task lease expired");
-                handle_expired_lease(&state, previous_task).await;
+            for snapshot_task in expired {
+                info!(task_id = %snapshot_task.task_id, run_id = %snapshot_task.run_id, "Task lease expired");
+                handle_expired_lease(&state, snapshot_task).await;
             }
             sweep_reconciliation_timeouts(&state, reconciliation_timeout).await;
             rapidbyte_metrics::instruments::controller::reconciliation_sweeps().add(1, &[]);
@@ -315,20 +311,19 @@ mod tests {
         };
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
         }
 
-        let previous_task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        let snapshot_task = state.tasks.read().await.get(&task_id).unwrap().clone();
         {
             let mut tasks = state.tasks.write().await;
             assert!(tasks.mark_timed_out(&task_id));
         }
-        handle_expired_lease(&state, previous_task).await;
+        handle_expired_lease(&state, snapshot_task).await;
 
         let runs = state.runs.read().await;
         let record = runs.get_run(&run_id).unwrap();
-        assert_eq!(record.state, InternalRunState::TimedOut);
+        assert_eq!(record.state, RunState::TimedOut);
         assert_eq!(
             record.error.as_ref().map(|e| e.message.as_str()),
             Some(format!("Task {task_id} lease expired (agent unresponsive)").as_str())
@@ -353,22 +348,20 @@ mod tests {
         };
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
-            runs.transition(&run_id, InternalRunState::Reconciling)
-                .unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
+            runs.transition(&run_id, RunState::Reconciling).unwrap();
         }
 
-        let previous_task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        let snapshot_task = state.tasks.read().await.get(&task_id).unwrap().clone();
         {
             let mut tasks = state.tasks.write().await;
             assert!(tasks.mark_timed_out(&task_id));
         }
-        handle_expired_lease(&state, previous_task).await;
+        handle_expired_lease(&state, snapshot_task).await;
 
         let runs = state.runs.read().await;
         let record = runs.get_run(&run_id).unwrap();
-        assert_eq!(record.state, InternalRunState::RecoveryFailed);
+        assert_eq!(record.state, RunState::RecoveryFailed);
         assert!(record
             .error
             .as_ref()
@@ -397,17 +390,16 @@ mod tests {
         };
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
         }
 
         let mut rx = state.watchers.write().await.subscribe(&run_id);
-        let previous_task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        let snapshot_task = state.tasks.read().await.get(&task_id).unwrap().clone();
         {
             let mut tasks = state.tasks.write().await;
             assert!(tasks.mark_timed_out(&task_id));
         }
-        handle_expired_lease(&state, previous_task).await;
+        handle_expired_lease(&state, snapshot_task).await;
 
         let recv = tokio::time::timeout(Duration::from_millis(100), rx.recv()).await;
         assert!(
@@ -419,7 +411,7 @@ mod tests {
         assert_eq!(task.state, crate::scheduler::TaskState::Assigned);
         assert!(task.lease.is_some());
         let run = state.runs.read().await.get_run(&run_id).unwrap().clone();
-        assert_eq!(run.state, InternalRunState::Assigned);
+        assert_eq!(run.state, RunState::Assigned);
     }
 
     #[tokio::test]
@@ -441,18 +433,17 @@ mod tests {
         };
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
         }
 
-        let previous_run = state.runs.read().await.get_run(&run_id).unwrap().clone();
-        let previous_task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        let snapshot_run = state.runs.read().await.get_run(&run_id).unwrap().clone();
+        let snapshot_task = state.tasks.read().await.get(&task_id).unwrap().clone();
         state
-            .persist_run_record(&previous_run)
+            .persist_run_record(&snapshot_run)
             .await
             .expect("initial run persistence should succeed");
         state
-            .persist_task_record(&previous_task)
+            .persist_task_record(&snapshot_task)
             .await
             .expect("initial task persistence should succeed");
 
@@ -460,7 +451,7 @@ mod tests {
             let mut tasks = state.tasks.write().await;
             assert!(tasks.mark_timed_out(&task_id));
         }
-        handle_expired_lease(&state, previous_task).await;
+        handle_expired_lease(&state, snapshot_task).await;
 
         let durable_task = store
             .persisted_task(&task_id)
@@ -470,7 +461,7 @@ mod tests {
         let durable_run = store
             .persisted_run(&run_id)
             .expect("durable run snapshot should exist");
-        assert_eq!(durable_run.state, InternalRunState::Assigned);
+        assert_eq!(durable_run.state, RunState::Assigned);
     }
 
     #[tokio::test]
@@ -482,10 +473,8 @@ mod tests {
         };
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
-            runs.transition(&run_id, InternalRunState::Reconciling)
-                .unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
+            runs.transition(&run_id, RunState::Reconciling).unwrap();
             runs.get_run_mut(&run_id).unwrap().recovery_started_at = Some(
                 std::time::SystemTime::now()
                     .checked_sub(Duration::from_secs(120))
@@ -497,7 +486,7 @@ mod tests {
 
         let runs = state.runs.read().await;
         let record = runs.get_run(&run_id).unwrap();
-        assert_eq!(record.state, InternalRunState::RecoveryFailed);
+        assert_eq!(record.state, RunState::RecoveryFailed);
         assert!(record
             .error
             .as_ref()
@@ -526,10 +515,8 @@ mod tests {
         };
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
-            runs.transition(&run_id, InternalRunState::Reconciling)
-                .unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
+            runs.transition(&run_id, RunState::Reconciling).unwrap();
             runs.get_run_mut(&run_id).unwrap().recovery_started_at = Some(
                 std::time::SystemTime::now()
                     .checked_sub(Duration::from_secs(120))
@@ -540,7 +527,7 @@ mod tests {
         sweep_reconciliation_timeouts(&state, Duration::from_secs(30)).await;
 
         let run = state.runs.read().await.get_run(&run_id).unwrap().clone();
-        assert_eq!(run.state, InternalRunState::Reconciling);
+        assert_eq!(run.state, RunState::Reconciling);
         let task = state.tasks.read().await.get(&task_id).unwrap().clone();
         assert_eq!(task.state, crate::scheduler::TaskState::Assigned);
         assert!(task.lease.is_some());
@@ -555,16 +542,14 @@ mod tests {
         };
         {
             let mut runs = state.runs.write().await;
-            runs.transition(&run_id, InternalRunState::Assigned)
-                .unwrap();
-            runs.transition(&run_id, InternalRunState::Reconciling)
-                .unwrap();
+            runs.transition(&run_id, RunState::Assigned).unwrap();
+            runs.transition(&run_id, RunState::Reconciling).unwrap();
         }
 
         sweep_reconciliation_timeouts(&state, Duration::from_secs(300)).await;
 
         let runs = state.runs.read().await;
         let record = runs.get_run(&run_id).unwrap();
-        assert_eq!(record.state, InternalRunState::Reconciling);
+        assert_eq!(record.state, RunState::Reconciling);
     }
 }

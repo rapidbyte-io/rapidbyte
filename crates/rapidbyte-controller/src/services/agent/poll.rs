@@ -8,7 +8,7 @@ use crate::proto::rapidbyte::v1::{
     poll_task_response, run_event, NoTask, PollTaskRequest, PollTaskResponse,
     ReportProgressRequest, ReportProgressResponse, RunEvent,
 };
-use crate::run_state::RunState as InternalRunState;
+use crate::run_state::RunState;
 use crate::scheduler::TaskState;
 use crate::state::ControllerState;
 
@@ -88,7 +88,7 @@ pub(crate) async fn handle_report_progress(
 ) -> Result<Response<ReportProgressResponse>, Status> {
     let state = &handler.state;
 
-    let (previous_task, previous_run) = state.snapshot_task_and_run(&req.task_id).await?;
+    let (snapshot_task, snapshot_run) = state.snapshot_task_and_run(&req.task_id).await?;
 
     // Validate lease and update scheduler state while holding the task lock.
     let run_id = {
@@ -133,7 +133,7 @@ pub(crate) async fn handle_report_progress(
         .persist_running_records(&running_run, &running_task)
         .await
     {
-        rollback_assignment(state, previous_run, previous_task).await;
+        rollback_assignment(state, snapshot_run, snapshot_task).await;
         return Err(Status::internal(error.to_string()));
     }
 
@@ -165,7 +165,7 @@ async fn claim_task(
         {
             return Ok(None);
         }
-        let Some(previous_task) = tasks.peek_pending().cloned() else {
+        let Some(snapshot_task) = tasks.peek_pending().cloned() else {
             return Ok(None);
         };
         let Some(assignment) = tasks.poll(agent_id, LEASE_TTL, &state.epoch_gen) else {
@@ -176,12 +176,12 @@ async fn claim_task(
             .cloned()
             .expect("claimed task should still exist");
         let mut runs = state.runs.write().await;
-        let previous_run = runs
+        let snapshot_run = runs
             .get_run(&assignment.run_id)
             .cloned()
             .expect("claimed run should exist");
         if runs
-            .transition(&assignment.run_id, InternalRunState::Assigned)
+            .transition(&assignment.run_id, RunState::Assigned)
             .is_err()
         {
             drop(runs);
@@ -210,20 +210,20 @@ async fn claim_task(
             .expect("assigned run should exist");
         (
             assignment,
-            previous_task,
-            previous_run,
+            snapshot_task,
+            snapshot_run,
             assigned_task,
             assigned_run,
         )
     };
 
-    let (assignment, previous_task, previous_run, assigned_task, assigned_run) = claimed;
+    let (assignment, snapshot_task, snapshot_run, assigned_task, assigned_run) = claimed;
 
     if let Err(error) = state
         .persist_assignment_records(&assigned_run, &assigned_task)
         .await
     {
-        rollback_assignment(state, previous_run, previous_task).await;
+        rollback_assignment(state, snapshot_run, snapshot_task).await;
         return Err(Status::internal(error.to_string()));
     }
 
@@ -233,15 +233,15 @@ async fn claim_task(
 
 pub(super) async fn rollback_assignment(
     state: &ControllerState,
-    previous_run: crate::run_state::RunRecord,
-    previous_task: crate::scheduler::TaskRecord,
+    snapshot_run: crate::run_state::RunRecord,
+    snapshot_task: crate::scheduler::TaskRecord,
 ) {
     {
         let mut runs = state.runs.write().await;
-        runs.restore_run(previous_run);
+        runs.restore_run(snapshot_run);
     }
     {
         let mut tasks = state.tasks.write().await;
-        tasks.restore_task(previous_task);
+        tasks.restore_task(snapshot_task);
     }
 }
