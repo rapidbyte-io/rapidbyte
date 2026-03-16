@@ -22,6 +22,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod agent_service;
+pub mod background;
 pub mod config;
 pub mod lease;
 pub mod middleware;
