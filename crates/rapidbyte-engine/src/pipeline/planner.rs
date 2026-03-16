@@ -11,7 +11,10 @@ use rapidbyte_types::state::{PipelineId, StreamName};
 use rapidbyte_types::stream::{PartitionStrategy, StreamContext, StreamLimits, StreamPolicies};
 use rapidbyte_types::wire::{Feature, SyncMode, WriteMode};
 
-use crate::config::types::{parse_byte_size, PipelineConfig, PipelineParallelism};
+use crate::config::types::{
+    parse_byte_size, PipelineConfig, PipelineParallelism, MAX_FLUSH_CHUNK_BYTES,
+    MIN_FLUSH_CHUNK_BYTES,
+};
 use crate::error::PipelineError;
 
 const SYSTEM_CORE_RESERVE_DIVISOR: u32 = 8;
@@ -161,6 +164,46 @@ fn decode_incremental_last_value(raw: String, tie_breaker_field: Option<&str>) -
     CursorValue::Utf8 { value: raw }
 }
 
+/// Resolved autotune overrides for stream execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AutotuneDecision {
+    parallelism: u32,
+    partition_strategy: Option<PartitionStrategy>,
+    copy_flush_bytes_override: Option<u64>,
+    autotune_enabled: bool,
+}
+
+/// Apply autotune config overrides to the baseline parallelism decision.
+fn resolve_autotune_overrides(
+    config: &PipelineConfig,
+    baseline_parallelism: u32,
+    supports_partitioned_read: bool,
+) -> AutotuneDecision {
+    let autotune_cfg = &config.resources.autotune;
+
+    let parallelism = autotune_cfg
+        .parallelism
+        .map_or_else(|| baseline_parallelism.max(1), |v| v.max(1));
+
+    let partition_strategy = if supports_partitioned_read {
+        autotune_cfg.partition_mode
+    } else {
+        None
+    };
+
+    let copy_flush_bytes_override = autotune_cfg.flush_bytes.map(|bytes| {
+        let bytes = u64::try_from(bytes).unwrap_or(MAX_FLUSH_CHUNK_BYTES as u64);
+        bytes.clamp(MIN_FLUSH_CHUNK_BYTES as u64, MAX_FLUSH_CHUNK_BYTES as u64)
+    });
+
+    AutotuneDecision {
+        parallelism,
+        partition_strategy,
+        copy_flush_bytes_override,
+        autotune_enabled: autotune_cfg.enabled,
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn build_stream_contexts(
     config: &PipelineConfig,
@@ -171,11 +214,8 @@ pub(crate) fn build_stream_contexts(
     let supports_partitioned_read = source_manifest
         .is_some_and(|m: &PluginManifest| m.has_source_feature(Feature::PartitionedRead));
     let baseline_parallelism = compute_pipeline_parallelism(config, supports_partitioned_read);
-    let autotune_decision = super::autotune::compute_autotune_decision(
-        config,
-        baseline_parallelism,
-        supports_partitioned_read,
-    );
+    let autotune_decision =
+        resolve_autotune_overrides(config, baseline_parallelism, supports_partitioned_read);
     let configured_parallelism = autotune_decision.parallelism;
     tracing::info!(
         autotune_enabled = autotune_decision.autotune_enabled,
@@ -758,5 +798,78 @@ state:
         let preflight = destination_preflight_streams(&stream_ctxs);
         assert_eq!(preflight.len(), 1);
         assert_eq!(preflight[0].stream_name, "orders_append");
+    }
+
+    // -- autotune tests --
+
+    fn base_pipeline_yaml() -> &'static str {
+        r#"
+version: "1.0"
+pipeline: autotune_test
+source:
+  use: postgres
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: postgres
+  config: {}
+  write_mode: append
+"#
+    }
+
+    #[tokio::test]
+    async fn manual_parallelism_overrides_baseline() {
+        let yaml = format!(
+            "{}\nresources:\n  autotune:\n    parallelism: 8\n",
+            base_pipeline_yaml().trim_end()
+        );
+        let config = crate::config::parser::parse_pipeline(
+            &yaml,
+            &rapidbyte_secrets::SecretProviders::new(),
+        )
+        .await
+        .unwrap();
+
+        let decision = resolve_autotune_overrides(&config, 3, true);
+        assert_eq!(decision.parallelism, 8);
+    }
+
+    #[tokio::test]
+    async fn partition_mode_override_maps_to_strategy() {
+        let yaml = format!(
+            "{}\nresources:\n  autotune:\n    partition_mode: range\n",
+            base_pipeline_yaml().trim_end()
+        );
+        let config = crate::config::parser::parse_pipeline(
+            &yaml,
+            &rapidbyte_secrets::SecretProviders::new(),
+        )
+        .await
+        .unwrap();
+
+        let decision = resolve_autotune_overrides(&config, 3, true);
+        assert_eq!(decision.partition_strategy, Some(PartitionStrategy::Range));
+    }
+
+    #[tokio::test]
+    async fn flush_bytes_override_is_clamped_to_guardrail() {
+        let yaml = format!(
+            "{}\nresources:\n  autotune:\n    flush_bytes: 999999999\n",
+            base_pipeline_yaml().trim_end()
+        );
+        let config = crate::config::parser::parse_pipeline(
+            &yaml,
+            &rapidbyte_secrets::SecretProviders::new(),
+        )
+        .await
+        .unwrap();
+
+        let decision = resolve_autotune_overrides(&config, 3, true);
+        assert_eq!(
+            decision.copy_flush_bytes_override,
+            Some(MAX_FLUSH_CHUNK_BYTES as u64)
+        );
     }
 }
