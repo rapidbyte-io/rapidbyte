@@ -5,19 +5,20 @@
 //!
 //! # Crate structure
 //!
-//! | Module         | Responsibility |
-//! |----------------|----------------|
-//! | `arrow`        | Arrow IPC encode/decode utilities |
-//! | `config`       | Pipeline YAML config types, parsing, validation |
-//! | `error`        | Pipeline error types and retry policy |
-//! | `finalizers`   | Checkpoint correlation, DLQ persistence, run finalization (internal) |
-//! | `execution`    | Runtime execution mode types (dry-run, limits) |
-//! | `orchestrator` | Pipeline execution, retry, stream dispatch |
-//! | `pipeline`     | Pipeline planning: stream context building, parallelism computation (internal) |
-//! | `progress`     | Progress event types for live CLI updates |
-//! | `plugin`       | Plugin lifecycle management: resolution, manifest validation, sandbox (internal) |
-//! | `result`       | Pipeline execution result types and timing breakdowns |
-//! | `runner`       | Individual plugin runners (source, dest, transform) |
+//! | Module             | Responsibility |
+//! |--------------------|----------------|
+//! | `arrow`            | Arrow IPC encode/decode utilities |
+//! | `autotune`         | Runtime autotune decision helpers |
+//! | `config`           | Pipeline YAML config types, parsing, validation |
+//! | `error`            | Pipeline error types, retry policy, convenience constructors |
+//! | `execution`        | Runtime execution mode types (dry-run, limits) |
+//! | `finalizers`       | Post-execution: checkpoint correlation, DLQ, run finalization |
+//! | `orchestrator`     | Top-level pipeline coordination (run, check, discover) |
+//! | `pipeline`         | Pipeline execution: planning, scheduling, stream execution |
+//! | `plugin`           | Plugin resolution, manifest validation, module loading |
+//! | `progress`         | Progress event types and ProgressSender for live CLI updates |
+//! | `result`           | Pipeline result types, timing breakdowns |
+//! | `runner`           | Per-kind plugin runners (source, dest, transform, validate) |
 
 #![warn(clippy::pedantic)]
 
