@@ -6,11 +6,11 @@ pub(crate) mod transform;
 pub(crate) mod validator;
 
 // Re-export main types for crate-internal use
-// DestRunResult is re-exported for API completeness; callers use type inference
+// DestinationOutcome is re-exported for API completeness; callers use type inference
 #[allow(unused_imports)]
-pub(crate) use destination::{run_destination_stream, DestRunResult};
-pub(crate) use source::{run_source_stream, SourceRunResult};
-pub(crate) use transform::{run_transform_stream, TransformRunResult};
+pub(crate) use destination::{run_destination_stream, DestinationOutcome};
+pub(crate) use source::{run_source_stream, SourceOutcome};
+pub(crate) use transform::{run_transform_stream, TransformOutcome};
 pub(crate) use validator::{run_discover, validate_plugin};
 
 use std::sync::{Arc, Mutex};
@@ -30,7 +30,7 @@ use crate::error::PipelineError;
 /// transform).  Built once per stream by the orchestrator and passed to
 /// each runner function.
 pub(crate) struct StreamRunContext<'a> {
-    pub module: &'a LoadedComponent,
+    pub component: &'a LoadedComponent,
     pub state_backend: Arc<dyn StateBackend>,
     pub pipeline_name: &'a str,
     pub metric_run_label: &'a str,

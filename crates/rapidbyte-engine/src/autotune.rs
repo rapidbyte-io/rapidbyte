@@ -2,7 +2,7 @@
 
 use rapidbyte_types::stream::PartitionStrategy;
 
-use crate::config::types::{PipelineConfig, MAX_COPY_FLUSH_BYTES, MIN_COPY_FLUSH_BYTES};
+use crate::config::types::{PipelineConfig, MAX_FLUSH_CHUNK_BYTES, MIN_FLUSH_CHUNK_BYTES};
 
 /// Resolved runtime overrides for a stream execution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,7 +15,7 @@ pub struct StreamAutotuneDecision {
 
 /// Build parallelism candidates around a baseline value within the provided cap.
 #[must_use]
-pub fn parallelism_candidates(base: u32, cap: u32) -> Vec<u32> {
+pub fn generate_parallelism_options(base: u32, cap: u32) -> Vec<u32> {
     let base = base.max(1);
     let cap = cap.max(1);
     let half = (base / 2).max(1);
@@ -33,25 +33,25 @@ pub fn parallelism_candidates(base: u32, cap: u32) -> Vec<u32> {
 
 /// Resolve stream-level autotune decisions, honoring explicit manual pins.
 #[must_use]
-pub fn resolve_stream_autotune(
+pub fn compute_autotune_decision(
     config: &PipelineConfig,
     baseline_parallelism: u32,
     supports_partitioned_read: bool,
 ) -> StreamAutotuneDecision {
     let autotune_cfg = &config.resources.autotune;
 
-    let pinned_parallelism = autotune_cfg.pin_parallelism.map(|value| value.max(1));
+    let pinned_parallelism = autotune_cfg.parallelism.map(|value| value.max(1));
     let parallelism = pinned_parallelism.unwrap_or_else(|| baseline_parallelism.max(1));
 
     let partition_strategy = if supports_partitioned_read {
-        autotune_cfg.pin_source_partition_mode
+        autotune_cfg.partition_mode
     } else {
         None
     };
 
-    let copy_flush_bytes_override = autotune_cfg.pin_copy_flush_bytes.map(|bytes| {
-        let bytes = u64::try_from(bytes).unwrap_or(MAX_COPY_FLUSH_BYTES as u64);
-        bytes.clamp(MIN_COPY_FLUSH_BYTES as u64, MAX_COPY_FLUSH_BYTES as u64)
+    let copy_flush_bytes_override = autotune_cfg.flush_bytes.map(|bytes| {
+        let bytes = u64::try_from(bytes).unwrap_or(MAX_FLUSH_CHUNK_BYTES as u64);
+        bytes.clamp(MIN_FLUSH_CHUNK_BYTES as u64, MAX_FLUSH_CHUNK_BYTES as u64)
     });
 
     StreamAutotuneDecision {
@@ -88,51 +88,51 @@ destination:
     #[tokio::test]
     async fn manual_pin_parallelism_overrides_baseline() {
         let yaml = format!(
-            "{}\nresources:\n  autotune:\n    pin_parallelism: 8\n",
+            "{}\nresources:\n  autotune:\n    parallelism: 8\n",
             base_pipeline_yaml().trim_end()
         );
         let config = parse_pipeline(&yaml, &SecretProviders::new())
             .await
             .unwrap();
 
-        let decision = resolve_stream_autotune(&config, 3, true);
+        let decision = compute_autotune_decision(&config, 3, true);
         assert_eq!(decision.parallelism, 8);
     }
 
     #[tokio::test]
     async fn partition_mode_pin_maps_to_strategy() {
         let yaml = format!(
-            "{}\nresources:\n  autotune:\n    pin_source_partition_mode: range\n",
+            "{}\nresources:\n  autotune:\n    partition_mode: range\n",
             base_pipeline_yaml().trim_end()
         );
         let config = parse_pipeline(&yaml, &SecretProviders::new())
             .await
             .unwrap();
 
-        let decision = resolve_stream_autotune(&config, 3, true);
+        let decision = compute_autotune_decision(&config, 3, true);
         assert_eq!(decision.partition_strategy, Some(PartitionStrategy::Range));
     }
 
     #[tokio::test]
     async fn copy_flush_pin_is_clamped_to_guardrail() {
         let yaml = format!(
-            "{}\nresources:\n  autotune:\n    pin_copy_flush_bytes: 999999999\n",
+            "{}\nresources:\n  autotune:\n    flush_bytes: 999999999\n",
             base_pipeline_yaml().trim_end()
         );
         let config = parse_pipeline(&yaml, &SecretProviders::new())
             .await
             .unwrap();
 
-        let decision = resolve_stream_autotune(&config, 3, true);
+        let decision = compute_autotune_decision(&config, 3, true);
         assert_eq!(
             decision.copy_flush_bytes_override,
-            Some(MAX_COPY_FLUSH_BYTES as u64)
+            Some(MAX_FLUSH_CHUNK_BYTES as u64)
         );
     }
 
     #[test]
     fn candidate_generation_stays_within_cap_and_dedupes() {
-        assert_eq!(parallelism_candidates(1, 1), vec![1]);
-        assert_eq!(parallelism_candidates(12, 16), vec![6, 12, 16]);
+        assert_eq!(generate_parallelism_options(1, 1), vec![1]);
+        assert_eq!(generate_parallelism_options(12, 16), vec![6, 12, 16]);
     }
 }

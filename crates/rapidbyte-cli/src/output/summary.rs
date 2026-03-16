@@ -117,12 +117,12 @@ fn print_verbose(result: &PipelineResult) {
         format_duration(dst.arrow_decode_secs),
     );
 
-    if result.transform_count > 0 {
+    if result.num_transforms > 0 {
         eprintln!(
             "    {:<10} {} ({} stages)",
             "Transform",
-            format_duration(result.transform_duration_secs),
-            result.transform_count,
+            format_duration(result.total_transform_secs),
+            result.num_transforms,
         );
     }
 }
@@ -136,7 +136,7 @@ fn print_diagnostic(result: &PipelineResult) {
     let compress_secs = src.compress_nanos as f64 / 1_000_000_000.0;
     let decompress_secs = dst.decompress_nanos as f64 / 1_000_000_000.0;
     let emit_secs = src.emit_nanos as f64 / 1_000_000_000.0;
-    let recv_secs = dst.recv_nanos as f64 / 1_000_000_000.0;
+    let recv_secs = dst.frame_receive_nanos as f64 / 1_000_000_000.0;
 
     eprintln!();
     eprintln!("  Diagnostics");

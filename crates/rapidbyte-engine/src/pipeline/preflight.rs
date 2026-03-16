@@ -76,7 +76,7 @@ pub(crate) async fn run_destination_preflight(
             // accumulate in the SnapshotReader's finished_run_snapshots map.
             let preflight_result = tokio::task::spawn_blocking(move || {
                 let ctx = StreamRunContext {
-                    module: &dest_module,
+                    component: &dest_module,
                     state_backend: state_dst,
                     pipeline_name: &params.pipeline_name,
                     metric_run_label: "",

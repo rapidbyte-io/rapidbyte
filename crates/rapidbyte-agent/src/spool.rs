@@ -33,8 +33,8 @@ pub struct PreviewSpool {
 struct SpoolEntry {
     streams: Vec<StoredStream>,
     source: SourceTiming,
-    transform_count: usize,
-    transform_duration_secs: f64,
+    num_transforms: usize,
+    total_transform_secs: f64,
     duration_secs: f64,
     created_at: Instant,
     created_at_wall: SystemTime,
@@ -121,8 +121,8 @@ impl PreviewSpool {
             SpoolEntry {
                 streams,
                 source: result.source,
-                transform_count: result.transform_count,
-                transform_duration_secs: result.transform_duration_secs,
+                num_transforms: result.num_transforms,
+                total_transform_secs: result.total_transform_secs,
                 duration_secs: result.duration_secs,
                 created_at: Instant::now(),
                 created_at_wall: SystemTime::now(),
@@ -182,8 +182,8 @@ impl PreviewSpool {
         Some(DryRunResult {
             streams,
             source: entry.source.clone(),
-            transform_count: entry.transform_count,
-            transform_duration_secs: entry.transform_duration_secs,
+            num_transforms: entry.num_transforms,
+            total_transform_secs: entry.total_transform_secs,
             duration_secs: entry.duration_secs,
         })
     }
@@ -340,8 +340,8 @@ mod tests {
         DryRunResult {
             streams: vec![],
             source: SourceTiming::default(),
-            transform_count: 0,
-            transform_duration_secs: 0.0,
+            num_transforms: 0,
+            total_transform_secs: 0.0,
             duration_secs: 1.0,
         }
     }
@@ -407,8 +407,8 @@ mod tests {
                 total_bytes: 16,
             }],
             source: SourceTiming::default(),
-            transform_count: 0,
-            transform_duration_secs: 0.0,
+            num_transforms: 0,
+            total_transform_secs: 0.0,
             duration_secs: 1.0,
         };
         spool.store(key.clone(), result);
@@ -482,8 +482,8 @@ mod tests {
                 total_bytes: 16,
             }],
             source: SourceTiming::default(),
-            transform_count: 0,
-            transform_duration_secs: 0.0,
+            num_transforms: 0,
+            total_transform_secs: 0.0,
             duration_secs: 1.0,
         };
 
@@ -519,8 +519,8 @@ mod tests {
                 total_bytes: 16,
             }],
             source: SourceTiming::default(),
-            transform_count: 0,
-            transform_duration_secs: 0.0,
+            num_transforms: 0,
+            total_transform_secs: 0.0,
             duration_secs: 1.0,
         };
         spool.store(key.clone(), result);

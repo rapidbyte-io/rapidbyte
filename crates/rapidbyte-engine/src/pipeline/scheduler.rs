@@ -17,7 +17,7 @@ use crate::progress::ProgressEvent;
 pub(crate) type ProgressTx = Option<tokio_mpsc::UnboundedSender<ProgressEvent>>;
 
 /// Per-stream execution result with summaries, checkpoints, and timings.
-pub(crate) struct StreamResult {
+pub(crate) struct StreamShardOutcome {
     pub(crate) stream_name: String,
     pub(crate) partition_index: Option<u32>,
     pub(crate) partition_count: Option<u32>,
@@ -25,22 +25,22 @@ pub(crate) struct StreamResult {
     pub(crate) write_summary: WriteSummary,
     pub(crate) source_checkpoints: Vec<Checkpoint>,
     pub(crate) dest_checkpoints: Vec<Checkpoint>,
-    pub(crate) src_duration: f64,
-    pub(crate) dst_duration: f64,
-    pub(crate) vm_setup_secs: f64,
-    pub(crate) recv_secs: f64,
+    pub(crate) source_duration_secs: f64,
+    pub(crate) dest_duration_secs: f64,
+    pub(crate) wasm_instantiation_secs: f64,
+    pub(crate) frame_receive_secs: f64,
     pub(crate) transform_durations: Vec<f64>,
     pub(crate) dry_run_result: Option<DryRunStreamResult>,
 }
 
 /// Collection of completed stream tasks, distinguishing successes from the first error.
-pub(crate) struct StreamTaskCollection {
-    pub(crate) successes: Vec<StreamResult>,
+pub(crate) struct StreamTaskOutcomes {
+    pub(crate) successes: Vec<StreamShardOutcome>,
     pub(crate) first_error: Option<PipelineError>,
 }
 
 /// Collection of completed transform tasks with durations and first error.
-pub(crate) struct CollectedTransforms {
+pub(crate) struct TransformStageOutcomes {
     pub(crate) durations: Vec<f64>,
     pub(crate) first_error: Option<PipelineError>,
 }
@@ -81,9 +81,9 @@ pub(crate) async fn acquire_permit_cancellable(
 
 /// Join all stream tasks in the set, collecting successes and aborting siblings on first error.
 pub(crate) async fn collect_stream_task_results(
-    mut stream_join_set: JoinSet<Result<StreamResult, PipelineError>>,
+    mut stream_join_set: JoinSet<Result<StreamShardOutcome, PipelineError>>,
     progress_tx: &ProgressTx,
-) -> Result<StreamTaskCollection, PipelineError> {
+) -> Result<StreamTaskOutcomes, PipelineError> {
     let mut successes = Vec::new();
     let mut first_error: Option<PipelineError> = None;
 
@@ -117,7 +117,7 @@ pub(crate) async fn collect_stream_task_results(
         }
     }
 
-    Ok(StreamTaskCollection {
+    Ok(StreamTaskOutcomes {
         successes,
         first_error,
     })
@@ -127,10 +127,10 @@ pub(crate) async fn collect_stream_task_results(
 pub(crate) async fn collect_transform_results(
     transform_handles: Vec<(
         usize,
-        tokio::task::JoinHandle<Result<crate::runner::TransformRunResult, PipelineError>>,
+        tokio::task::JoinHandle<Result<crate::runner::TransformOutcome, PipelineError>>,
     )>,
     stream_name: &str,
-) -> Result<CollectedTransforms, PipelineError> {
+) -> Result<TransformStageOutcomes, PipelineError> {
     let mut durations = Vec::new();
     let mut first_error: Option<PipelineError> = None;
     for (i, t_handle) in transform_handles {
@@ -163,7 +163,7 @@ pub(crate) async fn collect_transform_results(
             }
         }
     }
-    Ok(CollectedTransforms {
+    Ok(TransformStageOutcomes {
         durations,
         first_error,
     })
@@ -197,8 +197,8 @@ mod stream_task_collection_tests {
     use super::*;
     use std::time::{Duration, Instant};
 
-    fn success_result(stream_name: &str) -> StreamResult {
-        StreamResult {
+    fn success_result(stream_name: &str) -> StreamShardOutcome {
+        StreamShardOutcome {
             stream_name: stream_name.to_string(),
             partition_index: None,
             partition_count: None,
@@ -218,10 +218,10 @@ mod stream_task_collection_tests {
             },
             source_checkpoints: Vec::new(),
             dest_checkpoints: Vec::new(),
-            src_duration: 0.0,
-            dst_duration: 0.0,
-            vm_setup_secs: 0.0,
-            recv_secs: 0.0,
+            source_duration_secs: 0.0,
+            dest_duration_secs: 0.0,
+            wasm_instantiation_secs: 0.0,
+            frame_receive_secs: 0.0,
             transform_durations: Vec::new(),
             dry_run_result: None,
         }
@@ -229,7 +229,7 @@ mod stream_task_collection_tests {
 
     #[tokio::test]
     async fn collect_stream_tasks_fails_fast_and_cancels_siblings() {
-        let mut join_set: JoinSet<Result<StreamResult, PipelineError>> = JoinSet::new();
+        let mut join_set: JoinSet<Result<StreamShardOutcome, PipelineError>> = JoinSet::new();
         join_set.spawn(async {
             tokio::time::sleep(Duration::from_millis(250)).await;
             Ok(success_result("slow_stream"))

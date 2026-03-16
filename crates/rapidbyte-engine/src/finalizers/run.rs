@@ -21,7 +21,7 @@ use crate::result::{DestTiming, PipelineCounts, PipelineResult, SourceTiming, St
 // Types
 // ---------------------------------------------------------------------------
 
-pub(crate) struct AggregatedStreamResults {
+pub(crate) struct StreamAggregation {
     pub(crate) execution_parallelism: u32,
     pub(crate) total_read_summary: ReadSummary,
     pub(crate) total_write_summary: WriteSummary,
@@ -81,7 +81,7 @@ pub(crate) async fn finalize_pipeline_execution(
     start: Instant,
     metric_run_label: &str,
     modules: &PluginModules,
-    mut aggregated: AggregatedStreamResults,
+    mut aggregated: StreamAggregation,
     metrics_runtime: &MetricsRuntime<'_>,
 ) -> Result<PipelineResult, PipelineError> {
     // 1. If any stream failed → mark Failed, persist DLQ, return error
@@ -136,7 +136,7 @@ pub(crate) async fn finalize_pipeline_execution(
 
     // 6. Assemble and return PipelineResult
     let duration = start.elapsed();
-    let transform_module_load_ms = modules
+    let transform_load_times_ms = modules
         .transform_modules
         .iter()
         .map(|m| m.load_ms)
@@ -163,9 +163,9 @@ pub(crate) async fn finalize_pipeline_execution(
             modules.source_module_load_ms,
         ),
         dest: build_dest_timing(&snap, &aggregated, modules.dest_module_load_ms),
-        transform_count: aggregated.transform_durations.len(),
-        transform_duration_secs: aggregated.transform_durations.iter().sum(),
-        transform_module_load_ms,
+        num_transforms: aggregated.transform_durations.len(),
+        total_transform_secs: aggregated.transform_durations.iter().sum(),
+        transform_load_times_ms,
         duration_secs: duration.as_secs_f64(),
         wasm_overhead_secs,
         retry_count: attempt.saturating_sub(1),
@@ -222,7 +222,7 @@ pub(crate) async fn persist_run_state(
     state: Arc<dyn StateBackend>,
     pipeline_id: &PipelineId,
     run_id: i64,
-    aggregated: &mut AggregatedStreamResults,
+    aggregated: &mut StreamAggregation,
 ) -> Result<u64, PipelineError> {
     let state_for_cursor = state.clone();
     let pipeline_id_for_cursor = pipeline_id.clone();
@@ -295,10 +295,7 @@ pub(crate) async fn persist_run_state(
 // Timing / metric helpers (moved from orchestrator.rs unchanged)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn reported_parallelism(
-    config: &PipelineConfig,
-    aggregated: &AggregatedStreamResults,
-) -> u32 {
+pub(crate) fn reported_parallelism(config: &PipelineConfig, aggregated: &StreamAggregation) -> u32 {
     if aggregated.execution_parallelism > 0 {
         aggregated.execution_parallelism
     } else {
@@ -326,22 +323,22 @@ pub(crate) fn build_source_timing(
 
 pub(crate) fn build_dry_run_result(
     snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
-    aggregated: AggregatedStreamResults,
+    aggregated: StreamAggregation,
     source_module_load_ms: u64,
     duration_secs: f64,
 ) -> DryRunResult {
     DryRunResult {
         streams: aggregated.dry_run_streams,
         source: build_source_timing(snap, aggregated.max_source_duration, source_module_load_ms),
-        transform_count: aggregated.transform_durations.len(),
-        transform_duration_secs: aggregated.transform_durations.iter().sum(),
+        num_transforms: aggregated.transform_durations.len(),
+        total_transform_secs: aggregated.transform_durations.iter().sum(),
         duration_secs,
     }
 }
 
 pub(crate) fn compute_wasm_overhead_secs(
     snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
-    aggregated: &AggregatedStreamResults,
+    aggregated: &StreamAggregation,
 ) -> f64 {
     let plugin_internal_secs =
         snap.dest_connect_secs + snap.dest_flush_secs + snap.dest_commit_secs;
@@ -355,7 +352,7 @@ pub(crate) fn compute_wasm_overhead_secs(
 
 pub(crate) fn build_dest_timing(
     snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
-    aggregated: &AggregatedStreamResults,
+    aggregated: &StreamAggregation,
     dest_module_load_ms: u64,
 ) -> DestTiming {
     DestTiming {
@@ -365,13 +362,13 @@ pub(crate) fn build_dest_timing(
         flush_secs: snap.dest_flush_secs,
         commit_secs: snap.dest_commit_secs,
         arrow_decode_secs: snap.dest_decode_secs,
-        vm_setup_secs: aggregated.max_vm_setup_secs,
-        recv_secs: aggregated.max_recv_secs,
-        recv_nanos: snap.next_batch_nanos,
-        recv_wait_nanos: snap.next_batch_wait_nanos,
-        recv_process_nanos: snap.next_batch_process_nanos,
+        wasm_instantiation_secs: aggregated.max_vm_setup_secs,
+        frame_receive_secs: aggregated.max_recv_secs,
+        frame_receive_nanos: snap.next_batch_nanos,
+        frame_wait_nanos: snap.next_batch_wait_nanos,
+        frame_process_nanos: snap.next_batch_process_nanos,
         decompress_nanos: snap.decompress_nanos,
-        recv_count: snap.next_batch_count,
+        frame_count: snap.next_batch_count,
     }
 }
 
@@ -471,8 +468,8 @@ mod tests {
         }
     }
 
-    fn make_aggregated_results() -> AggregatedStreamResults {
-        AggregatedStreamResults {
+    fn make_aggregated_results() -> StreamAggregation {
+        StreamAggregation {
             execution_parallelism: 1,
             total_read_summary: ReadSummary {
                 records_read: 10,

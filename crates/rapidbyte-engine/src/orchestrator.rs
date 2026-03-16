@@ -23,8 +23,7 @@ use crate::config::types::PipelineConfig;
 use crate::error::{compute_backoff, PipelineError};
 use crate::execution::{DryRunStreamResult, ExecutionOptions, PipelineOutcome};
 use crate::finalizers::run::{
-    build_dry_run_result, finalize_pipeline_execution, prepare_metrics_runtime,
-    AggregatedStreamResults,
+    build_dry_run_result, finalize_pipeline_execution, prepare_metrics_runtime, StreamAggregation,
 };
 use crate::pipeline::executor::{execute_single_stream, DestinationMode};
 use crate::pipeline::planner::{
@@ -34,7 +33,7 @@ use crate::pipeline::planner::{
 use crate::pipeline::preflight::run_destination_preflight;
 use crate::pipeline::scheduler::{
     acquire_permit_cancellable, collect_stream_task_results, ensure_not_cancelled, send_progress,
-    ProgressTx, StreamResult,
+    ProgressTx, StreamShardOutcome,
 };
 use crate::plugin::loader::{load_all_modules, PluginModules};
 use crate::plugin::resolver::{
@@ -42,7 +41,7 @@ use crate::plugin::resolver::{
 };
 use crate::plugin::sandbox::{build_sandbox_overrides, check_state_backend, create_state_backend};
 use crate::progress::{Phase, ProgressEvent};
-use crate::result::{CheckItemResult, CheckResult, StreamShardMetric};
+use crate::result::{CheckResult, CheckStatus, StreamShardMetric};
 use crate::runner::{run_discover, validate_plugin};
 
 static NEXT_METRIC_RUN_LABEL: AtomicU64 = AtomicU64::new(1);
@@ -346,7 +345,7 @@ async fn execute_streams(
     metric_run_label: &str,
     progress_tx: &ProgressTx,
     cancel_token: &CancellationToken,
-) -> Result<AggregatedStreamResults, PipelineError> {
+) -> Result<StreamAggregation, PipelineError> {
     let (source_plugin_id, source_plugin_version) = parse_plugin_ref(&config.source.use_ref);
     let (dest_plugin_id, dest_plugin_version) = parse_plugin_ref(&config.destination.use_ref);
     let stats = Arc::new(Mutex::new(RunStats::default()));
@@ -411,7 +410,7 @@ async fn execute_streams(
         channel_capacity: (stream_build.limits.max_inflight_batches as usize).max(1),
     });
 
-    let mut stream_join_set: JoinSet<Result<StreamResult, PipelineError>> = JoinSet::new();
+    let mut stream_join_set: JoinSet<Result<StreamShardOutcome, PipelineError>> = JoinSet::new();
     let run_dlq_records: Arc<Mutex<Vec<DlqRecord>>> = Arc::new(Mutex::new(Vec::new()));
 
     // --- Destination DDL preflight (skipped in dry-run mode) ---
@@ -509,10 +508,10 @@ async fn execute_streams(
     let stream_collection = collect_stream_task_results(stream_join_set, progress_tx).await?;
 
     for sr in stream_collection.successes {
-        max_source_duration = max_source_duration.max(sr.src_duration);
-        max_dest_duration = max_dest_duration.max(sr.dst_duration);
-        max_vm_setup_secs = max_vm_setup_secs.max(sr.vm_setup_secs);
-        max_recv_secs = max_recv_secs.max(sr.recv_secs);
+        max_source_duration = max_source_duration.max(sr.source_duration_secs);
+        max_dest_duration = max_dest_duration.max(sr.dest_duration_secs);
+        max_vm_setup_secs = max_vm_setup_secs.max(sr.wasm_instantiation_secs);
+        max_recv_secs = max_recv_secs.max(sr.frame_receive_secs);
 
         total_read_summary.records_read += sr.read_summary.records_read;
         total_read_summary.bytes_read += sr.read_summary.bytes_read;
@@ -539,10 +538,10 @@ async fn execute_streams(
             records_written: sr.write_summary.records_written,
             bytes_read: sr.read_summary.bytes_read,
             bytes_written: sr.write_summary.bytes_written,
-            source_duration_secs: sr.src_duration,
-            dest_duration_secs: sr.dst_duration,
-            dest_vm_setup_secs: sr.vm_setup_secs,
-            dest_recv_secs: sr.recv_secs,
+            source_duration_secs: sr.source_duration_secs,
+            dest_duration_secs: sr.dest_duration_secs,
+            dest_wasm_instantiation_secs: sr.wasm_instantiation_secs,
+            dest_frame_receive_secs: sr.frame_receive_secs,
         });
 
         if let Some(dr) = sr.dry_run_result {
@@ -587,7 +586,7 @@ async fn execute_streams(
 
     let final_stats = PipelineError::lock_or_infra(&stats, "run stats")?.clone();
 
-    Ok(AggregatedStreamResults {
+    Ok(StreamAggregation {
         execution_parallelism: u32::try_from(parallelism).unwrap_or(u32::MAX),
         total_read_summary,
         total_write_summary,
@@ -624,11 +623,11 @@ pub async fn check_pipeline(
     let plugins = resolve_plugins(config, registry_config)
         .await
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    let source_manifest = plugins.source_manifest.as_ref().map(|_| CheckItemResult {
+    let source_manifest = plugins.source_manifest.as_ref().map(|_| CheckStatus {
         ok: true,
         message: String::new(),
     });
-    let destination_manifest = plugins.dest_manifest.as_ref().map(|_| CheckItemResult {
+    let destination_manifest = plugins.dest_manifest.as_ref().map(|_| CheckStatus {
         ok: true,
         message: String::new(),
     });
@@ -702,7 +701,7 @@ pub async fn check_pipeline(
         if let Some(ref m) = manifest {
             transform_configs.push(config_check_result(&tc.use_ref, &tc.config, m));
         } else {
-            transform_configs.push(CheckItemResult {
+            transform_configs.push(CheckStatus {
                 ok: true,
                 message: String::new(),
             });
@@ -819,13 +818,13 @@ fn config_check_result(
     plugin_ref: &str,
     config: &serde_json::Value,
     manifest: &PluginManifest,
-) -> CheckItemResult {
+) -> CheckStatus {
     match validate_config_against_schema(plugin_ref, config, manifest) {
-        Ok(()) => CheckItemResult {
+        Ok(()) => CheckStatus {
             ok: true,
             message: String::new(),
         },
-        Err(error) => CheckItemResult {
+        Err(error) => CheckStatus {
             ok: false,
             message: error.to_string(),
         },
@@ -984,8 +983,8 @@ mod orchestrator_helper_tests {
         }
     }
 
-    fn make_aggregated_results() -> AggregatedStreamResults {
-        AggregatedStreamResults {
+    fn make_aggregated_results() -> StreamAggregation {
+        StreamAggregation {
             execution_parallelism: 1,
             total_read_summary: ReadSummary {
                 records_read: 10,

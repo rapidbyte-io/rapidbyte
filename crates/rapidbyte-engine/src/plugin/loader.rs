@@ -19,7 +19,7 @@ pub(crate) struct LoadedModule {
 
 /// A transform WASM module with associated plugin metadata and config.
 #[derive(Clone)]
-pub(crate) struct LoadedTransformModule {
+pub(crate) struct TransformModule {
     pub(crate) module: LoadedComponent,
     pub(crate) plugin_id: String,
     pub(crate) plugin_version: String,
@@ -35,7 +35,7 @@ pub(crate) struct PluginModules {
     pub(crate) dest_module: LoadedComponent,
     pub(crate) source_module_load_ms: u64,
     pub(crate) dest_module_load_ms: u64,
-    pub(crate) transform_modules: Vec<LoadedTransformModule>,
+    pub(crate) transform_modules: Vec<TransformModule>,
 }
 
 /// Spawn a blocking task to load a single WASM module, returning load timing.
@@ -116,7 +116,7 @@ pub(crate) async fn load_all_modules(
         // Safety: module load time is always well under u64::MAX milliseconds
         let load_ms = load_start.elapsed().as_millis() as u64;
         let (id, ver) = parse_plugin_ref(&tc.use_ref);
-        transform_modules.push(LoadedTransformModule {
+        transform_modules.push(TransformModule {
             module,
             plugin_id: id,
             plugin_version: ver,

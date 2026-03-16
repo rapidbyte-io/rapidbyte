@@ -6,7 +6,7 @@ use rapidbyte_runtime::{resolve_min_limit, SandboxOverrides};
 use rapidbyte_state::{SqliteStateBackend, StateBackend};
 
 use crate::config::types::{parse_byte_size, PipelineConfig, StateBackendKind};
-use crate::result::CheckItemResult;
+use crate::result::CheckStatus;
 
 /// Create and open the state backend (`SQLite` or Postgres) based on pipeline config.
 ///
@@ -38,18 +38,18 @@ pub fn create_state_backend(config: &PipelineConfig) -> Result<Arc<dyn StateBack
     }
 }
 
-pub fn check_state_backend(config: &PipelineConfig) -> CheckItemResult {
+pub fn check_state_backend(config: &PipelineConfig) -> CheckStatus {
     match create_state_backend(config) {
         Ok(_) => {
             tracing::info!("State backend: OK");
-            CheckItemResult {
+            CheckStatus {
                 ok: true,
                 message: String::new(),
             }
         }
         Err(e) => {
             tracing::error!("State backend: FAILED — {}", e);
-            CheckItemResult {
+            CheckStatus {
                 ok: false,
                 message: e.to_string(),
             }

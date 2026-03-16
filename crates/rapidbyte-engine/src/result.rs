@@ -34,13 +34,13 @@ pub struct DestTiming {
     pub flush_secs: f64,
     pub commit_secs: f64,
     pub arrow_decode_secs: f64,
-    pub vm_setup_secs: f64,
-    pub recv_secs: f64,
-    pub recv_nanos: u64,
-    pub recv_wait_nanos: u64,
-    pub recv_process_nanos: u64,
+    pub wasm_instantiation_secs: f64,
+    pub frame_receive_secs: f64,
+    pub frame_receive_nanos: u64,
+    pub frame_wait_nanos: u64,
+    pub frame_process_nanos: u64,
     pub decompress_nanos: u64,
-    pub recv_count: u64,
+    pub frame_count: u64,
 }
 
 /// Result of a pipeline run.
@@ -49,9 +49,9 @@ pub struct PipelineResult {
     pub counts: PipelineCounts,
     pub source: SourceTiming,
     pub dest: DestTiming,
-    pub transform_count: usize,
-    pub transform_duration_secs: f64,
-    pub transform_module_load_ms: Vec<u64>,
+    pub num_transforms: usize,
+    pub total_transform_secs: f64,
+    pub transform_load_times_ms: Vec<u64>,
     pub duration_secs: f64,
     pub wasm_overhead_secs: f64,
     pub retry_count: u32,
@@ -71,13 +71,13 @@ pub struct StreamShardMetric {
     pub bytes_written: u64,
     pub source_duration_secs: f64,
     pub dest_duration_secs: f64,
-    pub dest_vm_setup_secs: f64,
-    pub dest_recv_secs: f64,
+    pub dest_wasm_instantiation_secs: f64,
+    pub dest_frame_receive_secs: f64,
 }
 
 /// Result of a pipeline check.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckItemResult {
+pub struct CheckStatus {
     pub ok: bool,
     pub message: String,
 }
@@ -85,13 +85,13 @@ pub struct CheckItemResult {
 /// Result of a pipeline check.
 #[derive(Debug, Clone)]
 pub struct CheckResult {
-    pub source_manifest: Option<CheckItemResult>,
-    pub destination_manifest: Option<CheckItemResult>,
-    pub source_config: Option<CheckItemResult>,
-    pub destination_config: Option<CheckItemResult>,
-    pub transform_configs: Vec<CheckItemResult>,
+    pub source_manifest: Option<CheckStatus>,
+    pub destination_manifest: Option<CheckStatus>,
+    pub source_config: Option<CheckStatus>,
+    pub destination_config: Option<CheckStatus>,
+    pub transform_configs: Vec<CheckStatus>,
     pub source_validation: ValidationResult,
     pub destination_validation: ValidationResult,
     pub transform_validations: Vec<ValidationResult>,
-    pub state: CheckItemResult,
+    pub state: CheckStatus,
 }

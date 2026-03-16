@@ -18,11 +18,11 @@ use super::{
 use crate::error::PipelineError;
 
 /// Result of running a destination plugin for a single stream.
-pub(crate) struct DestRunResult {
+pub(crate) struct DestinationOutcome {
     pub duration_secs: f64,
     pub summary: WriteSummary,
-    pub vm_setup_secs: f64,
-    pub recv_secs: f64,
+    pub wasm_instantiation_secs: f64,
+    pub frame_receive_secs: f64,
     pub checkpoints: Vec<Checkpoint>,
 }
 
@@ -35,11 +35,11 @@ pub(crate) struct DestRunResult {
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 pub(crate) fn run_destination_stream(
     ctx: &StreamRunContext<'_>,
-    receiver: mpsc::Receiver<Frame>,
+    frame_receiver: mpsc::Receiver<Frame>,
     dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     dest_config: &serde_json::Value,
     stats: Arc<Mutex<RunStats>>,
-) -> Result<DestRunResult, PipelineError> {
+) -> Result<DestinationOutcome, PipelineError> {
     let phase_start = Instant::now();
     let vm_setup_start = Instant::now();
 
@@ -47,14 +47,14 @@ pub(crate) fn run_destination_stream(
 
     // Build host state: shared fields + destination-specific additions
     let builder = build_base_host_state(ctx, "destination", dest_config, None)
-        .receiver(receiver)
+        .receiver(frame_receiver)
         .dest_checkpoints(dest_checkpoints.clone())
         .dlq_records(dlq_records.clone());
     let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
     let timeout = ctx.overrides.and_then(|o| o.timeout_seconds);
-    let mut store = ctx.module.new_store(host_state, timeout);
-    let linker = create_component_linker(&ctx.module.engine, "destination", |linker| {
+    let mut store = ctx.component.new_store(host_state, timeout);
+    let linker = create_component_linker(&ctx.component.engine, "destination", |linker| {
         dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(linker, |state| state)
             .context("Failed to add rapidbyte destination host imports")?;
         Ok(())
@@ -62,7 +62,7 @@ pub(crate) fn run_destination_stream(
     .map_err(PipelineError::Infrastructure)?;
     let bindings = dest_bindings::RapidbyteDestination::instantiate(
         &mut store,
-        &ctx.module.component,
+        &ctx.component.component,
         &linker,
     )
     .map_err(|e| {
@@ -70,7 +70,7 @@ pub(crate) fn run_destination_stream(
     })?;
 
     let iface = bindings.rapidbyte_plugin_destination();
-    let vm_setup_secs = vm_setup_start.elapsed().as_secs_f64();
+    let wasm_instantiation_secs = vm_setup_start.elapsed().as_secs_f64();
 
     let dest_config_json = serialize_plugin_config(dest_config, "destination")?;
 
@@ -139,7 +139,7 @@ pub(crate) fn run_destination_stream(
         s.bytes_written += summary.bytes_written;
     }
 
-    let recv_secs = recv_start.elapsed().as_secs_f64();
+    let frame_receive_secs = recv_start.elapsed().as_secs_f64();
 
     tracing::info!(
         plugin = ctx.plugin_id,
@@ -156,11 +156,11 @@ pub(crate) fn run_destination_stream(
 
     let checkpoints = extract_checkpoints(&dest_checkpoints, "destination")?;
 
-    Ok(DestRunResult {
+    Ok(DestinationOutcome {
         duration_secs: phase_start.elapsed().as_secs_f64(),
         summary,
-        vm_setup_secs,
-        recv_secs,
+        wasm_instantiation_secs,
+        frame_receive_secs,
         checkpoints,
     })
 }

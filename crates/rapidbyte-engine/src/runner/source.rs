@@ -17,7 +17,7 @@ use super::{
 use crate::error::PipelineError;
 
 /// Result of running a source plugin for a single stream.
-pub(crate) struct SourceRunResult {
+pub(crate) struct SourceOutcome {
     pub duration_secs: f64,
     pub summary: ReadSummary,
     pub checkpoints: Vec<Checkpoint>,
@@ -32,27 +32,27 @@ pub(crate) struct SourceRunResult {
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn run_source_stream(
     ctx: &StreamRunContext<'_>,
-    sender: mpsc::SyncSender<Frame>,
+    frame_sender: mpsc::SyncSender<Frame>,
     source_config: &serde_json::Value,
     stats: Arc<Mutex<RunStats>>,
-    on_emit: Option<Arc<dyn Fn(u64) + Send + Sync>>,
-) -> Result<SourceRunResult, PipelineError> {
+    on_batch_emitted: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+) -> Result<SourceOutcome, PipelineError> {
     let phase_start = Instant::now();
 
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Build host state: shared fields + source-specific additions
     let mut builder = build_base_host_state(ctx, "source", source_config, None)
-        .sender(sender.clone())
+        .sender(frame_sender.clone())
         .source_checkpoints(source_checkpoints.clone());
-    if let Some(cb) = on_emit {
+    if let Some(cb) = on_batch_emitted {
         builder = builder.on_emit(cb);
     }
     let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
     let timeout = ctx.overrides.and_then(|o| o.timeout_seconds);
-    let mut store = ctx.module.new_store(host_state, timeout);
-    let linker = create_component_linker(&ctx.module.engine, "source", |linker| {
+    let mut store = ctx.component.new_store(host_state, timeout);
+    let linker = create_component_linker(&ctx.component.engine, "source", |linker| {
         source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(linker, |state| state)
             .context("Failed to add rapidbyte source host imports")?;
         Ok(())
@@ -60,7 +60,7 @@ pub(crate) fn run_source_stream(
     .map_err(PipelineError::Infrastructure)?;
     let bindings = source_bindings::RapidbyteSource::instantiate(
         &mut store,
-        &ctx.module.component,
+        &ctx.component.component,
         &linker,
     )
     .map_err(|e| PipelineError::infra(format!("Failed to instantiate source bindings: {e}")))?;
@@ -130,7 +130,7 @@ pub(crate) fn run_source_stream(
         s.bytes_read += summary.bytes_read;
     }
 
-    let _ = sender.send(Frame::EndStream);
+    let _ = frame_sender.send(Frame::EndStream);
 
     tracing::info!(
         plugin = ctx.plugin_id,
@@ -147,7 +147,7 @@ pub(crate) fn run_source_stream(
 
     let checkpoints = extract_checkpoints(&source_checkpoints, "source")?;
 
-    Ok(SourceRunResult {
+    Ok(SourceOutcome {
         duration_secs: phase_start.elapsed().as_secs_f64(),
         summary,
         checkpoints,

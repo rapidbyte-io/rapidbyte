@@ -138,9 +138,9 @@ async fn manual_autotune_pins_run_successfully() {
 
         let pinned = AutotuneOptions {
             enabled: Some(true),
-            pin_parallelism: Some(1),
-            pin_source_partition_mode: Some("mod".to_string()),
-            pin_copy_flush_bytes: Some(4 * 1024 * 1024),
+            parallelism: Some(1),
+            partition_mode: Some("mod".to_string()),
+            flush_bytes: Some(4 * 1024 * 1024),
         };
 
         let summary = context

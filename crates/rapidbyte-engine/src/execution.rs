@@ -27,8 +27,8 @@ pub struct DryRunStreamResult {
 pub struct DryRunResult {
     pub streams: Vec<DryRunStreamResult>,
     pub source: SourceTiming,
-    pub transform_count: usize,
-    pub transform_duration_secs: f64,
+    pub num_transforms: usize,
+    pub total_transform_secs: f64,
     pub duration_secs: f64,
 }
 

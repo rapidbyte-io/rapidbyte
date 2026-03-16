@@ -19,7 +19,7 @@ use super::{
 use crate::error::PipelineError;
 
 /// Result of running a transform plugin for a single stream.
-pub(crate) struct TransformRunResult {
+pub(crate) struct TransformOutcome {
     pub duration_secs: f64,
     pub summary: TransformSummary,
 }
@@ -33,12 +33,12 @@ pub(crate) struct TransformRunResult {
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn run_transform_stream(
     ctx: &StreamRunContext<'_>,
-    receiver: mpsc::Receiver<Frame>,
-    sender: mpsc::SyncSender<Frame>,
+    frame_receiver: mpsc::Receiver<Frame>,
+    frame_sender: mpsc::SyncSender<Frame>,
     dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     transform_index: usize,
     transform_config: &serde_json::Value,
-) -> Result<TransformRunResult, PipelineError> {
+) -> Result<TransformOutcome, PipelineError> {
     let phase_start = Instant::now();
 
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
@@ -46,16 +46,16 @@ pub(crate) fn run_transform_stream(
 
     // Build host state: shared fields + transform-specific additions
     let builder = build_base_host_state(ctx, "transform", transform_config, Some(transform_index))
-        .sender(sender.clone())
-        .receiver(receiver)
+        .sender(frame_sender.clone())
+        .receiver(frame_receiver)
         .dlq_records(dlq_records)
         .source_checkpoints(source_checkpoints)
         .dest_checkpoints(dest_checkpoints);
     let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
     let timeout = ctx.overrides.and_then(|o| o.timeout_seconds);
-    let mut store = ctx.module.new_store(host_state, timeout);
-    let linker = create_component_linker(&ctx.module.engine, "transform", |linker| {
+    let mut store = ctx.component.new_store(host_state, timeout);
+    let linker = create_component_linker(&ctx.component.engine, "transform", |linker| {
         transform_bindings::RapidbyteTransform::add_to_linker::<_, HasSelf<_>>(linker, |state| {
             state
         })
@@ -65,7 +65,7 @@ pub(crate) fn run_transform_stream(
     .map_err(PipelineError::Infrastructure)?;
     let bindings = transform_bindings::RapidbyteTransform::instantiate(
         &mut store,
-        &ctx.module.component,
+        &ctx.component.component,
         &linker,
     )
     .map_err(|e| PipelineError::infra(format!("Failed to instantiate transform bindings: {e}")))?;
@@ -120,7 +120,7 @@ pub(crate) fn run_transform_stream(
         }
     };
 
-    let _ = sender.send(Frame::EndStream);
+    let _ = frame_sender.send(Frame::EndStream);
 
     tracing::info!(
         plugin = ctx.plugin_id,
@@ -135,7 +135,7 @@ pub(crate) fn run_transform_stream(
         |err| transform_error_to_sdk(err).to_string(),
     );
 
-    Ok(TransformRunResult {
+    Ok(TransformOutcome {
         duration_secs: phase_start.elapsed().as_secs_f64(),
         summary,
     })

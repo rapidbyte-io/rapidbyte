@@ -89,11 +89,11 @@ pub(crate) fn compute_auto_parallelism(
     };
 
     #[allow(clippy::cast_precision_loss)]
-    let transform_count = config.transforms.len() as f64;
-    let transform_factor = if transform_count == 0.0 {
+    let num_transforms = config.transforms.len() as f64;
+    let transform_factor = if num_transforms == 0.0 {
         1.0
     } else {
-        (1.0 / (1.0 + (TRANSFORM_PENALTY_SLOPE * transform_count))).max(MIN_TRANSFORM_FACTOR)
+        (1.0 / (1.0 + (TRANSFORM_PENALTY_SLOPE * num_transforms))).max(MIN_TRANSFORM_FACTOR)
     };
 
     let scaled = (f64::from(base_target) * transform_factor).round();
@@ -164,7 +164,7 @@ pub(crate) fn build_stream_contexts(
     let supports_partitioned_read = source_manifest
         .is_some_and(|m: &PluginManifest| m.has_source_feature(Feature::PartitionedRead));
     let baseline_parallelism = compute_pipeline_parallelism(config, supports_partitioned_read);
-    let autotune_decision = crate::autotune::resolve_stream_autotune(
+    let autotune_decision = crate::autotune::compute_autotune_decision(
         config,
         baseline_parallelism,
         supports_partitioned_read,
@@ -397,13 +397,13 @@ resources:
         source_use: &str,
         sync_mode: &str,
         write_mode: &str,
-        transform_count: usize,
+        num_transforms: usize,
     ) -> PipelineConfig {
-        let transforms_yaml = if transform_count == 0 {
+        let transforms_yaml = if num_transforms == 0 {
             String::new()
         } else {
             let mut transforms = String::from("transforms:\n");
-            for _ in 0..transform_count {
+            for _ in 0..num_transforms {
                 transforms.push_str("  - use: sql\n    config: {}\n");
             }
             transforms

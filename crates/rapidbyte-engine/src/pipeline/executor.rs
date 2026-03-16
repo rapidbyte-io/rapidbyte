@@ -21,8 +21,8 @@ use crate::arrow::ipc_to_record_batches;
 use crate::error::PipelineError;
 use crate::execution::DryRunStreamResult;
 use crate::pipeline::planner::StreamParams;
-use crate::pipeline::scheduler::{collect_transform_results, ProgressTx, StreamResult};
-use crate::plugin::loader::LoadedTransformModule;
+use crate::pipeline::scheduler::{collect_transform_results, ProgressTx, StreamShardOutcome};
+use crate::plugin::loader::TransformModule;
 use crate::progress::ProgressEvent;
 use crate::runner::{
     run_destination_stream, run_source_stream, run_transform_stream, StreamRunContext,
@@ -39,7 +39,7 @@ pub(crate) enum DestinationMode {
 /// Execute a single stream through the source -> transforms -> destination pipeline.
 ///
 /// Creates inter-stage channels, spawns blocking tasks for source, transforms,
-/// and destination (or dry-run collector), then assembles a `StreamResult`.
+/// and destination (or dry-run collector), then assembles a `StreamShardOutcome`.
 ///
 /// # Errors
 ///
@@ -54,13 +54,13 @@ pub(crate) async fn execute_single_stream(
     params: Arc<StreamParams>,
     source_module: LoadedComponent,
     dest_module: LoadedComponent,
-    transforms: Vec<LoadedTransformModule>,
+    transforms: Vec<TransformModule>,
     state: Arc<dyn StateBackend>,
     stats: Arc<Mutex<RunStats>>,
     run_dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     mode: DestinationMode,
     progress_tx: ProgressTx,
-) -> Result<StreamResult, PipelineError> {
+) -> Result<StreamShardOutcome, PipelineError> {
     let num_t = transforms.len();
     let mut channels = Vec::with_capacity(num_t + 1);
     for _ in 0..=num_t {
@@ -81,7 +81,7 @@ pub(crate) async fn execute_single_stream(
     let stream_ctx_for_dst = stream_ctx.clone();
 
     // Build per-batch progress callback for the source runner
-    let on_emit: Option<Arc<dyn Fn(u64) + Send + Sync>> = progress_tx.as_ref().map(|tx| {
+    let on_batch_emitted: Option<Arc<dyn Fn(u64) + Send + Sync>> = progress_tx.as_ref().map(|tx| {
         let tx = tx.clone();
         Arc::new(move |bytes: u64| {
             let _ = tx.send(ProgressEvent::BatchEmitted { bytes });
@@ -93,7 +93,7 @@ pub(crate) async fn execute_single_stream(
     let stats_src = stats.clone();
     let src_handle = tokio::task::spawn_blocking(move || {
         let ctx = StreamRunContext {
-            module: &source_module,
+            component: &source_module,
             state_backend: state_src,
             pipeline_name: &params_src.pipeline_name,
             metric_run_label: &params_src.metric_run_label,
@@ -109,7 +109,7 @@ pub(crate) async fn execute_single_stream(
             source_tx,
             &params_src.source_config,
             stats_src,
-            on_emit,
+            on_batch_emitted,
         )
     });
 
@@ -123,7 +123,7 @@ pub(crate) async fn execute_single_stream(
         let params_t = params.clone();
         let t_handle = tokio::task::spawn_blocking(move || {
             let ctx = StreamRunContext {
-                module: &t.module,
+                component: &t.module,
                 state_backend: state_t,
                 pipeline_name: &params_t.pipeline_name,
                 metric_run_label: &params_t.metric_run_label,
@@ -181,15 +181,15 @@ async fn run_normal_destination(
     stats: Arc<Mutex<RunStats>>,
     run_dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     dest_rx: sync_mpsc::Receiver<Frame>,
-    src_handle: tokio::task::JoinHandle<Result<crate::runner::SourceRunResult, PipelineError>>,
+    src_handle: tokio::task::JoinHandle<Result<crate::runner::SourceOutcome, PipelineError>>,
     transform_handles: Vec<(
         usize,
-        tokio::task::JoinHandle<Result<crate::runner::TransformRunResult, PipelineError>>,
+        tokio::task::JoinHandle<Result<crate::runner::TransformOutcome, PipelineError>>,
     )>,
-) -> Result<StreamResult, PipelineError> {
+) -> Result<StreamShardOutcome, PipelineError> {
     let dst_handle = tokio::task::spawn_blocking(move || {
         let ctx = StreamRunContext {
-            module: &dest_module,
+            component: &dest_module,
             state_backend: state,
             pipeline_name: &params.pipeline_name,
             metric_run_label: &params.metric_run_label,
@@ -226,7 +226,7 @@ async fn run_normal_destination(
     let src = src_result?;
     let dst = dst_result?;
 
-    Ok(StreamResult {
+    Ok(StreamShardOutcome {
         stream_name: stream_ctx.stream_name.clone(),
         partition_index: stream_ctx.partition_index,
         partition_count: stream_ctx.partition_count,
@@ -234,10 +234,10 @@ async fn run_normal_destination(
         write_summary: dst.summary,
         source_checkpoints: src.checkpoints,
         dest_checkpoints: dst.checkpoints,
-        src_duration: src.duration_secs,
-        dst_duration: dst.duration_secs,
-        vm_setup_secs: dst.vm_setup_secs,
-        recv_secs: dst.recv_secs,
+        source_duration_secs: src.duration_secs,
+        dest_duration_secs: dst.duration_secs,
+        wasm_instantiation_secs: dst.wasm_instantiation_secs,
+        frame_receive_secs: dst.frame_receive_secs,
         transform_durations: transforms.durations,
         dry_run_result: None,
     })
@@ -249,12 +249,12 @@ async fn run_dry_run_collector(
     params: Arc<StreamParams>,
     limit: Option<u64>,
     dest_rx: sync_mpsc::Receiver<Frame>,
-    src_handle: tokio::task::JoinHandle<Result<crate::runner::SourceRunResult, PipelineError>>,
+    src_handle: tokio::task::JoinHandle<Result<crate::runner::SourceOutcome, PipelineError>>,
     transform_handles: Vec<(
         usize,
-        tokio::task::JoinHandle<Result<crate::runner::TransformRunResult, PipelineError>>,
+        tokio::task::JoinHandle<Result<crate::runner::TransformOutcome, PipelineError>>,
     )>,
-) -> Result<StreamResult, PipelineError> {
+) -> Result<StreamShardOutcome, PipelineError> {
     let compression = params.compression;
     let dry_run_stream_name = stream_ctx.stream_name.clone();
     let collector_handle = tokio::task::spawn_blocking(move || {
@@ -283,7 +283,7 @@ async fn run_dry_run_collector(
 
     let src = src_result?;
 
-    Ok(StreamResult {
+    Ok(StreamShardOutcome {
         stream_name: stream_ctx.stream_name.clone(),
         partition_index: stream_ctx.partition_index,
         partition_count: stream_ctx.partition_count,
@@ -297,10 +297,10 @@ async fn run_dry_run_collector(
         },
         source_checkpoints: src.checkpoints,
         dest_checkpoints: Vec::new(),
-        src_duration: src.duration_secs,
-        dst_duration: 0.0,
-        vm_setup_secs: 0.0,
-        recv_secs: 0.0,
+        source_duration_secs: src.duration_secs,
+        dest_duration_secs: 0.0,
+        wasm_instantiation_secs: 0.0,
+        frame_receive_secs: 0.0,
         transform_durations: transforms.durations,
         dry_run_result: Some(collected),
     })
