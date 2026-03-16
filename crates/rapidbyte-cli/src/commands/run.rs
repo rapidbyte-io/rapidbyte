@@ -9,8 +9,8 @@ use std::path::Path;
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_engine::orchestrator;
+use rapidbyte_engine::outcome::{ExecutionOptions, PipelineOutcome};
 
 use crate::commands::transport::TlsClientConfig;
 use crate::output::{
@@ -317,7 +317,7 @@ fn post_pipeline_metrics() -> (Option<f64>, Option<f64>) {
 }
 
 fn bench_json_from_result(
-    result: &rapidbyte_engine::result::PipelineResult,
+    result: &rapidbyte_engine::outcome::PipelineResult,
     cpu_metrics: Option<&ProcessCpuMetrics>,
     peak_rss_mb: Option<f64>,
 ) -> serde_json::Value {
@@ -417,7 +417,7 @@ fn bench_json_from_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapidbyte_engine::result::{
+    use rapidbyte_engine::outcome::{
         DestTiming, PipelineCounts, PipelineResult, SourceTiming, StreamShardMetric,
     };
 

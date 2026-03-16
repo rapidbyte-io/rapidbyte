@@ -11,14 +11,14 @@ use rapidbyte_types::state::{PipelineId, RunStats, RunStatus};
 
 use crate::config::types::PipelineConfig;
 use crate::error::PipelineError;
-use crate::execution::{DryRunResult, DryRunStreamResult};
 use crate::finalizers::checkpoint::correlate_and_persist_cursors;
-use crate::pipeline::planner::compute_pipeline_parallelism;
-use crate::plugin::loader::PluginModules;
-use crate::result::{
+use crate::outcome::{
     compute_wasm_overhead_secs, DestTiming, PipelineCounts, PipelineResult, SourceTiming,
     StreamShardMetric,
 };
+use crate::outcome::{DryRunResult, DryRunStreamResult};
+use crate::pipeline::planner::compute_pipeline_parallelism;
+use crate::plugin::loader::PluginModules;
 
 // ---------------------------------------------------------------------------
 // Types

@@ -9,7 +9,7 @@ use rapidbyte_types::checkpoint::Checkpoint;
 use rapidbyte_types::metric::{ReadSummary, WriteSummary};
 
 use crate::error::PipelineError;
-use crate::execution::DryRunStreamResult;
+use crate::outcome::DryRunStreamResult;
 use crate::progress::{ProgressEvent, ProgressSender};
 
 /// Per-stream execution result with summaries, checkpoints, and timings.

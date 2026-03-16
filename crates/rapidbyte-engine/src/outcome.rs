@@ -1,6 +1,50 @@
-//! Pipeline execution result types and timing breakdowns.
+//! Pipeline operation output types: results, timings, dry-run data, and check statuses.
+//!
+//! This module contains all public data types returned by pipeline operations
+//! (`run_pipeline`, `check_pipeline`) and the input options (`ExecutionOptions`).
 
+use arrow::record_batch::RecordBatch;
 use rapidbyte_types::error::ValidationResult;
+
+// ---------------------------------------------------------------------------
+// Execution input
+// ---------------------------------------------------------------------------
+
+/// Runtime execution options (not part of pipeline YAML config).
+#[derive(Debug, Clone, Default)]
+pub struct ExecutionOptions {
+    /// Skip destination, print output to stdout.
+    pub dry_run: bool,
+    /// Maximum rows to read per stream (only used with `dry_run`).
+    pub limit: Option<u64>,
+}
+
+// ---------------------------------------------------------------------------
+// Pipeline run output
+// ---------------------------------------------------------------------------
+
+/// Either a normal pipeline result or a dry-run result.
+#[derive(Debug)]
+pub enum PipelineOutcome {
+    Run(PipelineResult),
+    DryRun(DryRunResult),
+}
+
+/// Result of a pipeline run.
+#[derive(Debug, Clone)]
+pub struct PipelineResult {
+    pub counts: PipelineCounts,
+    pub source: SourceTiming,
+    pub dest: DestTiming,
+    pub num_transforms: usize,
+    pub total_transform_secs: f64,
+    pub transform_load_times_ms: Vec<u64>,
+    pub duration_secs: f64,
+    pub wasm_overhead_secs: f64,
+    pub retry_count: u32,
+    pub parallelism: u32,
+    pub stream_metrics: Vec<StreamShardMetric>,
+}
 
 /// Aggregate record/byte counts for a pipeline run.
 #[derive(Debug, Clone, Default)]
@@ -43,22 +87,6 @@ pub struct DestTiming {
     pub frame_count: u64,
 }
 
-/// Result of a pipeline run.
-#[derive(Debug, Clone)]
-pub struct PipelineResult {
-    pub counts: PipelineCounts,
-    pub source: SourceTiming,
-    pub dest: DestTiming,
-    pub num_transforms: usize,
-    pub total_transform_secs: f64,
-    pub transform_load_times_ms: Vec<u64>,
-    pub duration_secs: f64,
-    pub wasm_overhead_secs: f64,
-    pub retry_count: u32,
-    pub parallelism: u32,
-    pub stream_metrics: Vec<StreamShardMetric>,
-}
-
 /// Per-stream/per-shard metrics for skew analysis.
 #[derive(Debug, Clone)]
 pub struct StreamShardMetric {
@@ -74,6 +102,58 @@ pub struct StreamShardMetric {
     pub dest_wasm_instantiation_secs: f64,
     pub dest_frame_receive_secs: f64,
 }
+
+// ---------------------------------------------------------------------------
+// Dry-run output
+// ---------------------------------------------------------------------------
+
+/// Result of a dry-run pipeline execution.
+#[derive(Debug)]
+pub struct DryRunResult {
+    pub streams: Vec<DryRunStreamResult>,
+    pub source: SourceTiming,
+    pub num_transforms: usize,
+    pub total_transform_secs: f64,
+    pub duration_secs: f64,
+}
+
+/// Result of a single stream in dry-run mode.
+#[derive(Debug)]
+pub struct DryRunStreamResult {
+    pub stream_name: String,
+    pub batches: Vec<RecordBatch>,
+    pub total_rows: u64,
+    pub total_bytes: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Check output
+// ---------------------------------------------------------------------------
+
+/// Result of a single check item (manifest, config, state, etc.).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckStatus {
+    pub ok: bool,
+    pub message: String,
+}
+
+/// Result of a full pipeline check.
+#[derive(Debug, Clone)]
+pub struct CheckResult {
+    pub source_manifest: Option<CheckStatus>,
+    pub destination_manifest: Option<CheckStatus>,
+    pub source_config: Option<CheckStatus>,
+    pub destination_config: Option<CheckStatus>,
+    pub transform_configs: Vec<CheckStatus>,
+    pub source_validation: ValidationResult,
+    pub destination_validation: ValidationResult,
+    pub transform_validations: Vec<ValidationResult>,
+    pub state: CheckStatus,
+}
+
+// ---------------------------------------------------------------------------
+// Internal timing constructors (pub(crate) — used by finalizers/run.rs)
+// ---------------------------------------------------------------------------
 
 impl SourceTiming {
     /// Construct a `SourceTiming` from a metrics snapshot and wall-clock totals.
@@ -140,23 +220,29 @@ pub(crate) fn compute_wasm_overhead_secs(
         .max(0.0)
 }
 
-/// Result of a pipeline check.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckStatus {
-    pub ok: bool,
-    pub message: String,
-}
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
-/// Result of a pipeline check.
-#[derive(Debug, Clone)]
-pub struct CheckResult {
-    pub source_manifest: Option<CheckStatus>,
-    pub destination_manifest: Option<CheckStatus>,
-    pub source_config: Option<CheckStatus>,
-    pub destination_config: Option<CheckStatus>,
-    pub transform_configs: Vec<CheckStatus>,
-    pub source_validation: ValidationResult,
-    pub destination_validation: ValidationResult,
-    pub transform_validations: Vec<ValidationResult>,
-    pub state: CheckStatus,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execution_options_default_is_normal_mode() {
+        let opts = ExecutionOptions::default();
+        assert!(!opts.dry_run);
+        assert!(opts.limit.is_none());
+    }
+
+    #[test]
+    fn dry_run_stream_result_holds_batches() {
+        let result = DryRunStreamResult {
+            stream_name: "public.users".into(),
+            batches: vec![],
+            total_rows: 0,
+            total_bytes: 0,
+        };
+        assert_eq!(result.stream_name, "public.users");
+    }
 }

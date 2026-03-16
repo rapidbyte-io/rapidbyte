@@ -10,7 +10,7 @@ use arrow::datatypes::SchemaRef;
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use rapidbyte_engine::result::SourceTiming;
+use rapidbyte_engine::outcome::SourceTiming;
 use rapidbyte_engine::DryRunResult;
 use rapidbyte_engine::DryRunStreamResult;
 use uuid::Uuid;
@@ -332,7 +332,7 @@ mod tests {
     use arrow::array::Int32Array;
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use rapidbyte_engine::result::SourceTiming;
+    use rapidbyte_engine::outcome::SourceTiming;
     use rapidbyte_engine::DryRunStreamResult;
     use std::sync::Arc;
 

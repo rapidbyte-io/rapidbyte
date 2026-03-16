@@ -19,7 +19,7 @@ use rapidbyte_types::stream::StreamContext;
 
 use crate::arrow::ipc_to_record_batches;
 use crate::error::PipelineError;
-use crate::execution::DryRunStreamResult;
+use crate::outcome::DryRunStreamResult;
 use crate::pipeline::planner::StreamExecutionParams;
 use crate::pipeline::scheduler::{collect_transform_results, StreamShardOutcome};
 use crate::plugin::loader::TransformModule;

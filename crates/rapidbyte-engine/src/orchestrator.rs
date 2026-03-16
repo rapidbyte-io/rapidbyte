@@ -21,11 +21,12 @@ use rapidbyte_types::wire::PluginKind;
 
 use crate::config::types::PipelineConfig;
 use crate::error::{compute_backoff, PipelineError};
-use crate::execution::{DryRunStreamResult, ExecutionOptions, PipelineOutcome};
 use crate::finalizers::run::{
     build_dry_run_result, finalize_pipeline_execution, snapshot_for_run, ExecutionDiagnostics,
     ReadWriteTotals, StateOutcome, StreamAggregation, TimingMaxima,
 };
+use crate::outcome::{CheckResult, CheckStatus, StreamShardMetric};
+use crate::outcome::{DryRunStreamResult, ExecutionOptions, PipelineOutcome};
 use crate::pipeline::executor::{execute_single_stream, DestinationMode};
 use crate::pipeline::planner::{
     build_stream_contexts, destination_preflight_streams, execution_parallelism, ExecutionPlan,
@@ -42,7 +43,6 @@ use crate::plugin::resolver::{
 };
 use crate::plugin::sandbox::build_sandbox_overrides;
 use crate::progress::{Phase, ProgressEvent, ProgressSender};
-use crate::result::{CheckResult, CheckStatus, StreamShardMetric};
 use crate::runner::{run_discover, validate_plugin};
 
 static NEXT_METRIC_RUN_LABEL: AtomicU64 = AtomicU64::new(1);

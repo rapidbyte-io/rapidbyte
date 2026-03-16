@@ -3,7 +3,7 @@
 #![allow(clippy::cast_precision_loss)]
 
 use console::style;
-use rapidbyte_engine::result::PipelineResult;
+use rapidbyte_engine::outcome::PipelineResult;
 
 use super::format::{format_byte_rate, format_bytes, format_count, format_duration, format_rate};
 use crate::Verbosity;
@@ -200,7 +200,7 @@ fn print_diagnostic(result: &PipelineResult) {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-fn unique_stream_count(metrics: &[rapidbyte_engine::result::StreamShardMetric]) -> usize {
+fn unique_stream_count(metrics: &[rapidbyte_engine::outcome::StreamShardMetric]) -> usize {
     let mut names: Vec<&str> = metrics.iter().map(|m| m.stream_name.as_str()).collect();
     names.sort_unstable();
     names.dedup();
@@ -217,7 +217,7 @@ struct StreamAggregate {
 }
 
 fn aggregate_streams(
-    metrics: &[rapidbyte_engine::result::StreamShardMetric],
+    metrics: &[rapidbyte_engine::outcome::StreamShardMetric],
 ) -> Vec<StreamAggregate> {
     use std::collections::BTreeMap;
 
