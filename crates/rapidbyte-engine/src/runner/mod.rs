@@ -1,16 +1,14 @@
 //! Plugin runners: shared lifecycle, per-kind implementations, and validation.
 
-pub(crate) mod destination;
-pub(crate) mod source;
-pub(crate) mod transform;
-pub(crate) mod validator;
+mod destination;
+mod source;
+mod transform;
+mod validator;
 
-// Re-export main types for crate-internal use
-// DestinationOutcome is re-exported for API completeness; callers use type inference
-#[allow(unused_imports)]
-pub(crate) use destination::{run_destination_stream, DestinationOutcome};
-pub(crate) use source::{run_source_stream, SourceOutcome};
-pub(crate) use transform::{run_transform_stream, TransformOutcome};
+// Re-export runner functions and types (pub for benchmarks crate)
+pub use destination::{run_destination_stream, DestinationOutcome};
+pub use source::{run_source_stream, SourceOutcome};
+pub use transform::{run_transform_stream, TransformOutcome};
 pub(crate) use validator::{run_discover, validate_plugin};
 
 use std::sync::{Arc, Mutex};
@@ -29,7 +27,7 @@ use crate::error::PipelineError;
 /// Shared context for running a plugin stream (source, destination, or
 /// transform).  Built once per stream by the orchestrator and passed to
 /// each runner function.
-pub(crate) struct StreamRunContext<'a> {
+pub struct StreamRunContext<'a> {
     pub component: &'a LoadedComponent,
     pub state_backend: Arc<dyn StateBackend>,
     pub pipeline_name: &'a str,

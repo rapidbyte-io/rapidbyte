@@ -19,7 +19,7 @@ use super::{
 use crate::error::PipelineError;
 
 /// Result of running a transform plugin for a single stream.
-pub(crate) struct TransformOutcome {
+pub struct TransformOutcome {
     pub duration_secs: f64,
     pub summary: TransformSummary,
 }
@@ -31,7 +31,7 @@ pub(crate) struct TransformOutcome {
 /// Returns an error if the component cannot be instantiated, opened, consume
 /// input frames, emit output frames, or close cleanly for the given stream.
 #[allow(clippy::needless_pass_by_value)]
-pub(crate) fn run_transform_stream(
+pub fn run_transform_stream(
     ctx: &StreamRunContext<'_>,
     frame_receiver: mpsc::Receiver<Frame>,
     frame_sender: mpsc::SyncSender<Frame>,

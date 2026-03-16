@@ -17,7 +17,7 @@ use super::{
 use crate::error::PipelineError;
 
 /// Result of running a source plugin for a single stream.
-pub(crate) struct SourceOutcome {
+pub struct SourceOutcome {
     pub duration_secs: f64,
     pub summary: ReadSummary,
     pub checkpoints: Vec<Checkpoint>,
@@ -30,7 +30,7 @@ pub(crate) struct SourceOutcome {
 /// Returns an error if the component cannot be instantiated, opened, run, or
 /// closed cleanly for the given stream.
 #[allow(clippy::needless_pass_by_value)]
-pub(crate) fn run_source_stream(
+pub fn run_source_stream(
     ctx: &StreamRunContext<'_>,
     frame_sender: mpsc::SyncSender<Frame>,
     source_config: &serde_json::Value,

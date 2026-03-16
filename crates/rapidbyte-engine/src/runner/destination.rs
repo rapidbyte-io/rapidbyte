@@ -18,7 +18,7 @@ use super::{
 use crate::error::PipelineError;
 
 /// Result of running a destination plugin for a single stream.
-pub(crate) struct DestinationOutcome {
+pub struct DestinationOutcome {
     pub duration_secs: f64,
     pub summary: WriteSummary,
     pub wasm_instantiation_secs: f64,
@@ -33,7 +33,7 @@ pub(crate) struct DestinationOutcome {
 /// Returns an error if the component cannot be instantiated, opened, consume
 /// all input frames, or close cleanly for the given stream.
 #[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
-pub(crate) fn run_destination_stream(
+pub fn run_destination_stream(
     ctx: &StreamRunContext<'_>,
     frame_receiver: mpsc::Receiver<Frame>,
     dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
