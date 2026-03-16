@@ -5,26 +5,16 @@ use tonic::{Response, Status};
 
 use crate::proto::rapidbyte::v1::{SubmitPipelineRequest, SubmitPipelineResponse};
 
-pub(crate) async fn handle_submit(
-    handler: &super::PipelineHandler,
-    req: SubmitPipelineRequest,
-) -> Result<Response<SubmitPipelineResponse>, Status> {
-    // Parse YAML to validate and extract pipeline name
-    let yaml_str = std::str::from_utf8(&req.pipeline_yaml_utf8)
+/// Validate pipeline YAML and extract the pipeline name.
+#[allow(clippy::result_large_err)]
+fn validate_pipeline_yaml(raw: &[u8]) -> Result<String, Status> {
+    let yaml_str = std::str::from_utf8(raw)
         .map_err(|e| Status::invalid_argument(format!("Pipeline YAML is not valid UTF-8: {e}")))?;
 
     let config: serde_yaml::Value = serde_yaml::from_str(yaml_str)
         .map_err(|e| Status::invalid_argument(format!("Invalid YAML: {e}")))?;
 
-    let pipeline_name = config
-        .get("pipeline")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-
     // Reject SQLite backend (explicit or implicit) in distributed mode.
-    // Pipelines without a state section or without state.backend default to
-    // SQLite in the engine, which is a local file unreachable after reassignment.
     let backend = config
         .get("state")
         .and_then(|s| s.get("backend"))
@@ -36,6 +26,19 @@ pub(crate) async fn handle_submit(
         ));
     }
 
+    Ok(config
+        .get("pipeline")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string())
+}
+
+pub(crate) async fn handle_submit(
+    handler: &super::PipelineHandler,
+    req: SubmitPipelineRequest,
+) -> Result<Response<SubmitPipelineResponse>, Status> {
+    let pipeline_name = validate_pipeline_yaml(&req.pipeline_yaml_utf8)?;
+
     // Check idempotency
     let idempotency_key = if req.idempotency_key.is_empty() {
         None
@@ -43,11 +46,32 @@ pub(crate) async fn handle_submit(
         Some(req.idempotency_key.clone())
     };
 
+    // Guard against concurrent submissions with the same idempotency key.
+    // The pending set covers the window between in-memory create_run and
+    // durable persistence — without it, a duplicate could observe the
+    // idempotency index entry before the run+task are durably persisted.
+    if let Some(key) = &idempotency_key {
+        let pending = handler.state.pending_idempotency_keys.read().await;
+        if pending.contains(key) {
+            return Err(Status::aborted(
+                "A submission with this idempotency key is already in progress. Retry shortly.",
+            ));
+        }
+    }
+    if let Some(key) = &idempotency_key {
+        handler
+            .state
+            .pending_idempotency_keys
+            .write()
+            .await
+            .insert(key.clone());
+    }
+
     let run_id = uuid::Uuid::new_v4().to_string();
 
     let (actual_run_id, is_new) = {
         let mut runs = handler.state.runs.write().await;
-        runs.create_run(run_id, pipeline_name, idempotency_key)
+        runs.create_run(run_id, pipeline_name, idempotency_key.clone())
     };
 
     if is_new {
@@ -91,6 +115,14 @@ pub(crate) async fn handle_submit(
             .await
         {
             rollback_new_submission(handler, &actual_run_id, &task_id).await;
+            if let Some(key) = &idempotency_key {
+                handler
+                    .state
+                    .pending_idempotency_keys
+                    .write()
+                    .await
+                    .remove(key);
+            }
             return Err(Status::internal(error.to_string()));
         }
         handler.state.task_notify.notify_waiters();
@@ -99,6 +131,16 @@ pub(crate) async fn handle_submit(
             &[KeyValue::new(rapidbyte_metrics::labels::STATUS, "accepted")],
         );
         rapidbyte_metrics::instruments::controller::active_runs().add(1, &[]);
+    }
+
+    // Persistence succeeded (or deduped) — release the pending guard.
+    if let Some(key) = &idempotency_key {
+        handler
+            .state
+            .pending_idempotency_keys
+            .write()
+            .await
+            .remove(key);
     }
 
     Ok(Response::new(SubmitPipelineResponse {

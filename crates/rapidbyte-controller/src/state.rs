@@ -32,6 +32,10 @@ pub struct ControllerState {
     pub task_notify: Arc<Notify>,
     /// Secret providers for resolving `${vault:...}` references at dispatch time.
     pub secrets: Arc<rapidbyte_secrets::SecretProviders>,
+    /// Idempotency keys currently being persisted. Guards the window between
+    /// in-memory `create_run` and durable `create_run_with_task_records` to
+    /// prevent duplicate requests from observing a partially-persisted run.
+    pub pending_idempotency_keys: Arc<RwLock<HashSet<String>>>,
 }
 
 impl ControllerState {
@@ -78,6 +82,7 @@ impl ControllerState {
             metadata_store,
             task_notify: Arc::new(Notify::new()),
             secrets: Arc::new(rapidbyte_secrets::SecretProviders::new()),
+            pending_idempotency_keys: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 

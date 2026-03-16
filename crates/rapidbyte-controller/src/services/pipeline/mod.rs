@@ -1116,4 +1116,82 @@ mod tests {
     // A dedicated metric assertion test is not feasible because OnceLock-cached
     // instruments bind to the first provider and cannot be redirected to a
     // per-test provider.
+
+    #[tokio::test]
+    async fn concurrent_idempotent_submit_is_rejected_while_in_flight() {
+        let state = test_state();
+
+        // Simulate an in-flight submission by inserting a key into pending set.
+        state
+            .pending_idempotency_keys
+            .write()
+            .await
+            .insert("inflight-key".into());
+
+        let svc = PipelineHandler::new(state.clone());
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+
+        let err = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: "inflight-key".into(),
+            }))
+            .await
+            .expect_err("should reject concurrent idempotent submit");
+
+        assert_eq!(err.code(), tonic::Code::Aborted);
+        assert!(err.message().contains("already in progress"));
+
+        // After the "in-flight" submission completes, remove from pending.
+        state
+            .pending_idempotency_keys
+            .write()
+            .await
+            .remove("inflight-key");
+
+        // Now the same key should succeed (creates a new run).
+        let resp = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: "inflight-key".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!resp.run_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn pending_key_cleared_on_persist_failure() {
+        use crate::store::test_support::FailingMetadataStore;
+
+        let store = FailingMetadataStore::new().fail_run_upsert_on(1);
+        let state = ControllerState::with_metadata_store(b"test-signing-key", store);
+        let svc = PipelineHandler::new(state.clone());
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+
+        let err = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: "fail-key".into(),
+            }))
+            .await
+            .expect_err("persist failure should reject submit");
+
+        assert_eq!(err.code(), tonic::Code::Internal);
+
+        // The pending key must be cleared after failure so retries aren't blocked.
+        assert!(
+            !state
+                .pending_idempotency_keys
+                .read()
+                .await
+                .contains("fail-key"),
+            "pending key should be cleared after persist failure"
+        );
+    }
 }
