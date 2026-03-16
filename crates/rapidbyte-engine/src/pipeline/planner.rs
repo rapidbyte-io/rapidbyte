@@ -26,19 +26,26 @@ pub(crate) struct ExecutionPlan {
     pub(crate) stream_ctxs: Vec<StreamContext>,
 }
 
-pub(crate) struct StreamParams {
-    pub(crate) pipeline_name: String,
+/// Pipeline identity metadata.
+pub(crate) struct PipelineIdentity {
+    pub(crate) name: String,
     pub(crate) metric_run_label: String,
-    pub(crate) source_config: serde_json::Value,
-    pub(crate) dest_config: serde_json::Value,
-    pub(crate) source_plugin_id: String,
-    pub(crate) source_plugin_version: String,
-    pub(crate) dest_plugin_id: String,
-    pub(crate) dest_plugin_version: String,
-    pub(crate) source_permissions: Option<Permissions>,
-    pub(crate) dest_permissions: Option<Permissions>,
-    pub(crate) source_overrides: Option<SandboxOverrides>,
-    pub(crate) dest_overrides: Option<SandboxOverrides>,
+}
+
+/// Identity, config, and sandbox for a single plugin.
+pub(crate) struct PluginSpec {
+    pub(crate) id: String,
+    pub(crate) version: String,
+    pub(crate) config: serde_json::Value,
+    pub(crate) permissions: Option<Permissions>,
+    pub(crate) overrides: Option<SandboxOverrides>,
+}
+
+/// Full execution parameters for a stream pipeline.
+pub(crate) struct StreamExecutionParams {
+    pub(crate) pipeline: PipelineIdentity,
+    pub(crate) source: PluginSpec,
+    pub(crate) destination: PluginSpec,
     pub(crate) transform_overrides: Vec<Option<SandboxOverrides>>,
     pub(crate) compression: Option<CompressionCodec>,
     pub(crate) channel_capacity: usize,

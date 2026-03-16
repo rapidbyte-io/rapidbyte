@@ -28,7 +28,7 @@ use crate::finalizers::run::{
 use crate::pipeline::executor::{execute_single_stream, DestinationMode};
 use crate::pipeline::planner::{
     build_stream_contexts, destination_preflight_streams, execution_parallelism, ExecutionPlan,
-    StreamParams,
+    PipelineIdentity, PluginSpec, StreamExecutionParams,
 };
 use crate::pipeline::preflight::run_destination_preflight;
 use crate::pipeline::scheduler::{
@@ -370,27 +370,33 @@ async fn execute_streams(
         })
         .collect();
 
-    let params = Arc::new(StreamParams {
-        pipeline_name: config.pipeline.clone(),
-        metric_run_label: metric_run_label.to_owned(),
-        source_config: config.source.config.clone(),
-        dest_config: config.destination.config.clone(),
-        source_plugin_id,
-        source_plugin_version,
-        dest_plugin_id,
-        dest_plugin_version,
-        source_permissions: plugins.source_permissions.clone(),
-        dest_permissions: plugins.dest_permissions.clone(),
-        source_overrides: build_sandbox_overrides(
-            config.source.permissions.as_ref(),
-            config.source.limits.as_ref(),
-            &source_manifest_limits,
-        ),
-        dest_overrides: build_sandbox_overrides(
-            config.destination.permissions.as_ref(),
-            config.destination.limits.as_ref(),
-            &dest_manifest_limits,
-        ),
+    let params = Arc::new(StreamExecutionParams {
+        pipeline: PipelineIdentity {
+            name: config.pipeline.clone(),
+            metric_run_label: metric_run_label.to_owned(),
+        },
+        source: PluginSpec {
+            id: source_plugin_id,
+            version: source_plugin_version,
+            config: config.source.config.clone(),
+            permissions: plugins.source_permissions.clone(),
+            overrides: build_sandbox_overrides(
+                config.source.permissions.as_ref(),
+                config.source.limits.as_ref(),
+                &source_manifest_limits,
+            ),
+        },
+        destination: PluginSpec {
+            id: dest_plugin_id,
+            version: dest_plugin_version,
+            config: config.destination.config.clone(),
+            permissions: plugins.dest_permissions.clone(),
+            overrides: build_sandbox_overrides(
+                config.destination.permissions.as_ref(),
+                config.destination.limits.as_ref(),
+                &dest_manifest_limits,
+            ),
+        },
         transform_overrides,
         compression: stream_build.compression,
         channel_capacity: (stream_build.limits.max_inflight_batches as usize).max(1),

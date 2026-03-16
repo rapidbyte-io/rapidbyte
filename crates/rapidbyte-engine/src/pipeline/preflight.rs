@@ -14,7 +14,7 @@ use rapidbyte_types::state::RunStats;
 use rapidbyte_types::stream::StreamContext;
 
 use crate::error::PipelineError;
-use crate::pipeline::planner::StreamParams;
+use crate::pipeline::planner::StreamExecutionParams;
 use crate::pipeline::scheduler::{acquire_permit_cancellable, ensure_not_cancelled};
 use crate::runner::{run_destination_stream, StreamRunContext};
 
@@ -31,7 +31,7 @@ pub(crate) async fn run_destination_preflight(
     preflight_streams: Vec<StreamContext>,
     dest_module: &LoadedComponent,
     state: Arc<dyn StateBackend>,
-    params: &Arc<StreamParams>,
+    params: &Arc<StreamExecutionParams>,
     parallelism: usize,
     cancel_token: &CancellationToken,
 ) -> Result<(), PipelineError> {
@@ -78,20 +78,20 @@ pub(crate) async fn run_destination_preflight(
                 let ctx = StreamRunContext {
                     component: &dest_module,
                     state_backend: state_dst,
-                    pipeline_name: &params.pipeline_name,
+                    pipeline_name: &params.pipeline.name,
                     metric_run_label: "",
-                    plugin_id: &params.dest_plugin_id,
-                    plugin_version: &params.dest_plugin_version,
+                    plugin_id: &params.destination.id,
+                    plugin_version: &params.destination.version,
                     stream_ctx: &stream_ctx,
-                    permissions: params.dest_permissions.as_ref(),
+                    permissions: params.destination.permissions.as_ref(),
                     compression: params.compression,
-                    overrides: params.dest_overrides.as_ref(),
+                    overrides: params.destination.overrides.as_ref(),
                 };
                 run_destination_stream(
                     &ctx,
                     rx,
                     Arc::new(Mutex::new(Vec::new())),
-                    &params.dest_config,
+                    &params.destination.config,
                     Arc::new(Mutex::new(RunStats::default())),
                 )
             })

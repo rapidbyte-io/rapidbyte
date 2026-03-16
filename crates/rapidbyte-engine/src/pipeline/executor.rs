@@ -20,7 +20,7 @@ use rapidbyte_types::stream::StreamContext;
 use crate::arrow::ipc_to_record_batches;
 use crate::error::PipelineError;
 use crate::execution::DryRunStreamResult;
-use crate::pipeline::planner::StreamParams;
+use crate::pipeline::planner::StreamExecutionParams;
 use crate::pipeline::scheduler::{collect_transform_results, StreamShardOutcome};
 use crate::plugin::loader::TransformModule;
 use crate::progress::{ProgressEvent, ProgressSender};
@@ -51,7 +51,7 @@ pub(crate) enum DestinationMode {
 )]
 pub(crate) async fn execute_single_stream(
     stream_ctx: StreamContext,
-    params: Arc<StreamParams>,
+    params: Arc<StreamExecutionParams>,
     source_module: LoadedComponent,
     dest_module: LoadedComponent,
     transforms: Vec<TransformModule>,
@@ -95,19 +95,19 @@ pub(crate) async fn execute_single_stream(
         let ctx = StreamRunContext {
             component: &source_module,
             state_backend: state_src,
-            pipeline_name: &params_src.pipeline_name,
-            metric_run_label: &params_src.metric_run_label,
-            plugin_id: &params_src.source_plugin_id,
-            plugin_version: &params_src.source_plugin_version,
+            pipeline_name: &params_src.pipeline.name,
+            metric_run_label: &params_src.pipeline.metric_run_label,
+            plugin_id: &params_src.source.id,
+            plugin_version: &params_src.source.version,
             stream_ctx: &stream_ctx_for_src,
-            permissions: params_src.source_permissions.as_ref(),
+            permissions: params_src.source.permissions.as_ref(),
             compression: params_src.compression,
-            overrides: params_src.source_overrides.as_ref(),
+            overrides: params_src.source.overrides.as_ref(),
         };
         run_source_stream(
             &ctx,
             source_tx,
-            &params_src.source_config,
+            &params_src.source.config,
             stats_src,
             on_batch_emitted,
         )
@@ -125,8 +125,8 @@ pub(crate) async fn execute_single_stream(
             let ctx = StreamRunContext {
                 component: &t.module,
                 state_backend: state_t,
-                pipeline_name: &params_t.pipeline_name,
-                metric_run_label: &params_t.metric_run_label,
+                pipeline_name: &params_t.pipeline.name,
+                metric_run_label: &params_t.pipeline.metric_run_label,
                 plugin_id: &t.plugin_id,
                 plugin_version: &t.plugin_version,
                 stream_ctx: &stream_ctx_t,
@@ -175,7 +175,7 @@ pub(crate) async fn execute_single_stream(
 async fn run_normal_destination(
     stream_ctx: StreamContext,
     stream_ctx_for_dst: StreamContext,
-    params: Arc<StreamParams>,
+    params: Arc<StreamExecutionParams>,
     dest_module: LoadedComponent,
     state: Arc<dyn StateBackend>,
     stats: Arc<Mutex<RunStats>>,
@@ -191,16 +191,22 @@ async fn run_normal_destination(
         let ctx = StreamRunContext {
             component: &dest_module,
             state_backend: state,
-            pipeline_name: &params.pipeline_name,
-            metric_run_label: &params.metric_run_label,
-            plugin_id: &params.dest_plugin_id,
-            plugin_version: &params.dest_plugin_version,
+            pipeline_name: &params.pipeline.name,
+            metric_run_label: &params.pipeline.metric_run_label,
+            plugin_id: &params.destination.id,
+            plugin_version: &params.destination.version,
             stream_ctx: &stream_ctx_for_dst,
-            permissions: params.dest_permissions.as_ref(),
+            permissions: params.destination.permissions.as_ref(),
             compression: params.compression,
-            overrides: params.dest_overrides.as_ref(),
+            overrides: params.destination.overrides.as_ref(),
         };
-        run_destination_stream(&ctx, dest_rx, run_dlq_records, &params.dest_config, stats)
+        run_destination_stream(
+            &ctx,
+            dest_rx,
+            run_dlq_records,
+            &params.destination.config,
+            stats,
+        )
     });
 
     let src_result = src_handle.await.map_err(|e| {
@@ -246,7 +252,7 @@ async fn run_normal_destination(
 /// Dry-run mode: collect frames into memory instead of running destination plugin.
 async fn run_dry_run_collector(
     stream_ctx: StreamContext,
-    params: Arc<StreamParams>,
+    params: Arc<StreamExecutionParams>,
     limit: Option<u64>,
     dest_rx: sync_mpsc::Receiver<Frame>,
     src_handle: tokio::task::JoinHandle<Result<crate::runner::SourceOutcome, PipelineError>>,
