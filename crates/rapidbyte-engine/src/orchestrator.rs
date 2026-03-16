@@ -29,11 +29,11 @@ use crate::config::types::{parse_byte_size, PipelineConfig, PipelineParallelism}
 use crate::error::{compute_backoff, PipelineError};
 use crate::execution::{DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineOutcome};
 use crate::finalizers::checkpoint::correlate_and_persist_cursors;
-use crate::progress::{Phase, ProgressEvent};
-use crate::resolve::{
-    build_sandbox_overrides, check_state_backend, create_state_backend, load_and_validate_manifest,
-    resolve_plugins, validate_config_against_schema, ResolvedPlugins,
+use crate::plugin::resolver::{
+    load_and_validate_manifest, resolve_plugins, validate_config_against_schema, ResolvedPlugins,
 };
+use crate::plugin::sandbox::{build_sandbox_overrides, check_state_backend, create_state_backend};
+use crate::progress::{Phase, ProgressEvent};
 use crate::result::{
     CheckItemResult, CheckResult, DestTiming, PipelineCounts, PipelineResult, SourceTiming,
     StreamShardMetric,

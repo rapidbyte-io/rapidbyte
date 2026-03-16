@@ -14,7 +14,7 @@
 //! | `execution`    | Runtime execution mode types (dry-run, limits) |
 //! | `orchestrator` | Pipeline execution, retry, stream dispatch |
 //! | `progress`     | Progress event types for live CLI updates |
-//! | `resolve`      | Plugin resolution, manifest validation, state backend (internal) |
+//! | `plugin`       | Plugin lifecycle management: resolution, manifest validation, sandbox (internal) |
 //! | `result`       | Pipeline execution result types and timing breakdowns |
 //! | `runner`       | Individual plugin runners (source, dest, transform) |
 
@@ -27,8 +27,8 @@ pub mod error;
 pub mod execution;
 pub(crate) mod finalizers;
 pub mod orchestrator;
+pub mod plugin;
 pub mod progress;
-pub mod resolve;
 pub mod result;
 pub mod runner;
 

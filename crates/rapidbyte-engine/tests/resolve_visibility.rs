@@ -1,6 +1,7 @@
-//! Verify that resolve module items are publicly accessible.
+//! Verify that plugin module items are publicly accessible.
 
-use rapidbyte_engine::resolve::{create_state_backend, resolve_plugins, ResolvedPlugins};
+use rapidbyte_engine::plugin::resolver::{resolve_plugins, ResolvedPlugins};
+use rapidbyte_engine::plugin::sandbox::create_state_backend;
 
 #[test]
 fn resolve_types_are_public() {
