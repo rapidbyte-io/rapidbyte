@@ -7,42 +7,22 @@ use tracing::info;
 
 use crate::proto::rapidbyte::v1::{run_event, RunEvent, RunFailed, TaskError};
 use crate::run_state::{
-    RunState as InternalRunState, ERROR_CODE_LEASE_EXPIRED, ERROR_CODE_RECOVERY_TIMEOUT,
+    RunError, RunState as InternalRunState, ERROR_CODE_LEASE_EXPIRED, ERROR_CODE_RECOVERY_TIMEOUT,
 };
 use crate::state::ControllerState;
 
-struct TimeoutErrorInfo {
-    code: &'static str,
-    message: String,
-    retryable: bool,
-    safe_to_retry: bool,
-}
-
-fn set_run_error(run: &mut crate::run_state::RunRecord, error: &TimeoutErrorInfo) {
-    run.error_code = Some(error.code.into());
-    run.error_message = Some(error.message.clone());
-    run.error_retryable = Some(error.retryable);
-    run.error_safe_to_retry = Some(error.safe_to_retry);
-    run.error_commit_state = Some(String::new());
-}
-
-async fn publish_run_failed(
-    state: &ControllerState,
-    run_id: &str,
-    error: TimeoutErrorInfo,
-    attempt: u32,
-) {
+async fn publish_run_failed(state: &ControllerState, run_id: &str, error: &RunError, attempt: u32) {
     state.watchers.write().await.publish_terminal(
         run_id,
         RunEvent {
             run_id: run_id.to_string(),
             event: Some(run_event::Event::Failed(RunFailed {
                 error: Some(TaskError {
-                    code: error.code.into(),
-                    message: error.message,
+                    code: error.code.clone(),
+                    message: error.message.clone(),
                     retryable: error.retryable,
                     safe_to_retry: error.safe_to_retry,
-                    commit_state: String::new(),
+                    commit_state: error.commit_state.clone(),
                 }),
                 attempt,
             })),
@@ -98,23 +78,25 @@ pub(crate) async fn handle_expired_lease(
             let record = runs.get_run_mut(&run_id);
             if let Some(r) = record {
                 let error_info = if target_state == InternalRunState::RecoveryFailed {
-                    TimeoutErrorInfo {
-                        code: ERROR_CODE_RECOVERY_TIMEOUT,
+                    RunError {
+                        code: ERROR_CODE_RECOVERY_TIMEOUT.into(),
                         message: format!(
                             "Run recovery reconciliation timed out after controller restart for task {task_id}"
                         ),
                         retryable: false,
                         safe_to_retry: false,
+                        commit_state: String::new(),
                     }
                 } else {
-                    TimeoutErrorInfo {
-                        code: ERROR_CODE_LEASE_EXPIRED,
+                    RunError {
+                        code: ERROR_CODE_LEASE_EXPIRED.into(),
                         message: format!("Task {task_id} lease expired (agent unresponsive)"),
                         retryable: true,
                         safe_to_retry: true,
+                        commit_state: String::new(),
                     }
                 };
-                set_run_error(r, &error_info);
+                r.error = Some(error_info.clone());
                 Some((error_info, r.attempt))
             } else {
                 None
@@ -173,7 +155,7 @@ pub(crate) async fn handle_expired_lease(
     }
 
     if durable {
-        publish_run_failed(state, &run_id, error_info, attempt).await;
+        publish_run_failed(state, &run_id, &error_info, attempt).await;
         decrement_active_runs(&rapidbyte_metrics::instruments::controller::active_runs());
     } else {
         tracing::warn!(
@@ -220,11 +202,12 @@ pub(crate) async fn sweep_reconciliation_timeouts(
         } else {
             None
         };
-        let error_info = TimeoutErrorInfo {
-            code: ERROR_CODE_RECOVERY_TIMEOUT,
+        let error_info = RunError {
+            code: ERROR_CODE_RECOVERY_TIMEOUT.into(),
             message: "Run recovery reconciliation timed out after controller restart".into(),
             retryable: false,
             safe_to_retry: false,
+            commit_state: String::new(),
         };
 
         let attempt = {
@@ -243,7 +226,7 @@ pub(crate) async fn sweep_reconciliation_timeouts(
                 continue;
             }
             if let Some(run) = runs.get_run_mut(&run_id) {
-                set_run_error(run, &error_info);
+                run.error = Some(error_info.clone());
             }
             attempt
         };
@@ -288,7 +271,7 @@ pub(crate) async fn sweep_reconciliation_timeouts(
         }
 
         if durable {
-            publish_run_failed(state, &run_id, error_info, attempt).await;
+            publish_run_failed(state, &run_id, &error_info, attempt).await;
             decrement_active_runs(&rapidbyte_metrics::instruments::controller::active_runs());
         } else {
             tracing::warn!(run_id, "skipping reconciliation-timeout terminal publish because durable persistence failed");
@@ -387,7 +370,7 @@ mod tests {
         let record = runs.get_run(&run_id).unwrap();
         assert_eq!(record.state, InternalRunState::TimedOut);
         assert_eq!(
-            record.error_message.as_deref(),
+            record.error.as_ref().map(|e| e.message.as_str()),
             Some(format!("Task {task_id} lease expired (agent unresponsive)").as_str())
         );
     }
@@ -427,8 +410,9 @@ mod tests {
         let record = runs.get_run(&run_id).unwrap();
         assert_eq!(record.state, InternalRunState::RecoveryFailed);
         assert!(record
-            .error_message
-            .as_deref()
+            .error
+            .as_ref()
+            .map(|e| e.message.as_str())
             .is_some_and(|message| message.contains("reconciliation timed out")));
     }
 
@@ -555,8 +539,9 @@ mod tests {
         let record = runs.get_run(&run_id).unwrap();
         assert_eq!(record.state, InternalRunState::RecoveryFailed);
         assert!(record
-            .error_message
-            .as_deref()
+            .error
+            .as_ref()
+            .map(|e| e.message.as_str())
             .is_some_and(|message| message.contains("reconciliation timed out")));
     }
 

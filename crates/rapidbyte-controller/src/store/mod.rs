@@ -20,7 +20,7 @@ use tokio_rustls::{
 use crate::lease::Lease;
 use crate::preview::{PreviewEntry, PreviewStreamEntry};
 use crate::registry::AgentRecord;
-use crate::run_state::{CurrentTask, RunRecord, RunState};
+use crate::run_state::{CurrentTask, RunError, RunMetrics, RunRecord, RunState};
 use crate::scheduler::{TaskRecord, TaskState};
 
 pub const CONTROLLER_METADATA_MIGRATIONS: &str =
@@ -597,9 +597,14 @@ async fn upsert_run_on(
         .map(|task| i64::try_from(task.lease_epoch))
         .transpose()?;
     let attempt = i32::try_from(run.attempt)?;
-    let total_records = i64::try_from(run.total_records)?;
-    let total_bytes = i64::try_from(run.total_bytes)?;
-    let cursors_advanced = i64::try_from(run.cursors_advanced)?;
+    let total_records = i64::try_from(run.metrics.total_records)?;
+    let total_bytes = i64::try_from(run.metrics.total_bytes)?;
+    let cursors_advanced = i64::try_from(run.metrics.cursors_advanced)?;
+    let error_code = run.error.as_ref().map(|e| e.code.clone());
+    let error_message = run.error.as_ref().map(|e| e.message.clone());
+    let error_retryable = run.error.as_ref().map(|e| e.retryable);
+    let error_safe_to_retry = run.error.as_ref().map(|e| e.safe_to_retry);
+    let error_commit_state = run.error.as_ref().map(|e| e.commit_state.clone());
 
     client
         .execute(
@@ -656,16 +661,16 @@ async fn upsert_run_on(
                 &current_attempt,
                 &current_lease_epoch,
                 &current_task.map(|task| to_datetime(task.assigned_at)),
-                &run.error_code,
-                &run.error_message,
-                &run.error_retryable,
-                &run.error_safe_to_retry,
-                &run.error_commit_state,
+                &error_code,
+                &error_message,
+                &error_retryable,
+                &error_safe_to_retry,
+                &error_commit_state,
                 &attempt,
                 &run.idempotency_key,
                 &total_records,
                 &total_bytes,
-                &run.elapsed_seconds,
+                &run.metrics.elapsed_seconds,
                 &cursors_advanced,
             ],
         )
@@ -807,17 +812,31 @@ fn run_record_from_row(row: &Row) -> anyhow::Result<RunRecord> {
             .get::<_, Option<DateTime<Utc>>>("recovery_started_at")
             .map(datetime_to_system_time),
         current_task: current_task_from_row(row)?,
-        error_code: row.get("error_code"),
-        error_message: row.get("error_message"),
-        error_retryable: row.get("error_retryable"),
-        error_safe_to_retry: row.get("error_safe_to_retry"),
-        error_commit_state: row.get("error_commit_state"),
+        error: row
+            .get::<_, Option<String>>("error_code")
+            .map(|code| RunError {
+                code,
+                message: row
+                    .get::<_, Option<String>>("error_message")
+                    .unwrap_or_default(),
+                retryable: row
+                    .get::<_, Option<bool>>("error_retryable")
+                    .unwrap_or(false),
+                safe_to_retry: row
+                    .get::<_, Option<bool>>("error_safe_to_retry")
+                    .unwrap_or(false),
+                commit_state: row
+                    .get::<_, Option<String>>("error_commit_state")
+                    .unwrap_or_default(),
+            }),
         attempt: u32::try_from(row.get::<_, i32>("attempt"))?,
         idempotency_key: row.get("idempotency_key"),
-        total_records: u64::try_from(row.get::<_, i64>("total_records"))?,
-        total_bytes: u64::try_from(row.get::<_, i64>("total_bytes"))?,
-        elapsed_seconds: row.get("elapsed_seconds"),
-        cursors_advanced: u64::try_from(row.get::<_, i64>("cursors_advanced"))?,
+        metrics: RunMetrics {
+            total_records: u64::try_from(row.get::<_, i64>("total_records"))?,
+            total_bytes: u64::try_from(row.get::<_, i64>("total_bytes"))?,
+            elapsed_seconds: row.get("elapsed_seconds"),
+            cursors_advanced: u64::try_from(row.get::<_, i64>("cursors_advanced"))?,
+        },
     })
 }
 
@@ -1061,17 +1080,16 @@ mod tests {
                 assigned_at: now,
             }),
             recovery_started_at: Some(now),
-            error_code: Some("TEST_ERROR".into()),
-            error_message: None,
-            error_retryable: Some(false),
-            error_safe_to_retry: Some(false),
-            error_commit_state: Some("before_commit".into()),
+            error: Some(RunError {
+                code: "TEST_ERROR".into(),
+                message: String::new(),
+                retryable: false,
+                safe_to_retry: false,
+                commit_state: "before_commit".into(),
+            }),
             attempt: 1,
             idempotency_key: Some("idem-key".into()),
-            total_records: 0,
-            total_bytes: 0,
-            elapsed_seconds: 0.0,
-            cursors_advanced: 0,
+            metrics: RunMetrics::default(),
         };
 
         store
@@ -1179,17 +1197,10 @@ mod tests {
             completed_at: None,
             current_task: None,
             recovery_started_at: None,
-            error_code: None,
-            error_message: None,
-            error_retryable: None,
-            error_safe_to_retry: None,
-            error_commit_state: None,
+            error: None,
             attempt: 1,
             idempotency_key: None,
-            total_records: 0,
-            total_bytes: 0,
-            elapsed_seconds: 0.0,
-            cursors_advanced: 0,
+            metrics: RunMetrics::default(),
         };
         let task = TaskRecord {
             task_id: "task-transaction".into(),
@@ -1266,17 +1277,10 @@ mod tests {
                 assigned_at: now,
             }),
             recovery_started_at: None,
-            error_code: None,
-            error_message: None,
-            error_retryable: None,
-            error_safe_to_retry: None,
-            error_commit_state: None,
+            error: None,
             attempt: 1,
             idempotency_key: None,
-            total_records: 0,
-            total_bytes: 0,
-            elapsed_seconds: 0.0,
-            cursors_advanced: 0,
+            metrics: RunMetrics::default(),
         };
         let task = TaskRecord {
             task_id: "task-repair".into(),
@@ -1383,17 +1387,10 @@ mod tests {
                 assigned_at: now,
             }),
             recovery_started_at: None,
-            error_code: None,
-            error_message: None,
-            error_retryable: None,
-            error_safe_to_retry: None,
-            error_commit_state: None,
+            error: None,
             attempt: 1,
             idempotency_key: None,
-            total_records: 0,
-            total_bytes: 0,
-            elapsed_seconds: 0.0,
-            cursors_advanced: 0,
+            metrics: RunMetrics::default(),
         };
         let task = TaskRecord {
             task_id: "task-expired-preview".into(),

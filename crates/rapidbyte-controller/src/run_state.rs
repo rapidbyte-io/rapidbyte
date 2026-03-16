@@ -58,6 +58,25 @@ pub struct CurrentTask {
     pub assigned_at: SystemTime,
 }
 
+/// Error details for a failed run.
+#[derive(Debug, Clone)]
+pub struct RunError {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+    pub safe_to_retry: bool,
+    pub commit_state: String,
+}
+
+/// Completion metrics for a successful run.
+#[derive(Debug, Clone, Default)]
+pub struct RunMetrics {
+    pub total_records: u64,
+    pub total_bytes: u64,
+    pub elapsed_seconds: f64,
+    pub cursors_advanced: u64,
+}
+
 /// Record for a single pipeline run.
 #[derive(Debug, Clone)]
 pub struct RunRecord {
@@ -70,18 +89,11 @@ pub struct RunRecord {
     pub completed_at: Option<SystemTime>,
     pub recovery_started_at: Option<SystemTime>,
     pub current_task: Option<CurrentTask>,
-    pub error_code: Option<String>,
-    pub error_message: Option<String>,
-    pub error_retryable: Option<bool>,
-    pub error_safe_to_retry: Option<bool>,
-    pub error_commit_state: Option<String>,
+    pub error: Option<RunError>,
     pub attempt: u32,
     pub idempotency_key: Option<String>,
     /// Terminal completion metrics (populated when a run completes successfully).
-    pub total_records: u64,
-    pub total_bytes: u64,
-    pub elapsed_seconds: f64,
-    pub cursors_advanced: u64,
+    pub metrics: RunMetrics,
 }
 
 /// In-memory store for run records with idempotency dedup.
@@ -128,17 +140,10 @@ impl RunStore {
             completed_at: None,
             recovery_started_at: None,
             current_task: None,
-            error_code: None,
-            error_message: None,
-            error_retryable: None,
-            error_safe_to_retry: None,
-            error_commit_state: None,
+            error: None,
             attempt: 1,
             idempotency_key: idempotency_key.clone(),
-            total_records: 0,
-            total_bytes: 0,
-            elapsed_seconds: 0.0,
-            cursors_advanced: 0,
+            metrics: RunMetrics::default(),
         };
 
         self.runs.insert(run_id.clone(), record);
@@ -552,17 +557,10 @@ mod tests {
             completed_at: None,
             recovery_started_at: None,
             current_task: None,
-            error_code: None,
-            error_message: None,
-            error_retryable: None,
-            error_safe_to_retry: None,
-            error_commit_state: None,
+            error: None,
             attempt: 1,
             idempotency_key: Some("idem-key".into()),
-            total_records: 0,
-            total_bytes: 0,
-            elapsed_seconds: 0.0,
-            cursors_advanced: 0,
+            metrics: RunMetrics::default(),
         });
 
         assert_eq!(

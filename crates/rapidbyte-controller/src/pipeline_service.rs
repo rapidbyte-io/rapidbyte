@@ -60,14 +60,15 @@ fn from_proto_states(v: i32) -> Option<Vec<InternalRunState>> {
 }
 
 fn terminal_error_for_run(record: &crate::run_state::RunRecord) -> Option<TaskError> {
-    let message = record.error_message.clone()?;
+    let error = record.error.as_ref();
+    let message = error.map(|e| e.message.clone())?;
     let (code, retryable, safe_to_retry) = match record.state {
         InternalRunState::RecoveryFailed => (ERROR_CODE_RECOVERY_TIMEOUT.into(), false, false),
         InternalRunState::TimedOut => (ERROR_CODE_LEASE_EXPIRED.into(), true, true),
         _ => (
-            record.error_code.clone().unwrap_or_default(),
-            record.error_retryable.unwrap_or(false),
-            record.error_safe_to_retry.unwrap_or(false),
+            error.map_or_else(String::new, |e| e.code.clone()),
+            error.is_some_and(|e| e.retryable),
+            error.is_some_and(|e| e.safe_to_retry),
         ),
     };
     Some(TaskError {
@@ -75,7 +76,7 @@ fn terminal_error_for_run(record: &crate::run_state::RunRecord) -> Option<TaskEr
         message,
         retryable,
         safe_to_retry,
-        commit_state: record.error_commit_state.clone().unwrap_or_default(),
+        commit_state: error.map_or_else(String::new, |e| e.commit_state.clone()),
     })
 }
 
@@ -84,10 +85,10 @@ fn terminal_error_for_run(record: &crate::run_state::RunRecord) -> Option<TaskEr
 fn terminal_event_for_run(record: &crate::run_state::RunRecord) -> RunEvent {
     let event = match record.state {
         InternalRunState::Completed => run_event::Event::Completed(RunCompleted {
-            total_records: record.total_records,
-            total_bytes: record.total_bytes,
-            elapsed_seconds: record.elapsed_seconds,
-            cursors_advanced: record.cursors_advanced,
+            total_records: record.metrics.total_records,
+            total_bytes: record.metrics.total_bytes,
+            elapsed_seconds: record.metrics.elapsed_seconds,
+            cursors_advanced: record.metrics.cursors_advanced,
         }),
         InternalRunState::Cancelled => run_event::Event::Cancelled(RunCancelled {}),
         _ => run_event::Event::Failed(RunFailed {
@@ -1320,7 +1321,7 @@ mod tests {
             runs.transition(&run_id, InternalRunState::Completed)
                 .unwrap();
             if let Some(record) = runs.get_run_mut(&run_id) {
-                record.total_records = 11;
+                record.metrics.total_records = 11;
             }
         }
 
@@ -1489,8 +1490,13 @@ mod tests {
                 .unwrap();
             runs.transition(&run_id, InternalRunState::TimedOut)
                 .unwrap();
-            runs.get_run_mut(&run_id).unwrap().error_message =
-                Some("Task task-1 lease expired (agent unresponsive)".into());
+            runs.get_run_mut(&run_id).unwrap().error = Some(crate::run_state::RunError {
+                code: String::new(),
+                message: "Task task-1 lease expired (agent unresponsive)".into(),
+                retryable: true,
+                safe_to_retry: true,
+                commit_state: String::new(),
+            });
         }
 
         let resp = svc
@@ -1530,11 +1536,13 @@ mod tests {
             runs.transition(&run_id, InternalRunState::Running).unwrap();
             runs.transition(&run_id, InternalRunState::Failed).unwrap();
             let run = runs.get_run_mut(&run_id).unwrap();
-            run.error_code = Some("TEST_EXECUTION_FAILED".into());
-            run.error_message = Some("TEST_EXECUTION_FAILED: injected failure".into());
-            run.error_retryable = Some(false);
-            run.error_safe_to_retry = Some(false);
-            run.error_commit_state = Some("before_commit".into());
+            run.error = Some(crate::run_state::RunError {
+                code: "TEST_EXECUTION_FAILED".into(),
+                message: "TEST_EXECUTION_FAILED: injected failure".into(),
+                retryable: false,
+                safe_to_retry: false,
+                commit_state: "before_commit".into(),
+            });
         }
 
         let resp = svc
@@ -1673,8 +1681,13 @@ mod tests {
                 .unwrap();
             runs.transition(&run_id, InternalRunState::RecoveryFailed)
                 .unwrap();
-            runs.get_run_mut(&run_id).unwrap().error_message =
-                Some("Run recovery reconciliation timed out after controller restart".into());
+            runs.get_run_mut(&run_id).unwrap().error = Some(crate::run_state::RunError {
+                code: String::new(),
+                message: "Run recovery reconciliation timed out after controller restart".into(),
+                retryable: false,
+                safe_to_retry: false,
+                commit_state: String::new(),
+            });
         }
 
         let response = svc.watch_run_after_subscribe(&run_id).await.unwrap();

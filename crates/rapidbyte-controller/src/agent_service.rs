@@ -16,7 +16,7 @@ use crate::proto::rapidbyte::v1::{
     RegisterAgentRequest, RegisterAgentResponse, ReportProgressRequest, ReportProgressResponse,
     RunCancelled, RunCompleted, RunEvent, RunFailed, TaskAssignment, TaskOutcome,
 };
-use crate::run_state::RunState as InternalRunState;
+use crate::run_state::{RunError, RunMetrics, RunState as InternalRunState};
 use crate::scheduler::{TaskState, TerminalTaskOutcome};
 use crate::state::ControllerState;
 
@@ -251,16 +251,15 @@ impl AgentServiceImpl {
         let mut runs = self.state.runs.write().await;
         let _ = runs.transition(run_id, InternalRunState::Failed);
         if let Some(record) = runs.get_run_mut(run_id) {
-            let error_msg = format!("{ERROR_CODE_SECRET_RESOLUTION}: {}", error.message());
-            record.error_code = Some(ERROR_CODE_SECRET_RESOLUTION.into());
-            record.error_message = Some(error_msg);
-            record.error_retryable = Some(false);
-            record.error_safe_to_retry = Some(false);
-            record.error_commit_state = Some(
-                rapidbyte_types::error::CommitState::BeforeCommit
+            record.error = Some(RunError {
+                code: ERROR_CODE_SECRET_RESOLUTION.into(),
+                message: format!("{ERROR_CODE_SECRET_RESOLUTION}: {}", error.message()),
+                retryable: false,
+                safe_to_retry: false,
+                commit_state: rapidbyte_types::error::CommitState::BeforeCommit
                     .as_str()
                     .into(),
-            );
+            });
         }
         let failed_run = runs.get_run(run_id).cloned();
         drop(runs);
@@ -890,10 +889,12 @@ impl AgentService for AgentServiceImpl {
                     let _ = runs.transition(&run_id, InternalRunState::Completed);
                     if let Some(record) = runs.get_run_mut(&run_id) {
                         let metrics = req.metrics.as_ref();
-                        record.total_records = metrics.map_or(0, |m| m.records_processed);
-                        record.total_bytes = metrics.map_or(0, |m| m.bytes_processed);
-                        record.elapsed_seconds = metrics.map_or(0.0, |m| m.elapsed_seconds);
-                        record.cursors_advanced = metrics.map_or(0, |m| m.cursors_advanced);
+                        record.metrics = RunMetrics {
+                            total_records: metrics.map_or(0, |m| m.records_processed),
+                            total_bytes: metrics.map_or(0, |m| m.bytes_processed),
+                            elapsed_seconds: metrics.map_or(0.0, |m| m.elapsed_seconds),
+                            cursors_advanced: metrics.map_or(0, |m| m.cursors_advanced),
+                        };
                     }
                 }
 
@@ -1136,12 +1137,13 @@ impl AgentService for AgentServiceImpl {
                         runs.ensure_running(&run_id);
                         let _ = runs.transition(&run_id, InternalRunState::Failed);
                         if let Some(record) = runs.get_run_mut(&run_id) {
-                            record.error_code = error.map(|e| e.code.clone());
-                            record.error_message =
-                                error.map(|e| format!("{}: {}", e.code, e.message));
-                            record.error_retryable = error.map(|e| e.retryable);
-                            record.error_safe_to_retry = error.map(|e| e.safe_to_retry);
-                            record.error_commit_state = error.map(|e| e.commit_state.clone());
+                            record.error = error.map(|e| RunError {
+                                code: e.code.clone(),
+                                message: format!("{}: {}", e.code, e.message),
+                                retryable: e.retryable,
+                                safe_to_retry: e.safe_to_retry,
+                                commit_state: e.commit_state.clone(),
+                            });
                         }
                     }
                     let failed_run = self
@@ -2673,7 +2675,10 @@ mod tests {
         let runs = state.runs.read().await;
         let record = runs.get_run(&run_id).unwrap();
         assert_eq!(record.state, InternalRunState::Failed);
-        assert_eq!(record.error_message.as_deref(), Some("UNKNOWN: ambiguous"));
+        assert_eq!(
+            record.error.as_ref().map(|e| e.message.as_str()),
+            Some("UNKNOWN: ambiguous")
+        );
     }
 
     #[tokio::test]
@@ -3602,7 +3607,7 @@ mod tests {
         let runs = state.runs.read().await;
         let record = runs.get_run(&run_id).unwrap();
         assert_eq!(record.state, InternalRunState::Completed);
-        assert_eq!(record.total_records, 7);
+        assert_eq!(record.metrics.total_records, 7);
     }
 
     #[tokio::test]
@@ -3672,7 +3677,10 @@ mod tests {
         let runs = state.runs.read().await;
         let record = runs.get_run(&run_id).unwrap();
         assert_eq!(record.state, InternalRunState::Failed);
-        assert_eq!(record.error_message.as_deref(), Some("PLUGIN: boom"));
+        assert_eq!(
+            record.error.as_ref().map(|e| e.message.as_str()),
+            Some("PLUGIN: boom")
+        );
     }
 
     #[tokio::test]
@@ -3742,7 +3750,10 @@ mod tests {
         let runs = state.runs.read().await;
         let record = runs.get_run(&run_id).unwrap();
         assert_eq!(record.state, InternalRunState::Failed);
-        assert_eq!(record.error_message.as_deref(), Some("RETRY: try again"));
+        assert_eq!(
+            record.error.as_ref().map(|e| e.message.as_str()),
+            Some("RETRY: try again")
+        );
         drop(runs);
 
         let tasks = state.tasks.read().await;
