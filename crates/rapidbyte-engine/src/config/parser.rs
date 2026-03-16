@@ -92,36 +92,9 @@ fn apply_replacements(input: &str, mut replacements: Vec<MatchReplacement>) -> S
 #[allow(clippy::missing_panics_doc)] // regex group 0 always exists
 pub async fn substitute_secrets(input: &str, secrets: &SecretProviders) -> Result<String> {
     let mut replacements = Vec::new();
-    let mut secret_cache: HashMap<String, String> = HashMap::new();
     let mut secret_errors: Vec<(String, SecretError)> = Vec::new();
 
-    for cap in SECRET_REF_RE.captures_iter(input) {
-        let m = cap.get(0).unwrap();
-        let full_match = m.as_str().to_string();
-        let prefix = &cap[1];
-        let path = &cap[2];
-        let key = &cap[3];
-
-        let value = if let Some(cached) = secret_cache.get(&full_match) {
-            cached.clone()
-        } else {
-            match secrets.resolve(prefix, path, key).await {
-                Ok(val) => {
-                    secret_cache.insert(full_match, val.clone());
-                    val
-                }
-                Err(e) => {
-                    secret_errors.push((format!("{prefix}:{path}#{key}"), e));
-                    continue;
-                }
-            }
-        };
-        replacements.push(MatchReplacement {
-            start: m.start(),
-            end: m.end(),
-            value,
-        });
-    }
+    collect_secret_replacements(input, secrets, &mut replacements, &mut secret_errors).await;
 
     if !secret_errors.is_empty() {
         let any_transient = secret_errors.iter().any(|(_, e)| e.is_transient());
@@ -142,38 +115,28 @@ pub async fn substitute_secrets(input: &str, secrets: &SecretProviders) -> Resul
     Ok(apply_replacements(input, replacements))
 }
 
-/// Substitute all `${...}` references: env vars and secret provider refs.
-///
-/// Each unique secret path is fetched once even if referenced multiple times.
-/// Resolution is atomic — all references must resolve or the entire
-/// substitution fails.
-///
-/// Replacement is positional — secret values containing `${...}` are
-/// never expanded as env vars.
-///
-/// # Errors
-///
-/// Returns an error if any env var is missing, a secret provider prefix
-/// has no registered provider, or a secret read fails.
-#[allow(clippy::missing_panics_doc)] // regex group 0 always exists
-pub async fn substitute_variables(input: &str, secrets: &SecretProviders) -> Result<String> {
-    let mut replacements = Vec::new();
+/// Shared logic for collecting secret-ref replacements. Normalizes
+/// captured prefixes to lowercase so `${Vault:...}` matches the
+/// `"vault"` provider registration.
+async fn collect_secret_replacements(
+    input: &str,
+    secrets: &SecretProviders,
+    replacements: &mut Vec<MatchReplacement>,
+    secret_errors: &mut Vec<(String, SecretError)>,
+) {
     let mut secret_cache: HashMap<String, String> = HashMap::new();
-    let mut secret_errors: Vec<(String, SecretError)> = Vec::new();
-    let mut env_errors = Vec::new();
 
-    // Collect secret ref replacements.
     for cap in SECRET_REF_RE.captures_iter(input) {
         let m = cap.get(0).unwrap();
         let full_match = m.as_str().to_string();
-        let prefix = &cap[1];
+        let prefix = cap[1].to_ascii_lowercase();
         let path = &cap[2];
         let key = &cap[3];
 
         let value = if let Some(cached) = secret_cache.get(&full_match) {
             cached.clone()
         } else {
-            match secrets.resolve(prefix, path, key).await {
+            match secrets.resolve(&prefix, path, key).await {
                 Ok(val) => {
                     secret_cache.insert(full_match, val.clone());
                     val
@@ -190,6 +153,29 @@ pub async fn substitute_variables(input: &str, secrets: &SecretProviders) -> Res
             value,
         });
     }
+}
+
+/// Substitute all `${...}` references: env vars and secret provider refs.
+///
+/// Each unique secret path is fetched once even if referenced multiple times.
+/// Resolution is atomic — all references must resolve or the entire
+/// substitution fails.
+///
+/// Replacement is positional — secret values containing `${...}` are
+/// never expanded as env vars.
+///
+/// # Errors
+///
+/// Returns an error if any env var is missing, a secret provider prefix
+/// has no registered provider, or a secret read fails.
+#[allow(clippy::missing_panics_doc)] // regex group 0 always exists
+pub async fn substitute_variables(input: &str, secrets: &SecretProviders) -> Result<String> {
+    let mut replacements = Vec::new();
+    let mut secret_errors: Vec<(String, SecretError)> = Vec::new();
+    let mut env_errors = Vec::new();
+
+    // Collect secret ref replacements.
+    collect_secret_replacements(input, secrets, &mut replacements, &mut secret_errors).await;
 
     if !secret_errors.is_empty() {
         let any_transient = secret_errors.iter().any(|(_, e)| e.is_transient());
@@ -453,6 +439,37 @@ destination:
 
         // Secret ref resolved, env var left untouched.
         assert_eq!(result, "host: ${DB_HOST}\npassword: resolved-secret");
+    }
+
+    #[tokio::test]
+    async fn mixed_case_prefix_resolves_via_lowercase_provider() {
+        use std::sync::Arc;
+
+        struct FakeProvider;
+
+        #[async_trait::async_trait]
+        impl rapidbyte_secrets::SecretProvider for FakeProvider {
+            async fn read_secret(
+                &self,
+                _path: &str,
+                _key: &str,
+            ) -> Result<String, rapidbyte_secrets::SecretError> {
+                Ok("secret-value".to_owned())
+            }
+        }
+
+        let mut secrets = SecretProviders::new();
+        secrets.register("vault", Arc::new(FakeProvider));
+
+        // ${Vault:...} with uppercase V should resolve via "vault" provider.
+        let input = "password: ${Vault:secret/db#password}";
+        let result = substitute_variables(input, &secrets).await.unwrap();
+        assert_eq!(result, "password: secret-value");
+
+        // ${VAULT:...} all-caps should also resolve.
+        let input = "password: ${VAULT:secret/db#password}";
+        let result = substitute_variables(input, &secrets).await.unwrap();
+        assert_eq!(result, "password: secret-value");
     }
 
     #[tokio::test]

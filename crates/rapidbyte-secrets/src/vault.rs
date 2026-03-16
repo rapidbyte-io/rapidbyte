@@ -84,11 +84,10 @@ impl VaultProvider {
                 .get_or_try_init(|| async {
                     vaultrs::auth::approle::login(&self.client, "approle", &role_id, &secret_id)
                         .await
-                        .context("Vault AppRole authentication failed")?;
-                    Ok(())
+                        .map(|_| ())
+                        .map_err(|e| classify_vault_error(e, "AppRole authentication"))
                 })
-                .await
-                .map_err(|e: anyhow::Error| SecretError::Unavailable(format!("{e:#}")))?;
+                .await?;
         }
         Ok(())
     }
@@ -97,21 +96,17 @@ impl VaultProvider {
 /// Classify a Vault API error into a `SecretError` variant.
 ///
 /// Uses structured `ClientError` variants and HTTP status codes where
-/// available, falling back to case-insensitive text matching for
-/// transport-level errors that lack structured fields.
-fn classify_vault_error(error: vaultrs::error::ClientError, path: &str) -> SecretError {
+/// available. `context` describes the operation (e.g. path or "`AppRole`
+/// authentication") for error messages.
+fn classify_vault_error(error: vaultrs::error::ClientError, context: &str) -> SecretError {
     match &error {
         // Structured API errors — classify by HTTP status code.
         vaultrs::error::ClientError::APIError { code, .. } => match *code {
-            403 => {
-                SecretError::AuthFailed(format!("failed to read Vault secret at {path}: {error}"))
-            }
-            404 => SecretError::NotFound(format!("Vault secret not found at {path}")),
-            500..=599 => {
-                SecretError::Unavailable(format!("failed to read Vault secret at {path}: {error}"))
-            }
+            403 => SecretError::AuthFailed(format!("Vault {context} failed: {error}")),
+            404 => SecretError::NotFound(format!("Vault {context}: not found")),
+            500..=599 => SecretError::Unavailable(format!("Vault {context} failed: {error}")),
             _ => SecretError::Other(
-                anyhow::Error::new(error).context(format!("failed to read Vault secret at {path}")),
+                anyhow::Error::new(error).context(format!("Vault {context} failed")),
             ),
         },
         // Transport/network errors (reqwest under the hood) and empty
@@ -119,12 +114,12 @@ fn classify_vault_error(error: vaultrs::error::ClientError, path: &str) -> Secre
         vaultrs::error::ClientError::RestClientError { .. }
         | vaultrs::error::ClientError::RestClientBuildError { .. }
         | vaultrs::error::ClientError::ResponseEmptyError => {
-            SecretError::Unavailable(format!("failed to read Vault secret at {path}: {error}"))
+            SecretError::Unavailable(format!("Vault {context} failed: {error}"))
         }
         // Everything else — permanent.
-        _ => SecretError::Other(
-            anyhow::Error::new(error).context(format!("failed to read Vault secret at {path}")),
-        ),
+        _ => {
+            SecretError::Other(anyhow::Error::new(error).context(format!("Vault {context} failed")))
+        }
     }
 }
 
@@ -144,7 +139,7 @@ impl SecretProvider for VaultProvider {
         let data: HashMap<String, serde_json::Value> =
             vaultrs::kv2::read(&self.client, mount, secret_path)
                 .await
-                .map_err(|e| classify_vault_error(e, path))?;
+                .map_err(|e| classify_vault_error(e, &format!("read secret at {path}")))?;
 
         let value = data.get(key).ok_or_else(|| {
             SecretError::NotFound(format!("key '{key}' not found in Vault secret {path}"))
@@ -157,5 +152,76 @@ impl SecretProvider for VaultProvider {
             serde_json::Value::Null => Ok(String::new()),
             other => Ok(other.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_api_403_as_auth_failed() {
+        let err = vaultrs::error::ClientError::APIError {
+            code: 403,
+            errors: vec!["permission denied".into()],
+        };
+        let classified = classify_vault_error(err, "test");
+        assert!(
+            matches!(classified, SecretError::AuthFailed(_)),
+            "403 should be AuthFailed, got: {classified}"
+        );
+        assert!(!classified.is_transient());
+    }
+
+    #[test]
+    fn classify_api_404_as_not_found() {
+        let err = vaultrs::error::ClientError::APIError {
+            code: 404,
+            errors: vec![],
+        };
+        let classified = classify_vault_error(err, "test");
+        assert!(matches!(classified, SecretError::NotFound(_)));
+        assert!(!classified.is_transient());
+    }
+
+    #[test]
+    fn classify_api_503_as_unavailable() {
+        let err = vaultrs::error::ClientError::APIError {
+            code: 503,
+            errors: vec!["sealed".into()],
+        };
+        let classified = classify_vault_error(err, "test");
+        assert!(matches!(classified, SecretError::Unavailable(_)));
+        assert!(classified.is_transient());
+    }
+
+    #[test]
+    fn classify_api_500_as_unavailable() {
+        let err = vaultrs::error::ClientError::APIError {
+            code: 500,
+            errors: vec!["internal error".into()],
+        };
+        let classified = classify_vault_error(err, "test");
+        assert!(matches!(classified, SecretError::Unavailable(_)));
+        assert!(classified.is_transient());
+    }
+
+    #[test]
+    fn classify_api_400_as_other_permanent() {
+        let err = vaultrs::error::ClientError::APIError {
+            code: 400,
+            errors: vec!["bad request".into()],
+        };
+        let classified = classify_vault_error(err, "test");
+        assert!(matches!(classified, SecretError::Other(_)));
+        assert!(!classified.is_transient());
+    }
+
+    #[test]
+    fn classify_empty_response_as_unavailable() {
+        let err = vaultrs::error::ClientError::ResponseEmptyError;
+        let classified = classify_vault_error(err, "test");
+        assert!(matches!(classified, SecretError::Unavailable(_)));
+        assert!(classified.is_transient());
     }
 }
