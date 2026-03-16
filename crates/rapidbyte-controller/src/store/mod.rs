@@ -1471,6 +1471,7 @@ pub mod test_support {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
+    use tokio::sync::Notify;
 
     use super::{DurableMetadataStore, PreviewData};
     use crate::registry::AgentRecord;
@@ -1485,6 +1486,10 @@ pub mod test_support {
         preview_upsert_fail_on: Option<usize>,
         delete_run_fail_on: Option<usize>,
         delete_preview_fail_on: Option<usize>,
+        /// Notify triggered when `create_run_with_task` enters (signals "I'm inside").
+        run_create_entered: Option<Arc<tokio::sync::Notify>>,
+        /// Notify awaited inside `create_run_with_task` (blocks until signaled).
+        run_create_resume: Option<Arc<tokio::sync::Notify>>,
         run_upsert_calls: usize,
         task_upsert_calls: usize,
         agent_upsert_calls: usize,
@@ -1541,6 +1546,21 @@ pub mod test_support {
         #[must_use]
         pub fn fail_delete_preview_on(self: Arc<Self>, call: usize) -> Arc<Self> {
             self.failures.lock().unwrap().delete_preview_fail_on = Some(call);
+            self
+        }
+
+        /// Install a blocking hook on `create_run_with_task`. When the method
+        /// enters, it notifies `entered` then awaits `resume` before proceeding.
+        #[must_use]
+        pub fn pause_run_create(
+            self: Arc<Self>,
+            entered: Arc<Notify>,
+            resume: Arc<Notify>,
+        ) -> Arc<Self> {
+            let mut cfg = self.failures.lock().unwrap();
+            cfg.run_create_entered = Some(entered);
+            cfg.run_create_resume = Some(resume);
+            drop(cfg);
             self
         }
 
@@ -1616,6 +1636,19 @@ pub mod test_support {
             run: &RunRecord,
             task: &TaskRecord,
         ) -> anyhow::Result<()> {
+            // Test hook: signal entry and block until resumed.
+            let (entered, resume) = {
+                let cfg = self.failures.lock().unwrap();
+                (
+                    cfg.run_create_entered.clone(),
+                    cfg.run_create_resume.clone(),
+                )
+            };
+            if let (Some(entered), Some(resume)) = (entered, resume) {
+                entered.notify_one();
+                resume.notified().await;
+            }
+
             let previous_run = self.persisted_run(&run.run_id);
             let previous_task = self.persisted_task(&task.task_id);
             self.upsert_run(run).await?;

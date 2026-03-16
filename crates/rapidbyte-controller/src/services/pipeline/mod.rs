@@ -1116,4 +1116,197 @@ mod tests {
     // A dedicated metric assertion test is not feasible because OnceLock-cached
     // instruments bind to the first provider and cannot be redirected to a
     // per-test provider.
+
+    #[tokio::test]
+    async fn concurrent_idempotent_submit_second_gets_aborted() {
+        use crate::store::test_support::FailingMetadataStore;
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        // Wire a store that blocks inside create_run_with_task until we say go.
+        let entered = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        let store =
+            FailingMetadataStore::new().pause_run_create(Arc::clone(&entered), Arc::clone(&resume));
+        let state = ControllerState::with_metadata_store(b"test-signing-key", store);
+        let svc = Arc::new(PipelineHandler::new(state.clone()));
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+
+        // Task A: starts submit, blocks inside the durable persist.
+        let svc_a = Arc::clone(&svc);
+        let yaml_a = yaml.to_vec();
+        let handle_a = tokio::spawn(async move {
+            svc_a
+                .submit_pipeline(Request::new(SubmitPipelineRequest {
+                    pipeline_yaml_utf8: yaml_a,
+                    execution: None,
+                    idempotency_key: "race-key".into(),
+                }))
+                .await
+        });
+
+        // Wait until task A is inside create_run_with_task.
+        entered.notified().await;
+
+        // Task B: submits with same key while A is blocked — must get ABORTED.
+        let err = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: "race-key".into(),
+            }))
+            .await
+            .expect_err("second submit should be aborted while first is in-flight");
+        assert_eq!(err.code(), tonic::Code::Aborted);
+
+        // Resume task A so it completes.
+        resume.notify_one();
+        let result_a = handle_a.await.unwrap().unwrap().into_inner();
+        assert!(!result_a.run_id.is_empty());
+
+        // Pending key must be cleared.
+        assert!(
+            state.pending_idempotency_keys.read().await.is_empty(),
+            "pending key should be cleared after completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn dedup_does_not_clear_inflight_pending_key() {
+        let state = test_state();
+        let svc = PipelineHandler::new(state.clone());
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+
+        // First submission succeeds, creating the run and clearing pending.
+        let first = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: "dedup-key".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Simulate another request in-flight with a different key.
+        state
+            .pending_idempotency_keys
+            .write()
+            .await
+            .insert("other-key".into());
+
+        // Second submission with the same key deduplicates (is_new=false).
+        let second = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: "dedup-key".into(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(first.run_id, second.run_id);
+
+        // The OTHER pending key must still be there — dedup must not clear it.
+        assert!(
+            state
+                .pending_idempotency_keys
+                .read()
+                .await
+                .contains("other-key"),
+            "dedup path must not clear other pending keys"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_key_cleared_on_handler_cancellation() {
+        use crate::store::test_support::FailingMetadataStore;
+        use std::sync::Arc;
+        use tokio::sync::Notify;
+
+        // Wire a store that blocks inside create_run_with_task.
+        let entered = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        let store =
+            FailingMetadataStore::new().pause_run_create(Arc::clone(&entered), Arc::clone(&resume));
+        let state = ControllerState::with_metadata_store(b"test-signing-key", store);
+        let svc = Arc::new(PipelineHandler::new(state.clone()));
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+
+        // Spawn a submit that will block inside persist.
+        let svc_clone = Arc::clone(&svc);
+        let yaml_clone = yaml.to_vec();
+        let handle = tokio::spawn(async move {
+            svc_clone
+                .submit_pipeline(Request::new(SubmitPipelineRequest {
+                    pipeline_yaml_utf8: yaml_clone,
+                    execution: None,
+                    idempotency_key: "cancel-key".into(),
+                }))
+                .await
+        });
+
+        // Wait until the handler is inside the persist call.
+        entered.notified().await;
+
+        // Key should be in pending now.
+        assert!(
+            state
+                .pending_idempotency_keys
+                .read()
+                .await
+                .contains("cancel-key"),
+            "key should be pending while persist is in flight"
+        );
+
+        // Abort the handler (simulates client disconnect / cancellation).
+        handle.abort();
+        let _ = handle.await;
+
+        // The drop guard should clean up the key via spawned task.
+        // Give the spawned cleanup task a moment to run.
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            !state
+                .pending_idempotency_keys
+                .read()
+                .await
+                .contains("cancel-key"),
+            "pending key should be cleaned up by drop guard after cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_key_cleared_on_persist_failure() {
+        use crate::store::test_support::FailingMetadataStore;
+
+        let store = FailingMetadataStore::new().fail_run_upsert_on(1);
+        let state = ControllerState::with_metadata_store(b"test-signing-key", store);
+        let svc = PipelineHandler::new(state.clone());
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
+
+        let err = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: None,
+                idempotency_key: "fail-key".into(),
+            }))
+            .await
+            .expect_err("persist failure should reject submit");
+
+        assert_eq!(err.code(), tonic::Code::Internal);
+
+        // The pending key must be cleared after failure so retries aren't blocked.
+        assert!(
+            !state
+                .pending_idempotency_keys
+                .read()
+                .await
+                .contains("fail-key"),
+            "pending key should be cleared after persist failure"
+        );
+    }
 }

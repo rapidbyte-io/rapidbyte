@@ -1,30 +1,63 @@
 //! `submit_pipeline` handler.
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use opentelemetry::KeyValue;
+use tokio::sync::RwLock;
 use tonic::{Response, Status};
 
 use crate::proto::rapidbyte::v1::{SubmitPipelineRequest, SubmitPipelineResponse};
 
-pub(crate) async fn handle_submit(
-    handler: &super::PipelineHandler,
-    req: SubmitPipelineRequest,
-) -> Result<Response<SubmitPipelineResponse>, Status> {
-    // Parse YAML to validate and extract pipeline name
-    let yaml_str = std::str::from_utf8(&req.pipeline_yaml_utf8)
+/// RAII guard that removes an idempotency key from the pending set on drop.
+///
+/// Ensures the key is cleaned up even if the handler future is cancelled
+/// (client disconnect, shutdown, task abort). On normal completion, call
+/// [`disarm()`](Self::disarm) before the explicit cleanup path.
+struct PendingKeyGuard {
+    pending: Arc<RwLock<HashSet<String>>>,
+    key: Option<String>,
+}
+
+impl PendingKeyGuard {
+    fn new(pending: Arc<RwLock<HashSet<String>>>, key: String) -> Self {
+        Self {
+            pending,
+            key: Some(key),
+        }
+    }
+
+    /// Disarm the guard so it does NOT remove the key on drop.
+    /// Call this after the explicit cleanup path has already removed the key.
+    fn disarm(&mut self) {
+        self.key = None;
+    }
+}
+
+impl Drop for PendingKeyGuard {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            let pending = Arc::clone(&self.pending);
+            // Spawn a cleanup task because Drop cannot be async.
+            // If the runtime is shutting down, the key leak is harmless
+            // since pending_idempotency_keys is in-memory only.
+            tokio::spawn(async move {
+                pending.write().await.remove(&key);
+            });
+        }
+    }
+}
+
+/// Validate pipeline YAML and extract the pipeline name.
+#[allow(clippy::result_large_err)]
+fn validate_pipeline_yaml(raw: &[u8]) -> Result<String, Status> {
+    let yaml_str = std::str::from_utf8(raw)
         .map_err(|e| Status::invalid_argument(format!("Pipeline YAML is not valid UTF-8: {e}")))?;
 
     let config: serde_yaml::Value = serde_yaml::from_str(yaml_str)
         .map_err(|e| Status::invalid_argument(format!("Invalid YAML: {e}")))?;
 
-    let pipeline_name = config
-        .get("pipeline")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-
     // Reject SQLite backend (explicit or implicit) in distributed mode.
-    // Pipelines without a state section or without state.backend default to
-    // SQLite in the engine, which is a local file unreachable after reassignment.
     let backend = config
         .get("state")
         .and_then(|s| s.get("backend"))
@@ -36,6 +69,19 @@ pub(crate) async fn handle_submit(
         ));
     }
 
+    Ok(config
+        .get("pipeline")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string())
+}
+
+pub(crate) async fn handle_submit(
+    handler: &super::PipelineHandler,
+    req: SubmitPipelineRequest,
+) -> Result<Response<SubmitPipelineResponse>, Status> {
+    let pipeline_name = validate_pipeline_yaml(&req.pipeline_yaml_utf8)?;
+
     // Check idempotency
     let idempotency_key = if req.idempotency_key.is_empty() {
         None
@@ -43,11 +89,28 @@ pub(crate) async fn handle_submit(
         Some(req.idempotency_key.clone())
     };
 
+    // Guard against concurrent submissions with the same idempotency key.
+    // Atomic check-and-insert: a single write lock ensures no TOCTOU race.
+    // The PendingKeyGuard ensures cleanup even if the future is cancelled.
+    let mut pending_guard: Option<PendingKeyGuard> = None;
+    if let Some(key) = &idempotency_key {
+        let mut pending = handler.state.pending_idempotency_keys.write().await;
+        if !pending.insert(key.clone()) {
+            return Err(Status::aborted(
+                "A submission with this idempotency key is already in progress. Retry shortly.",
+            ));
+        }
+        pending_guard = Some(PendingKeyGuard::new(
+            Arc::clone(&handler.state.pending_idempotency_keys),
+            key.clone(),
+        ));
+    }
+
     let run_id = uuid::Uuid::new_v4().to_string();
 
     let (actual_run_id, is_new) = {
         let mut runs = handler.state.runs.write().await;
-        runs.create_run(run_id, pipeline_name, idempotency_key)
+        runs.create_run(run_id, pipeline_name, idempotency_key.clone())
     };
 
     if is_new {
@@ -91,6 +154,18 @@ pub(crate) async fn handle_submit(
             .await
         {
             rollback_new_submission(handler, &actual_run_id, &task_id).await;
+            // Explicit cleanup + disarm so we don't rely on async drop.
+            if let Some(guard) = &mut pending_guard {
+                if let Some(key) = &idempotency_key {
+                    handler
+                        .state
+                        .pending_idempotency_keys
+                        .write()
+                        .await
+                        .remove(key);
+                }
+                guard.disarm();
+            }
             return Err(Status::internal(error.to_string()));
         }
         handler.state.task_notify.notify_waiters();
@@ -99,6 +174,19 @@ pub(crate) async fn handle_submit(
             &[KeyValue::new(rapidbyte_metrics::labels::STATUS, "accepted")],
         );
         rapidbyte_metrics::instruments::controller::active_runs().add(1, &[]);
+    }
+
+    // Persistence succeeded (or deduped) — explicitly release and disarm guard.
+    if let Some(guard) = &mut pending_guard {
+        if let Some(key) = &idempotency_key {
+            handler
+                .state
+                .pending_idempotency_keys
+                .write()
+                .await
+                .remove(key);
+        }
+        guard.disarm();
     }
 
     Ok(Response::new(SubmitPipelineResponse {
