@@ -171,7 +171,7 @@ pub(crate) async fn execute_single_stream(
 }
 
 /// Normal mode: run destination plugin and assemble results.
-#[allow(clippy::similar_names)]
+#[allow(clippy::similar_names, clippy::too_many_arguments)]
 async fn run_normal_destination(
     stream_ctx: StreamContext,
     stream_ctx_for_dst: StreamContext,

@@ -71,7 +71,8 @@ impl PipelineError {
         Self::Infrastructure(anyhow::anyhow!("{}", msg.into()))
     }
 
-    /// Shorthand for Infrastructure from an existing anyhow::Error.
+    /// Shorthand for Infrastructure from an existing `anyhow::Error`.
+    #[must_use]
     pub fn from_infra(err: anyhow::Error) -> Self {
         Self::Infrastructure(err)
     }
@@ -82,6 +83,10 @@ impl PipelineError {
     }
 
     /// Lock a mutex, converting poison errors to Infrastructure errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `PipelineError::Infrastructure` if the mutex is poisoned.
     pub fn lock_or_infra<'a, T>(
         mutex: &'a std::sync::Mutex<T>,
         name: &str,
@@ -92,6 +97,7 @@ impl PipelineError {
     }
 
     /// Cancelled pipeline error with safe-to-retry metadata.
+    #[must_use]
     pub fn cancelled(message: &str) -> Self {
         use rapidbyte_types::error::CommitState;
         let mut error = PluginError::internal("CANCELLED", message);

@@ -22,6 +22,7 @@ use rapidbyte_types::wire::PluginKind;
 ///
 /// Returns an error if the component cannot be loaded, opened, validated,
 /// or if the plugin reports an invalid configuration.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn validate_plugin(
     wasm_path: &std::path::Path,
     kind: PluginKind,

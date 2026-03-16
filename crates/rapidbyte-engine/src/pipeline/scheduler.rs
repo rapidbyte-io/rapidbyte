@@ -1,4 +1,4 @@
-//! Concurrency management: semaphore permits, JoinSet collection, task results.
+//! Concurrency management: semaphore permits, `JoinSet` collection, task results.
 
 use std::sync::Arc;
 

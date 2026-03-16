@@ -6,6 +6,7 @@ pub struct ProgressSender(Option<tokio::sync::mpsc::UnboundedSender<ProgressEven
 
 impl ProgressSender {
     /// Create from an optional channel sender.
+    #[must_use]
     pub fn new(tx: Option<tokio::sync::mpsc::UnboundedSender<ProgressEvent>>) -> Self {
         Self(tx)
     }
