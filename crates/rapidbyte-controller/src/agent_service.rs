@@ -1228,20 +1228,19 @@ async fn make_task_response(
     assignment: crate::scheduler::TaskAssignment,
     secrets: &rapidbyte_secrets::SecretProviders,
 ) -> Result<PollTaskResponse, Status> {
-    // Resolve ALL variable references (secrets + env vars) at dispatch time.
-    // The agent receives fully-resolved YAML with no ${...} patterns.
-    // This prevents secret values containing ${...} from being re-expanded
-    // by the agent's environment. Deployments where agent env differs from
-    // controller env should use ${vault:...} refs for those values.
+    // Resolve only secret references (${vault:...}) at dispatch time.
+    // Env vars (${ENV_VAR}) are left for the agent to expand from its own
+    // environment, preserving distributed-mode semantics where agents may
+    // have different env vars than the controller.
     let yaml_str = std::str::from_utf8(&assignment.pipeline_yaml)
         .map_err(|e| Status::internal(format!("pipeline YAML is not valid UTF-8: {e}")))?;
     // Reject malformed secret references (e.g. ${vault:path} without #key).
     rapidbyte_engine::config::parser::reject_malformed_refs(yaml_str)
         .map_err(|e| Status::internal(e.to_string()))?;
-    let resolved = rapidbyte_engine::config::parser::substitute_variables(yaml_str, secrets)
+    let resolved = rapidbyte_engine::config::parser::substitute_secrets(yaml_str, secrets)
         .await
         .map_err(|e| {
-            let msg = format!("failed to resolve variables: {e}");
+            let msg = format!("failed to resolve secrets: {e}");
             let is_transient = e
                 .downcast_ref::<rapidbyte_secrets::SecretError>()
                 .is_some_and(rapidbyte_secrets::SecretError::is_transient);
@@ -1252,13 +1251,13 @@ async fn make_task_response(
             }
         })?;
 
-    // Redact YAML parse errors whenever any substitution was performed
-    // (secret refs OR env vars), since either may contain sensitive values.
-    let had_substitution = resolved != yaml_str;
+    // Redact YAML parse errors whenever secret substitution was performed,
+    // since resolved secret values may appear in serde error messages.
+    let had_secrets = resolved != yaml_str;
 
     // Validate the resolved YAML parses correctly.
     if let Err(e) = serde_yaml::from_str::<serde_yaml::Value>(&resolved) {
-        let msg = if had_substitution {
+        let msg = if had_secrets {
             format!(
                 "pipeline YAML invalid after variable resolution (source redacted): line {}, column {}",
                 e.location().map_or(0, |l| l.line()),
@@ -4254,17 +4253,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn make_task_response_resolves_env_vars_from_controller() {
-        // Verify the distributed-mode contract: env vars are resolved
-        // by the controller at dispatch time, not left for the agent.
-        std::env::set_var("RB_TEST_DISPATCH_HOST", "controller-host");
-
+    async fn make_task_response_preserves_env_vars_for_agent() {
+        // Verify the distributed-mode contract: env vars are NOT resolved
+        // by the controller — they are left for the agent to expand from
+        // its own environment.
         let assignment = crate::scheduler::TaskAssignment {
             task_id: "task-1".into(),
             run_id: "run-1".into(),
             attempt: 1,
             lease_epoch: 1,
-            pipeline_yaml: b"host: ${RB_TEST_DISPATCH_HOST}".to_vec(),
+            pipeline_yaml: b"host: ${DB_HOST}".to_vec(),
             dry_run: false,
             limit: None,
         };
@@ -4283,11 +4281,8 @@ mod tests {
 
         let yaml = String::from_utf8(task.pipeline_yaml_utf8).unwrap();
         assert_eq!(
-            yaml, "host: controller-host",
-            "env vars must be resolved by the controller"
+            yaml, "host: ${DB_HOST}",
+            "env vars must be preserved for the agent to resolve"
         );
-        assert!(!yaml.contains("${"), "no unresolved patterns should remain");
-
-        std::env::remove_var("RB_TEST_DISPATCH_HOST");
     }
 }

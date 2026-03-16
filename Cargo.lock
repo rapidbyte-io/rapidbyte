@@ -4603,6 +4603,7 @@ dependencies = [
  "rapidbyte-metrics",
  "rapidbyte-registry",
  "rapidbyte-runtime",
+ "rapidbyte-secrets",
  "rapidbyte-state",
  "rapidbyte-types",
  "sha2",

@@ -130,30 +130,27 @@ where
         }
     };
 
-    // The controller resolves ALL variable references at dispatch time:
-    // both ${vault:...} secret refs and ${ENV_VAR} patterns. This is
-    // intentional — secret values may contain ${...} patterns that must
-    // not be re-expanded by the agent's environment. parse_resolved
-    // skips all substitution on the pre-resolved YAML.
-    //
-    // Deployments where agent env differs from controller env should use
-    // ${vault:...} secret refs for those values rather than ${ENV_VAR}.
-    let config = match parser::parse_resolved(yaml_str) {
-        Ok(c) => c,
-        Err(e) => {
-            return TaskExecutionResult {
-                outcome: TaskOutcomeKind::Failed(TaskErrorInfo {
-                    code: "PARSE_FAILED".into(),
-                    message: format!("{e:#}"),
-                    retryable: false,
-                    safe_to_retry: false,
-                    commit_state: CommitState::BeforeCommit,
-                }),
-                metrics: TaskMetrics::zero(),
-                dry_run_result: None,
-            };
-        }
-    };
+    // The controller resolves only ${vault:...} secret refs at dispatch
+    // time. ${ENV_VAR} patterns remain and are expanded here from the
+    // agent's environment. parse_pipeline with empty secrets expands
+    // env vars without attempting secret resolution.
+    let config =
+        match parser::parse_pipeline(yaml_str, &rapidbyte_secrets::SecretProviders::new()).await {
+            Ok(c) => c,
+            Err(e) => {
+                return TaskExecutionResult {
+                    outcome: TaskOutcomeKind::Failed(TaskErrorInfo {
+                        code: "PARSE_FAILED".into(),
+                        message: format!("{e:#}"),
+                        retryable: false,
+                        safe_to_retry: false,
+                        commit_state: CommitState::BeforeCommit,
+                    }),
+                    metrics: TaskMetrics::zero(),
+                    dry_run_result: None,
+                };
+            }
+        };
 
     if let Err(e) = validator::validate_pipeline(&config) {
         return TaskExecutionResult {

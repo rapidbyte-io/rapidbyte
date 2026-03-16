@@ -18,16 +18,18 @@ static ENV_VAR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").expect("valid env var regex"));
 
 /// Matches `${prefix:path#key}` (secret provider reference).
-/// Case-insensitive prefix so `${Vault:...}` is caught rather than silently ignored.
+/// Case-insensitive prefix; allows letters, digits, hyphens, underscores
+/// (e.g. `vault`, `aws-sm`, `gcp_secrets`, `vault1`).
 static SECRET_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\$\{([a-z]+):([^#\}]+)#([^}]+)\}").expect("valid secret ref regex")
+    Regex::new(r"(?i)\$\{([a-z][a-z0-9_-]*):([^#\}]+)#([^}]+)\}").expect("valid secret ref regex")
 });
 
 /// Matches `${prefix:...}` patterns that are NOT well-formed secret refs
 /// (e.g. missing `#key`). Used to reject malformed references.
-/// Case-insensitive prefix so `${Vault:path}` is caught as malformed.
-static MALFORMED_REF_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\$\{([a-z]+):[^}]*\}").expect("valid malformed ref regex"));
+/// Same prefix rules as `SECRET_REF_RE`.
+static MALFORMED_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\$\{([a-z][a-z0-9_-]*):[^}]*\}").expect("valid malformed ref regex")
+});
 
 /// Returns `true` if `input` contains any `${prefix:...}` secret references.
 pub fn contains_secret_refs(input: &str) -> bool {
@@ -394,6 +396,10 @@ destination:
         // Mixed case is detected (case-insensitive prefix).
         assert!(contains_secret_refs("${Vault:secret/pg#password}"));
         assert!(contains_secret_refs("${VAULT:secret/pg#password}"));
+        // Prefixes with digits, hyphens, underscores.
+        assert!(contains_secret_refs("${vault1:path#key}"));
+        assert!(contains_secret_refs("${aws-sm:path#key}"));
+        assert!(contains_secret_refs("${gcp_secrets:path#key}"));
         assert!(!contains_secret_refs("${NORMAL_ENV_VAR}"));
         assert!(!contains_secret_refs("no refs here"));
     }
@@ -406,8 +412,14 @@ destination:
         assert!(reject_malformed_refs("${vault:}").is_err());
         // Mixed case — still rejected as malformed
         assert!(reject_malformed_refs("${Vault:secret/pg}").is_err());
+        // Prefixes with digits/hyphens/underscores — still malformed without #key
+        assert!(reject_malformed_refs("${vault1:secret/pg}").is_err());
+        assert!(reject_malformed_refs("${aws-sm:path}").is_err());
+        assert!(reject_malformed_refs("${gcp_secrets:path}").is_err());
         // Well-formed ref should pass
         assert!(reject_malformed_refs("${vault:secret/pg#password}").is_ok());
+        // Extended prefixes with #key should pass
+        assert!(reject_malformed_refs("${aws-sm:path#key}").is_ok());
         // Normal env var should pass
         assert!(reject_malformed_refs("${ENV_VAR}").is_ok());
         // No refs should pass

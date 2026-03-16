@@ -100,6 +100,13 @@ impl VaultProvider {
         Ok(())
     }
 
+    /// Expose the inner client for integration tests (token lookup/revoke).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn client_for_test(&self) -> &vaultrs::client::VaultClient {
+        &self.client
+    }
+
     /// Read a Vault KV v2 secret, with one transparent re-auth attempt
     /// on 403 for `AppRole` auth (handles expired tokens).
     async fn read_with_reauth(
