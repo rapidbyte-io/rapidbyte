@@ -10,8 +10,8 @@
 //! |--------------------|----------------|
 //! | `proto`            | Generated protobuf types |
 //! | `server`           | gRPC server startup and wiring |
-//! | `pipeline_service` | `PipelineService` RPC implementations |
-//! | `services::agent`  | `AgentService` RPC implementations |
+//! | `services::pipeline` | `PipelineService` RPC implementations |
+//! | `services::agent`   | `AgentService` RPC implementations |
 //! | `scheduler`        | FIFO task queue, assignment, lease epochs |
 //! | `registry`         | Agent registry, heartbeat monitoring |
 //! | `run_state`        | Run state machine with attempt tracking |
@@ -25,7 +25,6 @@ pub mod background;
 pub mod config;
 pub mod lease;
 pub mod middleware;
-pub mod pipeline_service;
 pub mod preview;
 pub mod proto;
 pub mod registry;

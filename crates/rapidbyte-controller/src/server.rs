@@ -8,10 +8,10 @@ use tracing::info;
 use crate::background;
 use crate::config::{initialize_metadata_store, validate, ControllerConfig, DEFAULT_SIGNING_KEY};
 use crate::middleware::BearerAuthInterceptor;
-use crate::pipeline_service::PipelineServiceImpl;
 use crate::proto::rapidbyte::v1::agent_service_server::AgentServiceServer;
 use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineServiceServer;
 use crate::services::agent::AgentHandler;
+use crate::services::pipeline::PipelineHandler;
 use crate::state::ControllerState;
 
 /// Start the controller gRPC server.
@@ -67,10 +67,8 @@ pub async fn run(
 
     let auth = BearerAuthInterceptor::new(config.auth_tokens.clone());
 
-    let pipeline_svc = PipelineServiceServer::with_interceptor(
-        PipelineServiceImpl::new(state.clone()),
-        auth.clone(),
-    );
+    let pipeline_svc =
+        PipelineServiceServer::with_interceptor(PipelineHandler::new(state.clone()), auth.clone());
     // Read trusted key PEM contents from files
     let mut trusted_key_pems: Vec<String> = Vec::new();
     for path in &config.trusted_key_paths {

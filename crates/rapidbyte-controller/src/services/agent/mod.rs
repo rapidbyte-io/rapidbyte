@@ -182,7 +182,7 @@ mod tests {
 
     /// Helper to submit a pipeline and return the `run_id`.
     async fn submit_pipeline(state: &ControllerState) -> String {
-        let svc = crate::pipeline_service::PipelineServiceImpl::new(state.clone());
+        let svc = crate::services::pipeline::PipelineHandler::new(state.clone());
         let yaml = b"pipeline: test\nstate:\n  backend: postgres\n";
         svc.submit_pipeline(Request::new(SubmitPipelineRequest {
             pipeline_yaml_utf8: yaml.to_vec(),
@@ -1607,7 +1607,7 @@ mod tests {
     ) {
         let state = test_state();
         let svc = AgentHandler::new(state.clone());
-        let pipeline_svc = crate::pipeline_service::PipelineServiceImpl::new(state.clone());
+        let pipeline_svc = crate::services::pipeline::PipelineHandler::new(state.clone());
 
         let agent_id = svc
             .register_agent(Request::new(RegisterAgentRequest {
@@ -2671,7 +2671,7 @@ mod tests {
         providers.register("vault", std::sync::Arc::new(provider));
         let state = test_state().with_secrets(providers);
 
-        let svc = crate::pipeline_service::PipelineServiceImpl::new(state.clone());
+        let svc = crate::services::pipeline::PipelineHandler::new(state.clone());
         let yaml = b"pipeline: test\nstate:\n  backend: postgres\nsource:\n  config:\n    password: ${vault:secret/db#password}\n";
         let run_id = svc
             .submit_pipeline(Request::new(SubmitPipelineRequest {
@@ -2727,7 +2727,7 @@ mod tests {
         providers.register("vault", std::sync::Arc::new(provider));
         let state = state.with_secrets(providers);
 
-        let svc = crate::pipeline_service::PipelineServiceImpl::new(state.clone());
+        let svc = crate::services::pipeline::PipelineHandler::new(state.clone());
         let yaml = b"pipeline: test\nstate:\n  backend: postgres\nsource:\n  config:\n    password: ${vault:secret/db#password}\n";
         let run_id = svc
             .submit_pipeline(Request::new(SubmitPipelineRequest {
@@ -2972,7 +2972,7 @@ mod tests {
         providers.register("vault", std::sync::Arc::new(MissingKeyProvider));
         let state = test_state().with_secrets(providers);
 
-        let svc = crate::pipeline_service::PipelineServiceImpl::new(state.clone());
+        let svc = crate::services::pipeline::PipelineHandler::new(state.clone());
         let yaml = b"pipeline: test\nstate:\n  backend: postgres\nsource:\n  config:\n    password: ${vault:secret/db#password}\n";
         let run_id = svc
             .submit_pipeline(Request::new(SubmitPipelineRequest {
@@ -3199,7 +3199,7 @@ mod tests {
         let state = test_state();
 
         // Use a very short lease so expire_leases() triggers.
-        let svc = crate::pipeline_service::PipelineServiceImpl::new(state.clone());
+        let svc = crate::services::pipeline::PipelineHandler::new(state.clone());
         let yaml = b"pipeline: test\nstate:\n  backend: postgres\nsource:\n  config:\n    password: ${vault:secret/db#password}\n";
         let run_id = svc
             .submit_pipeline(Request::new(SubmitPipelineRequest {
