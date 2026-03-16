@@ -76,22 +76,36 @@ impl VaultProvider {
 }
 
 /// Classify a Vault API error into a `SecretError` variant.
+///
+/// Uses structured `ClientError` variants and HTTP status codes where
+/// available, falling back to case-insensitive text matching for
+/// transport-level errors that lack structured fields.
 fn classify_vault_error(error: vaultrs::error::ClientError, path: &str) -> SecretError {
-    let err_str = format!("{error:#}");
-    if err_str.contains("connection refused")
-        || err_str.contains("timed out")
-        || err_str.contains("temporarily unavailable")
-        || err_str.contains("503")
-    {
-        SecretError::Unavailable(format!("failed to read Vault secret at {path}: {error}"))
-    } else if err_str.contains("403") || err_str.contains("permission denied") {
-        SecretError::AuthFailed(format!("failed to read Vault secret at {path}: {error}"))
-    } else if err_str.contains("404") {
-        SecretError::NotFound(format!("Vault secret not found at {path}"))
-    } else {
-        SecretError::Other(
+    match &error {
+        // Structured API errors — classify by HTTP status code.
+        vaultrs::error::ClientError::APIError { code, .. } => match *code {
+            403 => {
+                SecretError::AuthFailed(format!("failed to read Vault secret at {path}: {error}"))
+            }
+            404 => SecretError::NotFound(format!("Vault secret not found at {path}")),
+            500..=599 => {
+                SecretError::Unavailable(format!("failed to read Vault secret at {path}: {error}"))
+            }
+            _ => SecretError::Other(
+                anyhow::Error::new(error).context(format!("failed to read Vault secret at {path}")),
+            ),
+        },
+        // Transport/network errors (reqwest under the hood) and empty
+        // responses (Vault may be starting up) — transient.
+        vaultrs::error::ClientError::RestClientError { .. }
+        | vaultrs::error::ClientError::RestClientBuildError { .. }
+        | vaultrs::error::ClientError::ResponseEmptyError => {
+            SecretError::Unavailable(format!("failed to read Vault secret at {path}: {error}"))
+        }
+        // Everything else — permanent.
+        _ => SecretError::Other(
             anyhow::Error::new(error).context(format!("failed to read Vault secret at {path}")),
-        )
+        ),
     }
 }
 
