@@ -14,8 +14,8 @@ pub struct StreamAutotuneDecision {
 }
 
 /// Build parallelism candidates around a baseline value within the provided cap.
-#[must_use]
-pub fn generate_parallelism_options(base: u32, cap: u32) -> Vec<u32> {
+#[cfg(test)]
+fn generate_parallelism_options(base: u32, cap: u32) -> Vec<u32> {
     let base = base.max(1);
     let cap = cap.max(1);
     let half = (base / 2).max(1);

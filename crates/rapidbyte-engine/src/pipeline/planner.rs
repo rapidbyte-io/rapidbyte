@@ -171,7 +171,7 @@ pub(crate) fn build_stream_contexts(
     let supports_partitioned_read = source_manifest
         .is_some_and(|m: &PluginManifest| m.has_source_feature(Feature::PartitionedRead));
     let baseline_parallelism = compute_pipeline_parallelism(config, supports_partitioned_read);
-    let autotune_decision = crate::autotune::compute_autotune_decision(
+    let autotune_decision = super::autotune::compute_autotune_decision(
         config,
         baseline_parallelism,
         supports_partitioned_read,

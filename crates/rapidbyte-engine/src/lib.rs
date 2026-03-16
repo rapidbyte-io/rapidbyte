@@ -8,13 +8,12 @@
 //! | Module             | Responsibility |
 //! |--------------------|----------------|
 //! | `arrow`            | Arrow IPC encode/decode utilities |
-//! | `autotune`         | Runtime autotune decision helpers |
 //! | `config`           | Pipeline YAML config types, parsing, validation |
 //! | `error`            | Pipeline error types, retry policy, convenience constructors |
 //! | `execution`        | Runtime execution mode types (dry-run, limits) |
 //! | `finalizers`       | Post-execution: checkpoint correlation, DLQ, run finalization |
 //! | `orchestrator`     | Top-level pipeline coordination (run, check, discover) |
-//! | `pipeline`         | Pipeline execution: planning, scheduling, stream execution |
+//! | `pipeline`         | Pipeline execution: planning, autotune, scheduling, stream execution |
 //! | `plugin`           | Plugin resolution, manifest validation, module loading |
 //! | `progress`         | Progress event types and ProgressSender for live CLI updates |
 //! | `result`           | Pipeline result types, timing breakdowns |
@@ -23,7 +22,6 @@
 #![warn(clippy::pedantic)]
 
 pub mod arrow;
-pub mod autotune;
 pub mod config;
 pub mod error;
 pub mod execution;
