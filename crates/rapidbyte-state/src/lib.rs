@@ -22,6 +22,20 @@ pub mod sqlite;
 // Top-level re-exports for convenience.
 pub use backend::StateBackend;
 pub use error::StateError;
+
+/// Supported state backend implementations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendKind {
+    Sqlite,
+    Postgres,
+}
+
+impl Default for BackendKind {
+    fn default() -> Self {
+        Self::Sqlite
+    }
+}
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresStateBackend;
 #[cfg(feature = "sqlite")]

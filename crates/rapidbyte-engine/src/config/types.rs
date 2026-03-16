@@ -12,7 +12,6 @@ pub(crate) const MIN_FLUSH_CHUNK_BYTES: usize = 1024 * 1024;
 /// Maximum allowed value for `flush_bytes` (32 MiB).
 pub(crate) const MAX_FLUSH_CHUNK_BYTES: usize = 32 * 1024 * 1024;
 
-const DEFAULT_STATE_BACKEND: StateBackendKind = StateBackendKind::Sqlite;
 const DEFAULT_MAX_MEMORY: &str = "256mb";
 const DEFAULT_MAX_BATCH_BYTES: &str = "64mb";
 const DEFAULT_CHECKPOINT_INTERVAL_BYTES: &str = "64mb";
@@ -153,18 +152,7 @@ pub struct DestinationConfig {
     pub limits: Option<PipelineLimits>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum StateBackendKind {
-    Sqlite,
-    Postgres,
-}
-
-impl Default for StateBackendKind {
-    fn default() -> Self {
-        DEFAULT_STATE_BACKEND
-    }
-}
+pub use rapidbyte_state::BackendKind as StateBackendKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]

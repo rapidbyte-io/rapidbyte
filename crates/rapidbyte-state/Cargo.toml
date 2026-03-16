@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 rapidbyte-types = { path = "../rapidbyte-types" }
 chrono = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
