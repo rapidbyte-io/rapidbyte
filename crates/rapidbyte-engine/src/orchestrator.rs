@@ -17,17 +17,20 @@ use rapidbyte_types::envelope::DlqRecord;
 use rapidbyte_types::error::{CommitState, PluginError, ValidationResult, ValidationStatus};
 use rapidbyte_types::manifest::PluginManifest;
 use rapidbyte_types::metric::{ReadSummary, WriteSummary};
-use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
+use rapidbyte_types::state::{PipelineId, RunStats, StreamName};
 use rapidbyte_types::wire::PluginKind;
 
 use crate::arrow::ipc_to_record_batches;
 use crate::config::types::PipelineConfig;
 use crate::error::{compute_backoff, PipelineError};
-use crate::execution::{DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineOutcome};
-use crate::finalizers::checkpoint::correlate_and_persist_cursors;
+use crate::execution::{DryRunStreamResult, ExecutionOptions, PipelineOutcome};
+use crate::finalizers::run::{
+    build_dry_run_result, finalize_pipeline_execution, prepare_metrics_runtime,
+    AggregatedStreamResults,
+};
 use crate::pipeline::planner::{
-    build_stream_contexts, compute_pipeline_parallelism, destination_preflight_streams,
-    execution_parallelism, ExecutionPlan, StreamParams,
+    build_stream_contexts, destination_preflight_streams, execution_parallelism, ExecutionPlan,
+    StreamParams,
 };
 use crate::plugin::loader::{load_all_modules, PluginModules};
 use crate::plugin::resolver::{
@@ -35,10 +38,7 @@ use crate::plugin::resolver::{
 };
 use crate::plugin::sandbox::{build_sandbox_overrides, check_state_backend, create_state_backend};
 use crate::progress::{Phase, ProgressEvent};
-use crate::result::{
-    CheckItemResult, CheckResult, DestTiming, PipelineCounts, PipelineResult, SourceTiming,
-    StreamShardMetric,
-};
+use crate::result::{CheckItemResult, CheckResult, StreamShardMetric};
 use crate::runner::{
     run_destination_stream, run_discover, run_source_stream, run_transform_stream, validate_plugin,
     StreamRunContext, TransformRunResult,
@@ -74,24 +74,6 @@ struct StreamResult {
     recv_secs: f64,
     transform_durations: Vec<f64>,
     dry_run_result: Option<DryRunStreamResult>,
-}
-
-struct AggregatedStreamResults {
-    execution_parallelism: u32,
-    total_read_summary: ReadSummary,
-    total_write_summary: WriteSummary,
-    source_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
-    dest_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
-    max_source_duration: f64,
-    max_dest_duration: f64,
-    max_vm_setup_secs: f64,
-    max_recv_secs: f64,
-    transform_durations: Vec<f64>,
-    dlq_records: Vec<DlqRecord>,
-    final_stats: RunStats,
-    first_error: Option<PipelineError>,
-    dry_run_streams: Vec<DryRunStreamResult>,
-    stream_metrics: Vec<StreamShardMetric>,
 }
 
 struct StreamTaskCollection {
@@ -259,32 +241,6 @@ pub async fn run_pipeline(
     }
 }
 
-struct MetricsRuntime<'a> {
-    snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
-    meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
-}
-
-impl MetricsRuntime<'_> {
-    fn snapshot_for_run(
-        &self,
-        pipeline: &str,
-        run: Option<&str>,
-    ) -> rapidbyte_metrics::snapshot::PipelineMetricsSnapshot {
-        self.snapshot_reader
-            .flush_and_snapshot_for_run(self.meter_provider, pipeline, run)
-    }
-}
-
-fn prepare_metrics_runtime<'a>(
-    snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
-    meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
-) -> MetricsRuntime<'a> {
-    MetricsRuntime {
-        snapshot_reader,
-        meter_provider,
-    }
-}
-
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 async fn execute_pipeline_once(
     config: &PipelineConfig,
@@ -434,7 +390,7 @@ async fn execute_pipeline_once(
                 )));
             }
 
-            let result = finalize_run(
+            let result = finalize_pipeline_execution(
                 config,
                 &pipeline_id,
                 state_for_execution.clone(),
@@ -1079,199 +1035,6 @@ async fn execute_streams(
     })
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn finalize_run(
-    config: &PipelineConfig,
-    pipeline_id: &PipelineId,
-    state: Arc<dyn StateBackend>,
-    run_id: i64,
-    attempt: u32,
-    start: Instant,
-    metric_run_label: &str,
-    modules: &PluginModules,
-    mut aggregated: AggregatedStreamResults,
-    metrics_runtime: &MetricsRuntime<'_>,
-) -> Result<PipelineResult, PipelineError> {
-    if let Some(err) = aggregated.first_error {
-        // Drain the run's snapshot entry so it doesn't accumulate in the
-        // SnapshotReader's finished_run_snapshots map (memory leak in
-        // long-lived agent processes).
-        let _ = metrics_runtime.snapshot_for_run(&config.pipeline, Some(metric_run_label));
-
-        let state_for_complete = state.clone();
-        let run_stats = RunStats {
-            records_read: aggregated.final_stats.records_read,
-            records_written: aggregated.final_stats.records_written,
-            bytes_read: aggregated.final_stats.bytes_read,
-            bytes_written: aggregated.final_stats.bytes_written,
-            error_message: Some(format!("Stream error: {err}")),
-        };
-        tokio::task::spawn_blocking(move || {
-            state_for_complete.complete_run(run_id, RunStatus::Failed, &run_stats)
-        })
-        .await
-        .map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!("complete_run task panicked: {e}"))
-        })?
-        .map_err(|e| PipelineError::Infrastructure(e.into()))?;
-
-        let state_for_dlq = state.clone();
-        let pipeline_id_for_dlq = pipeline_id.clone();
-        let dlq_records = std::mem::take(&mut aggregated.dlq_records);
-        tokio::task::spawn_blocking(move || {
-            crate::finalizers::dlq::persist_dlq_records(
-                state_for_dlq.as_ref(),
-                &pipeline_id_for_dlq,
-                run_id,
-                &dlq_records,
-            )
-        })
-        .await
-        .map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!("persist_dlq_records task panicked: {e}"))
-        })?
-        .map_err(|e| PipelineError::Infrastructure(e.into()))?;
-
-        return Err(err);
-    }
-
-    let snap = metrics_runtime.snapshot_for_run(&config.pipeline, Some(metric_run_label));
-
-    let wasm_overhead_secs = compute_wasm_overhead_secs(&snap, &aggregated);
-
-    tracing::debug!(
-        pipeline = config.pipeline,
-        source_checkpoint_count = aggregated.source_checkpoints.len(),
-        dest_checkpoint_count = aggregated.dest_checkpoints.len(),
-        "About to correlate checkpoints"
-    );
-
-    let cursors_advanced =
-        finalize_successful_run_state(state.clone(), pipeline_id, run_id, &mut aggregated).await?;
-    if cursors_advanced > 0 {
-        tracing::info!(
-            pipeline = config.pipeline,
-            cursors_advanced,
-            "Checkpoint coordination complete"
-        );
-    }
-
-    let duration = start.elapsed();
-    let transform_module_load_ms = modules
-        .transform_modules
-        .iter()
-        .map(|m| m.load_ms)
-        .collect::<Vec<_>>();
-
-    tracing::info!(
-        pipeline = config.pipeline,
-        records_read = aggregated.total_read_summary.records_read,
-        records_written = aggregated.total_write_summary.records_written,
-        duration_secs = duration.as_secs_f64(),
-        "Pipeline run completed"
-    );
-
-    Ok(PipelineResult {
-        counts: PipelineCounts {
-            records_read: aggregated.total_read_summary.records_read,
-            records_written: aggregated.total_write_summary.records_written,
-            bytes_read: aggregated.total_read_summary.bytes_read,
-            bytes_written: aggregated.total_write_summary.bytes_written,
-        },
-        source: build_source_timing(
-            &snap,
-            aggregated.max_source_duration,
-            modules.source_module_load_ms,
-        ),
-        dest: build_dest_timing(&snap, &aggregated, modules.dest_module_load_ms),
-        transform_count: aggregated.transform_durations.len(),
-        transform_duration_secs: aggregated.transform_durations.iter().sum(),
-        transform_module_load_ms,
-        duration_secs: duration.as_secs_f64(),
-        wasm_overhead_secs,
-        retry_count: attempt.saturating_sub(1),
-        parallelism: reported_parallelism(config, &aggregated),
-        stream_metrics: aggregated.stream_metrics,
-    })
-}
-
-fn reported_parallelism(config: &PipelineConfig, aggregated: &AggregatedStreamResults) -> u32 {
-    if aggregated.execution_parallelism > 0 {
-        aggregated.execution_parallelism
-    } else {
-        compute_pipeline_parallelism(config, false)
-    }
-}
-
-fn build_source_timing(
-    snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
-    max_source_duration: f64,
-    source_module_load_ms: u64,
-) -> SourceTiming {
-    SourceTiming {
-        duration_secs: max_source_duration,
-        module_load_ms: source_module_load_ms,
-        connect_secs: snap.source_connect_secs,
-        query_secs: snap.source_query_secs,
-        fetch_secs: snap.source_fetch_secs,
-        arrow_encode_secs: snap.source_encode_secs,
-        emit_nanos: snap.emit_batch_nanos,
-        compress_nanos: snap.compress_nanos,
-        emit_count: snap.emit_count,
-    }
-}
-
-fn build_dry_run_result(
-    snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
-    aggregated: AggregatedStreamResults,
-    source_module_load_ms: u64,
-    duration_secs: f64,
-) -> DryRunResult {
-    DryRunResult {
-        streams: aggregated.dry_run_streams,
-        source: build_source_timing(snap, aggregated.max_source_duration, source_module_load_ms),
-        transform_count: aggregated.transform_durations.len(),
-        transform_duration_secs: aggregated.transform_durations.iter().sum(),
-        duration_secs,
-    }
-}
-
-fn compute_wasm_overhead_secs(
-    snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
-    aggregated: &AggregatedStreamResults,
-) -> f64 {
-    let plugin_internal_secs =
-        snap.dest_connect_secs + snap.dest_flush_secs + snap.dest_commit_secs;
-
-    (aggregated.max_dest_duration
-        - aggregated.max_vm_setup_secs
-        - aggregated.max_recv_secs
-        - plugin_internal_secs)
-        .max(0.0)
-}
-
-fn build_dest_timing(
-    snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
-    aggregated: &AggregatedStreamResults,
-    dest_module_load_ms: u64,
-) -> DestTiming {
-    DestTiming {
-        duration_secs: aggregated.max_dest_duration,
-        module_load_ms: dest_module_load_ms,
-        connect_secs: snap.dest_connect_secs,
-        flush_secs: snap.dest_flush_secs,
-        commit_secs: snap.dest_commit_secs,
-        arrow_decode_secs: snap.dest_decode_secs,
-        vm_setup_secs: aggregated.max_vm_setup_secs,
-        recv_secs: aggregated.max_recv_secs,
-        recv_nanos: snap.next_batch_nanos,
-        recv_wait_nanos: snap.next_batch_wait_nanos,
-        recv_process_nanos: snap.next_batch_process_nanos,
-        decompress_nanos: snap.decompress_nanos,
-        recv_count: snap.next_batch_count,
-    }
-}
-
 fn cancelled_pipeline_error(message: &str) -> PipelineError {
     let mut error = PluginError::internal("CANCELLED", message);
     error.safe_to_retry = true;
@@ -1297,100 +1060,6 @@ where
     Fut: Future<Output = Result<T, PipelineError>>,
 {
     finalize.await
-}
-
-async fn complete_run_status(
-    backend: Arc<dyn StateBackend>,
-    run_id: i64,
-    status: RunStatus,
-    run_stats: RunStats,
-) -> Result<(), PipelineError> {
-    tokio::task::spawn_blocking(move || backend.complete_run(run_id, status, &run_stats))
-        .await
-        .map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!("complete_run task panicked: {e}"))
-        })?
-        .map_err(|e| PipelineError::Infrastructure(e.into()))
-}
-
-async fn finalize_successful_run_state(
-    state: Arc<dyn StateBackend>,
-    pipeline_id: &PipelineId,
-    run_id: i64,
-    aggregated: &mut AggregatedStreamResults,
-) -> Result<u64, PipelineError> {
-    let state_for_cursor = state.clone();
-    let pipeline_id_for_cursor = pipeline_id.clone();
-    let source_checkpoints = std::mem::take(&mut aggregated.source_checkpoints);
-    let dest_checkpoints = std::mem::take(&mut aggregated.dest_checkpoints);
-    let cursor_result = tokio::task::spawn_blocking(move || {
-        correlate_and_persist_cursors(
-            state_for_cursor.as_ref(),
-            &pipeline_id_for_cursor,
-            &source_checkpoints,
-            &dest_checkpoints,
-        )
-    })
-    .await
-    .map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!(
-            "correlate_and_persist_cursors task panicked: {e}"
-        ))
-    })?;
-
-    let cursors_advanced = match cursor_result {
-        Ok(cursors_advanced) => cursors_advanced,
-        Err(error) => {
-            let failed_stats = finalization_failed_stats(aggregated, &error.to_string());
-            let _ = complete_run_status(state, run_id, RunStatus::Failed, failed_stats).await;
-            return Err(PipelineError::Infrastructure(error));
-        }
-    };
-
-    let state_for_dlq = state.clone();
-    let pipeline_id_for_dlq = pipeline_id.clone();
-    let dlq_records = std::mem::take(&mut aggregated.dlq_records);
-    let dlq_result = tokio::task::spawn_blocking(move || {
-        crate::finalizers::dlq::persist_dlq_records(
-            state_for_dlq.as_ref(),
-            &pipeline_id_for_dlq,
-            run_id,
-            &dlq_records,
-        )
-    })
-    .await
-    .map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!("persist_dlq_records task panicked: {e}"))
-    })?;
-    if let Err(error) = dlq_result {
-        let failed_stats = finalization_failed_stats(aggregated, &error.to_string());
-        let _ = complete_run_status(state, run_id, RunStatus::Failed, failed_stats).await;
-        return Err(PipelineError::Infrastructure(error.into()));
-    }
-
-    let complete_stats = RunStats {
-        records_read: aggregated.total_read_summary.records_read,
-        records_written: aggregated.total_write_summary.records_written,
-        bytes_read: aggregated.total_read_summary.bytes_read,
-        bytes_written: aggregated.total_write_summary.bytes_written,
-        error_message: None,
-    };
-    complete_run_status(state, run_id, RunStatus::Completed, complete_stats).await?;
-
-    Ok(cursors_advanced)
-}
-
-fn finalization_failed_stats(
-    aggregated: &AggregatedStreamResults,
-    error_message: &str,
-) -> RunStats {
-    RunStats {
-        records_read: aggregated.total_read_summary.records_read,
-        records_written: aggregated.total_write_summary.records_written,
-        bytes_read: aggregated.total_read_summary.bytes_read,
-        bytes_written: aggregated.total_write_summary.bytes_written,
-        error_message: Some(format!("Post-run finalization failed: {error_message}")),
-    }
 }
 
 /// Collect frames from a channel, decode IPC, enforce row limit.
@@ -1897,28 +1566,25 @@ mod metrics_runtime_tests {
 }
 
 #[cfg(test)]
-mod finalize_run_state_tests {
+mod orchestrator_helper_tests {
     use super::*;
-    use rapidbyte_state::error::{Result as StateResult, StateError};
+    use crate::finalizers::run::persist_run_state;
+    use rapidbyte_state::error::Result as StateResult;
     use rapidbyte_types::checkpoint::{Checkpoint, CheckpointKind};
     use rapidbyte_types::cursor::CursorValue;
-    use rapidbyte_types::state::CursorState;
+    use rapidbyte_types::state::{CursorState, RunStatus};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct TestStateBackend {
         complete_statuses: Mutex<Vec<(RunStatus, Option<String>)>>,
         cursor_written: AtomicBool,
-        fail_set_cursor: bool,
-        fail_insert_dlq: bool,
     }
 
     impl TestStateBackend {
-        fn new(fail_set_cursor: bool, fail_insert_dlq: bool) -> Self {
+        fn new() -> Self {
             Self {
                 complete_statuses: Mutex::new(Vec::new()),
                 cursor_written: AtomicBool::new(false),
-                fail_set_cursor,
-                fail_insert_dlq,
             }
         }
     }
@@ -1938,11 +1604,6 @@ mod finalize_run_state_tests {
             _stream: &StreamName,
             _cursor: &CursorState,
         ) -> StateResult<()> {
-            if self.fail_set_cursor {
-                return Err(StateError::backend(std::io::Error::other(
-                    "cursor write failed",
-                )));
-            }
             self.cursor_written.store(true, Ordering::SeqCst);
             Ok(())
         }
@@ -1980,11 +1641,6 @@ mod finalize_run_state_tests {
             _run_id: i64,
             _records: &[DlqRecord],
         ) -> StateResult<u64> {
-            if self.fail_insert_dlq {
-                return Err(StateError::backend(std::io::Error::other(
-                    "dlq insert failed",
-                )));
-            }
             Ok(0)
         }
     }
@@ -2037,137 +1693,15 @@ mod finalize_run_state_tests {
         }
     }
 
-    #[test]
-    fn reported_parallelism_prefers_aggregated_execution_parallelism() {
-        let yaml = r#"
-version: "1.0"
-pipeline: test_parallelism
-source:
-  use: postgres
-  config: {}
-  streams:
-    - name: bench_events
-      sync_mode: full_refresh
-destination:
-  use: postgres
-  config: {}
-  write_mode: append
-resources:
-  parallelism: auto
-"#;
-        let config: PipelineConfig = serde_yaml::from_str(yaml).expect("valid pipeline yaml");
-        let mut aggregated = make_aggregated_results();
-        aggregated.execution_parallelism = 12;
-
-        assert_eq!(reported_parallelism(&config, &aggregated), 12);
-    }
-
-    #[tokio::test]
-    async fn successful_finalization_marks_run_completed_after_cursor_persist() {
-        let backend = Arc::new(TestStateBackend::new(false, false));
-        let mut aggregated = make_aggregated_results();
-
-        let advanced = finalize_successful_run_state(
-            backend.clone(),
-            &PipelineId::new("p"),
-            1,
-            &mut aggregated,
-        )
-        .await
-        .expect("finalization should succeed");
-
-        assert_eq!(advanced, 1);
-        assert!(backend.cursor_written.load(Ordering::SeqCst));
-        assert_eq!(
-            backend
-                .complete_statuses
-                .lock()
-                .expect("complete statuses lock poisoned")
-                .as_slice(),
-            &[(RunStatus::Completed, None)]
-        );
-    }
-
-    #[tokio::test]
-    async fn cursor_finalization_failure_marks_run_failed_not_completed() {
-        let backend = Arc::new(TestStateBackend::new(true, false));
-        let mut aggregated = make_aggregated_results();
-
-        let result = finalize_successful_run_state(
-            backend.clone(),
-            &PipelineId::new("p"),
-            1,
-            &mut aggregated,
-        )
-        .await;
-
-        assert!(result.is_err());
-        assert!(!backend.cursor_written.load(Ordering::SeqCst));
-
-        let statuses = backend
-            .complete_statuses
-            .lock()
-            .expect("complete statuses lock poisoned");
-        assert_eq!(statuses.len(), 1);
-        assert_eq!(statuses[0].0, RunStatus::Failed);
-        assert!(statuses[0]
-            .1
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Post-run finalization failed"));
-    }
-
-    #[tokio::test]
-    async fn dlq_finalization_failure_marks_run_failed_not_completed() {
-        let backend = Arc::new(TestStateBackend::new(false, true));
-        let mut aggregated = make_aggregated_results();
-        aggregated.dlq_records.push(DlqRecord {
-            stream_name: "users".to_string(),
-            record_json: "{\"id\":42}".to_string(),
-            error_message: "bad row".to_string(),
-            error_category: rapidbyte_types::error::ErrorCategory::Data,
-            failed_at: rapidbyte_types::envelope::Timestamp::new("2026-03-08T00:00:00Z"),
-        });
-
-        let result = finalize_successful_run_state(
-            backend.clone(),
-            &PipelineId::new("p"),
-            1,
-            &mut aggregated,
-        )
-        .await;
-
-        assert!(result.is_err());
-        assert!(backend.cursor_written.load(Ordering::SeqCst));
-
-        let statuses = backend
-            .complete_statuses
-            .lock()
-            .expect("complete statuses lock poisoned");
-        assert_eq!(statuses.len(), 1);
-        assert_eq!(statuses[0].0, RunStatus::Failed);
-        assert!(statuses[0]
-            .1
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Post-run finalization failed"));
-    }
-
     #[tokio::test]
     async fn cancellation_after_stream_execution_preserves_real_finalization_outcome() {
-        let backend = Arc::new(TestStateBackend::new(false, false));
+        let backend = Arc::new(TestStateBackend::new());
         let mut aggregated = make_aggregated_results();
         let token = CancellationToken::new();
         token.cancel();
 
         let advanced = preserve_real_outcome_after_stream_execution(&token, async {
-            finalize_successful_run_state(
-                backend.clone(),
-                &PipelineId::new("p"),
-                1,
-                &mut aggregated,
-            )
-            .await
+            persist_run_state(backend.clone(), &PipelineId::new("p"), 1, &mut aggregated).await
         })
         .await
         .expect("finalization should succeed even after late cancellation");
