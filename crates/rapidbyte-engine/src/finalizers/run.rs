@@ -79,7 +79,6 @@ pub(crate) fn snapshot_for_run(
 
 /// Finalize a pipeline run: handle stream errors, correlate checkpoints,
 /// persist DLQ records, mark run status, and assemble timing results.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn finalize_pipeline_execution(
     config: &PipelineConfig,
     pipeline_id: &PipelineId,

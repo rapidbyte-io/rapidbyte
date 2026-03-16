@@ -161,7 +161,6 @@ fn decode_incremental_last_value(raw: String, tie_breaker_field: Option<&str>) -
     CursorValue::Utf8 { value: raw }
 }
 
-#[allow(clippy::too_many_lines)]
 pub(crate) fn build_stream_contexts(
     config: &PipelineConfig,
     state: &dyn StateBackend,

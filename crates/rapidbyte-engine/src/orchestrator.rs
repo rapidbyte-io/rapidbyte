@@ -58,7 +58,6 @@ struct PipelineAttempt<'a> {
 }
 
 impl<'a> PipelineAttempt<'a> {
-    #[allow(clippy::too_many_lines)]
     async fn execute(
         &self,
         attempt: u32,
@@ -618,7 +617,6 @@ async fn execute_streams(
 /// # Errors
 ///
 /// Returns an error if plugin resolution, module loading, or validation fails.
-#[allow(clippy::too_many_lines)]
 pub async fn check_pipeline(
     config: &PipelineConfig,
     registry_config: &rapidbyte_registry::RegistryConfig,
