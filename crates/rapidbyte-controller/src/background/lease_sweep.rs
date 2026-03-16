@@ -2,33 +2,12 @@
 
 use std::time::{Duration, Instant};
 
-use opentelemetry::metrics::UpDownCounter;
 use tracing::info;
 
-use crate::proto::rapidbyte::v1::{run_event, RunEvent, RunFailed, TaskError};
 use crate::run_state::{
     RunError, RunState as InternalRunState, ERROR_CODE_LEASE_EXPIRED, ERROR_CODE_RECOVERY_TIMEOUT,
 };
 use crate::state::ControllerState;
-
-async fn publish_run_failed(state: &ControllerState, run_id: &str, error: &RunError, attempt: u32) {
-    state.watchers.write().await.publish_terminal(
-        run_id,
-        RunEvent {
-            run_id: run_id.to_string(),
-            event: Some(run_event::Event::Failed(RunFailed {
-                error: Some(TaskError {
-                    code: error.code.clone(),
-                    message: error.message.clone(),
-                    retryable: error.retryable,
-                    safe_to_retry: error.safe_to_retry,
-                    commit_state: error.commit_state.clone(),
-                }),
-                attempt,
-            })),
-        },
-    );
-}
 
 async fn rollback_background_timeout(
     state: &ControllerState,
@@ -43,10 +22,6 @@ async fn rollback_background_timeout(
         let mut tasks = state.tasks.write().await;
         tasks.restore_task(previous_task);
     }
-}
-
-fn decrement_active_runs(counter: &UpDownCounter<i64>) {
-    counter.add(-1, &[]);
 }
 
 #[allow(clippy::too_many_lines)]
@@ -97,7 +72,7 @@ pub(crate) async fn handle_expired_lease(
                     }
                 };
                 r.error = Some(error_info.clone());
-                Some((error_info, r.attempt))
+                Some((target_state, error_info, r.attempt))
             } else {
                 None
             }
@@ -114,7 +89,7 @@ pub(crate) async fn handle_expired_lease(
             None
         }
     };
-    let Some((error_info, attempt)) = timeout_outcome else {
+    let Some((target_state, error_info, attempt)) = timeout_outcome else {
         return;
     };
     let timed_out_run = state
@@ -155,8 +130,18 @@ pub(crate) async fn handle_expired_lease(
     }
 
     if durable {
-        publish_run_failed(state, &run_id, &error_info, attempt).await;
-        decrement_active_runs(&rapidbyte_metrics::instruments::controller::active_runs());
+        let outcome = if target_state == InternalRunState::RecoveryFailed {
+            crate::terminal::TerminalOutcome::RecoveryFailed {
+                error: error_info,
+                attempt,
+            }
+        } else {
+            crate::terminal::TerminalOutcome::TimedOut {
+                error: error_info,
+                attempt,
+            }
+        };
+        crate::terminal::finalize_terminal(state, &run_id, outcome).await;
     } else {
         tracing::warn!(
             task_id = %task_id,
@@ -271,8 +256,15 @@ pub(crate) async fn sweep_reconciliation_timeouts(
         }
 
         if durable {
-            publish_run_failed(state, &run_id, &error_info, attempt).await;
-            decrement_active_runs(&rapidbyte_metrics::instruments::controller::active_runs());
+            crate::terminal::finalize_terminal(
+                state,
+                &run_id,
+                crate::terminal::TerminalOutcome::RecoveryFailed {
+                    error: error_info,
+                    attempt,
+                },
+            )
+            .await;
         } else {
             tracing::warn!(run_id, "skipping reconciliation-timeout terminal publish because durable persistence failed");
         }
@@ -303,39 +295,7 @@ pub fn spawn_lease_sweep(
 mod tests {
     use super::*;
     use crate::store::test_support::FailingMetadataStore;
-    use opentelemetry::metrics::MeterProvider;
-    use opentelemetry_sdk::metrics::data::Sum;
-    use opentelemetry_sdk::metrics::InMemoryMetricExporter;
     use std::time::Duration;
-
-    fn active_runs_value(exporter: &InMemoryMetricExporter) -> i64 {
-        let metrics = exporter.get_finished_metrics().unwrap_or_default();
-        for resource_metrics in metrics.iter().rev() {
-            for scope_metrics in &resource_metrics.scope_metrics {
-                for metric in &scope_metrics.metrics {
-                    if metric.name != "controller.active_runs" {
-                        continue;
-                    }
-                    if let Some(sum) = metric.data.as_any().downcast_ref::<Sum<i64>>() {
-                        return sum.data_points.iter().map(|dp| dp.value).sum();
-                    }
-                }
-            }
-        }
-        0
-    }
-
-    #[test]
-    fn decrement_active_runs_records_metric() {
-        let (provider, exporter) = rapidbyte_metrics::test_support::exporter_test_provider();
-        let counter = provider
-            .meter("test")
-            .i64_up_down_counter("controller.active_runs")
-            .build();
-        decrement_active_runs(&counter);
-        let _ = provider.force_flush();
-        assert_eq!(active_runs_value(&exporter), -1);
-    }
 
     #[tokio::test]
     async fn handle_expired_lease_transitions_assigned_run_to_timed_out() {

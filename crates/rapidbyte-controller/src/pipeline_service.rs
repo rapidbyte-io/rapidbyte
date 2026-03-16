@@ -310,15 +310,12 @@ impl PipelineServiceImpl {
             self.rollback_queued_cancel(previous_run, None).await;
             return Err(Status::internal(error.to_string()));
         }
-        self.publish_cancelled(run_id).await;
-        rapidbyte_metrics::instruments::controller::runs_completed().add(
-            1,
-            &[KeyValue::new(
-                rapidbyte_metrics::labels::STATUS,
-                "cancelled",
-            )],
-        );
-        rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
+        crate::terminal::finalize_terminal(
+            &self.state,
+            run_id,
+            crate::terminal::TerminalOutcome::Cancelled,
+        )
+        .await;
         Ok(CancelRunResponse {
             accepted: true,
             message: "Queued run cancelled".into(),
@@ -414,16 +411,6 @@ impl PipelineServiceImpl {
             return (Some(previous_task), cancelled_task);
         }
         (None, None)
-    }
-
-    async fn publish_cancelled(&self, run_id: &str) {
-        self.state.watchers.write().await.publish_terminal(
-            run_id,
-            RunEvent {
-                run_id: run_id.to_string(),
-                event: Some(run_event::Event::Cancelled(RunCancelled {})),
-            },
-        );
     }
 }
 

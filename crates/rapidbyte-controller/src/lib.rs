@@ -35,6 +35,7 @@ pub mod scheduler;
 pub mod server;
 pub mod state;
 pub mod store;
+pub mod terminal;
 pub mod watcher;
 
 pub use config::{ControllerConfig, ServerTlsConfig};

@@ -14,7 +14,7 @@ use crate::proto::rapidbyte::v1::{
     AgentDirective, CancelTask, CompleteTaskRequest, CompleteTaskResponse, ExecutionOptions,
     HeartbeatRequest, HeartbeatResponse, NoTask, PollTaskRequest, PollTaskResponse,
     RegisterAgentRequest, RegisterAgentResponse, ReportProgressRequest, ReportProgressResponse,
-    RunCancelled, RunCompleted, RunEvent, RunFailed, TaskAssignment, TaskOutcome,
+    RunEvent, TaskAssignment, TaskOutcome,
 };
 use crate::run_state::{RunError, RunMetrics, RunState as InternalRunState};
 use crate::scheduler::{TaskState, TerminalTaskOutcome};
@@ -279,13 +279,13 @@ impl AgentServiceImpl {
             }
         }
 
-        // Publish terminal event so watch clients see the failure.
-        let terminal_event = RunEvent {
-            run_id: run_id.to_owned(),
-            event: Some(run_event::Event::Failed(RunFailed {
-                error: Some(crate::proto::rapidbyte::v1::TaskError {
+        crate::terminal::finalize_terminal(
+            &self.state,
+            run_id,
+            crate::terminal::TerminalOutcome::Failed {
+                error: Some(RunError {
                     code: ERROR_CODE_SECRET_RESOLUTION.into(),
-                    message: error.message().to_owned(),
+                    message: format!("{ERROR_CODE_SECRET_RESOLUTION}: {}", error.message()),
                     retryable: false,
                     safe_to_retry: false,
                     commit_state: rapidbyte_types::error::CommitState::BeforeCommit
@@ -293,21 +293,9 @@ impl AgentServiceImpl {
                         .into(),
                 }),
                 attempt,
-            })),
-        };
-        self.state
-            .watchers
-            .write()
-            .await
-            .publish_terminal(run_id, terminal_event);
-        rapidbyte_metrics::instruments::controller::runs_completed().add(
-            1,
-            &[KeyValue::new(
-                rapidbyte_metrics::labels::STATUS,
-                rapidbyte_metrics::labels::STATUS_ERROR,
-            )],
-        );
-        rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
+            },
+        )
+        .await;
 
         Ok(PollTaskResponse {
             result: Some(poll_task_response::Result::NoTask(NoTask {})),
@@ -1011,21 +999,19 @@ impl AgentService for AgentServiceImpl {
                 }
 
                 let metrics = req.metrics.as_ref();
-                self.state.watchers.write().await.publish_terminal(
+                crate::terminal::finalize_terminal(
+                    &self.state,
                     &run_id,
-                    RunEvent {
-                        run_id: run_id.clone(),
-                        event: Some(run_event::Event::Completed(RunCompleted {
+                    crate::terminal::TerminalOutcome::Completed {
+                        metrics: RunMetrics {
                             total_records: metrics.map_or(0, |m| m.records_processed),
                             total_bytes: metrics.map_or(0, |m| m.bytes_processed),
                             elapsed_seconds: metrics.map_or(0.0, |m| m.elapsed_seconds),
                             cursors_advanced: metrics.map_or(0, |m| m.cursors_advanced),
-                        })),
+                        },
                     },
-                );
-                rapidbyte_metrics::instruments::controller::runs_completed()
-                    .add(1, &[KeyValue::new(rapidbyte_metrics::labels::STATUS, "ok")]);
-                rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
+                )
+                .await;
             }
             TaskOutcome::Failed => {
                 let error = req.error.as_ref();
@@ -1174,21 +1160,21 @@ impl AgentService for AgentServiceImpl {
                         }));
                     }
 
-                    self.state.watchers.write().await.publish_terminal(
+                    crate::terminal::finalize_terminal(
+                        &self.state,
                         &run_id,
-                        RunEvent {
-                            run_id: run_id.clone(),
-                            event: Some(run_event::Event::Failed(RunFailed {
-                                error: req.error,
-                                attempt,
-                            })),
+                        crate::terminal::TerminalOutcome::Failed {
+                            error: error.map(|e| RunError {
+                                code: e.code.clone(),
+                                message: format!("{}: {}", e.code, e.message),
+                                retryable: e.retryable,
+                                safe_to_retry: e.safe_to_retry,
+                                commit_state: e.commit_state.clone(),
+                            }),
+                            attempt,
                         },
-                    );
-                    rapidbyte_metrics::instruments::controller::runs_completed().add(
-                        1,
-                        &[KeyValue::new(rapidbyte_metrics::labels::STATUS, "error")],
-                    );
-                    rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
+                    )
+                    .await;
                 }
             }
             TaskOutcome::Cancelled => {
@@ -1224,21 +1210,12 @@ impl AgentService for AgentServiceImpl {
                     }));
                 }
 
-                self.state.watchers.write().await.publish_terminal(
+                crate::terminal::finalize_terminal(
+                    &self.state,
                     &run_id,
-                    RunEvent {
-                        run_id: run_id.clone(),
-                        event: Some(run_event::Event::Cancelled(RunCancelled {})),
-                    },
-                );
-                rapidbyte_metrics::instruments::controller::runs_completed().add(
-                    1,
-                    &[KeyValue::new(
-                        rapidbyte_metrics::labels::STATUS,
-                        "cancelled",
-                    )],
-                );
-                rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
+                    crate::terminal::TerminalOutcome::Cancelled,
+                )
+                .await;
             }
             TaskOutcome::Unspecified => unreachable!("invalid task outcome rejected above"),
         }
