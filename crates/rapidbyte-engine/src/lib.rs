@@ -41,5 +41,5 @@ pub use config::validator::validate_pipeline;
 pub use error::PipelineError;
 pub use execution::{DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineOutcome};
 pub use orchestrator::{check_pipeline, discover_plugin, run_pipeline};
-pub use progress::{Phase, ProgressEvent};
+pub use progress::{Phase, ProgressEvent, ProgressSender};
 pub use result::{CheckResult, CheckStatus, PipelineResult};

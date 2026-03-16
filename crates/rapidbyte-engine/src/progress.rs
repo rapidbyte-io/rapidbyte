@@ -1,5 +1,23 @@
 //! Lightweight progress events emitted during pipeline execution.
 
+/// Newtype wrapper around the progress channel sender.
+#[derive(Clone)]
+pub struct ProgressSender(Option<tokio::sync::mpsc::UnboundedSender<ProgressEvent>>);
+
+impl ProgressSender {
+    /// Create from an optional channel sender.
+    pub fn new(tx: Option<tokio::sync::mpsc::UnboundedSender<ProgressEvent>>) -> Self {
+        Self(tx)
+    }
+
+    /// Emit a progress event. No-op if no channel is connected.
+    pub fn emit(&self, event: ProgressEvent) {
+        if let Some(tx) = &self.0 {
+            let _ = tx.send(event);
+        }
+    }
+}
+
 /// Execution phase of the pipeline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {

@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use tokio::sync::mpsc as tokio_mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -11,10 +10,7 @@ use rapidbyte_types::metric::{ReadSummary, WriteSummary};
 
 use crate::error::PipelineError;
 use crate::execution::DryRunStreamResult;
-use crate::progress::ProgressEvent;
-
-/// Type alias for the progress channel sender used throughout the orchestrator.
-pub(crate) type ProgressTx = Option<tokio_mpsc::UnboundedSender<ProgressEvent>>;
+use crate::progress::{ProgressEvent, ProgressSender};
 
 /// Per-stream execution result with summaries, checkpoints, and timings.
 pub(crate) struct StreamShardOutcome {
@@ -43,13 +39,6 @@ pub(crate) struct StreamTaskOutcomes {
 pub(crate) struct TransformStageOutcomes {
     pub(crate) durations: Vec<f64>,
     pub(crate) first_error: Option<PipelineError>,
-}
-
-/// Send a progress event through the channel, ignoring send errors.
-pub(crate) fn send_progress(tx: &ProgressTx, event: ProgressEvent) {
-    if let Some(tx) = tx {
-        let _ = tx.send(event);
-    }
 }
 
 /// Check if the cancellation token has fired; return a `PipelineError::cancelled` if so.
@@ -82,7 +71,7 @@ pub(crate) async fn acquire_permit_cancellable(
 /// Join all stream tasks in the set, collecting successes and aborting siblings on first error.
 pub(crate) async fn collect_stream_task_results(
     mut stream_join_set: JoinSet<Result<StreamShardOutcome, PipelineError>>,
-    progress_tx: &ProgressTx,
+    progress_tx: &ProgressSender,
 ) -> Result<StreamTaskOutcomes, PipelineError> {
     let mut successes = Vec::new();
     let mut first_error: Option<PipelineError> = None;
@@ -90,12 +79,9 @@ pub(crate) async fn collect_stream_task_results(
     while let Some(joined) = stream_join_set.join_next().await {
         match joined {
             Ok(Ok(sr)) if first_error.is_none() => {
-                send_progress(
-                    progress_tx,
-                    ProgressEvent::StreamCompleted {
-                        stream: sr.stream_name.clone(),
-                    },
-                );
+                progress_tx.emit(ProgressEvent::StreamCompleted {
+                    stream: sr.stream_name.clone(),
+                });
                 successes.push(sr);
             }
             Ok(Ok(_)) => {}
@@ -240,7 +226,7 @@ mod stream_task_collection_tests {
         });
 
         let start = Instant::now();
-        let collected = collect_stream_task_results(join_set, &None)
+        let collected = collect_stream_task_results(join_set, &ProgressSender::new(None))
             .await
             .expect("collector should return first error, not infra panic");
 

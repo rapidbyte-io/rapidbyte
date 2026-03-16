@@ -32,15 +32,15 @@ use crate::pipeline::planner::{
 };
 use crate::pipeline::preflight::run_destination_preflight;
 use crate::pipeline::scheduler::{
-    acquire_permit_cancellable, collect_stream_task_results, ensure_not_cancelled, send_progress,
-    ProgressTx, StreamShardOutcome,
+    acquire_permit_cancellable, collect_stream_task_results, ensure_not_cancelled,
+    StreamShardOutcome,
 };
 use crate::plugin::loader::{load_all_modules, PluginModules};
 use crate::plugin::resolver::{
     load_and_validate_manifest, resolve_plugins, validate_config_against_schema, ResolvedPlugins,
 };
 use crate::plugin::sandbox::{build_sandbox_overrides, check_state_backend, create_state_backend};
-use crate::progress::{Phase, ProgressEvent};
+use crate::progress::{Phase, ProgressEvent, ProgressSender};
 use crate::result::{CheckResult, CheckStatus, StreamShardMetric};
 use crate::runner::{run_discover, validate_plugin};
 
@@ -61,7 +61,7 @@ impl<'a> PipelineAttempt<'a> {
     async fn execute(
         &self,
         attempt: u32,
-        progress_tx: ProgressTx,
+        progress_tx: ProgressSender,
     ) -> Result<PipelineOutcome, PipelineError> {
         let config = self.config;
         let options = self.options;
@@ -77,12 +77,9 @@ impl<'a> PipelineAttempt<'a> {
             "Starting pipeline run"
         );
 
-        send_progress(
-            &progress_tx,
-            ProgressEvent::PhaseChange {
-                phase: Phase::Resolving,
-            },
-        );
+        progress_tx.emit(ProgressEvent::PhaseChange {
+            phase: Phase::Resolving,
+        });
         let plugins = resolve_plugins(config, registry_config).await?;
         if let Some(ref manifest) = plugins.source_manifest {
             validate_config_against_schema(&config.source.use_ref, &config.source.config, manifest)
@@ -128,12 +125,9 @@ impl<'a> PipelineAttempt<'a> {
                 format!("{run_id}:{attempt}")
             };
 
-            send_progress(
-                &progress_tx,
-                ProgressEvent::PhaseChange {
-                    phase: Phase::Loading,
-                },
-            );
+            progress_tx.emit(ProgressEvent::PhaseChange {
+                phase: Phase::Loading,
+            });
             let modules = load_all_modules(config, &plugins, registry_config).await?;
             let config_for_build = config.clone();
             let state_for_build = state_for_execution.clone();
@@ -149,12 +143,9 @@ impl<'a> PipelineAttempt<'a> {
             })
             .await
             .map_err(|e| PipelineError::task_panicked("build_stream_contexts", e))??;
-            send_progress(
-                &progress_tx,
-                ProgressEvent::PhaseChange {
-                    phase: Phase::Running,
-                },
-            );
+            progress_tx.emit(ProgressEvent::PhaseChange {
+                phase: Phase::Running,
+            });
             ensure_not_cancelled(cancel_token, "Pipeline cancelled before stream execution")?;
             let aggregated = match execute_streams(
                 config,
@@ -179,12 +170,9 @@ impl<'a> PipelineAttempt<'a> {
                 }
             };
 
-            send_progress(
-                &progress_tx,
-                ProgressEvent::PhaseChange {
-                    phase: Phase::Finished,
-                },
-            );
+            progress_tx.emit(ProgressEvent::PhaseChange {
+                phase: Phase::Finished,
+            });
 
             if options.dry_run {
                 let duration_secs = start.elapsed().as_secs_f64();
@@ -243,6 +231,7 @@ pub async fn run_pipeline(
     meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
     registry_config: &rapidbyte_registry::RegistryConfig,
 ) -> Result<PipelineOutcome, PipelineError> {
+    let progress_tx = ProgressSender::new(progress_tx);
     let max_retries = config.resources.max_retries;
     let mut attempt_num = 0u32;
     let attempt = PipelineAttempt {
@@ -279,18 +268,15 @@ pub async fn run_pipeline(
                         safe_to_retry = plugin_err.safe_to_retry,
                         "Retryable error, will retry"
                     );
-                    send_progress(
-                        &progress_tx,
-                        ProgressEvent::Retry {
-                            attempt: attempt_num,
-                            max_retries,
-                            message: format!(
-                                "[{}] {}: {}",
-                                plugin_err.category, plugin_err.code, plugin_err.message
-                            ),
-                            delay_secs: delay.as_secs_f64(),
-                        },
-                    );
+                    progress_tx.emit(ProgressEvent::Retry {
+                        attempt: attempt_num,
+                        max_retries,
+                        message: format!(
+                            "[{}] {}: {}",
+                            plugin_err.category, plugin_err.code, plugin_err.message
+                        ),
+                        delay_secs: delay.as_secs_f64(),
+                    });
                     tokio::select! {
                         () = cancel_token.cancelled() => {
                             return Err(PipelineError::cancelled("Pipeline cancelled during retry backoff"));
@@ -343,7 +329,7 @@ async fn execute_streams(
     state: Arc<dyn StateBackend>,
     options: &ExecutionOptions,
     metric_run_label: &str,
-    progress_tx: &ProgressTx,
+    progress_tx: &ProgressSender,
     cancel_token: &CancellationToken,
 ) -> Result<StreamAggregation, PipelineError> {
     let (source_plugin_id, source_plugin_version) = parse_plugin_ref(&config.source.use_ref);

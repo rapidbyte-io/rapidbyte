@@ -21,9 +21,9 @@ use crate::arrow::ipc_to_record_batches;
 use crate::error::PipelineError;
 use crate::execution::DryRunStreamResult;
 use crate::pipeline::planner::StreamParams;
-use crate::pipeline::scheduler::{collect_transform_results, ProgressTx, StreamShardOutcome};
+use crate::pipeline::scheduler::{collect_transform_results, StreamShardOutcome};
 use crate::plugin::loader::TransformModule;
-use crate::progress::ProgressEvent;
+use crate::progress::{ProgressEvent, ProgressSender};
 use crate::runner::{
     run_destination_stream, run_source_stream, run_transform_stream, StreamRunContext,
 };
@@ -59,7 +59,7 @@ pub(crate) async fn execute_single_stream(
     stats: Arc<Mutex<RunStats>>,
     run_dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     mode: DestinationMode,
-    progress_tx: ProgressTx,
+    progress_tx: ProgressSender,
 ) -> Result<StreamShardOutcome, PipelineError> {
     let num_t = transforms.len();
     let mut channels = Vec::with_capacity(num_t + 1);
@@ -81,12 +81,12 @@ pub(crate) async fn execute_single_stream(
     let stream_ctx_for_dst = stream_ctx.clone();
 
     // Build per-batch progress callback for the source runner
-    let on_batch_emitted: Option<Arc<dyn Fn(u64) + Send + Sync>> = progress_tx.as_ref().map(|tx| {
-        let tx = tx.clone();
-        Arc::new(move |bytes: u64| {
-            let _ = tx.send(ProgressEvent::BatchEmitted { bytes });
-        }) as Arc<dyn Fn(u64) + Send + Sync>
-    });
+    let on_batch_emitted: Option<Arc<dyn Fn(u64) + Send + Sync>> = {
+        let tx = progress_tx.clone();
+        Some(Arc::new(move |bytes: u64| {
+            tx.emit(ProgressEvent::BatchEmitted { bytes });
+        }) as Arc<dyn Fn(u64) + Send + Sync>)
+    };
 
     let params_src = params.clone();
     let state_src = state.clone();
