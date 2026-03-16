@@ -1,0 +1,24 @@
+version: "1.0"
+pipeline: vault_test_pg_to_pg
+
+source:
+  use: postgres
+  config:
+    host: ${vault:secret/postgres#host}
+    port: 5433
+    user: ${vault:secret/postgres#user}
+    password: ${vault:secret/postgres#password}
+    database: ${vault:secret/postgres#database}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+
+destination:
+  use: postgres
+  config:
+    host: localhost
+    port: 5433
+    user: postgres
+    password: ${vault:secret/postgres#password}
+    database: rapidbyte_test
+  write_mode: append

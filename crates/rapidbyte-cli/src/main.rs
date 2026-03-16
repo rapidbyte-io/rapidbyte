@@ -92,6 +92,22 @@ struct Cli {
     /// Trusted Ed25519 public key files for plugin verification (can be repeated)
     #[arg(long, global = true, action = clap::ArgAction::Append)]
     trust_key: Vec<PathBuf>,
+
+    /// Vault server address for secret resolution
+    #[arg(long, global = true, env = "VAULT_ADDR")]
+    vault_addr: Option<String>,
+
+    /// Vault authentication token
+    #[arg(long, global = true, env = "VAULT_TOKEN")]
+    vault_token: Option<String>,
+
+    /// Vault `AppRole` role ID
+    #[arg(long, global = true, env = "VAULT_ROLE_ID")]
+    vault_role_id: Option<String>,
+
+    /// Vault `AppRole` secret ID
+    #[arg(long, global = true, env = "VAULT_SECRET_ID")]
+    vault_secret_id: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -334,6 +350,64 @@ fn resolve_controller_url(
     )
 }
 
+fn try_build_secrets(
+    vault_addr: Option<&str>,
+    vault_token: Option<&str>,
+    vault_role_id: Option<&str>,
+    vault_secret_id: Option<&str>,
+) -> Option<rapidbyte_secrets::SecretProviders> {
+    match build_secret_providers(vault_addr, vault_token, vault_role_id, vault_secret_id) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("{} {e:#}", console::style("\u{2718}").red().bold());
+            None
+        }
+    }
+}
+
+fn build_secret_providers(
+    vault_addr: Option<&str>,
+    vault_token: Option<&str>,
+    vault_role_id: Option<&str>,
+    vault_secret_id: Option<&str>,
+) -> anyhow::Result<rapidbyte_secrets::SecretProviders> {
+    let mut providers = rapidbyte_secrets::SecretProviders::new();
+
+    if let Some(addr) = vault_addr {
+        let auth = if let Some(token) = vault_token {
+            Some(rapidbyte_secrets::VaultAuth::Token(token.to_owned()))
+        } else if let (Some(role_id), Some(secret_id)) = (vault_role_id, vault_secret_id) {
+            Some(rapidbyte_secrets::VaultAuth::AppRole {
+                role_id: role_id.to_owned(),
+                secret_id: secret_id.to_owned(),
+            })
+        } else {
+            // VAULT_ADDR set but no auth — skip registration.
+            // If a pipeline has ${vault:...} refs, the parser will
+            // error with "no secret provider registered for prefix 'vault'".
+            tracing::debug!(
+                "VAULT_ADDR is set but no Vault auth configured; \
+                 vault provider not registered"
+            );
+            None
+        };
+
+        let Some(auth) = auth else {
+            return Ok(providers);
+        };
+
+        let config = rapidbyte_secrets::VaultConfig {
+            address: addr.to_owned(),
+            auth,
+        };
+        let vault = rapidbyte_secrets::VaultProvider::new(&config)?;
+
+        providers.register("vault", std::sync::Arc::new(vault));
+    }
+
+    Ok(providers)
+}
+
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> ExitCode {
@@ -382,6 +456,11 @@ async fn main() -> ExitCode {
         ..Default::default()
     };
 
+    let vault_addr = cli.vault_addr.as_deref();
+    let vault_token = cli.vault_token.as_deref();
+    let vault_role_id = cli.vault_role_id.as_deref();
+    let vault_secret_id = cli.vault_secret_id.as_deref();
+
     let result = match cli.command {
         Commands::Run {
             pipeline,
@@ -389,6 +468,18 @@ async fn main() -> ExitCode {
             limit,
         } => {
             let controller_url = resolve_controller_url(cli.controller.clone(), false);
+            // Only build secret providers for local mode — distributed mode
+            // delegates secret resolution to the controller.
+            let secrets = if controller_url.is_none() {
+                let Some(s) =
+                    try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id)
+                else {
+                    return ExitCode::FAILURE;
+                };
+                s
+            } else {
+                rapidbyte_secrets::SecretProviders::new()
+            };
             commands::run::execute(
                 &pipeline,
                 dry_run,
@@ -399,6 +490,7 @@ async fn main() -> ExitCode {
                 tls.as_ref(),
                 &otel_guard,
                 &registry_config,
+                &secrets,
             )
             .await
         }
@@ -437,10 +529,20 @@ async fn main() -> ExitCode {
             .await
         }
         Commands::Check { pipeline } => {
-            commands::check::execute(&pipeline, verbosity, &registry_config).await
+            let Some(secrets) =
+                try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id)
+            else {
+                return ExitCode::FAILURE;
+            };
+            commands::check::execute(&pipeline, verbosity, &registry_config, &secrets).await
         }
         Commands::Discover { pipeline } => {
-            commands::discover::execute(&pipeline, verbosity, &registry_config).await
+            let Some(secrets) =
+                try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id)
+            else {
+                return ExitCode::FAILURE;
+            };
+            commands::discover::execute(&pipeline, verbosity, &registry_config, &secrets).await
         }
         Commands::Plugin { command } => commands::plugin::execute(command, &registry_config).await,
         Commands::Scaffold { name, output } => commands::scaffold::run(&name, output.as_deref()),
@@ -479,6 +581,10 @@ async fn main() -> ExitCode {
                 &cli.trust_policy,
                 cli.trust_key.clone(),
                 otel_guard,
+                match try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id) {
+                    Some(s) => s,
+                    None => return ExitCode::FAILURE,
+                },
             )
             .await
         }

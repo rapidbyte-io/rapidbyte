@@ -454,6 +454,7 @@ fn spawn_preview_cleanup_task(
 pub async fn run(
     config: ControllerConfig,
     otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
+    secrets: rapidbyte_secrets::SecretProviders,
 ) -> anyhow::Result<()> {
     validate_auth_config(&config)?;
     validate_signing_key_config(&config)?;
@@ -481,6 +482,7 @@ pub async fn run(
     }
 
     let state = ControllerState::from_metadata_store(&config.signing_key, metadata_store).await?;
+    let state = state.with_secrets(secrets);
 
     // Background task: reap dead agents
     let reap_state = state.clone();
@@ -690,6 +692,7 @@ mod tests {
                 ..Default::default()
             },
             guard,
+            rapidbyte_secrets::SecretProviders::new(),
         )
         .await
         .unwrap_err();

@@ -22,6 +22,7 @@ pub async fn execute(
     trust_policy: &str,
     trusted_key_paths: Vec<std::path::PathBuf>,
     otel_guard: rapidbyte_metrics::OtelGuard,
+    secrets: rapidbyte_secrets::SecretProviders,
 ) -> Result<()> {
     let config = build_config(
         listen,
@@ -39,7 +40,7 @@ pub async fn execute(
         trust_policy,
         trusted_key_paths,
     )?;
-    rapidbyte_controller::run(config, Arc::new(otel_guard)).await
+    rapidbyte_controller::run(config, Arc::new(otel_guard), secrets).await
 }
 
 #[allow(clippy::too_many_arguments)]

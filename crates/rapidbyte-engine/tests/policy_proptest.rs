@@ -2,6 +2,16 @@ use proptest::prelude::*;
 use rapidbyte_engine::config::parser;
 use rapidbyte_engine::config::validator;
 
+fn parse_pipeline_sync(yaml: &str) -> rapidbyte_engine::config::types::PipelineConfig {
+    tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(parser::parse_pipeline(
+            yaml,
+            &rapidbyte_secrets::SecretProviders::new(),
+        ))
+        .expect("pipeline YAML must parse")
+}
+
 proptest! {
     #[test]
     fn upsert_requires_primary_key(pk_len in 0_usize..3) {
@@ -42,7 +52,7 @@ state:
 "#
         );
 
-        let config = parser::parse_pipeline_str(&yaml).expect("generated yaml must parse");
+        let config = parse_pipeline_sync(&yaml);
         let result = validator::validate_pipeline(&config);
 
         if pk_len == 0 {
@@ -90,7 +100,7 @@ state:
 "#
         );
 
-        let config = parser::parse_pipeline_str(&yaml).expect("generated yaml must parse");
+        let config = parse_pipeline_sync(&yaml);
         let result = validator::validate_pipeline(&config);
 
         if has_cursor {

@@ -65,7 +65,8 @@ pub fn resolve_stream_autotune(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::parser::parse_pipeline_str;
+    use crate::config::parser::parse_pipeline;
+    use rapidbyte_secrets::SecretProviders;
 
     fn base_pipeline_yaml() -> &'static str {
         r#"
@@ -84,37 +85,43 @@ destination:
 "#
     }
 
-    #[test]
-    fn manual_pin_parallelism_overrides_baseline() {
+    #[tokio::test]
+    async fn manual_pin_parallelism_overrides_baseline() {
         let yaml = format!(
             "{}\nresources:\n  autotune:\n    pin_parallelism: 8\n",
             base_pipeline_yaml().trim_end()
         );
-        let config = parse_pipeline_str(&yaml).unwrap();
+        let config = parse_pipeline(&yaml, &SecretProviders::new())
+            .await
+            .unwrap();
 
         let decision = resolve_stream_autotune(&config, 3, true);
         assert_eq!(decision.parallelism, 8);
     }
 
-    #[test]
-    fn partition_mode_pin_maps_to_strategy() {
+    #[tokio::test]
+    async fn partition_mode_pin_maps_to_strategy() {
         let yaml = format!(
             "{}\nresources:\n  autotune:\n    pin_source_partition_mode: range\n",
             base_pipeline_yaml().trim_end()
         );
-        let config = parse_pipeline_str(&yaml).unwrap();
+        let config = parse_pipeline(&yaml, &SecretProviders::new())
+            .await
+            .unwrap();
 
         let decision = resolve_stream_autotune(&config, 3, true);
         assert_eq!(decision.partition_strategy, Some(PartitionStrategy::Range));
     }
 
-    #[test]
-    fn copy_flush_pin_is_clamped_to_guardrail() {
+    #[tokio::test]
+    async fn copy_flush_pin_is_clamped_to_guardrail() {
         let yaml = format!(
             "{}\nresources:\n  autotune:\n    pin_copy_flush_bytes: 999999999\n",
             base_pipeline_yaml().trim_end()
         );
-        let config = parse_pipeline_str(&yaml).unwrap();
+        let config = parse_pipeline(&yaml, &SecretProviders::new())
+            .await
+            .unwrap();
 
         let decision = resolve_stream_autotune(&config, 3, true);
         assert_eq!(

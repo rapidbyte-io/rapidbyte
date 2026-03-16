@@ -14,6 +14,7 @@ members = [
     "crates/rapidbyte-sdk/macros",
     "crates/rapidbyte-state",
     "crates/rapidbyte-types",
+    "crates/rapidbyte-secrets",
 ]
 # Plugins target wasm32-wasip2 — build separately
 exclude = [

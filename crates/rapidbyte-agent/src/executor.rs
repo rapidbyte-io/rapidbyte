@@ -130,22 +130,27 @@ where
         }
     };
 
-    let config = match parser::parse_pipeline_str(yaml_str) {
-        Ok(c) => c,
-        Err(e) => {
-            return TaskExecutionResult {
-                outcome: TaskOutcomeKind::Failed(TaskErrorInfo {
-                    code: "PARSE_FAILED".into(),
-                    message: format!("{e:#}"),
-                    retryable: false,
-                    safe_to_retry: false,
-                    commit_state: CommitState::BeforeCommit,
-                }),
-                metrics: TaskMetrics::zero(),
-                dry_run_result: None,
-            };
-        }
-    };
+    // The controller resolves only ${vault:...} secret refs at dispatch
+    // time. ${ENV_VAR} patterns remain and are expanded here from the
+    // agent's environment. parse_pipeline with empty secrets expands
+    // env vars without attempting secret resolution.
+    let config =
+        match parser::parse_pipeline(yaml_str, &rapidbyte_secrets::SecretProviders::new()).await {
+            Ok(c) => c,
+            Err(e) => {
+                return TaskExecutionResult {
+                    outcome: TaskOutcomeKind::Failed(TaskErrorInfo {
+                        code: "PARSE_FAILED".into(),
+                        message: format!("{e:#}"),
+                        retryable: false,
+                        safe_to_retry: false,
+                        commit_state: CommitState::BeforeCommit,
+                    }),
+                    metrics: TaskMetrics::zero(),
+                    dry_run_result: None,
+                };
+            }
+        };
 
     if let Err(e) = validator::validate_pipeline(&config) {
         return TaskExecutionResult {

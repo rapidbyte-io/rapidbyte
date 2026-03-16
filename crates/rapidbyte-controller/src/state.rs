@@ -30,6 +30,8 @@ pub struct ControllerState {
     pub metadata_store: Option<Arc<dyn DurableMetadataStore>>,
     /// Notified when a new task is enqueued, waking long-poll waiters.
     pub task_notify: Arc<Notify>,
+    /// Secret providers for resolving `${vault:...}` references at dispatch time.
+    pub secrets: Arc<rapidbyte_secrets::SecretProviders>,
 }
 
 impl ControllerState {
@@ -75,7 +77,15 @@ impl ControllerState {
             ticket_signer: Arc::new(TicketSigner::new(signing_key)),
             metadata_store,
             task_notify: Arc::new(Notify::new()),
+            secrets: Arc::new(rapidbyte_secrets::SecretProviders::new()),
         }
+    }
+
+    /// Set the secret providers for this controller state.
+    #[must_use]
+    pub fn with_secrets(mut self, secrets: rapidbyte_secrets::SecretProviders) -> Self {
+        self.secrets = Arc::new(secrets);
+        self
     }
 
     /// Build controller state by loading the latest durable metadata snapshot.

@@ -13,6 +13,7 @@ dev-up rows="1000000":
     docker compose up -d --wait
     just build-all
     just seed {{ rows }}
+    scripts/vault-seed.sh
     @echo ""
     @echo "Dev environment ready. Run a pipeline:"
     @echo "  just run tests/fixtures/pipelines/simple_pg_to_pg.yaml"

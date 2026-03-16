@@ -134,11 +134,18 @@ fn str_key(value: &str) -> YamlValue {
 mod tests {
     use std::fs;
 
-    use rapidbyte_engine::config::{
-        parser::parse_pipeline_str,
-        types::{PipelineWriteMode, StateBackendKind},
-    };
+    use rapidbyte_engine::config::types::{PipelineConfig, PipelineWriteMode, StateBackendKind};
     use rapidbyte_types::wire::SyncMode;
+
+    fn parse_pipeline_sync(yaml: &str) -> PipelineConfig {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(rapidbyte_engine::config::parser::parse_pipeline(
+                yaml,
+                &rapidbyte_secrets::SecretProviders::new(),
+            ))
+            .expect("pipeline YAML must parse")
+    }
 
     use super::*;
     use crate::scenario::{
@@ -154,7 +161,7 @@ mod tests {
         let scenario = sample_postgres_pipeline("insert");
 
         let yaml = render_pipeline_yaml(&scenario).expect("render pipeline yaml");
-        let parsed = parse_pipeline_str(&yaml).expect("rendered yaml must parse");
+        let parsed = parse_pipeline_sync(&yaml);
 
         assert_eq!(parsed.pipeline, "benchmark_pg_dest_insert");
         assert_eq!(parsed.source.use_ref, "postgres");
@@ -170,7 +177,7 @@ mod tests {
         let scenario = sample_postgres_pipeline("copy");
 
         let yaml = render_pipeline_yaml(&scenario).expect("render pipeline yaml");
-        let parsed = parse_pipeline_str(&yaml).expect("rendered yaml must parse");
+        let parsed = parse_pipeline_sync(&yaml);
 
         assert_eq!(parsed.destination.config["load_method"], "copy");
         assert_eq!(parsed.destination.config["schema"], "raw");
@@ -185,7 +192,7 @@ mod tests {
         let rendered =
             write_rendered_pipeline(&scenario, &env, &temp_root).expect("write pipeline");
         let yaml = fs::read_to_string(&rendered.path).expect("read rendered pipeline");
-        let parsed = parse_pipeline_str(&yaml).expect("rendered yaml must parse");
+        let parsed = parse_pipeline_sync(&yaml);
 
         assert!(rendered.path.starts_with(&temp_root));
         assert!(rendered.path.exists());
@@ -205,7 +212,7 @@ mod tests {
         let rendered =
             write_rendered_pipeline(&scenario, &env, &temp_root).expect("write pipeline");
         let yaml = fs::read_to_string(&rendered.path).expect("read rendered pipeline");
-        let parsed = parse_pipeline_str(&yaml).expect("rendered yaml must parse");
+        let parsed = parse_pipeline_sync(&yaml);
 
         let connection = parsed
             .state
@@ -225,7 +232,7 @@ mod tests {
         let rendered =
             write_rendered_pipeline(&scenario, &env, &temp_root).expect("write pipeline");
         let yaml = fs::read_to_string(&rendered.path).expect("read rendered pipeline");
-        let parsed = parse_pipeline_str(&yaml).expect("rendered yaml must parse");
+        let parsed = parse_pipeline_sync(&yaml);
 
         assert_eq!(parsed.state.backend, StateBackendKind::Postgres);
         let connection = parsed
@@ -261,7 +268,7 @@ mod tests {
 
         let yaml =
             render_pipeline_yaml_for_environment(&scenario, &resolved).expect("render pipeline");
-        let parsed = parse_pipeline_str(&yaml).expect("rendered yaml must parse");
+        let parsed = parse_pipeline_sync(&yaml);
 
         assert_eq!(parsed.source.config["host"], "source-db");
         assert_eq!(parsed.destination.config["host"], "dest-db");
@@ -300,7 +307,7 @@ mod tests {
         }];
 
         let yaml = render_pipeline_yaml(&scenario).expect("render pipeline yaml");
-        let parsed = parse_pipeline_str(&yaml).expect("rendered yaml must parse");
+        let parsed = parse_pipeline_sync(&yaml);
 
         assert_eq!(parsed.transforms.len(), 1);
         assert_eq!(parsed.transforms[0].use_ref, "sql");

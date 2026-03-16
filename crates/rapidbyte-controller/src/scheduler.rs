@@ -255,6 +255,50 @@ impl TaskQueue {
         Ok(())
     }
 
+    /// Release an assigned task back to pending.
+    ///
+    /// Used when the controller fails to prepare the task for dispatch (e.g.
+    /// secret resolution failure). Unlike [`reject_assignment`] which cancels,
+    /// this returns the task to the pending queue for retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task does not exist, is not in the `Assigned`
+    /// state, or the lease epoch does not match.
+    pub fn release_assignment(
+        &mut self,
+        task_id: &str,
+        lease_epoch: u64,
+    ) -> Result<(), SchedulerError> {
+        let record = self
+            .tasks
+            .get_mut(task_id)
+            .ok_or_else(|| SchedulerError::UnknownTask(task_id.to_string()))?;
+
+        if record.state != TaskState::Assigned {
+            return Err(SchedulerError::InvalidState(
+                task_id.to_string(),
+                TaskState::Assigned,
+            ));
+        }
+
+        match &record.lease {
+            Some(lease) if lease.is_valid(lease_epoch) => {}
+            _ => {
+                return Err(SchedulerError::InvalidState(
+                    task_id.to_string(),
+                    TaskState::Assigned,
+                ));
+            }
+        }
+
+        record.state = TaskState::Pending;
+        record.lease = None;
+        record.assigned_agent_id = None;
+        self.pending.push_back(task_id.to_string());
+        Ok(())
+    }
+
     /// Cancel a task.
     /// If pending, removes it from the queue. If running/assigned, marks it cancelled.
     ///
@@ -361,7 +405,12 @@ impl TaskQueue {
     }
 
     /// Restore an existing task record loaded from durable storage.
+    ///
+    /// Removes any stale pending-queue entry for this task before
+    /// conditionally re-adding it, so rollbacks after
+    /// `release_assignment` cannot leave ghost entries.
     pub fn restore_task(&mut self, record: TaskRecord) {
+        self.pending.retain(|id| id != &record.task_id);
         if record.state == TaskState::Pending {
             self.pending.push_back(record.task_id.clone());
         }
@@ -564,6 +613,44 @@ mod tests {
     }
 
     #[test]
+    fn release_assignment_returns_task_to_pending() {
+        let (mut q, gen) = make_queue_and_gen();
+        q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
+
+        let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
+        assert_eq!(
+            q.get(&assignment.task_id).unwrap().state,
+            TaskState::Assigned
+        );
+
+        // No pending tasks after assignment.
+        assert!(q.peek_pending().is_none());
+
+        q.release_assignment(&assignment.task_id, assignment.lease_epoch)
+            .unwrap();
+
+        let task = q.get(&assignment.task_id).unwrap();
+        assert_eq!(task.state, TaskState::Pending);
+        assert!(task.lease.is_none());
+        assert!(task.assigned_agent_id.is_none());
+
+        // Task is back in the pending queue — can be polled again.
+        assert!(q.peek_pending().is_some());
+        let re_assignment = q.poll("agent-2", Duration::from_secs(60), &gen).unwrap();
+        assert_eq!(re_assignment.task_id, assignment.task_id);
+    }
+
+    #[test]
+    fn release_assignment_rejects_wrong_epoch() {
+        let (mut q, gen) = make_queue_and_gen();
+        q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
+
+        let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
+        let result = q.release_assignment(&assignment.task_id, assignment.lease_epoch + 999);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn renew_lease_extends_expiry() {
         let (mut q, gen) = make_queue_and_gen();
         q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
@@ -718,5 +805,45 @@ mod tests {
         let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
         assert_eq!(assignment.task_id, "task-1");
         assert_eq!(assignment.run_id, "r1");
+    }
+
+    #[test]
+    fn restore_task_cleans_stale_pending_entry() {
+        let (mut q, gen) = make_queue_and_gen();
+
+        // Enqueue → poll (assigns) → release (pushes back to pending).
+        let task_id = q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
+        let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
+        q.release_assignment(&task_id, assignment.lease_epoch)
+            .unwrap();
+
+        // At this point, task is Pending and in the pending queue.
+        assert_eq!(q.get(&task_id).unwrap().state, TaskState::Pending);
+
+        // Restore a snapshot where the task was Assigned (simulating a
+        // rollback after persist failure). This must remove the stale
+        // pending entry so the task is NOT re-assignable.
+        let assigned_record = TaskRecord {
+            task_id: task_id.clone(),
+            run_id: "r1".into(),
+            attempt: 1,
+            lease: Some(crate::lease::Lease::new(
+                assignment.lease_epoch,
+                Duration::from_secs(60),
+            )),
+            state: TaskState::Assigned,
+            pipeline_yaml: b"yaml".to_vec(),
+            dry_run: false,
+            limit: None,
+            assigned_agent_id: Some("agent-1".into()),
+        };
+        q.restore_task(assigned_record);
+
+        // The task is Assigned — poll must NOT return it.
+        assert!(
+            q.poll("agent-2", Duration::from_secs(60), &gen).is_none(),
+            "assigned task must not be re-polled from stale pending entry"
+        );
+        assert_eq!(q.get(&task_id).unwrap().state, TaskState::Assigned);
     }
 }
