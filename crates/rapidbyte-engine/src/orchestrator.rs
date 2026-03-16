@@ -14,7 +14,7 @@ use rapidbyte_runtime::{parse_plugin_ref, Frame, SandboxOverrides};
 use rapidbyte_state::StateBackend;
 use rapidbyte_types::catalog::Catalog;
 use rapidbyte_types::envelope::DlqRecord;
-use rapidbyte_types::error::{CommitState, PluginError, ValidationResult, ValidationStatus};
+use rapidbyte_types::error::{ValidationResult, ValidationStatus};
 use rapidbyte_types::manifest::PluginManifest;
 use rapidbyte_types::metric::{ReadSummary, WriteSummary};
 use rapidbyte_types::state::{PipelineId, RunStats, StreamName};
@@ -32,6 +32,10 @@ use crate::pipeline::planner::{
     build_stream_contexts, destination_preflight_streams, execution_parallelism, ExecutionPlan,
     StreamParams,
 };
+use crate::pipeline::scheduler::{
+    collect_stream_task_results, collect_transform_results, ensure_not_cancelled, send_progress,
+    ProgressTx, StreamResult,
+};
 use crate::plugin::loader::{load_all_modules, PluginModules};
 use crate::plugin::resolver::{
     load_and_validate_manifest, resolve_plugins, validate_config_against_schema, ResolvedPlugins,
@@ -41,7 +45,7 @@ use crate::progress::{Phase, ProgressEvent};
 use crate::result::{CheckItemResult, CheckResult, StreamShardMetric};
 use crate::runner::{
     run_destination_stream, run_discover, run_source_stream, run_transform_stream, validate_plugin,
-    StreamRunContext, TransformRunResult,
+    StreamRunContext,
 };
 
 async fn run_blocking_infrastructure_task<T, F>(
@@ -60,80 +64,7 @@ where
         .map_err(PipelineError::Infrastructure)
 }
 
-struct StreamResult {
-    stream_name: String,
-    partition_index: Option<u32>,
-    partition_count: Option<u32>,
-    read_summary: ReadSummary,
-    write_summary: WriteSummary,
-    source_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
-    dest_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
-    src_duration: f64,
-    dst_duration: f64,
-    vm_setup_secs: f64,
-    recv_secs: f64,
-    transform_durations: Vec<f64>,
-    dry_run_result: Option<DryRunStreamResult>,
-}
-
-struct StreamTaskCollection {
-    successes: Vec<StreamResult>,
-    first_error: Option<PipelineError>,
-}
-
 static NEXT_METRIC_RUN_LABEL: AtomicU64 = AtomicU64::new(1);
-
-/// Type alias for the progress channel sender used throughout the orchestrator.
-type ProgressTx = Option<tokio_mpsc::UnboundedSender<ProgressEvent>>;
-
-fn send_progress(tx: &ProgressTx, event: ProgressEvent) {
-    if let Some(tx) = tx {
-        let _ = tx.send(event);
-    }
-}
-
-async fn collect_stream_task_results(
-    mut stream_join_set: JoinSet<Result<StreamResult, PipelineError>>,
-    progress_tx: &ProgressTx,
-) -> Result<StreamTaskCollection, PipelineError> {
-    let mut successes = Vec::new();
-    let mut first_error: Option<PipelineError> = None;
-
-    while let Some(joined) = stream_join_set.join_next().await {
-        match joined {
-            Ok(Ok(sr)) if first_error.is_none() => {
-                send_progress(
-                    progress_tx,
-                    ProgressEvent::StreamCompleted {
-                        stream: sr.stream_name.clone(),
-                    },
-                );
-                successes.push(sr);
-            }
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                tracing::error!("Stream failed: {}", error);
-                if first_error.is_none() {
-                    first_error = Some(error);
-                    stream_join_set.abort_all();
-                }
-            }
-            Err(join_err) if join_err.is_cancelled() && first_error.is_some() => {
-                // Expected: sibling tasks cancelled after first stream failure.
-            }
-            Err(join_err) => {
-                return Err(PipelineError::Infrastructure(anyhow::anyhow!(
-                    "Stream task panicked: {join_err}"
-                )));
-            }
-        }
-    }
-
-    Ok(StreamTaskCollection {
-        successes,
-        first_error,
-    })
-}
 
 /// Run a pipeline with OpenTelemetry metric snapshot support.
 ///
@@ -204,7 +135,7 @@ pub async fn run_pipeline(
                     );
                     tokio::select! {
                         () = cancel_token.cancelled() => {
-                            return Err(cancelled_pipeline_error("Pipeline cancelled during retry backoff"));
+                            return Err(PipelineError::cancelled("Pipeline cancelled during retry backoff"));
                         }
                         () = tokio::time::sleep(delay) => {}
                     }
@@ -422,56 +353,6 @@ async fn execute_pipeline_once(
     execution_result
 }
 
-struct CollectedTransforms {
-    durations: Vec<f64>,
-    first_error: Option<PipelineError>,
-}
-
-async fn collect_transform_results(
-    transform_handles: Vec<(
-        usize,
-        tokio::task::JoinHandle<Result<TransformRunResult, PipelineError>>,
-    )>,
-    stream_name: &str,
-) -> Result<CollectedTransforms, PipelineError> {
-    let mut durations = Vec::new();
-    let mut first_error: Option<PipelineError> = None;
-    for (i, t_handle) in transform_handles {
-        let result = t_handle.await.map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!(
-                "Transform {i} task panicked for stream '{stream_name}': {e}"
-            ))
-        })?;
-        match result {
-            Ok(tr) => {
-                tracing::info!(
-                    transform_index = i,
-                    stream = stream_name,
-                    duration_secs = tr.duration_secs,
-                    records_in = tr.summary.records_in,
-                    records_out = tr.summary.records_out,
-                    "Transform stage completed for stream"
-                );
-                durations.push(tr.duration_secs);
-            }
-            Err(e) => {
-                tracing::error!(
-                    transform_index = i,
-                    stream = stream_name,
-                    "Transform failed: {e}",
-                );
-                if first_error.is_none() {
-                    first_error = Some(e);
-                }
-            }
-        }
-    }
-    Ok(CollectedTransforms {
-        durations,
-        first_error,
-    })
-}
-
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -578,7 +459,7 @@ async fn execute_streams(
             )?;
             let permit = tokio::select! {
                 () = cancel_token.cancelled() => {
-                    return Err(cancelled_pipeline_error("Pipeline cancelled before destination preflight"));
+                    return Err(PipelineError::cancelled("Pipeline cancelled before destination preflight"));
                 }
                 permit = preflight_semaphore.clone().acquire_owned() => {
                     permit.map_err(|e| {
@@ -665,7 +546,7 @@ async fn execute_streams(
         ensure_not_cancelled(cancel_token, "Pipeline cancelled before stream execution")?;
         let permit = tokio::select! {
             () = cancel_token.cancelled() => {
-                return Err(cancelled_pipeline_error("Pipeline cancelled before stream execution"));
+                return Err(PipelineError::cancelled("Pipeline cancelled before stream execution"));
             }
             permit = semaphore.clone().acquire_owned() => {
                 permit.map_err(|e| {
@@ -1035,23 +916,6 @@ async fn execute_streams(
     })
 }
 
-fn cancelled_pipeline_error(message: &str) -> PipelineError {
-    let mut error = PluginError::internal("CANCELLED", message);
-    error.safe_to_retry = true;
-    error.commit_state = Some(CommitState::BeforeCommit);
-    PipelineError::Plugin(error)
-}
-
-fn ensure_not_cancelled(
-    cancel_token: &CancellationToken,
-    message: &str,
-) -> Result<(), PipelineError> {
-    if cancel_token.is_cancelled() {
-        return Err(cancelled_pipeline_error(message));
-    }
-    Ok(())
-}
-
 async fn preserve_real_outcome_after_stream_execution<T, Fut>(
     _cancel_token: &CancellationToken,
     finalize: Fut,
@@ -1375,66 +1239,6 @@ pub async fn discover_plugin(
     })
     .await
     .map_err(|e| anyhow::anyhow!("Discover task panicked: {e}"))?
-}
-
-#[cfg(test)]
-mod stream_task_collection_tests {
-    use super::*;
-    use std::time::{Duration, Instant};
-
-    fn success_result(stream_name: &str) -> StreamResult {
-        StreamResult {
-            stream_name: stream_name.to_string(),
-            partition_index: None,
-            partition_count: None,
-            read_summary: ReadSummary {
-                records_read: 0,
-                bytes_read: 0,
-                batches_emitted: 0,
-                checkpoint_count: 0,
-                records_skipped: 0,
-            },
-            write_summary: WriteSummary {
-                records_written: 0,
-                bytes_written: 0,
-                batches_written: 0,
-                checkpoint_count: 0,
-                records_failed: 0,
-            },
-            source_checkpoints: Vec::new(),
-            dest_checkpoints: Vec::new(),
-            src_duration: 0.0,
-            dst_duration: 0.0,
-            vm_setup_secs: 0.0,
-            recv_secs: 0.0,
-            transform_durations: Vec::new(),
-            dry_run_result: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn collect_stream_tasks_fails_fast_and_cancels_siblings() {
-        let mut join_set: JoinSet<Result<StreamResult, PipelineError>> = JoinSet::new();
-        join_set.spawn(async {
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            Ok(success_result("slow_stream"))
-        });
-        join_set.spawn(async {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-            Err(PipelineError::Infrastructure(anyhow::anyhow!(
-                "expected failure"
-            )))
-        });
-
-        let start = Instant::now();
-        let collected = collect_stream_task_results(join_set, &None)
-            .await
-            .expect("collector should return first error, not infra panic");
-
-        assert!(collected.first_error.is_some());
-        assert!(collected.successes.is_empty());
-        assert!(start.elapsed() < Duration::from_millis(200));
-    }
 }
 
 #[cfg(test)]
