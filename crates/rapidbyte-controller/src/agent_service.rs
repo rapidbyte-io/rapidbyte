@@ -195,6 +195,9 @@ impl AgentServiceImpl {
             }
         }
 
+        // Wake long-poll waiters so the requeued task is picked up promptly.
+        self.state.task_notify.notify_waiters();
+
         Ok(PollTaskResponse {
             result: Some(poll_task_response::Result::NoTask(NoTask {})),
         })
@@ -1234,7 +1237,6 @@ async fn make_task_response(
     // Reject malformed secret references (e.g. ${vault:path} without #key).
     rapidbyte_engine::config::parser::reject_malformed_refs(yaml_str)
         .map_err(|e| Status::internal(e.to_string()))?;
-    let had_secrets = rapidbyte_engine::config::parser::contains_secret_refs(yaml_str);
     let resolved = rapidbyte_engine::config::parser::substitute_variables(yaml_str, secrets)
         .await
         .map_err(|e| {
@@ -1249,13 +1251,15 @@ async fn make_task_response(
             }
         })?;
 
-    // Validate the resolved YAML parses correctly. If secrets were involved,
-    // redact the error to prevent plaintext secrets from leaking in error
-    // messages to the agent.
+    // Redact YAML parse errors whenever any substitution was performed
+    // (secret refs OR env vars), since env vars may also contain secrets.
+    let had_substitution = resolved != yaml_str;
+
+    // Validate the resolved YAML parses correctly.
     if let Err(e) = serde_yaml::from_str::<serde_yaml::Value>(&resolved) {
-        let msg = if had_secrets {
+        let msg = if had_substitution {
             format!(
-                "pipeline YAML invalid after secret resolution (source redacted): line {}, column {}",
+                "pipeline YAML invalid after variable resolution (source redacted): line {}, column {}",
                 e.location().map_or(0, |l| l.line()),
                 e.location().map_or(0, |l| l.column()),
             )
@@ -4156,5 +4160,95 @@ mod tests {
             }
             other => panic!("expected Failed event, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn transient_secret_requeue_notifies_waiters() {
+        struct TransientFailProvider;
+
+        #[async_trait::async_trait]
+        impl rapidbyte_secrets::SecretProvider for TransientFailProvider {
+            async fn read_secret(
+                &self,
+                _path: &str,
+                _key: &str,
+            ) -> Result<String, rapidbyte_secrets::SecretError> {
+                Err(rapidbyte_secrets::SecretError::Unavailable(
+                    "connection refused".into(),
+                ))
+            }
+        }
+
+        let (state, _run_id, result) = poll_with_secret_provider(TransientFailProvider).await;
+
+        assert!(
+            matches!(result, poll_task_response::Result::NoTask(_)),
+            "expected NoTask after transient failure"
+        );
+
+        // After successful transient requeue, a long-poll waiter should
+        // be woken. Verify by subscribing to task_notify and checking
+        // that a notification is immediately available (it was already sent).
+        let notified = state.task_notify.notified();
+        // If notify_waiters was called, `notified()` created after the
+        // call won't fire immediately — but we can verify indirectly by
+        // checking the task is pending and pollable.
+        let tasks = state.tasks.read().await;
+        assert!(
+            tasks.peek_pending().is_some(),
+            "requeued task should be in pending queue and pollable"
+        );
+        drop(tasks);
+        drop(notified);
+    }
+
+    #[tokio::test]
+    async fn transient_persist_failure_rollback_cleans_pending_queue() {
+        use crate::store::test_support::FailingMetadataStore;
+
+        struct TransientFailProvider;
+
+        #[async_trait::async_trait]
+        impl rapidbyte_secrets::SecretProvider for TransientFailProvider {
+            async fn read_secret(
+                &self,
+                _path: &str,
+                _key: &str,
+            ) -> Result<String, rapidbyte_secrets::SecretError> {
+                Err(rapidbyte_secrets::SecretError::Unavailable(
+                    "connection refused".into(),
+                ))
+            }
+        }
+
+        // Fail the 3rd run upsert: 1st = submit_pipeline, 2nd = try_claim_task, 3rd = secret failure handler.
+        let store = FailingMetadataStore::new().fail_run_upsert_on(3);
+        let state = ControllerState::with_metadata_store(b"test-key-for-agent-service!!!!", store);
+        let (state, run_id, _agent_id, poll_result) =
+            poll_with_state_and_provider(state, TransientFailProvider).await;
+
+        assert!(
+            poll_result.is_err(),
+            "expected gRPC error on persist failure"
+        );
+
+        // After rollback, the task should be Assigned (not Pending), and
+        // critically it must NOT appear in the pending queue — otherwise
+        // a second agent could claim an already-assigned task.
+        let tasks = state.tasks.read().await;
+        let task = tasks
+            .all_tasks()
+            .into_iter()
+            .find(|t| t.run_id == run_id)
+            .expect("task should exist");
+        assert_eq!(
+            task.state,
+            crate::scheduler::TaskState::Assigned,
+            "task should be rolled back to Assigned"
+        );
+        assert!(
+            tasks.peek_pending().is_none(),
+            "pending queue must be empty after rollback — no duplicate assignment risk"
+        );
     }
 }

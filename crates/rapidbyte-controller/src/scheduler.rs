@@ -405,7 +405,12 @@ impl TaskQueue {
     }
 
     /// Restore an existing task record loaded from durable storage.
+    ///
+    /// Removes any stale pending-queue entry for this task before
+    /// conditionally re-adding it, so rollbacks after
+    /// `release_assignment` cannot leave ghost entries.
     pub fn restore_task(&mut self, record: TaskRecord) {
+        self.pending.retain(|id| id != &record.task_id);
         if record.state == TaskState::Pending {
             self.pending.push_back(record.task_id.clone());
         }
@@ -800,5 +805,45 @@ mod tests {
         let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
         assert_eq!(assignment.task_id, "task-1");
         assert_eq!(assignment.run_id, "r1");
+    }
+
+    #[test]
+    fn restore_task_cleans_stale_pending_entry() {
+        let (mut q, gen) = make_queue_and_gen();
+
+        // Enqueue → poll (assigns) → release (pushes back to pending).
+        let task_id = q.enqueue("r1".into(), b"yaml".to_vec(), false, None, 1);
+        let assignment = q.poll("agent-1", Duration::from_secs(60), &gen).unwrap();
+        q.release_assignment(&task_id, assignment.lease_epoch)
+            .unwrap();
+
+        // At this point, task is Pending and in the pending queue.
+        assert_eq!(q.get(&task_id).unwrap().state, TaskState::Pending);
+
+        // Restore a snapshot where the task was Assigned (simulating a
+        // rollback after persist failure). This must remove the stale
+        // pending entry so the task is NOT re-assignable.
+        let assigned_record = TaskRecord {
+            task_id: task_id.clone(),
+            run_id: "r1".into(),
+            attempt: 1,
+            lease: Some(crate::lease::Lease::new(
+                assignment.lease_epoch,
+                Duration::from_secs(60),
+            )),
+            state: TaskState::Assigned,
+            pipeline_yaml: b"yaml".to_vec(),
+            dry_run: false,
+            limit: None,
+            assigned_agent_id: Some("agent-1".into()),
+        };
+        q.restore_task(assigned_record);
+
+        // The task is Assigned — poll must NOT return it.
+        assert!(
+            q.poll("agent-2", Duration::from_secs(60), &gen).is_none(),
+            "assigned task must not be re-polled from stale pending entry"
+        );
+        assert_eq!(q.get(&task_id).unwrap().state, TaskState::Assigned);
     }
 }
