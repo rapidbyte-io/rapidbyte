@@ -1,6 +1,5 @@
 //! Pipeline orchestrator: resolves plugins, loads modules, executes streams, and finalizes state.
 
-use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -44,22 +43,6 @@ use crate::plugin::sandbox::{build_sandbox_overrides, check_state_backend, creat
 use crate::progress::{Phase, ProgressEvent};
 use crate::result::{CheckItemResult, CheckResult, StreamShardMetric};
 use crate::runner::{run_discover, validate_plugin};
-
-async fn run_blocking_infrastructure_task<T, F>(
-    task: F,
-    context: &'static str,
-) -> Result<T, PipelineError>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T> + Send + 'static,
-{
-    tokio::task::spawn_blocking(task)
-        .await
-        .map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!("{context} task panicked: {e}"))
-        })?
-        .map_err(PipelineError::Infrastructure)
-}
 
 static NEXT_METRIC_RUN_LABEL: AtomicU64 = AtomicU64::new(1);
 
@@ -208,11 +191,10 @@ async fn execute_pipeline_once(
         .map_err(PipelineError::Infrastructure)?;
     }
     let config_for_state = config.clone();
-    let state = run_blocking_infrastructure_task(
-        move || create_state_backend(&config_for_state),
-        "create_state_backend",
-    )
-    .await?;
+    let state = tokio::task::spawn_blocking(move || create_state_backend(&config_for_state))
+        .await
+        .map_err(|e| PipelineError::task_panicked("create_state_backend", e))?
+        .map_err(PipelineError::Infrastructure)?;
 
     let state_for_execution = state.clone();
     let execution_result = async move {
@@ -303,49 +285,40 @@ async fn execute_pipeline_once(
             },
         );
 
-        preserve_real_outcome_after_stream_execution(cancel_token, async move {
-            if options.dry_run {
-                let duration_secs = start.elapsed().as_secs_f64();
+        if options.dry_run {
+            let duration_secs = start.elapsed().as_secs_f64();
 
-                let snap =
-                    metrics_runtime.snapshot_for_run(&config.pipeline, Some(&metric_run_label));
+            let snap = metrics_runtime.snapshot_for_run(&config.pipeline, Some(&metric_run_label));
 
-                return Ok(PipelineOutcome::DryRun(build_dry_run_result(
-                    &snap,
-                    aggregated,
-                    modules.source_module_load_ms,
-                    duration_secs,
-                )));
-            }
-
-            let result = finalize_pipeline_execution(
-                config,
-                &pipeline_id,
-                state_for_execution.clone(),
-                run_id,
-                attempt,
-                start,
-                &metric_run_label,
-                &modules,
+            return Ok(PipelineOutcome::DryRun(build_dry_run_result(
+                &snap,
                 aggregated,
-                &metrics_runtime,
-            )
-            .await?;
-            Ok(PipelineOutcome::Run(result))
-        })
-        .await
+                modules.source_module_load_ms,
+                duration_secs,
+            )));
+        }
+
+        let result = finalize_pipeline_execution(
+            config,
+            &pipeline_id,
+            state_for_execution.clone(),
+            run_id,
+            attempt,
+            start,
+            &metric_run_label,
+            &modules,
+            aggregated,
+            &metrics_runtime,
+        )
+        .await?;
+        Ok(PipelineOutcome::Run(result))
     }
     .await;
 
     let state_for_drop = state;
-    run_blocking_infrastructure_task(
-        move || {
-            drop(state_for_drop);
-            Ok(())
-        },
-        "drop_state_backend",
-    )
-    .await?;
+    tokio::task::spawn_blocking(move || drop(state_for_drop))
+        .await
+        .map_err(|e| PipelineError::task_panicked("drop_state_backend", e))?;
 
     execution_result
 }
@@ -634,16 +607,6 @@ async fn execute_streams(
         dry_run_streams,
         stream_metrics,
     })
-}
-
-async fn preserve_real_outcome_after_stream_execution<T, Fut>(
-    _cancel_token: &CancellationToken,
-    finalize: Fut,
-) -> Result<T, PipelineError>
-where
-    Fut: Future<Output = Result<T, PipelineError>>,
-{
-    finalize.await
 }
 
 /// Check a pipeline: validate configuration and connectivity without running.
@@ -1076,14 +1039,12 @@ mod orchestrator_helper_tests {
     async fn cancellation_after_stream_execution_preserves_real_finalization_outcome() {
         let backend = Arc::new(TestStateBackend::new());
         let mut aggregated = make_aggregated_results();
-        let token = CancellationToken::new();
-        token.cancel();
-
-        let advanced = preserve_real_outcome_after_stream_execution(&token, async {
-            persist_run_state(backend.clone(), &PipelineId::new("p"), 1, &mut aggregated).await
-        })
-        .await
-        .expect("finalization should succeed even after late cancellation");
+        // Even when the token is already cancelled, finalization still runs directly
+        // because preserve_real_outcome_after_stream_execution was a no-op passthrough.
+        let advanced =
+            persist_run_state(backend.clone(), &PipelineId::new("p"), 1, &mut aggregated)
+                .await
+                .expect("finalization should succeed even after late cancellation");
 
         assert_eq!(advanced, 1);
         assert_eq!(
@@ -1097,22 +1058,21 @@ mod orchestrator_helper_tests {
     }
 
     #[tokio::test]
-    async fn blocking_infrastructure_helper_moves_runtime_sensitive_init_off_worker_threads() {
-        let value = run_blocking_infrastructure_task(
-            || {
-                let runtime = tokio::runtime::Runtime::new().expect("runtime");
-                runtime.block_on(async { Ok::<_, anyhow::Error>(7) })
-            },
-            "test_blocking_init",
-        )
+    async fn spawn_blocking_allows_runtime_sensitive_init() {
+        let value = tokio::task::spawn_blocking(|| {
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            runtime.block_on(async { Ok::<_, anyhow::Error>(7) })
+        })
         .await
-        .expect("blocking helper should allow runtime creation");
+        .map_err(|e| PipelineError::task_panicked("test_blocking_init", e))
+        .expect("spawn_blocking should succeed")
+        .expect("inner result should succeed");
 
         assert_eq!(value, 7);
     }
 
     #[tokio::test]
-    async fn blocking_infrastructure_helper_moves_runtime_sensitive_drop_off_worker_threads() {
+    async fn spawn_blocking_allows_runtime_sensitive_drop() {
         struct RuntimeOnDrop;
 
         impl Drop for RuntimeOnDrop {
@@ -1122,16 +1082,13 @@ mod orchestrator_helper_tests {
             }
         }
 
-        run_blocking_infrastructure_task(
-            || {
-                let value = RuntimeOnDrop;
-                drop(value);
-                Ok::<_, anyhow::Error>(())
-            },
-            "test_blocking_drop",
-        )
+        tokio::task::spawn_blocking(|| {
+            let value = RuntimeOnDrop;
+            drop(value);
+        })
         .await
-        .expect("blocking helper should allow runtime-sensitive drop");
+        .map_err(|e| PipelineError::task_panicked("test_blocking_drop", e))
+        .expect("spawn_blocking should allow runtime-sensitive drop");
     }
 }
 
