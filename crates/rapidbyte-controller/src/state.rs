@@ -335,6 +335,56 @@ impl ControllerState {
         };
         metadata_store.delete_preview(run_id).await
     }
+
+    /// Snapshot a task and its associated run for rollback purposes.
+    ///
+    /// # Errors
+    /// Returns `Status::NotFound` if the task or run does not exist.
+    pub async fn snapshot_task_and_run(
+        &self,
+        task_id: &str,
+    ) -> Result<(crate::scheduler::TaskRecord, crate::run_state::RunRecord), tonic::Status> {
+        let task = self
+            .tasks
+            .read()
+            .await
+            .get(task_id)
+            .cloned()
+            .ok_or_else(|| tonic::Status::not_found(format!("unknown task: {task_id}")))?;
+        let run = self
+            .runs
+            .read()
+            .await
+            .get_run(&task.run_id)
+            .cloned()
+            .ok_or_else(|| tonic::Status::not_found(format!("unknown run: {}", task.run_id)))?;
+        Ok((task, run))
+    }
+}
+
+/// Validate that a task's lease is still valid for the given agent and epoch.
+///
+/// # Errors
+/// Returns `Status::FailedPrecondition` if the lease epoch is stale,
+/// or `Status::PermissionDenied` if the agent doesn't own the lease.
+pub fn validate_lease(
+    task: &crate::scheduler::TaskRecord,
+    agent_id: &str,
+    lease_epoch: u64,
+) -> Result<(), tonic::Status> {
+    match (&task.lease, task.state) {
+        (
+            Some(lease),
+            crate::scheduler::TaskState::Assigned | crate::scheduler::TaskState::Running,
+        ) if lease.is_valid(lease_epoch) => {}
+        _ => return Err(tonic::Status::failed_precondition("Stale lease epoch")),
+    }
+    if task.assigned_agent_id.as_deref() != Some(agent_id) {
+        return Err(tonic::Status::permission_denied(
+            "Task lease belongs to a different agent",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn normalize_recovery_snapshot(
@@ -572,5 +622,105 @@ mod tests {
         let preview = state.previews.blocking_read().get("run-1").cloned();
         assert!(preview.is_some());
         assert_eq!(preview.unwrap().streams[0].stream, "users");
+    }
+
+    #[tokio::test]
+    async fn snapshot_task_and_run_returns_both() {
+        let state = ControllerState::new(b"test-signing-key");
+        let (run_id, _) = state
+            .runs
+            .write()
+            .await
+            .create_run("r1".into(), "pipe".into(), None);
+        let task_id =
+            state
+                .tasks
+                .write()
+                .await
+                .enqueue(run_id.clone(), b"yaml".to_vec(), false, None, 1);
+        let (task, run) = state.snapshot_task_and_run(&task_id).await.unwrap();
+        assert_eq!(task.task_id, task_id);
+        assert_eq!(run.run_id, run_id);
+    }
+
+    #[tokio::test]
+    async fn snapshot_task_and_run_errors_on_unknown_task() {
+        let state = ControllerState::new(b"test-signing-key");
+        let err = state
+            .snapshot_task_and_run("nonexistent")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn validate_lease_accepts_valid_lease() {
+        let state = ControllerState::new(b"test-signing-key");
+        let (run_id, _) = state
+            .runs
+            .write()
+            .await
+            .create_run("r1".into(), "pipe".into(), None);
+        let task_id = state
+            .tasks
+            .write()
+            .await
+            .enqueue(run_id, b"yaml".to_vec(), false, None, 1);
+        let assignment = state
+            .tasks
+            .write()
+            .await
+            .poll("agent-1", Duration::from_secs(60), &state.epoch_gen)
+            .unwrap();
+        let task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        assert!(super::validate_lease(&task, "agent-1", assignment.lease_epoch).is_ok());
+    }
+
+    #[tokio::test]
+    async fn validate_lease_rejects_stale_epoch() {
+        let state = ControllerState::new(b"test-signing-key");
+        let (run_id, _) = state
+            .runs
+            .write()
+            .await
+            .create_run("r1".into(), "pipe".into(), None);
+        let task_id = state
+            .tasks
+            .write()
+            .await
+            .enqueue(run_id, b"yaml".to_vec(), false, None, 1);
+        let _assignment =
+            state
+                .tasks
+                .write()
+                .await
+                .poll("agent-1", Duration::from_secs(60), &state.epoch_gen);
+        let task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        let err = super::validate_lease(&task, "agent-1", 9999).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn validate_lease_rejects_wrong_agent() {
+        let state = ControllerState::new(b"test-signing-key");
+        let (run_id, _) = state
+            .runs
+            .write()
+            .await
+            .create_run("r1".into(), "pipe".into(), None);
+        let task_id = state
+            .tasks
+            .write()
+            .await
+            .enqueue(run_id, b"yaml".to_vec(), false, None, 1);
+        let assignment = state
+            .tasks
+            .write()
+            .await
+            .poll("agent-1", Duration::from_secs(60), &state.epoch_gen)
+            .unwrap();
+        let task = state.tasks.read().await.get(&task_id).unwrap().clone();
+        let err = super::validate_lease(&task, "agent-2", assignment.lease_epoch).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
     }
 }
