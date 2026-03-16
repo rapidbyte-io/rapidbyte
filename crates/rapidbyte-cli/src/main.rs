@@ -350,13 +350,13 @@ fn resolve_controller_url(
     )
 }
 
-async fn try_build_secrets(
+fn try_build_secrets(
     vault_addr: Option<&str>,
     vault_token: Option<&str>,
     vault_role_id: Option<&str>,
     vault_secret_id: Option<&str>,
 ) -> Option<rapidbyte_secrets::SecretProviders> {
-    match build_secret_providers(vault_addr, vault_token, vault_role_id, vault_secret_id).await {
+    match build_secret_providers(vault_addr, vault_token, vault_role_id, vault_secret_id) {
         Ok(s) => Some(s),
         Err(e) => {
             eprintln!("{} {e:#}", console::style("\u{2718}").red().bold());
@@ -365,7 +365,7 @@ async fn try_build_secrets(
     }
 }
 
-async fn build_secret_providers(
+fn build_secret_providers(
     vault_addr: Option<&str>,
     vault_token: Option<&str>,
     vault_role_id: Option<&str>,
@@ -396,11 +396,11 @@ async fn build_secret_providers(
             return Ok(providers);
         };
 
-        let vault = rapidbyte_secrets::VaultProvider::new(rapidbyte_secrets::VaultConfig {
+        let config = rapidbyte_secrets::VaultConfig {
             address: addr.to_owned(),
             auth,
-        })
-        .await?;
+        };
+        let vault = rapidbyte_secrets::VaultProvider::new(&config)?;
 
         providers.register("vault", std::sync::Arc::new(vault));
     }
@@ -473,7 +473,6 @@ async fn main() -> ExitCode {
             let secrets = if controller_url.is_none() {
                 let Some(s) =
                     try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id)
-                        .await
                 else {
                     return ExitCode::FAILURE;
                 };
@@ -531,7 +530,7 @@ async fn main() -> ExitCode {
         }
         Commands::Check { pipeline } => {
             let Some(secrets) =
-                try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id).await
+                try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id)
             else {
                 return ExitCode::FAILURE;
             };
@@ -539,7 +538,7 @@ async fn main() -> ExitCode {
         }
         Commands::Discover { pipeline } => {
             let Some(secrets) =
-                try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id).await
+                try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id)
             else {
                 return ExitCode::FAILURE;
             };
@@ -582,9 +581,7 @@ async fn main() -> ExitCode {
                 &cli.trust_policy,
                 cli.trust_key.clone(),
                 otel_guard,
-                match try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id)
-                    .await
-                {
+                match try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id) {
                     Some(s) => s,
                     None => return ExitCode::FAILURE,
                 },

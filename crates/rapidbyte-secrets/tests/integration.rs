@@ -7,12 +7,11 @@ use rapidbyte_secrets::{SecretProvider, VaultAuth, VaultConfig, VaultProvider};
 #[tokio::test]
 #[ignore]
 async fn read_seeded_postgres_secret() {
-    let provider = VaultProvider::new(VaultConfig {
+    let provider = VaultProvider::new(&VaultConfig {
         address: "http://127.0.0.1:8200".into(),
         auth: VaultAuth::Token("rapidbyte-dev-vault-token".into()),
     })
-    .await
-    .expect("should connect to dev Vault");
+    .expect("should create Vault provider");
 
     let password = provider
         .read_secret("secret/postgres", "password")
@@ -25,11 +24,10 @@ async fn read_seeded_postgres_secret() {
 #[tokio::test]
 #[ignore]
 async fn read_missing_path_returns_error() {
-    let provider = VaultProvider::new(VaultConfig {
+    let provider = VaultProvider::new(&VaultConfig {
         address: "http://127.0.0.1:8200".into(),
         auth: VaultAuth::Token("rapidbyte-dev-vault-token".into()),
     })
-    .await
     .unwrap();
 
     let result = provider.read_secret("secret/nonexistent", "key").await;
@@ -39,11 +37,10 @@ async fn read_missing_path_returns_error() {
 #[tokio::test]
 #[ignore]
 async fn read_missing_key_returns_error() {
-    let provider = VaultProvider::new(VaultConfig {
+    let provider = VaultProvider::new(&VaultConfig {
         address: "http://127.0.0.1:8200".into(),
         auth: VaultAuth::Token("rapidbyte-dev-vault-token".into()),
     })
-    .await
     .unwrap();
 
     let result = provider

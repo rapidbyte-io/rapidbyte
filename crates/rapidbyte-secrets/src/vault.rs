@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
+use tokio::sync::OnceCell;
 
 use crate::{SecretError, SecretProvider};
 
@@ -28,49 +29,67 @@ pub enum VaultAuth {
 ///
 /// Reads secrets from a `HashiCorp` Vault server. Path format in pipeline
 /// YAML: `${vault:mount/path#key}` (e.g. `${vault:secret/postgres#password}`).
+///
+/// `AppRole` authentication is deferred until the first `read_secret` call,
+/// so constructing the provider never performs network I/O unless a token
+/// is already provided.
 pub struct VaultProvider {
     client: vaultrs::client::VaultClient,
+    /// Deferred `AppRole` credentials — `None` for token auth.
+    approle_creds: Option<(String, String)>,
+    /// Ensures `AppRole` login happens exactly once.
+    auth_once: OnceCell<()>,
 }
 
 impl VaultProvider {
-    /// Create a new Vault provider and authenticate.
+    /// Create a new Vault provider.
     ///
-    /// For [`VaultAuth::Token`], the token is set directly.
-    /// For [`VaultAuth::AppRole`], the client exchanges `role_id`/`secret_id`
-    /// for a token immediately.
+    /// For [`VaultAuth::Token`], the token is set directly on the client.
+    /// For [`VaultAuth::AppRole`], credentials are stored and authentication
+    /// is deferred until the first [`SecretProvider::read_secret`] call.
     ///
     /// # Errors
     ///
-    /// Returns an error if Vault is unreachable or authentication fails.
-    pub async fn new(config: VaultConfig) -> Result<Self> {
+    /// Returns an error if client settings are invalid.
+    pub fn new(config: &VaultConfig) -> Result<Self> {
         let mut settings = vaultrs::client::VaultClientSettingsBuilder::default();
         settings.address(&config.address);
 
-        match &config.auth {
+        let approle_creds = match &config.auth {
             VaultAuth::Token(token) => {
                 settings.token(token);
+                None
             }
-            VaultAuth::AppRole { .. } => {}
-        }
+            VaultAuth::AppRole { role_id, secret_id } => Some((role_id.clone(), secret_id.clone())),
+        };
 
         let client = vaultrs::client::VaultClient::new(
             settings.build().context("invalid Vault client settings")?,
         )
         .context("failed to create Vault client")?;
 
-        let provider = Self { client };
-
-        if let VaultAuth::AppRole { role_id, secret_id } = &config.auth {
-            provider.approle_login(role_id, secret_id).await?;
-        }
-
-        Ok(provider)
+        Ok(Self {
+            client,
+            approle_creds,
+            auth_once: OnceCell::new(),
+        })
     }
 
-    async fn approle_login(&self, role_id: &str, secret_id: &str) -> Result<()> {
-        vaultrs::auth::approle::login(&self.client, "approle", role_id, secret_id)
-            .await
-            .context("Vault AppRole authentication failed")?;
+    /// Ensure `AppRole` auth has completed. No-op for token auth.
+    async fn ensure_authenticated(&self) -> Result<(), SecretError> {
+        if let Some((role_id, secret_id)) = &self.approle_creds {
+            let role_id = role_id.clone();
+            let secret_id = secret_id.clone();
+            self.auth_once
+                .get_or_try_init(|| async {
+                    vaultrs::auth::approle::login(&self.client, "approle", &role_id, &secret_id)
+                        .await
+                        .context("Vault AppRole authentication failed")?;
+                    Ok(())
+                })
+                .await
+                .map_err(|e: anyhow::Error| SecretError::Unavailable(format!("{e:#}")))?;
+        }
         Ok(())
     }
 }
@@ -112,6 +131,8 @@ fn classify_vault_error(error: vaultrs::error::ClientError, path: &str) -> Secre
 #[async_trait::async_trait]
 impl SecretProvider for VaultProvider {
     async fn read_secret(&self, path: &str, key: &str) -> Result<String, SecretError> {
+        self.ensure_authenticated().await?;
+
         // Split mount from path: "secret/postgres" → mount="secret", path="postgres"
         let (mount, secret_path) = path.split_once('/').ok_or_else(|| {
             SecretError::InvalidPath(format!(

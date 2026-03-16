@@ -130,10 +130,14 @@ where
         }
     };
 
-    // The agent receives pre-resolved YAML from the controller (all
-    // ${vault:...} and ${ENV_VAR} patterns already substituted). Use
-    // parse_resolved to avoid re-expanding patterns that appear inside
-    // secret values.
+    // The controller resolves ALL variable references at dispatch time:
+    // both ${vault:...} secret refs and ${ENV_VAR} patterns. This is
+    // intentional — secret values may contain ${...} patterns that must
+    // not be re-expanded by the agent's environment. parse_resolved
+    // skips all substitution on the pre-resolved YAML.
+    //
+    // Deployments where agent env differs from controller env should use
+    // ${vault:...} secret refs for those values rather than ${ENV_VAR}.
     let config = match parser::parse_resolved(yaml_str) {
         Ok(c) => c,
         Err(e) => {

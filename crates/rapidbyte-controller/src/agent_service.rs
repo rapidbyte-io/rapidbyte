@@ -1228,10 +1228,11 @@ async fn make_task_response(
     assignment: crate::scheduler::TaskAssignment,
     secrets: &rapidbyte_secrets::SecretProviders,
 ) -> Result<PollTaskResponse, Status> {
-    // Resolve ALL variable references (secrets + env vars) at dispatch
-    // time. The agent receives fully-resolved YAML with no ${...} patterns.
+    // Resolve ALL variable references (secrets + env vars) at dispatch time.
+    // The agent receives fully-resolved YAML with no ${...} patterns.
     // This prevents secret values containing ${...} from being re-expanded
-    // by the agent's environment.
+    // by the agent's environment. Deployments where agent env differs from
+    // controller env should use ${vault:...} refs for those values.
     let yaml_str = std::str::from_utf8(&assignment.pipeline_yaml)
         .map_err(|e| Status::internal(format!("pipeline YAML is not valid UTF-8: {e}")))?;
     // Reject malformed secret references (e.g. ${vault:path} without #key).
@@ -1252,7 +1253,7 @@ async fn make_task_response(
         })?;
 
     // Redact YAML parse errors whenever any substitution was performed
-    // (secret refs OR env vars), since env vars may also contain secrets.
+    // (secret refs OR env vars), since either may contain sensitive values.
     let had_substitution = resolved != yaml_str;
 
     // Validate the resolved YAML parses correctly.
@@ -4250,5 +4251,43 @@ mod tests {
             tasks.peek_pending().is_none(),
             "pending queue must be empty after rollback — no duplicate assignment risk"
         );
+    }
+
+    #[tokio::test]
+    async fn make_task_response_resolves_env_vars_from_controller() {
+        // Verify the distributed-mode contract: env vars are resolved
+        // by the controller at dispatch time, not left for the agent.
+        std::env::set_var("RB_TEST_DISPATCH_HOST", "controller-host");
+
+        let assignment = crate::scheduler::TaskAssignment {
+            task_id: "task-1".into(),
+            run_id: "run-1".into(),
+            attempt: 1,
+            lease_epoch: 1,
+            pipeline_yaml: b"host: ${RB_TEST_DISPATCH_HOST}".to_vec(),
+            dry_run: false,
+            limit: None,
+        };
+
+        let secrets = rapidbyte_secrets::SecretProviders::new();
+        let resp = make_task_response(assignment, &secrets)
+            .await
+            .expect("make_task_response should succeed");
+
+        let task = match resp.result.unwrap() {
+            poll_task_response::Result::Task(t) => t,
+            other @ poll_task_response::Result::NoTask(_) => {
+                panic!("expected Task, got: {other:?}")
+            }
+        };
+
+        let yaml = String::from_utf8(task.pipeline_yaml_utf8).unwrap();
+        assert_eq!(
+            yaml, "host: controller-host",
+            "env vars must be resolved by the controller"
+        );
+        assert!(!yaml.contains("${"), "no unresolved patterns should remain");
+
+        std::env::remove_var("RB_TEST_DISPATCH_HOST");
     }
 }

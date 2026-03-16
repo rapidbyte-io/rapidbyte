@@ -18,14 +18,16 @@ static ENV_VAR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").expect("valid env var regex"));
 
 /// Matches `${prefix:path#key}` (secret provider reference).
+/// Case-insensitive prefix so `${Vault:...}` is caught rather than silently ignored.
 static SECRET_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\$\{([a-z]+):([^#\}]+)#([^}]+)\}").expect("valid secret ref regex")
+    Regex::new(r"(?i)\$\{([a-z]+):([^#\}]+)#([^}]+)\}").expect("valid secret ref regex")
 });
 
 /// Matches `${prefix:...}` patterns that are NOT well-formed secret refs
 /// (e.g. missing `#key`). Used to reject malformed references.
+/// Case-insensitive prefix so `${Vault:path}` is caught as malformed.
 static MALFORMED_REF_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\$\{([a-z]+):[^}]*\}").expect("valid malformed ref regex"));
+    LazyLock::new(|| Regex::new(r"(?i)\$\{([a-z]+):[^}]*\}").expect("valid malformed ref regex"));
 
 /// Returns `true` if `input` contains any `${prefix:...}` secret references.
 pub fn contains_secret_refs(input: &str) -> bool {
@@ -74,6 +76,70 @@ fn apply_replacements(input: &str, mut replacements: Vec<MatchReplacement>) -> S
         result.replace_range(r.start..r.end, &r.value);
     }
     result
+}
+
+/// Substitute only `${prefix:path#key}` secret references, leaving
+/// `${ENV_VAR}` patterns untouched.
+///
+/// Used by the controller at dispatch time: secrets are resolved
+/// centrally, but env vars are left for the agent to expand from its
+/// own environment.
+///
+/// # Errors
+///
+/// Returns an error if a secret provider prefix has no registered
+/// provider or a secret read fails.
+#[allow(clippy::missing_panics_doc)] // regex group 0 always exists
+pub async fn substitute_secrets(input: &str, secrets: &SecretProviders) -> Result<String> {
+    let mut replacements = Vec::new();
+    let mut secret_cache: HashMap<String, String> = HashMap::new();
+    let mut secret_errors: Vec<(String, SecretError)> = Vec::new();
+
+    for cap in SECRET_REF_RE.captures_iter(input) {
+        let m = cap.get(0).unwrap();
+        let full_match = m.as_str().to_string();
+        let prefix = &cap[1];
+        let path = &cap[2];
+        let key = &cap[3];
+
+        let value = if let Some(cached) = secret_cache.get(&full_match) {
+            cached.clone()
+        } else {
+            match secrets.resolve(prefix, path, key).await {
+                Ok(val) => {
+                    secret_cache.insert(full_match, val.clone());
+                    val
+                }
+                Err(e) => {
+                    secret_errors.push((format!("{prefix}:{path}#{key}"), e));
+                    continue;
+                }
+            }
+        };
+        replacements.push(MatchReplacement {
+            start: m.start(),
+            end: m.end(),
+            value,
+        });
+    }
+
+    if !secret_errors.is_empty() {
+        let any_transient = secret_errors.iter().any(|(_, e)| e.is_transient());
+        let msg = format!(
+            "Failed to resolve secret(s):\n  {}",
+            secret_errors
+                .iter()
+                .map(|(ref_name, e)| format!("{ref_name}: {e}"))
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        );
+        if any_transient {
+            return Err(SecretError::Unavailable(msg).into());
+        }
+        anyhow::bail!("{msg}");
+    }
+
+    Ok(apply_replacements(input, replacements))
 }
 
 /// Substitute all `${...}` references: env vars and secret provider refs.
@@ -339,6 +405,9 @@ destination:
     fn secret_ref_regex_matches() {
         assert!(contains_secret_refs("${vault:secret/pg#password}"));
         assert!(contains_secret_refs("${aws:arn:something#key}"));
+        // Mixed case is detected (case-insensitive prefix).
+        assert!(contains_secret_refs("${Vault:secret/pg#password}"));
+        assert!(contains_secret_refs("${VAULT:secret/pg#password}"));
         assert!(!contains_secret_refs("${NORMAL_ENV_VAR}"));
         assert!(!contains_secret_refs("no refs here"));
     }
@@ -349,12 +418,41 @@ destination:
         assert!(reject_malformed_refs("${vault:secret/pg}").is_err());
         // Missing path
         assert!(reject_malformed_refs("${vault:}").is_err());
+        // Mixed case — still rejected as malformed
+        assert!(reject_malformed_refs("${Vault:secret/pg}").is_err());
         // Well-formed ref should pass
         assert!(reject_malformed_refs("${vault:secret/pg#password}").is_ok());
         // Normal env var should pass
         assert!(reject_malformed_refs("${ENV_VAR}").is_ok());
         // No refs should pass
         assert!(reject_malformed_refs("plain text").is_ok());
+    }
+
+    #[tokio::test]
+    async fn substitute_secrets_leaves_env_vars_intact() {
+        use std::sync::Arc;
+
+        struct FakeProvider;
+
+        #[async_trait::async_trait]
+        impl rapidbyte_secrets::SecretProvider for FakeProvider {
+            async fn read_secret(
+                &self,
+                _path: &str,
+                _key: &str,
+            ) -> Result<String, rapidbyte_secrets::SecretError> {
+                Ok("resolved-secret".to_owned())
+            }
+        }
+
+        let mut secrets = SecretProviders::new();
+        secrets.register("vault", Arc::new(FakeProvider));
+
+        let input = "host: ${DB_HOST}\npassword: ${vault:secret/db#password}";
+        let result = substitute_secrets(input, &secrets).await.unwrap();
+
+        // Secret ref resolved, env var left untouched.
+        assert_eq!(result, "host: ${DB_HOST}\npassword: resolved-secret");
     }
 
     #[tokio::test]
