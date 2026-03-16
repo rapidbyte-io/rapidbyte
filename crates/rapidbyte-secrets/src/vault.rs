@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
-use tokio::sync::OnceCell;
+use tokio::sync::Mutex;
 
 use crate::{SecretError, SecretProvider};
 
@@ -32,13 +32,15 @@ pub enum VaultAuth {
 ///
 /// `AppRole` authentication is deferred until the first `read_secret` call,
 /// so constructing the provider never performs network I/O unless a token
-/// is already provided.
+/// is already provided. If the `AppRole` token expires, the provider
+/// transparently re-authenticates on the next 403 response.
 pub struct VaultProvider {
     client: vaultrs::client::VaultClient,
     /// Deferred `AppRole` credentials — `None` for token auth.
     approle_creds: Option<(String, String)>,
-    /// Ensures `AppRole` login happens exactly once.
-    auth_once: OnceCell<()>,
+    /// Whether initial `AppRole` login has been performed. Protected by
+    /// a mutex so concurrent readers don't race the login.
+    authenticated: Mutex<bool>,
 }
 
 impl VaultProvider {
@@ -71,26 +73,66 @@ impl VaultProvider {
         Ok(Self {
             client,
             approle_creds,
-            auth_once: OnceCell::new(),
+            authenticated: Mutex::new(false),
         })
     }
 
     /// Ensure `AppRole` auth has completed. No-op for token auth.
-    async fn ensure_authenticated(&self) -> Result<(), SecretError> {
-        if let Some((role_id, secret_id)) = &self.approle_creds {
-            let role_id = role_id.clone();
-            let secret_id = secret_id.clone();
-            self.auth_once
-                .get_or_try_init(|| async {
-                    vaultrs::auth::approle::login(&self.client, "approle", &role_id, &secret_id)
-                        .await
-                        .map(|_| ())
-                        .map_err(|e| classify_vault_error(e, "AppRole authentication"))
-                })
-                .await?;
+    ///
+    /// If `force` is true, re-authenticates even if a previous login
+    /// succeeded (used to recover from expired tokens).
+    async fn ensure_authenticated(&self, force: bool) -> Result<(), SecretError> {
+        let Some((role_id, secret_id)) = &self.approle_creds else {
+            return Ok(());
+        };
+
+        let mut authed = self.authenticated.lock().await;
+        if *authed && !force {
+            return Ok(());
         }
+
+        vaultrs::auth::approle::login(&self.client, "approle", role_id, secret_id)
+            .await
+            .map(|_| ())
+            .map_err(|e| classify_vault_error(e, "AppRole authentication"))?;
+
+        *authed = true;
         Ok(())
     }
+
+    /// Read a Vault KV v2 secret, with one transparent re-auth attempt
+    /// on 403 for `AppRole` auth (handles expired tokens).
+    async fn read_with_reauth(
+        &self,
+        mount: &str,
+        secret_path: &str,
+        path: &str,
+    ) -> Result<HashMap<String, serde_json::Value>, SecretError> {
+        match vaultrs::kv2::read(&self.client, mount, secret_path).await {
+            Ok(data) => Ok(data),
+            Err(e) => {
+                // On 403 with AppRole creds, the token may have expired.
+                // Force re-auth and retry once.
+                if self.approle_creds.is_some() && is_api_403(&e) {
+                    tracing::info!(path, "Vault token may have expired, re-authenticating");
+                    self.ensure_authenticated(true).await?;
+                    vaultrs::kv2::read(&self.client, mount, secret_path)
+                        .await
+                        .map_err(|e| classify_vault_error(e, &format!("read secret at {path}")))
+                } else {
+                    Err(classify_vault_error(e, &format!("read secret at {path}")))
+                }
+            }
+        }
+    }
+}
+
+/// Check if a `ClientError` is an API 403.
+fn is_api_403(error: &vaultrs::error::ClientError) -> bool {
+    matches!(
+        error,
+        vaultrs::error::ClientError::APIError { code: 403, .. }
+    )
 }
 
 /// Classify a Vault API error into a `SecretError` variant.
@@ -126,7 +168,7 @@ fn classify_vault_error(error: vaultrs::error::ClientError, context: &str) -> Se
 #[async_trait::async_trait]
 impl SecretProvider for VaultProvider {
     async fn read_secret(&self, path: &str, key: &str) -> Result<String, SecretError> {
-        self.ensure_authenticated().await?;
+        self.ensure_authenticated(false).await?;
 
         // Split mount from path: "secret/postgres" → mount="secret", path="postgres"
         let (mount, secret_path) = path.split_once('/').ok_or_else(|| {
@@ -135,11 +177,7 @@ impl SecretProvider for VaultProvider {
             ))
         })?;
 
-        // Deserialize as Value to handle mixed types (string, number, bool).
-        let data: HashMap<String, serde_json::Value> =
-            vaultrs::kv2::read(&self.client, mount, secret_path)
-                .await
-                .map_err(|e| classify_vault_error(e, &format!("read secret at {path}")))?;
+        let data = self.read_with_reauth(mount, secret_path, path).await?;
 
         let value = data.get(key).ok_or_else(|| {
             SecretError::NotFound(format!("key '{key}' not found in Vault secret {path}"))
@@ -223,5 +261,23 @@ mod tests {
         let classified = classify_vault_error(err, "test");
         assert!(matches!(classified, SecretError::Unavailable(_)));
         assert!(classified.is_transient());
+    }
+
+    #[test]
+    fn is_api_403_detects_forbidden() {
+        let err = vaultrs::error::ClientError::APIError {
+            code: 403,
+            errors: vec![],
+        };
+        assert!(is_api_403(&err));
+
+        let err = vaultrs::error::ClientError::APIError {
+            code: 404,
+            errors: vec![],
+        };
+        assert!(!is_api_403(&err));
+
+        let err = vaultrs::error::ClientError::ResponseEmptyError;
+        assert!(!is_api_403(&err));
     }
 }
