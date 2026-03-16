@@ -10,8 +10,8 @@
 //! |--------------------|----------------|
 //! | `proto`            | Generated protobuf types |
 //! | `server`           | gRPC server startup and wiring |
-//! | `pipeline_service` | `PipelineService` RPC implementations |
-//! | `agent_service`    | `AgentService` RPC implementations |
+//! | `services::pipeline` | `PipelineService` RPC implementations |
+//! | `services::agent`   | `AgentService` RPC implementations |
 //! | `scheduler`        | FIFO task queue, assignment, lease epochs |
 //! | `registry`         | Agent registry, heartbeat monitoring |
 //! | `run_state`        | Run state machine with attempt tracking |
@@ -21,18 +21,23 @@
 
 #![warn(clippy::pedantic)]
 
-pub mod agent_service;
+pub mod background;
+pub mod config;
 pub mod lease;
 pub mod middleware;
-pub mod pipeline_service;
 pub mod preview;
 pub mod proto;
 pub mod registry;
 pub mod run_state;
 pub mod scheduler;
 pub mod server;
+pub mod services;
 pub mod state;
 pub mod store;
+pub mod terminal;
 pub mod watcher;
 
-pub use server::{run, ControllerConfig, ServerTlsConfig};
+pub use config::{
+    AuthConfig, ControllerConfig, RegistryConfig, ServerTlsConfig, TimerConfig, TrustConfig,
+};
+pub use server::run;
