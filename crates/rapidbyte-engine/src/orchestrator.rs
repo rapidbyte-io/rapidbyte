@@ -40,7 +40,7 @@ use crate::plugin::loader::{load_all_modules, PluginModules};
 use crate::plugin::resolver::{
     load_and_validate_manifest, resolve_plugins, validate_config_against_schema, ResolvedPlugins,
 };
-use crate::plugin::sandbox::{build_sandbox_overrides, check_state_backend, create_state_backend};
+use crate::plugin::sandbox::build_sandbox_overrides;
 use crate::progress::{Phase, ProgressEvent, ProgressSender};
 use crate::result::{CheckResult, CheckStatus, StreamShardMetric};
 use crate::runner::{run_discover, validate_plugin};
@@ -93,11 +93,18 @@ impl<'a> PipelineAttempt<'a> {
             )
             .map_err(PipelineError::Infrastructure)?;
         }
-        let config_for_state = config.clone();
-        let state = tokio::task::spawn_blocking(move || create_state_backend(&config_for_state))
-            .await
-            .map_err(|e| PipelineError::task_panicked("create_state_backend", e))?
-            .map_err(PipelineError::Infrastructure)?;
+        let state_backend_kind = config.state.backend;
+        let state_connection = config
+            .state
+            .connection
+            .clone()
+            .unwrap_or_else(|| rapidbyte_state::default_connection(state_backend_kind));
+        let state = tokio::task::spawn_blocking(move || {
+            rapidbyte_state::open_backend(state_backend_kind, &state_connection)
+        })
+        .await
+        .map_err(|e| PipelineError::task_panicked("open_state_backend", e))?
+        .map_err(PipelineError::Infrastructure)?;
 
         let state_for_execution = state.clone();
         let execution_result = async move {
@@ -648,7 +655,29 @@ pub async fn check_pipeline(
         )
     });
 
-    let state = check_state_backend(config);
+    let state = {
+        let connection = config
+            .state
+            .connection
+            .clone()
+            .unwrap_or_else(|| rapidbyte_state::default_connection(config.state.backend));
+        match rapidbyte_state::open_backend(config.state.backend, &connection) {
+            Ok(_) => {
+                tracing::info!("State backend: OK");
+                CheckStatus {
+                    ok: true,
+                    message: String::new(),
+                }
+            }
+            Err(e) => {
+                tracing::error!("State backend: FAILED — {}", e);
+                CheckStatus {
+                    ok: false,
+                    message: e.to_string(),
+                }
+            }
+        }
+    };
 
     let source_config_json = config.source.config.clone();
     let source_permissions = plugins.source_permissions.clone();
