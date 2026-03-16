@@ -86,7 +86,7 @@ destination:
     }
 
     #[tokio::test]
-    async fn manual_pin_parallelism_overrides_baseline() {
+    async fn manual_parallelism_overrides_baseline() {
         let yaml = format!(
             "{}\nresources:\n  autotune:\n    parallelism: 8\n",
             base_pipeline_yaml().trim_end()
@@ -100,7 +100,7 @@ destination:
     }
 
     #[tokio::test]
-    async fn partition_mode_pin_maps_to_strategy() {
+    async fn partition_mode_override_maps_to_strategy() {
         let yaml = format!(
             "{}\nresources:\n  autotune:\n    partition_mode: range\n",
             base_pipeline_yaml().trim_end()
@@ -114,7 +114,7 @@ destination:
     }
 
     #[tokio::test]
-    async fn copy_flush_pin_is_clamped_to_guardrail() {
+    async fn flush_bytes_override_is_clamped_to_guardrail() {
         let yaml = format!(
             "{}\nresources:\n  autotune:\n    flush_bytes: 999999999\n",
             base_pipeline_yaml().trim_end()

@@ -232,7 +232,7 @@ impl<'de> Deserialize<'de> for PipelineParallelism {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AutotuneConfig {
     pub enabled: bool,
     pub parallelism: Option<u32>,

@@ -359,7 +359,7 @@ resources:
     }
 
     #[tokio::test]
-    async fn test_autotune_pin_parallelism_zero_fails() {
+    async fn test_autotune_parallelism_zero_fails() {
         let yaml = format!(
             "{}\nresources:\n  autotune:\n    parallelism: 0\n",
             valid_yaml().trim_end()
@@ -372,7 +372,7 @@ resources:
     }
 
     #[tokio::test]
-    async fn test_autotune_pin_copy_flush_bytes_below_min_fails() {
+    async fn test_autotune_flush_bytes_below_min_fails() {
         let yaml = format!(
             "{}\nresources:\n  autotune:\n    flush_bytes: 1024\n",
             valid_yaml().trim_end()
@@ -385,7 +385,7 @@ resources:
     }
 
     #[tokio::test]
-    async fn test_autotune_pin_copy_flush_bytes_in_range_passes() {
+    async fn test_autotune_flush_bytes_in_range_passes() {
         let yaml = format!(
             "{}\nresources:\n  autotune:\n    flush_bytes: 8388608\n",
             valid_yaml().trim_end()
