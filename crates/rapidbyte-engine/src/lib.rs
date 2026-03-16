@@ -8,10 +8,9 @@
 //! | Module         | Responsibility |
 //! |----------------|----------------|
 //! | `arrow`        | Arrow IPC encode/decode utilities |
-//! | `checkpoint`   | Cursor correlation and persistence |
 //! | `config`       | Pipeline YAML config types, parsing, validation |
-//! | `dlq`          | Dead-letter queue persistence (internal) |
 //! | `error`        | Pipeline error types and retry policy |
+//! | `finalizers`   | Checkpoint correlation, DLQ persistence, run finalization (internal) |
 //! | `execution`    | Runtime execution mode types (dry-run, limits) |
 //! | `orchestrator` | Pipeline execution, retry, stream dispatch |
 //! | `progress`     | Progress event types for live CLI updates |
@@ -23,11 +22,10 @@
 
 pub mod arrow;
 pub mod autotune;
-pub mod checkpoint;
 pub mod config;
-pub(crate) mod dlq;
 pub mod error;
 pub mod execution;
+pub(crate) mod finalizers;
 pub mod orchestrator;
 pub mod progress;
 pub mod resolve;

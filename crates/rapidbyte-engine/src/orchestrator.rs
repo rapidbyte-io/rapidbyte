@@ -25,10 +25,10 @@ use rapidbyte_types::wire::Feature;
 use rapidbyte_types::wire::{PluginKind, SyncMode, WriteMode};
 
 use crate::arrow::ipc_to_record_batches;
-use crate::checkpoint::correlate_and_persist_cursors;
 use crate::config::types::{parse_byte_size, PipelineConfig, PipelineParallelism};
 use crate::error::{compute_backoff, PipelineError};
 use crate::execution::{DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineOutcome};
+use crate::finalizers::checkpoint::correlate_and_persist_cursors;
 use crate::progress::{Phase, ProgressEvent};
 use crate::resolve::{
     build_sandbox_overrides, check_state_backend, create_state_backend, load_and_validate_manifest,
@@ -1548,7 +1548,7 @@ async fn finalize_run(
         let pipeline_id_for_dlq = pipeline_id.clone();
         let dlq_records = std::mem::take(&mut aggregated.dlq_records);
         tokio::task::spawn_blocking(move || {
-            crate::dlq::persist_dlq_records(
+            crate::finalizers::dlq::persist_dlq_records(
                 state_for_dlq.as_ref(),
                 &pipeline_id_for_dlq,
                 run_id,
@@ -1780,7 +1780,7 @@ async fn finalize_successful_run_state(
     let pipeline_id_for_dlq = pipeline_id.clone();
     let dlq_records = std::mem::take(&mut aggregated.dlq_records);
     let dlq_result = tokio::task::spawn_blocking(move || {
-        crate::dlq::persist_dlq_records(
+        crate::finalizers::dlq::persist_dlq_records(
             state_for_dlq.as_ref(),
             &pipeline_id_for_dlq,
             run_id,
