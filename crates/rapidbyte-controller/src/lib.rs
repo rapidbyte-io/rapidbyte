@@ -33,6 +33,7 @@ pub mod registry;
 pub mod run_state;
 pub mod scheduler;
 pub mod server;
+pub mod services;
 pub mod state;
 pub mod store;
 pub mod terminal;
