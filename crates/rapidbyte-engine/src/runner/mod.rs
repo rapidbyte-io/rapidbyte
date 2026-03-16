@@ -13,11 +13,18 @@ pub(crate) use source::{run_source_stream, SourceRunResult};
 pub(crate) use transform::{run_transform_stream, TransformRunResult};
 pub(crate) use validator::{run_discover, validate_plugin};
 
-use rapidbyte_runtime::{CompressionCodec, LoadedComponent, SandboxOverrides};
+use std::sync::{Arc, Mutex};
+
+use anyhow::Context;
+use rapidbyte_runtime::{
+    CompressionCodec, HostStateBuilder, HostTimings, LoadedComponent, SandboxOverrides,
+};
 use rapidbyte_state::StateBackend;
+use rapidbyte_types::checkpoint::Checkpoint;
 use rapidbyte_types::manifest::Permissions;
 use rapidbyte_types::stream::StreamContext;
-use std::sync::Arc;
+
+use crate::error::PipelineError;
 
 /// Shared context for running a plugin stream (source, destination, or
 /// transform).  Built once per stream by the orchestrator and passed to
@@ -34,6 +41,83 @@ pub(crate) struct StreamRunContext<'a> {
     pub compression: Option<CompressionCodec>,
     pub overrides: Option<&'a SandboxOverrides>,
 }
+
+// ── Shared lifecycle helpers ────────────────────────────────────────
+
+/// Build a [`HostStateBuilder`] pre-populated with every field that is
+/// common to all three runner kinds (source, destination, transform).
+///
+/// The caller should chain kind-specific setters (`.sender()`,
+/// `.receiver()`, `.source_checkpoints()`, etc.) and then call `.build()`.
+pub(crate) fn build_base_host_state(
+    ctx: &StreamRunContext<'_>,
+    stage: &str,
+    config: &serde_json::Value,
+    instance_ordinal: Option<usize>,
+) -> HostStateBuilder {
+    let shard_index = ctx.stream_ctx.partition_index.unwrap_or(0) as usize;
+    let host_timings =
+        HostTimings::new(ctx.pipeline_name, &ctx.stream_ctx.stream_name, shard_index)
+            .with_run_label(ctx.metric_run_label);
+
+    let mut builder = rapidbyte_runtime::ComponentHostState::builder()
+        .pipeline(ctx.pipeline_name)
+        .plugin_id(ctx.plugin_id)
+        .plugin_instance_key(plugin_instance_key(
+            stage,
+            ctx.plugin_id,
+            ctx.stream_ctx,
+            instance_ordinal,
+        ))
+        .stream(ctx.stream_ctx.stream_name.clone())
+        .metric_run_label(ctx.metric_run_label)
+        .state_backend(ctx.state_backend.clone())
+        .timings(host_timings)
+        .config(config)
+        .compression(ctx.compression);
+
+    if let Some(p) = ctx.permissions {
+        builder = builder.permissions(p);
+    }
+    if let Some(o) = ctx.overrides {
+        builder = builder.overrides(o);
+    }
+    builder
+}
+
+/// Serialize a plugin config value to JSON.
+pub(crate) fn serialize_plugin_config(
+    config: &serde_json::Value,
+    role: &str,
+) -> Result<String, PipelineError> {
+    serde_json::to_string(config)
+        .with_context(|| format!("Failed to serialize {role} config"))
+        .map_err(PipelineError::Infrastructure)
+}
+
+/// Serialize a [`StreamContext`] to JSON for the `RunRequest`.
+pub(crate) fn serialize_stream_context(
+    stream_ctx: &StreamContext,
+) -> Result<String, PipelineError> {
+    serde_json::to_string(stream_ctx)
+        .context("Failed to serialize StreamContext")
+        .map_err(PipelineError::Infrastructure)
+}
+
+/// Drain checkpoints from a shared mutex, returning an owned `Vec`.
+pub(crate) fn extract_checkpoints(
+    checkpoints: &Arc<Mutex<Vec<Checkpoint>>>,
+    role: &str,
+) -> Result<Vec<Checkpoint>, PipelineError> {
+    checkpoints
+        .lock()
+        .map_err(|_| {
+            PipelineError::Infrastructure(anyhow::anyhow!("{role} checkpoint mutex poisoned"))
+        })
+        .map(|mut guard| guard.drain(..).collect())
+}
+
+// ── Existing helpers ────────────────────────────────────────────────
 
 pub(crate) fn plugin_instance_key(
     stage: &str,

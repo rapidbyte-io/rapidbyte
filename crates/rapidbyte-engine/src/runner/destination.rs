@@ -11,7 +11,10 @@ use rapidbyte_types::envelope::DlqRecord;
 use rapidbyte_types::metric::WriteSummary;
 use rapidbyte_types::state::RunStats;
 
-use super::{handle_close_result, plugin_instance_key, StreamRunContext};
+use super::{
+    build_base_host_state, extract_checkpoints, handle_close_result, serialize_plugin_config,
+    serialize_stream_context, StreamRunContext,
+};
 use crate::error::PipelineError;
 
 /// Result of running a destination plugin for a single stream.
@@ -29,7 +32,7 @@ pub(crate) struct DestRunResult {
 ///
 /// Returns an error if the component cannot be instantiated, opened, consume
 /// all input frames, or close cleanly for the given stream.
-#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 pub(crate) fn run_destination_stream(
     ctx: &StreamRunContext<'_>,
     receiver: mpsc::Receiver<Frame>,
@@ -37,77 +40,42 @@ pub(crate) fn run_destination_stream(
     dest_config: &serde_json::Value,
     stats: Arc<Mutex<RunStats>>,
 ) -> Result<DestRunResult, PipelineError> {
-    let StreamRunContext {
-        module,
-        ref state_backend,
-        pipeline_name,
-        metric_run_label,
-        plugin_id,
-        plugin_version,
-        stream_ctx,
-        permissions,
-        compression,
-        overrides,
-    } = *ctx;
-
     let phase_start = Instant::now();
     let vm_setup_start = Instant::now();
 
     let dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
-    let shard_index = stream_ctx.partition_index.unwrap_or(0) as usize;
-    let host_timings =
-        rapidbyte_runtime::HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index)
-            .with_run_label(metric_run_label);
 
-    let mut builder = rapidbyte_runtime::ComponentHostState::builder()
-        .pipeline(pipeline_name)
-        .plugin_id(plugin_id)
-        .plugin_instance_key(plugin_instance_key(
-            "destination",
-            plugin_id,
-            stream_ctx,
-            None,
-        ))
-        .stream(stream_ctx.stream_name.clone())
-        .metric_run_label(metric_run_label)
-        .state_backend(state_backend.clone())
+    // Build host state: shared fields + destination-specific additions
+    let builder = build_base_host_state(ctx, "destination", dest_config, None)
         .receiver(receiver)
         .dest_checkpoints(dest_checkpoints.clone())
-        .dlq_records(dlq_records.clone())
-        .timings(host_timings)
-        .config(dest_config)
-        .compression(compression);
-    if let Some(p) = permissions {
-        builder = builder.permissions(p);
-    }
-    if let Some(o) = overrides {
-        builder = builder.overrides(o);
-    }
+        .dlq_records(dlq_records.clone());
     let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
-    let timeout = overrides.and_then(|o| o.timeout_seconds);
-    let mut store = module.new_store(host_state, timeout);
-    let linker = create_component_linker(&module.engine, "destination", |linker| {
+    let timeout = ctx.overrides.and_then(|o| o.timeout_seconds);
+    let mut store = ctx.module.new_store(host_state, timeout);
+    let linker = create_component_linker(&ctx.module.engine, "destination", |linker| {
         dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(linker, |state| state)
             .context("Failed to add rapidbyte destination host imports")?;
         Ok(())
     })
     .map_err(PipelineError::Infrastructure)?;
-    let bindings =
-        dest_bindings::RapidbyteDestination::instantiate(&mut store, &module.component, &linker)
-            .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
+    let bindings = dest_bindings::RapidbyteDestination::instantiate(
+        &mut store,
+        &ctx.module.component,
+        &linker,
+    )
+    .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
 
     let iface = bindings.rapidbyte_plugin_destination();
     let vm_setup_secs = vm_setup_start.elapsed().as_secs_f64();
 
-    let dest_config_json = serde_json::to_string(dest_config)
-        .context("Failed to serialize destination config")
-        .map_err(PipelineError::Infrastructure)?;
+    let dest_config_json = serialize_plugin_config(dest_config, "destination")?;
 
     tracing::info!(
-        plugin = plugin_id,
-        version = plugin_version,
-        stream = stream_ctx.stream_name,
+        plugin = ctx.plugin_id,
+        version = ctx.plugin_version,
+        stream = ctx.stream_ctx.stream_name,
         "Opening destination plugin for stream"
     );
     let session = iface
@@ -116,12 +84,10 @@ pub(crate) fn run_destination_stream(
         .map_err(|err| PipelineError::Plugin(dest_error_to_sdk(err)))?;
 
     let recv_start = Instant::now();
-    let ctx_json = serde_json::to_string(stream_ctx)
-        .context("Failed to serialize StreamContext")
-        .map_err(PipelineError::Infrastructure)?;
+    let ctx_json = serialize_stream_context(ctx.stream_ctx)?;
 
     tracing::info!(
-        stream = stream_ctx.stream_name,
+        stream = ctx.stream_ctx.stream_name,
         "Starting destination write"
     );
     let run_request = dest_bindings::rapidbyte::plugin::types::RunRequest {
@@ -157,7 +123,7 @@ pub(crate) fn run_destination_stream(
     };
 
     tracing::info!(
-        stream = stream_ctx.stream_name,
+        stream = ctx.stream_ctx.stream_name,
         records = summary.records_written,
         bytes = summary.bytes_written,
         "Destination write complete for stream"
@@ -174,25 +140,19 @@ pub(crate) fn run_destination_stream(
     let recv_secs = recv_start.elapsed().as_secs_f64();
 
     tracing::info!(
-        plugin = plugin_id,
-        version = plugin_version,
-        stream = stream_ctx.stream_name,
+        plugin = ctx.plugin_id,
+        version = ctx.plugin_version,
+        stream = ctx.stream_ctx.stream_name,
         "Closing destination plugin for stream"
     );
     handle_close_result(
         iface.call_close(&mut store, session),
         "Destination",
-        &stream_ctx.stream_name,
+        &ctx.stream_ctx.stream_name,
         |err| dest_error_to_sdk(err).to_string(),
     );
 
-    let checkpoints = dest_checkpoints
-        .lock()
-        .map_err(|_| {
-            PipelineError::Infrastructure(anyhow::anyhow!("destination checkpoint mutex poisoned"))
-        })?
-        .drain(..)
-        .collect::<Vec<_>>();
+    let checkpoints = extract_checkpoints(&dest_checkpoints, "destination")?;
 
     Ok(DestRunResult {
         duration_secs: phase_start.elapsed().as_secs_f64(),

@@ -12,7 +12,10 @@ use rapidbyte_types::checkpoint::Checkpoint;
 use rapidbyte_types::envelope::DlqRecord;
 use rapidbyte_types::metric::TransformSummary;
 
-use super::{handle_close_result, plugin_instance_key, StreamRunContext};
+use super::{
+    build_base_host_state, handle_close_result, serialize_plugin_config, serialize_stream_context,
+    StreamRunContext,
+};
 use crate::error::PipelineError;
 
 /// Result of running a transform plugin for a single stream.
@@ -27,7 +30,7 @@ pub(crate) struct TransformRunResult {
 ///
 /// Returns an error if the component cannot be instantiated, opened, consume
 /// input frames, emit output frames, or close cleanly for the given stream.
-#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
+#[allow(clippy::needless_pass_by_value)]
 pub(crate) fn run_transform_stream(
     ctx: &StreamRunContext<'_>,
     receiver: mpsc::Receiver<Frame>,
@@ -36,59 +39,23 @@ pub(crate) fn run_transform_stream(
     transform_index: usize,
     transform_config: &serde_json::Value,
 ) -> Result<TransformRunResult, PipelineError> {
-    let StreamRunContext {
-        module,
-        ref state_backend,
-        pipeline_name,
-        metric_run_label,
-        plugin_id,
-        plugin_version,
-        stream_ctx,
-        permissions,
-        compression,
-        overrides,
-    } = *ctx;
-
     let phase_start = Instant::now();
 
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
-    let shard_index = stream_ctx.partition_index.unwrap_or(0) as usize;
-    let host_timings =
-        rapidbyte_runtime::HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index)
-            .with_run_label(metric_run_label);
 
-    let mut builder = rapidbyte_runtime::ComponentHostState::builder()
-        .pipeline(pipeline_name)
-        .plugin_id(plugin_id)
-        .plugin_instance_key(plugin_instance_key(
-            "transform",
-            plugin_id,
-            stream_ctx,
-            Some(transform_index),
-        ))
-        .stream(stream_ctx.stream_name.clone())
-        .metric_run_label(metric_run_label)
-        .state_backend(state_backend.clone())
+    // Build host state: shared fields + transform-specific additions
+    let builder = build_base_host_state(ctx, "transform", transform_config, Some(transform_index))
         .sender(sender.clone())
         .receiver(receiver)
         .dlq_records(dlq_records)
         .source_checkpoints(source_checkpoints)
-        .dest_checkpoints(dest_checkpoints)
-        .timings(host_timings)
-        .config(transform_config)
-        .compression(compression);
-    if let Some(p) = permissions {
-        builder = builder.permissions(p);
-    }
-    if let Some(o) = overrides {
-        builder = builder.overrides(o);
-    }
+        .dest_checkpoints(dest_checkpoints);
     let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
-    let timeout = overrides.and_then(|o| o.timeout_seconds);
-    let mut store = module.new_store(host_state, timeout);
-    let linker = create_component_linker(&module.engine, "transform", |linker| {
+    let timeout = ctx.overrides.and_then(|o| o.timeout_seconds);
+    let mut store = ctx.module.new_store(host_state, timeout);
+    let linker = create_component_linker(&ctx.module.engine, "transform", |linker| {
         transform_bindings::RapidbyteTransform::add_to_linker::<_, HasSelf<_>>(linker, |state| {
             state
         })
@@ -96,20 +63,21 @@ pub(crate) fn run_transform_stream(
         Ok(())
     })
     .map_err(PipelineError::Infrastructure)?;
-    let bindings =
-        transform_bindings::RapidbyteTransform::instantiate(&mut store, &module.component, &linker)
-            .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
+    let bindings = transform_bindings::RapidbyteTransform::instantiate(
+        &mut store,
+        &ctx.module.component,
+        &linker,
+    )
+    .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
 
     let iface = bindings.rapidbyte_plugin_transform();
 
-    let transform_config_json = serde_json::to_string(transform_config)
-        .context("Failed to serialize transform config")
-        .map_err(PipelineError::Infrastructure)?;
+    let transform_config_json = serialize_plugin_config(transform_config, "transform")?;
 
     tracing::info!(
-        plugin = plugin_id,
-        version = plugin_version,
-        stream = stream_ctx.stream_name,
+        plugin = ctx.plugin_id,
+        version = ctx.plugin_version,
+        stream = ctx.stream_ctx.stream_name,
         "Opening transform plugin for stream"
     );
     let session = iface
@@ -117,11 +85,9 @@ pub(crate) fn run_transform_stream(
         .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?
         .map_err(|err| PipelineError::Plugin(transform_error_to_sdk(err)))?;
 
-    let ctx_json = serde_json::to_string(stream_ctx)
-        .context("Failed to serialize StreamContext")
-        .map_err(PipelineError::Infrastructure)?;
+    let ctx_json = serialize_stream_context(ctx.stream_ctx)?;
 
-    tracing::info!(stream = stream_ctx.stream_name, "Starting transform");
+    tracing::info!(stream = ctx.stream_ctx.stream_name, "Starting transform");
     let run_request = transform_bindings::rapidbyte::plugin::types::RunRequest {
         phase: transform_bindings::rapidbyte::plugin::types::RunPhase::Transform,
         stream_context_json: ctx_json,
@@ -157,15 +123,15 @@ pub(crate) fn run_transform_stream(
     let _ = sender.send(Frame::EndStream);
 
     tracing::info!(
-        plugin = plugin_id,
-        version = plugin_version,
-        stream = stream_ctx.stream_name,
+        plugin = ctx.plugin_id,
+        version = ctx.plugin_version,
+        stream = ctx.stream_ctx.stream_name,
         "Closing transform plugin for stream"
     );
     handle_close_result(
         iface.call_close(&mut store, session),
         "Transform",
-        &stream_ctx.stream_name,
+        &ctx.stream_ctx.stream_name,
         |err| transform_error_to_sdk(err).to_string(),
     );
 

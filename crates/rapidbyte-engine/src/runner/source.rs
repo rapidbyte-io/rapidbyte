@@ -10,7 +10,10 @@ use rapidbyte_types::checkpoint::Checkpoint;
 use rapidbyte_types::metric::ReadSummary;
 use rapidbyte_types::state::RunStats;
 
-use super::{handle_close_result, plugin_instance_key, StreamRunContext};
+use super::{
+    build_base_host_state, extract_checkpoints, handle_close_result, serialize_plugin_config,
+    serialize_stream_context, StreamRunContext,
+};
 use crate::error::PipelineError;
 
 /// Result of running a source plugin for a single stream.
@@ -26,7 +29,7 @@ pub(crate) struct SourceRunResult {
 ///
 /// Returns an error if the component cannot be instantiated, opened, run, or
 /// closed cleanly for the given stream.
-#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value)]
 pub(crate) fn run_source_stream(
     ctx: &StreamRunContext<'_>,
     sender: mpsc::SyncSender<Frame>,
@@ -34,72 +37,39 @@ pub(crate) fn run_source_stream(
     stats: Arc<Mutex<RunStats>>,
     on_emit: Option<Arc<dyn Fn(u64) + Send + Sync>>,
 ) -> Result<SourceRunResult, PipelineError> {
-    let StreamRunContext {
-        module,
-        ref state_backend,
-        pipeline_name,
-        metric_run_label,
-        plugin_id,
-        plugin_version,
-        stream_ctx,
-        permissions,
-        compression,
-        overrides,
-    } = *ctx;
-
     let phase_start = Instant::now();
 
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
-    let shard_index = stream_ctx.partition_index.unwrap_or(0) as usize;
-    let host_timings =
-        rapidbyte_runtime::HostTimings::new(pipeline_name, &stream_ctx.stream_name, shard_index)
-            .with_run_label(metric_run_label);
 
-    let mut builder = rapidbyte_runtime::ComponentHostState::builder()
-        .pipeline(pipeline_name)
-        .plugin_id(plugin_id)
-        .plugin_instance_key(plugin_instance_key("source", plugin_id, stream_ctx, None))
-        .stream(stream_ctx.stream_name.clone())
-        .metric_run_label(metric_run_label)
-        .state_backend(state_backend.clone())
+    // Build host state: shared fields + source-specific additions
+    let mut builder = build_base_host_state(ctx, "source", source_config, None)
         .sender(sender.clone())
-        .source_checkpoints(source_checkpoints.clone())
-        .timings(host_timings)
-        .config(source_config)
-        .compression(compression);
-    if let Some(p) = permissions {
-        builder = builder.permissions(p);
-    }
-    if let Some(o) = overrides {
-        builder = builder.overrides(o);
-    }
+        .source_checkpoints(source_checkpoints.clone());
     if let Some(cb) = on_emit {
         builder = builder.on_emit(cb);
     }
     let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
-    let timeout = overrides.and_then(|o| o.timeout_seconds);
-    let mut store = module.new_store(host_state, timeout);
-    let linker = create_component_linker(&module.engine, "source", |linker| {
+    let timeout = ctx.overrides.and_then(|o| o.timeout_seconds);
+    let mut store = ctx.module.new_store(host_state, timeout);
+    let linker = create_component_linker(&ctx.module.engine, "source", |linker| {
         source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(linker, |state| state)
             .context("Failed to add rapidbyte source host imports")?;
         Ok(())
     })
     .map_err(PipelineError::Infrastructure)?;
     let bindings =
-        source_bindings::RapidbyteSource::instantiate(&mut store, &module.component, &linker)
+        source_bindings::RapidbyteSource::instantiate(&mut store, &ctx.module.component, &linker)
             .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
 
     let iface = bindings.rapidbyte_plugin_source();
 
-    let source_config_json = serde_json::to_string(source_config)
-        .context("Failed to serialize source config")
-        .map_err(PipelineError::Infrastructure)?;
+    let source_config_json = serialize_plugin_config(source_config, "source")?;
 
     tracing::info!(
-        plugin = plugin_id,
-        version = plugin_version,
-        stream = stream_ctx.stream_name,
+        plugin = ctx.plugin_id,
+        version = ctx.plugin_version,
+        stream = ctx.stream_ctx.stream_name,
         "Opening source plugin for stream"
     );
     let session = iface
@@ -107,11 +77,9 @@ pub(crate) fn run_source_stream(
         .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?
         .map_err(|err| PipelineError::Plugin(source_error_to_sdk(err)))?;
 
-    let ctx_json = serde_json::to_string(stream_ctx)
-        .context("Failed to serialize StreamContext")
-        .map_err(PipelineError::Infrastructure)?;
+    let ctx_json = serialize_stream_context(ctx.stream_ctx)?;
 
-    tracing::info!(stream = stream_ctx.stream_name, "Starting source read");
+    tracing::info!(stream = ctx.stream_ctx.stream_name, "Starting source read");
     let run_request = source_bindings::rapidbyte::plugin::types::RunRequest {
         phase: source_bindings::rapidbyte::plugin::types::RunPhase::Read,
         stream_context_json: ctx_json,
@@ -145,7 +113,7 @@ pub(crate) fn run_source_stream(
     };
 
     tracing::info!(
-        stream = stream_ctx.stream_name,
+        stream = ctx.stream_ctx.stream_name,
         records = summary.records_read,
         bytes = summary.bytes_read,
         "Source read complete for stream"
@@ -162,25 +130,19 @@ pub(crate) fn run_source_stream(
     let _ = sender.send(Frame::EndStream);
 
     tracing::info!(
-        plugin = plugin_id,
-        version = plugin_version,
-        stream = stream_ctx.stream_name,
+        plugin = ctx.plugin_id,
+        version = ctx.plugin_version,
+        stream = ctx.stream_ctx.stream_name,
         "Closing source plugin for stream"
     );
     handle_close_result(
         iface.call_close(&mut store, session),
         "Source",
-        &stream_ctx.stream_name,
+        &ctx.stream_ctx.stream_name,
         |err| source_error_to_sdk(err).to_string(),
     );
 
-    let checkpoints = source_checkpoints
-        .lock()
-        .map_err(|_| {
-            PipelineError::Infrastructure(anyhow::anyhow!("source checkpoint mutex poisoned"))
-        })?
-        .drain(..)
-        .collect::<Vec<_>>();
+    let checkpoints = extract_checkpoints(&source_checkpoints, "source")?;
 
     Ok(SourceRunResult {
         duration_secs: phase_start.elapsed().as_secs_f64(),
