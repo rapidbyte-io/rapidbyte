@@ -15,7 +15,10 @@ use crate::execution::{DryRunResult, DryRunStreamResult};
 use crate::finalizers::checkpoint::correlate_and_persist_cursors;
 use crate::pipeline::planner::compute_pipeline_parallelism;
 use crate::plugin::loader::PluginModules;
-use crate::result::{DestTiming, PipelineCounts, PipelineResult, SourceTiming, StreamShardMetric};
+use crate::result::{
+    compute_wasm_overhead_secs, DestTiming, PipelineCounts, PipelineResult, SourceTiming,
+    StreamShardMetric,
+};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -114,7 +117,12 @@ pub(crate) async fn finalize_pipeline_execution(
     // 2. Take metrics snapshot
     let snap = metrics_runtime.snapshot_for_run(&config.pipeline, Some(metric_run_label));
 
-    let wasm_overhead_secs = compute_wasm_overhead_secs(&snap, &aggregated);
+    let wasm_overhead_secs = compute_wasm_overhead_secs(
+        &snap,
+        aggregated.max_dest_duration,
+        aggregated.max_vm_setup_secs,
+        aggregated.max_recv_secs,
+    );
 
     tracing::debug!(
         pipeline = config.pipeline,
@@ -157,12 +165,18 @@ pub(crate) async fn finalize_pipeline_execution(
             bytes_read: aggregated.total_read_summary.bytes_read,
             bytes_written: aggregated.total_write_summary.bytes_written,
         },
-        source: build_source_timing(
+        source: SourceTiming::from_snapshot(
             &snap,
             aggregated.max_source_duration,
             modules.source_module_load_ms,
         ),
-        dest: build_dest_timing(&snap, &aggregated, modules.dest_module_load_ms),
+        dest: DestTiming::from_snapshot(
+            &snap,
+            aggregated.max_dest_duration,
+            aggregated.max_vm_setup_secs,
+            aggregated.max_recv_secs,
+            modules.dest_module_load_ms,
+        ),
         num_transforms: aggregated.transform_durations.len(),
         total_transform_secs: aggregated.transform_durations.iter().sum(),
         transform_load_times_ms,
@@ -303,24 +317,6 @@ pub(crate) fn reported_parallelism(config: &PipelineConfig, aggregated: &StreamA
     }
 }
 
-pub(crate) fn build_source_timing(
-    snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
-    max_source_duration: f64,
-    source_module_load_ms: u64,
-) -> SourceTiming {
-    SourceTiming {
-        duration_secs: max_source_duration,
-        module_load_ms: source_module_load_ms,
-        connect_secs: snap.source_connect_secs,
-        query_secs: snap.source_query_secs,
-        fetch_secs: snap.source_fetch_secs,
-        arrow_encode_secs: snap.source_encode_secs,
-        emit_nanos: snap.emit_batch_nanos,
-        compress_nanos: snap.compress_nanos,
-        emit_count: snap.emit_count,
-    }
-}
-
 pub(crate) fn build_dry_run_result(
     snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
     aggregated: StreamAggregation,
@@ -329,46 +325,14 @@ pub(crate) fn build_dry_run_result(
 ) -> DryRunResult {
     DryRunResult {
         streams: aggregated.dry_run_streams,
-        source: build_source_timing(snap, aggregated.max_source_duration, source_module_load_ms),
+        source: SourceTiming::from_snapshot(
+            snap,
+            aggregated.max_source_duration,
+            source_module_load_ms,
+        ),
         num_transforms: aggregated.transform_durations.len(),
         total_transform_secs: aggregated.transform_durations.iter().sum(),
         duration_secs,
-    }
-}
-
-pub(crate) fn compute_wasm_overhead_secs(
-    snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
-    aggregated: &StreamAggregation,
-) -> f64 {
-    let plugin_internal_secs =
-        snap.dest_connect_secs + snap.dest_flush_secs + snap.dest_commit_secs;
-
-    (aggregated.max_dest_duration
-        - aggregated.max_vm_setup_secs
-        - aggregated.max_recv_secs
-        - plugin_internal_secs)
-        .max(0.0)
-}
-
-pub(crate) fn build_dest_timing(
-    snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
-    aggregated: &StreamAggregation,
-    dest_module_load_ms: u64,
-) -> DestTiming {
-    DestTiming {
-        duration_secs: aggregated.max_dest_duration,
-        module_load_ms: dest_module_load_ms,
-        connect_secs: snap.dest_connect_secs,
-        flush_secs: snap.dest_flush_secs,
-        commit_secs: snap.dest_commit_secs,
-        arrow_decode_secs: snap.dest_decode_secs,
-        wasm_instantiation_secs: aggregated.max_vm_setup_secs,
-        frame_receive_secs: aggregated.max_recv_secs,
-        frame_receive_nanos: snap.next_batch_nanos,
-        frame_wait_nanos: snap.next_batch_wait_nanos,
-        frame_process_nanos: snap.next_batch_process_nanos,
-        decompress_nanos: snap.decompress_nanos,
-        frame_count: snap.next_batch_count,
     }
 }
 

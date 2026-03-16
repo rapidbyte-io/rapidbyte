@@ -75,6 +75,71 @@ pub struct StreamShardMetric {
     pub dest_frame_receive_secs: f64,
 }
 
+impl SourceTiming {
+    /// Construct a `SourceTiming` from a metrics snapshot and wall-clock totals.
+    pub(crate) fn from_snapshot(
+        snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
+        max_source_duration: f64,
+        source_module_load_ms: u64,
+    ) -> Self {
+        Self {
+            duration_secs: max_source_duration,
+            module_load_ms: source_module_load_ms,
+            connect_secs: snap.source_connect_secs,
+            query_secs: snap.source_query_secs,
+            fetch_secs: snap.source_fetch_secs,
+            arrow_encode_secs: snap.source_encode_secs,
+            emit_nanos: snap.emit_batch_nanos,
+            compress_nanos: snap.compress_nanos,
+            emit_count: snap.emit_count,
+        }
+    }
+}
+
+impl DestTiming {
+    /// Construct a `DestTiming` from a metrics snapshot and wall-clock totals.
+    pub(crate) fn from_snapshot(
+        snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
+        max_dest_duration: f64,
+        max_wasm_instantiation_secs: f64,
+        max_frame_receive_secs: f64,
+        dest_module_load_ms: u64,
+    ) -> Self {
+        Self {
+            duration_secs: max_dest_duration,
+            module_load_ms: dest_module_load_ms,
+            connect_secs: snap.dest_connect_secs,
+            flush_secs: snap.dest_flush_secs,
+            commit_secs: snap.dest_commit_secs,
+            arrow_decode_secs: snap.dest_decode_secs,
+            wasm_instantiation_secs: max_wasm_instantiation_secs,
+            frame_receive_secs: max_frame_receive_secs,
+            frame_receive_nanos: snap.next_batch_nanos,
+            frame_wait_nanos: snap.next_batch_wait_nanos,
+            frame_process_nanos: snap.next_batch_process_nanos,
+            decompress_nanos: snap.decompress_nanos,
+            frame_count: snap.next_batch_count,
+        }
+    }
+}
+
+/// Compute the WASM overhead seconds from a metrics snapshot and wall-clock totals.
+pub(crate) fn compute_wasm_overhead_secs(
+    snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
+    max_dest_duration: f64,
+    max_wasm_instantiation_secs: f64,
+    max_frame_receive_secs: f64,
+) -> f64 {
+    let plugin_internal_secs =
+        snap.dest_connect_secs + snap.dest_flush_secs + snap.dest_commit_secs;
+
+    (max_dest_duration
+        - max_wasm_instantiation_secs
+        - max_frame_receive_secs
+        - plugin_internal_secs)
+        .max(0.0)
+}
+
 /// Result of a pipeline check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckStatus {
