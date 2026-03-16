@@ -47,6 +47,186 @@ use crate::runner::{run_discover, validate_plugin};
 
 static NEXT_METRIC_RUN_LABEL: AtomicU64 = AtomicU64::new(1);
 
+/// Holds shared references across retry attempts for a single pipeline run.
+struct PipelineAttempt<'a> {
+    config: &'a PipelineConfig,
+    options: &'a ExecutionOptions,
+    cancel_token: &'a CancellationToken,
+    snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
+    meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
+    registry_config: &'a rapidbyte_registry::RegistryConfig,
+}
+
+impl<'a> PipelineAttempt<'a> {
+    #[allow(clippy::too_many_lines)]
+    async fn execute(
+        &self,
+        attempt: u32,
+        progress_tx: ProgressTx,
+    ) -> Result<PipelineOutcome, PipelineError> {
+        let config = self.config;
+        let options = self.options;
+        let cancel_token = self.cancel_token;
+        let snapshot_reader = self.snapshot_reader;
+        let meter_provider = self.meter_provider;
+        let registry_config = self.registry_config;
+        let start = Instant::now();
+        let pipeline_id = PipelineId::new(config.pipeline.clone());
+        tracing::info!(
+            pipeline = config.pipeline,
+            dry_run = options.dry_run,
+            "Starting pipeline run"
+        );
+
+        send_progress(
+            &progress_tx,
+            ProgressEvent::PhaseChange {
+                phase: Phase::Resolving,
+            },
+        );
+        let plugins = resolve_plugins(config, registry_config).await?;
+        if let Some(ref manifest) = plugins.source_manifest {
+            validate_config_against_schema(&config.source.use_ref, &config.source.config, manifest)
+                .map_err(PipelineError::Infrastructure)?;
+        }
+        if let Some(ref manifest) = plugins.dest_manifest {
+            validate_config_against_schema(
+                &config.destination.use_ref,
+                &config.destination.config,
+                manifest,
+            )
+            .map_err(PipelineError::Infrastructure)?;
+        }
+        let config_for_state = config.clone();
+        let state = tokio::task::spawn_blocking(move || create_state_backend(&config_for_state))
+            .await
+            .map_err(|e| PipelineError::task_panicked("create_state_backend", e))?
+            .map_err(PipelineError::Infrastructure)?;
+
+        let state_for_execution = state.clone();
+        let execution_result = async move {
+            let metrics_runtime = prepare_metrics_runtime(snapshot_reader, meter_provider);
+
+            // Skip run tracking in dry-run mode to avoid orphaned run records.
+            let run_id = if options.dry_run {
+                0
+            } else {
+                let state_for_run = state_for_execution.clone();
+                let pipeline_id_for_run = pipeline_id.clone();
+                tokio::task::spawn_blocking(move || {
+                    state_for_run.start_run(&pipeline_id_for_run, &StreamName::new("all"))
+                })
+                .await
+                .map_err(|e| PipelineError::task_panicked("start_run", e))?
+                .map_err(|e| PipelineError::Infrastructure(e.into()))?
+            };
+            let metric_run_label = if options.dry_run {
+                format!(
+                    "dry-run-{}-{attempt}",
+                    NEXT_METRIC_RUN_LABEL.fetch_add(1, Ordering::Relaxed)
+                )
+            } else {
+                format!("{run_id}:{attempt}")
+            };
+
+            send_progress(
+                &progress_tx,
+                ProgressEvent::PhaseChange {
+                    phase: Phase::Loading,
+                },
+            );
+            let modules = load_all_modules(config, &plugins, registry_config).await?;
+            let config_for_build = config.clone();
+            let state_for_build = state_for_execution.clone();
+            let max_records = options.limit;
+            let source_manifest_for_build = plugins.source_manifest.clone();
+            let stream_build = tokio::task::spawn_blocking(move || {
+                build_stream_contexts(
+                    &config_for_build,
+                    state_for_build.as_ref(),
+                    max_records,
+                    source_manifest_for_build.as_ref(),
+                )
+            })
+            .await
+            .map_err(|e| PipelineError::task_panicked("build_stream_contexts", e))??;
+            send_progress(
+                &progress_tx,
+                ProgressEvent::PhaseChange {
+                    phase: Phase::Running,
+                },
+            );
+            ensure_not_cancelled(cancel_token, "Pipeline cancelled before stream execution")?;
+            let aggregated = match execute_streams(
+                config,
+                &plugins,
+                &modules,
+                &stream_build,
+                state_for_execution.clone(),
+                options,
+                &metric_run_label,
+                &progress_tx,
+                cancel_token,
+            )
+            .await
+            {
+                Ok(agg) => agg,
+                Err(err) => {
+                    // Drain the run's snapshot entry to prevent memory leaks in
+                    // long-lived processes with repeated failed attempts.
+                    let _ =
+                        metrics_runtime.snapshot_for_run(&config.pipeline, Some(&metric_run_label));
+                    return Err(err);
+                }
+            };
+
+            send_progress(
+                &progress_tx,
+                ProgressEvent::PhaseChange {
+                    phase: Phase::Finished,
+                },
+            );
+
+            if options.dry_run {
+                let duration_secs = start.elapsed().as_secs_f64();
+
+                let snap =
+                    metrics_runtime.snapshot_for_run(&config.pipeline, Some(&metric_run_label));
+
+                return Ok(PipelineOutcome::DryRun(build_dry_run_result(
+                    &snap,
+                    aggregated,
+                    modules.source_module_load_ms,
+                    duration_secs,
+                )));
+            }
+
+            let result = finalize_pipeline_execution(
+                config,
+                &pipeline_id,
+                state_for_execution.clone(),
+                run_id,
+                attempt,
+                start,
+                &metric_run_label,
+                &modules,
+                aggregated,
+                &metrics_runtime,
+            )
+            .await?;
+            Ok(PipelineOutcome::Run(result))
+        }
+        .await;
+
+        let state_for_drop = state;
+        tokio::task::spawn_blocking(move || drop(state_for_drop))
+            .await
+            .map_err(|e| PipelineError::task_panicked("drop_state_backend", e))?;
+
+        execution_result
+    }
+}
+
 /// Run a pipeline with OpenTelemetry metric snapshot support.
 ///
 /// `finalize_run()` reads timing data from the OpenTelemetry metric snapshot
@@ -65,35 +245,33 @@ pub async fn run_pipeline(
     registry_config: &rapidbyte_registry::RegistryConfig,
 ) -> Result<PipelineOutcome, PipelineError> {
     let max_retries = config.resources.max_retries;
-    let mut attempt = 0u32;
+    let mut attempt_num = 0u32;
+    let attempt = PipelineAttempt {
+        config,
+        options,
+        cancel_token: &cancel_token,
+        snapshot_reader,
+        meter_provider,
+        registry_config,
+    };
 
     loop {
         ensure_not_cancelled(&cancel_token, "Pipeline cancelled before execution")?;
-        attempt += 1;
-        let result = execute_pipeline_once(
-            config,
-            options,
-            attempt,
-            progress_tx.clone(),
-            &cancel_token,
-            snapshot_reader,
-            meter_provider,
-            registry_config,
-        )
-        .await;
+        attempt_num += 1;
+        let result = attempt.execute(attempt_num, progress_tx.clone()).await;
 
         match result {
             Ok(outcome) => return Ok(outcome),
-            Err(ref err) if err.is_retryable() && attempt <= max_retries => {
+            Err(ref err) if err.is_retryable() && attempt_num <= max_retries => {
                 if let Some(plugin_err) = err.as_plugin_error() {
-                    let delay = compute_backoff(plugin_err, attempt);
+                    let delay = compute_backoff(plugin_err, attempt_num);
                     let commit_state_str =
                         plugin_err.commit_state.as_ref().map(|cs| format!("{cs:?}"));
                     #[allow(clippy::cast_possible_truncation)]
                     // Safety: delay.as_millis() is always well under u64::MAX
                     let delay_ms = delay.as_millis() as u64;
                     tracing::warn!(
-                        attempt,
+                        attempt = attempt_num,
                         max_retries,
                         delay_ms,
                         category = %plugin_err.category,
@@ -105,7 +283,7 @@ pub async fn run_pipeline(
                     send_progress(
                         &progress_tx,
                         ProgressEvent::Retry {
-                            attempt,
+                            attempt: attempt_num,
                             max_retries,
                             message: format!(
                                 "[{}] {}: {}",
@@ -128,7 +306,7 @@ pub async fn run_pipeline(
                         plugin_err.commit_state.as_ref().map(|cs| format!("{cs:?}"));
                     if err.is_retryable() {
                         tracing::error!(
-                            attempt,
+                            attempt = attempt_num,
                             max_retries,
                             category = %plugin_err.category,
                             code = %plugin_err.code,
@@ -151,171 +329,6 @@ pub async fn run_pipeline(
             }
         }
     }
-}
-
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-async fn execute_pipeline_once(
-    config: &PipelineConfig,
-    options: &ExecutionOptions,
-    attempt: u32,
-    progress_tx: ProgressTx,
-    cancel_token: &CancellationToken,
-    snapshot_reader: &rapidbyte_metrics::snapshot::SnapshotReader,
-    meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
-    registry_config: &rapidbyte_registry::RegistryConfig,
-) -> Result<PipelineOutcome, PipelineError> {
-    let start = Instant::now();
-    let pipeline_id = PipelineId::new(config.pipeline.clone());
-    tracing::info!(
-        pipeline = config.pipeline,
-        dry_run = options.dry_run,
-        "Starting pipeline run"
-    );
-
-    send_progress(
-        &progress_tx,
-        ProgressEvent::PhaseChange {
-            phase: Phase::Resolving,
-        },
-    );
-    let plugins = resolve_plugins(config, registry_config).await?;
-    if let Some(ref manifest) = plugins.source_manifest {
-        validate_config_against_schema(&config.source.use_ref, &config.source.config, manifest)
-            .map_err(PipelineError::Infrastructure)?;
-    }
-    if let Some(ref manifest) = plugins.dest_manifest {
-        validate_config_against_schema(
-            &config.destination.use_ref,
-            &config.destination.config,
-            manifest,
-        )
-        .map_err(PipelineError::Infrastructure)?;
-    }
-    let config_for_state = config.clone();
-    let state = tokio::task::spawn_blocking(move || create_state_backend(&config_for_state))
-        .await
-        .map_err(|e| PipelineError::task_panicked("create_state_backend", e))?
-        .map_err(PipelineError::Infrastructure)?;
-
-    let state_for_execution = state.clone();
-    let execution_result = async move {
-        let metrics_runtime = prepare_metrics_runtime(snapshot_reader, meter_provider);
-
-        // Skip run tracking in dry-run mode to avoid orphaned run records.
-        let run_id = if options.dry_run {
-            0
-        } else {
-            let state_for_run = state_for_execution.clone();
-            let pipeline_id_for_run = pipeline_id.clone();
-            tokio::task::spawn_blocking(move || {
-                state_for_run.start_run(&pipeline_id_for_run, &StreamName::new("all"))
-            })
-            .await
-            .map_err(|e| PipelineError::task_panicked("start_run", e))?
-            .map_err(|e| PipelineError::Infrastructure(e.into()))?
-        };
-        let metric_run_label = if options.dry_run {
-            format!(
-                "dry-run-{}-{attempt}",
-                NEXT_METRIC_RUN_LABEL.fetch_add(1, Ordering::Relaxed)
-            )
-        } else {
-            format!("{run_id}:{attempt}")
-        };
-
-        send_progress(
-            &progress_tx,
-            ProgressEvent::PhaseChange {
-                phase: Phase::Loading,
-            },
-        );
-        let modules = load_all_modules(config, &plugins, registry_config).await?;
-        let config_for_build = config.clone();
-        let state_for_build = state_for_execution.clone();
-        let max_records = options.limit;
-        let source_manifest_for_build = plugins.source_manifest.clone();
-        let stream_build = tokio::task::spawn_blocking(move || {
-            build_stream_contexts(
-                &config_for_build,
-                state_for_build.as_ref(),
-                max_records,
-                source_manifest_for_build.as_ref(),
-            )
-        })
-        .await
-        .map_err(|e| PipelineError::task_panicked("build_stream_contexts", e))??;
-        send_progress(
-            &progress_tx,
-            ProgressEvent::PhaseChange {
-                phase: Phase::Running,
-            },
-        );
-        ensure_not_cancelled(cancel_token, "Pipeline cancelled before stream execution")?;
-        let aggregated = match execute_streams(
-            config,
-            &plugins,
-            &modules,
-            &stream_build,
-            state_for_execution.clone(),
-            options,
-            &metric_run_label,
-            &progress_tx,
-            cancel_token,
-        )
-        .await
-        {
-            Ok(agg) => agg,
-            Err(err) => {
-                // Drain the run's snapshot entry to prevent memory leaks in
-                // long-lived processes with repeated failed attempts.
-                let _ = metrics_runtime.snapshot_for_run(&config.pipeline, Some(&metric_run_label));
-                return Err(err);
-            }
-        };
-
-        send_progress(
-            &progress_tx,
-            ProgressEvent::PhaseChange {
-                phase: Phase::Finished,
-            },
-        );
-
-        if options.dry_run {
-            let duration_secs = start.elapsed().as_secs_f64();
-
-            let snap = metrics_runtime.snapshot_for_run(&config.pipeline, Some(&metric_run_label));
-
-            return Ok(PipelineOutcome::DryRun(build_dry_run_result(
-                &snap,
-                aggregated,
-                modules.source_module_load_ms,
-                duration_secs,
-            )));
-        }
-
-        let result = finalize_pipeline_execution(
-            config,
-            &pipeline_id,
-            state_for_execution.clone(),
-            run_id,
-            attempt,
-            start,
-            &metric_run_label,
-            &modules,
-            aggregated,
-            &metrics_runtime,
-        )
-        .await?;
-        Ok(PipelineOutcome::Run(result))
-    }
-    .await;
-
-    let state_for_drop = state;
-    tokio::task::spawn_blocking(move || drop(state_for_drop))
-        .await
-        .map_err(|e| PipelineError::task_panicked("drop_state_backend", e))?;
-
-    execution_result
 }
 
 #[allow(
