@@ -65,6 +65,31 @@ impl PipelineError {
             Self::Infrastructure(_) => None,
         }
     }
+
+    /// Shorthand for Infrastructure variant from a string message.
+    pub fn infra(msg: impl Into<String>) -> Self {
+        Self::Infrastructure(anyhow::anyhow!("{}", msg.into()))
+    }
+
+    /// Shorthand for Infrastructure from an existing anyhow::Error.
+    pub fn from_infra(err: anyhow::Error) -> Self {
+        Self::Infrastructure(err)
+    }
+
+    /// Wrap a task panic into an Infrastructure error with context.
+    pub fn task_panicked(context: &str, err: impl std::fmt::Display) -> Self {
+        Self::infra(format!("{context} task panicked: {err}"))
+    }
+
+    /// Cancelled pipeline error with safe-to-retry metadata.
+    pub fn cancelled(message: &str) -> Self {
+        use rapidbyte_types::error::CommitState;
+        let mut error = PluginError::internal("CANCELLED", message);
+        error.retryable = true;
+        error.safe_to_retry = true;
+        error.commit_state = Some(CommitState::BeforeCommit);
+        Self::Plugin(error)
+    }
 }
 
 /// Compute retry delay based on error hints and attempt number.
@@ -225,5 +250,40 @@ mod tests {
                 .with_commit_state(CommitState::AfterCommitConfirmed),
         );
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn test_infra_from_string() {
+        let err = PipelineError::infra("module load failed");
+        assert!(matches!(err, PipelineError::Infrastructure(_)));
+        assert!(err.to_string().contains("module load failed"));
+    }
+
+    #[test]
+    fn test_infra_from_anyhow() {
+        let anyhow_err = anyhow::anyhow!("something broke");
+        let err = PipelineError::from_infra(anyhow_err);
+        assert!(matches!(err, PipelineError::Infrastructure(_)));
+    }
+
+    #[test]
+    fn test_task_panicked() {
+        let err = PipelineError::task_panicked("load_module", "task panicked unexpectedly");
+        assert!(matches!(err, PipelineError::Infrastructure(_)));
+        assert!(err.to_string().contains("load_module"));
+        assert!(err.to_string().contains("task panicked"));
+    }
+
+    #[test]
+    fn test_cancelled_constructor() {
+        let err = PipelineError::cancelled("Pipeline cancelled before execution");
+        assert!(err.is_retryable());
+        let pe = err.as_plugin_error().unwrap();
+        assert_eq!(pe.code, "CANCELLED");
+        assert!(pe.safe_to_retry);
+        assert_eq!(
+            pe.commit_state,
+            Some(rapidbyte_types::error::CommitState::BeforeCommit)
+        );
     }
 }
