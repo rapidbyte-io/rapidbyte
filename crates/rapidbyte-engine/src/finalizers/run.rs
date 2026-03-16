@@ -114,7 +114,7 @@ pub(crate) async fn finalize_pipeline_execution(
             bytes_written: aggregated.state.final_stats.bytes_written,
             error_message: Some(format!("Stream error: {err}")),
         };
-        mark_run_complete(state.clone(), run_id, RunStatus::Failed, run_stats).await;
+        mark_run_failed(state.clone(), run_id, run_stats).await;
 
         persist_dlq(
             state.clone(),
@@ -210,21 +210,26 @@ pub(crate) async fn finalize_pipeline_execution(
 // Private helpers
 // ---------------------------------------------------------------------------
 
-/// Fire-and-forget run status marker. The old code used `let _ =` on errors
-/// from `complete_run_status` in failure paths, so we unify on fire-and-forget
-/// to simplify the control flow.
+/// Mark a run as completed or failed in the state backend.
+///
+/// Returns `Result` so success-path callers can propagate errors.
+/// Failure-path callers should use `mark_run_failed()` which logs and suppresses.
 async fn mark_run_complete(
     backend: Arc<dyn StateBackend>,
     run_id: i64,
     status: RunStatus,
     run_stats: RunStats,
-) {
-    let result =
-        tokio::task::spawn_blocking(move || backend.complete_run(run_id, status, &run_stats)).await;
-    match result {
-        Err(e) => tracing::warn!("mark_run_complete task panicked: {e}"),
-        Ok(Err(e)) => tracing::warn!("mark_run_complete backend error: {e}"),
-        Ok(Ok(())) => {}
+) -> Result<(), PipelineError> {
+    tokio::task::spawn_blocking(move || backend.complete_run(run_id, status, &run_stats))
+        .await
+        .map_err(|e| PipelineError::task_panicked("complete_run", e))?
+        .map_err(|e| PipelineError::infra(format!("complete_run failed: {e}")))
+}
+
+/// Best-effort run status marker for failure paths — logs errors, never propagates.
+async fn mark_run_failed(backend: Arc<dyn StateBackend>, run_id: i64, run_stats: RunStats) {
+    if let Err(e) = mark_run_complete(backend, run_id, RunStatus::Failed, run_stats).await {
+        tracing::warn!("Failed to mark run {run_id} as Failed: {e}");
     }
 }
 
@@ -281,7 +286,7 @@ pub(crate) async fn persist_run_state(
                 bytes_written: aggregated.totals.total_write_summary.bytes_written,
                 error_message: Some(format!("Post-run finalization failed: {error}")),
             };
-            mark_run_complete(state, run_id, RunStatus::Failed, failed_stats).await;
+            mark_run_failed(state, run_id, failed_stats).await;
             return Err(PipelineError::Infrastructure(error));
         }
     };
@@ -307,7 +312,7 @@ pub(crate) async fn persist_run_state(
             bytes_written: aggregated.totals.total_write_summary.bytes_written,
             error_message: Some(format!("Post-run finalization failed: {error}")),
         };
-        mark_run_complete(state, run_id, RunStatus::Failed, failed_stats).await;
+        mark_run_failed(state, run_id, failed_stats).await;
         return Err(PipelineError::Infrastructure(error.into()));
     }
 
@@ -318,7 +323,7 @@ pub(crate) async fn persist_run_state(
         bytes_written: aggregated.totals.total_write_summary.bytes_written,
         error_message: None,
     };
-    mark_run_complete(state, run_id, RunStatus::Completed, complete_stats).await;
+    mark_run_complete(state, run_id, RunStatus::Completed, complete_stats).await?;
 
     Ok(cursors_advanced)
 }
