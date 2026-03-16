@@ -84,7 +84,7 @@ pub fn execute_source_benchmark(
         }
     });
     let ctx = StreamRunContext {
-        module: &module,
+        component: &module,
         state_backend: state,
         pipeline_name: "benchmark-source",
         metric_run_label: "benchmark-source-run",
@@ -185,7 +185,7 @@ pub fn execute_destination_benchmark(
     let (sender, receiver) = mpsc::sync_channel(destination_input_channel_capacity(batches.len()));
     send_input_batches(sender, &batches)?;
     let ctx = StreamRunContext {
-        module: &module,
+        component: &module,
         state_backend: state,
         pipeline_name: "benchmark-destination",
         metric_run_label: "benchmark-destination-run",
@@ -214,8 +214,8 @@ pub fn execute_destination_benchmark(
         connector_metrics: serde_json::json!({
             "destination": {
                 "duration_secs": result.duration_secs,
-                "vm_setup_secs": result.vm_setup_secs,
-                "recv_secs": result.recv_secs,
+                "vm_setup_secs": result.wasm_instantiation_secs,
+                "recv_secs": result.frame_receive_secs,
                 "connect_secs": otel_snap.dest_connect_secs,
                 "flush_secs": otel_snap.dest_flush_secs,
                 "commit_secs": otel_snap.dest_commit_secs,
@@ -299,7 +299,7 @@ pub fn execute_transform_benchmark(
         let (plugin_id, plugin_version) = parse_plugin_ref(&connector.plugin);
         let transform_config = serde_json::to_value(config.config)?;
         let ctx = StreamRunContext {
-            module: &module,
+            component: &module,
             state_backend: state.clone(),
             pipeline_name: "benchmark-transform",
             metric_run_label: "benchmark-transform-run",

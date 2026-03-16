@@ -40,7 +40,7 @@ pub use bindings::{
 pub use compression::CompressionCodec;
 pub use engine::{create_component_linker, HasStoreLimits, LoadedComponent, WasmRuntime};
 pub use frame::FrameTable;
-pub use host_state::{ComponentHostState, Frame, HostTimings};
+pub use host_state::{ComponentHostState, Frame, HostStateBuilder, HostTimings};
 pub use plugin::{
     extract_manifest_from_wasm, is_oci_reference, load_plugin_manifest, parse_plugin_ref,
     plugin_search_dirs, resolve_plugin, resolve_plugin_from_registry, resolve_plugin_path,

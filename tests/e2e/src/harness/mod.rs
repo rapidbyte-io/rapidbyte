@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use rapidbyte_engine::config::parser;
 use rapidbyte_engine::config::validator;
 use rapidbyte_secrets::SecretProviders;
-use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
+use rapidbyte_engine::outcome::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_metrics::snapshot::SnapshotReader;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use tokio_postgres::NoTls;
@@ -65,9 +65,9 @@ pub struct DlqRow {
 #[derive(Debug, Clone, Default)]
 pub struct AutotuneOptions {
     pub enabled: Option<bool>,
-    pub pin_parallelism: Option<u32>,
-    pub pin_source_partition_mode: Option<String>,
-    pub pin_copy_flush_bytes: Option<u64>,
+    pub parallelism: Option<u32>,
+    pub partition_mode: Option<String>,
+    pub flush_bytes: Option<u64>,
 }
 
 pub struct PipelinePolicies<'a> {
@@ -696,15 +696,15 @@ fn render_resources_block(
         if let Some(enabled) = autotune.enabled {
             autotune_lines.push(format!("    enabled: {enabled}"));
         }
-        if let Some(pin_parallelism) = autotune.pin_parallelism {
-            autotune_lines.push(format!("    pin_parallelism: {pin_parallelism}"));
+        if let Some(parallelism) = autotune.parallelism {
+            autotune_lines.push(format!("    parallelism: {parallelism}"));
         }
-        if let Some(pin_source_partition_mode) = &autotune.pin_source_partition_mode {
+        if let Some(partition_mode) = &autotune.partition_mode {
             autotune_lines
-                .push(format!("    pin_source_partition_mode: {pin_source_partition_mode}"));
+                .push(format!("    partition_mode: {partition_mode}"));
         }
-        if let Some(pin_copy_flush_bytes) = autotune.pin_copy_flush_bytes {
-            autotune_lines.push(format!("    pin_copy_flush_bytes: {pin_copy_flush_bytes}"));
+        if let Some(flush_bytes) = autotune.flush_bytes {
+            autotune_lines.push(format!("    flush_bytes: {flush_bytes}"));
         }
 
         if !autotune_lines.is_empty() {
@@ -915,17 +915,17 @@ mod tests {
             Some("zstd"),
             Some(&AutotuneOptions {
                 enabled: Some(true),
-                pin_parallelism: Some(4),
-                pin_source_partition_mode: Some("range".to_string()),
-                pin_copy_flush_bytes: Some(8 * 1024 * 1024),
+                parallelism: Some(4),
+                partition_mode: Some("range".to_string()),
+                flush_bytes: Some(8 * 1024 * 1024),
             }),
         );
 
         assert!(rendered.contains("compression: zstd"));
         assert!(rendered.contains("autotune:"));
         assert!(rendered.contains("enabled: true"));
-        assert!(rendered.contains("pin_parallelism: 4"));
-        assert!(rendered.contains("pin_source_partition_mode: range"));
-        assert!(rendered.contains("pin_copy_flush_bytes: 8388608"));
+        assert!(rendered.contains("parallelism: 4"));
+        assert!(rendered.contains("partition_mode: range"));
+        assert!(rendered.contains("flush_bytes: 8388608"));
     }
 }

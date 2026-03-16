@@ -239,9 +239,9 @@ Byte sizes accept human-readable units: `64mb`, `1gb`, `512kb`.
 resources:
   autotune:
     enabled: true                    # default: true
-    pin_parallelism: 8               # lock parallelism (overrides auto)
-    pin_source_partition_mode: range  # lock to range or mod
-    pin_copy_flush_bytes: 8388608    # lock COPY flush threshold (1mb-32mb)
+    parallelism: 8                   # override auto-parallelism
+    partition_mode: range            # override partition strategy (range or mod)
+    flush_bytes: 8388608             # override flush chunk size (1mb-32mb)
 ```
 
 ### Per-Plugin Permissions and Limits

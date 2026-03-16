@@ -1,9 +1,7 @@
 //! Pipeline orchestrator: resolves plugins, loads modules, executes streams, and finalizes state.
 
-use std::collections::HashSet;
-use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc as sync_mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -11,302 +9,224 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use rapidbyte_runtime::{parse_plugin_ref, Frame, LoadedComponent, SandboxOverrides, WasmRuntime};
+use rapidbyte_runtime::{parse_plugin_ref, SandboxOverrides};
 use rapidbyte_state::StateBackend;
-use rapidbyte_types::catalog::{Catalog, SchemaHint};
-use rapidbyte_types::cursor::{CursorInfo, CursorType, CursorValue};
+use rapidbyte_types::catalog::Catalog;
 use rapidbyte_types::envelope::DlqRecord;
-use rapidbyte_types::error::{CommitState, PluginError, ValidationResult, ValidationStatus};
-use rapidbyte_types::manifest::{Permissions, PluginManifest, ResourceLimits};
+use rapidbyte_types::error::{ValidationResult, ValidationStatus};
+use rapidbyte_types::manifest::PluginManifest;
 use rapidbyte_types::metric::{ReadSummary, WriteSummary};
-use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
-use rapidbyte_types::stream::{PartitionStrategy, StreamContext, StreamLimits, StreamPolicies};
-use rapidbyte_types::wire::Feature;
-use rapidbyte_types::wire::{PluginKind, SyncMode, WriteMode};
+use rapidbyte_types::state::{PipelineId, RunStats, StreamName};
+use rapidbyte_types::wire::PluginKind;
 
-use crate::arrow::ipc_to_record_batches;
-use crate::checkpoint::correlate_and_persist_cursors;
-use crate::config::types::{parse_byte_size, PipelineConfig, PipelineParallelism};
+use crate::config::types::PipelineConfig;
 use crate::error::{compute_backoff, PipelineError};
-use crate::execution::{DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineOutcome};
-use crate::progress::{Phase, ProgressEvent};
-use crate::resolve::{
-    build_sandbox_overrides, check_state_backend, create_state_backend, load_and_validate_manifest,
-    resolve_plugins, validate_config_against_schema, ResolvedPlugins,
+use crate::finalizers::run::{
+    build_dry_run_result, finalize_pipeline_execution, snapshot_for_run, ExecutionDiagnostics,
+    ReadWriteTotals, StateOutcome, StreamAggregation, TimingMaxima,
 };
-use crate::result::{
-    CheckItemResult, CheckResult, DestTiming, PipelineCounts, PipelineResult, SourceTiming,
-    StreamShardMetric,
+use crate::outcome::{CheckResult, CheckStatus, StreamShardMetric};
+use crate::outcome::{DryRunStreamResult, ExecutionOptions, PipelineOutcome};
+use crate::pipeline::executor::{execute_single_stream, DestinationMode};
+use crate::pipeline::planner::{
+    build_stream_contexts, destination_preflight_streams, execution_parallelism, ExecutionPlan,
+    PipelineIdentity, PluginSpec, StreamExecutionParams,
 };
-use crate::runner::{
-    run_destination_stream, run_discover, run_source_stream, run_transform_stream, validate_plugin,
-    StreamRunContext, TransformRunResult,
+use crate::pipeline::preflight::run_destination_preflight;
+use crate::pipeline::scheduler::{
+    acquire_permit_cancellable, collect_stream_task_results, ensure_not_cancelled,
+    StreamShardOutcome,
 };
+use crate::plugin::loader::{load_all_modules, PluginModules};
+use crate::plugin::resolver::{
+    load_and_validate_manifest, resolve_plugins, validate_config_against_schema, ResolvedPlugins,
+};
+use crate::plugin::sandbox::build_sandbox_overrides;
+use crate::progress::{Phase, ProgressEvent, ProgressSender};
+use crate::runner::{run_discover, validate_plugin};
 
-async fn run_blocking_infrastructure_task<T, F>(
-    task: F,
-    context: &'static str,
-) -> Result<T, PipelineError>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T> + Send + 'static,
-{
-    tokio::task::spawn_blocking(task)
-        .await
-        .map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!("{context} task panicked: {e}"))
-        })?
-        .map_err(PipelineError::Infrastructure)
-}
-
-struct StreamResult {
-    stream_name: String,
-    partition_index: Option<u32>,
-    partition_count: Option<u32>,
-    read_summary: ReadSummary,
-    write_summary: WriteSummary,
-    source_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
-    dest_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
-    src_duration: f64,
-    dst_duration: f64,
-    vm_setup_secs: f64,
-    recv_secs: f64,
-    transform_durations: Vec<f64>,
-    dry_run_result: Option<DryRunStreamResult>,
-}
-
-#[derive(Clone)]
-struct LoadedTransformModule {
-    module: LoadedComponent,
-    plugin_id: String,
-    plugin_version: String,
-    config: serde_json::Value,
-    load_ms: u64,
-    permissions: Option<Permissions>,
-    manifest_limits: ResourceLimits,
-}
-
-struct LoadedModules {
-    source_module: LoadedComponent,
-    dest_module: LoadedComponent,
-    source_module_load_ms: u64,
-    dest_module_load_ms: u64,
-    transform_modules: Vec<LoadedTransformModule>,
-}
-
-struct StreamBuild {
-    limits: StreamLimits,
-    compression: Option<rapidbyte_runtime::CompressionCodec>,
-    stream_ctxs: Vec<StreamContext>,
-}
-
-struct StreamParams {
-    pipeline_name: String,
-    metric_run_label: String,
-    source_config: serde_json::Value,
-    dest_config: serde_json::Value,
-    source_plugin_id: String,
-    source_plugin_version: String,
-    dest_plugin_id: String,
-    dest_plugin_version: String,
-    source_permissions: Option<Permissions>,
-    dest_permissions: Option<Permissions>,
-    source_overrides: Option<SandboxOverrides>,
-    dest_overrides: Option<SandboxOverrides>,
-    transform_overrides: Vec<Option<SandboxOverrides>>,
-    compression: Option<rapidbyte_runtime::CompressionCodec>,
-    channel_capacity: usize,
-}
-
-struct AggregatedStreamResults {
-    execution_parallelism: u32,
-    total_read_summary: ReadSummary,
-    total_write_summary: WriteSummary,
-    source_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
-    dest_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
-    max_source_duration: f64,
-    max_dest_duration: f64,
-    max_vm_setup_secs: f64,
-    max_recv_secs: f64,
-    transform_durations: Vec<f64>,
-    dlq_records: Vec<DlqRecord>,
-    final_stats: RunStats,
-    first_error: Option<PipelineError>,
-    dry_run_streams: Vec<DryRunStreamResult>,
-    stream_metrics: Vec<StreamShardMetric>,
-}
-
-struct StreamTaskCollection {
-    successes: Vec<StreamResult>,
-    first_error: Option<PipelineError>,
-}
-
-const SYSTEM_CORE_RESERVE_DIVISOR: u32 = 8;
-const MIN_PIPELINE_COORDINATION_CORES: u32 = 1;
-const MAX_PIPELINE_COORDINATION_CORES: u32 = 2;
-const TRANSFORM_PENALTY_SLOPE: f64 = 0.05;
 static NEXT_METRIC_RUN_LABEL: AtomicU64 = AtomicU64::new(1);
-const MIN_TRANSFORM_FACTOR: f64 = 0.75;
 
-fn resolve_effective_parallelism(config: &PipelineConfig, supports_partitioned_read: bool) -> u32 {
-    match config.resources.parallelism {
-        PipelineParallelism::Manual(value) => value.max(1),
-        PipelineParallelism::Auto => resolve_auto_parallelism(config, supports_partitioned_read),
-    }
+/// Holds shared references across retry attempts for a single pipeline run.
+struct PipelineAttempt<'a> {
+    config: &'a PipelineConfig,
+    options: &'a ExecutionOptions,
+    cancel_token: &'a CancellationToken,
+    snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
+    meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
+    registry_config: &'a rapidbyte_registry::RegistryConfig,
 }
 
-fn resolve_auto_parallelism(config: &PipelineConfig, supports_partitioned_read: bool) -> u32 {
-    let available_cores = std::thread::available_parallelism()
-        .map(std::num::NonZeroUsize::get)
-        .unwrap_or(1);
-    let available_cores = u32::try_from(available_cores).unwrap_or(u32::MAX);
-    resolve_auto_parallelism_for_cores(config, available_cores, supports_partitioned_read)
-}
+impl PipelineAttempt<'_> {
+    #[allow(clippy::too_many_lines)]
+    async fn execute(
+        &self,
+        attempt: u32,
+        progress_tx: ProgressSender,
+    ) -> Result<PipelineOutcome, PipelineError> {
+        let config = self.config;
+        let options = self.options;
+        let cancel_token = self.cancel_token;
+        let snapshot_reader = self.snapshot_reader;
+        let meter_provider = self.meter_provider;
+        let registry_config = self.registry_config;
+        let start = Instant::now();
+        let pipeline_id = PipelineId::new(config.pipeline.clone());
+        tracing::info!(
+            pipeline = config.pipeline,
+            dry_run = options.dry_run,
+            "Starting pipeline run"
+        );
 
-fn resolve_auto_parallelism_for_cores(
-    config: &PipelineConfig,
-    available_cores: u32,
-    supports_partitioned_read: bool,
-) -> u32 {
-    let cap = auto_worker_core_budget(available_cores);
-
-    let eligible_streams = if supports_partitioned_read {
-        u32::try_from(
-            config
-                .source
-                .streams
-                .iter()
-                .filter(|stream| stream.sync_mode == SyncMode::FullRefresh)
-                .count(),
-        )
-        .unwrap_or(u32::MAX)
-    } else {
-        0
-    };
-
-    let base_target = if eligible_streams == 0 {
-        1
-    } else {
-        let per_stream_budget = (cap / eligible_streams).max(1);
-        (eligible_streams * per_stream_budget).min(cap)
-    };
-
-    #[allow(clippy::cast_precision_loss)]
-    let transform_count = config.transforms.len() as f64;
-    let transform_factor = if transform_count == 0.0 {
-        1.0
-    } else {
-        (1.0 / (1.0 + (TRANSFORM_PENALTY_SLOPE * transform_count))).max(MIN_TRANSFORM_FACTOR)
-    };
-
-    let scaled = (f64::from(base_target) * transform_factor).round();
-    if scaled <= 1.0 {
-        1
-    } else if scaled >= f64::from(cap) {
-        cap
-    } else {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let scaled_u32 = scaled as u32;
-        scaled_u32.clamp(1, cap)
-    }
-}
-
-fn auto_worker_core_budget(available_cores: u32) -> u32 {
-    let available_cores = available_cores.max(1);
-
-    let system_reserve = if available_cores <= 2 {
-        0
-    } else {
-        (available_cores / SYSTEM_CORE_RESERVE_DIVISOR).max(1)
-    };
-    let coordination_reserve = (available_cores / 4).clamp(
-        MIN_PIPELINE_COORDINATION_CORES,
-        MAX_PIPELINE_COORDINATION_CORES,
-    );
-
-    available_cores
-        .saturating_sub(system_reserve)
-        .saturating_sub(coordination_reserve)
-        .max(1)
-}
-
-fn decode_incremental_last_value(raw: String, tie_breaker_field: Option<&str>) -> CursorValue {
-    if tie_breaker_field.is_some() {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
-            if value
-                .as_object()
-                .is_some_and(|object| object.contains_key("cursor"))
-            {
-                return CursorValue::Json { value };
-            }
+        progress_tx.emit(ProgressEvent::PhaseChange {
+            phase: Phase::Resolving,
+        });
+        let plugins = resolve_plugins(config, registry_config).await?;
+        if let Some(ref manifest) = plugins.source_manifest {
+            validate_config_against_schema(&config.source.use_ref, &config.source.config, manifest)
+                .map_err(PipelineError::Infrastructure)?;
         }
+        if let Some(ref manifest) = plugins.dest_manifest {
+            validate_config_against_schema(
+                &config.destination.use_ref,
+                &config.destination.config,
+                manifest,
+            )
+            .map_err(PipelineError::Infrastructure)?;
+        }
+        let state_backend_kind = config.state.backend;
+        let state_connection = config
+            .state
+            .connection
+            .clone()
+            .unwrap_or_else(|| rapidbyte_state::default_connection(state_backend_kind));
+        let state = tokio::task::spawn_blocking(move || {
+            rapidbyte_state::open_backend(state_backend_kind, &state_connection)
+        })
+        .await
+        .map_err(|e| PipelineError::task_panicked("open_state_backend", e))?
+        .map_err(PipelineError::Infrastructure)?;
 
-        return CursorValue::Json {
-            value: serde_json::json!({
-                "cursor": {
-                    "type": "utf8",
-                    "value": raw,
-                },
-                "tie_breaker": {
-                    "type": "null",
+        let state_for_execution = state.clone();
+        let execution_result = async move {
+            // Skip run tracking in dry-run mode to avoid orphaned run records.
+            let run_id = if options.dry_run {
+                0
+            } else {
+                let state_for_run = state_for_execution.clone();
+                let pipeline_id_for_run = pipeline_id.clone();
+                tokio::task::spawn_blocking(move || {
+                    state_for_run.start_run(&pipeline_id_for_run, &StreamName::new("all"))
+                })
+                .await
+                .map_err(|e| PipelineError::task_panicked("start_run", e))?
+                .map_err(|e| PipelineError::Infrastructure(e.into()))?
+            };
+            let metric_run_label = if options.dry_run {
+                format!(
+                    "dry-run-{}-{attempt}",
+                    NEXT_METRIC_RUN_LABEL.fetch_add(1, Ordering::Relaxed)
+                )
+            } else {
+                format!("{run_id}:{attempt}")
+            };
+
+            progress_tx.emit(ProgressEvent::PhaseChange {
+                phase: Phase::Loading,
+            });
+            let modules = load_all_modules(config, &plugins, registry_config).await?;
+            let config_for_build = config.clone();
+            let state_for_build = state_for_execution.clone();
+            let max_records = options.limit;
+            let source_manifest_for_build = plugins.source_manifest.clone();
+            let stream_build = tokio::task::spawn_blocking(move || {
+                build_stream_contexts(
+                    &config_for_build,
+                    state_for_build.as_ref(),
+                    max_records,
+                    source_manifest_for_build.as_ref(),
+                )
+            })
+            .await
+            .map_err(|e| PipelineError::task_panicked("build_stream_contexts", e))??;
+            progress_tx.emit(ProgressEvent::PhaseChange {
+                phase: Phase::Running,
+            });
+            ensure_not_cancelled(cancel_token, "Pipeline cancelled before stream execution")?;
+            let aggregated = match execute_streams(
+                config,
+                &plugins,
+                &modules,
+                &stream_build,
+                state_for_execution.clone(),
+                options,
+                &metric_run_label,
+                &progress_tx,
+                cancel_token,
+            )
+            .await
+            {
+                Ok(agg) => agg,
+                Err(err) => {
+                    // Drain the run's snapshot entry to prevent memory leaks in
+                    // long-lived processes with repeated failed attempts.
+                    let _ = snapshot_for_run(
+                        snapshot_reader,
+                        meter_provider,
+                        &config.pipeline,
+                        Some(&metric_run_label),
+                    );
+                    return Err(err);
                 }
-            }),
-        };
-    }
+            };
 
-    CursorValue::Utf8 { value: raw }
-}
+            progress_tx.emit(ProgressEvent::PhaseChange {
+                phase: Phase::Finished,
+            });
 
-/// Type alias for the progress channel sender used throughout the orchestrator.
-type ProgressTx = Option<tokio_mpsc::UnboundedSender<ProgressEvent>>;
+            if options.dry_run {
+                let duration_secs = start.elapsed().as_secs_f64();
 
-fn send_progress(tx: &ProgressTx, event: ProgressEvent) {
-    if let Some(tx) = tx {
-        let _ = tx.send(event);
-    }
-}
-
-async fn collect_stream_task_results(
-    mut stream_join_set: JoinSet<Result<StreamResult, PipelineError>>,
-    progress_tx: &ProgressTx,
-) -> Result<StreamTaskCollection, PipelineError> {
-    let mut successes = Vec::new();
-    let mut first_error: Option<PipelineError> = None;
-
-    while let Some(joined) = stream_join_set.join_next().await {
-        match joined {
-            Ok(Ok(sr)) if first_error.is_none() => {
-                send_progress(
-                    progress_tx,
-                    ProgressEvent::StreamCompleted {
-                        stream: sr.stream_name.clone(),
-                    },
+                let snap = snapshot_for_run(
+                    snapshot_reader,
+                    meter_provider,
+                    &config.pipeline,
+                    Some(&metric_run_label),
                 );
-                successes.push(sr);
-            }
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => {
-                tracing::error!("Stream failed: {}", error);
-                if first_error.is_none() {
-                    first_error = Some(error);
-                    stream_join_set.abort_all();
-                }
-            }
-            Err(join_err) if join_err.is_cancelled() && first_error.is_some() => {
-                // Expected: sibling tasks cancelled after first stream failure.
-            }
-            Err(join_err) => {
-                return Err(PipelineError::Infrastructure(anyhow::anyhow!(
-                    "Stream task panicked: {join_err}"
+
+                return Ok(PipelineOutcome::DryRun(build_dry_run_result(
+                    &snap,
+                    aggregated,
+                    modules.source_module_load_ms,
+                    duration_secs,
                 )));
             }
-        }
-    }
 
-    Ok(StreamTaskCollection {
-        successes,
-        first_error,
-    })
+            let result = finalize_pipeline_execution(
+                config,
+                &pipeline_id,
+                state_for_execution.clone(),
+                run_id,
+                attempt,
+                start,
+                &metric_run_label,
+                &modules,
+                aggregated,
+                snapshot_reader,
+                meter_provider,
+            )
+            .await?;
+            Ok(PipelineOutcome::Run(result))
+        }
+        .await;
+
+        let state_for_drop = state;
+        tokio::task::spawn_blocking(move || drop(state_for_drop))
+            .await
+            .map_err(|e| PipelineError::task_panicked("drop_state_backend", e))?;
+
+        execution_result
+    }
 }
 
 /// Run a pipeline with OpenTelemetry metric snapshot support.
@@ -326,36 +246,35 @@ pub async fn run_pipeline(
     meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
     registry_config: &rapidbyte_registry::RegistryConfig,
 ) -> Result<PipelineOutcome, PipelineError> {
+    let progress_tx = ProgressSender::new(progress_tx);
     let max_retries = config.resources.max_retries;
-    let mut attempt = 0u32;
+    let mut attempt_num = 0u32;
+    let attempt = PipelineAttempt {
+        config,
+        options,
+        cancel_token: &cancel_token,
+        snapshot_reader,
+        meter_provider,
+        registry_config,
+    };
 
     loop {
         ensure_not_cancelled(&cancel_token, "Pipeline cancelled before execution")?;
-        attempt += 1;
-        let result = execute_pipeline_once(
-            config,
-            options,
-            attempt,
-            progress_tx.clone(),
-            &cancel_token,
-            snapshot_reader,
-            meter_provider,
-            registry_config,
-        )
-        .await;
+        attempt_num += 1;
+        let result = attempt.execute(attempt_num, progress_tx.clone()).await;
 
         match result {
             Ok(outcome) => return Ok(outcome),
-            Err(ref err) if err.is_retryable() && attempt <= max_retries => {
+            Err(ref err) if err.is_retryable() && attempt_num <= max_retries => {
                 if let Some(plugin_err) = err.as_plugin_error() {
-                    let delay = compute_backoff(plugin_err, attempt);
+                    let delay = compute_backoff(plugin_err, attempt_num);
                     let commit_state_str =
                         plugin_err.commit_state.as_ref().map(|cs| format!("{cs:?}"));
                     #[allow(clippy::cast_possible_truncation)]
                     // Safety: delay.as_millis() is always well under u64::MAX
                     let delay_ms = delay.as_millis() as u64;
                     tracing::warn!(
-                        attempt,
+                        attempt = attempt_num,
                         max_retries,
                         delay_ms,
                         category = %plugin_err.category,
@@ -364,21 +283,18 @@ pub async fn run_pipeline(
                         safe_to_retry = plugin_err.safe_to_retry,
                         "Retryable error, will retry"
                     );
-                    send_progress(
-                        &progress_tx,
-                        ProgressEvent::Retry {
-                            attempt,
-                            max_retries,
-                            message: format!(
-                                "[{}] {}: {}",
-                                plugin_err.category, plugin_err.code, plugin_err.message
-                            ),
-                            delay_secs: delay.as_secs_f64(),
-                        },
-                    );
+                    progress_tx.emit(ProgressEvent::Retry {
+                        attempt: attempt_num,
+                        max_retries,
+                        message: format!(
+                            "[{}] {}: {}",
+                            plugin_err.category, plugin_err.code, plugin_err.message
+                        ),
+                        delay_secs: delay.as_secs_f64(),
+                    });
                     tokio::select! {
                         () = cancel_token.cancelled() => {
-                            return Err(cancelled_pipeline_error("Pipeline cancelled during retry backoff"));
+                            return Err(PipelineError::cancelled("Pipeline cancelled during retry backoff"));
                         }
                         () = tokio::time::sleep(delay) => {}
                     }
@@ -390,7 +306,7 @@ pub async fn run_pipeline(
                         plugin_err.commit_state.as_ref().map(|cs| format!("{cs:?}"));
                     if err.is_retryable() {
                         tracing::error!(
-                            attempt,
+                            attempt = attempt_num,
                             max_retries,
                             category = %plugin_err.category,
                             code = %plugin_err.code,
@@ -415,536 +331,6 @@ pub async fn run_pipeline(
     }
 }
 
-struct MetricsRuntime<'a> {
-    snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
-    meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
-}
-
-impl MetricsRuntime<'_> {
-    fn snapshot_for_run(
-        &self,
-        pipeline: &str,
-        run: Option<&str>,
-    ) -> rapidbyte_metrics::snapshot::PipelineMetricsSnapshot {
-        self.snapshot_reader
-            .flush_and_snapshot_for_run(self.meter_provider, pipeline, run)
-    }
-}
-
-fn prepare_metrics_runtime<'a>(
-    snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
-    meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
-) -> MetricsRuntime<'a> {
-    MetricsRuntime {
-        snapshot_reader,
-        meter_provider,
-    }
-}
-
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-async fn execute_pipeline_once(
-    config: &PipelineConfig,
-    options: &ExecutionOptions,
-    attempt: u32,
-    progress_tx: ProgressTx,
-    cancel_token: &CancellationToken,
-    snapshot_reader: &rapidbyte_metrics::snapshot::SnapshotReader,
-    meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
-    registry_config: &rapidbyte_registry::RegistryConfig,
-) -> Result<PipelineOutcome, PipelineError> {
-    let start = Instant::now();
-    let pipeline_id = PipelineId::new(config.pipeline.clone());
-    tracing::info!(
-        pipeline = config.pipeline,
-        dry_run = options.dry_run,
-        "Starting pipeline run"
-    );
-
-    send_progress(
-        &progress_tx,
-        ProgressEvent::PhaseChange {
-            phase: Phase::Resolving,
-        },
-    );
-    let plugins = resolve_plugins(config, registry_config).await?;
-    if let Some(ref manifest) = plugins.source_manifest {
-        validate_config_against_schema(&config.source.use_ref, &config.source.config, manifest)
-            .map_err(PipelineError::Infrastructure)?;
-    }
-    if let Some(ref manifest) = plugins.dest_manifest {
-        validate_config_against_schema(
-            &config.destination.use_ref,
-            &config.destination.config,
-            manifest,
-        )
-        .map_err(PipelineError::Infrastructure)?;
-    }
-    let config_for_state = config.clone();
-    let state = run_blocking_infrastructure_task(
-        move || create_state_backend(&config_for_state),
-        "create_state_backend",
-    )
-    .await?;
-
-    let state_for_execution = state.clone();
-    let execution_result = async move {
-        let metrics_runtime = prepare_metrics_runtime(snapshot_reader, meter_provider);
-
-        // Skip run tracking in dry-run mode to avoid orphaned run records.
-        let run_id = if options.dry_run {
-            0
-        } else {
-            let state_for_run = state_for_execution.clone();
-            let pipeline_id_for_run = pipeline_id.clone();
-            tokio::task::spawn_blocking(move || {
-                state_for_run.start_run(&pipeline_id_for_run, &StreamName::new("all"))
-            })
-            .await
-            .map_err(|e| {
-                PipelineError::Infrastructure(anyhow::anyhow!("start_run task panicked: {e}"))
-            })?
-            .map_err(|e| PipelineError::Infrastructure(e.into()))?
-        };
-        let metric_run_label = if options.dry_run {
-            format!(
-                "dry-run-{}-{attempt}",
-                NEXT_METRIC_RUN_LABEL.fetch_add(1, Ordering::Relaxed)
-            )
-        } else {
-            format!("{run_id}:{attempt}")
-        };
-
-        send_progress(
-            &progress_tx,
-            ProgressEvent::PhaseChange {
-                phase: Phase::Loading,
-            },
-        );
-        let modules = load_modules(config, &plugins, registry_config).await?;
-        let config_for_build = config.clone();
-        let state_for_build = state_for_execution.clone();
-        let max_records = options.limit;
-        let source_manifest_for_build = plugins.source_manifest.clone();
-        let stream_build = tokio::task::spawn_blocking(move || {
-            build_stream_contexts(
-                &config_for_build,
-                state_for_build.as_ref(),
-                max_records,
-                source_manifest_for_build.as_ref(),
-            )
-        })
-        .await
-        .map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!(
-                "build_stream_contexts task panicked: {e}"
-            ))
-        })??;
-        send_progress(
-            &progress_tx,
-            ProgressEvent::PhaseChange {
-                phase: Phase::Running,
-            },
-        );
-        ensure_not_cancelled(cancel_token, "Pipeline cancelled before stream execution")?;
-        let aggregated = match execute_streams(
-            config,
-            &plugins,
-            &modules,
-            &stream_build,
-            state_for_execution.clone(),
-            options,
-            &metric_run_label,
-            &progress_tx,
-            cancel_token,
-        )
-        .await
-        {
-            Ok(agg) => agg,
-            Err(err) => {
-                // Drain the run's snapshot entry to prevent memory leaks in
-                // long-lived processes with repeated failed attempts.
-                let _ = metrics_runtime.snapshot_for_run(&config.pipeline, Some(&metric_run_label));
-                return Err(err);
-            }
-        };
-
-        send_progress(
-            &progress_tx,
-            ProgressEvent::PhaseChange {
-                phase: Phase::Finished,
-            },
-        );
-
-        preserve_real_outcome_after_stream_execution(cancel_token, async move {
-            if options.dry_run {
-                let duration_secs = start.elapsed().as_secs_f64();
-
-                let snap =
-                    metrics_runtime.snapshot_for_run(&config.pipeline, Some(&metric_run_label));
-
-                return Ok(PipelineOutcome::DryRun(build_dry_run_result(
-                    &snap,
-                    aggregated,
-                    modules.source_module_load_ms,
-                    duration_secs,
-                )));
-            }
-
-            let result = finalize_run(
-                config,
-                &pipeline_id,
-                state_for_execution.clone(),
-                run_id,
-                attempt,
-                start,
-                &metric_run_label,
-                &modules,
-                aggregated,
-                &metrics_runtime,
-            )
-            .await?;
-            Ok(PipelineOutcome::Run(result))
-        })
-        .await
-    }
-    .await;
-
-    let state_for_drop = state;
-    run_blocking_infrastructure_task(
-        move || {
-            drop(state_for_drop);
-            Ok(())
-        },
-        "drop_state_backend",
-    )
-    .await?;
-
-    execution_result
-}
-
-async fn load_modules(
-    config: &PipelineConfig,
-    plugins: &ResolvedPlugins,
-    registry_config: &rapidbyte_registry::RegistryConfig,
-) -> Result<LoadedModules, PipelineError> {
-    let runtime = Arc::new(WasmRuntime::new().map_err(PipelineError::Infrastructure)?);
-    tracing::info!(
-        source = %plugins.source_wasm.display(),
-        destination = %plugins.dest_wasm.display(),
-        "Loading plugin modules"
-    );
-
-    let source_wasm_for_load = plugins.source_wasm.clone();
-    let runtime_for_source = runtime.clone();
-    #[allow(clippy::cast_possible_truncation)]
-    let source_load_task = tokio::task::spawn_blocking(move || {
-        let load_start = Instant::now();
-        let module = runtime_for_source
-            .load_module(&source_wasm_for_load)
-            .map_err(PipelineError::Infrastructure)?;
-        // Safety: module load time is always well under u64::MAX milliseconds
-        let load_ms = load_start.elapsed().as_millis() as u64;
-        Ok::<_, PipelineError>((module, load_ms))
-    });
-
-    let dest_wasm_for_load = plugins.dest_wasm.clone();
-    let runtime_for_dest = runtime.clone();
-    #[allow(clippy::cast_possible_truncation)]
-    let dest_load_task = tokio::task::spawn_blocking(move || {
-        let load_start = Instant::now();
-        let module = runtime_for_dest
-            .load_module(&dest_wasm_for_load)
-            .map_err(PipelineError::Infrastructure)?;
-        // Safety: module load time is always well under u64::MAX milliseconds
-        let load_ms = load_start.elapsed().as_millis() as u64;
-        Ok::<_, PipelineError>((module, load_ms))
-    });
-
-    let (source_module, source_module_load_ms) = source_load_task.await.map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!("Source module load task panicked: {e}"))
-    })??;
-    let (dest_module, dest_module_load_ms) = dest_load_task.await.map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!(
-            "Destination module load task panicked: {e}"
-        ))
-    })??;
-
-    tracing::info!(
-        source_ms = source_module_load_ms,
-        dest_ms = dest_module_load_ms,
-        "Plugin modules loaded"
-    );
-
-    let mut transform_modules = Vec::with_capacity(config.transforms.len());
-    for tc in &config.transforms {
-        let wasm_path =
-            rapidbyte_runtime::resolve_plugin(&tc.use_ref, PluginKind::Transform, registry_config)
-                .await
-                .map_err(PipelineError::Infrastructure)?;
-        let manifest = load_and_validate_manifest(&wasm_path, &tc.use_ref, PluginKind::Transform)
-            .map_err(PipelineError::Infrastructure)?;
-        if let Some(ref m) = manifest {
-            validate_config_against_schema(&tc.use_ref, &tc.config, m)
-                .map_err(PipelineError::Infrastructure)?;
-        }
-        let transform_perms = manifest.as_ref().map(|m| m.permissions.clone());
-        let transform_manifest_limits = manifest
-            .as_ref()
-            .map(|m| m.limits.clone())
-            .unwrap_or_default();
-        let load_start = Instant::now();
-        let module = runtime
-            .load_module(&wasm_path)
-            .map_err(PipelineError::Infrastructure)?;
-        #[allow(clippy::cast_possible_truncation)]
-        // Safety: module load time is always well under u64::MAX milliseconds
-        let load_ms = load_start.elapsed().as_millis() as u64;
-        let (id, ver) = parse_plugin_ref(&tc.use_ref);
-        transform_modules.push(LoadedTransformModule {
-            module,
-            plugin_id: id,
-            plugin_version: ver,
-            config: tc.config.clone(),
-            load_ms,
-            permissions: transform_perms,
-            manifest_limits: transform_manifest_limits,
-        });
-    }
-
-    Ok(LoadedModules {
-        source_module,
-        dest_module,
-        source_module_load_ms,
-        dest_module_load_ms,
-        transform_modules,
-    })
-}
-
-#[allow(clippy::too_many_lines)]
-fn build_stream_contexts(
-    config: &PipelineConfig,
-    state: &dyn StateBackend,
-    max_records: Option<u64>,
-    source_manifest: Option<&PluginManifest>,
-) -> Result<StreamBuild, PipelineError> {
-    let supports_partitioned_read = source_manifest
-        .is_some_and(|m: &PluginManifest| m.has_source_feature(Feature::PartitionedRead));
-    let baseline_parallelism = resolve_effective_parallelism(config, supports_partitioned_read);
-    let autotune_decision = crate::autotune::resolve_stream_autotune(
-        config,
-        baseline_parallelism,
-        supports_partitioned_read,
-    );
-    let configured_parallelism = autotune_decision.parallelism;
-    tracing::info!(
-        autotune_enabled = autotune_decision.autotune_enabled,
-        baseline_parallelism,
-        configured_parallelism,
-        partition_strategy = ?autotune_decision.partition_strategy,
-        copy_flush_bytes_override = autotune_decision.copy_flush_bytes_override,
-        "Autotune decision resolved"
-    );
-    let max_batch = parse_byte_size(&config.resources.max_batch_bytes).map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!(
-            "Invalid max_batch_bytes '{}': {}",
-            config.resources.max_batch_bytes,
-            e
-        ))
-    })?;
-    let checkpoint_interval = parse_byte_size(&config.resources.checkpoint_interval_bytes)
-        .map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!(
-                "Invalid checkpoint_interval_bytes '{}': {}",
-                config.resources.checkpoint_interval_bytes,
-                e
-            ))
-        })?;
-
-    let limits = StreamLimits {
-        max_batch_bytes: if max_batch > 0 {
-            max_batch
-        } else {
-            StreamLimits::default().max_batch_bytes
-        },
-        checkpoint_interval_bytes: checkpoint_interval,
-        checkpoint_interval_rows: config.resources.checkpoint_interval_rows,
-        checkpoint_interval_seconds: config.resources.checkpoint_interval_seconds,
-        max_inflight_batches: config.resources.max_inflight_batches,
-        max_records,
-        ..StreamLimits::default()
-    };
-
-    let pipeline_id = PipelineId::new(config.pipeline.clone());
-    let should_partition = supports_partitioned_read && configured_parallelism > 1;
-    let mut stream_ctxs = Vec::new();
-
-    for s in &config.source.streams {
-        let cursor_info = match s.sync_mode {
-            SyncMode::Incremental => {
-                if let Some(cursor_field) = &s.cursor_field {
-                    let last_value = state
-                        .get_cursor(&pipeline_id, &StreamName::new(s.name.clone()))
-                        .map_err(|e| PipelineError::Infrastructure(e.into()))?
-                        .and_then(|cs| cs.cursor_value)
-                        .map(|v| decode_incremental_last_value(v, s.tie_breaker_field.as_deref()));
-                    Some(CursorInfo {
-                        cursor_field: cursor_field.clone(),
-                        tie_breaker_field: s.tie_breaker_field.clone(),
-                        cursor_type: CursorType::Utf8,
-                        last_value,
-                    })
-                } else {
-                    None
-                }
-            }
-            SyncMode::Cdc => {
-                let last_value = state
-                    .get_cursor(&pipeline_id, &StreamName::new(s.name.clone()))
-                    .map_err(|e| PipelineError::Infrastructure(e.into()))?
-                    .and_then(|cs| cs.cursor_value)
-                    .map(|v| CursorValue::Lsn { value: v });
-                Some(CursorInfo {
-                    cursor_field: "lsn".to_string(),
-                    tie_breaker_field: None,
-                    cursor_type: CursorType::Lsn,
-                    last_value,
-                })
-            }
-            SyncMode::FullRefresh => None,
-        };
-
-        let base_ctx = StreamContext {
-            stream_name: s.name.clone(),
-            source_stream_name: None,
-            schema: SchemaHint::Columns(vec![]),
-            sync_mode: s.sync_mode,
-            cursor_info,
-            limits: limits.clone(),
-            policies: StreamPolicies {
-                on_data_error: config.destination.on_data_error,
-                schema_evolution: config.destination.schema_evolution.unwrap_or_default(),
-            },
-            write_mode: Some(
-                config
-                    .destination
-                    .write_mode
-                    .to_protocol(config.destination.primary_key.clone()),
-            ),
-            selected_columns: s.columns.clone(),
-            partition_key: s.partition_key.clone(),
-            partition_count: None,
-            partition_index: None,
-            effective_parallelism: Some(configured_parallelism),
-            partition_strategy: None,
-            copy_flush_bytes_override: autotune_decision.copy_flush_bytes_override,
-        };
-
-        if should_partition
-            && s.sync_mode == SyncMode::FullRefresh
-            && !matches!(base_ctx.write_mode, Some(WriteMode::Replace))
-        {
-            for shard in 0..configured_parallelism {
-                let mut shard_ctx = base_ctx.clone();
-                shard_ctx.source_stream_name = Some(s.name.clone());
-                shard_ctx.partition_count = Some(configured_parallelism);
-                shard_ctx.partition_index = Some(shard);
-                shard_ctx.partition_strategy = Some(
-                    autotune_decision
-                        .partition_strategy
-                        .unwrap_or(PartitionStrategy::Mod),
-                );
-                stream_ctxs.push(shard_ctx);
-            }
-        } else {
-            stream_ctxs.push(base_ctx);
-        }
-    }
-
-    Ok(StreamBuild {
-        limits,
-        compression: config.resources.compression,
-        stream_ctxs,
-    })
-}
-
-fn destination_preflight_streams(stream_ctxs: &[StreamContext]) -> Vec<StreamContext> {
-    let mut seen = HashSet::new();
-    let mut preflight = Vec::new();
-    for stream_ctx in stream_ctxs {
-        if matches!(stream_ctx.write_mode, Some(WriteMode::Replace)) {
-            continue;
-        }
-        if seen.insert(stream_ctx.stream_name.clone()) {
-            let mut preflight_ctx = stream_ctx.clone();
-            // Preflight runs once per logical stream and should not carry shard identity.
-            preflight_ctx.partition_count = None;
-            preflight_ctx.partition_index = None;
-            preflight.push(preflight_ctx);
-        }
-    }
-    preflight
-}
-
-fn execution_parallelism(config: &PipelineConfig, stream_ctxs: &[StreamContext]) -> usize {
-    let resolved = stream_ctxs
-        .iter()
-        .filter_map(|ctx| ctx.effective_parallelism)
-        .max()
-        .unwrap_or_else(|| resolve_effective_parallelism(config, false));
-
-    usize::try_from(resolved.max(1)).unwrap_or(usize::MAX)
-}
-
-struct CollectedTransforms {
-    durations: Vec<f64>,
-    first_error: Option<PipelineError>,
-}
-
-async fn collect_transform_results(
-    transform_handles: Vec<(
-        usize,
-        tokio::task::JoinHandle<Result<TransformRunResult, PipelineError>>,
-    )>,
-    stream_name: &str,
-) -> Result<CollectedTransforms, PipelineError> {
-    let mut durations = Vec::new();
-    let mut first_error: Option<PipelineError> = None;
-    for (i, t_handle) in transform_handles {
-        let result = t_handle.await.map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!(
-                "Transform {i} task panicked for stream '{stream_name}': {e}"
-            ))
-        })?;
-        match result {
-            Ok(tr) => {
-                tracing::info!(
-                    transform_index = i,
-                    stream = stream_name,
-                    duration_secs = tr.duration_secs,
-                    records_in = tr.summary.records_in,
-                    records_out = tr.summary.records_out,
-                    "Transform stage completed for stream"
-                );
-                durations.push(tr.duration_secs);
-            }
-            Err(e) => {
-                tracing::error!(
-                    transform_index = i,
-                    stream = stream_name,
-                    "Transform failed: {e}",
-                );
-                if first_error.is_none() {
-                    first_error = Some(e);
-                }
-            }
-        }
-    }
-    Ok(CollectedTransforms {
-        durations,
-        first_error,
-    })
-}
-
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
@@ -953,14 +339,14 @@ async fn collect_transform_results(
 async fn execute_streams(
     config: &PipelineConfig,
     plugins: &ResolvedPlugins,
-    modules: &LoadedModules,
-    stream_build: &StreamBuild,
+    modules: &PluginModules,
+    stream_build: &ExecutionPlan,
     state: Arc<dyn StateBackend>,
     options: &ExecutionOptions,
     metric_run_label: &str,
-    progress_tx: &ProgressTx,
+    progress_tx: &ProgressSender,
     cancel_token: &CancellationToken,
-) -> Result<AggregatedStreamResults, PipelineError> {
+) -> Result<StreamAggregation, PipelineError> {
     let (source_plugin_id, source_plugin_version) = parse_plugin_ref(&config.source.use_ref);
     let (dest_plugin_id, dest_plugin_version) = parse_plugin_ref(&config.destination.use_ref);
     let stats = Arc::new(Mutex::new(RunStats::default()));
@@ -999,385 +385,110 @@ async fn execute_streams(
         })
         .collect();
 
-    let params = Arc::new(StreamParams {
-        pipeline_name: config.pipeline.clone(),
-        metric_run_label: metric_run_label.to_owned(),
-        source_config: config.source.config.clone(),
-        dest_config: config.destination.config.clone(),
-        source_plugin_id,
-        source_plugin_version,
-        dest_plugin_id,
-        dest_plugin_version,
-        source_permissions: plugins.source_permissions.clone(),
-        dest_permissions: plugins.dest_permissions.clone(),
-        source_overrides: build_sandbox_overrides(
-            config.source.permissions.as_ref(),
-            config.source.limits.as_ref(),
-            &source_manifest_limits,
-        ),
-        dest_overrides: build_sandbox_overrides(
-            config.destination.permissions.as_ref(),
-            config.destination.limits.as_ref(),
-            &dest_manifest_limits,
-        ),
+    let params = Arc::new(StreamExecutionParams {
+        pipeline: PipelineIdentity {
+            name: config.pipeline.clone(),
+            metric_run_label: metric_run_label.to_owned(),
+        },
+        source: PluginSpec {
+            id: source_plugin_id,
+            version: source_plugin_version,
+            config: config.source.config.clone(),
+            permissions: plugins.source_permissions.clone(),
+            overrides: build_sandbox_overrides(
+                config.source.permissions.as_ref(),
+                config.source.limits.as_ref(),
+                &source_manifest_limits,
+            ),
+        },
+        destination: PluginSpec {
+            id: dest_plugin_id,
+            version: dest_plugin_version,
+            config: config.destination.config.clone(),
+            permissions: plugins.dest_permissions.clone(),
+            overrides: build_sandbox_overrides(
+                config.destination.permissions.as_ref(),
+                config.destination.limits.as_ref(),
+                &dest_manifest_limits,
+            ),
+        },
         transform_overrides,
         compression: stream_build.compression,
         channel_capacity: (stream_build.limits.max_inflight_batches as usize).max(1),
     });
 
-    let mut stream_join_set: JoinSet<Result<StreamResult, PipelineError>> = JoinSet::new();
+    let mut stream_join_set: JoinSet<Result<StreamShardOutcome, PipelineError>> = JoinSet::new();
     let run_dlq_records: Arc<Mutex<Vec<DlqRecord>>> = Arc::new(Mutex::new(Vec::new()));
 
+    // --- Destination DDL preflight (skipped in dry-run mode) ---
     if !options.dry_run {
         ensure_not_cancelled(
             cancel_token,
             "Pipeline cancelled before destination preflight",
         )?;
         let preflight_streams = destination_preflight_streams(&stream_build.stream_ctxs);
-        let preflight_parallelism = parallelism.min(preflight_streams.len()).max(1);
-        tracing::info!(
-            unique_streams = preflight_streams.len(),
-            preflight_parallelism,
-            "Running destination DDL preflight before shard workers"
-        );
-
-        let mut preflight_join_set: JoinSet<Result<(), PipelineError>> = JoinSet::new();
-        let preflight_semaphore = Arc::new(tokio::sync::Semaphore::new(preflight_parallelism));
-
-        for stream_ctx in preflight_streams {
-            ensure_not_cancelled(
-                cancel_token,
-                "Pipeline cancelled before destination preflight",
-            )?;
-            let permit = tokio::select! {
-                () = cancel_token.cancelled() => {
-                    return Err(cancelled_pipeline_error("Pipeline cancelled before destination preflight"));
-                }
-                permit = preflight_semaphore.clone().acquire_owned() => {
-                    permit.map_err(|e| {
-                        PipelineError::Infrastructure(anyhow::anyhow!(
-                            "Preflight semaphore closed: {e}"
-                        ))
-                    })?
-                }
-            };
-
-            let stream_name = stream_ctx.stream_name.clone();
-            let state_dst = state.clone();
-            let dest_module = modules.dest_module.clone();
-            let params = params.clone();
-
-            preflight_join_set.spawn(async move {
-                let _permit = permit;
-                let (tx, rx) = sync_mpsc::sync_channel::<Frame>(1);
-                tx.send(Frame::EndStream).map_err(|e| {
-                    PipelineError::Infrastructure(anyhow::anyhow!(
-                        "Failed to prime destination preflight channel for stream '{stream_name}': {e}",
-                    ))
-                })?;
-                drop(tx);
-
-                // Empty run label so preflight metrics are unscoped and don't
-                // accumulate in the SnapshotReader's finished_run_snapshots map.
-                let preflight_result = tokio::task::spawn_blocking(move || {
-                    let ctx = StreamRunContext {
-                        module: &dest_module,
-                        state_backend: state_dst,
-                        pipeline_name: &params.pipeline_name,
-                        metric_run_label: "",
-                        plugin_id: &params.dest_plugin_id,
-                        plugin_version: &params.dest_plugin_version,
-                        stream_ctx: &stream_ctx,
-                        permissions: params.dest_permissions.as_ref(),
-                        compression: params.compression,
-                        overrides: params.dest_overrides.as_ref(),
-                    };
-                    run_destination_stream(
-                        &ctx,
-                        rx,
-                        Arc::new(Mutex::new(Vec::new())),
-                        &params.dest_config,
-                        Arc::new(Mutex::new(RunStats::default())),
-                    )
-                })
-                .await
-                .map_err(|e| {
-                    PipelineError::Infrastructure(anyhow::anyhow!(
-                        "Destination preflight task panicked for stream '{stream_name}': {e}",
-                    ))
-                })??;
-
-                tracing::info!(
-                    stream = stream_name,
-                    duration_secs = preflight_result.duration_secs,
-                    "Destination preflight completed"
-                );
-
-                Ok(())
-            });
-        }
-
-        while let Some(joined) = preflight_join_set.join_next().await {
-            match joined {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    preflight_join_set.abort_all();
-                    return Err(err);
-                }
-                Err(join_err) => {
-                    preflight_join_set.abort_all();
-                    return Err(PipelineError::Infrastructure(anyhow::anyhow!(
-                        "Destination preflight join error: {join_err}"
-                    )));
-                }
-            }
-        }
+        run_destination_preflight(
+            preflight_streams,
+            &modules.dest_module,
+            state.clone(),
+            &params,
+            parallelism,
+            cancel_token,
+        )
+        .await?;
     }
+
+    // --- Per-stream execution ---
+    let mode = if options.dry_run {
+        DestinationMode::DryRun {
+            limit: options.limit,
+        }
+    } else {
+        DestinationMode::Normal
+    };
 
     for stream_ctx in &stream_build.stream_ctxs {
         ensure_not_cancelled(cancel_token, "Pipeline cancelled before stream execution")?;
-        let permit = tokio::select! {
-            () = cancel_token.cancelled() => {
-                return Err(cancelled_pipeline_error("Pipeline cancelled before stream execution"));
-            }
-            permit = semaphore.clone().acquire_owned() => {
-                permit.map_err(|e| {
-                PipelineError::Infrastructure(anyhow::anyhow!("Semaphore closed: {e}"))
-                })?
-            }
-        };
+        let permit = acquire_permit_cancellable(
+            &semaphore,
+            cancel_token,
+            "Pipeline cancelled before stream execution",
+        )
+        .await?;
 
+        let stream_ctx = stream_ctx.clone();
         let params = params.clone();
         let source_module = modules.source_module.clone();
         let dest_module = modules.dest_module.clone();
-        let state_src = state.clone();
-        let state_dst = state.clone();
-        let stats_src = stats.clone();
-        let stats_dst = stats.clone();
-        let stream_ctx = stream_ctx.clone();
-        let run_dlq_records = run_dlq_records.clone();
         let transforms = modules.transform_modules.clone();
-        let is_dry_run = options.dry_run;
-        let dry_run_limit = options.limit;
+        let state = state.clone();
+        let stats = stats.clone();
+        let run_dlq_records = run_dlq_records.clone();
         let progress_tx_for_stream = progress_tx.clone();
-
-        let handle = tokio::spawn(async move {
-            let num_t = transforms.len();
-            let mut channels = Vec::with_capacity(num_t + 1);
-            for _ in 0..=num_t {
-                channels.push(sync_mpsc::sync_channel::<Frame>(params.channel_capacity));
-            }
-
-            let (mut senders, mut receivers): (
-                Vec<sync_mpsc::SyncSender<Frame>>,
-                Vec<sync_mpsc::Receiver<Frame>>,
-            ) = channels.into_iter().unzip();
-
-            let source_tx = senders.remove(0);
-            let dest_rx = receivers.pop().ok_or_else(|| {
-                PipelineError::Infrastructure(anyhow::anyhow!("Missing destination receiver"))
-            })?;
-
-            let stream_ctx_for_src = stream_ctx.clone();
-            let stream_ctx_for_dst = stream_ctx.clone();
-
-            // Build per-batch progress callback for the source runner
-            let on_emit: Option<Arc<dyn Fn(u64) + Send + Sync>> =
-                progress_tx_for_stream.as_ref().map(|tx| {
-                    let tx = tx.clone();
-                    Arc::new(move |bytes: u64| {
-                        let _ = tx.send(ProgressEvent::BatchEmitted { bytes });
-                    }) as Arc<dyn Fn(u64) + Send + Sync>
-                });
-
-            let params_src = params.clone();
-            let src_handle = tokio::task::spawn_blocking(move || {
-                let ctx = StreamRunContext {
-                    module: &source_module,
-                    state_backend: state_src,
-                    pipeline_name: &params_src.pipeline_name,
-                    metric_run_label: &params_src.metric_run_label,
-                    plugin_id: &params_src.source_plugin_id,
-                    plugin_version: &params_src.source_plugin_version,
-                    stream_ctx: &stream_ctx_for_src,
-                    permissions: params_src.source_permissions.as_ref(),
-                    compression: params_src.compression,
-                    overrides: params_src.source_overrides.as_ref(),
-                };
-                run_source_stream(
-                    &ctx,
-                    source_tx,
-                    &params_src.source_config,
-                    stats_src,
-                    on_emit,
-                )
-            });
-
-            let mut transform_handles = Vec::with_capacity(num_t);
-            for (i, t) in transforms.into_iter().enumerate() {
-                let rx = receivers.remove(0);
-                let tx = senders.remove(0);
-                let state_t = state_dst.clone();
-                let dlq_records_t = run_dlq_records.clone();
-                let stream_ctx_t = stream_ctx.clone();
-                let params_t = params.clone();
-                let t_handle = tokio::task::spawn_blocking(move || {
-                    let ctx = StreamRunContext {
-                        module: &t.module,
-                        state_backend: state_t,
-                        pipeline_name: &params_t.pipeline_name,
-                        metric_run_label: &params_t.metric_run_label,
-                        plugin_id: &t.plugin_id,
-                        plugin_version: &t.plugin_version,
-                        stream_ctx: &stream_ctx_t,
-                        permissions: t.permissions.as_ref(),
-                        compression: params_t.compression,
-                        overrides: params_t.transform_overrides.get(i).and_then(Option::as_ref),
-                    };
-                    run_transform_stream(&ctx, rx, tx, dlq_records_t, i, &t.config)
-                });
-                transform_handles.push((i, t_handle));
-            }
-
-            if is_dry_run {
-                // Dry-run: collect frames instead of running destination plugin
-                let compression = params.compression;
-                let dry_run_stream_name = stream_ctx_for_dst.stream_name.clone();
-                let collector_handle = tokio::task::spawn_blocking(move || {
-                    collect_dry_run_frames(
-                        &dry_run_stream_name,
-                        &dest_rx,
-                        dry_run_limit,
-                        compression,
-                    )
-                });
-
-                let src_result = src_handle.await.map_err(|e| {
-                    PipelineError::Infrastructure(anyhow::anyhow!(
-                        "Source task panicked for stream '{}': {}",
-                        stream_ctx.stream_name,
-                        e
-                    ))
-                })?;
-
-                let transforms =
-                    collect_transform_results(transform_handles, &stream_ctx.stream_name).await?;
-
-                let collected = collector_handle.await.map_err(|e| {
-                    PipelineError::Infrastructure(anyhow::anyhow!(
-                        "Dry-run collector task panicked for stream '{}': {}",
-                        stream_ctx.stream_name,
-                        e
-                    ))
-                })??;
-
-                drop(permit);
-
-                if let Some(transform_err) = transforms.first_error {
-                    return Err(transform_err);
-                }
-
-                let src = src_result?;
-
-                Ok(StreamResult {
-                    stream_name: stream_ctx.stream_name.clone(),
-                    partition_index: stream_ctx.partition_index,
-                    partition_count: stream_ctx.partition_count,
-                    read_summary: src.summary,
-                    write_summary: WriteSummary {
-                        records_written: 0,
-                        bytes_written: 0,
-                        batches_written: 0,
-                        checkpoint_count: 0,
-                        records_failed: 0,
-                    },
-                    source_checkpoints: src.checkpoints,
-                    dest_checkpoints: Vec::new(),
-                    src_duration: src.duration_secs,
-                    dst_duration: 0.0,
-                    vm_setup_secs: 0.0,
-                    recv_secs: 0.0,
-                    transform_durations: transforms.durations,
-                    dry_run_result: Some(collected),
-                })
-            } else {
-                // Normal mode: run destination plugin
-                let dst_handle = tokio::task::spawn_blocking(move || {
-                    let ctx = StreamRunContext {
-                        module: &dest_module,
-                        state_backend: state_dst,
-                        pipeline_name: &params.pipeline_name,
-                        metric_run_label: &params.metric_run_label,
-                        plugin_id: &params.dest_plugin_id,
-                        plugin_version: &params.dest_plugin_version,
-                        stream_ctx: &stream_ctx_for_dst,
-                        permissions: params.dest_permissions.as_ref(),
-                        compression: params.compression,
-                        overrides: params.dest_overrides.as_ref(),
-                    };
-                    run_destination_stream(
-                        &ctx,
-                        dest_rx,
-                        run_dlq_records,
-                        &params.dest_config,
-                        stats_dst,
-                    )
-                });
-
-                let src_result = src_handle.await.map_err(|e| {
-                    PipelineError::Infrastructure(anyhow::anyhow!(
-                        "Source task panicked for stream '{}': {}",
-                        stream_ctx.stream_name,
-                        e
-                    ))
-                })?;
-
-                let transforms =
-                    collect_transform_results(transform_handles, &stream_ctx.stream_name).await?;
-
-                let dst_result = dst_handle.await.map_err(|e| {
-                    PipelineError::Infrastructure(anyhow::anyhow!(
-                        "Destination task panicked for stream '{}': {}",
-                        stream_ctx.stream_name,
-                        e
-                    ))
-                })?;
-
-                drop(permit);
-
-                if let Some(transform_err) = transforms.first_error {
-                    return Err(transform_err);
-                }
-
-                let src = src_result?;
-
-                let dst = dst_result?;
-
-                Ok(StreamResult {
-                    stream_name: stream_ctx.stream_name.clone(),
-                    partition_index: stream_ctx.partition_index,
-                    partition_count: stream_ctx.partition_count,
-                    read_summary: src.summary,
-                    write_summary: dst.summary,
-                    source_checkpoints: src.checkpoints,
-                    dest_checkpoints: dst.checkpoints,
-                    src_duration: src.duration_secs,
-                    dst_duration: dst.duration_secs,
-                    vm_setup_secs: dst.vm_setup_secs,
-                    recv_secs: dst.recv_secs,
-                    transform_durations: transforms.durations,
-                    dry_run_result: None,
-                })
-            }
-        });
+        let stream_mode = match &mode {
+            DestinationMode::Normal => DestinationMode::Normal,
+            DestinationMode::DryRun { limit } => DestinationMode::DryRun { limit: *limit },
+        };
 
         stream_join_set.spawn(async move {
-            handle.await.map_err(|e| {
-                PipelineError::Infrastructure(anyhow::anyhow!("Stream task panicked: {e}"))
-            })?
+            let _permit = permit;
+            execute_single_stream(
+                stream_ctx,
+                params,
+                source_module,
+                dest_module,
+                transforms,
+                state,
+                stats,
+                run_dlq_records,
+                stream_mode,
+                progress_tx_for_stream,
+            )
+            .await
         });
     }
 
+    // --- Aggregate results ---
     let mut source_checkpoints = Vec::new();
     let mut dest_checkpoints = Vec::new();
     let mut total_read_summary = ReadSummary {
@@ -1404,10 +515,10 @@ async fn execute_streams(
     let stream_collection = collect_stream_task_results(stream_join_set, progress_tx).await?;
 
     for sr in stream_collection.successes {
-        max_source_duration = max_source_duration.max(sr.src_duration);
-        max_dest_duration = max_dest_duration.max(sr.dst_duration);
-        max_vm_setup_secs = max_vm_setup_secs.max(sr.vm_setup_secs);
-        max_recv_secs = max_recv_secs.max(sr.recv_secs);
+        max_source_duration = max_source_duration.max(sr.source_duration_secs);
+        max_dest_duration = max_dest_duration.max(sr.dest_duration_secs);
+        max_vm_setup_secs = max_vm_setup_secs.max(sr.wasm_instantiation_secs);
+        max_recv_secs = max_recv_secs.max(sr.frame_receive_secs);
 
         total_read_summary.records_read += sr.read_summary.records_read;
         total_read_summary.bytes_read += sr.read_summary.bytes_read;
@@ -1434,10 +545,10 @@ async fn execute_streams(
             records_written: sr.write_summary.records_written,
             bytes_read: sr.read_summary.bytes_read,
             bytes_written: sr.write_summary.bytes_written,
-            source_duration_secs: sr.src_duration,
-            dest_duration_secs: sr.dst_duration,
-            dest_vm_setup_secs: sr.vm_setup_secs,
-            dest_recv_secs: sr.recv_secs,
+            source_duration_secs: sr.source_duration_secs,
+            dest_duration_secs: sr.dest_duration_secs,
+            dest_wasm_instantiation_secs: sr.wasm_instantiation_secs,
+            dest_frame_receive_secs: sr.frame_receive_secs,
         });
 
         if let Some(dr) = sr.dry_run_result {
@@ -1476,408 +587,36 @@ async fn execute_streams(
 
     let first_error = stream_collection.first_error;
 
-    let dlq_records = run_dlq_records
-        .lock()
-        .map_err(|_| {
-            PipelineError::Infrastructure(anyhow::anyhow!("DLQ collection mutex poisoned"))
-        })?
+    let dlq_records = PipelineError::lock_or_infra(&run_dlq_records, "DLQ collection")?
         .drain(..)
         .collect();
 
-    let final_stats = stats
-        .lock()
-        .map_err(|_| PipelineError::Infrastructure(anyhow::anyhow!("run stats mutex poisoned")))?
-        .clone();
+    let final_stats = PipelineError::lock_or_infra(&stats, "run stats")?.clone();
 
-    Ok(AggregatedStreamResults {
-        execution_parallelism: u32::try_from(parallelism).unwrap_or(u32::MAX),
-        total_read_summary,
-        total_write_summary,
-        source_checkpoints,
-        dest_checkpoints,
-        max_source_duration,
-        max_dest_duration,
-        max_vm_setup_secs,
-        max_recv_secs,
-        transform_durations,
-        dlq_records,
-        final_stats,
-        first_error,
-        dry_run_streams,
-        stream_metrics,
-    })
-}
-
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn finalize_run(
-    config: &PipelineConfig,
-    pipeline_id: &PipelineId,
-    state: Arc<dyn StateBackend>,
-    run_id: i64,
-    attempt: u32,
-    start: Instant,
-    metric_run_label: &str,
-    modules: &LoadedModules,
-    mut aggregated: AggregatedStreamResults,
-    metrics_runtime: &MetricsRuntime<'_>,
-) -> Result<PipelineResult, PipelineError> {
-    if let Some(err) = aggregated.first_error {
-        // Drain the run's snapshot entry so it doesn't accumulate in the
-        // SnapshotReader's finished_run_snapshots map (memory leak in
-        // long-lived agent processes).
-        let _ = metrics_runtime.snapshot_for_run(&config.pipeline, Some(metric_run_label));
-
-        let state_for_complete = state.clone();
-        let run_stats = RunStats {
-            records_read: aggregated.final_stats.records_read,
-            records_written: aggregated.final_stats.records_written,
-            bytes_read: aggregated.final_stats.bytes_read,
-            bytes_written: aggregated.final_stats.bytes_written,
-            error_message: Some(format!("Stream error: {err}")),
-        };
-        tokio::task::spawn_blocking(move || {
-            state_for_complete.complete_run(run_id, RunStatus::Failed, &run_stats)
-        })
-        .await
-        .map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!("complete_run task panicked: {e}"))
-        })?
-        .map_err(|e| PipelineError::Infrastructure(e.into()))?;
-
-        let state_for_dlq = state.clone();
-        let pipeline_id_for_dlq = pipeline_id.clone();
-        let dlq_records = std::mem::take(&mut aggregated.dlq_records);
-        tokio::task::spawn_blocking(move || {
-            crate::dlq::persist_dlq_records(
-                state_for_dlq.as_ref(),
-                &pipeline_id_for_dlq,
-                run_id,
-                &dlq_records,
-            )
-        })
-        .await
-        .map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!("persist_dlq_records task panicked: {e}"))
-        })?
-        .map_err(|e| PipelineError::Infrastructure(e.into()))?;
-
-        return Err(err);
-    }
-
-    let snap = metrics_runtime.snapshot_for_run(&config.pipeline, Some(metric_run_label));
-
-    let wasm_overhead_secs = compute_wasm_overhead_secs(&snap, &aggregated);
-
-    tracing::debug!(
-        pipeline = config.pipeline,
-        source_checkpoint_count = aggregated.source_checkpoints.len(),
-        dest_checkpoint_count = aggregated.dest_checkpoints.len(),
-        "About to correlate checkpoints"
-    );
-
-    let cursors_advanced =
-        finalize_successful_run_state(state.clone(), pipeline_id, run_id, &mut aggregated).await?;
-    if cursors_advanced > 0 {
-        tracing::info!(
-            pipeline = config.pipeline,
-            cursors_advanced,
-            "Checkpoint coordination complete"
-        );
-    }
-
-    let duration = start.elapsed();
-    let transform_module_load_ms = modules
-        .transform_modules
-        .iter()
-        .map(|m| m.load_ms)
-        .collect::<Vec<_>>();
-
-    tracing::info!(
-        pipeline = config.pipeline,
-        records_read = aggregated.total_read_summary.records_read,
-        records_written = aggregated.total_write_summary.records_written,
-        duration_secs = duration.as_secs_f64(),
-        "Pipeline run completed"
-    );
-
-    Ok(PipelineResult {
-        counts: PipelineCounts {
-            records_read: aggregated.total_read_summary.records_read,
-            records_written: aggregated.total_write_summary.records_written,
-            bytes_read: aggregated.total_read_summary.bytes_read,
-            bytes_written: aggregated.total_write_summary.bytes_written,
+    Ok(StreamAggregation {
+        totals: ReadWriteTotals {
+            total_read_summary,
+            total_write_summary,
         },
-        source: build_source_timing(
-            &snap,
-            aggregated.max_source_duration,
-            modules.source_module_load_ms,
-        ),
-        dest: build_dest_timing(&snap, &aggregated, modules.dest_module_load_ms),
-        transform_count: aggregated.transform_durations.len(),
-        transform_duration_secs: aggregated.transform_durations.iter().sum(),
-        transform_module_load_ms,
-        duration_secs: duration.as_secs_f64(),
-        wasm_overhead_secs,
-        retry_count: attempt.saturating_sub(1),
-        parallelism: reported_parallelism(config, &aggregated),
-        stream_metrics: aggregated.stream_metrics,
-    })
-}
-
-fn reported_parallelism(config: &PipelineConfig, aggregated: &AggregatedStreamResults) -> u32 {
-    if aggregated.execution_parallelism > 0 {
-        aggregated.execution_parallelism
-    } else {
-        resolve_effective_parallelism(config, false)
-    }
-}
-
-fn build_source_timing(
-    snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
-    max_source_duration: f64,
-    source_module_load_ms: u64,
-) -> SourceTiming {
-    SourceTiming {
-        duration_secs: max_source_duration,
-        module_load_ms: source_module_load_ms,
-        connect_secs: snap.source_connect_secs,
-        query_secs: snap.source_query_secs,
-        fetch_secs: snap.source_fetch_secs,
-        arrow_encode_secs: snap.source_encode_secs,
-        emit_nanos: snap.emit_batch_nanos,
-        compress_nanos: snap.compress_nanos,
-        emit_count: snap.emit_count,
-    }
-}
-
-fn build_dry_run_result(
-    snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
-    aggregated: AggregatedStreamResults,
-    source_module_load_ms: u64,
-    duration_secs: f64,
-) -> DryRunResult {
-    DryRunResult {
-        streams: aggregated.dry_run_streams,
-        source: build_source_timing(snap, aggregated.max_source_duration, source_module_load_ms),
-        transform_count: aggregated.transform_durations.len(),
-        transform_duration_secs: aggregated.transform_durations.iter().sum(),
-        duration_secs,
-    }
-}
-
-fn compute_wasm_overhead_secs(
-    snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
-    aggregated: &AggregatedStreamResults,
-) -> f64 {
-    let plugin_internal_secs =
-        snap.dest_connect_secs + snap.dest_flush_secs + snap.dest_commit_secs;
-
-    (aggregated.max_dest_duration
-        - aggregated.max_vm_setup_secs
-        - aggregated.max_recv_secs
-        - plugin_internal_secs)
-        .max(0.0)
-}
-
-fn build_dest_timing(
-    snap: &rapidbyte_metrics::snapshot::PipelineMetricsSnapshot,
-    aggregated: &AggregatedStreamResults,
-    dest_module_load_ms: u64,
-) -> DestTiming {
-    DestTiming {
-        duration_secs: aggregated.max_dest_duration,
-        module_load_ms: dest_module_load_ms,
-        connect_secs: snap.dest_connect_secs,
-        flush_secs: snap.dest_flush_secs,
-        commit_secs: snap.dest_commit_secs,
-        arrow_decode_secs: snap.dest_decode_secs,
-        vm_setup_secs: aggregated.max_vm_setup_secs,
-        recv_secs: aggregated.max_recv_secs,
-        recv_nanos: snap.next_batch_nanos,
-        recv_wait_nanos: snap.next_batch_wait_nanos,
-        recv_process_nanos: snap.next_batch_process_nanos,
-        decompress_nanos: snap.decompress_nanos,
-        recv_count: snap.next_batch_count,
-    }
-}
-
-fn cancelled_pipeline_error(message: &str) -> PipelineError {
-    let mut error = PluginError::internal("CANCELLED", message);
-    error.safe_to_retry = true;
-    error.commit_state = Some(CommitState::BeforeCommit);
-    PipelineError::Plugin(error)
-}
-
-fn ensure_not_cancelled(
-    cancel_token: &CancellationToken,
-    message: &str,
-) -> Result<(), PipelineError> {
-    if cancel_token.is_cancelled() {
-        return Err(cancelled_pipeline_error(message));
-    }
-    Ok(())
-}
-
-async fn preserve_real_outcome_after_stream_execution<T, Fut>(
-    _cancel_token: &CancellationToken,
-    finalize: Fut,
-) -> Result<T, PipelineError>
-where
-    Fut: Future<Output = Result<T, PipelineError>>,
-{
-    finalize.await
-}
-
-async fn complete_run_status(
-    backend: Arc<dyn StateBackend>,
-    run_id: i64,
-    status: RunStatus,
-    run_stats: RunStats,
-) -> Result<(), PipelineError> {
-    tokio::task::spawn_blocking(move || backend.complete_run(run_id, status, &run_stats))
-        .await
-        .map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!("complete_run task panicked: {e}"))
-        })?
-        .map_err(|e| PipelineError::Infrastructure(e.into()))
-}
-
-async fn finalize_successful_run_state(
-    state: Arc<dyn StateBackend>,
-    pipeline_id: &PipelineId,
-    run_id: i64,
-    aggregated: &mut AggregatedStreamResults,
-) -> Result<u64, PipelineError> {
-    let state_for_cursor = state.clone();
-    let pipeline_id_for_cursor = pipeline_id.clone();
-    let source_checkpoints = std::mem::take(&mut aggregated.source_checkpoints);
-    let dest_checkpoints = std::mem::take(&mut aggregated.dest_checkpoints);
-    let cursor_result = tokio::task::spawn_blocking(move || {
-        correlate_and_persist_cursors(
-            state_for_cursor.as_ref(),
-            &pipeline_id_for_cursor,
-            &source_checkpoints,
-            &dest_checkpoints,
-        )
-    })
-    .await
-    .map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!(
-            "correlate_and_persist_cursors task panicked: {e}"
-        ))
-    })?;
-
-    let cursors_advanced = match cursor_result {
-        Ok(cursors_advanced) => cursors_advanced,
-        Err(error) => {
-            let failed_stats = finalization_failed_stats(aggregated, &error.to_string());
-            let _ = complete_run_status(state, run_id, RunStatus::Failed, failed_stats).await;
-            return Err(PipelineError::Infrastructure(error));
-        }
-    };
-
-    let state_for_dlq = state.clone();
-    let pipeline_id_for_dlq = pipeline_id.clone();
-    let dlq_records = std::mem::take(&mut aggregated.dlq_records);
-    let dlq_result = tokio::task::spawn_blocking(move || {
-        crate::dlq::persist_dlq_records(
-            state_for_dlq.as_ref(),
-            &pipeline_id_for_dlq,
-            run_id,
-            &dlq_records,
-        )
-    })
-    .await
-    .map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!("persist_dlq_records task panicked: {e}"))
-    })?;
-    if let Err(error) = dlq_result {
-        let failed_stats = finalization_failed_stats(aggregated, &error.to_string());
-        let _ = complete_run_status(state, run_id, RunStatus::Failed, failed_stats).await;
-        return Err(PipelineError::Infrastructure(error.into()));
-    }
-
-    let complete_stats = RunStats {
-        records_read: aggregated.total_read_summary.records_read,
-        records_written: aggregated.total_write_summary.records_written,
-        bytes_read: aggregated.total_read_summary.bytes_read,
-        bytes_written: aggregated.total_write_summary.bytes_written,
-        error_message: None,
-    };
-    complete_run_status(state, run_id, RunStatus::Completed, complete_stats).await?;
-
-    Ok(cursors_advanced)
-}
-
-fn finalization_failed_stats(
-    aggregated: &AggregatedStreamResults,
-    error_message: &str,
-) -> RunStats {
-    RunStats {
-        records_read: aggregated.total_read_summary.records_read,
-        records_written: aggregated.total_write_summary.records_written,
-        bytes_read: aggregated.total_read_summary.bytes_read,
-        bytes_written: aggregated.total_write_summary.bytes_written,
-        error_message: Some(format!("Post-run finalization failed: {error_message}")),
-    }
-}
-
-/// Collect frames from a channel, decode IPC, enforce row limit.
-/// Used in dry-run mode instead of the destination runner.
-fn collect_dry_run_frames(
-    stream_name: &str,
-    receiver: &sync_mpsc::Receiver<Frame>,
-    limit: Option<u64>,
-    compression: Option<rapidbyte_runtime::CompressionCodec>,
-) -> Result<DryRunStreamResult, PipelineError> {
-    let mut batches = Vec::new();
-    let mut total_rows: u64 = 0;
-    let mut total_bytes: u64 = 0;
-
-    'recv: while let Ok(frame) = receiver.recv() {
-        let Frame::Data { payload: data, .. } = frame else {
-            break 'recv;
-        };
-        let ipc_bytes = match compression {
-            Some(codec) => {
-                rapidbyte_runtime::compression::decompress(codec, &data).map_err(|e| {
-                    PipelineError::Infrastructure(anyhow::anyhow!(
-                        "Dry-run decompression failed: {e}"
-                    ))
-                })?
-            }
-            None => data.to_vec(),
-        };
-
-        let decoded = ipc_to_record_batches(&ipc_bytes).map_err(PipelineError::Infrastructure)?;
-
-        for batch in decoded {
-            let rows = batch.num_rows() as u64;
-            total_bytes += batch.get_array_memory_size() as u64;
-
-            if let Some(max) = limit {
-                let remaining = max.saturating_sub(total_rows);
-                if remaining == 0 {
-                    break 'recv;
-                }
-                if rows > remaining {
-                    #[allow(clippy::cast_possible_truncation)]
-                    batches.push(batch.slice(0, remaining as usize));
-                    total_rows += remaining;
-                    break 'recv;
-                }
-            }
-
-            total_rows += rows;
-            batches.push(batch);
-        }
-    }
-
-    Ok(DryRunStreamResult {
-        stream_name: stream_name.to_string(),
-        batches,
-        total_rows,
-        total_bytes,
+        timing: TimingMaxima {
+            max_source_duration,
+            max_dest_duration,
+            max_wasm_instantiation_secs: max_vm_setup_secs,
+            max_frame_receive_secs: max_recv_secs,
+            transform_durations,
+        },
+        diagnostics: ExecutionDiagnostics {
+            execution_parallelism: u32::try_from(parallelism).unwrap_or(u32::MAX),
+            stream_metrics,
+            dry_run_streams,
+        },
+        state: StateOutcome {
+            source_checkpoints,
+            dest_checkpoints,
+            dlq_records,
+            final_stats,
+            first_error,
+        },
     })
 }
 
@@ -1899,11 +638,11 @@ pub async fn check_pipeline(
     let plugins = resolve_plugins(config, registry_config)
         .await
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    let source_manifest = plugins.source_manifest.as_ref().map(|_| CheckItemResult {
+    let source_manifest = plugins.source_manifest.as_ref().map(|_| CheckStatus {
         ok: true,
         message: String::new(),
     });
-    let destination_manifest = plugins.dest_manifest.as_ref().map(|_| CheckItemResult {
+    let destination_manifest = plugins.dest_manifest.as_ref().map(|_| CheckStatus {
         ok: true,
         message: String::new(),
     });
@@ -1918,7 +657,29 @@ pub async fn check_pipeline(
         )
     });
 
-    let state = check_state_backend(config);
+    let state = {
+        let connection = config
+            .state
+            .connection
+            .clone()
+            .unwrap_or_else(|| rapidbyte_state::default_connection(config.state.backend));
+        match rapidbyte_state::open_backend(config.state.backend, &connection) {
+            Ok(_) => {
+                tracing::info!("State backend: OK");
+                CheckStatus {
+                    ok: true,
+                    message: String::new(),
+                }
+            }
+            Err(e) => {
+                tracing::error!("State backend: FAILED — {}", e);
+                CheckStatus {
+                    ok: false,
+                    message: e.to_string(),
+                }
+            }
+        }
+    };
 
     let source_config_json = config.source.config.clone();
     let source_permissions = plugins.source_permissions.clone();
@@ -1977,7 +738,7 @@ pub async fn check_pipeline(
         if let Some(ref m) = manifest {
             transform_configs.push(config_check_result(&tc.use_ref, &tc.config, m));
         } else {
-            transform_configs.push(CheckItemResult {
+            transform_configs.push(CheckStatus {
                 ok: true,
                 message: String::new(),
             });
@@ -2094,13 +855,13 @@ fn config_check_result(
     plugin_ref: &str,
     config: &serde_json::Value,
     manifest: &PluginManifest,
-) -> CheckItemResult {
+) -> CheckStatus {
     match validate_config_against_schema(plugin_ref, config, manifest) {
-        Ok(()) => CheckItemResult {
+        Ok(()) => CheckStatus {
             ok: true,
             message: String::new(),
         },
-        Err(error) => CheckItemResult {
+        Err(error) => CheckStatus {
             ok: false,
             message: error.to_string(),
         },
@@ -2135,576 +896,6 @@ pub async fn discover_plugin(
     })
     .await
     .map_err(|e| anyhow::anyhow!("Discover task panicked: {e}"))?
-}
-
-#[cfg(test)]
-mod stream_task_collection_tests {
-    use super::*;
-    use std::time::{Duration, Instant};
-
-    fn success_result(stream_name: &str) -> StreamResult {
-        StreamResult {
-            stream_name: stream_name.to_string(),
-            partition_index: None,
-            partition_count: None,
-            read_summary: ReadSummary {
-                records_read: 0,
-                bytes_read: 0,
-                batches_emitted: 0,
-                checkpoint_count: 0,
-                records_skipped: 0,
-            },
-            write_summary: WriteSummary {
-                records_written: 0,
-                bytes_written: 0,
-                batches_written: 0,
-                checkpoint_count: 0,
-                records_failed: 0,
-            },
-            source_checkpoints: Vec::new(),
-            dest_checkpoints: Vec::new(),
-            src_duration: 0.0,
-            dst_duration: 0.0,
-            vm_setup_secs: 0.0,
-            recv_secs: 0.0,
-            transform_durations: Vec::new(),
-            dry_run_result: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn collect_stream_tasks_fails_fast_and_cancels_siblings() {
-        let mut join_set: JoinSet<Result<StreamResult, PipelineError>> = JoinSet::new();
-        join_set.spawn(async {
-            tokio::time::sleep(Duration::from_millis(250)).await;
-            Ok(success_result("slow_stream"))
-        });
-        join_set.spawn(async {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-            Err(PipelineError::Infrastructure(anyhow::anyhow!(
-                "expected failure"
-            )))
-        });
-
-        let start = Instant::now();
-        let collected = collect_stream_task_results(join_set, &None)
-            .await
-            .expect("collector should return first error, not infra panic");
-
-        assert!(collected.first_error.is_some());
-        assert!(collected.successes.is_empty());
-        assert!(start.elapsed() < Duration::from_millis(200));
-    }
-}
-
-#[cfg(test)]
-mod dry_run_tests {
-    use super::*;
-    use crate::arrow::record_batch_to_ipc;
-    use arrow::array::{Array, Int64Array, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatch;
-    use std::sync::Arc;
-
-    fn make_test_batch(n: usize) -> RecordBatch {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("id", DataType::Int64, false),
-            Field::new("name", DataType::Utf8, true),
-        ]));
-        let max = i64::try_from(n).expect("test row count must fit in i64");
-        let ids: Vec<i64> = (0..max).collect();
-        let names: Vec<String> = (0..n).map(|i| format!("row_{i}")).collect();
-        RecordBatch::try_new(
-            schema,
-            vec![
-                Arc::new(Int64Array::from(ids)) as Arc<dyn Array>,
-                Arc::new(StringArray::from(names)) as Arc<dyn Array>,
-            ],
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn collect_dry_run_frames_basic() {
-        let (tx, rx) = sync_mpsc::sync_channel::<Frame>(16);
-        let batch = make_test_batch(5);
-        let ipc = record_batch_to_ipc(&batch).unwrap();
-        tx.send(Frame::Data {
-            payload: bytes::Bytes::from(ipc),
-            checkpoint_id: 1,
-        })
-        .unwrap();
-        tx.send(Frame::EndStream).unwrap();
-        drop(tx);
-
-        let result = collect_dry_run_frames("public.users", &rx, None, None).unwrap();
-        assert_eq!(result.stream_name, "public.users");
-        assert_eq!(result.total_rows, 5);
-        assert_eq!(result.batches.len(), 1);
-    }
-
-    #[test]
-    fn collect_dry_run_frames_with_limit() {
-        let (tx, rx) = sync_mpsc::sync_channel::<Frame>(16);
-        let batch = make_test_batch(100);
-        let ipc = record_batch_to_ipc(&batch).unwrap();
-        tx.send(Frame::Data {
-            payload: bytes::Bytes::from(ipc),
-            checkpoint_id: 1,
-        })
-        .unwrap();
-        tx.send(Frame::EndStream).unwrap();
-        drop(tx);
-
-        let result = collect_dry_run_frames("public.users", &rx, Some(10), None).unwrap();
-        assert_eq!(result.total_rows, 10);
-        let total: usize = result.batches.iter().map(RecordBatch::num_rows).sum();
-        assert_eq!(total, 10);
-    }
-
-    #[test]
-    fn collect_dry_run_frames_multiple_batches() {
-        let (tx, rx) = sync_mpsc::sync_channel::<Frame>(16);
-        for _ in 0..3 {
-            let batch = make_test_batch(5);
-            let ipc = record_batch_to_ipc(&batch).unwrap();
-            tx.send(Frame::Data {
-                payload: bytes::Bytes::from(ipc),
-                checkpoint_id: 1,
-            })
-            .unwrap();
-        }
-        tx.send(Frame::EndStream).unwrap();
-        drop(tx);
-
-        let result = collect_dry_run_frames("public.users", &rx, Some(12), None).unwrap();
-        assert_eq!(result.stream_name, "public.users");
-        assert_eq!(result.total_rows, 12);
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::cast_possible_truncation)]
-mod stream_context_partition_tests {
-    use super::*;
-    use crate::config::types::PipelineConfig;
-    use rapidbyte_state::SqliteStateBackend;
-    use rapidbyte_types::manifest::{Roles, SourceCapabilities};
-    use rapidbyte_types::wire::ProtocolVersion;
-
-    fn test_manifest_with_partitioned_read() -> PluginManifest {
-        PluginManifest {
-            id: "test/pg".to_string(),
-            name: "Test".to_string(),
-            version: "0.1.0".to_string(),
-            description: String::new(),
-            author: None,
-            license: None,
-            protocol_version: ProtocolVersion::current(),
-            roles: Roles {
-                source: Some(SourceCapabilities {
-                    supported_sync_modes: vec![SyncMode::FullRefresh],
-                    features: vec![Feature::PartitionedRead],
-                }),
-                destination: None,
-                transform: None,
-            },
-            permissions: Permissions::default(),
-            limits: ResourceLimits::default(),
-            config_schema: None,
-        }
-    }
-
-    fn config_with_parallelism(parallelism: u32, sync_mode: &str) -> PipelineConfig {
-        config_with_parallelism_and_write_mode(parallelism, sync_mode, "append")
-    }
-
-    fn config_with_parallelism_and_write_mode(
-        parallelism: u32,
-        sync_mode: &str,
-        write_mode: &str,
-    ) -> PipelineConfig {
-        let yaml = format!(
-            r#"
-version: "1.0"
-pipeline: test_partitioning
-source:
-  use: postgres
-  config: {{}}
-  streams:
-    - name: bench_events
-      sync_mode: {sync_mode}
-destination:
-  use: postgres
-  config: {{}}
-  write_mode: {write_mode}
-resources:
-  parallelism: {parallelism}
-"#
-        );
-        serde_yaml::from_str(&yaml).expect("valid pipeline yaml")
-    }
-
-    fn config_with_parallelism_expr(
-        parallelism: &str,
-        source_use: &str,
-        sync_mode: &str,
-        write_mode: &str,
-        transform_count: usize,
-    ) -> PipelineConfig {
-        let transforms_yaml = if transform_count == 0 {
-            String::new()
-        } else {
-            let mut transforms = String::from("transforms:\n");
-            for _ in 0..transform_count {
-                transforms.push_str("  - use: sql\n    config: {}\n");
-            }
-            transforms
-        };
-
-        let yaml = format!(
-            r#"
-version: "1.0"
-pipeline: test_partitioning
-source:
-  use: {source_use}
-  config: {{}}
-  streams:
-    - name: bench_events
-      sync_mode: {sync_mode}
-{transforms_yaml}destination:
-  use: postgres
-  config: {{}}
-  write_mode: {write_mode}
-resources:
-  parallelism: {parallelism}
-"#
-        );
-        serde_yaml::from_str(&yaml).expect("valid pipeline yaml")
-    }
-
-    #[test]
-    fn full_refresh_with_parallelism_fans_out_stream_contexts() {
-        let config = config_with_parallelism(4, "full_refresh");
-        let state = SqliteStateBackend::in_memory().expect("in-memory state backend");
-        let manifest = test_manifest_with_partitioned_read();
-
-        let build = build_stream_contexts(&config, &state, None, Some(&manifest))
-            .expect("stream contexts built");
-
-        assert_eq!(build.stream_ctxs.len(), 4);
-        assert_eq!(
-            build
-                .stream_ctxs
-                .iter()
-                .map(|ctx| ctx.stream_name.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                "bench_events",
-                "bench_events",
-                "bench_events",
-                "bench_events"
-            ]
-        );
-        for (idx, stream_ctx) in build.stream_ctxs.iter().enumerate() {
-            assert_eq!(stream_ctx.sync_mode, SyncMode::FullRefresh);
-            assert_eq!(
-                stream_ctx.source_stream_name.as_deref(),
-                Some("bench_events")
-            );
-            assert_eq!(stream_ctx.partition_count, Some(4));
-            assert_eq!(
-                stream_ctx.partition_index,
-                Some(u32::try_from(idx).expect("partition index should fit in u32"))
-            );
-        }
-    }
-
-    #[test]
-    fn incremental_streams_remain_unpartitioned() {
-        let config = config_with_parallelism(4, "incremental");
-        let state = SqliteStateBackend::in_memory().expect("in-memory state backend");
-        let manifest = test_manifest_with_partitioned_read();
-
-        let build = build_stream_contexts(&config, &state, None, Some(&manifest))
-            .expect("stream contexts built");
-
-        assert_eq!(build.stream_ctxs.len(), 1);
-        let stream_ctx = &build.stream_ctxs[0];
-        assert_eq!(stream_ctx.stream_name, "bench_events");
-        assert_eq!(stream_ctx.source_stream_name, None);
-        assert_eq!(stream_ctx.partition_count, None);
-        assert_eq!(stream_ctx.partition_index, None);
-    }
-
-    #[test]
-    fn replace_mode_streams_remain_unpartitioned() {
-        let config = config_with_parallelism_and_write_mode(4, "full_refresh", "replace");
-        let state = SqliteStateBackend::in_memory().expect("in-memory state backend");
-        let manifest = test_manifest_with_partitioned_read();
-
-        let build = build_stream_contexts(&config, &state, None, Some(&manifest))
-            .expect("stream contexts built");
-
-        assert_eq!(build.stream_ctxs.len(), 1);
-        let stream_ctx = &build.stream_ctxs[0];
-        assert_eq!(stream_ctx.stream_name, "bench_events");
-        assert_eq!(stream_ctx.source_stream_name, None);
-        assert_eq!(stream_ctx.partition_count, None);
-        assert_eq!(stream_ctx.partition_index, None);
-        assert_eq!(stream_ctx.write_mode, Some(WriteMode::Replace));
-    }
-
-    #[test]
-    fn decode_incremental_last_value_wraps_legacy_scalar_for_tie_breaker_streams() {
-        let value = decode_incremental_last_value("42".to_string(), Some("id"));
-
-        match value {
-            CursorValue::Json { value } => {
-                assert_eq!(value["cursor"]["type"], "utf8");
-                assert_eq!(value["cursor"]["value"], "42");
-                assert_eq!(value["tie_breaker"]["type"], "null");
-            }
-            other => panic!("expected wrapped composite cursor, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn decode_incremental_last_value_preserves_composite_json() {
-        let raw = r#"{"cursor":{"type":"utf8","value":"2024-01-01T00:00:00Z"},"tie_breaker":{"type":"int64","value":7}}"#;
-        let value = decode_incremental_last_value(raw.to_string(), Some("id"));
-
-        match value {
-            CursorValue::Json { value } => {
-                assert_eq!(value["cursor"]["value"], "2024-01-01T00:00:00Z");
-                assert_eq!(value["tie_breaker"]["value"], 7);
-            }
-            other => panic!("expected composite cursor json, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn auto_parallelism_without_eligible_streams_resolves_to_one() {
-        let config = config_with_parallelism_expr("auto", "postgres", "incremental", "append", 0);
-        assert_eq!(resolve_effective_parallelism(&config, true), 1);
-    }
-
-    #[test]
-    fn auto_parallelism_uses_adaptive_core_budget() {
-        let config = config_with_parallelism_expr("auto", "postgres", "full_refresh", "append", 0);
-
-        assert_eq!(resolve_auto_parallelism_for_cores(&config, 16, true), 12);
-        assert_eq!(resolve_auto_parallelism_for_cores(&config, 8, true), 5);
-        assert_eq!(resolve_auto_parallelism_for_cores(&config, 4, true), 2);
-    }
-
-    #[test]
-    fn manual_parallelism_override_is_honored() {
-        let config = config_with_parallelism_expr("7", "postgres", "full_refresh", "append", 0);
-        assert_eq!(resolve_effective_parallelism(&config, true), 7);
-    }
-
-    #[test]
-    fn transform_count_reduces_auto_parallelism() {
-        let without_transforms =
-            config_with_parallelism_expr("auto", "postgres", "full_refresh", "append", 0);
-        let with_transforms =
-            config_with_parallelism_expr("auto", "postgres", "full_refresh", "append", 3);
-
-        assert!(
-            resolve_auto_parallelism_for_cores(&with_transforms, 16, true)
-                <= resolve_auto_parallelism_for_cores(&without_transforms, 16, true)
-        );
-    }
-
-    #[test]
-    fn auto_parallelism_scales_with_multiple_streams() {
-        let yaml = r#"
-version: "1.0"
-pipeline: bench_pg
-source:
-  use: postgres
-  config: {}
-  streams:
-    - name: a
-      sync_mode: full_refresh
-    - name: b
-      sync_mode: full_refresh
-    - name: c
-      sync_mode: full_refresh
-destination:
-  use: postgres
-  config: {}
-  write_mode: append
-resources:
-  parallelism: auto
-state:
-  backend: sqlite
-  connection: ":memory:"
-"#;
-        let config: PipelineConfig = serde_yaml::from_str(yaml).expect("valid pipeline yaml");
-
-        // 16 cores => 12 worker cores after reserves; split across 3 streams => 4 shards each.
-        assert_eq!(resolve_auto_parallelism_for_cores(&config, 16, true), 12);
-    }
-
-    #[test]
-    fn execution_parallelism_prefers_stream_context_override() {
-        let config = config_with_parallelism_expr("2", "postgres", "full_refresh", "append", 0);
-        let stream_ctxs = vec![StreamContext {
-            stream_name: "users".to_string(),
-            source_stream_name: Some("users".to_string()),
-            schema: SchemaHint::Columns(vec![]),
-            sync_mode: SyncMode::FullRefresh,
-            cursor_info: None,
-            limits: StreamLimits::default(),
-            policies: StreamPolicies::default(),
-            write_mode: Some(WriteMode::Append),
-            selected_columns: None,
-            partition_key: None,
-            partition_count: Some(5),
-            partition_index: Some(0),
-            effective_parallelism: Some(5),
-            partition_strategy: Some(rapidbyte_types::stream::PartitionStrategy::Mod),
-            copy_flush_bytes_override: None,
-        }];
-
-        assert_eq!(execution_parallelism(&config, &stream_ctxs), 5);
-    }
-
-    #[test]
-    fn execution_parallelism_falls_back_to_pipeline_setting() {
-        let config = config_with_parallelism_expr("3", "postgres", "full_refresh", "append", 0);
-        let stream_ctxs = vec![StreamContext {
-            stream_name: "users".to_string(),
-            source_stream_name: None,
-            schema: SchemaHint::Columns(vec![]),
-            sync_mode: SyncMode::FullRefresh,
-            cursor_info: None,
-            limits: StreamLimits::default(),
-            policies: StreamPolicies::default(),
-            write_mode: Some(WriteMode::Append),
-            selected_columns: None,
-            partition_key: None,
-            partition_count: None,
-            partition_index: None,
-            effective_parallelism: None,
-            partition_strategy: None,
-            copy_flush_bytes_override: None,
-        }];
-
-        assert_eq!(execution_parallelism(&config, &stream_ctxs), 3);
-    }
-
-    #[test]
-    fn destination_preflight_deduplicates_partitioned_streams() {
-        let stream_ctxs = vec![
-            StreamContext {
-                stream_name: "bench_events".to_string(),
-                source_stream_name: Some("bench_events".to_string()),
-                schema: SchemaHint::Columns(vec![]),
-                sync_mode: SyncMode::FullRefresh,
-                cursor_info: None,
-                limits: StreamLimits::default(),
-                policies: StreamPolicies::default(),
-                write_mode: None,
-                selected_columns: None,
-                partition_key: None,
-                partition_count: Some(4),
-                partition_index: Some(0),
-                effective_parallelism: Some(4),
-                partition_strategy: Some(rapidbyte_types::stream::PartitionStrategy::Mod),
-                copy_flush_bytes_override: None,
-            },
-            StreamContext {
-                stream_name: "bench_events".to_string(),
-                source_stream_name: Some("bench_events".to_string()),
-                schema: SchemaHint::Columns(vec![]),
-                sync_mode: SyncMode::FullRefresh,
-                cursor_info: None,
-                limits: StreamLimits::default(),
-                policies: StreamPolicies::default(),
-                write_mode: None,
-                selected_columns: None,
-                partition_key: None,
-                partition_count: Some(4),
-                partition_index: Some(3),
-                effective_parallelism: Some(4),
-                partition_strategy: Some(rapidbyte_types::stream::PartitionStrategy::Mod),
-                copy_flush_bytes_override: None,
-            },
-            StreamContext {
-                stream_name: "users".to_string(),
-                source_stream_name: None,
-                schema: SchemaHint::Columns(vec![]),
-                sync_mode: SyncMode::Incremental,
-                cursor_info: None,
-                limits: StreamLimits::default(),
-                policies: StreamPolicies::default(),
-                write_mode: None,
-                selected_columns: None,
-                partition_key: None,
-                partition_count: None,
-                partition_index: None,
-                effective_parallelism: Some(1),
-                partition_strategy: None,
-                copy_flush_bytes_override: None,
-            },
-        ];
-
-        let preflight = destination_preflight_streams(&stream_ctxs);
-        assert_eq!(preflight.len(), 2);
-        assert_eq!(preflight[0].stream_name, "bench_events");
-        assert_eq!(preflight[0].partition_count, None);
-        assert_eq!(preflight[0].partition_index, None);
-        assert_eq!(preflight[1].stream_name, "users");
-        assert_eq!(preflight[1].partition_count, None);
-        assert_eq!(preflight[1].partition_index, None);
-    }
-
-    #[test]
-    fn destination_preflight_skips_replace_mode_streams() {
-        let stream_ctxs = vec![
-            StreamContext {
-                stream_name: "users_replace".to_string(),
-                source_stream_name: None,
-                schema: SchemaHint::Columns(vec![]),
-                sync_mode: SyncMode::FullRefresh,
-                cursor_info: None,
-                limits: StreamLimits::default(),
-                policies: StreamPolicies::default(),
-                write_mode: Some(WriteMode::Replace),
-                selected_columns: None,
-                partition_key: None,
-                partition_count: None,
-                partition_index: None,
-                effective_parallelism: Some(1),
-                partition_strategy: None,
-                copy_flush_bytes_override: None,
-            },
-            StreamContext {
-                stream_name: "orders_append".to_string(),
-                source_stream_name: None,
-                schema: SchemaHint::Columns(vec![]),
-                sync_mode: SyncMode::FullRefresh,
-                cursor_info: None,
-                limits: StreamLimits::default(),
-                policies: StreamPolicies::default(),
-                write_mode: Some(WriteMode::Append),
-                selected_columns: None,
-                partition_key: None,
-                partition_count: None,
-                partition_index: None,
-                effective_parallelism: Some(1),
-                partition_strategy: None,
-                copy_flush_bytes_override: None,
-            },
-        ];
-
-        let preflight = destination_preflight_streams(&stream_ctxs);
-        assert_eq!(preflight.len(), 1);
-        assert_eq!(preflight[0].stream_name, "orders_append");
-    }
 }
 
 #[cfg(test)]
@@ -2750,28 +941,25 @@ mod metrics_runtime_tests {
 }
 
 #[cfg(test)]
-mod finalize_run_state_tests {
+mod orchestrator_helper_tests {
     use super::*;
-    use rapidbyte_state::error::{Result as StateResult, StateError};
+    use crate::finalizers::run::persist_run_state;
+    use rapidbyte_state::error::Result as StateResult;
     use rapidbyte_types::checkpoint::{Checkpoint, CheckpointKind};
     use rapidbyte_types::cursor::CursorValue;
-    use rapidbyte_types::state::CursorState;
+    use rapidbyte_types::state::{CursorState, RunStatus};
     use std::sync::atomic::{AtomicBool, Ordering};
 
     struct TestStateBackend {
         complete_statuses: Mutex<Vec<(RunStatus, Option<String>)>>,
         cursor_written: AtomicBool,
-        fail_set_cursor: bool,
-        fail_insert_dlq: bool,
     }
 
     impl TestStateBackend {
-        fn new(fail_set_cursor: bool, fail_insert_dlq: bool) -> Self {
+        fn new() -> Self {
             Self {
                 complete_statuses: Mutex::new(Vec::new()),
                 cursor_written: AtomicBool::new(false),
-                fail_set_cursor,
-                fail_insert_dlq,
             }
         }
     }
@@ -2791,11 +979,6 @@ mod finalize_run_state_tests {
             _stream: &StreamName,
             _cursor: &CursorState,
         ) -> StateResult<()> {
-            if self.fail_set_cursor {
-                return Err(StateError::backend(std::io::Error::other(
-                    "cursor write failed",
-                )));
-            }
             self.cursor_written.store(true, Ordering::SeqCst);
             Ok(())
         }
@@ -2833,197 +1016,76 @@ mod finalize_run_state_tests {
             _run_id: i64,
             _records: &[DlqRecord],
         ) -> StateResult<u64> {
-            if self.fail_insert_dlq {
-                return Err(StateError::backend(std::io::Error::other(
-                    "dlq insert failed",
-                )));
-            }
             Ok(0)
         }
     }
 
-    fn make_aggregated_results() -> AggregatedStreamResults {
-        AggregatedStreamResults {
-            execution_parallelism: 1,
-            total_read_summary: ReadSummary {
-                records_read: 10,
-                bytes_read: 100,
-                batches_emitted: 1,
-                checkpoint_count: 1,
-                records_skipped: 0,
+    fn make_aggregated_results() -> StreamAggregation {
+        StreamAggregation {
+            totals: ReadWriteTotals {
+                total_read_summary: ReadSummary {
+                    records_read: 10,
+                    bytes_read: 100,
+                    batches_emitted: 1,
+                    checkpoint_count: 1,
+                    records_skipped: 0,
+                },
+                total_write_summary: WriteSummary {
+                    records_written: 10,
+                    bytes_written: 100,
+                    batches_written: 1,
+                    checkpoint_count: 1,
+                    records_failed: 0,
+                },
             },
-            total_write_summary: WriteSummary {
-                records_written: 10,
-                bytes_written: 100,
-                batches_written: 1,
-                checkpoint_count: 1,
-                records_failed: 0,
+            timing: TimingMaxima {
+                max_source_duration: 0.0,
+                max_dest_duration: 0.0,
+                max_wasm_instantiation_secs: 0.0,
+                max_frame_receive_secs: 0.0,
+                transform_durations: Vec::new(),
             },
-            source_checkpoints: vec![Checkpoint {
-                id: 7,
-                kind: CheckpointKind::Source,
-                stream: "users".to_string(),
-                cursor_field: Some("id".to_string()),
-                cursor_value: Some(CursorValue::Int64 { value: 42 }),
-                records_processed: 10,
-                bytes_processed: 100,
-            }],
-            dest_checkpoints: vec![Checkpoint {
-                id: 7,
-                kind: CheckpointKind::Dest,
-                stream: "users".to_string(),
-                cursor_field: None,
-                cursor_value: None,
-                records_processed: 10,
-                bytes_processed: 100,
-            }],
-            max_source_duration: 0.0,
-            max_dest_duration: 0.0,
-            max_vm_setup_secs: 0.0,
-            max_recv_secs: 0.0,
-            transform_durations: Vec::new(),
-            dlq_records: Vec::new(),
-            final_stats: RunStats::default(),
-            first_error: None,
-            dry_run_streams: Vec::new(),
-            stream_metrics: Vec::new(),
+            diagnostics: ExecutionDiagnostics {
+                execution_parallelism: 1,
+                stream_metrics: Vec::new(),
+                dry_run_streams: Vec::new(),
+            },
+            state: StateOutcome {
+                source_checkpoints: vec![Checkpoint {
+                    id: 7,
+                    kind: CheckpointKind::Source,
+                    stream: "users".to_string(),
+                    cursor_field: Some("id".to_string()),
+                    cursor_value: Some(CursorValue::Int64 { value: 42 }),
+                    records_processed: 10,
+                    bytes_processed: 100,
+                }],
+                dest_checkpoints: vec![Checkpoint {
+                    id: 7,
+                    kind: CheckpointKind::Dest,
+                    stream: "users".to_string(),
+                    cursor_field: None,
+                    cursor_value: None,
+                    records_processed: 10,
+                    bytes_processed: 100,
+                }],
+                dlq_records: Vec::new(),
+                final_stats: RunStats::default(),
+                first_error: None,
+            },
         }
-    }
-
-    #[test]
-    fn reported_parallelism_prefers_aggregated_execution_parallelism() {
-        let yaml = r#"
-version: "1.0"
-pipeline: test_parallelism
-source:
-  use: postgres
-  config: {}
-  streams:
-    - name: bench_events
-      sync_mode: full_refresh
-destination:
-  use: postgres
-  config: {}
-  write_mode: append
-resources:
-  parallelism: auto
-"#;
-        let config: PipelineConfig = serde_yaml::from_str(yaml).expect("valid pipeline yaml");
-        let mut aggregated = make_aggregated_results();
-        aggregated.execution_parallelism = 12;
-
-        assert_eq!(reported_parallelism(&config, &aggregated), 12);
-    }
-
-    #[tokio::test]
-    async fn successful_finalization_marks_run_completed_after_cursor_persist() {
-        let backend = Arc::new(TestStateBackend::new(false, false));
-        let mut aggregated = make_aggregated_results();
-
-        let advanced = finalize_successful_run_state(
-            backend.clone(),
-            &PipelineId::new("p"),
-            1,
-            &mut aggregated,
-        )
-        .await
-        .expect("finalization should succeed");
-
-        assert_eq!(advanced, 1);
-        assert!(backend.cursor_written.load(Ordering::SeqCst));
-        assert_eq!(
-            backend
-                .complete_statuses
-                .lock()
-                .expect("complete statuses lock poisoned")
-                .as_slice(),
-            &[(RunStatus::Completed, None)]
-        );
-    }
-
-    #[tokio::test]
-    async fn cursor_finalization_failure_marks_run_failed_not_completed() {
-        let backend = Arc::new(TestStateBackend::new(true, false));
-        let mut aggregated = make_aggregated_results();
-
-        let result = finalize_successful_run_state(
-            backend.clone(),
-            &PipelineId::new("p"),
-            1,
-            &mut aggregated,
-        )
-        .await;
-
-        assert!(result.is_err());
-        assert!(!backend.cursor_written.load(Ordering::SeqCst));
-
-        let statuses = backend
-            .complete_statuses
-            .lock()
-            .expect("complete statuses lock poisoned");
-        assert_eq!(statuses.len(), 1);
-        assert_eq!(statuses[0].0, RunStatus::Failed);
-        assert!(statuses[0]
-            .1
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Post-run finalization failed"));
-    }
-
-    #[tokio::test]
-    async fn dlq_finalization_failure_marks_run_failed_not_completed() {
-        let backend = Arc::new(TestStateBackend::new(false, true));
-        let mut aggregated = make_aggregated_results();
-        aggregated.dlq_records.push(DlqRecord {
-            stream_name: "users".to_string(),
-            record_json: "{\"id\":42}".to_string(),
-            error_message: "bad row".to_string(),
-            error_category: rapidbyte_types::error::ErrorCategory::Data,
-            failed_at: rapidbyte_types::envelope::Timestamp::new("2026-03-08T00:00:00Z"),
-        });
-
-        let result = finalize_successful_run_state(
-            backend.clone(),
-            &PipelineId::new("p"),
-            1,
-            &mut aggregated,
-        )
-        .await;
-
-        assert!(result.is_err());
-        assert!(backend.cursor_written.load(Ordering::SeqCst));
-
-        let statuses = backend
-            .complete_statuses
-            .lock()
-            .expect("complete statuses lock poisoned");
-        assert_eq!(statuses.len(), 1);
-        assert_eq!(statuses[0].0, RunStatus::Failed);
-        assert!(statuses[0]
-            .1
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Post-run finalization failed"));
     }
 
     #[tokio::test]
     async fn cancellation_after_stream_execution_preserves_real_finalization_outcome() {
-        let backend = Arc::new(TestStateBackend::new(false, false));
+        let backend = Arc::new(TestStateBackend::new());
         let mut aggregated = make_aggregated_results();
-        let token = CancellationToken::new();
-        token.cancel();
-
-        let advanced = preserve_real_outcome_after_stream_execution(&token, async {
-            finalize_successful_run_state(
-                backend.clone(),
-                &PipelineId::new("p"),
-                1,
-                &mut aggregated,
-            )
-            .await
-        })
-        .await
-        .expect("finalization should succeed even after late cancellation");
+        // Even when the token is already cancelled, finalization still runs directly
+        // because preserve_real_outcome_after_stream_execution was a no-op passthrough.
+        let advanced =
+            persist_run_state(backend.clone(), &PipelineId::new("p"), 1, &mut aggregated)
+                .await
+                .expect("finalization should succeed even after late cancellation");
 
         assert_eq!(advanced, 1);
         assert_eq!(
@@ -3037,22 +1099,21 @@ resources:
     }
 
     #[tokio::test]
-    async fn blocking_infrastructure_helper_moves_runtime_sensitive_init_off_worker_threads() {
-        let value = run_blocking_infrastructure_task(
-            || {
-                let runtime = tokio::runtime::Runtime::new().expect("runtime");
-                runtime.block_on(async { Ok::<_, anyhow::Error>(7) })
-            },
-            "test_blocking_init",
-        )
+    async fn spawn_blocking_allows_runtime_sensitive_init() {
+        let value = tokio::task::spawn_blocking(|| {
+            let runtime = tokio::runtime::Runtime::new().expect("runtime");
+            runtime.block_on(async { Ok::<_, anyhow::Error>(7) })
+        })
         .await
-        .expect("blocking helper should allow runtime creation");
+        .map_err(|e| PipelineError::task_panicked("test_blocking_init", e))
+        .expect("spawn_blocking should succeed")
+        .expect("inner result should succeed");
 
         assert_eq!(value, 7);
     }
 
     #[tokio::test]
-    async fn blocking_infrastructure_helper_moves_runtime_sensitive_drop_off_worker_threads() {
+    async fn spawn_blocking_allows_runtime_sensitive_drop() {
         struct RuntimeOnDrop;
 
         impl Drop for RuntimeOnDrop {
@@ -3062,16 +1123,13 @@ resources:
             }
         }
 
-        run_blocking_infrastructure_task(
-            || {
-                let value = RuntimeOnDrop;
-                drop(value);
-                Ok::<_, anyhow::Error>(())
-            },
-            "test_blocking_drop",
-        )
+        tokio::task::spawn_blocking(|| {
+            let value = RuntimeOnDrop;
+            drop(value);
+        })
         .await
-        .expect("blocking helper should allow runtime-sensitive drop");
+        .map_err(|e| PipelineError::task_panicked("test_blocking_drop", e))
+        .expect("spawn_blocking should allow runtime-sensitive drop");
     }
 }
 

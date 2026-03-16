@@ -5,7 +5,7 @@ use std::pin::Pin;
 
 use rapidbyte_engine::config::parser;
 use rapidbyte_engine::config::validator;
-use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
+use rapidbyte_engine::outcome::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_engine::progress::ProgressEvent;
 use rapidbyte_engine::PipelineError;
 use rapidbyte_types::prelude::CommitState;
@@ -269,8 +269,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapidbyte_engine::execution::PipelineOutcome;
-    use rapidbyte_engine::result::{DestTiming, PipelineCounts, PipelineResult, SourceTiming};
+    use rapidbyte_engine::outcome::PipelineOutcome;
+    use rapidbyte_engine::outcome::{DestTiming, PipelineCounts, PipelineResult, SourceTiming};
     use rapidbyte_engine::PipelineError;
     use rapidbyte_metrics::snapshot::SnapshotReader;
     use rapidbyte_types::error::{CommitState, PluginError};
@@ -313,9 +313,9 @@ destination:
             },
             source: SourceTiming::default(),
             dest: DestTiming::default(),
-            transform_count: 0,
-            transform_duration_secs: 0.0,
-            transform_module_load_ms: Vec::new(),
+            num_transforms: 0,
+            total_transform_secs: 0.0,
+            transform_load_times_ms: Vec::new(),
             duration_secs: 0.5,
             wasm_overhead_secs: 0.0,
             retry_count: 0,

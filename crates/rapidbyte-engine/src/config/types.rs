@@ -7,12 +7,11 @@ use rapidbyte_types::compression::CompressionCodec;
 use rapidbyte_types::stream::{DataErrorPolicy, PartitionStrategy, SchemaEvolutionPolicy};
 use rapidbyte_types::wire::{SyncMode, WriteMode};
 
-/// Minimum allowed value for `pin_copy_flush_bytes` (1 MiB).
-pub(crate) const MIN_COPY_FLUSH_BYTES: usize = 1024 * 1024;
-/// Maximum allowed value for `pin_copy_flush_bytes` (32 MiB).
-pub(crate) const MAX_COPY_FLUSH_BYTES: usize = 32 * 1024 * 1024;
+/// Minimum allowed value for `flush_bytes` (1 MiB).
+pub(crate) const MIN_FLUSH_CHUNK_BYTES: usize = 1024 * 1024;
+/// Maximum allowed value for `flush_bytes` (32 MiB).
+pub(crate) const MAX_FLUSH_CHUNK_BYTES: usize = 32 * 1024 * 1024;
 
-const DEFAULT_STATE_BACKEND: StateBackendKind = StateBackendKind::Sqlite;
 const DEFAULT_MAX_MEMORY: &str = "256mb";
 const DEFAULT_MAX_BATCH_BYTES: &str = "64mb";
 const DEFAULT_CHECKPOINT_INTERVAL_BYTES: &str = "64mb";
@@ -37,7 +36,7 @@ pub struct PipelineConfig {
 /// Pipeline-level network permission overrides.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
-pub struct PipelineNetworkPermissions {
+pub struct NetworkPermissions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_hosts: Option<Vec<String>>,
 }
@@ -45,7 +44,7 @@ pub struct PipelineNetworkPermissions {
 /// Pipeline-level environment variable permission overrides.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
-pub struct PipelineEnvPermissions {
+pub struct EnvPermissions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_vars: Option<Vec<String>>,
 }
@@ -53,7 +52,7 @@ pub struct PipelineEnvPermissions {
 /// Pipeline-level filesystem permission overrides.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
-pub struct PipelineFsPermissions {
+pub struct FsPermissions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed_preopens: Option<Vec<String>>,
 }
@@ -62,9 +61,9 @@ pub struct PipelineFsPermissions {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct PipelinePermissions {
-    pub network: PipelineNetworkPermissions,
-    pub env: PipelineEnvPermissions,
-    pub fs: PipelineFsPermissions,
+    pub network: NetworkPermissions,
+    pub env: EnvPermissions,
+    pub fs: FsPermissions,
 }
 
 /// Pipeline-level resource limit overrides for a plugin.
@@ -153,18 +152,7 @@ pub struct DestinationConfig {
     pub limits: Option<PipelineLimits>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum StateBackendKind {
-    Sqlite,
-    Postgres,
-}
-
-impl Default for StateBackendKind {
-    fn default() -> Self {
-        DEFAULT_STATE_BACKEND
-    }
-}
+pub use rapidbyte_state::BackendKind as StateBackendKind;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -244,21 +232,21 @@ impl<'de> Deserialize<'de> for PipelineParallelism {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AutotuneConfig {
     pub enabled: bool,
-    pub pin_parallelism: Option<u32>,
-    pub pin_source_partition_mode: Option<PartitionStrategy>,
-    pub pin_copy_flush_bytes: Option<usize>,
+    pub parallelism: Option<u32>,
+    pub partition_mode: Option<PartitionStrategy>,
+    pub flush_bytes: Option<usize>,
 }
 
 impl Default for AutotuneConfig {
     fn default() -> Self {
         Self {
             enabled: DEFAULT_AUTOTUNE_ENABLED,
-            pin_parallelism: None,
-            pin_source_partition_mode: None,
-            pin_copy_flush_bytes: None,
+            parallelism: None,
+            partition_mode: None,
+            flush_bytes: None,
         }
     }
 }
@@ -465,9 +453,9 @@ destination:
 "#;
         let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.resources.autotune.enabled);
-        assert_eq!(config.resources.autotune.pin_parallelism, None);
-        assert_eq!(config.resources.autotune.pin_source_partition_mode, None);
-        assert_eq!(config.resources.autotune.pin_copy_flush_bytes, None);
+        assert_eq!(config.resources.autotune.parallelism, None);
+        assert_eq!(config.resources.autotune.partition_mode, None);
+        assert_eq!(config.resources.autotune.flush_bytes, None);
     }
 
     #[test]
@@ -488,21 +476,18 @@ destination:
 resources:
   autotune:
     enabled: true
-    pin_parallelism: 8
-    pin_source_partition_mode: range
-    pin_copy_flush_bytes: 8388608
+    parallelism: 8
+    partition_mode: range
+    flush_bytes: 8388608
 "#;
         let config: PipelineConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.resources.autotune.enabled);
-        assert_eq!(config.resources.autotune.pin_parallelism, Some(8));
+        assert_eq!(config.resources.autotune.parallelism, Some(8));
         assert_eq!(
-            config.resources.autotune.pin_source_partition_mode,
+            config.resources.autotune.partition_mode,
             Some(PartitionStrategy::Range)
         );
-        assert_eq!(
-            config.resources.autotune.pin_copy_flush_bytes,
-            Some(8_388_608)
-        );
+        assert_eq!(config.resources.autotune.flush_bytes, Some(8_388_608));
     }
 
     #[test]

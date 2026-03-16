@@ -9,8 +9,8 @@ use std::path::Path;
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_engine::orchestrator;
+use rapidbyte_engine::outcome::{ExecutionOptions, PipelineOutcome};
 
 use crate::commands::transport::TlsClientConfig;
 use crate::output::{
@@ -220,11 +220,11 @@ pub async fn execute(
             }
 
             eprintln!("Duration: {}", format_duration(result.duration_secs));
-            if result.transform_count > 0 {
+            if result.num_transforms > 0 {
                 eprintln!(
                     "Transforms: {} applied ({})",
-                    result.transform_count,
-                    format_duration(result.transform_duration_secs),
+                    result.num_transforms,
+                    format_duration(result.total_transform_secs),
                 );
             }
         }
@@ -317,7 +317,7 @@ fn post_pipeline_metrics() -> (Option<f64>, Option<f64>) {
 }
 
 fn bench_json_from_result(
-    result: &rapidbyte_engine::result::PipelineResult,
+    result: &rapidbyte_engine::outcome::PipelineResult,
     cpu_metrics: Option<&ProcessCpuMetrics>,
     peak_rss_mb: Option<f64>,
 ) -> serde_json::Value {
@@ -339,8 +339,8 @@ fn bench_json_from_result(
                 "bytes_written": m.bytes_written,
                 "source_duration_secs": m.source_duration_secs,
                 "dest_duration_secs": m.dest_duration_secs,
-                "dest_vm_setup_secs": m.dest_vm_setup_secs,
-                "dest_recv_secs": m.dest_recv_secs,
+                "dest_wasm_instantiation_secs": m.dest_wasm_instantiation_secs,
+                "dest_frame_receive_secs": m.dest_frame_receive_secs,
             })
         })
         .collect();
@@ -358,8 +358,9 @@ fn bench_json_from_result(
         .and_then(|(min, max)| (max > 0).then_some(min as f64 / max as f64));
 
     let worker_dest_total_secs: f64 = partitioned().map(|m| m.dest_duration_secs).sum();
-    let worker_dest_recv_secs: f64 = partitioned().map(|m| m.dest_recv_secs).sum();
-    let worker_dest_vm_setup_secs: f64 = partitioned().map(|m| m.dest_vm_setup_secs).sum();
+    let worker_dest_recv_secs: f64 = partitioned().map(|m| m.dest_frame_receive_secs).sum();
+    let worker_dest_vm_setup_secs: f64 =
+        partitioned().map(|m| m.dest_wasm_instantiation_secs).sum();
     let worker_dest_active_secs =
         (worker_dest_total_secs - worker_dest_recv_secs - worker_dest_vm_setup_secs).max(0.0);
 
@@ -374,8 +375,8 @@ fn bench_json_from_result(
         "dest_connect_secs": dest.connect_secs,
         "dest_flush_secs": dest.flush_secs,
         "dest_commit_secs": dest.commit_secs,
-        "dest_vm_setup_secs": dest.vm_setup_secs,
-        "dest_recv_secs": dest.recv_secs,
+        "dest_wasm_instantiation_secs": dest.wasm_instantiation_secs,
+        "dest_frame_receive_secs": dest.frame_receive_secs,
         "wasm_overhead_secs": result.wasm_overhead_secs,
         "source_connect_secs": source.connect_secs,
         "source_query_secs": source.query_secs,
@@ -387,14 +388,14 @@ fn bench_json_from_result(
         "source_emit_nanos": source.emit_nanos,
         "source_compress_nanos": source.compress_nanos,
         "source_emit_count": source.emit_count,
-        "dest_recv_nanos": dest.recv_nanos,
-        "dest_recv_wait_nanos": dest.recv_wait_nanos,
-        "dest_recv_process_nanos": dest.recv_process_nanos,
+        "dest_recv_nanos": dest.frame_receive_nanos,
+        "dest_recv_wait_nanos": dest.frame_wait_nanos,
+        "dest_recv_process_nanos": dest.frame_process_nanos,
         "dest_decompress_nanos": dest.decompress_nanos,
-        "dest_recv_count": dest.recv_count,
-        "transform_count": result.transform_count,
-        "transform_duration_secs": result.transform_duration_secs,
-        "transform_module_load_ms": result.transform_module_load_ms,
+        "dest_recv_count": dest.frame_count,
+        "num_transforms": result.num_transforms,
+        "total_transform_secs": result.total_transform_secs,
+        "transform_load_times_ms": result.transform_load_times_ms,
         "retry_count": result.retry_count,
         "parallelism": result.parallelism,
         "stream_metrics": stream_metrics,
@@ -416,7 +417,7 @@ fn bench_json_from_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapidbyte_engine::result::{
+    use rapidbyte_engine::outcome::{
         DestTiming, PipelineCounts, PipelineResult, SourceTiming, StreamShardMetric,
     };
 
@@ -431,9 +432,9 @@ mod tests {
             },
             source: SourceTiming::default(),
             dest: DestTiming::default(),
-            transform_count: 0,
-            transform_duration_secs: 0.0,
-            transform_module_load_ms: vec![],
+            num_transforms: 0,
+            total_transform_secs: 0.0,
+            transform_load_times_ms: vec![],
             duration_secs: 1.0,
             wasm_overhead_secs: 0.0,
             retry_count: 0,
@@ -448,8 +449,8 @@ mod tests {
                 bytes_written: 30,
                 source_duration_secs: 0.4,
                 dest_duration_secs: 0.6,
-                dest_vm_setup_secs: 0.1,
-                dest_recv_secs: 0.2,
+                dest_wasm_instantiation_secs: 0.1,
+                dest_frame_receive_secs: 0.2,
             }],
         };
 
@@ -464,8 +465,11 @@ mod tests {
         assert_eq!(json["stream_metrics"][0]["partition_index"], 1);
         assert_eq!(json["stream_metrics"][0]["partition_count"], 4);
         assert_eq!(json["stream_metrics"][0]["records_read"], 3);
-        assert_eq!(json["stream_metrics"][0]["dest_vm_setup_secs"], 0.1);
-        assert_eq!(json["stream_metrics"][0]["dest_recv_secs"], 0.2);
+        assert_eq!(
+            json["stream_metrics"][0]["dest_wasm_instantiation_secs"],
+            0.1
+        );
+        assert_eq!(json["stream_metrics"][0]["dest_frame_receive_secs"], 0.2);
         assert_eq!(json["parallelism"], 4);
         assert_eq!(json["process_cpu_secs"], 1.2);
         assert_eq!(json["available_cores"], 4);

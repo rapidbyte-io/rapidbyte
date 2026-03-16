@@ -5,7 +5,7 @@ use rapidbyte_types::wire::SyncMode;
 
 use crate::config::types::{
     parse_byte_size, PipelineConfig, PipelineLimits, PipelineParallelism, PipelinePermissions,
-    PipelineWriteMode, MAX_COPY_FLUSH_BYTES, MIN_COPY_FLUSH_BYTES,
+    PipelineWriteMode, MAX_FLUSH_CHUNK_BYTES, MIN_FLUSH_CHUNK_BYTES,
 };
 
 /// Validate host patterns in `allowed_hosts` lists.
@@ -170,14 +170,14 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
         errors.push("parallelism must be at least 1".to_string());
     }
 
-    if matches!(config.resources.autotune.pin_parallelism, Some(0)) {
-        errors.push("autotune.pin_parallelism must be at least 1".to_string());
+    if matches!(config.resources.autotune.parallelism, Some(0)) {
+        errors.push("autotune.parallelism must be at least 1".to_string());
     }
 
-    if let Some(copy_flush_bytes) = config.resources.autotune.pin_copy_flush_bytes {
-        if !(MIN_COPY_FLUSH_BYTES..=MAX_COPY_FLUSH_BYTES).contains(&copy_flush_bytes) {
+    if let Some(copy_flush_bytes) = config.resources.autotune.flush_bytes {
+        if !(MIN_FLUSH_CHUNK_BYTES..=MAX_FLUSH_CHUNK_BYTES).contains(&copy_flush_bytes) {
             errors.push(format!(
-                "autotune.pin_copy_flush_bytes must be between {MIN_COPY_FLUSH_BYTES} and {MAX_COPY_FLUSH_BYTES}"
+                "autotune.flush_bytes must be between {MIN_FLUSH_CHUNK_BYTES} and {MAX_FLUSH_CHUNK_BYTES}"
             ));
         }
     }
@@ -359,35 +359,35 @@ resources:
     }
 
     #[tokio::test]
-    async fn test_autotune_pin_parallelism_zero_fails() {
+    async fn test_autotune_parallelism_zero_fails() {
         let yaml = format!(
-            "{}\nresources:\n  autotune:\n    pin_parallelism: 0\n",
+            "{}\nresources:\n  autotune:\n    parallelism: 0\n",
             valid_yaml().trim_end()
         );
         let config = parse_pipeline(&yaml, &SecretProviders::new())
             .await
             .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
-        assert!(err.contains("autotune.pin_parallelism"));
+        assert!(err.contains("autotune.parallelism"));
     }
 
     #[tokio::test]
-    async fn test_autotune_pin_copy_flush_bytes_below_min_fails() {
+    async fn test_autotune_flush_bytes_below_min_fails() {
         let yaml = format!(
-            "{}\nresources:\n  autotune:\n    pin_copy_flush_bytes: 1024\n",
+            "{}\nresources:\n  autotune:\n    flush_bytes: 1024\n",
             valid_yaml().trim_end()
         );
         let config = parse_pipeline(&yaml, &SecretProviders::new())
             .await
             .unwrap();
         let err = validate_pipeline(&config).unwrap_err().to_string();
-        assert!(err.contains("autotune.pin_copy_flush_bytes"));
+        assert!(err.contains("autotune.flush_bytes"));
     }
 
     #[tokio::test]
-    async fn test_autotune_pin_copy_flush_bytes_in_range_passes() {
+    async fn test_autotune_flush_bytes_in_range_passes() {
         let yaml = format!(
-            "{}\nresources:\n  autotune:\n    pin_copy_flush_bytes: 8388608\n",
+            "{}\nresources:\n  autotune:\n    flush_bytes: 8388608\n",
             valid_yaml().trim_end()
         );
         let config = parse_pipeline(&yaml, &SecretProviders::new())

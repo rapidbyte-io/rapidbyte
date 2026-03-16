@@ -256,7 +256,7 @@ mod tests {
     use arrow::array::{Int32Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use rapidbyte_engine::result::SourceTiming;
+    use rapidbyte_engine::outcome::SourceTiming;
     use rapidbyte_engine::{DryRunResult, DryRunStreamResult};
     use tokio_stream::StreamExt;
 
@@ -308,8 +308,8 @@ mod tests {
                 },
             ],
             source: SourceTiming::default(),
-            transform_count: 0,
-            transform_duration_secs: 0.0,
+            num_transforms: 0,
+            total_transform_secs: 0.0,
             duration_secs: 1.0,
         }
     }
@@ -323,8 +323,8 @@ mod tests {
                 total_bytes: 0,
             }],
             source: SourceTiming::default(),
-            transform_count: 0,
-            transform_duration_secs: 0.0,
+            num_transforms: 0,
+            total_transform_secs: 0.0,
             duration_secs: 1.0,
         }
     }

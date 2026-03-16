@@ -324,7 +324,7 @@ fn bench_json_from_completed(completed: &RunCompleted) -> serde_json::Value {
             "bytes_written": completed.total_bytes,
             "source_duration_secs": completed.elapsed_seconds,
             "dest_duration_secs": completed.elapsed_seconds,
-            "dest_recv_secs": completed.elapsed_seconds
+            "dest_frame_receive_secs": completed.elapsed_seconds
         }],
     })
 }

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use console::style;
-use rapidbyte_engine::CheckItemResult;
+use rapidbyte_engine::CheckStatus;
 use rapidbyte_types::error::{ValidationResult, ValidationStatus};
 
 use rapidbyte_engine::orchestrator;
@@ -77,7 +77,7 @@ pub async fn execute(
     }
 }
 
-fn print_check_item(label: &str, result: &CheckItemResult) {
+fn print_check_item(label: &str, result: &CheckStatus) {
     if result.ok {
         eprintln!("{} {:<20} valid", style("\u{2713}").green().bold(), label);
     } else {
@@ -111,7 +111,7 @@ fn validation_passes(result: &ValidationResult) -> bool {
     )
 }
 
-fn check_item_passes(result: Option<&CheckItemResult>) -> bool {
+fn check_item_passes(result: Option<&CheckStatus>) -> bool {
     result.is_none_or(|item| item.ok)
 }
 
@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn failed_check_item_is_fatal() {
-        let result = CheckItemResult {
+        let result = CheckStatus {
             ok: false,
             message: "invalid schema".to_string(),
         };
