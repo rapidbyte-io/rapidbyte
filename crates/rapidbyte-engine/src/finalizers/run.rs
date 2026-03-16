@@ -63,30 +63,14 @@ pub(crate) struct StreamAggregation {
     pub(crate) state: StateOutcome,
 }
 
-pub(crate) struct MetricsRuntime<'a> {
-    pub(crate) snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
-    pub(crate) meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
-}
-
-impl MetricsRuntime<'_> {
-    pub(crate) fn snapshot_for_run(
-        &self,
-        pipeline: &str,
-        run: Option<&str>,
-    ) -> rapidbyte_metrics::snapshot::PipelineMetricsSnapshot {
-        self.snapshot_reader
-            .flush_and_snapshot_for_run(self.meter_provider, pipeline, run)
-    }
-}
-
-pub(crate) fn prepare_metrics_runtime<'a>(
-    snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
-    meter_provider: &'a opentelemetry_sdk::metrics::SdkMeterProvider,
-) -> MetricsRuntime<'a> {
-    MetricsRuntime {
-        snapshot_reader,
-        meter_provider,
-    }
+/// Take a metrics snapshot for a pipeline run.
+pub(crate) fn snapshot_for_run(
+    snapshot_reader: &rapidbyte_metrics::snapshot::SnapshotReader,
+    meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
+    pipeline: &str,
+    run: Option<&str>,
+) -> rapidbyte_metrics::snapshot::PipelineMetricsSnapshot {
+    snapshot_reader.flush_and_snapshot_for_run(meter_provider, pipeline, run)
 }
 
 // ---------------------------------------------------------------------------
@@ -106,14 +90,20 @@ pub(crate) async fn finalize_pipeline_execution(
     metric_run_label: &str,
     modules: &PluginModules,
     mut aggregated: StreamAggregation,
-    metrics_runtime: &MetricsRuntime<'_>,
+    snapshot_reader: &rapidbyte_metrics::snapshot::SnapshotReader,
+    meter_provider: &opentelemetry_sdk::metrics::SdkMeterProvider,
 ) -> Result<PipelineResult, PipelineError> {
     // 1. If any stream failed → mark Failed, persist DLQ, return error
     if let Some(err) = aggregated.state.first_error {
         // Drain the run's snapshot entry so it doesn't accumulate in the
         // SnapshotReader's finished_run_snapshots map (memory leak in
         // long-lived agent processes).
-        let _ = metrics_runtime.snapshot_for_run(&config.pipeline, Some(metric_run_label));
+        let _ = snapshot_for_run(
+            snapshot_reader,
+            meter_provider,
+            &config.pipeline,
+            Some(metric_run_label),
+        );
 
         let run_stats = RunStats {
             records_read: aggregated.state.final_stats.records_read,
@@ -136,7 +126,12 @@ pub(crate) async fn finalize_pipeline_execution(
     }
 
     // 2. Take metrics snapshot
-    let snap = metrics_runtime.snapshot_for_run(&config.pipeline, Some(metric_run_label));
+    let snap = snapshot_for_run(
+        snapshot_reader,
+        meter_provider,
+        &config.pipeline,
+        Some(metric_run_label),
+    );
 
     let wasm_overhead_secs = compute_wasm_overhead_secs(
         &snap,

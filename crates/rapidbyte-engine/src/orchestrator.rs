@@ -23,8 +23,8 @@ use crate::config::types::PipelineConfig;
 use crate::error::{compute_backoff, PipelineError};
 use crate::execution::{DryRunStreamResult, ExecutionOptions, PipelineOutcome};
 use crate::finalizers::run::{
-    build_dry_run_result, finalize_pipeline_execution, prepare_metrics_runtime,
-    ExecutionDiagnostics, ReadWriteTotals, StateOutcome, StreamAggregation, TimingMaxima,
+    build_dry_run_result, finalize_pipeline_execution, snapshot_for_run, ExecutionDiagnostics,
+    ReadWriteTotals, StateOutcome, StreamAggregation, TimingMaxima,
 };
 use crate::pipeline::executor::{execute_single_stream, DestinationMode};
 use crate::pipeline::planner::{
@@ -102,8 +102,6 @@ impl<'a> PipelineAttempt<'a> {
 
         let state_for_execution = state.clone();
         let execution_result = async move {
-            let metrics_runtime = prepare_metrics_runtime(snapshot_reader, meter_provider);
-
             // Skip run tracking in dry-run mode to avoid orphaned run records.
             let run_id = if options.dry_run {
                 0
@@ -165,8 +163,12 @@ impl<'a> PipelineAttempt<'a> {
                 Err(err) => {
                     // Drain the run's snapshot entry to prevent memory leaks in
                     // long-lived processes with repeated failed attempts.
-                    let _ =
-                        metrics_runtime.snapshot_for_run(&config.pipeline, Some(&metric_run_label));
+                    let _ = snapshot_for_run(
+                        snapshot_reader,
+                        meter_provider,
+                        &config.pipeline,
+                        Some(&metric_run_label),
+                    );
                     return Err(err);
                 }
             };
@@ -178,8 +180,12 @@ impl<'a> PipelineAttempt<'a> {
             if options.dry_run {
                 let duration_secs = start.elapsed().as_secs_f64();
 
-                let snap =
-                    metrics_runtime.snapshot_for_run(&config.pipeline, Some(&metric_run_label));
+                let snap = snapshot_for_run(
+                    snapshot_reader,
+                    meter_provider,
+                    &config.pipeline,
+                    Some(&metric_run_label),
+                );
 
                 return Ok(PipelineOutcome::DryRun(build_dry_run_result(
                     &snap,
@@ -199,7 +205,8 @@ impl<'a> PipelineAttempt<'a> {
                 &metric_run_label,
                 &modules,
                 aggregated,
-                &metrics_runtime,
+                snapshot_reader,
+                meter_provider,
             )
             .await?;
             Ok(PipelineOutcome::Run(result))
