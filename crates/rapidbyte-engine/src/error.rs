@@ -81,6 +81,16 @@ impl PipelineError {
         Self::infra(format!("{context} task panicked: {err}"))
     }
 
+    /// Lock a mutex, converting poison errors to Infrastructure errors.
+    pub fn lock_or_infra<'a, T>(
+        mutex: &'a std::sync::Mutex<T>,
+        name: &str,
+    ) -> Result<std::sync::MutexGuard<'a, T>, PipelineError> {
+        mutex
+            .lock()
+            .map_err(|_| PipelineError::infra(format!("{name} mutex poisoned")))
+    }
+
     /// Cancelled pipeline error with safe-to-retry metadata.
     pub fn cancelled(message: &str) -> Self {
         use rapidbyte_types::error::CommitState;

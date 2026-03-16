@@ -33,7 +33,8 @@ use crate::pipeline::planner::{
 };
 use crate::pipeline::preflight::run_destination_preflight;
 use crate::pipeline::scheduler::{
-    collect_stream_task_results, ensure_not_cancelled, send_progress, ProgressTx, StreamResult,
+    acquire_permit_cancellable, collect_stream_task_results, ensure_not_cancelled, send_progress,
+    ProgressTx, StreamResult,
 };
 use crate::plugin::loader::{load_all_modules, PluginModules};
 use crate::plugin::resolver::{
@@ -429,16 +430,12 @@ async fn execute_streams(
 
     for stream_ctx in &stream_build.stream_ctxs {
         ensure_not_cancelled(cancel_token, "Pipeline cancelled before stream execution")?;
-        let permit = tokio::select! {
-            () = cancel_token.cancelled() => {
-                return Err(PipelineError::cancelled("Pipeline cancelled before stream execution"));
-            }
-            permit = semaphore.clone().acquire_owned() => {
-                permit.map_err(|e| {
-                PipelineError::infra(format!("Semaphore closed: {e}"))
-                })?
-            }
-        };
+        let permit = acquire_permit_cancellable(
+            &semaphore,
+            cancel_token,
+            "Pipeline cancelled before stream execution",
+        )
+        .await?;
 
         let stream_ctx = stream_ctx.clone();
         let params = params.clone();
@@ -571,16 +568,11 @@ async fn execute_streams(
 
     let first_error = stream_collection.first_error;
 
-    let dlq_records = run_dlq_records
-        .lock()
-        .map_err(|_| PipelineError::infra("DLQ collection mutex poisoned"))?
+    let dlq_records = PipelineError::lock_or_infra(&run_dlq_records, "DLQ collection")?
         .drain(..)
         .collect();
 
-    let final_stats = stats
-        .lock()
-        .map_err(|_| PipelineError::infra("run stats mutex poisoned"))?
-        .clone();
+    let final_stats = PipelineError::lock_or_infra(&stats, "run stats")?.clone();
 
     Ok(AggregatedStreamResults {
         execution_parallelism: u32::try_from(parallelism).unwrap_or(u32::MAX),

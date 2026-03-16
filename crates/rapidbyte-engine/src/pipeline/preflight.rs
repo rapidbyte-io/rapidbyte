@@ -15,7 +15,7 @@ use rapidbyte_types::stream::StreamContext;
 
 use crate::error::PipelineError;
 use crate::pipeline::planner::StreamParams;
-use crate::pipeline::scheduler::ensure_not_cancelled;
+use crate::pipeline::scheduler::{acquire_permit_cancellable, ensure_not_cancelled};
 use crate::runner::{run_destination_stream, StreamRunContext};
 
 /// Run destination DDL preflight for each unique logical stream.
@@ -50,16 +50,12 @@ pub(crate) async fn run_destination_preflight(
             cancel_token,
             "Pipeline cancelled before destination preflight",
         )?;
-        let permit = tokio::select! {
-            () = cancel_token.cancelled() => {
-                return Err(PipelineError::cancelled("Pipeline cancelled before destination preflight"));
-            }
-            permit = preflight_semaphore.clone().acquire_owned() => {
-                permit.map_err(|e| {
-                    PipelineError::infra(format!("Preflight semaphore closed: {e}"))
-                })?
-            }
-        };
+        let permit = acquire_permit_cancellable(
+            &preflight_semaphore,
+            cancel_token,
+            "Pipeline cancelled before destination preflight",
+        )
+        .await?;
 
         let stream_name = stream_ctx.stream_name.clone();
         let state_dst = state.clone();

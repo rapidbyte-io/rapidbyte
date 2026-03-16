@@ -64,7 +64,6 @@ pub(crate) fn ensure_not_cancelled(
 }
 
 /// Acquire a semaphore permit, returning a cancellation error if the token fires first.
-#[allow(dead_code)] // Used in Task 13
 pub(crate) async fn acquire_permit_cancellable(
     semaphore: &Arc<tokio::sync::Semaphore>,
     cancel: &CancellationToken,
@@ -168,6 +167,29 @@ pub(crate) async fn collect_transform_results(
         durations,
         first_error,
     })
+}
+
+#[cfg(test)]
+mod semaphore_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn acquire_permit_cancellable_succeeds() {
+        let sem = Arc::new(tokio::sync::Semaphore::new(1));
+        let cancel = CancellationToken::new();
+        let permit = acquire_permit_cancellable(&sem, &cancel, "test").await;
+        assert!(permit.is_ok());
+    }
+
+    #[tokio::test]
+    async fn acquire_permit_cancellable_returns_cancelled() {
+        let sem = Arc::new(tokio::sync::Semaphore::new(0));
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let result = acquire_permit_cancellable(&sem, &cancel, "test").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().is_retryable());
+    }
 }
 
 #[cfg(test)]
