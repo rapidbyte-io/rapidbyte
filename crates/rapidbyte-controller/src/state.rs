@@ -81,6 +81,13 @@ impl ControllerState {
         }
     }
 
+    /// Set the secret providers for this controller state.
+    #[must_use]
+    pub fn with_secrets(mut self, secrets: rapidbyte_secrets::SecretProviders) -> Self {
+        self.secrets = Arc::new(secrets);
+        self
+    }
+
     /// Build controller state by loading the latest durable metadata snapshot.
     ///
     /// # Errors

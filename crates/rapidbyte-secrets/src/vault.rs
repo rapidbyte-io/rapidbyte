@@ -1,10 +1,10 @@
-//! HashiCorp Vault KV v2 secret provider.
+//! `HashiCorp` Vault KV v2 secret provider.
 
 use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 
-use crate::SecretProvider;
+use crate::{SecretError, SecretProvider};
 
 /// Vault connection and authentication configuration.
 ///
@@ -20,13 +20,13 @@ pub struct VaultConfig {
 pub enum VaultAuth {
     /// Pre-existing token (e.g. from `VAULT_TOKEN` env var).
     Token(String),
-    /// AppRole machine-to-machine authentication.
+    /// `AppRole` machine-to-machine authentication.
     AppRole { role_id: String, secret_id: String },
 }
 
 /// Vault KV v2 secret provider.
 ///
-/// Reads secrets from a HashiCorp Vault server. Path format in pipeline
+/// Reads secrets from a `HashiCorp` Vault server. Path format in pipeline
 /// YAML: `${vault:mount/path#key}` (e.g. `${vault:secret/postgres#password}`).
 pub struct VaultProvider {
     client: vaultrs::client::VaultClient,
@@ -36,7 +36,7 @@ impl VaultProvider {
     /// Create a new Vault provider and authenticate.
     ///
     /// For [`VaultAuth::Token`], the token is set directly.
-    /// For [`VaultAuth::AppRole`], the client exchanges role_id/secret_id
+    /// For [`VaultAuth::AppRole`], the client exchanges `role_id`/`secret_id`
     /// for a token immediately.
     ///
     /// # Errors
@@ -75,23 +75,45 @@ impl VaultProvider {
     }
 }
 
+/// Classify a Vault API error into a `SecretError` variant.
+fn classify_vault_error(error: vaultrs::error::ClientError, path: &str) -> SecretError {
+    let err_str = format!("{error:#}");
+    if err_str.contains("connection refused")
+        || err_str.contains("timed out")
+        || err_str.contains("temporarily unavailable")
+        || err_str.contains("503")
+    {
+        SecretError::Unavailable(format!("failed to read Vault secret at {path}: {error}"))
+    } else if err_str.contains("403") || err_str.contains("permission denied") {
+        SecretError::AuthFailed(format!("failed to read Vault secret at {path}: {error}"))
+    } else if err_str.contains("404") {
+        SecretError::NotFound(format!("Vault secret not found at {path}"))
+    } else {
+        SecretError::Other(
+            anyhow::Error::new(error).context(format!("failed to read Vault secret at {path}")),
+        )
+    }
+}
+
 #[async_trait::async_trait]
 impl SecretProvider for VaultProvider {
-    async fn read_secret(&self, path: &str, key: &str) -> Result<String> {
+    async fn read_secret(&self, path: &str, key: &str) -> Result<String, SecretError> {
         // Split mount from path: "secret/postgres" → mount="secret", path="postgres"
-        let (mount, secret_path) = path
-            .split_once('/')
-            .with_context(|| format!("invalid Vault path '{path}': expected mount/path format"))?;
+        let (mount, secret_path) = path.split_once('/').ok_or_else(|| {
+            SecretError::InvalidPath(format!(
+                "invalid Vault path '{path}': expected mount/path format"
+            ))
+        })?;
 
         // Deserialize as Value to handle mixed types (string, number, bool).
         let data: HashMap<String, serde_json::Value> =
             vaultrs::kv2::read(&self.client, mount, secret_path)
                 .await
-                .with_context(|| format!("failed to read Vault secret at {path}"))?;
+                .map_err(|e| classify_vault_error(e, path))?;
 
-        let value = data
-            .get(key)
-            .with_context(|| format!("key '{key}' not found in Vault secret {path}"))?;
+        let value = data.get(key).ok_or_else(|| {
+            SecretError::NotFound(format!("key '{key}' not found in Vault secret {path}"))
+        })?;
 
         // Convert to string: strings stay as-is, numbers/bools use their
         // JSON representation, null becomes empty string.

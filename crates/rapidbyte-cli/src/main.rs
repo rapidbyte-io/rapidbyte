@@ -350,6 +350,21 @@ fn resolve_controller_url(
     )
 }
 
+async fn try_build_secrets(
+    vault_addr: Option<&str>,
+    vault_token: Option<&str>,
+    vault_role_id: Option<&str>,
+    vault_secret_id: Option<&str>,
+) -> Option<rapidbyte_secrets::SecretProviders> {
+    match build_secret_providers(vault_addr, vault_token, vault_role_id, vault_secret_id).await {
+        Ok(s) => Some(s),
+        Err(e) => {
+            eprintln!("{} {e:#}", console::style("\u{2718}").red().bold());
+            None
+        }
+    }
+}
+
 async fn build_secret_providers(
     vault_addr: Option<&str>,
     vault_token: Option<&str>,
@@ -441,6 +456,11 @@ async fn main() -> ExitCode {
         ..Default::default()
     };
 
+    let vault_addr = cli.vault_addr.as_deref();
+    let vault_token = cli.vault_token.as_deref();
+    let vault_role_id = cli.vault_role_id.as_deref();
+    let vault_secret_id = cli.vault_secret_id.as_deref();
+
     let result = match cli.command {
         Commands::Run {
             pipeline,
@@ -451,20 +471,13 @@ async fn main() -> ExitCode {
             // Only build secret providers for local mode — distributed mode
             // delegates secret resolution to the controller.
             let secrets = if controller_url.is_none() {
-                match build_secret_providers(
-                    cli.vault_addr.as_deref(),
-                    cli.vault_token.as_deref(),
-                    cli.vault_role_id.as_deref(),
-                    cli.vault_secret_id.as_deref(),
-                )
-                .await
-                {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
-                        return ExitCode::FAILURE;
-                    }
-                }
+                let Some(s) =
+                    try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id)
+                        .await
+                else {
+                    return ExitCode::FAILURE;
+                };
+                s
             } else {
                 rapidbyte_secrets::SecretProviders::new()
             };
@@ -517,36 +530,18 @@ async fn main() -> ExitCode {
             .await
         }
         Commands::Check { pipeline } => {
-            let secrets = match build_secret_providers(
-                cli.vault_addr.as_deref(),
-                cli.vault_token.as_deref(),
-                cli.vault_role_id.as_deref(),
-                cli.vault_secret_id.as_deref(),
-            )
-            .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
-                    return ExitCode::FAILURE;
-                }
+            let Some(secrets) =
+                try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id).await
+            else {
+                return ExitCode::FAILURE;
             };
             commands::check::execute(&pipeline, verbosity, &registry_config, &secrets).await
         }
         Commands::Discover { pipeline } => {
-            let secrets = match build_secret_providers(
-                cli.vault_addr.as_deref(),
-                cli.vault_token.as_deref(),
-                cli.vault_role_id.as_deref(),
-                cli.vault_secret_id.as_deref(),
-            )
-            .await
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
-                    return ExitCode::FAILURE;
-                }
+            let Some(secrets) =
+                try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id).await
+            else {
+                return ExitCode::FAILURE;
             };
             commands::discover::execute(&pipeline, verbosity, &registry_config, &secrets).await
         }
@@ -587,19 +582,11 @@ async fn main() -> ExitCode {
                 &cli.trust_policy,
                 cli.trust_key.clone(),
                 otel_guard,
-                match build_secret_providers(
-                    cli.vault_addr.as_deref(),
-                    cli.vault_token.as_deref(),
-                    cli.vault_role_id.as_deref(),
-                    cli.vault_secret_id.as_deref(),
-                )
-                .await
+                match try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id)
+                    .await
                 {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
-                        return ExitCode::FAILURE;
-                    }
+                    Some(s) => s,
+                    None => return ExitCode::FAILURE,
                 },
             )
             .await

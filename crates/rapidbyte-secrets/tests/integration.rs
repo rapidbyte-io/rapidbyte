@@ -50,5 +50,10 @@ async fn read_missing_key_returns_error() {
         .read_secret("secret/postgres", "nonexistent_key")
         .await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("not found"));
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, rapidbyte_secrets::SecretError::NotFound(_)),
+        "expected NotFound, got: {err}"
+    );
+    assert!(err.to_string().contains("not found"));
 }

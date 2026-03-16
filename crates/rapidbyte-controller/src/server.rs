@@ -481,9 +481,8 @@ pub async fn run(
         );
     }
 
-    let mut state =
-        ControllerState::from_metadata_store(&config.signing_key, metadata_store).await?;
-    state.secrets = Arc::new(secrets);
+    let state = ControllerState::from_metadata_store(&config.signing_key, metadata_store).await?;
+    let state = state.with_secrets(secrets);
 
     // Background task: reap dead agents
     let reap_state = state.clone();

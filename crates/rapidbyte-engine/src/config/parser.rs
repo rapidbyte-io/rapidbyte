@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 
 use anyhow::{Context, Result};
-use rapidbyte_secrets::SecretProviders;
+use rapidbyte_secrets::{SecretError, SecretProviders};
 use regex::Regex;
 
 use crate::config::types::PipelineConfig;
@@ -93,7 +93,7 @@ fn apply_replacements(input: &str, mut replacements: Vec<MatchReplacement>) -> S
 pub async fn substitute_variables(input: &str, secrets: &SecretProviders) -> Result<String> {
     let mut replacements = Vec::new();
     let mut secret_cache: HashMap<String, String> = HashMap::new();
-    let mut secret_errors = Vec::new();
+    let mut secret_errors: Vec<(String, SecretError)> = Vec::new();
     let mut env_errors = Vec::new();
 
     // Collect secret ref replacements.
@@ -113,7 +113,7 @@ pub async fn substitute_variables(input: &str, secrets: &SecretProviders) -> Res
                     val
                 }
                 Err(e) => {
-                    secret_errors.push(format!("{prefix}:{path}#{key}: {e}"));
+                    secret_errors.push((format!("{prefix}:{path}#{key}"), e));
                     continue;
                 }
             }
@@ -126,10 +126,19 @@ pub async fn substitute_variables(input: &str, secrets: &SecretProviders) -> Res
     }
 
     if !secret_errors.is_empty() {
-        anyhow::bail!(
+        let any_transient = secret_errors.iter().any(|(_, e)| e.is_transient());
+        let msg = format!(
             "Failed to resolve secret(s):\n  {}",
-            secret_errors.join("\n  ")
+            secret_errors
+                .iter()
+                .map(|(ref_name, e)| format!("{ref_name}: {e}"))
+                .collect::<Vec<_>>()
+                .join("\n  ")
         );
+        if any_transient {
+            return Err(SecretError::Unavailable(msg).into());
+        }
+        anyhow::bail!("{msg}");
     }
 
     // Collect env var replacements (from original input positions).
@@ -184,15 +193,15 @@ pub async fn parse_pipeline(yaml_str: &str, secrets: &SecretProviders) -> Result
     // Reject malformed secret references (e.g. ${vault:path} without #key).
     reject_malformed_refs(yaml_str)?;
 
+    let has_secrets = contains_secret_refs(yaml_str);
+
     // Reject secret refs when no providers are configured.
-    if secrets.is_empty() && contains_secret_refs(yaml_str) {
+    if secrets.is_empty() && has_secrets {
         anyhow::bail!(
             "pipeline contains secret references (${{vault:...}}) \
              but no secret provider is configured"
         );
     }
-
-    let has_secrets = contains_secret_refs(yaml_str);
     let substituted = substitute_variables(yaml_str, secrets).await?;
 
     serde_yaml::from_str(&substituted).map_err(|e| {
@@ -358,7 +367,11 @@ destination:
 
         #[async_trait::async_trait]
         impl rapidbyte_secrets::SecretProvider for FakeProvider {
-            async fn read_secret(&self, _path: &str, _key: &str) -> anyhow::Result<String> {
+            async fn read_secret(
+                &self,
+                _path: &str,
+                _key: &str,
+            ) -> Result<String, rapidbyte_secrets::SecretError> {
                 // Return a value that contains ${RB_OPAQUE_HOST} — same pattern
                 // as an env var that exists in the original YAML.
                 Ok("${RB_OPAQUE_HOST}".to_owned())

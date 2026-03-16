@@ -23,6 +23,8 @@ use crate::state::ControllerState;
 /// Default lease TTL for assigned tasks.
 const LEASE_TTL: Duration = Duration::from_secs(300);
 
+const ERROR_CODE_SECRET_RESOLUTION: &str = "SECRET_RESOLUTION_FAILED";
+
 pub struct AgentServiceImpl {
     state: ControllerState,
     registry_url: String,
@@ -143,6 +145,159 @@ impl AgentServiceImpl {
         }
     }
 
+    async fn handle_transient_secret_failure(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        lease_epoch: u64,
+        error: &Status,
+    ) -> PollTaskResponse {
+        tracing::warn!(
+            task_id,
+            "transient secret resolution failure, requeueing: {error}"
+        );
+        let released_task = {
+            let mut tasks = self.state.tasks.write().await;
+            if let Err(release_err) = tasks.release_assignment(task_id, lease_epoch) {
+                tracing::error!(task_id, "failed to release task: {release_err}");
+            }
+            tasks.get(task_id).cloned()
+        };
+
+        let released_run = {
+            let mut runs = self.state.runs.write().await;
+            if let Some(record) = runs.get_run_mut(run_id) {
+                record.state = InternalRunState::Pending;
+                record.current_task = None;
+            }
+            runs.get_run(run_id).cloned()
+        };
+
+        // Persist rollback so restarts see consistent state.
+        if let (Some(task), Some(run)) = (released_task, released_run) {
+            if let Err(persist_err) = self.state.persist_assignment_records(&run, &task).await {
+                tracing::error!(
+                    task_id,
+                    "failed to persist transient rollback: {persist_err}"
+                );
+            }
+        }
+
+        PollTaskResponse {
+            result: Some(poll_task_response::Result::NoTask(NoTask {})),
+        }
+    }
+
+    async fn handle_permanent_secret_failure(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        agent_id: &str,
+        lease_epoch: u64,
+        attempt: u32,
+        error: &Status,
+    ) -> PollTaskResponse {
+        tracing::error!(
+            task_id,
+            "secret resolution failed during dispatch, failing task: {error}"
+        );
+        let mut tasks = self.state.tasks.write().await;
+        let _ = tasks.complete(task_id, agent_id, lease_epoch, TerminalTaskOutcome::Failed);
+        let failed_task = tasks.get(task_id).cloned();
+        drop(tasks);
+
+        let mut runs = self.state.runs.write().await;
+        let _ = runs.transition(run_id, InternalRunState::Failed);
+        if let Some(record) = runs.get_run_mut(run_id) {
+            let error_msg = format!("{ERROR_CODE_SECRET_RESOLUTION}: {}", error.message());
+            record.error_code = Some(ERROR_CODE_SECRET_RESOLUTION.into());
+            record.error_message = Some(error_msg);
+            record.error_retryable = Some(false);
+            record.error_safe_to_retry = Some(false);
+            record.error_commit_state = Some(
+                rapidbyte_types::error::CommitState::BeforeCommit
+                    .as_str()
+                    .into(),
+            );
+        }
+        let failed_run = runs.get_run(run_id).cloned();
+        drop(runs);
+
+        if let (Some(task), Some(run)) = (failed_task, failed_run) {
+            if let Err(persist_err) = self.state.persist_assignment_records(&run, &task).await {
+                tracing::error!(
+                    task_id,
+                    "failed to persist secret-resolution failure: {persist_err}"
+                );
+            }
+        }
+
+        // Publish terminal event so watch clients see the failure.
+        let terminal_event = RunEvent {
+            run_id: run_id.to_owned(),
+            event: Some(run_event::Event::Failed(RunFailed {
+                error: Some(crate::proto::rapidbyte::v1::TaskError {
+                    code: ERROR_CODE_SECRET_RESOLUTION.into(),
+                    message: error.message().to_owned(),
+                    retryable: false,
+                    safe_to_retry: false,
+                    commit_state: rapidbyte_types::error::CommitState::BeforeCommit
+                        .as_str()
+                        .into(),
+                }),
+                attempt,
+            })),
+        };
+        self.state
+            .watchers
+            .write()
+            .await
+            .publish_terminal(run_id, terminal_event);
+        rapidbyte_metrics::instruments::controller::runs_completed().add(
+            1,
+            &[KeyValue::new(
+                rapidbyte_metrics::labels::STATUS,
+                rapidbyte_metrics::labels::STATUS_ERROR,
+            )],
+        );
+        rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
+
+        PollTaskResponse {
+            result: Some(poll_task_response::Result::NoTask(NoTask {})),
+        }
+    }
+
+    async fn dispatch_or_handle_secret_error(
+        &self,
+        assignment: crate::scheduler::TaskAssignment,
+        agent_id: &str,
+    ) -> Result<PollTaskResponse, Status> {
+        let task_id = assignment.task_id.clone();
+        let run_id = assignment.run_id.clone();
+        let lease_epoch = assignment.lease_epoch;
+        let attempt = assignment.attempt;
+        match make_task_response(assignment, &self.state.secrets).await {
+            Ok(resp) => Ok(resp),
+            Err(e) => {
+                let resp = if e.code() == tonic::Code::Unavailable {
+                    self.handle_transient_secret_failure(&task_id, &run_id, lease_epoch, &e)
+                        .await
+                } else {
+                    self.handle_permanent_secret_failure(
+                        &task_id,
+                        &run_id,
+                        agent_id,
+                        lease_epoch,
+                        attempt,
+                        &e,
+                    )
+                    .await
+                };
+                Ok(resp)
+            }
+        }
+    }
+
     async fn try_claim_task(
         &self,
         agent_id: &str,
@@ -229,7 +384,10 @@ impl AgentServiceImpl {
         retryable: bool,
         commit_state: &str,
     ) -> bool {
-        if !safe_to_retry || !retryable || commit_state != "before_commit" {
+        if !safe_to_retry
+            || !retryable
+            || commit_state != rapidbyte_types::error::CommitState::BeforeCommit.as_str()
+        {
             return false;
         }
 
@@ -455,126 +613,10 @@ impl AgentService for AgentServiceImpl {
             poll_barrier.wait().await;
         }
         if let Some(assignment) = self.try_claim_task(&req.agent_id, max_tasks).await? {
-            let task_id = assignment.task_id.clone();
-            let run_id = assignment.run_id.clone();
-            let lease_epoch = assignment.lease_epoch;
-            match make_task_response(assignment, &self.state.secrets).await {
-                Ok(resp) => return Ok(Response::new(resp)),
-                Err(e) => {
-                    if e.code() == tonic::Code::Unavailable {
-                        // Transient error (Vault unreachable, timeout).
-                        // Release the task back to Pending for retry.
-                        tracing::warn!(
-                            task_id,
-                            "transient secret resolution failure, requeueing: {e}"
-                        );
-                        let mut tasks = self.state.tasks.write().await;
-                        if let Err(release_err) = tasks.release_assignment(&task_id, lease_epoch) {
-                            tracing::error!(task_id, "failed to release task: {release_err}");
-                        }
-                        drop(tasks);
-
-                        let mut runs = self.state.runs.write().await;
-                        if let Some(record) = runs.get_run_mut(&run_id) {
-                            record.state = InternalRunState::Pending;
-                            record.current_task = None;
-                        }
-                        let released_run = runs.get_run(&run_id).cloned();
-                        drop(runs);
-
-                        // Persist rollback so restarts see consistent state.
-                        let released_task = {
-                            let tasks = self.state.tasks.read().await;
-                            tasks.get(&task_id).cloned()
-                        };
-                        if let (Some(task), Some(run)) = (released_task, released_run) {
-                            if let Err(persist_err) =
-                                self.state.persist_assignment_records(&run, &task).await
-                            {
-                                tracing::error!(
-                                    task_id,
-                                    "failed to persist transient rollback: {persist_err}"
-                                );
-                            }
-                        }
-
-                        return Ok(Response::new(PollTaskResponse {
-                            result: Some(poll_task_response::Result::NoTask(NoTask {})),
-                        }));
-                    }
-
-                    // Permanent config error — fail the task.
-                    tracing::error!(
-                        task_id,
-                        "secret resolution failed during dispatch, failing task: {e}"
-                    );
-                    let mut tasks = self.state.tasks.write().await;
-                    let _ = tasks.complete(
-                        &task_id,
-                        &req.agent_id,
-                        lease_epoch,
-                        TerminalTaskOutcome::Failed,
-                    );
-                    let failed_task = tasks.get(&task_id).cloned();
-                    drop(tasks);
-
-                    let mut runs = self.state.runs.write().await;
-                    let _ = runs.transition(&run_id, InternalRunState::Failed);
-                    if let Some(record) = runs.get_run_mut(&run_id) {
-                        let error_msg = format!("SECRET_RESOLUTION_FAILED: {}", e.message());
-                        record.error_code = Some("SECRET_RESOLUTION_FAILED".into());
-                        record.error_message = Some(error_msg);
-                        record.error_retryable = Some(false);
-                        record.error_safe_to_retry = Some(false);
-                        record.error_commit_state = Some("before_commit".into());
-                    }
-                    let failed_run = runs.get_run(&run_id).cloned();
-                    drop(runs);
-
-                    if let (Some(task), Some(run)) = (failed_task, failed_run) {
-                        if let Err(persist_err) =
-                            self.state.persist_assignment_records(&run, &task).await
-                        {
-                            tracing::error!(
-                                task_id,
-                                "failed to persist secret-resolution failure: {persist_err}"
-                            );
-                        }
-                    }
-
-                    // Publish terminal event so watch clients see the failure.
-                    self.state.watchers.write().await.publish_terminal(
-                        &run_id,
-                        RunEvent {
-                            run_id: run_id.clone(),
-                            event: Some(run_event::Event::Failed(RunFailed {
-                                error: Some(crate::proto::rapidbyte::v1::TaskError {
-                                    code: "SECRET_RESOLUTION_FAILED".into(),
-                                    message: e.message().to_owned(),
-                                    retryable: false,
-                                    safe_to_retry: false,
-                                    commit_state: "before_commit".into(),
-                                }),
-                                attempt: 1,
-                            })),
-                        },
-                    );
-                    rapidbyte_metrics::instruments::controller::runs_completed().add(
-                        1,
-                        &[KeyValue::new(
-                            rapidbyte_metrics::labels::STATUS,
-                            rapidbyte_metrics::labels::STATUS_ERROR,
-                        )],
-                    );
-                    rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
-
-                    // Return NoTask instead of a gRPC error so the agent
-                    // keeps polling. The task/run are already marked Failed.
-                    return Ok(Response::new(PollTaskResponse {
-                        result: Some(poll_task_response::Result::NoTask(NoTask {})),
-                    }));
-                }
-            }
+            let resp = self
+                .dispatch_or_handle_secret_error(assignment, &req.agent_id)
+                .await?;
+            return Ok(Response::new(resp));
         }
 
         // Long-poll: wait for notification or timeout
@@ -601,126 +643,10 @@ impl AgentService for AgentServiceImpl {
         }
         drop(tasks);
         if let Some(assignment) = self.try_claim_task(&req.agent_id, max_tasks).await? {
-            let task_id = assignment.task_id.clone();
-            let run_id = assignment.run_id.clone();
-            let lease_epoch = assignment.lease_epoch;
-            match make_task_response(assignment, &self.state.secrets).await {
-                Ok(resp) => return Ok(Response::new(resp)),
-                Err(e) => {
-                    if e.code() == tonic::Code::Unavailable {
-                        // Transient error (Vault unreachable, timeout).
-                        // Release the task back to Pending for retry.
-                        tracing::warn!(
-                            task_id,
-                            "transient secret resolution failure, requeueing: {e}"
-                        );
-                        let mut tasks = self.state.tasks.write().await;
-                        if let Err(release_err) = tasks.release_assignment(&task_id, lease_epoch) {
-                            tracing::error!(task_id, "failed to release task: {release_err}");
-                        }
-                        drop(tasks);
-
-                        let mut runs = self.state.runs.write().await;
-                        if let Some(record) = runs.get_run_mut(&run_id) {
-                            record.state = InternalRunState::Pending;
-                            record.current_task = None;
-                        }
-                        let released_run = runs.get_run(&run_id).cloned();
-                        drop(runs);
-
-                        // Persist rollback so restarts see consistent state.
-                        let released_task = {
-                            let tasks = self.state.tasks.read().await;
-                            tasks.get(&task_id).cloned()
-                        };
-                        if let (Some(task), Some(run)) = (released_task, released_run) {
-                            if let Err(persist_err) =
-                                self.state.persist_assignment_records(&run, &task).await
-                            {
-                                tracing::error!(
-                                    task_id,
-                                    "failed to persist transient rollback: {persist_err}"
-                                );
-                            }
-                        }
-
-                        return Ok(Response::new(PollTaskResponse {
-                            result: Some(poll_task_response::Result::NoTask(NoTask {})),
-                        }));
-                    }
-
-                    // Permanent config error — fail the task.
-                    tracing::error!(
-                        task_id,
-                        "secret resolution failed during dispatch, failing task: {e}"
-                    );
-                    let mut tasks = self.state.tasks.write().await;
-                    let _ = tasks.complete(
-                        &task_id,
-                        &req.agent_id,
-                        lease_epoch,
-                        TerminalTaskOutcome::Failed,
-                    );
-                    let failed_task = tasks.get(&task_id).cloned();
-                    drop(tasks);
-
-                    let mut runs = self.state.runs.write().await;
-                    let _ = runs.transition(&run_id, InternalRunState::Failed);
-                    if let Some(record) = runs.get_run_mut(&run_id) {
-                        let error_msg = format!("SECRET_RESOLUTION_FAILED: {}", e.message());
-                        record.error_code = Some("SECRET_RESOLUTION_FAILED".into());
-                        record.error_message = Some(error_msg);
-                        record.error_retryable = Some(false);
-                        record.error_safe_to_retry = Some(false);
-                        record.error_commit_state = Some("before_commit".into());
-                    }
-                    let failed_run = runs.get_run(&run_id).cloned();
-                    drop(runs);
-
-                    if let (Some(task), Some(run)) = (failed_task, failed_run) {
-                        if let Err(persist_err) =
-                            self.state.persist_assignment_records(&run, &task).await
-                        {
-                            tracing::error!(
-                                task_id,
-                                "failed to persist secret-resolution failure: {persist_err}"
-                            );
-                        }
-                    }
-
-                    // Publish terminal event so watch clients see the failure.
-                    self.state.watchers.write().await.publish_terminal(
-                        &run_id,
-                        RunEvent {
-                            run_id: run_id.clone(),
-                            event: Some(run_event::Event::Failed(RunFailed {
-                                error: Some(crate::proto::rapidbyte::v1::TaskError {
-                                    code: "SECRET_RESOLUTION_FAILED".into(),
-                                    message: e.message().to_owned(),
-                                    retryable: false,
-                                    safe_to_retry: false,
-                                    commit_state: "before_commit".into(),
-                                }),
-                                attempt: 1,
-                            })),
-                        },
-                    );
-                    rapidbyte_metrics::instruments::controller::runs_completed().add(
-                        1,
-                        &[KeyValue::new(
-                            rapidbyte_metrics::labels::STATUS,
-                            rapidbyte_metrics::labels::STATUS_ERROR,
-                        )],
-                    );
-                    rapidbyte_metrics::instruments::controller::active_runs().add(-1, &[]);
-
-                    // Return NoTask instead of a gRPC error so the agent
-                    // keeps polling. The task/run are already marked Failed.
-                    return Ok(Response::new(PollTaskResponse {
-                        result: Some(poll_task_response::Result::NoTask(NoTask {})),
-                    }));
-                }
-            }
+            let resp = self
+                .dispatch_or_handle_secret_error(assignment, &req.agent_id)
+                .await?;
+            return Ok(Response::new(resp));
         }
 
         Ok(Response::new(PollTaskResponse {
@@ -1285,22 +1211,16 @@ async fn make_task_response(
         .map_err(|e| Status::internal(format!("pipeline YAML is not valid UTF-8: {e}")))?;
     // Reject malformed secret references (e.g. ${vault:path} without #key).
     rapidbyte_engine::config::parser::reject_malformed_refs(yaml_str)
-        .map_err(|e| Status::internal(format!("{e}")))?;
+        .map_err(|e| Status::internal(e.to_string()))?;
     let had_secrets = rapidbyte_engine::config::parser::contains_secret_refs(yaml_str);
     let resolved = rapidbyte_engine::config::parser::substitute_variables(yaml_str, secrets)
         .await
         .map_err(|e| {
             let msg = format!("failed to resolve variables: {e}");
-            // Default to permanent failure (Internal). Only classify known
-            // transient network errors as Unavailable for retry. This is
-            // safer: unknown errors (auth, permissions, bad tokens) fail
-            // permanently rather than retrying forever.
-            let err_str = format!("{e:#}");
-            if err_str.contains("connection refused")
-                || err_str.contains("timed out")
-                || err_str.contains("temporarily unavailable")
-                || err_str.contains("503")
-            {
+            let is_transient = e
+                .downcast_ref::<rapidbyte_secrets::SecretError>()
+                .is_some_and(rapidbyte_secrets::SecretError::is_transient);
+            if is_transient {
                 Status::unavailable(msg)
             } else {
                 Status::internal(msg)
@@ -3834,13 +3754,9 @@ mod tests {
         String, // run_id
         poll_task_response::Result,
     ) {
-        let state = test_state();
         let mut providers = rapidbyte_secrets::SecretProviders::new();
         providers.register("vault", std::sync::Arc::new(provider));
-        let state = ControllerState {
-            secrets: std::sync::Arc::new(providers),
-            ..state
-        };
+        let state = test_state().with_secrets(providers);
 
         let svc = crate::pipeline_service::PipelineServiceImpl::new(state.clone());
         let yaml = b"pipeline: test\nstate:\n  backend: postgres\nsource:\n  config:\n    password: ${vault:secret/db#password}\n";
@@ -3889,8 +3805,14 @@ mod tests {
 
         #[async_trait::async_trait]
         impl rapidbyte_secrets::SecretProvider for TransientFailProvider {
-            async fn read_secret(&self, _path: &str, _key: &str) -> anyhow::Result<String> {
-                anyhow::bail!("connection refused")
+            async fn read_secret(
+                &self,
+                _path: &str,
+                _key: &str,
+            ) -> Result<String, rapidbyte_secrets::SecretError> {
+                Err(rapidbyte_secrets::SecretError::Unavailable(
+                    "connection refused".into(),
+                ))
             }
         }
 
@@ -3929,8 +3851,14 @@ mod tests {
 
         #[async_trait::async_trait]
         impl rapidbyte_secrets::SecretProvider for MissingKeyProvider {
-            async fn read_secret(&self, _path: &str, _key: &str) -> anyhow::Result<String> {
-                anyhow::bail!("key 'password' not found in Vault secret secret/db")
+            async fn read_secret(
+                &self,
+                _path: &str,
+                _key: &str,
+            ) -> Result<String, rapidbyte_secrets::SecretError> {
+                Err(rapidbyte_secrets::SecretError::NotFound(
+                    "key 'password' not found in Vault secret secret/db".into(),
+                ))
             }
         }
 
