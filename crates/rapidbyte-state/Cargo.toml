@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 rapidbyte-types = { path = "../rapidbyte-types" }
+anyhow = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
@@ -16,6 +17,7 @@ postgres = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+tempfile = "3"
 
 [features]
 default = ["sqlite"]
