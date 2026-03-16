@@ -24,22 +24,43 @@ use crate::result::{
 // Types
 // ---------------------------------------------------------------------------
 
-pub(crate) struct StreamAggregation {
-    pub(crate) execution_parallelism: u32,
+/// Aggregate read/write counters.
+pub(crate) struct ReadWriteTotals {
     pub(crate) total_read_summary: ReadSummary,
     pub(crate) total_write_summary: WriteSummary,
-    pub(crate) source_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
-    pub(crate) dest_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
+}
+
+/// Max timing values across all stream shards.
+pub(crate) struct TimingMaxima {
     pub(crate) max_source_duration: f64,
     pub(crate) max_dest_duration: f64,
-    pub(crate) max_vm_setup_secs: f64,
-    pub(crate) max_recv_secs: f64,
+    pub(crate) max_wasm_instantiation_secs: f64,
+    pub(crate) max_frame_receive_secs: f64,
     pub(crate) transform_durations: Vec<f64>,
+}
+
+/// Diagnostic data from stream execution.
+pub(crate) struct ExecutionDiagnostics {
+    pub(crate) execution_parallelism: u32,
+    pub(crate) stream_metrics: Vec<StreamShardMetric>,
+    pub(crate) dry_run_streams: Vec<DryRunStreamResult>,
+}
+
+/// State persistence outcomes.
+pub(crate) struct StateOutcome {
+    pub(crate) source_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
+    pub(crate) dest_checkpoints: Vec<rapidbyte_types::checkpoint::Checkpoint>,
     pub(crate) dlq_records: Vec<DlqRecord>,
     pub(crate) final_stats: RunStats,
     pub(crate) first_error: Option<PipelineError>,
-    pub(crate) dry_run_streams: Vec<DryRunStreamResult>,
-    pub(crate) stream_metrics: Vec<StreamShardMetric>,
+}
+
+/// Aggregated results from all stream executions.
+pub(crate) struct StreamAggregation {
+    pub(crate) totals: ReadWriteTotals,
+    pub(crate) timing: TimingMaxima,
+    pub(crate) diagnostics: ExecutionDiagnostics,
+    pub(crate) state: StateOutcome,
 }
 
 pub(crate) struct MetricsRuntime<'a> {
@@ -88,17 +109,17 @@ pub(crate) async fn finalize_pipeline_execution(
     metrics_runtime: &MetricsRuntime<'_>,
 ) -> Result<PipelineResult, PipelineError> {
     // 1. If any stream failed → mark Failed, persist DLQ, return error
-    if let Some(err) = aggregated.first_error {
+    if let Some(err) = aggregated.state.first_error {
         // Drain the run's snapshot entry so it doesn't accumulate in the
         // SnapshotReader's finished_run_snapshots map (memory leak in
         // long-lived agent processes).
         let _ = metrics_runtime.snapshot_for_run(&config.pipeline, Some(metric_run_label));
 
         let run_stats = RunStats {
-            records_read: aggregated.final_stats.records_read,
-            records_written: aggregated.final_stats.records_written,
-            bytes_read: aggregated.final_stats.bytes_read,
-            bytes_written: aggregated.final_stats.bytes_written,
+            records_read: aggregated.state.final_stats.records_read,
+            records_written: aggregated.state.final_stats.records_written,
+            bytes_read: aggregated.state.final_stats.bytes_read,
+            bytes_written: aggregated.state.final_stats.bytes_written,
             error_message: Some(format!("Stream error: {err}")),
         };
         mark_run_complete(state.clone(), run_id, RunStatus::Failed, run_stats).await;
@@ -107,7 +128,7 @@ pub(crate) async fn finalize_pipeline_execution(
             state.clone(),
             pipeline_id,
             run_id,
-            &mut aggregated.dlq_records,
+            &mut aggregated.state.dlq_records,
         )
         .await?;
 
@@ -119,15 +140,15 @@ pub(crate) async fn finalize_pipeline_execution(
 
     let wasm_overhead_secs = compute_wasm_overhead_secs(
         &snap,
-        aggregated.max_dest_duration,
-        aggregated.max_vm_setup_secs,
-        aggregated.max_recv_secs,
+        aggregated.timing.max_dest_duration,
+        aggregated.timing.max_wasm_instantiation_secs,
+        aggregated.timing.max_frame_receive_secs,
     );
 
     tracing::debug!(
         pipeline = config.pipeline,
-        source_checkpoint_count = aggregated.source_checkpoints.len(),
-        dest_checkpoint_count = aggregated.dest_checkpoints.len(),
+        source_checkpoint_count = aggregated.state.source_checkpoints.len(),
+        dest_checkpoint_count = aggregated.state.dest_checkpoints.len(),
         "About to correlate checkpoints"
     );
 
@@ -152,39 +173,39 @@ pub(crate) async fn finalize_pipeline_execution(
 
     tracing::info!(
         pipeline = config.pipeline,
-        records_read = aggregated.total_read_summary.records_read,
-        records_written = aggregated.total_write_summary.records_written,
+        records_read = aggregated.totals.total_read_summary.records_read,
+        records_written = aggregated.totals.total_write_summary.records_written,
         duration_secs = duration.as_secs_f64(),
         "Pipeline run completed"
     );
 
     Ok(PipelineResult {
         counts: PipelineCounts {
-            records_read: aggregated.total_read_summary.records_read,
-            records_written: aggregated.total_write_summary.records_written,
-            bytes_read: aggregated.total_read_summary.bytes_read,
-            bytes_written: aggregated.total_write_summary.bytes_written,
+            records_read: aggregated.totals.total_read_summary.records_read,
+            records_written: aggregated.totals.total_write_summary.records_written,
+            bytes_read: aggregated.totals.total_read_summary.bytes_read,
+            bytes_written: aggregated.totals.total_write_summary.bytes_written,
         },
         source: SourceTiming::from_snapshot(
             &snap,
-            aggregated.max_source_duration,
+            aggregated.timing.max_source_duration,
             modules.source_module_load_ms,
         ),
         dest: DestTiming::from_snapshot(
             &snap,
-            aggregated.max_dest_duration,
-            aggregated.max_vm_setup_secs,
-            aggregated.max_recv_secs,
+            aggregated.timing.max_dest_duration,
+            aggregated.timing.max_wasm_instantiation_secs,
+            aggregated.timing.max_frame_receive_secs,
             modules.dest_module_load_ms,
         ),
-        num_transforms: aggregated.transform_durations.len(),
-        total_transform_secs: aggregated.transform_durations.iter().sum(),
+        num_transforms: aggregated.timing.transform_durations.len(),
+        total_transform_secs: aggregated.timing.transform_durations.iter().sum(),
         transform_load_times_ms,
         duration_secs: duration.as_secs_f64(),
         wasm_overhead_secs,
         retry_count: attempt.saturating_sub(1),
         parallelism: reported_parallelism(config, &aggregated),
-        stream_metrics: aggregated.stream_metrics,
+        stream_metrics: aggregated.diagnostics.stream_metrics,
     })
 }
 
@@ -240,8 +261,8 @@ pub(crate) async fn persist_run_state(
 ) -> Result<u64, PipelineError> {
     let state_for_cursor = state.clone();
     let pipeline_id_for_cursor = pipeline_id.clone();
-    let source_checkpoints = std::mem::take(&mut aggregated.source_checkpoints);
-    let dest_checkpoints = std::mem::take(&mut aggregated.dest_checkpoints);
+    let source_checkpoints = std::mem::take(&mut aggregated.state.source_checkpoints);
+    let dest_checkpoints = std::mem::take(&mut aggregated.state.dest_checkpoints);
     let cursor_result = tokio::task::spawn_blocking(move || {
         correlate_and_persist_cursors(
             state_for_cursor.as_ref(),
@@ -257,10 +278,10 @@ pub(crate) async fn persist_run_state(
         Ok(n) => n,
         Err(error) => {
             let failed_stats = RunStats {
-                records_read: aggregated.total_read_summary.records_read,
-                records_written: aggregated.total_write_summary.records_written,
-                bytes_read: aggregated.total_read_summary.bytes_read,
-                bytes_written: aggregated.total_write_summary.bytes_written,
+                records_read: aggregated.totals.total_read_summary.records_read,
+                records_written: aggregated.totals.total_write_summary.records_written,
+                bytes_read: aggregated.totals.total_read_summary.bytes_read,
+                bytes_written: aggregated.totals.total_write_summary.bytes_written,
                 error_message: Some(format!("Post-run finalization failed: {error}")),
             };
             mark_run_complete(state, run_id, RunStatus::Failed, failed_stats).await;
@@ -270,7 +291,7 @@ pub(crate) async fn persist_run_state(
 
     let state_for_dlq = state.clone();
     let pipeline_id_for_dlq = pipeline_id.clone();
-    let dlq_records = std::mem::take(&mut aggregated.dlq_records);
+    let dlq_records = std::mem::take(&mut aggregated.state.dlq_records);
     let dlq_result = tokio::task::spawn_blocking(move || {
         crate::finalizers::dlq::persist_dlq_records(
             state_for_dlq.as_ref(),
@@ -283,10 +304,10 @@ pub(crate) async fn persist_run_state(
     .map_err(|e| PipelineError::task_panicked("persist_dlq_records", e))?;
     if let Err(error) = dlq_result {
         let failed_stats = RunStats {
-            records_read: aggregated.total_read_summary.records_read,
-            records_written: aggregated.total_write_summary.records_written,
-            bytes_read: aggregated.total_read_summary.bytes_read,
-            bytes_written: aggregated.total_write_summary.bytes_written,
+            records_read: aggregated.totals.total_read_summary.records_read,
+            records_written: aggregated.totals.total_write_summary.records_written,
+            bytes_read: aggregated.totals.total_read_summary.bytes_read,
+            bytes_written: aggregated.totals.total_write_summary.bytes_written,
             error_message: Some(format!("Post-run finalization failed: {error}")),
         };
         mark_run_complete(state, run_id, RunStatus::Failed, failed_stats).await;
@@ -294,10 +315,10 @@ pub(crate) async fn persist_run_state(
     }
 
     let complete_stats = RunStats {
-        records_read: aggregated.total_read_summary.records_read,
-        records_written: aggregated.total_write_summary.records_written,
-        bytes_read: aggregated.total_read_summary.bytes_read,
-        bytes_written: aggregated.total_write_summary.bytes_written,
+        records_read: aggregated.totals.total_read_summary.records_read,
+        records_written: aggregated.totals.total_write_summary.records_written,
+        bytes_read: aggregated.totals.total_read_summary.bytes_read,
+        bytes_written: aggregated.totals.total_write_summary.bytes_written,
         error_message: None,
     };
     mark_run_complete(state, run_id, RunStatus::Completed, complete_stats).await;
@@ -310,8 +331,8 @@ pub(crate) async fn persist_run_state(
 // ---------------------------------------------------------------------------
 
 pub(crate) fn reported_parallelism(config: &PipelineConfig, aggregated: &StreamAggregation) -> u32 {
-    if aggregated.execution_parallelism > 0 {
-        aggregated.execution_parallelism
+    if aggregated.diagnostics.execution_parallelism > 0 {
+        aggregated.diagnostics.execution_parallelism
     } else {
         compute_pipeline_parallelism(config, false)
     }
@@ -324,14 +345,14 @@ pub(crate) fn build_dry_run_result(
     duration_secs: f64,
 ) -> DryRunResult {
     DryRunResult {
-        streams: aggregated.dry_run_streams,
+        streams: aggregated.diagnostics.dry_run_streams,
         source: SourceTiming::from_snapshot(
             snap,
-            aggregated.max_source_duration,
+            aggregated.timing.max_source_duration,
             source_module_load_ms,
         ),
-        num_transforms: aggregated.transform_durations.len(),
-        total_transform_secs: aggregated.transform_durations.iter().sum(),
+        num_transforms: aggregated.timing.transform_durations.len(),
+        total_transform_secs: aggregated.timing.transform_durations.iter().sum(),
         duration_secs,
     }
 }
@@ -434,49 +455,57 @@ mod tests {
 
     fn make_aggregated_results() -> StreamAggregation {
         StreamAggregation {
-            execution_parallelism: 1,
-            total_read_summary: ReadSummary {
-                records_read: 10,
-                bytes_read: 100,
-                batches_emitted: 1,
-                checkpoint_count: 1,
-                records_skipped: 0,
+            totals: ReadWriteTotals {
+                total_read_summary: ReadSummary {
+                    records_read: 10,
+                    bytes_read: 100,
+                    batches_emitted: 1,
+                    checkpoint_count: 1,
+                    records_skipped: 0,
+                },
+                total_write_summary: WriteSummary {
+                    records_written: 10,
+                    bytes_written: 100,
+                    batches_written: 1,
+                    checkpoint_count: 1,
+                    records_failed: 0,
+                },
             },
-            total_write_summary: WriteSummary {
-                records_written: 10,
-                bytes_written: 100,
-                batches_written: 1,
-                checkpoint_count: 1,
-                records_failed: 0,
+            timing: TimingMaxima {
+                max_source_duration: 0.0,
+                max_dest_duration: 0.0,
+                max_wasm_instantiation_secs: 0.0,
+                max_frame_receive_secs: 0.0,
+                transform_durations: Vec::new(),
             },
-            source_checkpoints: vec![Checkpoint {
-                id: 7,
-                kind: CheckpointKind::Source,
-                stream: "users".to_string(),
-                cursor_field: Some("id".to_string()),
-                cursor_value: Some(CursorValue::Int64 { value: 42 }),
-                records_processed: 10,
-                bytes_processed: 100,
-            }],
-            dest_checkpoints: vec![Checkpoint {
-                id: 7,
-                kind: CheckpointKind::Dest,
-                stream: "users".to_string(),
-                cursor_field: None,
-                cursor_value: None,
-                records_processed: 10,
-                bytes_processed: 100,
-            }],
-            max_source_duration: 0.0,
-            max_dest_duration: 0.0,
-            max_vm_setup_secs: 0.0,
-            max_recv_secs: 0.0,
-            transform_durations: Vec::new(),
-            dlq_records: Vec::new(),
-            final_stats: RunStats::default(),
-            first_error: None,
-            dry_run_streams: Vec::new(),
-            stream_metrics: Vec::new(),
+            diagnostics: ExecutionDiagnostics {
+                execution_parallelism: 1,
+                stream_metrics: Vec::new(),
+                dry_run_streams: Vec::new(),
+            },
+            state: StateOutcome {
+                source_checkpoints: vec![Checkpoint {
+                    id: 7,
+                    kind: CheckpointKind::Source,
+                    stream: "users".to_string(),
+                    cursor_field: Some("id".to_string()),
+                    cursor_value: Some(CursorValue::Int64 { value: 42 }),
+                    records_processed: 10,
+                    bytes_processed: 100,
+                }],
+                dest_checkpoints: vec![Checkpoint {
+                    id: 7,
+                    kind: CheckpointKind::Dest,
+                    stream: "users".to_string(),
+                    cursor_field: None,
+                    cursor_value: None,
+                    records_processed: 10,
+                    bytes_processed: 100,
+                }],
+                dlq_records: Vec::new(),
+                final_stats: RunStats::default(),
+                first_error: None,
+            },
         }
     }
 
@@ -500,7 +529,7 @@ resources:
 "#;
         let config: PipelineConfig = serde_yaml::from_str(yaml).expect("valid pipeline yaml");
         let mut aggregated = make_aggregated_results();
-        aggregated.execution_parallelism = 12;
+        aggregated.diagnostics.execution_parallelism = 12;
 
         assert_eq!(reported_parallelism(&config, &aggregated), 12);
     }
@@ -555,7 +584,7 @@ resources:
     async fn dlq_finalization_failure_marks_run_failed_not_completed() {
         let backend = Arc::new(TestStateBackend::new(false, true));
         let mut aggregated = make_aggregated_results();
-        aggregated.dlq_records.push(DlqRecord {
+        aggregated.state.dlq_records.push(DlqRecord {
             stream_name: "users".to_string(),
             record_json: "{\"id\":42}".to_string(),
             error_message: "bad row".to_string(),

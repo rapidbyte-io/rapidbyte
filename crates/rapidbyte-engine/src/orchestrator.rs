@@ -23,7 +23,8 @@ use crate::config::types::PipelineConfig;
 use crate::error::{compute_backoff, PipelineError};
 use crate::execution::{DryRunStreamResult, ExecutionOptions, PipelineOutcome};
 use crate::finalizers::run::{
-    build_dry_run_result, finalize_pipeline_execution, prepare_metrics_runtime, StreamAggregation,
+    build_dry_run_result, finalize_pipeline_execution, prepare_metrics_runtime,
+    ExecutionDiagnostics, ReadWriteTotals, StateOutcome, StreamAggregation, TimingMaxima,
 };
 use crate::pipeline::executor::{execute_single_stream, DestinationMode};
 use crate::pipeline::planner::{
@@ -579,21 +580,29 @@ async fn execute_streams(
     let final_stats = PipelineError::lock_or_infra(&stats, "run stats")?.clone();
 
     Ok(StreamAggregation {
-        execution_parallelism: u32::try_from(parallelism).unwrap_or(u32::MAX),
-        total_read_summary,
-        total_write_summary,
-        source_checkpoints,
-        dest_checkpoints,
-        max_source_duration,
-        max_dest_duration,
-        max_vm_setup_secs,
-        max_recv_secs,
-        transform_durations,
-        dlq_records,
-        final_stats,
-        first_error,
-        dry_run_streams,
-        stream_metrics,
+        totals: ReadWriteTotals {
+            total_read_summary,
+            total_write_summary,
+        },
+        timing: TimingMaxima {
+            max_source_duration,
+            max_dest_duration,
+            max_wasm_instantiation_secs: max_vm_setup_secs,
+            max_frame_receive_secs: max_recv_secs,
+            transform_durations,
+        },
+        diagnostics: ExecutionDiagnostics {
+            execution_parallelism: u32::try_from(parallelism).unwrap_or(u32::MAX),
+            stream_metrics,
+            dry_run_streams,
+        },
+        state: StateOutcome {
+            source_checkpoints,
+            dest_checkpoints,
+            dlq_records,
+            final_stats,
+            first_error,
+        },
     })
 }
 
@@ -977,49 +986,57 @@ mod orchestrator_helper_tests {
 
     fn make_aggregated_results() -> StreamAggregation {
         StreamAggregation {
-            execution_parallelism: 1,
-            total_read_summary: ReadSummary {
-                records_read: 10,
-                bytes_read: 100,
-                batches_emitted: 1,
-                checkpoint_count: 1,
-                records_skipped: 0,
+            totals: ReadWriteTotals {
+                total_read_summary: ReadSummary {
+                    records_read: 10,
+                    bytes_read: 100,
+                    batches_emitted: 1,
+                    checkpoint_count: 1,
+                    records_skipped: 0,
+                },
+                total_write_summary: WriteSummary {
+                    records_written: 10,
+                    bytes_written: 100,
+                    batches_written: 1,
+                    checkpoint_count: 1,
+                    records_failed: 0,
+                },
             },
-            total_write_summary: WriteSummary {
-                records_written: 10,
-                bytes_written: 100,
-                batches_written: 1,
-                checkpoint_count: 1,
-                records_failed: 0,
+            timing: TimingMaxima {
+                max_source_duration: 0.0,
+                max_dest_duration: 0.0,
+                max_wasm_instantiation_secs: 0.0,
+                max_frame_receive_secs: 0.0,
+                transform_durations: Vec::new(),
             },
-            source_checkpoints: vec![Checkpoint {
-                id: 7,
-                kind: CheckpointKind::Source,
-                stream: "users".to_string(),
-                cursor_field: Some("id".to_string()),
-                cursor_value: Some(CursorValue::Int64 { value: 42 }),
-                records_processed: 10,
-                bytes_processed: 100,
-            }],
-            dest_checkpoints: vec![Checkpoint {
-                id: 7,
-                kind: CheckpointKind::Dest,
-                stream: "users".to_string(),
-                cursor_field: None,
-                cursor_value: None,
-                records_processed: 10,
-                bytes_processed: 100,
-            }],
-            max_source_duration: 0.0,
-            max_dest_duration: 0.0,
-            max_vm_setup_secs: 0.0,
-            max_recv_secs: 0.0,
-            transform_durations: Vec::new(),
-            dlq_records: Vec::new(),
-            final_stats: RunStats::default(),
-            first_error: None,
-            dry_run_streams: Vec::new(),
-            stream_metrics: Vec::new(),
+            diagnostics: ExecutionDiagnostics {
+                execution_parallelism: 1,
+                stream_metrics: Vec::new(),
+                dry_run_streams: Vec::new(),
+            },
+            state: StateOutcome {
+                source_checkpoints: vec![Checkpoint {
+                    id: 7,
+                    kind: CheckpointKind::Source,
+                    stream: "users".to_string(),
+                    cursor_field: Some("id".to_string()),
+                    cursor_value: Some(CursorValue::Int64 { value: 42 }),
+                    records_processed: 10,
+                    bytes_processed: 100,
+                }],
+                dest_checkpoints: vec![Checkpoint {
+                    id: 7,
+                    kind: CheckpointKind::Dest,
+                    stream: "users".to_string(),
+                    cursor_field: None,
+                    cursor_value: None,
+                    records_processed: 10,
+                    bytes_processed: 100,
+                }],
+                dlq_records: Vec::new(),
+                final_stats: RunStats::default(),
+                first_error: None,
+            },
         }
     }
 
