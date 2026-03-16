@@ -13,6 +13,7 @@
 //! | `finalizers`   | Checkpoint correlation, DLQ persistence, run finalization (internal) |
 //! | `execution`    | Runtime execution mode types (dry-run, limits) |
 //! | `orchestrator` | Pipeline execution, retry, stream dispatch |
+//! | `pipeline`     | Pipeline planning: stream context building, parallelism computation (internal) |
 //! | `progress`     | Progress event types for live CLI updates |
 //! | `plugin`       | Plugin lifecycle management: resolution, manifest validation, sandbox (internal) |
 //! | `result`       | Pipeline execution result types and timing breakdowns |
@@ -27,6 +28,7 @@ pub mod error;
 pub mod execution;
 pub(crate) mod finalizers;
 pub mod orchestrator;
+pub(crate) mod pipeline;
 pub mod plugin;
 pub mod progress;
 pub mod result;
