@@ -484,8 +484,8 @@ mod tests {
                     "bytes_written": bytes_written,
                     "source_duration_secs": 1.0,
                     "dest_duration_secs": 1.5,
-                    "dest_vm_setup_secs": 0.1,
-                    "dest_recv_secs": 1.2
+                    "dest_wasm_instantiation_secs": 0.1,
+                    "dest_frame_receive_secs": 1.2
                 }]
             }),
             correctness: ArtifactCorrectness {

@@ -703,17 +703,17 @@ fn run_result_from_bench_json(
             "connect_secs": optional_f64(&bench_json, "dest_connect_secs"),
             "flush_secs": optional_f64(&bench_json, "dest_flush_secs"),
             "commit_secs": optional_f64(&bench_json, "dest_commit_secs"),
-            "recv_secs": optional_f64(&bench_json, "dest_recv_secs"),
-            "vm_setup_secs": optional_f64(&bench_json, "dest_vm_setup_secs"),
+            "recv_secs": optional_f64(&bench_json, "dest_frame_receive_secs"),
+            "vm_setup_secs": optional_f64(&bench_json, "dest_wasm_instantiation_secs"),
             "arrow_decode_secs": optional_f64(&bench_json, "dest_arrow_decode_secs"),
             "module_load_ms": optional_f64(&bench_json, "dest_module_load_ms"),
             "load_method": scenario.connector_options.destination.load_method.clone(),
             "write_mode": scenario.connector_options.destination.write_mode.clone(),
         },
         "transform": {
-            "count": optional_u64(&bench_json, "transform_count"),
-            "duration_secs": optional_f64(&bench_json, "transform_duration_secs"),
-            "module_load_ms": bench_json.get("transform_module_load_ms").cloned(),
+            "count": optional_u64(&bench_json, "num_transforms"),
+            "duration_secs": optional_f64(&bench_json, "total_transform_secs"),
+            "module_load_ms": bench_json.get("transform_load_times_ms").cloned(),
         },
         "process": {
             "cpu_secs": optional_f64(&bench_json, "process_cpu_secs"),
@@ -1663,8 +1663,8 @@ mod tests {
             "dest_connect_secs": 0.1,
             "dest_flush_secs": 1.2,
             "dest_commit_secs": 0.05,
-            "dest_recv_secs": 1.1,
-            "dest_vm_setup_secs": 0.02,
+            "dest_frame_receive_secs": 1.1,
+            "dest_wasm_instantiation_secs": 0.02,
             "dest_arrow_decode_secs": 0.01,
             "dest_module_load_ms": 4.0,
             "source_connect_secs": 0.06,
@@ -1672,9 +1672,9 @@ mod tests {
             "source_fetch_secs": 0.63,
             "source_arrow_encode_secs": 0.01,
             "source_module_load_ms": 5.0,
-            "transform_count": 0,
-            "transform_duration_secs": 0.0,
-            "transform_module_load_ms": [],
+            "num_transforms": 0,
+            "total_transform_secs": 0.0,
+            "transform_load_times_ms": [],
             "retry_count": 0,
             "parallelism": 4,
             "dest_recv_count": 4,
@@ -1691,8 +1691,8 @@ mod tests {
                 "bytes_written": 2_097_152,
                 "source_duration_secs": 0.8,
                 "dest_duration_secs": 1.2,
-                "dest_vm_setup_secs": 0.02,
-                "dest_recv_secs": 1.1
+                "dest_wasm_instantiation_secs": 0.02,
+                "dest_frame_receive_secs": 1.1
             }]
         })
         .to_string()
