@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use rapidbyte_engine::config::parser;
 use rapidbyte_engine::config::validator;
 use rapidbyte_secrets::SecretProviders;
-use rapidbyte_engine::execution::{ExecutionOptions, PipelineOutcome};
+use rapidbyte_engine::outcome::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_metrics::snapshot::SnapshotReader;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use tokio_postgres::NoTls;
