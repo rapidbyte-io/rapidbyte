@@ -24,17 +24,12 @@ pub use backend::StateBackend;
 pub use error::StateError;
 
 /// Supported state backend implementations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BackendKind {
+    #[default]
     Sqlite,
     Postgres,
-}
-
-impl Default for BackendKind {
-    fn default() -> Self {
-        Self::Sqlite
-    }
 }
 
 #[cfg(feature = "postgres")]
@@ -48,7 +43,7 @@ use anyhow::Context;
 
 /// Open a state backend by kind and connection string.
 ///
-/// For SQLite, `connection` is a file path. For Postgres, it is a connection string.
+/// For `SQLite`, `connection` is a file path. For Postgres, it is a connection string.
 ///
 /// # Errors
 ///
@@ -88,7 +83,7 @@ pub fn open_backend(kind: BackendKind, connection: &str) -> anyhow::Result<Arc<d
 
 /// Default connection string for a given backend kind.
 ///
-/// - **SQLite**: `~/.rapidbyte/state.db` (expands `$HOME`)
+/// - **`SQLite`**: `~/.rapidbyte/state.db` (expands `$HOME`)
 /// - **Postgres**: `host=localhost dbname=rapidbyte_state`
 #[must_use]
 pub fn default_connection(kind: BackendKind) -> String {
