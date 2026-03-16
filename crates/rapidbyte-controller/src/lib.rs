@@ -22,6 +22,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod agent_service;
+pub mod config;
 pub mod lease;
 pub mod middleware;
 pub mod pipeline_service;
@@ -35,4 +36,5 @@ pub mod state;
 pub mod store;
 pub mod watcher;
 
-pub use server::{run, ControllerConfig, ServerTlsConfig};
+pub use config::{ControllerConfig, ServerTlsConfig};
+pub use server::run;
