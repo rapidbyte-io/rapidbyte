@@ -11,13 +11,13 @@ use tokio::sync::mpsc as tokio_mpsc;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-use rapidbyte_runtime::{parse_plugin_ref, Frame, LoadedComponent, SandboxOverrides, WasmRuntime};
+use rapidbyte_runtime::{parse_plugin_ref, Frame, SandboxOverrides};
 use rapidbyte_state::StateBackend;
 use rapidbyte_types::catalog::{Catalog, SchemaHint};
 use rapidbyte_types::cursor::{CursorInfo, CursorType, CursorValue};
 use rapidbyte_types::envelope::DlqRecord;
 use rapidbyte_types::error::{CommitState, PluginError, ValidationResult, ValidationStatus};
-use rapidbyte_types::manifest::{Permissions, PluginManifest, ResourceLimits};
+use rapidbyte_types::manifest::{Permissions, PluginManifest};
 use rapidbyte_types::metric::{ReadSummary, WriteSummary};
 use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
 use rapidbyte_types::stream::{PartitionStrategy, StreamContext, StreamLimits, StreamPolicies};
@@ -29,6 +29,7 @@ use crate::config::types::{parse_byte_size, PipelineConfig, PipelineParallelism}
 use crate::error::{compute_backoff, PipelineError};
 use crate::execution::{DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineOutcome};
 use crate::finalizers::checkpoint::correlate_and_persist_cursors;
+use crate::plugin::loader::{load_all_modules, PluginModules};
 use crate::plugin::resolver::{
     load_and_validate_manifest, resolve_plugins, validate_config_against_schema, ResolvedPlugins,
 };
@@ -73,25 +74,6 @@ struct StreamResult {
     recv_secs: f64,
     transform_durations: Vec<f64>,
     dry_run_result: Option<DryRunStreamResult>,
-}
-
-#[derive(Clone)]
-struct LoadedTransformModule {
-    module: LoadedComponent,
-    plugin_id: String,
-    plugin_version: String,
-    config: serde_json::Value,
-    load_ms: u64,
-    permissions: Option<Permissions>,
-    manifest_limits: ResourceLimits,
-}
-
-struct LoadedModules {
-    source_module: LoadedComponent,
-    dest_module: LoadedComponent,
-    source_module_load_ms: u64,
-    dest_module_load_ms: u64,
-    transform_modules: Vec<LoadedTransformModule>,
 }
 
 struct StreamBuild {
@@ -520,7 +502,7 @@ async fn execute_pipeline_once(
                 phase: Phase::Loading,
             },
         );
-        let modules = load_modules(config, &plugins, registry_config).await?;
+        let modules = load_all_modules(config, &plugins, registry_config).await?;
         let config_for_build = config.clone();
         let state_for_build = state_for_execution.clone();
         let max_records = options.limit;
@@ -620,104 +602,6 @@ async fn execute_pipeline_once(
     .await?;
 
     execution_result
-}
-
-async fn load_modules(
-    config: &PipelineConfig,
-    plugins: &ResolvedPlugins,
-    registry_config: &rapidbyte_registry::RegistryConfig,
-) -> Result<LoadedModules, PipelineError> {
-    let runtime = Arc::new(WasmRuntime::new().map_err(PipelineError::Infrastructure)?);
-    tracing::info!(
-        source = %plugins.source_wasm.display(),
-        destination = %plugins.dest_wasm.display(),
-        "Loading plugin modules"
-    );
-
-    let source_wasm_for_load = plugins.source_wasm.clone();
-    let runtime_for_source = runtime.clone();
-    #[allow(clippy::cast_possible_truncation)]
-    let source_load_task = tokio::task::spawn_blocking(move || {
-        let load_start = Instant::now();
-        let module = runtime_for_source
-            .load_module(&source_wasm_for_load)
-            .map_err(PipelineError::Infrastructure)?;
-        // Safety: module load time is always well under u64::MAX milliseconds
-        let load_ms = load_start.elapsed().as_millis() as u64;
-        Ok::<_, PipelineError>((module, load_ms))
-    });
-
-    let dest_wasm_for_load = plugins.dest_wasm.clone();
-    let runtime_for_dest = runtime.clone();
-    #[allow(clippy::cast_possible_truncation)]
-    let dest_load_task = tokio::task::spawn_blocking(move || {
-        let load_start = Instant::now();
-        let module = runtime_for_dest
-            .load_module(&dest_wasm_for_load)
-            .map_err(PipelineError::Infrastructure)?;
-        // Safety: module load time is always well under u64::MAX milliseconds
-        let load_ms = load_start.elapsed().as_millis() as u64;
-        Ok::<_, PipelineError>((module, load_ms))
-    });
-
-    let (source_module, source_module_load_ms) = source_load_task.await.map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!("Source module load task panicked: {e}"))
-    })??;
-    let (dest_module, dest_module_load_ms) = dest_load_task.await.map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!(
-            "Destination module load task panicked: {e}"
-        ))
-    })??;
-
-    tracing::info!(
-        source_ms = source_module_load_ms,
-        dest_ms = dest_module_load_ms,
-        "Plugin modules loaded"
-    );
-
-    let mut transform_modules = Vec::with_capacity(config.transforms.len());
-    for tc in &config.transforms {
-        let wasm_path =
-            rapidbyte_runtime::resolve_plugin(&tc.use_ref, PluginKind::Transform, registry_config)
-                .await
-                .map_err(PipelineError::Infrastructure)?;
-        let manifest = load_and_validate_manifest(&wasm_path, &tc.use_ref, PluginKind::Transform)
-            .map_err(PipelineError::Infrastructure)?;
-        if let Some(ref m) = manifest {
-            validate_config_against_schema(&tc.use_ref, &tc.config, m)
-                .map_err(PipelineError::Infrastructure)?;
-        }
-        let transform_perms = manifest.as_ref().map(|m| m.permissions.clone());
-        let transform_manifest_limits = manifest
-            .as_ref()
-            .map(|m| m.limits.clone())
-            .unwrap_or_default();
-        let load_start = Instant::now();
-        let module = runtime
-            .load_module(&wasm_path)
-            .map_err(PipelineError::Infrastructure)?;
-        #[allow(clippy::cast_possible_truncation)]
-        // Safety: module load time is always well under u64::MAX milliseconds
-        let load_ms = load_start.elapsed().as_millis() as u64;
-        let (id, ver) = parse_plugin_ref(&tc.use_ref);
-        transform_modules.push(LoadedTransformModule {
-            module,
-            plugin_id: id,
-            plugin_version: ver,
-            config: tc.config.clone(),
-            load_ms,
-            permissions: transform_perms,
-            manifest_limits: transform_manifest_limits,
-        });
-    }
-
-    Ok(LoadedModules {
-        source_module,
-        dest_module,
-        source_module_load_ms,
-        dest_module_load_ms,
-        transform_modules,
-    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -953,7 +837,7 @@ async fn collect_transform_results(
 async fn execute_streams(
     config: &PipelineConfig,
     plugins: &ResolvedPlugins,
-    modules: &LoadedModules,
+    modules: &PluginModules,
     stream_build: &StreamBuild,
     state: Arc<dyn StateBackend>,
     options: &ExecutionOptions,
@@ -1517,7 +1401,7 @@ async fn finalize_run(
     attempt: u32,
     start: Instant,
     metric_run_label: &str,
-    modules: &LoadedModules,
+    modules: &PluginModules,
     mut aggregated: AggregatedStreamResults,
     metrics_runtime: &MetricsRuntime<'_>,
 ) -> Result<PipelineResult, PipelineError> {
@@ -2289,7 +2173,7 @@ mod stream_context_partition_tests {
     use super::*;
     use crate::config::types::PipelineConfig;
     use rapidbyte_state::SqliteStateBackend;
-    use rapidbyte_types::manifest::{Roles, SourceCapabilities};
+    use rapidbyte_types::manifest::{ResourceLimits, Roles, SourceCapabilities};
     use rapidbyte_types::wire::ProtocolVersion;
 
     fn test_manifest_with_partitioned_read() -> PluginManifest {
