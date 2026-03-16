@@ -161,10 +161,18 @@ impl AgentServiceImpl {
         let previous_task = self.state.tasks.read().await.get(task_id).cloned();
         let previous_run = self.state.runs.read().await.get_run(run_id).cloned();
 
+        // Release the task assignment. If the lease expired during secret
+        // resolution, the background sweep owns cleanup — bail and let it.
         let released_task = {
             let mut tasks = self.state.tasks.write().await;
             if let Err(release_err) = tasks.release_assignment(task_id, lease_epoch) {
-                tracing::error!(task_id, "failed to release task: {release_err}");
+                tracing::warn!(
+                    task_id,
+                    "cannot release task (lease likely expired): {release_err}"
+                );
+                return Ok(PollTaskResponse {
+                    result: Some(poll_task_response::Result::NoTask(NoTask {})),
+                });
             }
             tasks.get(task_id).cloned()
         };
@@ -221,8 +229,22 @@ impl AgentServiceImpl {
         let previous_task = self.state.tasks.read().await.get(task_id).cloned();
         let previous_run = self.state.runs.read().await.get_run(run_id).cloned();
 
+        // Complete the task as Failed. If the lease expired during secret
+        // resolution, `complete` returns None — the background sweep owns
+        // cleanup, so bail and let it handle the terminal transition.
         let mut tasks = self.state.tasks.write().await;
-        let _ = tasks.complete(task_id, agent_id, lease_epoch, TerminalTaskOutcome::Failed);
+        match tasks.complete(task_id, agent_id, lease_epoch, TerminalTaskOutcome::Failed) {
+            Ok(None) | Err(_) => {
+                tracing::warn!(
+                    task_id,
+                    "cannot complete task (lease likely expired), deferring to sweep"
+                );
+                return Ok(PollTaskResponse {
+                    result: Some(poll_task_response::Result::NoTask(NoTask {})),
+                });
+            }
+            Ok(Some(_)) => {}
+        }
         let failed_task = tasks.get(task_id).cloned();
         drop(tasks);
 
@@ -4283,6 +4305,117 @@ mod tests {
         assert_eq!(
             yaml, "host: ${DB_HOST}",
             "env vars must be preserved for the agent to resolve"
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_failure_with_expired_lease_defers_to_sweep() {
+        // Provider that returns Unavailable after the lease has been expired.
+        struct SlowTransientProvider {
+            state: ControllerState,
+        }
+
+        #[async_trait::async_trait]
+        impl rapidbyte_secrets::SecretProvider for SlowTransientProvider {
+            async fn read_secret(
+                &self,
+                _path: &str,
+                _key: &str,
+            ) -> Result<String, rapidbyte_secrets::SecretError> {
+                // Expire all leases while "resolving" the secret.
+                let expired = self.state.tasks.write().await.expire_leases();
+                assert!(!expired.is_empty(), "should have expired a lease");
+                Err(rapidbyte_secrets::SecretError::Unavailable(
+                    "connection refused".into(),
+                ))
+            }
+        }
+
+        let state = test_state();
+
+        // Use a very short lease so expire_leases() triggers.
+        let svc = crate::pipeline_service::PipelineServiceImpl::new(state.clone());
+        let yaml = b"pipeline: test\nstate:\n  backend: postgres\nsource:\n  config:\n    password: ${vault:secret/db#password}\n";
+        let run_id = svc
+            .submit_pipeline(Request::new(SubmitPipelineRequest {
+                pipeline_yaml_utf8: yaml.to_vec(),
+                execution: Some(ExecutionOptions {
+                    dry_run: false,
+                    limit: None,
+                }),
+                idempotency_key: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner()
+            .run_id;
+
+        // Shorten the lease TTL on the pending task so it expires immediately.
+        {
+            let mut tasks = state.tasks.write().await;
+            let task_records: Vec<_> = tasks
+                .all_tasks()
+                .into_iter()
+                .filter(|t| t.run_id == run_id)
+                .collect();
+            for mut task in task_records {
+                // Set lease with 0-second TTL so it's already expired.
+                task.lease = Some(crate::lease::Lease::new(1, std::time::Duration::ZERO));
+                task.state = crate::scheduler::TaskState::Assigned;
+                task.assigned_agent_id = Some("test-agent".into());
+                tasks.restore_task(task);
+            }
+        }
+
+        let mut providers = rapidbyte_secrets::SecretProviders::new();
+        providers.register(
+            "vault",
+            std::sync::Arc::new(SlowTransientProvider {
+                state: state.clone(),
+            }),
+        );
+        let state = state.with_secrets(providers);
+
+        let agent_svc = AgentServiceImpl::new(state.clone());
+        let agent_resp = agent_svc
+            .register_agent(Request::new(RegisterAgentRequest {
+                max_tasks: 2, // Allow polling even with the expired task.
+                flight_advertise_endpoint: "localhost:9091".into(),
+                plugin_bundle_hash: String::new(),
+                available_plugins: vec![],
+                memory_bytes: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let poll_resp = agent_svc
+            .poll_task(Request::new(PollTaskRequest {
+                agent_id: agent_resp.agent_id,
+                wait_seconds: 0,
+            }))
+            .await
+            .expect("poll_task should not return gRPC error");
+
+        // Should get NoTask — the handler bailed because the lease expired.
+        let result = poll_resp.into_inner().result.unwrap();
+        assert!(
+            matches!(result, poll_task_response::Result::NoTask(_)),
+            "expected NoTask when lease expired during secret resolution"
+        );
+
+        // The task should NOT be in Pending (no stale requeue). The sweep
+        // is responsible for terminal cleanup.
+        let tasks = state.tasks.read().await;
+        let task = tasks
+            .all_tasks()
+            .into_iter()
+            .find(|t| t.run_id == run_id)
+            .expect("task should exist");
+        assert_ne!(
+            task.state,
+            crate::scheduler::TaskState::Pending,
+            "task must not be requeued when lease is stale"
         );
     }
 }

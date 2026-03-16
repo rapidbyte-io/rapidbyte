@@ -153,7 +153,7 @@ fn classify_vault_error(error: vaultrs::error::ClientError, context: &str) -> Se
         vaultrs::error::ClientError::APIError { code, .. } => match *code {
             403 => SecretError::AuthFailed(format!("Vault {context} failed: {error}")),
             404 => SecretError::NotFound(format!("Vault {context}: not found")),
-            500..=599 => SecretError::Unavailable(format!("Vault {context} failed: {error}")),
+            429 | 500..=599 => SecretError::Unavailable(format!("Vault {context} failed: {error}")),
             _ => SecretError::Other(
                 anyhow::Error::new(error).context(format!("Vault {context} failed")),
             ),
@@ -227,6 +227,17 @@ mod tests {
         let classified = classify_vault_error(err, "test");
         assert!(matches!(classified, SecretError::NotFound(_)));
         assert!(!classified.is_transient());
+    }
+
+    #[test]
+    fn classify_api_429_as_unavailable() {
+        let err = vaultrs::error::ClientError::APIError {
+            code: 429,
+            errors: vec!["rate limited".into()],
+        };
+        let classified = classify_vault_error(err, "test");
+        assert!(matches!(classified, SecretError::Unavailable(_)));
+        assert!(classified.is_transient());
     }
 
     #[test]
