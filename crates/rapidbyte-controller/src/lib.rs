@@ -37,5 +37,7 @@ pub mod store;
 pub mod terminal;
 pub mod watcher;
 
-pub use config::{ControllerConfig, ServerTlsConfig};
+pub use config::{
+    AuthConfig, ControllerConfig, RegistryConfig, ServerTlsConfig, TimerConfig, TrustConfig,
+};
 pub use server::run;

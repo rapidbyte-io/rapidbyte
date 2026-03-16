@@ -81,24 +81,27 @@ fn build_config(
         config.metadata_database_url = Some(url.to_string());
     }
     if let Some(key) = signing_key {
-        config.signing_key = key.as_bytes().to_vec();
+        config.auth.signing_key = key.as_bytes().to_vec();
     }
     if let Some(token) = auth_token {
         validate_auth_token(token)?;
-        config.auth_tokens = vec![token.to_string()];
+        config.auth.tokens = vec![token.to_string()];
     }
-    config.allow_unauthenticated = allow_unauthenticated;
-    config.allow_insecure_default_signing_key = allow_insecure_signing_key;
+    config.auth.allow_unauthenticated = allow_unauthenticated;
+    config.auth.allow_insecure_default_signing_key = allow_insecure_signing_key;
     if let Some(timeout) = reconciliation_timeout {
-        config.reconciliation_timeout = timeout;
+        config.timers.reconciliation_timeout = timeout;
     }
-    if config.auth_tokens.is_empty() && !config.allow_unauthenticated {
+    if config.auth.tokens.is_empty() && !config.auth.allow_unauthenticated {
         anyhow::bail!(
             "controller requires --auth-token / RAPIDBYTE_AUTH_TOKEN or --allow-unauthenticated"
         );
     }
-    if config.signing_key == rapidbyte_controller::ControllerConfig::default().signing_key
-        && !config.allow_insecure_default_signing_key
+    if config.auth.signing_key
+        == rapidbyte_controller::ControllerConfig::default()
+            .auth
+            .signing_key
+        && !config.auth.allow_insecure_default_signing_key
     {
         anyhow::bail!(
             "controller requires --signing-key / RAPIDBYTE_SIGNING_KEY or --allow-insecure-signing-key"
@@ -110,10 +113,10 @@ fn build_config(
         );
     }
     config.metrics_listen = metrics_listen.map(str::to_owned);
-    config.registry_url = registry_url.map(str::to_owned);
-    config.registry_insecure = registry_insecure;
-    trust_policy.clone_into(&mut config.trust_policy);
-    config.trusted_key_paths = trusted_key_paths;
+    config.registry.url = registry_url.map(str::to_owned);
+    config.registry.insecure = registry_insecure;
+    trust_policy.clone_into(&mut config.trust.policy);
+    config.trust.trusted_key_paths = trusted_key_paths;
     match (tls_cert, tls_key) {
         (Some(cert), Some(key)) => {
             config.tls = Some(rapidbyte_controller::ServerTlsConfig {
@@ -151,8 +154,8 @@ mod tests {
             vec![],
         )
         .unwrap();
-        assert_eq!(config.auth_tokens, vec!["secret".to_string()]);
-        assert_eq!(config.signing_key, b"signing".to_vec());
+        assert_eq!(config.auth.tokens, vec!["secret".to_string()]);
+        assert_eq!(config.auth.signing_key, b"signing".to_vec());
     }
 
     #[test]
@@ -197,8 +200,8 @@ mod tests {
             vec![],
         )
         .unwrap();
-        assert!(config.auth_tokens.is_empty());
-        assert!(config.allow_unauthenticated);
+        assert!(config.auth.tokens.is_empty());
+        assert!(config.auth.allow_unauthenticated);
     }
 
     #[test]
@@ -291,7 +294,7 @@ mod tests {
             vec![],
         )
         .unwrap();
-        assert!(config.allow_insecure_default_signing_key);
+        assert!(config.auth.allow_insecure_default_signing_key);
     }
 
     #[test]
@@ -393,7 +396,10 @@ mod tests {
             vec![],
         )
         .unwrap();
-        assert_eq!(config.reconciliation_timeout, Duration::from_secs(42));
+        assert_eq!(
+            config.timers.reconciliation_timeout,
+            Duration::from_secs(42)
+        );
     }
 
     #[test]
@@ -415,7 +421,7 @@ mod tests {
             vec![],
         )
         .unwrap();
-        assert_eq!(config.registry_url.as_deref(), Some("registry.example.com"));
-        assert!(config.registry_insecure);
+        assert_eq!(config.registry.url.as_deref(), Some("registry.example.com"));
+        assert!(config.registry.insecure);
     }
 }

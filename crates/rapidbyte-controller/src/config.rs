@@ -12,34 +12,58 @@ pub struct ServerTlsConfig {
     pub key_pem: Vec<u8>,
 }
 
-pub struct ControllerConfig {
-    pub listen_addr: SocketAddr,
+/// Authentication configuration.
+#[derive(Clone)]
+pub struct AuthConfig {
+    /// Bearer tokens for authentication. Empty requires `allow_unauthenticated`.
+    pub tokens: Vec<String>,
+    /// Explicit escape hatch for local/dev use. Production should configure auth.
+    pub allow_unauthenticated: bool,
+    /// Explicit escape hatch for the built-in development preview signing key.
+    pub allow_insecure_default_signing_key: bool,
     pub signing_key: Vec<u8>,
-    pub metadata_database_url: Option<String>,
+}
+
+/// Timer intervals for background tasks.
+#[derive(Clone)]
+pub struct TimerConfig {
     pub agent_reap_interval: Duration,
     pub agent_reap_timeout: Duration,
     pub lease_check_interval: Duration,
     pub reconciliation_timeout: Duration,
     pub preview_cleanup_interval: Duration,
-    /// Bearer tokens for authentication. Empty requires `allow_unauthenticated`.
-    pub auth_tokens: Vec<String>,
-    /// Explicit escape hatch for local/dev use. Production should configure auth.
-    pub allow_unauthenticated: bool,
-    /// Explicit escape hatch for the built-in development preview signing key.
-    pub allow_insecure_default_signing_key: bool,
+}
+
+/// OCI registry configuration broadcast to agents.
+#[derive(Clone)]
+pub struct RegistryConfig {
+    /// OCI registry URL broadcast to agents on registration (e.g. `registry.example.com`).
+    /// Empty or `None` means no registry is configured.
+    pub url: Option<String>,
+    /// Use HTTP instead of HTTPS when agents pull from the registry.
+    pub insecure: bool,
+}
+
+/// Plugin signature trust policy.
+#[derive(Clone)]
+pub struct TrustConfig {
+    /// Plugin signature trust policy broadcast to agents: "skip", "warn", or "verify".
+    pub policy: String,
+    /// Paths to trusted Ed25519 public key PEM files. Contents are read and sent to agents.
+    pub trusted_key_paths: Vec<std::path::PathBuf>,
+}
+
+pub struct ControllerConfig {
+    pub listen_addr: SocketAddr,
+    pub metadata_database_url: Option<String>,
+    pub auth: AuthConfig,
+    pub timers: TimerConfig,
     pub tls: Option<ServerTlsConfig>,
     /// Optional Prometheus metrics listen address (e.g. `127.0.0.1:9190`).
     /// Prometheus endpoint is only started when this is set.
     pub metrics_listen: Option<String>,
-    /// OCI registry URL broadcast to agents on registration (e.g. `registry.example.com`).
-    /// Empty or `None` means no registry is configured.
-    pub registry_url: Option<String>,
-    /// Use HTTP instead of HTTPS when agents pull from the registry.
-    pub registry_insecure: bool,
-    /// Plugin signature trust policy broadcast to agents: "skip", "warn", or "verify".
-    pub trust_policy: String,
-    /// Paths to trusted Ed25519 public key PEM files. Contents are read and sent to agents.
-    pub trusted_key_paths: Vec<std::path::PathBuf>,
+    pub registry: RegistryConfig,
+    pub trust: TrustConfig,
 }
 
 /// Default signing key used when no explicit key is configured.
@@ -51,22 +75,30 @@ impl Default for ControllerConfig {
     fn default() -> Self {
         Self {
             listen_addr: "[::]:9090".parse().unwrap(),
-            signing_key: DEFAULT_SIGNING_KEY.to_vec(),
             metadata_database_url: None,
-            agent_reap_interval: Duration::from_secs(15),
-            agent_reap_timeout: Duration::from_secs(60),
-            lease_check_interval: Duration::from_secs(10),
-            reconciliation_timeout: Duration::from_secs(300),
-            preview_cleanup_interval: Duration::from_secs(30),
-            auth_tokens: Vec::new(),
-            allow_unauthenticated: false,
-            allow_insecure_default_signing_key: false,
+            auth: AuthConfig {
+                tokens: Vec::new(),
+                allow_unauthenticated: false,
+                allow_insecure_default_signing_key: false,
+                signing_key: DEFAULT_SIGNING_KEY.to_vec(),
+            },
+            timers: TimerConfig {
+                agent_reap_interval: Duration::from_secs(15),
+                agent_reap_timeout: Duration::from_secs(60),
+                lease_check_interval: Duration::from_secs(10),
+                reconciliation_timeout: Duration::from_secs(300),
+                preview_cleanup_interval: Duration::from_secs(30),
+            },
             tls: None,
             metrics_listen: None,
-            registry_url: None,
-            registry_insecure: false,
-            trust_policy: "skip".to_owned(),
-            trusted_key_paths: Vec::new(),
+            registry: RegistryConfig {
+                url: None,
+                insecure: false,
+            },
+            trust: TrustConfig {
+                policy: "skip".to_owned(),
+                trusted_key_paths: Vec::new(),
+            },
         }
     }
 }
@@ -79,7 +111,7 @@ pub fn validate(config: &ControllerConfig) -> anyhow::Result<()> {
 }
 
 fn validate_auth_config(config: &ControllerConfig) -> anyhow::Result<()> {
-    if config.auth_tokens.is_empty() && !config.allow_unauthenticated {
+    if config.auth.tokens.is_empty() && !config.auth.allow_unauthenticated {
         anyhow::bail!(
             "Controller auth is required by default. Set --auth-token / RAPIDBYTE_AUTH_TOKEN or pass --allow-unauthenticated for local development."
         );
@@ -88,7 +120,9 @@ fn validate_auth_config(config: &ControllerConfig) -> anyhow::Result<()> {
 }
 
 fn validate_signing_key_config(config: &ControllerConfig) -> anyhow::Result<()> {
-    if config.signing_key == DEFAULT_SIGNING_KEY && !config.allow_insecure_default_signing_key {
+    if config.auth.signing_key == DEFAULT_SIGNING_KEY
+        && !config.auth.allow_insecure_default_signing_key
+    {
         anyhow::bail!(
             "Controller preview signing key must be set explicitly. Pass --signing-key / RAPIDBYTE_SIGNING_KEY or --allow-insecure-default-signing-key for local development."
         );
@@ -130,7 +164,10 @@ mod tests {
     #[test]
     fn allow_unauthenticated_permits_empty_token_list() {
         let config = ControllerConfig {
-            allow_unauthenticated: true,
+            auth: AuthConfig {
+                allow_unauthenticated: true,
+                ..ControllerConfig::default().auth
+            },
             ..Default::default()
         };
         validate_auth_config(&config).unwrap();
@@ -139,7 +176,10 @@ mod tests {
     #[test]
     fn default_signing_key_requires_explicit_override() {
         let config = ControllerConfig {
-            auth_tokens: vec!["secret".into()],
+            auth: AuthConfig {
+                tokens: vec!["secret".into()],
+                ..ControllerConfig::default().auth
+            },
             ..Default::default()
         };
         let err = validate_signing_key_config(&config).unwrap_err();
@@ -151,8 +191,11 @@ mod tests {
     #[test]
     fn metadata_database_url_is_required() {
         let config = ControllerConfig {
-            auth_tokens: vec!["secret".into()],
-            signing_key: b"signing".to_vec(),
+            auth: AuthConfig {
+                tokens: vec!["secret".into()],
+                signing_key: b"signing".to_vec(),
+                ..ControllerConfig::default().auth
+            },
             ..Default::default()
         };
         let err = metadata_database_url(&config).unwrap_err();
@@ -164,8 +207,11 @@ mod tests {
     #[test]
     fn metadata_database_url_rejects_whitespace() {
         let config = ControllerConfig {
-            auth_tokens: vec!["secret".into()],
-            signing_key: b"signing".to_vec(),
+            auth: AuthConfig {
+                tokens: vec!["secret".into()],
+                signing_key: b"signing".to_vec(),
+                ..ControllerConfig::default().auth
+            },
             metadata_database_url: Some("   ".into()),
             ..Default::default()
         };
@@ -178,8 +224,11 @@ mod tests {
     #[test]
     fn metadata_database_url_accepts_non_empty_value() {
         let config = ControllerConfig {
-            auth_tokens: vec!["secret".into()],
-            signing_key: b"signing".to_vec(),
+            auth: AuthConfig {
+                tokens: vec!["secret".into()],
+                signing_key: b"signing".to_vec(),
+                ..ControllerConfig::default().auth
+            },
             metadata_database_url: Some("postgresql://localhost/controller".into()),
             ..Default::default()
         };
@@ -192,8 +241,11 @@ mod tests {
     #[test]
     fn allow_insecure_default_signing_key_permits_dev_default() {
         let config = ControllerConfig {
-            auth_tokens: vec!["secret".into()],
-            allow_insecure_default_signing_key: true,
+            auth: AuthConfig {
+                tokens: vec!["secret".into()],
+                allow_insecure_default_signing_key: true,
+                ..ControllerConfig::default().auth
+            },
             ..Default::default()
         };
         validate_signing_key_config(&config).unwrap();

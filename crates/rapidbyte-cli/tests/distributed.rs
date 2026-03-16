@@ -113,12 +113,18 @@ fn spawn_controller(
         let config = ControllerConfig {
             listen_addr: ctrl_addr.parse().unwrap(),
             metadata_database_url: Some(metadata_database_url),
-            agent_reap_interval: Duration::from_secs(60),
-            agent_reap_timeout: Duration::from_secs(120),
-            lease_check_interval,
-            reconciliation_timeout,
-            allow_unauthenticated: true,
-            signing_key,
+            auth: rapidbyte_controller::AuthConfig {
+                allow_unauthenticated: true,
+                signing_key,
+                ..ControllerConfig::default().auth
+            },
+            timers: rapidbyte_controller::TimerConfig {
+                agent_reap_interval: Duration::from_secs(60),
+                agent_reap_timeout: Duration::from_secs(120),
+                lease_check_interval,
+                reconciliation_timeout,
+                ..ControllerConfig::default().timers
+            },
             ..Default::default()
         };
         let guard =
@@ -179,7 +185,7 @@ async fn distributed_submit_and_complete() {
         metadata.scoped_url.clone(),
         signing_key.clone(),
         Duration::from_secs(60),
-        ControllerConfig::default().reconciliation_timeout,
+        ControllerConfig::default().timers.reconciliation_timeout,
     );
 
     let controller_probe = wait_for_controller(&ctrl_url).await;

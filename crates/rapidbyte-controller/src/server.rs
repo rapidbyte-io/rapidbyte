@@ -39,39 +39,40 @@ pub async fn run(
 
     let metadata_store = initialize_metadata_store(&config).await?;
 
-    if config.signing_key == DEFAULT_SIGNING_KEY {
+    if config.auth.signing_key == DEFAULT_SIGNING_KEY {
         tracing::warn!(
             "Using default signing key — set RAPIDBYTE_SIGNING_KEY for production deployments"
         );
     }
-    if config.allow_unauthenticated {
+    if config.auth.allow_unauthenticated {
         tracing::warn!(
             "Controller authentication is disabled via explicit allow_unauthenticated override"
         );
     }
 
-    let state = ControllerState::from_metadata_store(&config.signing_key, metadata_store).await?;
+    let state =
+        ControllerState::from_metadata_store(&config.auth.signing_key, metadata_store).await?;
     let state = state.with_secrets(secrets);
 
     background::spawn_reaper(
         state.clone(),
-        config.agent_reap_interval,
-        config.agent_reap_timeout,
+        config.timers.agent_reap_interval,
+        config.timers.agent_reap_timeout,
     );
     background::spawn_lease_sweep(
         state.clone(),
-        config.lease_check_interval,
-        config.reconciliation_timeout,
+        config.timers.lease_check_interval,
+        config.timers.reconciliation_timeout,
     );
-    background::spawn_preview_cleanup(state.clone(), config.preview_cleanup_interval);
+    background::spawn_preview_cleanup(state.clone(), config.timers.preview_cleanup_interval);
 
-    let auth = BearerAuthInterceptor::new(config.auth_tokens.clone());
+    let auth = BearerAuthInterceptor::new(config.auth.tokens.clone());
 
     let pipeline_svc =
         PipelineServiceServer::with_interceptor(PipelineHandler::new(state.clone()), auth.clone());
     // Read trusted key PEM contents from files
     let mut trusted_key_pems: Vec<String> = Vec::new();
-    for path in &config.trusted_key_paths {
+    for path in &config.trust.trusted_key_paths {
         let pem = std::fs::read_to_string(path).map_err(|e| {
             anyhow::anyhow!("Failed to read trusted key file {}: {e}", path.display())
         })?;
@@ -81,9 +82,9 @@ pub async fn run(
     let agent_svc = AgentServiceServer::with_interceptor(
         AgentHandler::with_trust_config(
             state,
-            config.registry_url.clone().unwrap_or_default(),
-            config.registry_insecure,
-            config.trust_policy.clone(),
+            config.registry.url.clone().unwrap_or_default(),
+            config.registry.insecure,
+            config.trust.policy.clone(),
             trusted_key_pems,
         ),
         auth,
@@ -122,8 +123,11 @@ mod tests {
             Arc::new(rapidbyte_metrics::init("test-controller").expect("otel init should succeed"));
         let err = run(
             ControllerConfig {
-                auth_tokens: vec!["secret".into()],
-                signing_key: b"test-signing-key".to_vec(),
+                auth: crate::config::AuthConfig {
+                    tokens: vec!["secret".into()],
+                    signing_key: b"test-signing-key".to_vec(),
+                    ..ControllerConfig::default().auth
+                },
                 metrics_listen: Some(addr.to_string()),
                 ..Default::default()
             },
