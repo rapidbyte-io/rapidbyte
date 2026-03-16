@@ -65,7 +65,9 @@ pub(crate) fn run_destination_stream(
         &ctx.module.component,
         &linker,
     )
-    .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
+    .map_err(|e| {
+        PipelineError::infra(format!("Failed to instantiate destination bindings: {e}"))
+    })?;
 
     let iface = bindings.rapidbyte_plugin_destination();
     let vm_setup_secs = vm_setup_start.elapsed().as_secs_f64();
@@ -80,7 +82,7 @@ pub(crate) fn run_destination_stream(
     );
     let session = iface
         .call_open(&mut store, &dest_config_json)
-        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?
+        .map_err(|e| PipelineError::infra(format!("Failed to call destination open: {e}")))?
         .map_err(|err| PipelineError::Plugin(dest_error_to_sdk(err)))?;
 
     let recv_start = Instant::now();
@@ -98,15 +100,15 @@ pub(crate) fn run_destination_stream(
     };
     let run_result = iface
         .call_run(&mut store, session, &run_request)
-        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
+        .map_err(|e| PipelineError::infra(format!("Failed to call destination run: {e}")))?;
 
     let summary = match run_result {
         Ok(summary) => {
             let Some(summary) = summary.write else {
                 let _ = iface.call_close(&mut store, session);
-                return Err(PipelineError::Infrastructure(anyhow::anyhow!(
-                    "destination run summary missing write section"
-                )));
+                return Err(PipelineError::infra(
+                    "destination run summary missing write section",
+                ));
             };
             WriteSummary {
                 records_written: summary.records_written,
@@ -130,9 +132,9 @@ pub(crate) fn run_destination_stream(
     );
 
     {
-        let mut s = stats.lock().map_err(|_| {
-            PipelineError::Infrastructure(anyhow::anyhow!("run stats mutex poisoned"))
-        })?;
+        let mut s = stats
+            .lock()
+            .map_err(|_| PipelineError::infra("run stats mutex poisoned"))?;
         s.records_written += summary.records_written;
         s.bytes_written += summary.bytes_written;
     }

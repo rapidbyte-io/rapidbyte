@@ -210,9 +210,7 @@ async fn execute_pipeline_once(
                 state_for_run.start_run(&pipeline_id_for_run, &StreamName::new("all"))
             })
             .await
-            .map_err(|e| {
-                PipelineError::Infrastructure(anyhow::anyhow!("start_run task panicked: {e}"))
-            })?
+            .map_err(|e| PipelineError::task_panicked("start_run", e))?
             .map_err(|e| PipelineError::Infrastructure(e.into()))?
         };
         let metric_run_label = if options.dry_run {
@@ -244,11 +242,7 @@ async fn execute_pipeline_once(
             )
         })
         .await
-        .map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!(
-                "build_stream_contexts task panicked: {e}"
-            ))
-        })??;
+        .map_err(|e| PipelineError::task_panicked("build_stream_contexts", e))??;
         send_progress(
             &progress_tx,
             ProgressEvent::PhaseChange {
@@ -441,7 +435,7 @@ async fn execute_streams(
             }
             permit = semaphore.clone().acquire_owned() => {
                 permit.map_err(|e| {
-                PipelineError::Infrastructure(anyhow::anyhow!("Semaphore closed: {e}"))
+                PipelineError::infra(format!("Semaphore closed: {e}"))
                 })?
             }
         };
@@ -579,15 +573,13 @@ async fn execute_streams(
 
     let dlq_records = run_dlq_records
         .lock()
-        .map_err(|_| {
-            PipelineError::Infrastructure(anyhow::anyhow!("DLQ collection mutex poisoned"))
-        })?
+        .map_err(|_| PipelineError::infra("DLQ collection mutex poisoned"))?
         .drain(..)
         .collect();
 
     let final_stats = stats
         .lock()
-        .map_err(|_| PipelineError::Infrastructure(anyhow::anyhow!("run stats mutex poisoned")))?
+        .map_err(|_| PipelineError::infra("run stats mutex poisoned"))?
         .clone();
 
     Ok(AggregatedStreamResults {

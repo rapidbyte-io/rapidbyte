@@ -58,9 +58,12 @@ pub(crate) fn run_source_stream(
         Ok(())
     })
     .map_err(PipelineError::Infrastructure)?;
-    let bindings =
-        source_bindings::RapidbyteSource::instantiate(&mut store, &ctx.module.component, &linker)
-            .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
+    let bindings = source_bindings::RapidbyteSource::instantiate(
+        &mut store,
+        &ctx.module.component,
+        &linker,
+    )
+    .map_err(|e| PipelineError::infra(format!("Failed to instantiate source bindings: {e}")))?;
 
     let iface = bindings.rapidbyte_plugin_source();
 
@@ -74,7 +77,7 @@ pub(crate) fn run_source_stream(
     );
     let session = iface
         .call_open(&mut store, &source_config_json)
-        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?
+        .map_err(|e| PipelineError::infra(format!("Failed to call source open: {e}")))?
         .map_err(|err| PipelineError::Plugin(source_error_to_sdk(err)))?;
 
     let ctx_json = serialize_stream_context(ctx.stream_ctx)?;
@@ -88,15 +91,15 @@ pub(crate) fn run_source_stream(
     };
     let run_result = iface
         .call_run(&mut store, session, &run_request)
-        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
+        .map_err(|e| PipelineError::infra(format!("Failed to call source run: {e}")))?;
 
     let summary = match run_result {
         Ok(summary) => {
             let Some(summary) = summary.read else {
                 let _ = iface.call_close(&mut store, session);
-                return Err(PipelineError::Infrastructure(anyhow::anyhow!(
-                    "source run summary missing read section"
-                )));
+                return Err(PipelineError::infra(
+                    "source run summary missing read section",
+                ));
             };
             ReadSummary {
                 records_read: summary.records_read,
@@ -120,9 +123,9 @@ pub(crate) fn run_source_stream(
     );
 
     {
-        let mut s = stats.lock().map_err(|_| {
-            PipelineError::Infrastructure(anyhow::anyhow!("run stats mutex poisoned"))
-        })?;
+        let mut s = stats
+            .lock()
+            .map_err(|_| PipelineError::infra("run stats mutex poisoned"))?;
         s.records_read += summary.records_read;
         s.bytes_read += summary.bytes_read;
     }

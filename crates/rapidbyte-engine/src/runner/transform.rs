@@ -68,7 +68,7 @@ pub(crate) fn run_transform_stream(
         &ctx.module.component,
         &linker,
     )
-    .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
+    .map_err(|e| PipelineError::infra(format!("Failed to instantiate transform bindings: {e}")))?;
 
     let iface = bindings.rapidbyte_plugin_transform();
 
@@ -82,7 +82,7 @@ pub(crate) fn run_transform_stream(
     );
     let session = iface
         .call_open(&mut store, &transform_config_json)
-        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?
+        .map_err(|e| PipelineError::infra(format!("Failed to call transform open: {e}")))?
         .map_err(|err| PipelineError::Plugin(transform_error_to_sdk(err)))?;
 
     let ctx_json = serialize_stream_context(ctx.stream_ctx)?;
@@ -96,15 +96,15 @@ pub(crate) fn run_transform_stream(
     };
     let run_result = iface
         .call_run(&mut store, session, &run_request)
-        .map_err(|e| PipelineError::Infrastructure(anyhow::anyhow!(e)))?;
+        .map_err(|e| PipelineError::infra(format!("Failed to call transform run: {e}")))?;
 
     let summary = match run_result {
         Ok(summary) => {
             let Some(summary) = summary.transform else {
                 let _ = iface.call_close(&mut store, session);
-                return Err(PipelineError::Infrastructure(anyhow::anyhow!(
-                    "transform run summary missing transform section"
-                )));
+                return Err(PipelineError::infra(
+                    "transform run summary missing transform section",
+                ));
             };
             TransformSummary {
                 records_in: summary.records_in,

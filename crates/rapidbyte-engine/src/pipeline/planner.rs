@@ -179,18 +179,16 @@ pub(crate) fn build_stream_contexts(
         "Autotune decision resolved"
     );
     let max_batch = parse_byte_size(&config.resources.max_batch_bytes).map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!(
+        PipelineError::infra(format!(
             "Invalid max_batch_bytes '{}': {}",
-            config.resources.max_batch_bytes,
-            e
+            config.resources.max_batch_bytes, e
         ))
     })?;
     let checkpoint_interval = parse_byte_size(&config.resources.checkpoint_interval_bytes)
         .map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!(
+            PipelineError::infra(format!(
                 "Invalid checkpoint_interval_bytes '{}': {}",
-                config.resources.checkpoint_interval_bytes,
-                e
+                config.resources.checkpoint_interval_bytes, e
             ))
         })?;
 

@@ -73,9 +73,9 @@ pub(crate) async fn execute_single_stream(
     ) = channels.into_iter().unzip();
 
     let source_tx = senders.remove(0);
-    let dest_rx = receivers.pop().ok_or_else(|| {
-        PipelineError::Infrastructure(anyhow::anyhow!("Missing destination receiver"))
-    })?;
+    let dest_rx = receivers
+        .pop()
+        .ok_or_else(|| PipelineError::infra("Missing destination receiver"))?;
 
     let stream_ctx_for_src = stream_ctx.clone();
     let stream_ctx_for_dst = stream_ctx.clone();
@@ -204,20 +204,18 @@ async fn run_normal_destination(
     });
 
     let src_result = src_handle.await.map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!(
+        PipelineError::infra(format!(
             "Source task panicked for stream '{}': {}",
-            stream_ctx.stream_name,
-            e
+            stream_ctx.stream_name, e
         ))
     })?;
 
     let transforms = collect_transform_results(transform_handles, &stream_ctx.stream_name).await?;
 
     let dst_result = dst_handle.await.map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!(
+        PipelineError::infra(format!(
             "Destination task panicked for stream '{}': {}",
-            stream_ctx.stream_name,
-            e
+            stream_ctx.stream_name, e
         ))
     })?;
 
@@ -264,20 +262,18 @@ async fn run_dry_run_collector(
     });
 
     let src_result = src_handle.await.map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!(
+        PipelineError::infra(format!(
             "Source task panicked for stream '{}': {}",
-            stream_ctx.stream_name,
-            e
+            stream_ctx.stream_name, e
         ))
     })?;
 
     let transforms = collect_transform_results(transform_handles, &stream_ctx.stream_name).await?;
 
     let collected = collector_handle.await.map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!(
+        PipelineError::infra(format!(
             "Dry-run collector task panicked for stream '{}': {}",
-            stream_ctx.stream_name,
-            e
+            stream_ctx.stream_name, e
         ))
     })??;
 
@@ -327,13 +323,8 @@ fn collect_dry_run_frames(
             break 'recv;
         };
         let ipc_bytes = match compression {
-            Some(codec) => {
-                rapidbyte_runtime::compression::decompress(codec, &data).map_err(|e| {
-                    PipelineError::Infrastructure(anyhow::anyhow!(
-                        "Dry-run decompression failed: {e}"
-                    ))
-                })?
-            }
+            Some(codec) => rapidbyte_runtime::compression::decompress(codec, &data)
+                .map_err(|e| PipelineError::infra(format!("Dry-run decompression failed: {e}")))?,
             None => data.to_vec(),
         };
 

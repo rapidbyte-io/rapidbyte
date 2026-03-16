@@ -111,7 +111,7 @@ pub(crate) async fn collect_stream_task_results(
                 // Expected: sibling tasks cancelled after first stream failure.
             }
             Err(join_err) => {
-                return Err(PipelineError::Infrastructure(anyhow::anyhow!(
+                return Err(PipelineError::infra(format!(
                     "Stream task panicked: {join_err}"
                 )));
             }
@@ -136,7 +136,7 @@ pub(crate) async fn collect_transform_results(
     let mut first_error: Option<PipelineError> = None;
     for (i, t_handle) in transform_handles {
         let result = t_handle.await.map_err(|e| {
-            PipelineError::Infrastructure(anyhow::anyhow!(
+            PipelineError::infra(format!(
                 "Transform {i} task panicked for stream '{stream_name}': {e}"
             ))
         })?;
@@ -214,9 +214,7 @@ mod stream_task_collection_tests {
         });
         join_set.spawn(async {
             tokio::time::sleep(Duration::from_millis(25)).await;
-            Err(PipelineError::Infrastructure(anyhow::anyhow!(
-                "expected failure"
-            )))
+            Err(PipelineError::infra("expected failure"))
         });
 
         let start = Instant::now();

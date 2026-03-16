@@ -56,9 +56,7 @@ pub(crate) async fn run_destination_preflight(
             }
             permit = preflight_semaphore.clone().acquire_owned() => {
                 permit.map_err(|e| {
-                    PipelineError::Infrastructure(anyhow::anyhow!(
-                        "Preflight semaphore closed: {e}"
-                    ))
+                    PipelineError::infra(format!("Preflight semaphore closed: {e}"))
                 })?
             }
         };
@@ -72,7 +70,7 @@ pub(crate) async fn run_destination_preflight(
             let _permit = permit;
             let (tx, rx) = sync_mpsc::sync_channel::<Frame>(1);
             tx.send(Frame::EndStream).map_err(|e| {
-                PipelineError::Infrastructure(anyhow::anyhow!(
+                PipelineError::infra(format!(
                     "Failed to prime destination preflight channel for stream '{stream_name}': {e}",
                 ))
             })?;
@@ -103,9 +101,10 @@ pub(crate) async fn run_destination_preflight(
             })
             .await
             .map_err(|e| {
-                PipelineError::Infrastructure(anyhow::anyhow!(
-                    "Destination preflight task panicked for stream '{stream_name}': {e}",
-                ))
+                PipelineError::task_panicked(
+                    &format!("Destination preflight for stream '{stream_name}'"),
+                    e,
+                )
             })??;
 
             tracing::info!(
@@ -127,7 +126,7 @@ pub(crate) async fn run_destination_preflight(
             }
             Err(join_err) => {
                 preflight_join_set.abort_all();
-                return Err(PipelineError::Infrastructure(anyhow::anyhow!(
+                return Err(PipelineError::infra(format!(
                     "Destination preflight join error: {join_err}"
                 )));
             }

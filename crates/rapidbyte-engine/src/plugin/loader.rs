@@ -78,14 +78,12 @@ pub(crate) async fn load_all_modules(
     let source_load_task = spawn_module_load(runtime.clone(), plugins.source_wasm.clone());
     let dest_load_task = spawn_module_load(runtime.clone(), plugins.dest_wasm.clone());
 
-    let source_loaded = source_load_task.await.map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!("Source module load task panicked: {e}"))
-    })??;
-    let dest_loaded = dest_load_task.await.map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!(
-            "Destination module load task panicked: {e}"
-        ))
-    })??;
+    let source_loaded = source_load_task
+        .await
+        .map_err(|e| PipelineError::task_panicked("Source module load", e))??;
+    let dest_loaded = dest_load_task
+        .await
+        .map_err(|e| PipelineError::task_panicked("Destination module load", e))??;
 
     tracing::info!(
         source_ms = source_loaded.load_ms,

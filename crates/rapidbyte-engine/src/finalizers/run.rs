@@ -209,9 +209,7 @@ async fn persist_dlq(
         crate::finalizers::dlq::persist_dlq_records(state.as_ref(), &pipeline_id, run_id, &records)
     })
     .await
-    .map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!("persist_dlq_records task panicked: {e}"))
-    })?
+    .map_err(|e| PipelineError::task_panicked("persist_dlq_records", e))?
     .map_err(|e| PipelineError::Infrastructure(e.into()))?;
     Ok(())
 }
@@ -239,11 +237,7 @@ pub(crate) async fn persist_run_state(
         )
     })
     .await
-    .map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!(
-            "correlate_and_persist_cursors task panicked: {e}"
-        ))
-    })?;
+    .map_err(|e| PipelineError::task_panicked("correlate_and_persist_cursors", e))?;
 
     let cursors_advanced = match cursor_result {
         Ok(n) => n,
@@ -272,9 +266,7 @@ pub(crate) async fn persist_run_state(
         )
     })
     .await
-    .map_err(|e| {
-        PipelineError::Infrastructure(anyhow::anyhow!("persist_dlq_records task panicked: {e}"))
-    })?;
+    .map_err(|e| PipelineError::task_panicked("persist_dlq_records", e))?;
     if let Err(error) = dlq_result {
         let failed_stats = RunStats {
             records_read: aggregated.total_read_summary.records_read,

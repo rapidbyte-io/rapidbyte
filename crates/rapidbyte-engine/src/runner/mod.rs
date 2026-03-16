@@ -111,9 +111,7 @@ pub(crate) fn extract_checkpoints(
 ) -> Result<Vec<Checkpoint>, PipelineError> {
     checkpoints
         .lock()
-        .map_err(|_| {
-            PipelineError::Infrastructure(anyhow::anyhow!("{role} checkpoint mutex poisoned"))
-        })
+        .map_err(|_| PipelineError::infra(format!("{role} checkpoint mutex poisoned")))
         .map(|mut guard| guard.drain(..).collect())
 }
 
