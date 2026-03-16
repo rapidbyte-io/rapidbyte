@@ -265,8 +265,8 @@ fn status_event_for_run(record: &crate::run_state::RunRecord) -> Option<RunEvent
 fn to_timestamp(time: std::time::SystemTime) -> Timestamp {
     let duration = time.duration_since(UNIX_EPOCH).unwrap_or_default();
     Timestamp {
-        seconds: duration.as_secs().cast_signed(),
-        nanos: duration.subsec_nanos().cast_signed(),
+        seconds: i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
+        nanos: i32::try_from(duration.subsec_nanos()).unwrap_or(0),
     }
 }
 

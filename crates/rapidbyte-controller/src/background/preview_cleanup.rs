@@ -6,12 +6,20 @@ use tracing::info;
 
 use crate::state::ControllerState;
 
+/// Maximum number of preview delete retries per cleanup tick.
+/// Bounds work during metadata store outages to avoid amplifying failures.
+const MAX_DELETE_RETRIES_PER_TICK: usize = 50;
+
 async fn cleanup_expired_previews(state: &ControllerState) -> usize {
     let expired_run_ids = { state.previews.write().await.remove_expired() };
     let pending = {
         let mut retry_set = state.preview_delete_retries.write().await;
         retry_set.extend(expired_run_ids);
-        retry_set.iter().cloned().collect::<Vec<_>>()
+        retry_set
+            .iter()
+            .take(MAX_DELETE_RETRIES_PER_TICK)
+            .cloned()
+            .collect::<Vec<_>>()
     };
     let mut succeeded = Vec::new();
     for run_id in &pending {

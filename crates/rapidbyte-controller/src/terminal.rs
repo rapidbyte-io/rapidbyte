@@ -74,8 +74,10 @@ impl TerminalOutcome {
 /// Transition a run to its terminal state, set error/metrics, publish
 /// the terminal event to watchers, and record completion metrics.
 ///
-/// This is the single place where terminal transitions happen.
-/// Callers must NOT transition the run before calling this function.
+/// The transition is idempotent — callers that need to persist the
+/// terminal state durably before publishing MAY pre-transition the run.
+/// In that case, `finalize_terminal` handles event publishing and
+/// metric recording only (the redundant transition is a harmless no-op).
 pub async fn finalize_terminal(state: &ControllerState, run_id: &str, outcome: TerminalOutcome) {
     let target = outcome.target_state();
 

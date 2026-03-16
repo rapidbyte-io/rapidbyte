@@ -316,7 +316,7 @@ mod tests {
             .unwrap()
             .into_inner()
             .run_id;
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let second = svc
             .submit_pipeline(Request::new(SubmitPipelineRequest {
                 pipeline_yaml_utf8: b"pipeline: second\nstate:\n  backend: postgres\n".to_vec(),

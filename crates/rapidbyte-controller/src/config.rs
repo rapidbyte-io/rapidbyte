@@ -111,11 +111,13 @@ impl Default for ControllerConfig {
 pub fn validate(config: &ControllerConfig) -> anyhow::Result<()> {
     validate_auth_config(config)?;
     validate_signing_key_config(config)?;
+    validate_trust_config(config)?;
     Ok(())
 }
 
 fn validate_auth_config(config: &ControllerConfig) -> anyhow::Result<()> {
-    if config.auth.tokens.is_empty() && !config.auth.allow_unauthenticated {
+    let has_valid_token = config.auth.tokens.iter().any(|t| !t.trim().is_empty());
+    if !has_valid_token && !config.auth.allow_unauthenticated {
         anyhow::bail!(
             "Controller auth is required by default. Set --auth-token / RAPIDBYTE_AUTH_TOKEN or pass --allow-unauthenticated for local development."
         );
@@ -129,6 +131,21 @@ fn validate_signing_key_config(config: &ControllerConfig) -> anyhow::Result<()> 
     {
         anyhow::bail!(
             "Controller preview signing key must be set explicitly. Pass --signing-key / RAPIDBYTE_SIGNING_KEY or --allow-insecure-default-signing-key for local development."
+        );
+    }
+    Ok(())
+}
+
+fn validate_trust_config(config: &ControllerConfig) -> anyhow::Result<()> {
+    match config.trust.policy.as_str() {
+        "skip" | "warn" | "verify" => {}
+        other => {
+            anyhow::bail!("Invalid trust policy \"{other}\". Must be one of: skip, warn, verify.")
+        }
+    }
+    if config.trust.policy == "verify" && config.trust.trusted_key_paths.is_empty() {
+        anyhow::bail!(
+            "Trust policy \"verify\" requires at least one trusted key path. Set --trusted-key-path."
         );
     }
     Ok(())

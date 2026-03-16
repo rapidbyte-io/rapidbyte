@@ -20,10 +20,11 @@ pub fn spawn_reaper(
             for agent_id in &dead {
                 if let Err(error) = state.delete_agent(agent_id).await {
                     tracing::error!(agent_id, ?error, "failed to delete reaped agent");
+                } else {
+                    info!(agent_id, "Reaped dead agent");
+                    rapidbyte_metrics::instruments::controller::heartbeat_timeouts().add(1, &[]);
+                    rapidbyte_metrics::instruments::controller::active_agents().add(-1, &[]);
                 }
-                info!(agent_id, "Reaped dead agent");
-                rapidbyte_metrics::instruments::controller::heartbeat_timeouts().add(1, &[]);
-                rapidbyte_metrics::instruments::controller::active_agents().add(-1, &[]);
             }
         }
     })
