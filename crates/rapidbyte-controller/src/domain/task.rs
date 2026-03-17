@@ -82,6 +82,10 @@ impl Task {
     // --- State transitions ---
 
     /// Pending -> Running
+    ///
+    /// # Errors
+    ///
+    /// Returns `DomainError::InvalidTransition` if the task is not `Pending`.
     pub fn assign(&mut self, agent_id: String, lease: Lease) -> Result<(), DomainError> {
         if self.state != TaskState::Pending {
             return Err(DomainError::InvalidTransition {
@@ -96,6 +100,10 @@ impl Task {
     }
 
     /// Running -> Completed
+    ///
+    /// # Errors
+    ///
+    /// Returns `DomainError::InvalidTransition` if the task is not `Running`.
     pub fn complete(&mut self) -> Result<(), DomainError> {
         if self.state != TaskState::Running {
             return Err(DomainError::InvalidTransition {
@@ -108,6 +116,10 @@ impl Task {
     }
 
     /// Running -> Failed
+    ///
+    /// # Errors
+    ///
+    /// Returns `DomainError::InvalidTransition` if the task is not `Running`.
     pub fn fail(&mut self) -> Result<(), DomainError> {
         if self.state != TaskState::Running {
             return Err(DomainError::InvalidTransition {
@@ -120,6 +132,10 @@ impl Task {
     }
 
     /// Running -> Cancelled
+    ///
+    /// # Errors
+    ///
+    /// Returns `DomainError::InvalidTransition` if the task is not `Running`.
     pub fn cancel(&mut self) -> Result<(), DomainError> {
         if self.state != TaskState::Running {
             return Err(DomainError::InvalidTransition {
@@ -147,7 +163,11 @@ impl Task {
         Ok(())
     }
 
-    /// Running -> TimedOut
+    /// Running -> `TimedOut`
+    ///
+    /// # Errors
+    ///
+    /// Returns `DomainError::InvalidTransition` if the task is not `Running`.
     pub fn timeout(&mut self) -> Result<(), DomainError> {
         if self.state != TaskState::Running {
             return Err(DomainError::InvalidTransition {
@@ -162,6 +182,11 @@ impl Task {
     // --- Validation ---
 
     /// Validates that the given agent and lease epoch match the task's assigned values.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DomainError::AgentMismatch` or `DomainError::LeaseMismatch` if
+    /// the provided values do not match the task's assigned agent or lease epoch.
     pub fn validate_lease(&self, agent_id: &str, lease_epoch: u64) -> Result<(), DomainError> {
         if let Some(ref assigned_agent) = self.agent_id {
             if assigned_agent != agent_id {

@@ -66,11 +66,11 @@ fn run_from_row(row: &sqlx::postgres::PgRow) -> Result<Run, RepositoryError> {
         duration_ms,
     ) {
         (Some(rr), Some(rw), Some(br), Some(bw), Some(dm)) => Some(RunMetrics {
-            rows_read: rr as u64,
-            rows_written: rw as u64,
-            bytes_read: br as u64,
-            bytes_written: bw as u64,
-            duration_ms: dm as u64,
+            rows_read: rr.cast_unsigned(),
+            rows_written: rw.cast_unsigned(),
+            bytes_read: br.cast_unsigned(),
+            bytes_written: bw.cast_unsigned(),
+            duration_ms: dm.cast_unsigned(),
         }),
         _ => None,
     };
@@ -81,9 +81,9 @@ fn run_from_row(row: &sqlx::postgres::PgRow) -> Result<Run, RepositoryError> {
         pipeline_name,
         pipeline_yaml,
         state,
-        attempt as u32,
-        max_retries as u32,
-        timeout_seconds.map(|t| t as u64),
+        attempt.cast_unsigned(),
+        max_retries.cast_unsigned(),
+        timeout_seconds.map(i64::cast_unsigned),
         cancel_requested,
         error,
         metrics,
@@ -134,11 +134,11 @@ impl RunRepository for PgRunRepository {
         let (rows_read, rows_written, bytes_read, bytes_written, duration_ms) = match run.metrics()
         {
             Some(m) => (
-                Some(m.rows_read as i64),
-                Some(m.rows_written as i64),
-                Some(m.bytes_read as i64),
-                Some(m.bytes_written as i64),
-                Some(m.duration_ms as i64),
+                Some(m.rows_read.cast_signed()),
+                Some(m.rows_written.cast_signed()),
+                Some(m.bytes_read.cast_signed()),
+                Some(m.bytes_written.cast_signed()),
+                Some(m.duration_ms.cast_signed()),
             ),
             None => (None, None, None, None, None),
         };
@@ -170,9 +170,9 @@ impl RunRepository for PgRunRepository {
         .bind(run.pipeline_yaml())
         .bind(run_state_to_str(run.state()))
         .bind(run.is_cancel_requested())
-        .bind(run.current_attempt() as i32)
-        .bind(run.max_retries() as i32)
-        .bind(run.timeout_seconds().map(|t| t as i64))
+        .bind(run.current_attempt().cast_signed())
+        .bind(run.max_retries().cast_signed())
+        .bind(run.timeout_seconds().map(u64::cast_signed))
         .bind(error_code)
         .bind(error_message)
         .bind(rows_read)
@@ -247,7 +247,7 @@ impl RunRepository for PgRunRepository {
                 .map_err(box_err)?
         };
 
-        let has_next = rows.len() as i64 > i64::from(pagination.page_size);
+        let has_next = rows.len() > pagination.page_size as usize;
         let take = if has_next {
             pagination.page_size as usize
         } else {

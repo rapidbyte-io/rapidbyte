@@ -29,11 +29,11 @@ async fn insert_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
 
     let (rows_read, rows_written, bytes_read, bytes_written, duration_ms) = match run.metrics() {
         Some(m) => (
-            Some(m.rows_read as i64),
-            Some(m.rows_written as i64),
-            Some(m.bytes_read as i64),
-            Some(m.bytes_written as i64),
-            Some(m.duration_ms as i64),
+            Some(m.rows_read.cast_signed()),
+            Some(m.rows_written.cast_signed()),
+            Some(m.bytes_read.cast_signed()),
+            Some(m.bytes_written.cast_signed()),
+            Some(m.duration_ms.cast_signed()),
         ),
         None => (None, None, None, None, None),
     };
@@ -56,9 +56,9 @@ async fn insert_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
     .bind(run.pipeline_yaml())
     .bind(state_str)
     .bind(run.is_cancel_requested())
-    .bind(run.current_attempt() as i32)
-    .bind(run.max_retries() as i32)
-    .bind(run.timeout_seconds().map(|t| t as i64))
+    .bind(run.current_attempt().cast_signed())
+    .bind(run.max_retries().cast_signed())
+    .bind(run.timeout_seconds().map(u64::cast_signed))
     .bind(error_code)
     .bind(error_message)
     .bind(rows_read)
@@ -83,11 +83,11 @@ async fn update_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
 
     let (rows_read, rows_written, bytes_read, bytes_written, duration_ms) = match run.metrics() {
         Some(m) => (
-            Some(m.rows_read as i64),
-            Some(m.rows_written as i64),
-            Some(m.bytes_read as i64),
-            Some(m.bytes_written as i64),
-            Some(m.duration_ms as i64),
+            Some(m.rows_read.cast_signed()),
+            Some(m.rows_written.cast_signed()),
+            Some(m.bytes_read.cast_signed()),
+            Some(m.bytes_written.cast_signed()),
+            Some(m.duration_ms.cast_signed()),
         ),
         None => (None, None, None, None, None),
     };
@@ -105,9 +105,9 @@ async fn update_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
     )
     .bind(state_str)
     .bind(run.is_cancel_requested())
-    .bind(run.current_attempt() as i32)
-    .bind(run.max_retries() as i32)
-    .bind(run.timeout_seconds().map(|t| t as i64))
+    .bind(run.current_attempt().cast_signed())
+    .bind(run.max_retries().cast_signed())
+    .bind(run.timeout_seconds().map(u64::cast_signed))
     .bind(error_code)
     .bind(error_message)
     .bind(rows_read)
@@ -126,7 +126,7 @@ async fn update_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
 
 async fn insert_task(conn: &mut PgConnection, task: &Task) -> Result<(), RepositoryError> {
     let (lease_epoch, lease_expires_at) = match task.lease() {
-        Some(l) => (Some(l.epoch() as i64), Some(l.expires_at())),
+        Some(l) => (Some(l.epoch().cast_signed()), Some(l.expires_at())),
         None => (None, None),
     };
 
@@ -145,7 +145,7 @@ async fn insert_task(conn: &mut PgConnection, task: &Task) -> Result<(), Reposit
     )
     .bind(task.id())
     .bind(task.run_id())
-    .bind(task.attempt() as i32)
+    .bind(task.attempt().cast_signed())
     .bind(state_str)
     .bind(task.agent_id())
     .bind(lease_epoch)
@@ -161,7 +161,7 @@ async fn insert_task(conn: &mut PgConnection, task: &Task) -> Result<(), Reposit
 
 async fn update_task(conn: &mut PgConnection, task: &Task) -> Result<(), RepositoryError> {
     let (lease_epoch, lease_expires_at) = match task.lease() {
-        Some(l) => (Some(l.epoch() as i64), Some(l.expires_at())),
+        Some(l) => (Some(l.epoch().cast_signed()), Some(l.expires_at())),
         None => (None, None),
     };
 
@@ -194,24 +194,24 @@ async fn update_task(conn: &mut PgConnection, task: &Task) -> Result<(), Reposit
 impl PipelineStore for PgPipelineStore {
     async fn submit_run(&self, run: &Run, task: &Task) -> Result<(), RepositoryError> {
         let mut tx = self.pool.begin().await.map_err(box_err)?;
-        insert_run(&mut *tx, run).await?;
-        insert_task(&mut *tx, task).await?;
+        insert_run(&mut tx, run).await?;
+        insert_task(&mut tx, task).await?;
         tx.commit().await.map_err(box_err)?;
         Ok(())
     }
 
     async fn complete_run(&self, task: &Task, run: &Run) -> Result<(), RepositoryError> {
         let mut tx = self.pool.begin().await.map_err(box_err)?;
-        update_task(&mut *tx, task).await?;
-        update_run(&mut *tx, run).await?;
+        update_task(&mut tx, task).await?;
+        update_run(&mut tx, run).await?;
         tx.commit().await.map_err(box_err)?;
         Ok(())
     }
 
     async fn fail_run(&self, task: &Task, run: &Run) -> Result<(), RepositoryError> {
         let mut tx = self.pool.begin().await.map_err(box_err)?;
-        update_task(&mut *tx, task).await?;
-        update_run(&mut *tx, run).await?;
+        update_task(&mut tx, task).await?;
+        update_run(&mut tx, run).await?;
         tx.commit().await.map_err(box_err)?;
         Ok(())
     }
@@ -223,25 +223,25 @@ impl PipelineStore for PgPipelineStore {
         new_task: &Task,
     ) -> Result<(), RepositoryError> {
         let mut tx = self.pool.begin().await.map_err(box_err)?;
-        update_task(&mut *tx, failed_task).await?;
-        update_run(&mut *tx, run).await?;
-        insert_task(&mut *tx, new_task).await?;
+        update_task(&mut tx, failed_task).await?;
+        update_run(&mut tx, run).await?;
+        insert_task(&mut tx, new_task).await?;
         tx.commit().await.map_err(box_err)?;
         Ok(())
     }
 
     async fn cancel_run(&self, task: &Task, run: &Run) -> Result<(), RepositoryError> {
         let mut tx = self.pool.begin().await.map_err(box_err)?;
-        update_task(&mut *tx, task).await?;
-        update_run(&mut *tx, run).await?;
+        update_task(&mut tx, task).await?;
+        update_run(&mut tx, run).await?;
         tx.commit().await.map_err(box_err)?;
         Ok(())
     }
 
     async fn cancel_pending_run(&self, run: &Run, task: &Task) -> Result<(), RepositoryError> {
         let mut tx = self.pool.begin().await.map_err(box_err)?;
-        update_run(&mut *tx, run).await?;
-        update_task(&mut *tx, task).await?;
+        update_run(&mut tx, run).await?;
+        update_task(&mut tx, task).await?;
         tx.commit().await.map_err(box_err)?;
         Ok(())
     }
@@ -253,10 +253,10 @@ impl PipelineStore for PgPipelineStore {
         new_task: Option<&Task>,
     ) -> Result<(), RepositoryError> {
         let mut tx = self.pool.begin().await.map_err(box_err)?;
-        update_task(&mut *tx, timed_out_task).await?;
-        update_run(&mut *tx, run).await?;
+        update_task(&mut tx, timed_out_task).await?;
+        update_run(&mut tx, run).await?;
         if let Some(task) = new_task {
-            insert_task(&mut *tx, task).await?;
+            insert_task(&mut tx, task).await?;
         }
         tx.commit().await.map_err(box_err)?;
         Ok(())

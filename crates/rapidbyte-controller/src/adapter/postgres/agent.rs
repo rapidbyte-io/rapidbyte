@@ -18,7 +18,7 @@ fn agent_from_row(row: &sqlx::postgres::PgRow) -> Result<Agent, RepositoryError>
 
     let capabilities = AgentCapabilities {
         plugins,
-        max_concurrent_tasks: max_concurrent_tasks as u32,
+        max_concurrent_tasks: max_concurrent_tasks.cast_unsigned(),
     };
 
     Ok(Agent::from_row(
@@ -63,7 +63,7 @@ impl AgentRepository for PgAgentRepository {
         )
         .bind(agent.id())
         .bind(&agent.capabilities().plugins)
-        .bind(agent.capabilities().max_concurrent_tasks as i32)
+        .bind(agent.capabilities().max_concurrent_tasks.cast_signed())
         .bind(agent.last_seen_at())
         .bind(agent.registered_at())
         .execute(&self.pool)

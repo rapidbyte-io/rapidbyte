@@ -112,7 +112,7 @@ impl EventBus for PgEventBus {
             .or_insert_with(|| broadcast::channel(64).0);
         let rx = tx.subscribe();
 
-        let stream = BroadcastStream::new(rx).filter_map(|result| result.ok());
+        let stream = BroadcastStream::new(rx).filter_map(std::result::Result::ok);
 
         Ok(Box::pin(stream))
     }

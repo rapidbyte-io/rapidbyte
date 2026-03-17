@@ -130,6 +130,10 @@ impl Run {
     // --- State transitions ---
 
     /// Pending -> Running
+    ///
+    /// # Errors
+    ///
+    /// Returns `DomainError::InvalidTransition` if the run is not `Pending`.
     pub fn start(&mut self) -> Result<(), DomainError> {
         if self.state != RunState::Pending {
             return Err(DomainError::InvalidTransition {
@@ -142,6 +146,10 @@ impl Run {
     }
 
     /// Running -> Completed
+    ///
+    /// # Errors
+    ///
+    /// Returns `DomainError::InvalidTransition` if the run is not `Running`.
     pub fn complete(&mut self, metrics: RunMetrics) -> Result<(), DomainError> {
         if self.state != RunState::Running {
             return Err(DomainError::InvalidTransition {
@@ -155,6 +163,10 @@ impl Run {
     }
 
     /// Running -> Failed
+    ///
+    /// # Errors
+    ///
+    /// Returns `DomainError::InvalidTransition` if the run is not `Running`.
     pub fn fail(&mut self, error: RunError) -> Result<(), DomainError> {
         if self.state != RunState::Running {
             return Err(DomainError::InvalidTransition {
@@ -168,6 +180,10 @@ impl Run {
     }
 
     /// Pending|Running -> Cancelled
+    ///
+    /// # Errors
+    ///
+    /// Returns `DomainError::InvalidTransition` if the run is not `Pending` or `Running`.
     pub fn cancel(&mut self) -> Result<(), DomainError> {
         if self.state != RunState::Pending && self.state != RunState::Running {
             return Err(DomainError::InvalidTransition {
@@ -180,6 +196,10 @@ impl Run {
     }
 
     /// Running -> Pending (increments attempt, returns new attempt number)
+    ///
+    /// # Errors
+    ///
+    /// Returns `DomainError::InvalidTransition` if the run is not `Running`.
     pub fn retry(&mut self) -> Result<u32, DomainError> {
         if self.state != RunState::Running {
             return Err(DomainError::InvalidTransition {

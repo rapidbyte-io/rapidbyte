@@ -48,14 +48,14 @@ fn task_from_row(row: &sqlx::postgres::PgRow) -> Result<Task, RepositoryError> {
     let state = parse_task_state(&state_str);
 
     let lease = match (lease_epoch, lease_expires_at) {
-        (Some(epoch), Some(expires_at)) => Some(Lease::new(epoch as u64, expires_at)),
+        (Some(epoch), Some(expires_at)) => Some(Lease::new(epoch.cast_unsigned(), expires_at)),
         _ => None,
     };
 
     Ok(Task::from_row(
         id,
         run_id,
-        attempt as u32,
+        attempt.cast_unsigned(),
         state,
         agent_id,
         lease,
@@ -89,7 +89,7 @@ impl TaskRepository for PgTaskRepository {
 
     async fn save(&self, task: &Task) -> Result<(), RepositoryError> {
         let (lease_epoch, lease_expires_at) = match task.lease() {
-            Some(l) => (Some(l.epoch() as i64), Some(l.expires_at())),
+            Some(l) => (Some(l.epoch().cast_signed()), Some(l.expires_at())),
             None => (None, None),
         };
 
@@ -105,7 +105,7 @@ impl TaskRepository for PgTaskRepository {
         )
         .bind(task.id())
         .bind(task.run_id())
-        .bind(task.attempt() as i32)
+        .bind(task.attempt().cast_signed())
         .bind(task_state_to_str(task.state()))
         .bind(task.agent_id())
         .bind(lease_epoch)
@@ -144,7 +144,7 @@ impl TaskRepository for PgTaskRepository {
             "UPDATE tasks SET state = 'running', agent_id = $1, lease_epoch = $2, lease_expires_at = $3, updated_at = now() WHERE id = $4",
         )
         .bind(agent_id)
-        .bind(lease.epoch() as i64)
+        .bind(lease.epoch().cast_signed())
         .bind(lease.expires_at())
         .bind(task.id())
         .execute(&mut *tx)
@@ -203,6 +203,6 @@ impl TaskRepository for PgTaskRepository {
             .await
             .map_err(box_err)?;
 
-        Ok(row.0 as u64)
+        Ok(row.0.cast_unsigned())
     }
 }
