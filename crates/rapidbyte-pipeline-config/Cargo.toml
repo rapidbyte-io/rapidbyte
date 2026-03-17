@@ -1,0 +1,14 @@
+[package]
+name = "rapidbyte-pipeline-config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+regex = "1"
+serde_yaml = { workspace = true }
+rapidbyte-secrets = { path = "../rapidbyte-secrets" }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

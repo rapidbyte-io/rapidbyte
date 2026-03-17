@@ -24,6 +24,7 @@ chrono = { workspace = true }
 regex = "1"
 jsonschema = "0.28"
 rapidbyte-secrets = { path = "../rapidbyte-secrets" }
+rapidbyte-pipeline-config = { path = "../rapidbyte-pipeline-config" }
 
 [dev-dependencies]
 async-trait = { workspace = true }

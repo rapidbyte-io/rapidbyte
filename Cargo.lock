@@ -4693,8 +4693,8 @@ dependencies = [
  "prost",
  "prost-types",
  "protoc-bin-vendored",
- "rapidbyte-engine",
  "rapidbyte-metrics",
+ "rapidbyte-pipeline-config",
  "rapidbyte-secrets",
  "rapidbyte-types",
  "rustls",
@@ -4750,6 +4750,7 @@ dependencies = [
  "opentelemetry_sdk",
  "proptest",
  "rapidbyte-metrics",
+ "rapidbyte-pipeline-config",
  "rapidbyte-registry",
  "rapidbyte-runtime",
  "rapidbyte-secrets",
@@ -4784,6 +4785,18 @@ dependencies = [
  "tonic",
  "tower 0.5.3",
  "tracing",
+]
+
+[[package]]
+name = "rapidbyte-pipeline-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "rapidbyte-secrets",
+ "regex",
+ "serde_yaml",
+ "tokio",
 ]
 
 [[package]]
