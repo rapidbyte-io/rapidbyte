@@ -503,9 +503,13 @@ async fn process_task(
     let proto_outcome = match &result.outcome {
         TaskOutcomeKind::Completed => complete_task_request::Outcome::Completed(TaskCompleted {
             metrics: Some(RunMetrics {
-                rows_read: result.metrics.records_processed,
+                // The agent's TaskMetrics tracks aggregate processed counts from the
+                // engine, which are effectively the write-side metrics (records_written,
+                // bytes_written from ExecutionResult). Read-side metrics are not
+                // currently tracked by the agent executor.
+                rows_read: 0,
                 rows_written: result.metrics.records_processed,
-                bytes_read: result.metrics.bytes_processed,
+                bytes_read: 0,
                 bytes_written: result.metrics.bytes_processed,
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 duration_ms: { (result.metrics.elapsed_seconds * 1000.0).max(0.0) as u64 },

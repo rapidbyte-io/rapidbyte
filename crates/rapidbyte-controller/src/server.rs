@@ -30,7 +30,7 @@ use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineServiceServer;
 ///
 /// Returns an error if the database connection, migration, TLS setup, or gRPC
 /// server startup fails.
-#[allow(clippy::similar_names)]
+#[allow(clippy::similar_names, clippy::too_many_lines)]
 pub async fn run(
     config: ControllerConfig,
     otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
@@ -52,6 +52,13 @@ pub async fn run(
     if !config.auth.allow_unauthenticated && config.auth.tokens.is_empty() {
         anyhow::bail!(
             "controller misconfigured: auth tokens are empty and allow_unauthenticated is false — all requests would be rejected"
+        );
+    }
+    if config.trust.policy != "skip" {
+        tracing::warn!(
+            policy = %config.trust.policy,
+            "trust_policy is configured on the controller but no longer distributed to agents — \
+             agents now use their own --trust-policy setting; this controller setting has no effect"
         );
     }
 
