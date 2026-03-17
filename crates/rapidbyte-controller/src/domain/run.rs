@@ -46,6 +46,7 @@ pub struct RunMetrics {
     pub duration_ms: u64,
 }
 
+#[derive(Clone)]
 pub struct Run {
     id: String,
     idempotency_key: Option<String>,

@@ -27,6 +27,7 @@ impl TaskState {
     }
 }
 
+#[derive(Clone)]
 pub struct Task {
     id: String,
     run_id: String,

@@ -6,6 +6,7 @@ pub struct AgentCapabilities {
     pub max_concurrent_tasks: u32,
 }
 
+#[derive(Clone)]
 pub struct Agent {
     id: String,
     capabilities: AgentCapabilities,
