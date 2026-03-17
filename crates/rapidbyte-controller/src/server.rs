@@ -54,6 +54,15 @@ pub async fn run(
             "controller misconfigured: auth tokens are empty and allow_unauthenticated is false — all requests would be rejected"
         );
     }
+    if !config.auth.allow_insecure_default_signing_key {
+        let default_key = ControllerConfig::default().auth.signing_key;
+        if config.auth.signing_key.is_empty() || config.auth.signing_key == default_key {
+            anyhow::bail!(
+                "controller misconfigured: signing key is missing or uses the insecure default — \
+                 set --signing-key or use --allow-insecure-signing-key for development"
+            );
+        }
+    }
 
     // 1. Connect to Postgres
     let database_url = config

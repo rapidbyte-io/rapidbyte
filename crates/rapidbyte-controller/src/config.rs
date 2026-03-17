@@ -2,12 +2,29 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 /// Authentication settings for the controller gRPC server.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AuthConfig {
     pub signing_key: Vec<u8>,
     pub tokens: Vec<String>,
     pub allow_unauthenticated: bool,
     pub allow_insecure_default_signing_key: bool,
+}
+
+impl std::fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthConfig")
+            .field(
+                "signing_key",
+                &format_args!("<{} bytes>", self.signing_key.len()),
+            )
+            .field("tokens", &format_args!("<{} tokens>", self.tokens.len()))
+            .field("allow_unauthenticated", &self.allow_unauthenticated)
+            .field(
+                "allow_insecure_default_signing_key",
+                &self.allow_insecure_default_signing_key,
+            )
+            .finish()
+    }
 }
 
 impl Default for AuthConfig {
@@ -46,10 +63,19 @@ impl Default for TimerConfig {
 }
 
 /// TLS configuration for the gRPC server.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServerTlsConfig {
     pub cert_pem: Vec<u8>,
     pub key_pem: Vec<u8>,
+}
+
+impl std::fmt::Debug for ServerTlsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerTlsConfig")
+            .field("cert_pem", &format_args!("<{} bytes>", self.cert_pem.len()))
+            .field("key_pem", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Plugin registry configuration relayed to agents on registration.

@@ -43,7 +43,8 @@ pub async fn complete_task(
             entity: "Task",
             id: task_id.to_string(),
         })?;
-    task.validate_lease(agent_id, lease_epoch)?;
+    let now = ctx.clock.now();
+    task.validate_lease(agent_id, lease_epoch, now)?;
 
     // 2. Find run
     let mut run = ctx

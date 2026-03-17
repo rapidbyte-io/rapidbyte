@@ -51,23 +51,29 @@ pub async fn poll_task(
     agent.touch(now);
     ctx.agents.save(&agent).await?;
 
-    // 3. Get next lease epoch
+    // 3. Check agent capacity
+    let running_tasks = ctx.tasks.find_running_by_agent_id(agent_id).await?;
+    if running_tasks.len() >= agent.capabilities().max_concurrent_tasks as usize {
+        return Ok(None); // Agent is at capacity
+    }
+
+    // 5. Get next lease epoch
     let epoch = ctx.tasks.next_lease_epoch().await?;
 
-    // 4. Calculate lease duration (use default config)
+    // 6. Calculate lease duration (use default config)
     let lease_duration = chrono::Duration::from_std(ctx.config.default_lease_duration)
         .unwrap_or_else(|_| chrono::Duration::seconds(300));
     let expires_at = now + lease_duration;
 
-    // 5. Create lease
+    // 7. Create lease
     let lease = Lease::new(epoch, expires_at);
 
-    // 6. Poll and assign
+    // 8. Poll and assign
     let Some(task) = ctx.tasks.poll_and_assign(agent_id, lease).await? else {
         return Ok(None);
     };
 
-    // 7. Find the run
+    // 9. Find the run
     let mut run = ctx
         .runs
         .find_by_id(task.run_id())
@@ -77,7 +83,7 @@ pub async fn poll_task(
             id: task.run_id().to_string(),
         })?;
 
-    // 8. Transition run to Running
+    // 10. Transition run to Running
     run.start()?;
     ctx.runs.save(&run).await?;
 

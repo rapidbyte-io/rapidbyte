@@ -65,7 +65,10 @@ pub async fn heartbeat(
         };
 
         // 2b. Validate lease
-        if task.validate_lease(agent_id, input.lease_epoch).is_err() {
+        if task
+            .validate_lease(agent_id, input.lease_epoch, now)
+            .is_err()
+        {
             directives.push(TaskDirectiveOutput {
                 task_id: input.task_id,
                 acknowledged: false,

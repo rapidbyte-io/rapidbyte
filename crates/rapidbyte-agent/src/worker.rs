@@ -711,7 +711,15 @@ where
 
         match send_completion(request.clone()).await {
             Ok(_resp) => {
-                active_leases.write().await.remove(&request.task_id);
+                {
+                    let mut leases = active_leases.write().await;
+                    if leases
+                        .get(&request.task_id)
+                        .is_some_and(|e| e.lease_epoch == request.lease_epoch)
+                    {
+                        leases.remove(&request.task_id);
+                    }
+                }
                 info!(task_id = request.task_id, "Task completed");
                 return true;
             }

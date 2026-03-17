@@ -187,13 +187,27 @@ impl Task {
 
     // --- Validation ---
 
-    /// Validates that the given agent and lease epoch match the task's assigned values.
+    /// Validates that the task is running, the agent matches, the epoch matches,
+    /// and the lease has not expired.
     ///
     /// # Errors
     ///
-    /// Returns `DomainError::AgentMismatch` or `DomainError::LeaseMismatch` if
-    /// the provided values do not match the task's assigned agent or lease epoch.
-    pub fn validate_lease(&self, agent_id: &str, lease_epoch: u64) -> Result<(), DomainError> {
+    /// Returns `DomainError::InvalidTransition` if the task is not `Running`,
+    /// `DomainError::AgentMismatch` or `DomainError::LeaseMismatch` if the
+    /// provided values do not match, or `DomainError::LeaseExpired` if the
+    /// lease has passed its expiry time.
+    pub fn validate_lease(
+        &self,
+        agent_id: &str,
+        lease_epoch: u64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), DomainError> {
+        if self.state != TaskState::Running {
+            return Err(DomainError::InvalidTransition {
+                from: self.state.as_str(),
+                to: "validation",
+            });
+        }
         if let Some(ref assigned_agent) = self.agent_id {
             if assigned_agent != agent_id {
                 return Err(DomainError::AgentMismatch {
@@ -208,6 +222,9 @@ impl Task {
                     expected: lease.epoch(),
                     got: lease_epoch,
                 });
+            }
+            if lease.is_expired(now) {
+                return Err(DomainError::LeaseExpired);
             }
         }
         Ok(())
@@ -470,15 +487,19 @@ mod tests {
     #[test]
     fn validate_lease_success() {
         let mut task = make_task();
-        task.assign("agent-1".into(), Lease::new(5, now())).unwrap();
-        assert!(task.validate_lease("agent-1", 5).is_ok());
+        let future = now() + chrono::Duration::seconds(300);
+        task.assign("agent-1".into(), Lease::new(5, future))
+            .unwrap();
+        assert!(task.validate_lease("agent-1", 5, now()).is_ok());
     }
 
     #[test]
     fn validate_lease_agent_mismatch() {
         let mut task = make_task();
-        task.assign("agent-1".into(), make_lease()).unwrap();
-        let err = task.validate_lease("agent-2", 1).unwrap_err();
+        let future = now() + chrono::Duration::seconds(300);
+        task.assign("agent-1".into(), Lease::new(1, future))
+            .unwrap();
+        let err = task.validate_lease("agent-2", 1, now()).unwrap_err();
         assert!(matches!(err, DomainError::AgentMismatch { .. }));
         if let DomainError::AgentMismatch { expected, got } = err {
             assert_eq!(expected, "agent-1");
@@ -489,8 +510,10 @@ mod tests {
     #[test]
     fn validate_lease_epoch_mismatch() {
         let mut task = make_task();
-        task.assign("agent-1".into(), Lease::new(5, now())).unwrap();
-        let err = task.validate_lease("agent-1", 99).unwrap_err();
+        let future = now() + chrono::Duration::seconds(300);
+        task.assign("agent-1".into(), Lease::new(5, future))
+            .unwrap();
+        let err = task.validate_lease("agent-1", 99, now()).unwrap_err();
         assert!(matches!(err, DomainError::LeaseMismatch { .. }));
         if let DomainError::LeaseMismatch { expected, got } = err {
             assert_eq!(expected, 5);
@@ -499,10 +522,19 @@ mod tests {
     }
 
     #[test]
-    fn validate_lease_no_assignment_succeeds() {
-        // A task with no agent/lease assigned should pass validation
-        let task = make_task();
-        assert!(task.validate_lease("any-agent", 999).is_ok());
+    fn validate_lease_expired_returns_error() {
+        let mut task = make_task();
+        let past = now() - chrono::Duration::seconds(10);
+        task.assign("agent-1".into(), Lease::new(5, past)).unwrap();
+        let err = task.validate_lease("agent-1", 5, now()).unwrap_err();
+        assert!(matches!(err, DomainError::LeaseExpired));
+    }
+
+    #[test]
+    fn validate_lease_not_running_returns_error() {
+        let task = make_task(); // Pending state
+        let err = task.validate_lease("agent-1", 1, now()).unwrap_err();
+        assert!(matches!(err, DomainError::InvalidTransition { .. }));
     }
 
     // --- from_row ---
