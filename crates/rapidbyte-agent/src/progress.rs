@@ -1,64 +1,46 @@
-//! `ProgressEvent` to `ReportProgress` gRPC forwarding.
+//! Progress event collection for heartbeat-based reporting.
+//!
+//! The `ReportProgress` RPC has been removed from the proto.  Progress is now
+//! sent to the controller as part of the periodic heartbeat via
+//! `TaskHeartbeat.progress_message` / `TaskHeartbeat.progress_pct`.
+//!
+//! This module collects the latest progress event from the engine and exposes
+//! it for the heartbeat loop to include in the next heartbeat.
 
 use rapidbyte_engine::progress::ProgressEvent;
-use tokio::sync::mpsc;
-use tonic::transport::Channel;
-use tracing::warn;
+use std::sync::Arc;
+use tokio::sync::{mpsc, RwLock};
 
-use crate::auth::request_with_bearer;
-use crate::proto::rapidbyte::v1::agent_service_client::AgentServiceClient;
-use crate::proto::rapidbyte::v1::{ProgressUpdate, ReportProgressRequest};
+/// Latest progress snapshot for a running task, included in the next heartbeat.
+#[derive(Debug, Clone, Default)]
+pub struct ProgressSnapshot {
+    pub message: Option<String>,
+    pub progress_pct: Option<f64>,
+}
 
-/// Forward engine progress events to the controller.
+/// Collect engine progress events and maintain a latest snapshot.
 ///
 /// Runs until the receiver is closed (engine finished).
-pub async fn forward_progress(
+pub async fn collect_progress(
     mut rx: mpsc::UnboundedReceiver<ProgressEvent>,
-    mut client: AgentServiceClient<Channel>,
-    agent_id: String,
-    task_id: String,
-    lease_epoch: u64,
-    auth_token: Option<String>,
+    snapshot: Arc<RwLock<ProgressSnapshot>>,
 ) {
     while let Some(event) = rx.recv().await {
-        let progress = match &event {
-            ProgressEvent::BatchEmitted { bytes } => Some(ProgressUpdate {
-                stream: String::new(),
-                phase: "running".into(),
-                records: 0,
-                bytes: *bytes,
-            }),
-            ProgressEvent::StreamCompleted { stream } => Some(ProgressUpdate {
-                stream: stream.clone(),
-                phase: "completed".into(),
-                records: 0,
-                bytes: 0,
-            }),
-            ProgressEvent::PhaseChange { phase } => Some(ProgressUpdate {
-                stream: String::new(),
-                phase: format!("{phase:?}").to_lowercase(),
-                records: 0,
-                bytes: 0,
-            }),
-            ProgressEvent::Retry { .. } => None,
+        let update = match &event {
+            ProgressEvent::BatchEmitted { bytes } => ProgressSnapshot {
+                message: Some(format!("processing ({bytes} bytes)")),
+                progress_pct: None,
+            },
+            ProgressEvent::StreamCompleted { stream } => ProgressSnapshot {
+                message: Some(format!("stream {stream} completed")),
+                progress_pct: None,
+            },
+            ProgressEvent::PhaseChange { phase } => ProgressSnapshot {
+                message: Some(format!("{phase:?}").to_lowercase()),
+                progress_pct: None,
+            },
+            ProgressEvent::Retry { .. } => continue,
         };
-
-        if let Some(progress) = progress {
-            let Ok(req) = request_with_bearer(
-                ReportProgressRequest {
-                    agent_id: agent_id.clone(),
-                    task_id: task_id.clone(),
-                    lease_epoch,
-                    progress: Some(progress),
-                },
-                auth_token.as_deref(),
-            ) else {
-                warn!("Failed to build authenticated progress request: invalid bearer token");
-                break;
-            };
-            if let Err(e) = client.report_progress(req).await {
-                warn!(error = %e, "Failed to report progress to controller");
-            }
-        }
+        *snapshot.write().await = update;
     }
 }
