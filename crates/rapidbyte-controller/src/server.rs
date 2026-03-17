@@ -48,6 +48,13 @@ pub async fn run(
         ));
     }
 
+    // 0.5. Validate configuration
+    if !config.auth.allow_unauthenticated && config.auth.tokens.is_empty() {
+        anyhow::bail!(
+            "controller misconfigured: auth tokens are empty and allow_unauthenticated is false — all requests would be rejected"
+        );
+    }
+
     // 1. Connect to Postgres
     let database_url = config
         .metadata_database_url

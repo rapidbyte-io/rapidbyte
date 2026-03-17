@@ -72,13 +72,25 @@ pub async fn execute(
                 );
             }
             None => {
-                // Check for terminal states without detail (e.g., Cancelled)
+                // Check for terminal states without detail
                 let state = RunState::try_from(event.state).ok();
-                if matches!(state, Some(RunState::Cancelled)) {
-                    if verbosity != Verbosity::Quiet {
-                        eprintln!("Run cancelled");
+                match state {
+                    Some(RunState::Cancelled) => {
+                        if verbosity != Verbosity::Quiet {
+                            eprintln!("Run cancelled");
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
+                    Some(RunState::Completed) => {
+                        if verbosity != Verbosity::Quiet {
+                            eprintln!("Completed");
+                        }
+                        return Ok(());
+                    }
+                    Some(RunState::Failed) => {
+                        anyhow::bail!("Run failed (no error details available)");
+                    }
+                    _ => {}
                 }
             }
         }

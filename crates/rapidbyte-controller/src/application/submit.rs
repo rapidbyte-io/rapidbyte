@@ -48,7 +48,10 @@ pub async fn submit_pipeline(
     // 5. Get current time
     let now = ctx.clock.now();
 
-    // 6. Create Run
+    // 6. Clone idempotency key before it moves into Run
+    let idempotency_key_clone = idempotency_key.clone();
+
+    // 7. Create Run
     let run = Run::new(
         run_id.clone(),
         idempotency_key,
@@ -59,13 +62,28 @@ pub async fn submit_pipeline(
         now,
     );
 
-    // 7. Create Task
+    // 8. Create Task
     let task = Task::new(task_id, run_id.clone(), 1, now);
 
-    // 8. Persist atomically
-    ctx.store.submit_run(&run, &task).await?;
+    // 9. Persist atomically
+    match ctx.store.submit_run(&run, &task).await {
+        Ok(()) => {}
+        Err(e) => {
+            // If this was a unique constraint violation on idempotency_key,
+            // another request won the race -- return the existing run.
+            if let Some(ref key) = idempotency_key_clone {
+                if let Ok(Some(existing)) = ctx.runs.find_by_idempotency_key(key).await {
+                    return Ok(SubmitResult {
+                        run_id: existing.id().to_string(),
+                        already_exists: true,
+                    });
+                }
+            }
+            return Err(e.into());
+        }
+    }
 
-    // 9. Publish event
+    // 10. Publish event
     ctx.event_bus
         .publish(DomainEvent::RunStateChanged {
             run_id: run_id.clone(),
@@ -74,7 +92,7 @@ pub async fn submit_pipeline(
         })
         .await?;
 
-    // 10. Return result
+    // 11. Return result
     Ok(SubmitResult {
         run_id,
         already_exists: false,

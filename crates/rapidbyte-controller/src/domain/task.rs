@@ -96,6 +96,7 @@ impl Task {
         self.state = TaskState::Running;
         self.agent_id = Some(agent_id);
         self.lease = Some(lease);
+        self.updated_at = chrono::Utc::now();
         Ok(())
     }
 
@@ -112,6 +113,7 @@ impl Task {
             });
         }
         self.state = TaskState::Completed;
+        self.updated_at = chrono::Utc::now();
         Ok(())
     }
 
@@ -128,6 +130,7 @@ impl Task {
             });
         }
         self.state = TaskState::Failed;
+        self.updated_at = chrono::Utc::now();
         Ok(())
     }
 
@@ -144,6 +147,7 @@ impl Task {
             });
         }
         self.state = TaskState::Cancelled;
+        self.updated_at = chrono::Utc::now();
         Ok(())
     }
 
@@ -160,6 +164,7 @@ impl Task {
             });
         }
         self.state = TaskState::Cancelled;
+        self.updated_at = chrono::Utc::now();
         Ok(())
     }
 
@@ -176,6 +181,7 @@ impl Task {
             });
         }
         self.state = TaskState::TimedOut;
+        self.updated_at = chrono::Utc::now();
         Ok(())
     }
 

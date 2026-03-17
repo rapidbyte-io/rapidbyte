@@ -142,6 +142,7 @@ impl Run {
             });
         }
         self.state = RunState::Running;
+        self.updated_at = Utc::now();
         Ok(())
     }
 
@@ -159,6 +160,7 @@ impl Run {
         }
         self.state = RunState::Completed;
         self.metrics = Some(metrics);
+        self.updated_at = Utc::now();
         Ok(())
     }
 
@@ -176,6 +178,7 @@ impl Run {
         }
         self.state = RunState::Failed;
         self.error = Some(error);
+        self.updated_at = Utc::now();
         Ok(())
     }
 
@@ -192,6 +195,7 @@ impl Run {
             });
         }
         self.state = RunState::Cancelled;
+        self.updated_at = Utc::now();
         Ok(())
     }
 
@@ -210,6 +214,7 @@ impl Run {
         self.state = RunState::Pending;
         self.current_attempt += 1;
         self.error = None;
+        self.updated_at = Utc::now();
         Ok(self.current_attempt)
     }
 
@@ -218,6 +223,7 @@ impl Run {
     /// Sets `cancel_requested` without changing state.
     pub fn request_cancel(&mut self) {
         self.cancel_requested = true;
+        self.updated_at = Utc::now();
     }
 
     /// Whether this run can be retried after an error.

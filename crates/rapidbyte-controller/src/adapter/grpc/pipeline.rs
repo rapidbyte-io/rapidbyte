@@ -128,19 +128,19 @@ impl PipelineService for PipelineGrpcService {
     ) -> Result<Response<Self::WatchRunStream>, Status> {
         let run_id = req.into_inner().run_id;
 
-        // Get current state as the first event
-        let run = crate::application::query::get_run(&self.ctx, &run_id)
-            .await
-            .map_err(convert::app_error_to_status)?;
-        let initial = convert::run_state_to_event(&run);
-
-        // Subscribe to future events
+        // Subscribe FIRST so no events are missed
         let event_stream = self
             .ctx
             .event_bus
             .subscribe(&run_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Then get current state for catch-up
+        let run = crate::application::query::get_run(&self.ctx, &run_id)
+            .await
+            .map_err(convert::app_error_to_status)?;
+        let initial = convert::run_state_to_event(&run);
 
         // Map domain events to proto events
         let mapped = event_stream.map(|event| Ok(convert::domain_event_to_run_event(&event)));

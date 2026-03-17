@@ -103,10 +103,19 @@ pub async fn execute(
                 anyhow::bail!("Run failed: {} — {}", f.error_code, f.error_message,);
             }
             None => {
-                // Check for terminal states without detail (e.g., Cancelled)
+                // Check for terminal states without detail
                 let state = RunState::try_from(event.state).ok();
-                if matches!(state, Some(RunState::Cancelled)) {
-                    anyhow::bail!("Run was cancelled");
+                match state {
+                    Some(RunState::Cancelled) => {
+                        anyhow::bail!("Run was cancelled");
+                    }
+                    Some(RunState::Completed) => {
+                        return Ok(());
+                    }
+                    Some(RunState::Failed) => {
+                        anyhow::bail!("Run failed (no error details available)");
+                    }
+                    _ => {}
                 }
             }
         }
