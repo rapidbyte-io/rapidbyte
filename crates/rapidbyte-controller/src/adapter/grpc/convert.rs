@@ -325,10 +325,7 @@ mod tests {
     #[test]
     fn repository_error_maps_to_internal() {
         use crate::domain::ports::repository::RepositoryError;
-        let err = AppError::Repository(RepositoryError(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "db down",
-        ))));
+        let err = AppError::Repository(RepositoryError(Box::new(std::io::Error::other("db down"))));
         let status = app_error_to_status(err);
         assert_eq!(status.code(), tonic::Code::Internal);
         assert_eq!(status.message(), "internal error");

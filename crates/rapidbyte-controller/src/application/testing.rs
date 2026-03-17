@@ -99,11 +99,11 @@ impl RunRepository for FakeRunRepository {
                 filter
                     .state
                     .as_ref()
-                    .map_or(true, |state| r.state() == *state)
+                    .is_none_or(|state| r.state() == *state)
             })
             .cloned()
             .collect();
-        runs.sort_by(|a, b| a.created_at().cmp(&b.created_at()));
+        runs.sort_by_key(Run::created_at);
 
         let page_size = pagination.page_size as usize;
         let offset = pagination
@@ -197,7 +197,7 @@ impl TaskRepository for FakeTaskRepository {
             .values()
             .filter(|t| {
                 t.state() == TaskState::Running
-                    && t.lease().map_or(false, |lease| lease.is_expired(now))
+                    && t.lease().is_some_and(|lease| lease.is_expired(now))
             })
             .cloned()
             .collect())
@@ -382,6 +382,9 @@ impl FakeEventBus {
     }
 
     /// Return all published events for test assertions.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
     #[must_use]
     pub fn published_events(&self) -> Vec<DomainEvent> {
         self.events.lock().unwrap().clone()
@@ -459,9 +462,12 @@ impl FakeClock {
     }
 
     /// Advance the fake clock by the given duration.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
     pub fn advance(&self, duration: chrono::Duration) {
         let mut now = self.now.lock().unwrap();
-        *now = *now + duration;
+        *now += duration;
     }
 }
 
