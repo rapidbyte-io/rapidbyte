@@ -407,7 +407,7 @@ Pure business logic, no framework dependencies.
 
 **Run** (`domain/run.rs`):
 - Fields: id, idempotency_key, pipeline_name, pipeline_yaml, state, current_attempt,
-  max_retries, cancel_requested, error, metrics, created_at, updated_at
+  max_retries, timeout_seconds, cancel_requested, error, metrics, created_at, updated_at
 - State transition methods: `start()`, `complete(metrics)`, `fail(error)`, `cancel()`,
   `retry()` (returns new attempt number)
 - Cancel request: `request_cancel()` sets `cancel_requested = true` without changing state
@@ -469,14 +469,17 @@ to Cancelled. This is intentional — cancellation is a request, not a state cha
 **RunRepository**: find_by_id, find_by_idempotency_key, save, list
 
 **TaskRepository**: find_by_id, save, poll_and_assign(agent_id, lease),
-find_expired_leases(now), find_by_run_id
+find_expired_leases(now), find_by_run_id, find_running_by_agent_id(agent_id)
 
 **AgentRepository**: find_by_id, save, delete, find_stale(timeout, now)
 
 **PipelineStore** (cross-aggregate transactions):
 - submit_run(run, task) — atomic insert of run + initial task
-- complete_run(task, run)
-- fail_and_retry(failed_task, run, new_task)
+- complete_run(task, run) — task completed + run completed
+- fail_run(task, run) — task failed + run failed (terminal, no retry)
+- fail_and_retry(failed_task, run, new_task) — task failed + run retried + new task
+- cancel_run(task, run) — task cancelled + run cancelled (via CompleteTask)
+- cancel_pending_run(run, task) — pending run + pending task both cancelled
 - timeout_and_retry(timed_out_task, run, new_task or None if no retry)
 
 **EventBus**: publish(event), subscribe(run_id) -> EventStream
