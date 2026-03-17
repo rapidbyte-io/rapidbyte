@@ -445,6 +445,7 @@ impl ControlPlane for ControlPlaneHandler {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn validate_pipeline_yaml(raw: &[u8]) -> Result<String, Status> {
     let yaml = std::str::from_utf8(raw).map_err(|error| {
         Status::invalid_argument(format!("Pipeline YAML is not valid UTF-8: {error}"))
