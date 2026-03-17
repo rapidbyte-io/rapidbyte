@@ -70,13 +70,16 @@ pub async fn execute(
         .into_inner();
 
     let mut saw_event = false;
+    let mut saw_terminal_event = false;
     let mut bench_metrics: Option<DistributedBenchMetrics> = None;
+    let mut terminal_failure: Option<String> = None;
     while let Some(event) = stream.message().await? {
         saw_event = true;
 
         if let Some(run_event) = event.event {
             match run_event {
                 run_event::Event::Completed(completed) => {
+                    saw_terminal_event = true;
                     bench_metrics = Some(DistributedBenchMetrics {
                         total_records: completed.total_records,
                         total_bytes: completed.total_bytes,
@@ -84,13 +87,15 @@ pub async fn execute(
                     });
                 }
                 run_event::Event::Failed(failed) => {
-                    let message = failed
-                        .error
-                        .map_or_else(|| "run failed".to_owned(), |error| error.message);
-                    anyhow::bail!("distributed run failed: {message}");
+                    saw_terminal_event = true;
+                    terminal_failure = Some(failed.error.map_or_else(
+                        || "distributed run failed: run failed".to_owned(),
+                        |error| format!("distributed run failed: {}", error.message),
+                    ));
                 }
                 run_event::Event::Cancelled(_) => {
-                    anyhow::bail!("distributed run was cancelled");
+                    saw_terminal_event = true;
+                    terminal_failure = Some("distributed run was cancelled".to_owned());
                 }
                 _ => {}
             }
@@ -103,9 +108,17 @@ pub async fn execute(
                 eprintln!("Event: {}", event.detail);
             }
         }
+
+        if terminal_failure.is_some() {
+            break;
+        }
     }
 
-    if !saw_event {
+    if let Some(message) = terminal_failure {
+        anyhow::bail!(message);
+    }
+
+    if !saw_terminal_event {
         let run = client
             .get_run(request_with_bearer(
                 GetRunRequest {
@@ -115,12 +128,35 @@ pub async fn execute(
             )?)
             .await?
             .into_inner();
+        let normalized_state = normalize_state(&run.state);
         if verbosity != Verbosity::Quiet {
-            eprintln!("State: {}", normalize_state(&run.state));
+            eprintln!("State: {normalized_state}");
         }
 
-        if normalize_state(&run.state) == "COMPLETED" && bench_metrics.is_none() {
-            anyhow::bail!("distributed run reached COMPLETED without terminal metrics event");
+        match classify_terminal_state(&normalized_state) {
+            RunTerminalState::Succeeded => {
+                if bench_metrics.is_none() {
+                    anyhow::bail!(
+                        "distributed run reached terminal success state without terminal metrics event"
+                    );
+                }
+            }
+            RunTerminalState::Cancelled => {
+                anyhow::bail!("distributed run was cancelled");
+            }
+            RunTerminalState::Failed => {
+                anyhow::bail!("distributed run failed (state: {normalized_state})");
+            }
+            RunTerminalState::NonTerminal => {
+                let event_hint = if saw_event {
+                    "after receiving non-terminal stream events"
+                } else {
+                    "without receiving any stream events"
+                };
+                anyhow::bail!(
+                    "distributed run stream ended {event_hint}; latest state is {normalized_state}"
+                );
+            }
         }
     }
 
@@ -141,6 +177,25 @@ fn normalize_state(state: &str) -> String {
         return "UNKNOWN".to_owned();
     }
     state.trim().to_ascii_uppercase()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunTerminalState {
+    Succeeded,
+    Failed,
+    Cancelled,
+    NonTerminal,
+}
+
+fn classify_terminal_state(state: &str) -> RunTerminalState {
+    match state {
+        "COMPLETED" | "SUCCEEDED" => RunTerminalState::Succeeded,
+        "CANCELLED" => RunTerminalState::Cancelled,
+        "FAILED" | "RECOVERYFAILED" | "RECOVERY_FAILED" | "TIMEDOUT" | "TIMED_OUT" => {
+            RunTerminalState::Failed
+        }
+        _ => RunTerminalState::NonTerminal,
+    }
 }
 
 struct DistributedBenchMetrics {
@@ -179,6 +234,31 @@ mod tests {
     fn normalize_state_handles_empty_values() {
         assert_eq!(normalize_state(""), "UNKNOWN");
         assert_eq!(normalize_state(" accepted "), "ACCEPTED");
+    }
+
+    #[test]
+    fn classify_terminal_state_maps_controller_states() {
+        assert_eq!(
+            classify_terminal_state("COMPLETED"),
+            RunTerminalState::Succeeded
+        );
+        assert_eq!(
+            classify_terminal_state("SUCCEEDED"),
+            RunTerminalState::Succeeded
+        );
+        assert_eq!(classify_terminal_state("FAILED"), RunTerminalState::Failed);
+        assert_eq!(
+            classify_terminal_state("TIMED_OUT"),
+            RunTerminalState::Failed
+        );
+        assert_eq!(
+            classify_terminal_state("CANCELLED"),
+            RunTerminalState::Cancelled
+        );
+        assert_eq!(
+            classify_terminal_state("RUNNING"),
+            RunTerminalState::NonTerminal
+        );
     }
 
     #[test]

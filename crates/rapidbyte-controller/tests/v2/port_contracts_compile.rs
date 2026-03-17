@@ -31,7 +31,11 @@ impl RunRepository for FakeRunRepository {
         Ok(())
     }
 
-    async fn list(&self, _limit: usize) -> anyhow::Result<Vec<StoredRun>> {
+    async fn list(
+        &self,
+        _limit: usize,
+        _state: Option<rapidbyte_controller::domain::run::RunState>,
+    ) -> anyhow::Result<Vec<StoredRun>> {
         Ok(Vec::new())
     }
 

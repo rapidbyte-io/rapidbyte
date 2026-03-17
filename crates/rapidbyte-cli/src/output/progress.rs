@@ -74,7 +74,7 @@ pub fn spawn_progress_spinner(
                     }
                     Phase::Finished => break,
                 },
-                ProgressEvent::BatchEmitted { bytes } => {
+                ProgressEvent::BatchEmitted { bytes, .. } => {
                     counters.total_batches.fetch_add(1, Ordering::Relaxed);
                     counters.total_bytes.fetch_add(bytes, Ordering::Relaxed);
                     if last_update.elapsed() >= UPDATE_INTERVAL {
@@ -145,7 +145,10 @@ mod tests {
             "phase"
         );
         assert_eq!(
-            classify(&ProgressEvent::BatchEmitted { bytes: 42 }),
+            classify(&ProgressEvent::BatchEmitted {
+                records: 0,
+                bytes: 42,
+            }),
             "batch"
         );
         assert_eq!(

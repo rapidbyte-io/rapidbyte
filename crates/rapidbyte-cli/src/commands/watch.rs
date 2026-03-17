@@ -6,7 +6,7 @@ use crate::commands::transport::{connect_channel, request_with_bearer, TlsClient
 use crate::Verbosity;
 
 use rapidbyte_controller::proto::rapidbyte::v2::control_plane_client::ControlPlaneClient;
-use rapidbyte_controller::proto::rapidbyte::v2::StreamRunRequest;
+use rapidbyte_controller::proto::rapidbyte::v2::{run_event, StreamRunRequest};
 
 pub async fn execute(
     controller_url: Option<&str>,
@@ -34,8 +34,28 @@ pub async fn execute(
         .into_inner();
 
     let mut saw_event = false;
+    let mut saw_terminal_event = false;
     while let Some(event) = stream.message().await? {
         saw_event = true;
+
+        if let Some(run_event) = event.event {
+            match run_event {
+                run_event::Event::Completed(_) => {
+                    saw_terminal_event = true;
+                }
+                run_event::Event::Failed(failed) => {
+                    let message = failed
+                        .error
+                        .map_or_else(|| "run failed".to_owned(), |error| error.message);
+                    anyhow::bail!("distributed run failed: {message}");
+                }
+                run_event::Event::Cancelled(_) => {
+                    anyhow::bail!("distributed run was cancelled");
+                }
+                _ => {}
+            }
+        }
+
         if verbosity != Verbosity::Quiet {
             if event.detail.trim().is_empty() {
                 eprintln!("Event: <empty>");
@@ -43,10 +63,17 @@ pub async fn execute(
                 eprintln!("Event: {}", event.detail);
             }
         }
+
+        if saw_terminal_event {
+            break;
+        }
     }
 
     if !saw_event {
         anyhow::bail!("StreamRun ended before yielding any events");
+    }
+    if !saw_terminal_event {
+        anyhow::bail!("StreamRun ended before yielding a terminal event");
     }
 
     Ok(())

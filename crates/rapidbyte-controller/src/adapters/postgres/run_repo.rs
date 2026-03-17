@@ -115,18 +115,32 @@ impl RunRepository for PostgresRunRepository {
         Ok(())
     }
 
-    async fn list(&self, limit: usize) -> anyhow::Result<Vec<StoredRun>> {
+    async fn list(&self, limit: usize, state: Option<RunState>) -> anyhow::Result<Vec<StoredRun>> {
         let limit_i64 = i64::try_from(limit)?;
         let client = self.client.lock().await;
-        let rows = client
-            .query(
-                "SELECT run_id, state, retryable
-                 FROM controller_v2_runs
-                 ORDER BY created_at DESC
-                 LIMIT $1",
-                &[&limit_i64],
-            )
-            .await?;
+        let rows = if let Some(state) = state {
+            let state = format_state(state);
+            client
+                .query(
+                    "SELECT run_id, state, retryable
+                     FROM controller_v2_runs
+                     WHERE state = $1
+                     ORDER BY created_at DESC
+                     LIMIT $2",
+                    &[&state, &limit_i64],
+                )
+                .await?
+        } else {
+            client
+                .query(
+                    "SELECT run_id, state, retryable
+                     FROM controller_v2_runs
+                     ORDER BY created_at DESC
+                     LIMIT $1",
+                    &[&limit_i64],
+                )
+                .await?
+        };
 
         rows.iter().map(Self::row_to_stored_run).collect()
     }

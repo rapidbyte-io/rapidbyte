@@ -605,6 +605,10 @@ async fn process_task(ctx: TaskExecutionContext, task: TaskAssignment) -> anyhow
             task_id = task.task_id,
             "failed to send completion on v2 session"
         );
+        return Err(anyhow::anyhow!(
+            "failed to send completion on v2 session for task {}",
+            task.task_id
+        ));
     }
 
     if preview_prepared {

@@ -18,9 +18,9 @@ pub async fn forward_progress(
     lease_epoch: u64,
 ) {
     while let Some(event) = rx.recv().await {
-        let records = match event {
-            ProgressEvent::BatchEmitted { bytes } => bytes,
-            ProgressEvent::StreamCompleted { .. } | ProgressEvent::PhaseChange { .. } => 0,
+        let (records, bytes) = match event {
+            ProgressEvent::BatchEmitted { records, bytes } => (records, bytes),
+            ProgressEvent::StreamCompleted { .. } | ProgressEvent::PhaseChange { .. } => (0, 0),
             ProgressEvent::Retry { .. } => continue,
         };
 
@@ -30,6 +30,7 @@ pub async fn forward_progress(
                 task_id: task_id.clone(),
                 lease_epoch,
                 records,
+                bytes,
             })),
         };
         if session_outbound.send(message).is_err() {

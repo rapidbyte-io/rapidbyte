@@ -1,6 +1,6 @@
 //! In-memory/system clock adapter.
 
 #[derive(Debug, Default)]
-pub struct SystemClock;
+pub(crate) struct SystemClock;
 
 impl crate::ports::clock::Clock for SystemClock {}

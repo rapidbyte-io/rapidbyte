@@ -95,13 +95,14 @@ impl RunRepository for InMemoryRunRepository {
         anyhow::bail!("run is not in retryable state")
     }
 
-    async fn list(&self, limit: usize) -> anyhow::Result<Vec<StoredRun>> {
+    async fn list(&self, limit: usize, state: Option<RunState>) -> anyhow::Result<Vec<StoredRun>> {
         let mut runs = self
             .runs
             .lock()
             .expect("lock poisoned")
             .values()
             .cloned()
+            .filter(|stored| state.is_none_or(|filter| stored.run.state == filter))
             .collect::<Vec<_>>();
         runs.sort_by(|a, b| a.run.id.as_str().cmp(b.run.id.as_str()));
         runs.truncate(limit);

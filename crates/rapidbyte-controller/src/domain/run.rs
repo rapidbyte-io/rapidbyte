@@ -1,6 +1,6 @@
 //! Run aggregate and run lifecycle transitions.
 
-use crate::domain::error::StateViolation;
+use crate::domain::error::{DomainError, StateViolation};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunId(String);
@@ -54,13 +54,14 @@ impl Run {
 
     /// # Errors
     ///
-    /// Returns [`StateViolation`] when the requested transition is not allowed.
-    pub fn transition(&mut self, to: RunState) -> Result<(), StateViolation> {
+    /// Returns [`DomainError::StateViolation`] when the transition is invalid.
+    pub fn transition(&mut self, to: RunState) -> Result<(), DomainError> {
         if !is_valid_transition(self.state, to) {
             return Err(StateViolation {
                 from: self.state,
                 to,
-            });
+            }
+            .into());
         }
 
         self.state = to;

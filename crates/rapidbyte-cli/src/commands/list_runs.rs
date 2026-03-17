@@ -26,11 +26,11 @@ pub async fn execute(
     let mut client = ControlPlaneClient::new(channel);
 
     let request_limit = if limit < 0 { 0 } else { limit };
-    let filter_state = state.map(normalize_state);
     let resp = client
         .list_runs(request_with_bearer(
             ListRunsRequest {
                 limit: Some(request_limit),
+                state: state.map(ToOwned::to_owned),
             },
             auth_token,
         )?)
@@ -40,12 +40,6 @@ pub async fn execute(
     if verbosity != Verbosity::Quiet {
         for run in resp.runs {
             let normalized = normalize_state(&run.state);
-            if filter_state
-                .as_ref()
-                .is_some_and(|filter| filter != &normalized)
-            {
-                continue;
-            }
             eprintln!("{}  {}", run.run_id, normalized);
         }
     }

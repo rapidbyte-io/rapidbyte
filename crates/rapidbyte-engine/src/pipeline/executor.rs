@@ -81,11 +81,11 @@ pub(crate) async fn execute_single_stream(
     let stream_ctx_for_dst = stream_ctx.clone();
 
     // Build per-batch progress callback for the source runner
-    let on_batch_emitted: Option<Arc<dyn Fn(u64) + Send + Sync>> = {
+    let on_batch_emitted: Option<Arc<dyn Fn(u64, u64) + Send + Sync>> = {
         let tx = progress_tx.clone();
-        Some(Arc::new(move |bytes: u64| {
-            tx.emit(ProgressEvent::BatchEmitted { bytes });
-        }) as Arc<dyn Fn(u64) + Send + Sync>)
+        Some(Arc::new(move |records: u64, bytes: u64| {
+            tx.emit(ProgressEvent::BatchEmitted { records, bytes });
+        }) as Arc<dyn Fn(u64, u64) + Send + Sync>)
     };
 
     let params_src = params.clone();

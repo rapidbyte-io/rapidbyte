@@ -8,6 +8,7 @@ use crate::ports::repositories::RunRepository;
 #[derive(Debug, Clone)]
 pub struct ListRunsCommand {
     pub limit: Option<usize>,
+    pub state: Option<RunState>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +45,7 @@ where
         let limit = command.limit.unwrap_or(20);
         let runs = self
             .run_repository
-            .list(limit)
+            .list(limit, command.state)
             .await?
             .into_iter()
             .map(|stored| RunListItem {

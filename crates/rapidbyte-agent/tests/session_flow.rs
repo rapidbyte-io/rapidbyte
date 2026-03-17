@@ -135,6 +135,7 @@ async fn session_flow_carries_assignment_progress_and_completion() {
                 task_id: "task-1".to_owned(),
                 lease_epoch: 4,
                 records: 12,
+                bytes: 1024,
             })),
         })
         .expect("progress message should send");

@@ -51,7 +51,7 @@ async fn postgres_run_repository_roundtrip_and_transaction_rollback() {
         .expect("dedup should return existing run");
     assert_eq!(created.run.id.as_str(), dedup.run.id.as_str());
 
-    let listed = repo.list(10).await.expect("list should succeed");
+    let listed = repo.list(10, None).await.expect("list should succeed");
     assert_eq!(listed.len(), 1);
 
     repo.mark_cancelled(&RunId::new(created.run.id.as_str().to_owned()))

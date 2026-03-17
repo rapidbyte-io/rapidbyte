@@ -130,8 +130,8 @@ pub(crate) struct BatchRouter {
     pub current_checkpoint_id: Option<u64>,
     pub last_emitted_checkpoint_id: Option<u64>,
     pub compression: Option<CompressionCodec>,
-    /// Optional callback invoked after each `emit-batch` with the payload byte size.
-    pub on_emit: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+    /// Optional callback invoked after each `emit-batch` with `(records, bytes)`.
+    pub on_emit: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
 }
 
 pub(crate) struct CheckpointCollector {
@@ -182,7 +182,7 @@ pub struct HostStateBuilder {
     compression: Option<CompressionCodec>,
     overrides: Option<SandboxOverrides>,
     dlq_limit: usize,
-    on_emit: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+    on_emit: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
 }
 
 impl HostStateBuilder {
@@ -313,7 +313,7 @@ impl HostStateBuilder {
     }
 
     #[must_use]
-    pub fn on_emit(mut self, cb: Arc<dyn Fn(u64) + Send + Sync>) -> Self {
+    pub fn on_emit(mut self, cb: Arc<dyn Fn(u64, u64) + Send + Sync>) -> Self {
         self.on_emit = Some(cb);
         self
     }
@@ -583,7 +583,9 @@ impl ComponentHostState {
             .map_err(|e| PluginError::internal("CHANNEL_SEND", e.to_string()))?;
 
         if let Some(cb) = &self.batch.on_emit {
-            cb(payload_len);
+            // Runtime host imports can observe emitted payload bytes directly, but
+            // record counts are not available at this boundary.
+            cb(0, payload_len);
         }
 
         self.batch.last_emitted_checkpoint_id = Some(checkpoint_id);

@@ -34,7 +34,7 @@ pub enum ProgressEvent {
     /// Pipeline entered a new execution phase.
     PhaseChange { phase: Phase },
     /// A batch was emitted by the source plugin.
-    BatchEmitted { bytes: u64 },
+    BatchEmitted { records: u64, bytes: u64 },
     /// A stream finished processing.
     StreamCompleted { stream: String },
     /// A retryable error occurred; pipeline will retry after delay.

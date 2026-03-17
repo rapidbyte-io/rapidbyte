@@ -35,7 +35,7 @@ pub fn run_source_stream(
     frame_sender: mpsc::SyncSender<Frame>,
     source_config: &serde_json::Value,
     stats: Arc<Mutex<RunStats>>,
-    on_batch_emitted: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+    on_batch_emitted: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
 ) -> Result<SourceOutcome, PipelineError> {
     let phase_start = Instant::now();
 

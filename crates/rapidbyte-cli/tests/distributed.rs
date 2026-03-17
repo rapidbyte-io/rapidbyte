@@ -10,9 +10,9 @@ mod distributed_cli_contract {
         ControlPlane, ControlPlaneServer,
     };
     use rapidbyte_controller::proto::rapidbyte::v2::{
-        CancelRunRequest, CancelRunResponse, GetRunRequest, GetRunResponse, ListRunsRequest,
-        ListRunsResponse, RetryRunRequest, RetryRunResponse, RunEvent, RunSummary,
-        StreamRunRequest, SubmitRunRequest, SubmitRunResponse,
+        run_event, CancelRunRequest, CancelRunResponse, GetRunRequest, GetRunResponse,
+        ListRunsRequest, ListRunsResponse, RetryRunRequest, RetryRunResponse, RunCompleted,
+        RunEvent, RunSummary, StreamRunRequest, SubmitRunRequest, SubmitRunResponse,
     };
     use tempfile::NamedTempFile;
     use tokio_stream::wrappers::TcpListenerStream;
@@ -45,7 +45,7 @@ mod distributed_cli_contract {
         ) -> Result<tonic::Response<GetRunResponse>, tonic::Status> {
             Ok(tonic::Response::new(GetRunResponse {
                 run_id: request.into_inner().run_id,
-                state: "Accepted".to_owned(),
+                state: "Completed".to_owned(),
             }))
         }
 
@@ -88,8 +88,13 @@ mod distributed_cli_contract {
             let run_id = request.into_inner().run_id;
             let stream = tokio_stream::iter(vec![Ok(RunEvent {
                 run_id,
-                detail: "accepted".to_owned(),
-                event: None,
+                detail: "completed".to_owned(),
+                event: Some(run_event::Event::Completed(RunCompleted {
+                    total_records: 10,
+                    total_bytes: 1024,
+                    elapsed_seconds: 1.0,
+                    cursors_advanced: 1,
+                })),
             })]);
             Ok(tonic::Response::new(Box::pin(stream)))
         }

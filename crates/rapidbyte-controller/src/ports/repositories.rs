@@ -2,7 +2,7 @@
 
 use async_trait::async_trait;
 
-use crate::domain::run::{Run, RunId};
+use crate::domain::run::{Run, RunId, RunState};
 
 #[derive(Debug, Clone)]
 pub struct StoredRun {
@@ -43,7 +43,7 @@ pub trait RunRepository: Send + Sync {
     /// # Errors
     ///
     /// Returns an error when persistence fails.
-    async fn list(&self, limit: usize) -> anyhow::Result<Vec<StoredRun>>;
+    async fn list(&self, limit: usize, state: Option<RunState>) -> anyhow::Result<Vec<StoredRun>>;
 
     /// Mark a run as cancelled.
     ///

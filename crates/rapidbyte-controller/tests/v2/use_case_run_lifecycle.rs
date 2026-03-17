@@ -74,13 +74,14 @@ impl RunRepository for FakeRunRepository {
         Ok(())
     }
 
-    async fn list(&self, limit: usize) -> anyhow::Result<Vec<StoredRun>> {
+    async fn list(&self, limit: usize, state: Option<RunState>) -> anyhow::Result<Vec<StoredRun>> {
         let mut values = self
             .runs
             .lock()
             .expect("lock")
             .values()
             .cloned()
+            .filter(|stored| state.is_none_or(|filter| stored.run.state == filter))
             .collect::<Vec<_>>();
         values.truncate(limit);
         Ok(values)
@@ -216,7 +217,10 @@ async fn list_returns_submitted_run() {
         .expect("submit should pass");
 
     let runs = list
-        .execute(ListRunsCommand { limit: Some(20) })
+        .execute(ListRunsCommand {
+            limit: Some(20),
+            state: None,
+        })
         .await
         .expect("list should pass");
     assert_eq!(runs.runs.len(), 1);

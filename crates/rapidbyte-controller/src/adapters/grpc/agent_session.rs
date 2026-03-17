@@ -1,6 +1,7 @@
 //! v2 `AgentSession` gRPC handler.
 
 use std::pin::Pin;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -146,11 +147,14 @@ impl AgentSessionHandler {
                     break;
                 };
 
-                let agent_id = if message.agent_id.is_empty() {
-                    registered_agent_id.clone()
-                } else {
-                    message.agent_id
-                };
+                if !message.agent_id.is_empty() && message.agent_id != registered_agent_id {
+                    warn!(
+                        registered_agent_id = %registered_agent_id,
+                        reported_agent_id = %message.agent_id,
+                        "ignoring mismatched agent_id from session message"
+                    );
+                }
+                let agent_id = registered_agent_id.clone();
 
                 match message.payload {
                     Some(agent_message::Payload::Heartbeat(heartbeat)) => {
@@ -204,7 +208,7 @@ impl AgentSessionHandler {
                                 stream: String::new(),
                                 phase: "running".to_owned(),
                                 records: progress.records,
-                                bytes: 0,
+                                bytes: progress.bytes,
                             }),
                         };
                         if let Err(error) = handler.report_progress(Request::new(request)).await {
@@ -238,7 +242,7 @@ impl AgentSessionHandler {
                             preview: None,
                             backend_run_id: 0,
                         };
-                        if let Err(error) = handler.complete_task(Request::new(request)).await {
+                        if let Err(error) = complete_task_with_retry(&handler, request).await {
                             warn!(error = %error, "failed to bridge v2 completion message");
                         }
                     }
@@ -251,6 +255,29 @@ impl AgentSessionHandler {
 
         Ok(Box::pin(ReceiverStream::new(out_rx)))
     }
+}
+
+async fn complete_task_with_retry(
+    handler: &AgentHandler,
+    request: CompleteTaskRequest,
+) -> Result<(), tonic::Status> {
+    const MAX_ATTEMPTS: usize = 3;
+    const RETRY_DELAY: Duration = Duration::from_millis(100);
+
+    let mut last_error: Option<tonic::Status> = None;
+    for attempt in 1..=MAX_ATTEMPTS {
+        match handler.complete_task(Request::new(request.clone())).await {
+            Ok(_) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt < MAX_ATTEMPTS {
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| tonic::Status::internal("complete_task failed")))
 }
 
 #[tonic::async_trait]

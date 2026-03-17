@@ -195,15 +195,22 @@ impl ControlPlane for ControlPlaneHandler {
         &self,
         request: tonic::Request<ListRunsRequest>,
     ) -> Result<tonic::Response<ListRunsResponse>, tonic::Status> {
+        let request = request.into_inner();
         let limit = request
-            .into_inner()
             .limit
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(20)
             .max(1);
+        let state_filter = request
+            .state
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(parse_list_runs_state)
+            .transpose()?;
+        let state_slice = state_filter.map(|state| [state]);
 
         let runs = self.state.runs.read().await;
-        let mut records = runs.list_runs(None);
+        let mut records = runs.list_runs(state_slice.as_ref().map(|slice| &slice[..]));
         records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
         records.truncate(limit);
 
@@ -400,11 +407,11 @@ impl ControlPlane for ControlPlaneHandler {
         };
 
         if let Err(error) = self.state.persist_run_record(&retried_run).await {
-            rollback_new_submission(&self.state, &run_id, &retried_task_id).await;
+            rollback_new_task_only(&self.state, &retried_task_id).await;
             return Err(Status::internal(error.to_string()));
         }
         if let Err(error) = self.state.persist_task_record(&retried_task).await {
-            rollback_new_submission(&self.state, &run_id, &retried_task_id).await;
+            rollback_new_task_only(&self.state, &retried_task_id).await;
             return Err(Status::internal(error.to_string()));
         }
 
@@ -470,6 +477,26 @@ fn validate_pipeline_yaml(raw: &[u8]) -> Result<String, Status> {
         .to_owned())
 }
 
+fn parse_list_runs_state(raw: &str) -> Result<RunState, Status> {
+    let normalized = raw.trim().to_ascii_uppercase();
+    match normalized.as_str() {
+        "PENDING" => Ok(RunState::Pending),
+        "ASSIGNED" => Ok(RunState::Assigned),
+        "RECONCILING" => Ok(RunState::Reconciling),
+        "RUNNING" => Ok(RunState::Running),
+        "PREVIEW_READY" | "PREVIEWREADY" => Ok(RunState::PreviewReady),
+        "COMPLETED" | "SUCCEEDED" => Ok(RunState::Completed),
+        "FAILED" => Ok(RunState::Failed),
+        "RECOVERY_FAILED" | "RECOVERYFAILED" => Ok(RunState::RecoveryFailed),
+        "CANCELLING" => Ok(RunState::Cancelling),
+        "CANCELLED" => Ok(RunState::Cancelled),
+        "TIMED_OUT" | "TIMEDOUT" => Ok(RunState::TimedOut),
+        _ => Err(Status::invalid_argument(format!(
+            "Unsupported run state filter: {raw}"
+        ))),
+    }
+}
+
 async fn rollback_new_submission(state: &ControllerState, run_id: &str, task_id: &str) {
     {
         let mut tasks = state.tasks.write().await;
@@ -479,6 +506,11 @@ async fn rollback_new_submission(state: &ControllerState, run_id: &str, task_id:
         let mut runs = state.runs.write().await;
         let _ = runs.remove_run(run_id);
     }
+}
+
+async fn rollback_new_task_only(state: &ControllerState, task_id: &str) {
+    let mut tasks = state.tasks.write().await;
+    let _ = tasks.remove_task(task_id);
 }
 
 async fn cancel_latest_task(
