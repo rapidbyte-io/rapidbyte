@@ -1,1 +1,4 @@
-// gRPC adapters - populated in subsequent tasks
+pub mod agent;
+pub mod auth;
+pub mod convert;
+pub mod pipeline;

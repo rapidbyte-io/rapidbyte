@@ -7,4 +7,5 @@ pub mod domain;
 pub mod proto;
 
 mod server;
+pub use config::{ControllerConfig, ServerTlsConfig};
 pub use server::run;
