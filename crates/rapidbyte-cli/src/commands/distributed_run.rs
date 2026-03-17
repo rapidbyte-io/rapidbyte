@@ -9,7 +9,7 @@ use crate::Verbosity;
 
 use rapidbyte_controller::proto::rapidbyte::v2::control_plane_client::ControlPlaneClient;
 use rapidbyte_controller::proto::rapidbyte::v2::{
-    GetRunRequest, StreamRunRequest, SubmitRunRequest,
+    run_event, ExecutionOptions, GetRunRequest, StreamRunRequest, SubmitRunRequest,
 };
 
 pub async fn execute(
@@ -23,13 +23,13 @@ pub async fn execute(
 ) -> Result<()> {
     let pipeline_yaml = std::fs::read(pipeline_path)
         .with_context(|| format!("Failed to read pipeline: {}", pipeline_path.display()))?;
+    let effective_dry_run = dry_run || limit.is_some();
+
     if verbosity == Verbosity::Diagnostic {
         eprintln!("Loaded pipeline YAML ({} bytes)", pipeline_yaml.len());
     }
     if (dry_run || limit.is_some()) && verbosity != Verbosity::Quiet {
-        eprintln!(
-            "Note: --dry-run/--limit flags are accepted, but distributed execution options are currently controlled by the controller."
-        );
+        eprintln!("Forwarding --dry-run/--limit execution options to controller.");
     }
 
     let channel = connect_channel(controller_url, tls)
@@ -42,6 +42,11 @@ pub async fn execute(
         .submit_run(request_with_bearer(
             SubmitRunRequest {
                 idempotency_key: Some(uuid::Uuid::new_v4().to_string()),
+                pipeline_yaml_utf8: pipeline_yaml,
+                execution: Some(ExecutionOptions {
+                    dry_run: effective_dry_run,
+                    limit,
+                }),
             },
             auth_token,
         )?)
@@ -64,8 +69,32 @@ pub async fn execute(
         .into_inner();
 
     let mut saw_event = false;
+    let mut bench_metrics: Option<DistributedBenchMetrics> = None;
     while let Some(event) = stream.message().await? {
         saw_event = true;
+
+        if let Some(run_event) = event.event {
+            match run_event {
+                run_event::Event::Completed(completed) => {
+                    bench_metrics = Some(DistributedBenchMetrics {
+                        total_records: completed.total_records,
+                        total_bytes: completed.total_bytes,
+                        elapsed_seconds: completed.elapsed_seconds,
+                    });
+                }
+                run_event::Event::Failed(failed) => {
+                    let message = failed
+                        .error
+                        .map_or_else(|| "run failed".to_owned(), |error| error.message);
+                    anyhow::bail!("distributed run failed: {message}");
+                }
+                run_event::Event::Cancelled(_) => {
+                    anyhow::bail!("distributed run was cancelled");
+                }
+                _ => {}
+            }
+        }
+
         if verbosity != Verbosity::Quiet {
             if event.detail.is_empty() {
                 eprintln!("Event: <empty>");
@@ -88,9 +117,21 @@ pub async fn execute(
         if verbosity != Verbosity::Quiet {
             eprintln!("State: {}", normalize_state(&run.state));
         }
+
+        if normalize_state(&run.state) == "COMPLETED" && bench_metrics.is_none() {
+            anyhow::bail!("distributed run reached COMPLETED without terminal metrics event");
+        }
     }
 
-    emit_bench_json_stub();
+    if std::env::var_os("RAPIDBYTE_BENCH").is_some() {
+        let metrics = bench_metrics.ok_or_else(|| {
+            anyhow::anyhow!(
+                "distributed run did not emit terminal metrics required for benchmark output"
+            )
+        })?;
+        emit_bench_json(&metrics);
+    }
+
     Ok(())
 }
 
@@ -101,22 +142,24 @@ fn normalize_state(state: &str) -> String {
     state.trim().to_ascii_uppercase()
 }
 
-fn emit_bench_json_stub() {
-    if std::env::var_os("RAPIDBYTE_BENCH").is_none() {
-        return;
-    }
+struct DistributedBenchMetrics {
+    total_records: u64,
+    total_bytes: u64,
+    elapsed_seconds: f64,
+}
 
+fn emit_bench_json(metrics: &DistributedBenchMetrics) {
     println!(
         "@@BENCH_JSON@@{}",
         serde_json::json!({
-            "records_read": 0,
-            "records_written": 0,
-            "bytes_read": 0,
-            "bytes_written": 0,
-            "duration_secs": 0.0,
-            "source_duration_secs": 0.0,
-            "dest_duration_secs": 0.0,
-            "dest_recv_count": 0,
+            "records_read": metrics.total_records,
+            "records_written": metrics.total_records,
+            "bytes_read": metrics.total_bytes,
+            "bytes_written": metrics.total_bytes,
+            "duration_secs": metrics.elapsed_seconds,
+            "source_duration_secs": metrics.elapsed_seconds,
+            "dest_duration_secs": metrics.elapsed_seconds,
+            "dest_recv_count": 1,
             "parallelism": 1,
             "retry_count": 0,
             "stream_metrics": []

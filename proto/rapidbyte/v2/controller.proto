@@ -28,6 +28,8 @@ service AgentService {
 
 message SubmitRunRequest {
   optional string idempotency_key = 1;
+  bytes pipeline_yaml_utf8 = 2;
+  optional ExecutionOptions execution = 3;
 }
 
 message SubmitRunResponse {
@@ -178,6 +180,10 @@ message TaskCompletion {
   string task_id = 1;
   uint64 lease_epoch = 2;
   bool success = 3;
+  uint64 records_processed = 4;
+  uint64 bytes_processed = 5;
+  double elapsed_seconds = 6;
+  uint64 cursors_advanced = 7;
 }
 
 message SessionHeartbeat {

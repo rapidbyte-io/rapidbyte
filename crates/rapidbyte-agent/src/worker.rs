@@ -593,6 +593,10 @@ async fn process_task(ctx: TaskExecutionContext, task: TaskAssignment) -> anyhow
                 task_id: task.task_id.clone(),
                 lease_epoch: task.lease_epoch,
                 success: matches!(result.outcome, TaskOutcomeKind::Completed),
+                records_processed: result.metrics.records_processed,
+                bytes_processed: result.metrics.bytes_processed,
+                elapsed_seconds: result.metrics.elapsed_seconds,
+                cursors_advanced: result.metrics.cursors_advanced,
             })),
         })
         .is_err()

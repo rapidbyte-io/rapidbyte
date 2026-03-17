@@ -8,16 +8,6 @@ use tracing::info;
 use crate::adapters::grpc::agent_bridge::AgentHandler;
 use crate::adapters::grpc::agent_session::AgentSessionHandler;
 use crate::adapters::grpc::control_plane::ControlPlaneHandler;
-use crate::adapters::in_memory::clock::SystemClock;
-use crate::adapters::in_memory::event_bus::InMemoryEventBus;
-use crate::adapters::in_memory::id_generator::UuidIdGenerator;
-use crate::adapters::in_memory::repos::InMemoryRunRepository;
-use crate::adapters::in_memory::unit_of_work::InMemoryUnitOfWork;
-use crate::app::cancel_run::CancelRunUseCase;
-use crate::app::get_run::GetRunUseCase;
-use crate::app::list_runs::ListRunsUseCase;
-use crate::app::retry_run::RetryRunUseCase;
-use crate::app::submit_run::SubmitRunUseCase;
 use crate::background;
 use crate::config::{initialize_metadata_store, validate, ControllerConfig, DEFAULT_SIGNING_KEY};
 use crate::middleware::BearerAuthInterceptor;
@@ -76,24 +66,8 @@ pub async fn run(
 
     let auth = BearerAuthInterceptor::new(config.auth.tokens.clone());
 
-    let run_repository = Arc::new(InMemoryRunRepository::default());
-    let unit_of_work = Arc::new(InMemoryUnitOfWork::new(run_repository.clone()));
-    let control_plane_service = ControlPlaneServer::with_interceptor(
-        ControlPlaneHandler::new(
-            SubmitRunUseCase::new(
-                run_repository.clone(),
-                Arc::new(InMemoryEventBus),
-                Arc::new(SystemClock),
-                Arc::new(UuidIdGenerator),
-                unit_of_work.clone(),
-            ),
-            GetRunUseCase::new(run_repository.clone()),
-            ListRunsUseCase::new(run_repository.clone()),
-            CancelRunUseCase::new(run_repository.clone(), unit_of_work.clone()),
-            RetryRunUseCase::new(run_repository, unit_of_work),
-        ),
-        auth.clone(),
-    );
+    let control_plane_service =
+        ControlPlaneServer::with_interceptor(ControlPlaneHandler::new(state.clone()), auth.clone());
 
     // Read trusted key PEM contents from files
     let mut trusted_key_pems: Vec<String> = Vec::new();
