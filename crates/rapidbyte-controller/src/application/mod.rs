@@ -1,1 +1,2 @@
-// Application use cases - populated in subsequent tasks
+pub mod context;
+pub mod error;
