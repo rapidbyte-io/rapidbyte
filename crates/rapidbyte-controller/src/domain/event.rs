@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
+
 use super::run::{RunError, RunMetrics, RunState};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DomainEvent {
     RunStateChanged {
         run_id: String,

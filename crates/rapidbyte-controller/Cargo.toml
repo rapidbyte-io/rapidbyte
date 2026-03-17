@@ -20,17 +20,11 @@ uuid = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-hmac = { workspace = true }
-sha2 = { workspace = true }
-bytes = { workspace = true }
 tokio-stream = { workspace = true }
 tower = { workspace = true }
-tokio-postgres = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
-rustls = { workspace = true }
-tokio-rustls = { workspace = true }
-rustls-native-certs = { workspace = true }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "migrate"] }
 
 [build-dependencies]
 tonic-build = { workspace = true }
