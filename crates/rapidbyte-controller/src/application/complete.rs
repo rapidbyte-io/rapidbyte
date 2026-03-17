@@ -71,8 +71,10 @@ pub async fn complete_task(
                 .await?;
         }
         TaskOutcome::Failed { error } => {
-            if run.can_retry_after_error(error.retryable, &error.commit_state) {
-                // Retryable
+            if run.can_retry_after_error(error.retryable, &error.commit_state)
+                && !run.is_cancel_requested()
+            {
+                // Retryable (and not cancelled)
                 task.fail()?;
                 let new_attempt = run.retry()?;
                 let new_task_id = uuid::Uuid::new_v4().to_string();
@@ -406,5 +408,40 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn cancel_requested_prevents_retry_on_failure() {
+        let tc = fake_context();
+        let (task_id, run_id, epoch) = setup_running_task(&tc).await;
+
+        // Request cancellation while task is running
+        crate::application::cancel::cancel_run(&tc.ctx, &run_id)
+            .await
+            .unwrap();
+
+        // Agent reports retryable failure
+        complete_task(
+            &tc.ctx,
+            "agent-1",
+            &task_id,
+            epoch,
+            TaskOutcome::Failed {
+                error: TaskError {
+                    code: "TRANSIENT".to_string(),
+                    message: "temporary failure".to_string(),
+                    retryable: true,
+                    commit_state: crate::domain::run::CommitState::BeforeCommit,
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+        // Run should be Failed (not retried), because cancellation was requested
+        let run = tc.ctx.runs.find_by_id(&run_id).await.unwrap().unwrap();
+        assert_eq!(run.state(), RunState::Failed);
+        // Should NOT have been retried (attempt should still be 1)
+        assert_eq!(run.current_attempt(), 1);
     }
 }

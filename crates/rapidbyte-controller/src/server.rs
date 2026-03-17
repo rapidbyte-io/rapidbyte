@@ -69,7 +69,11 @@ pub async fn run(
         .metadata_database_url
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("metadata_database_url is required"))?;
-    let pool = PgPool::connect(database_url).await?;
+    // Use from_str to handle both postgres:// URLs and libpq-style connection strings
+    let connect_options: sqlx::postgres::PgConnectOptions = database_url
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid database URL: {e}"))?;
+    let pool = PgPool::connect_with(connect_options).await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
 
     // 2. Build adapters

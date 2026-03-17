@@ -30,13 +30,19 @@ impl AgentService for AgentGrpcService {
     ) -> Result<Response<pb::RegisterResponse>, Status> {
         let req = req.into_inner();
         let caps = req.capabilities.unwrap_or_default();
+        // Normalize: 0 means "use default" (1), prevents starvation
+        let max_tasks = if caps.max_concurrent_tasks == 0 {
+            1
+        } else {
+            caps.max_concurrent_tasks
+        };
 
         crate::application::register::register(
             &self.ctx,
             &req.agent_id,
             crate::domain::agent::AgentCapabilities {
                 plugins: caps.plugins,
-                max_concurrent_tasks: caps.max_concurrent_tasks,
+                max_concurrent_tasks: max_tasks,
             },
         )
         .await
