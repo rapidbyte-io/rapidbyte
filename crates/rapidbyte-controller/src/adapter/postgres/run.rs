@@ -10,14 +10,16 @@ fn box_err(e: impl std::error::Error + Send + Sync + 'static) -> RepositoryError
     RepositoryError(Box::new(e))
 }
 
-fn parse_run_state(s: &str) -> RunState {
+fn parse_run_state(s: &str) -> Result<RunState, RepositoryError> {
     match s {
-        "pending" => RunState::Pending,
-        "running" => RunState::Running,
-        "completed" => RunState::Completed,
-        "failed" => RunState::Failed,
-        "cancelled" => RunState::Cancelled,
-        other => panic!("unknown run state in database: {other}"),
+        "pending" => Ok(RunState::Pending),
+        "running" => Ok(RunState::Running),
+        "completed" => Ok(RunState::Completed),
+        "failed" => Ok(RunState::Failed),
+        "cancelled" => Ok(RunState::Cancelled),
+        other => Err(RepositoryError(Box::from(format!(
+            "unknown run state in database: {other}"
+        )))),
     }
 }
 
@@ -51,7 +53,7 @@ fn run_from_row(row: &sqlx::postgres::PgRow) -> Result<Run, RepositoryError> {
     let created_at = row.try_get("created_at").map_err(box_err)?;
     let updated_at = row.try_get("updated_at").map_err(box_err)?;
 
-    let state = parse_run_state(&state_str);
+    let state = parse_run_state(&state_str)?;
 
     let error = match (error_code, error_message) {
         (Some(code), Some(message)) => Some(RunError { code, message }),
@@ -196,7 +198,12 @@ impl RunRepository for PgRunRepository {
     ) -> Result<RunPage, RepositoryError> {
         // Cursor-based pagination using (created_at, id).
         // page_token format: "<created_at_rfc3339>|<id>"
-        let limit = i64::from(pagination.page_size) + 1; // fetch one extra to detect next page
+        let page_size = if pagination.page_size == 0 {
+            20
+        } else {
+            pagination.page_size
+        };
+        let limit = i64::from(page_size) + 1; // fetch one extra to detect next page
 
         let rows = if let Some(ref token) = pagination.page_token {
             let parts: Vec<&str> = token.splitn(2, '|').collect();
@@ -247,9 +254,9 @@ impl RunRepository for PgRunRepository {
                 .map_err(box_err)?
         };
 
-        let has_next = rows.len() > pagination.page_size as usize;
+        let has_next = rows.len() > page_size as usize;
         let take = if has_next {
-            pagination.page_size as usize
+            page_size as usize
         } else {
             rows.len()
         };

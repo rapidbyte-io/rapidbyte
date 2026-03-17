@@ -10,15 +10,17 @@ fn box_err(e: impl std::error::Error + Send + Sync + 'static) -> RepositoryError
     RepositoryError(Box::new(e))
 }
 
-fn parse_task_state(s: &str) -> TaskState {
+fn parse_task_state(s: &str) -> Result<TaskState, RepositoryError> {
     match s {
-        "pending" => TaskState::Pending,
-        "running" => TaskState::Running,
-        "completed" => TaskState::Completed,
-        "failed" => TaskState::Failed,
-        "cancelled" => TaskState::Cancelled,
-        "timed_out" => TaskState::TimedOut,
-        other => panic!("unknown task state in database: {other}"),
+        "pending" => Ok(TaskState::Pending),
+        "running" => Ok(TaskState::Running),
+        "completed" => Ok(TaskState::Completed),
+        "failed" => Ok(TaskState::Failed),
+        "cancelled" => Ok(TaskState::Cancelled),
+        "timed_out" => Ok(TaskState::TimedOut),
+        other => Err(RepositoryError(Box::from(format!(
+            "unknown task state in database: {other}"
+        )))),
     }
 }
 
@@ -45,7 +47,7 @@ fn task_from_row(row: &sqlx::postgres::PgRow) -> Result<Task, RepositoryError> {
     let created_at: DateTime<Utc> = row.try_get("created_at").map_err(box_err)?;
     let updated_at: DateTime<Utc> = row.try_get("updated_at").map_err(box_err)?;
 
-    let state = parse_task_state(&state_str);
+    let state = parse_task_state(&state_str)?;
 
     let lease = match (lease_epoch, lease_expires_at) {
         (Some(epoch), Some(expires_at)) => Some(Lease::new(epoch.cast_unsigned(), expires_at)),

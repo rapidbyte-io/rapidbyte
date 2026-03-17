@@ -121,6 +121,7 @@ impl PipelineService for PipelineGrpcService {
 
     type WatchRunStream = Pin<Box<dyn Stream<Item = Result<pb::RunEvent, Status>> + Send>>;
 
+    #[allow(clippy::result_large_err)]
     async fn watch_run(
         &self,
         req: Request<pb::WatchRunRequest>,

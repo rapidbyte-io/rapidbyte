@@ -33,9 +33,21 @@ use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineServiceServer;
 #[allow(clippy::similar_names)]
 pub async fn run(
     config: ControllerConfig,
-    _otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
+    otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
     secrets: SecretProviders,
 ) -> Result<()> {
+    // 0. Optionally bind Prometheus metrics endpoint.
+    //    The otel_guard is kept alive for the server lifetime regardless.
+    let _otel_keep = otel_guard.clone();
+    if let Some(ref metrics_addr) = config.metrics_listen {
+        tracing::info!(addr = %metrics_addr, "Prometheus metrics endpoint");
+        let metrics_listener = rapidbyte_metrics::bind_prometheus(metrics_addr).await?;
+        tokio::spawn(rapidbyte_metrics::serve_prometheus(
+            otel_guard,
+            metrics_listener,
+        ));
+    }
+
     // 1. Connect to Postgres
     let database_url = config
         .metadata_database_url

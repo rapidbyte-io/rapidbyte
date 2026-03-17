@@ -159,7 +159,13 @@ impl AgentService for AgentGrpcService {
                 let commit_state = match pb::CommitState::try_from(f.commit_state) {
                     Ok(pb::CommitState::AfterCommitConfirmed) => CommitState::AfterCommitConfirmed,
                     Ok(pb::CommitState::AfterCommitUnknown) => CommitState::AfterCommitUnknown,
-                    _ => CommitState::BeforeCommit,
+                    Ok(pb::CommitState::BeforeCommit) => CommitState::BeforeCommit,
+                    Ok(pb::CommitState::Unspecified) | Err(_) => {
+                        return Err(Status::invalid_argument(format!(
+                            "invalid or missing commit_state: {}",
+                            f.commit_state
+                        )));
+                    }
                 };
                 crate::application::complete::TaskOutcome::Failed {
                     error: crate::application::complete::TaskError {

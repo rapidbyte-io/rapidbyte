@@ -71,7 +71,16 @@ pub async fn execute(
                     failed.error_message,
                 );
             }
-            None => {}
+            None => {
+                // Check for terminal states without detail (e.g., Cancelled)
+                let state = RunState::try_from(event.state).ok();
+                if matches!(state, Some(RunState::Cancelled)) {
+                    if verbosity != Verbosity::Quiet {
+                        eprintln!("Run cancelled");
+                    }
+                    return Ok(());
+                }
+            }
         }
     }
 

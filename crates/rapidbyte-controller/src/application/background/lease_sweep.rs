@@ -25,7 +25,7 @@ pub async fn sweep_expired_leases(ctx: &AppContext) -> Result<(), AppError> {
                     id: task.run_id().to_string(),
                 })?;
 
-        if run.can_retry_after_timeout() {
+        if run.can_retry_after_timeout() && !run.is_cancel_requested() {
             let new_attempt = run.retry()?;
             let new_task_id = uuid::Uuid::new_v4().to_string();
             let new_task = Task::new(new_task_id, run.id().to_string(), new_attempt, now);
