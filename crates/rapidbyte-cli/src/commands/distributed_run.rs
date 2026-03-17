@@ -21,9 +21,16 @@ pub async fn execute(
     auth_token: Option<&str>,
     tls: Option<&TlsClientConfig>,
 ) -> Result<()> {
-    let _yaml = std::fs::read(pipeline_path)
+    let pipeline_yaml = std::fs::read(pipeline_path)
         .with_context(|| format!("Failed to read pipeline: {}", pipeline_path.display()))?;
-    let _effective_dry_run = dry_run || limit.is_some();
+    if verbosity == Verbosity::Diagnostic {
+        eprintln!("Loaded pipeline YAML ({} bytes)", pipeline_yaml.len());
+    }
+    if (dry_run || limit.is_some()) && verbosity != Verbosity::Quiet {
+        eprintln!(
+            "Note: --dry-run/--limit flags are accepted, but distributed execution options are currently controlled by the controller."
+        );
+    }
 
     let channel = connect_channel(controller_url, tls)
         .await

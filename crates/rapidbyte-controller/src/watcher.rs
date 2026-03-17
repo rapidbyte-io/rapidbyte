@@ -114,9 +114,10 @@ mod tests {
     #[test]
     fn remove_cleans_up() {
         let mut watchers = RunWatchers::new();
-        let _rx = watchers.subscribe("r1");
+        let subscriber = watchers.subscribe("r1");
         watchers.remove("r1");
         // Channel is gone, publish is a no-op
         watchers.publish("r1", make_progress_event("r1"));
+        drop(subscriber);
     }
 }

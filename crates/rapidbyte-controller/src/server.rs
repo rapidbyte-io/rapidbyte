@@ -60,36 +60,37 @@ pub async fn run(
         ControllerState::from_metadata_store(&config.auth.signing_key, metadata_store).await?;
     let state = state.with_secrets(secrets);
 
-    let _reaper = background::spawn_reaper(
+    let reaper_task = background::spawn_reaper(
         state.clone(),
         config.timers.agent_reap_interval,
         config.timers.agent_reap_timeout,
     );
-    let _lease_sweep = background::spawn_lease_sweep(
+    let lease_sweep_task = background::spawn_lease_sweep(
         state.clone(),
         config.timers.lease_check_interval,
         config.timers.reconciliation_timeout,
     );
-    let _preview_cleanup =
+    let preview_cleanup_task =
         background::spawn_preview_cleanup(state.clone(), config.timers.preview_cleanup_interval);
+    let background_tasks = (reaper_task, lease_sweep_task, preview_cleanup_task);
 
     let auth = BearerAuthInterceptor::new(config.auth.tokens.clone());
 
-    let v2_repo = Arc::new(InMemoryRunRepository::default());
-    let v2_uow = Arc::new(InMemoryUnitOfWork::new(v2_repo.clone()));
-    let control_plane_v2 = ControlPlaneServer::with_interceptor(
+    let run_repository = Arc::new(InMemoryRunRepository::default());
+    let unit_of_work = Arc::new(InMemoryUnitOfWork::new(run_repository.clone()));
+    let control_plane_service = ControlPlaneServer::with_interceptor(
         ControlPlaneHandler::new(
             SubmitRunUseCase::new(
-                v2_repo.clone(),
+                run_repository.clone(),
                 Arc::new(InMemoryEventBus),
                 Arc::new(SystemClock),
                 Arc::new(UuidIdGenerator),
-                v2_uow.clone(),
+                unit_of_work.clone(),
             ),
-            GetRunUseCase::new(v2_repo.clone()),
-            ListRunsUseCase::new(v2_repo.clone()),
-            CancelRunUseCase::new(v2_repo.clone(), v2_uow.clone()),
-            RetryRunUseCase::new(v2_repo, v2_uow),
+            GetRunUseCase::new(run_repository.clone()),
+            ListRunsUseCase::new(run_repository.clone()),
+            CancelRunUseCase::new(run_repository.clone(), unit_of_work.clone()),
+            RetryRunUseCase::new(run_repository, unit_of_work),
         ),
         auth.clone(),
     );
@@ -110,7 +111,7 @@ pub async fn run(
         config.trust.policy.clone(),
         trusted_key_pems,
     );
-    let agent_session_v2 =
+    let agent_session_service =
         AgentSessionServer::with_interceptor(AgentSessionHandler::new(agent_handler), auth.clone());
 
     info!(addr = %config.listen_addr, "Controller listening");
@@ -124,10 +125,12 @@ pub async fn run(
     }
 
     server
-        .add_service(control_plane_v2)
-        .add_service(agent_session_v2)
+        .add_service(control_plane_service)
+        .add_service(agent_session_service)
         .serve(config.listen_addr)
         .await?;
+
+    drop(background_tasks);
 
     Ok(())
 }

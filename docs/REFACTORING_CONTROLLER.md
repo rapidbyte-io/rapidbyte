@@ -430,7 +430,7 @@ Refactor is done only when every criterion passes.
 
 1. Verification gates passed: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test -p rapidbyte-controller`, `cargo test -p rapidbyte-agent`, `cargo test -p rapidbyte-cli`, and `cargo test --workspace`.
 2. Postgres-backed ignored controller tests passed against local Postgres on `127.0.0.1:33270` via `RAPIDBYTE_CONTROLLER_METADATA_TEST_DATABASE_URL`.
-3. Legacy ignored distributed CLI restart tests were removed during V2 cutover; distributed contract coverage is now provided by non-ignored `v2_cli_contract::*` tests in `crates/rapidbyte-cli/tests/distributed.rs`.
+3. Legacy ignored distributed CLI restart tests were removed during V2 cutover; distributed contract coverage is now provided by non-ignored `distributed_cli_contract::*` tests in `crates/rapidbyte-cli/tests/distributed.rs`.
 4. V2 migration surface: `proto/rapidbyte/v1/controller.proto` and legacy controller service modules were removed; controller/agent integration now targets `rapidbyte.v2` session and control-plane APIs.
 5. CLI migration surface: controller startup now requires explicit metadata DB URL, auth token, and signing key; insecure controller flags (`--allow-unauthenticated`, `--allow-insecure-signing-key`) are no longer part of the public controller interface.
 

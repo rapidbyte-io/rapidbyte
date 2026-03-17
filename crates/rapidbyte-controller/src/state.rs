@@ -695,12 +695,12 @@ mod tests {
             .write()
             .await
             .enqueue(run_id, b"yaml".to_vec(), false, None, 1);
-        let _assignment =
-            state
-                .tasks
-                .write()
-                .await
-                .poll("agent-1", Duration::from_secs(60), &state.epoch_gen);
+        assert!(state
+            .tasks
+            .write()
+            .await
+            .poll("agent-1", Duration::from_secs(60), &state.epoch_gen)
+            .is_some());
         let task = state.tasks.read().await.get(&task_id).unwrap().clone();
         let err = super::validate_lease(&task, "agent-1", 9999).unwrap_err();
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);

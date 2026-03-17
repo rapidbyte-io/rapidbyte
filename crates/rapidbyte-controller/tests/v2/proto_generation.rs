@@ -3,13 +3,17 @@ use rapidbyte_controller::proto::rapidbyte::v2::{
 };
 
 #[test]
-fn v2_proto_module_is_generated() {
-    let _ = SubmitRunRequest::default();
-    let _ = AgentMessage::default();
-    let _control_plane_path = std::any::type_name::<
+fn proto_module_is_generated() {
+    assert_eq!(SubmitRunRequest::default().idempotency_key, None);
+    let agent_message = AgentMessage::default();
+    assert!(agent_message.agent_id.is_empty());
+
+    let control_plane_path = std::any::type_name::<
         control_plane_client::ControlPlaneClient<tonic::transport::Channel>,
     >();
-    let _agent_session_path = std::any::type_name::<
+    let agent_session_path = std::any::type_name::<
         agent_session_client::AgentSessionClient<tonic::transport::Channel>,
     >();
+    assert!(control_plane_path.contains("ControlPlaneClient"));
+    assert!(agent_session_path.contains("AgentSessionClient"));
 }

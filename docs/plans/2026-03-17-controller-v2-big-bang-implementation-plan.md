@@ -745,7 +745,7 @@ Expected:
 Execution notes in this branch:
 - Started local Postgres test container on `127.0.0.1:33270` to satisfy metadata-store ignored tests.
 - `cargo test -p rapidbyte-controller -- --ignored` passed (store + v2 postgres roundtrip tests).
-- `cargo test -p rapidbyte-cli -- --ignored` currently runs zero tests; distributed CLI restart coverage now lives in non-ignored `v2_cli_contract::*` tests executed in Step 2.
+- `cargo test -p rapidbyte-cli -- --ignored` currently runs zero tests; distributed CLI restart coverage now lives in non-ignored `distributed_cli_contract::*` tests executed in Step 2.
 
 **Step 4: Final docs and changelog update**
 

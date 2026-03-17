@@ -1,6 +1,6 @@
 //! Integration tests for distributed CLI commands against the v2 control plane.
 
-mod v2_cli_contract {
+mod distributed_cli_contract {
     use std::pin::Pin;
     use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};

@@ -30,7 +30,7 @@ impl UnitOfWork for PostgresUnitOfWork {
         Fut: std::future::Future<Output = anyhow::Result<T>> + Send,
         T: Send,
     {
-        let _gate = self.transaction_gate.lock().await;
+        let gate_guard = self.transaction_gate.lock().await;
         {
             let client = self.client.lock().await;
             client.batch_execute("BEGIN").await?;
@@ -47,6 +47,7 @@ impl UnitOfWork for PostgresUnitOfWork {
             }
         }
 
+        drop(gate_guard);
         outcome
     }
 }
