@@ -131,6 +131,22 @@ impl Task {
         Ok(())
     }
 
+    /// Pending -> Cancelled (for immediate cancellation before assignment).
+    ///
+    /// # Errors
+    ///
+    /// Returns `DomainError::InvalidTransition` if the task is not `Pending`.
+    pub fn cancel_pending(&mut self) -> Result<(), DomainError> {
+        if self.state != TaskState::Pending {
+            return Err(DomainError::InvalidTransition {
+                from: self.state.as_str(),
+                to: "Cancelled",
+            });
+        }
+        self.state = TaskState::Cancelled;
+        Ok(())
+    }
+
     /// Running -> TimedOut
     pub fn timeout(&mut self) -> Result<(), DomainError> {
         if self.state != TaskState::Running {
@@ -206,6 +222,10 @@ impl Task {
     #[must_use]
     pub fn updated_at(&self) -> DateTime<Utc> {
         self.updated_at
+    }
+
+    pub fn set_lease(&mut self, lease: Lease) {
+        self.lease = Some(lease);
     }
 
     pub fn set_updated_at(&mut self, now: DateTime<Utc>) {
