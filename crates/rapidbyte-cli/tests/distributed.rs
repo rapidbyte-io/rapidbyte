@@ -10,9 +10,9 @@ use rapidbyte_agent::AgentConfig;
 use rapidbyte_controller::proto::rapidbyte::v1::agent_service_client::AgentServiceClient;
 use rapidbyte_controller::proto::rapidbyte::v1::pipeline_service_client::PipelineServiceClient;
 use rapidbyte_controller::proto::rapidbyte::v1::{
-    poll_task_response, CompleteTaskRequest, GetRunRequest, PollTaskRequest, ProgressUpdate,
-    RegisterAgentRequest, ReportProgressRequest, RunState, SubmitPipelineRequest, TaskError,
-    TaskOutcome,
+    complete_task_request, poll_task_response, AgentCapabilities, CompleteTaskRequest,
+    GetRunRequest, HeartbeatRequest, PollTaskRequest, RegisterRequest, RunState,
+    SubmitPipelineRequest, TaskFailed, TaskHeartbeat,
 };
 use rapidbyte_controller::ControllerConfig;
 use tokio_postgres::NoTls;
@@ -113,12 +113,12 @@ fn spawn_controller(
         let config = ControllerConfig {
             listen_addr: ctrl_addr.parse().unwrap(),
             metadata_database_url: Some(metadata_database_url),
-            auth: rapidbyte_controller::AuthConfig {
+            auth: rapidbyte_controller::config::AuthConfig {
                 allow_unauthenticated: true,
                 signing_key,
                 ..ControllerConfig::default().auth
             },
-            timers: rapidbyte_controller::TimerConfig {
+            timers: rapidbyte_controller::config::TimerConfig {
                 agent_reap_interval: Duration::from_secs(60),
                 agent_reap_timeout: Duration::from_secs(120),
                 lease_check_interval,
@@ -158,7 +158,8 @@ async fn wait_for_run_state(
             .expect("GetRun failed")
             .into_inner();
 
-        if response.state == expected_state as i32 {
+        let run = response.run.as_ref().expect("GetRun missing run detail");
+        if run.state == expected_state as i32 {
             return response;
         }
 
@@ -232,8 +233,8 @@ async fn distributed_submit_and_complete() {
     // Submit the pipeline
     let resp = client
         .submit_pipeline(SubmitPipelineRequest {
-            pipeline_yaml_utf8: TEST_PIPELINE_YAML.as_bytes().to_vec(),
-            execution: None,
+            pipeline_yaml: TEST_PIPELINE_YAML.to_string(),
+            options: None,
             idempotency_key: String::new(),
         })
         .await
@@ -272,7 +273,8 @@ async fn distributed_submit_and_complete() {
             .expect("GetRun failed")
             .into_inner();
 
-        final_state = run_resp.state;
+        let run = run_resp.run.as_ref().expect("GetRun missing run detail");
+        final_state = run.state;
 
         if final_state == RunState::Completed as i32
             || final_state == RunState::Failed as i32
@@ -298,128 +300,7 @@ async fn distributed_submit_and_complete() {
 
 #[tokio::test]
 #[ignore = "requires RAPIDBYTE_CONTROLLER_METADATA_TEST_DATABASE_URL"]
-async fn distributed_restart_reconciles_then_times_out() {
-    let _ = tracing_subscriber::fmt::try_init();
-    let metadata = TestMetadataSchema::create().await;
-
-    let ctrl_port = free_port();
-    let ctrl_addr = format!("127.0.0.1:{ctrl_port}");
-    let ctrl_url = format!("http://{ctrl_addr}");
-    let signing_key = b"distributed-test-signing-key".to_vec();
-    let reconciliation_timeout = Duration::from_secs(2);
-    let lease_check_interval = Duration::from_millis(100);
-
-    let controller_task = spawn_controller(
-        ctrl_addr.clone(),
-        metadata.scoped_url.clone(),
-        signing_key,
-        lease_check_interval,
-        reconciliation_timeout,
-    );
-
-    let controller_probe = wait_for_controller(&ctrl_url).await;
-    drop(controller_probe);
-
-    let channel = wait_for_controller(&ctrl_url).await;
-    let mut pipeline_client = PipelineServiceClient::new(channel.clone());
-    let mut agent_client = AgentServiceClient::new(channel);
-
-    let submit_response = pipeline_client
-        .submit_pipeline(SubmitPipelineRequest {
-            pipeline_yaml_utf8: TEST_PIPELINE_YAML.as_bytes().to_vec(),
-            execution: None,
-            idempotency_key: String::new(),
-        })
-        .await
-        .expect("SubmitPipeline failed")
-        .into_inner();
-    let run_id = submit_response.run_id;
-
-    let register_response = agent_client
-        .register_agent(RegisterAgentRequest {
-            max_tasks: 1,
-            flight_advertise_endpoint: "grpc://127.0.0.1:9999".into(),
-            plugin_bundle_hash: "fake-agent".into(),
-            available_plugins: Vec::new(),
-            memory_bytes: 0,
-        })
-        .await
-        .expect("RegisterAgent failed")
-        .into_inner();
-
-    let poll_response = agent_client
-        .poll_task(PollTaskRequest {
-            agent_id: register_response.agent_id,
-            wait_seconds: 1,
-        })
-        .await
-        .expect("PollTask failed")
-        .into_inner();
-
-    let assignment = match poll_response.result {
-        Some(poll_task_response::Result::Task(task)) => task,
-        other => panic!("expected task assignment, got {other:?}"),
-    };
-    assert_eq!(assignment.run_id, run_id);
-
-    let assigned_run = wait_for_run_state(
-        &mut pipeline_client,
-        &run_id,
-        RunState::Assigned,
-        Duration::from_secs(5),
-    )
-    .await;
-    assert_eq!(
-        assigned_run.current_task.unwrap().task_id,
-        assignment.task_id
-    );
-
-    controller_task.abort();
-    let _ = controller_task.await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let restarted_controller_task = spawn_controller(
-        ctrl_addr,
-        metadata.scoped_url.clone(),
-        b"distributed-test-signing-key".to_vec(),
-        lease_check_interval,
-        reconciliation_timeout,
-    );
-
-    let restarted_channel = wait_for_controller(&ctrl_url).await;
-    let mut restarted_pipeline_client = PipelineServiceClient::new(restarted_channel);
-
-    let reconciling_run = wait_for_run_state(
-        &mut restarted_pipeline_client,
-        &run_id,
-        RunState::Reconciling,
-        Duration::from_secs(5),
-    )
-    .await;
-    assert!(reconciling_run.last_error.is_none());
-
-    let recovery_failed_run = wait_for_run_state(
-        &mut restarted_pipeline_client,
-        &run_id,
-        RunState::RecoveryFailed,
-        Duration::from_secs(10),
-    )
-    .await;
-    assert_eq!(
-        recovery_failed_run
-            .last_error
-            .expect("recovery_failed run should expose last_error")
-            .code,
-        "RECOVERY_TIMEOUT"
-    );
-
-    restarted_controller_task.abort();
-    metadata.cleanup().await;
-}
-
-#[tokio::test]
-#[ignore = "requires RAPIDBYTE_CONTROLLER_METADATA_TEST_DATABASE_URL"]
-async fn distributed_restart_reconciles_and_resumes_execution() {
+async fn distributed_manual_agent_complete_task() {
     let _ = tracing_subscriber::fmt::try_init();
     let metadata = TestMetadataSchema::create().await;
 
@@ -445,8 +326,8 @@ async fn distributed_restart_reconciles_and_resumes_execution() {
 
     let submit_response = pipeline_client
         .submit_pipeline(SubmitPipelineRequest {
-            pipeline_yaml_utf8: TEST_PIPELINE_YAML.as_bytes().to_vec(),
-            execution: None,
+            pipeline_yaml: TEST_PIPELINE_YAML.to_string(),
+            options: None,
             idempotency_key: String::new(),
         })
         .await
@@ -454,130 +335,84 @@ async fn distributed_restart_reconciles_and_resumes_execution() {
         .into_inner();
     let run_id = submit_response.run_id;
 
-    let register_response = agent_client
-        .register_agent(RegisterAgentRequest {
-            max_tasks: 1,
-            flight_advertise_endpoint: "grpc://127.0.0.1:9999".into(),
-            plugin_bundle_hash: "fake-agent".into(),
-            available_plugins: Vec::new(),
-            memory_bytes: 0,
-        })
-        .await
-        .expect("RegisterAgent failed")
-        .into_inner();
-    let agent_id = register_response.agent_id;
-
-    let poll_response = agent_client
-        .poll_task(PollTaskRequest {
+    let agent_id = uuid::Uuid::new_v4().to_string();
+    let _register_response = agent_client
+        .register(RegisterRequest {
             agent_id: agent_id.clone(),
-            wait_seconds: 1,
-        })
-        .await
-        .expect("PollTask failed")
-        .into_inner();
-
-    let assignment = match poll_response.result {
-        Some(poll_task_response::Result::Task(task)) => task,
-        other => panic!("expected task assignment, got {other:?}"),
-    };
-    assert_eq!(assignment.run_id, run_id);
-
-    let assigned_run = wait_for_run_state(
-        &mut pipeline_client,
-        &run_id,
-        RunState::Assigned,
-        Duration::from_secs(5),
-    )
-    .await;
-    assert_eq!(
-        assigned_run.current_task.unwrap().task_id,
-        assignment.task_id
-    );
-
-    controller_task.abort();
-    let _ = controller_task.await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let restarted_controller_task = spawn_controller(
-        ctrl_addr,
-        metadata.scoped_url.clone(),
-        b"distributed-test-signing-key".to_vec(),
-        Duration::from_secs(60),
-        Duration::from_secs(30),
-    );
-
-    let restarted_channel = wait_for_controller(&ctrl_url).await;
-    let mut restarted_pipeline_client = PipelineServiceClient::new(restarted_channel.clone());
-    let mut restarted_agent_client = AgentServiceClient::new(restarted_channel);
-
-    let reconciling_run = wait_for_run_state(
-        &mut restarted_pipeline_client,
-        &run_id,
-        RunState::Reconciling,
-        Duration::from_secs(5),
-    )
-    .await;
-    assert!(reconciling_run.last_error.is_none());
-
-    restarted_agent_client
-        .report_progress(ReportProgressRequest {
-            agent_id: agent_id.clone(),
-            task_id: assignment.task_id.clone(),
-            lease_epoch: assignment.lease_epoch,
-            progress: Some(ProgressUpdate {
-                stream: "users".into(),
-                phase: "running".into(),
-                records: 5,
-                bytes: 10,
+            capabilities: Some(AgentCapabilities {
+                plugins: vec![],
+                max_concurrent_tasks: 1,
             }),
         })
         .await
-        .expect("ReportProgress should be accepted after restart");
+        .expect("Register failed")
+        .into_inner();
 
-    let running_run = wait_for_run_state(
-        &mut restarted_pipeline_client,
+    let poll_response = agent_client
+        .poll_task(PollTaskRequest {
+            agent_id: agent_id.clone(),
+        })
+        .await
+        .expect("PollTask failed")
+        .into_inner();
+
+    let assignment = match poll_response.result {
+        Some(poll_task_response::Result::Assignment(task)) => task,
+        other => panic!("expected task assignment, got {other:?}"),
+    };
+    assert_eq!(assignment.run_id, run_id);
+
+    // Send a heartbeat with progress
+    let _heartbeat_resp = agent_client
+        .heartbeat(HeartbeatRequest {
+            agent_id: agent_id.clone(),
+            tasks: vec![TaskHeartbeat {
+                task_id: assignment.task_id.clone(),
+                lease_epoch: assignment.lease_epoch,
+                progress_message: Some("running".into()),
+                progress_pct: Some(50.0),
+            }],
+        })
+        .await
+        .expect("Heartbeat should succeed");
+
+    // Wait for run to reach running state
+    let _running_run = wait_for_run_state(
+        &mut pipeline_client,
         &run_id,
         RunState::Running,
         Duration::from_secs(5),
     )
     .await;
-    assert!(running_run.last_error.is_none());
 
-    let completion = restarted_agent_client
+    // Complete with failure
+    let _completion = agent_client
         .complete_task(CompleteTaskRequest {
             agent_id,
             task_id: assignment.task_id,
             lease_epoch: assignment.lease_epoch,
-            outcome: TaskOutcome::Failed.into(),
-            error: Some(TaskError {
-                code: "TEST_EXECUTION_FAILED".into(),
-                message: "resume path injected failure".into(),
+            outcome: Some(complete_task_request::Outcome::Failed(TaskFailed {
+                error_code: "TEST_EXECUTION_FAILED".into(),
+                error_message: "manual test failure".into(),
                 retryable: false,
-                safe_to_retry: false,
-                commit_state: "before_commit".into(),
-            }),
-            metrics: None,
-            preview: None,
-            backend_run_id: 0,
+                commit_state: 1, // BEFORE_COMMIT
+            })),
         })
         .await
-        .expect("CompleteTask should be accepted after restart")
+        .expect("CompleteTask should succeed")
         .into_inner();
-    assert!(completion.acknowledged);
 
     let failed_run = wait_for_run_state(
-        &mut restarted_pipeline_client,
+        &mut pipeline_client,
         &run_id,
         RunState::Failed,
         Duration::from_secs(5),
     )
     .await;
-    let error = failed_run
-        .last_error
-        .expect("failed run should expose last_error");
+    let run = failed_run.run.expect("run detail missing");
+    let error = run.error.expect("failed run should expose error");
     assert_eq!(error.code, "TEST_EXECUTION_FAILED");
-    assert_ne!(failed_run.state, RunState::RecoveryFailed as i32);
 
-    restarted_controller_task.abort();
+    controller_task.abort();
     metadata.cleanup().await;
 }

@@ -34,40 +34,42 @@ pub async fn execute(
         .into_inner();
 
     while let Some(event) = stream.message().await? {
-        match event.event {
-            Some(run_event::Event::Progress(progress)) => {
+        if verbosity != Verbosity::Quiet {
+            let state = state_label(event.state);
+            if event.attempt > 0 {
+                eprintln!("State: {state} (attempt {})", event.attempt);
+            }
+        }
+
+        match event.detail {
+            Some(run_event::Detail::Progress(progress)) => {
                 if verbosity != Verbosity::Quiet {
-                    eprintln!(
-                        "[{}] {} - {} records, {} bytes",
-                        progress.stream, progress.phase, progress.records, progress.bytes
-                    );
+                    let pct = progress
+                        .progress_pct
+                        .map(|v| format!(" ({v:.0}%)"))
+                        .unwrap_or_default();
+                    eprintln!("  {}{pct}", progress.message);
                 }
             }
-            Some(run_event::Event::Status(status)) => {
+            Some(run_event::Detail::Completed(done)) => {
                 if verbosity != Verbosity::Quiet {
-                    let state = state_label(status.state);
-                    if status.message.is_empty() {
-                        eprintln!("State: {state}");
+                    if let Some(m) = &done.metrics {
+                        eprintln!(
+                            "Completed: {} rows read, {} rows written, {} bytes in {}ms",
+                            m.rows_read, m.rows_written, m.bytes_written, m.duration_ms,
+                        );
                     } else {
-                        eprintln!("State: {state} - {}", status.message);
+                        eprintln!("Completed");
                     }
-                }
-            }
-            Some(run_event::Event::Completed(done)) => {
-                if verbosity != Verbosity::Quiet {
-                    eprintln!(
-                        "Completed: {} records, {} bytes in {:.1}s",
-                        done.total_records, done.total_bytes, done.elapsed_seconds
-                    );
                 }
                 return Ok(());
             }
-            Some(run_event::Event::Failed(failed)) => {
-                let msg = failed.error.map(|e| e.message).unwrap_or_default();
-                anyhow::bail!("Run failed (attempt {}): {msg}", failed.attempt);
-            }
-            Some(run_event::Event::Cancelled(_)) => {
-                anyhow::bail!("Run was cancelled");
+            Some(run_event::Detail::Failed(failed)) => {
+                anyhow::bail!(
+                    "Run failed: {} — {}",
+                    failed.error_code,
+                    failed.error_message,
+                );
             }
             None => {}
         }
@@ -79,11 +81,7 @@ pub async fn execute(
 fn state_label(state: i32) -> &'static str {
     match RunState::try_from(state) {
         Ok(RunState::Pending) => "PENDING",
-        Ok(RunState::Assigned) => "ASSIGNED",
         Ok(RunState::Running) => "RUNNING",
-        Ok(RunState::Reconciling) => "RECONCILING",
-        Ok(RunState::RecoveryFailed) => "RECOVERY_FAILED",
-        Ok(RunState::PreviewReady) => "PREVIEW_READY",
         Ok(RunState::Completed) => "COMPLETED",
         Ok(RunState::Failed) => "FAILED",
         Ok(RunState::Cancelled) => "CANCELLED",

@@ -33,18 +33,29 @@ pub async fn execute(
         .await?
         .into_inner();
 
+    let run = resp
+        .run
+        .ok_or_else(|| anyhow::anyhow!("GetRun response missing run detail"))?;
+
     if verbosity != Verbosity::Quiet {
-        eprintln!("Run: {}", resp.run_id);
-        eprintln!("Pipeline: {}", resp.pipeline_name);
-        eprintln!("State: {}", state_label(resp.state));
-        if let Some(task) = resp.current_task {
-            eprintln!(
-                "Current task: {} on {} (attempt {}, lease {})",
-                task.task_id, task.agent_id, task.attempt, task.lease_epoch
-            );
+        eprintln!("Run: {}", run.run_id);
+        eprintln!("Pipeline: {}", run.pipeline_name);
+        eprintln!("State: {}", state_label(run.state));
+        eprintln!(
+            "Attempt: {} (max retries: {})",
+            run.attempt, run.max_retries
+        );
+        if run.cancel_requested {
+            eprintln!("Cancel requested: yes");
         }
-        if let Some(error) = resp.last_error {
-            eprintln!("Last error: {}", error.message);
+        if let Some(error) = run.error {
+            eprintln!("Error: {} — {}", error.code, error.message);
+        }
+        if let Some(metrics) = run.metrics {
+            eprintln!(
+                "Metrics: {} rows read, {} rows written, {} bytes in {}ms",
+                metrics.rows_read, metrics.rows_written, metrics.bytes_written, metrics.duration_ms,
+            );
         }
     }
 
@@ -54,11 +65,7 @@ pub async fn execute(
 fn state_label(state: i32) -> &'static str {
     match RunState::try_from(state) {
         Ok(RunState::Pending) => "PENDING",
-        Ok(RunState::Assigned) => "ASSIGNED",
         Ok(RunState::Running) => "RUNNING",
-        Ok(RunState::Reconciling) => "RECONCILING",
-        Ok(RunState::RecoveryFailed) => "RECOVERY_FAILED",
-        Ok(RunState::PreviewReady) => "PREVIEW_READY",
         Ok(RunState::Completed) => "COMPLETED",
         Ok(RunState::Failed) => "FAILED",
         Ok(RunState::Cancelled) => "CANCELLED",
@@ -76,18 +83,5 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("status requires --controller"));
-    }
-
-    #[test]
-    fn state_label_includes_reconciling() {
-        assert_eq!(state_label(RunState::Reconciling as i32), "RECONCILING");
-    }
-
-    #[test]
-    fn state_label_includes_recovery_failed() {
-        assert_eq!(
-            state_label(RunState::RecoveryFailed as i32),
-            "RECOVERY_FAILED"
-        );
     }
 }
