@@ -1,3 +1,5 @@
+use std::hash::{Hash, Hasher};
+
 use async_trait::async_trait;
 use sqlx::{PgConnection, PgPool};
 
@@ -212,17 +214,29 @@ impl PipelineStore for PgPipelineStore {
     ) -> Result<Option<(Task, Run)>, RepositoryError> {
         let mut tx = self.pool.begin().await.map_err(box_err)?;
 
-        // Check agent capacity — lock the agent's running tasks to prevent concurrent
-        // polls from both seeing below-capacity and each assigning a task.
-        let running_rows = sqlx::query(
-            "SELECT id FROM tasks WHERE agent_id = $1 AND state = 'running' FOR UPDATE",
-        )
-        .bind(agent_id)
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(box_err)?;
+        // Serialize concurrent polls for the same agent using an advisory lock.
+        // SELECT FOR UPDATE on running tasks doesn't lock when there are 0 rows,
+        // so two concurrent transactions could both pass a COUNT-based check.
+        // Advisory lock on a hash of the agent_id prevents this race.
+        // Simple hash of agent_id for advisory lock key
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        agent_id.hash(&mut hasher);
+        let lock_key = hasher.finish().cast_signed();
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await
+            .map_err(box_err)?;
 
-        if running_rows.len() >= max_concurrent_tasks as usize {
+        // Check agent capacity (serialized by the advisory lock above)
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE agent_id = $1 AND state = 'running'")
+                .bind(agent_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(box_err)?;
+
+        if count >= i64::from(max_concurrent_tasks) {
             tx.commit().await.map_err(box_err)?;
             return Ok(None);
         }

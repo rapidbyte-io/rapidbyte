@@ -49,10 +49,17 @@ pub async fn run(
     }
 
     // 0.5. Validate configuration
-    if !config.auth.allow_unauthenticated && config.auth.tokens.is_empty() {
-        anyhow::bail!(
-            "controller misconfigured: auth tokens are empty and allow_unauthenticated is false — all requests would be rejected"
-        );
+    if !config.auth.allow_unauthenticated {
+        if config.auth.tokens.is_empty() {
+            anyhow::bail!(
+                "controller misconfigured: auth tokens are empty and allow_unauthenticated is false — all requests would be rejected"
+            );
+        }
+        if config.auth.tokens.iter().any(|t| t.trim().is_empty()) {
+            anyhow::bail!(
+                "controller misconfigured: auth tokens contain empty or whitespace-only entries"
+            );
+        }
     }
     if !config.auth.allow_insecure_default_signing_key {
         let default_key = ControllerConfig::default().auth.signing_key;
