@@ -246,7 +246,9 @@ message CancelRunRequest {
   string run_id = 1;
 }
 
-message CancelRunResponse {}
+message CancelRunResponse {
+  bool accepted = 1;                  // False if run is already terminal
+}
 
 message ListRunsRequest {
   optional RunState state_filter = 1;
@@ -264,12 +266,13 @@ message RunDetail {
   string run_id = 1;
   string pipeline_name = 2;          // Extracted from YAML during submission
   RunState state = 3;
-  uint32 attempt = 4;
-  uint32 max_retries = 5;
-  optional RunMetrics metrics = 6;
-  optional RunError error = 7;
-  google.protobuf.Timestamp created_at = 8;
-  google.protobuf.Timestamp updated_at = 9;
+  bool cancel_requested = 4;         // True if CancelRun was called (run may still be Running)
+  uint32 attempt = 5;
+  uint32 max_retries = 6;
+  optional RunMetrics metrics = 7;
+  optional RunError error = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
 }
 
 // RunSummary is the compact list view (ListRuns).
@@ -335,7 +338,7 @@ message TaskAssignment {
   uint64 lease_epoch = 5;
   google.protobuf.Timestamp lease_expires_at = 6;
   uint32 attempt = 7;
-  RegistryInfo registry = 8;
+  // RegistryInfo is sent once via RegisterResponse, not per-task.
 }
 
 message RegistryInfo {
@@ -364,8 +367,9 @@ message HeartbeatResponse {
 
 message TaskDirective {
   string task_id = 1;
-  uint64 renewed_lease_epoch = 2;     // New epoch after renewal (0 if task unknown/stale)
+  bool acknowledged = 2;             // False if task/lease is stale (agent should stop)
   bool cancel_requested = 3;         // Controller signals agent to cancel this task
+  google.protobuf.Timestamp lease_expires_at = 4;  // Extended expiry (epoch unchanged)
 }
 
 message CompleteTaskRequest {
@@ -408,8 +412,11 @@ Pure business logic, no framework dependencies.
   `retry()` (returns new attempt number)
 - Cancel request: `request_cancel()` sets `cancel_requested = true` without changing state
 - Decision methods:
-  - `can_retry(error) -> bool` — checks retryable + commit_state == BeforeCommit +
-    current_attempt < max_retries + 1
+  - `can_retry_after_error(error) -> bool` — checks retryable + commit_state == BeforeCommit
+    + current_attempt < max_retries + 1
+  - `can_retry_after_timeout() -> bool` — checks current_attempt < max_retries + 1
+    (no commit state needed — lease expiry and agent deregistration mean the agent
+    never reached commit, so retry is always safe if attempts remain)
   - `is_cancel_requested() -> bool`
 - `max_retries` defaults to 0 (proto3 default), meaning no retries unless explicitly set
 - `pipeline_name` is extracted from YAML during submission (via rapidbyte-pipeline-config)
@@ -425,7 +432,11 @@ Pure business logic, no framework dependencies.
 
 **Lease** (`domain/lease.rs`):
 - Fields: epoch, expires_at
-- Methods: `is_expired(now)`, `renew(new_epoch, duration, now) -> Lease`
+- Methods: `is_expired(now)`, `extend(duration, now) -> Lease` (keeps same epoch, extends expiry)
+- Epoch is assigned once at poll_and_assign time (from Postgres sequence) and stays
+  fixed for the lifetime of that task assignment. Heartbeat extends the expiry, not the
+  epoch. The agent uses the same epoch for all subsequent heartbeats and CompleteTask.
+  New epochs are only generated on task assignment (poll) and reassignment after timeout.
 
 ### Domain Events (`domain/event.rs`)
 
@@ -442,9 +453,20 @@ pub enum DomainEvent {
 Published through the EventBus port. State changes are durable (persisted + NOTIFY).
 Progress is ephemeral (NOTIFY only).
 
+The gRPC adapter maps DomainEvent to proto RunEvent:
+- `RunStateChanged` → `RunEvent` with state field set, no detail (pure state change)
+- `ProgressReported` → `RunEvent` with `ProgressDetail`
+- `RunCompleted` → `RunEvent` with `CompletionDetail`
+- `RunFailed` → `RunEvent` with `FailureDetail`
+- `RunCancelled` → `RunEvent` with state = CANCELLED, no detail
+
+Note: `cancel_requested` is not a domain event. Clients see it via `GetRun` (the
+`RunDetail.cancel_requested` field) or infer it when the run eventually transitions
+to Cancelled. This is intentional — cancellation is a request, not a state change.
+
 ### Port Traits (`domain/ports/`)
 
-**RunRepository**: find_by_id, find_by_idempotency_key, save, list, delete
+**RunRepository**: find_by_id, find_by_idempotency_key, save, list
 
 **TaskRepository**: find_by_id, save, poll_and_assign(agent_id, lease),
 find_expired_leases(now), find_by_run_id
@@ -452,9 +474,10 @@ find_expired_leases(now), find_by_run_id
 **AgentRepository**: find_by_id, save, delete, find_stale(timeout, now)
 
 **PipelineStore** (cross-aggregate transactions):
+- submit_run(run, task) — atomic insert of run + initial task
 - complete_run(task, run)
 - fail_and_retry(failed_task, run, new_task)
-- timeout_and_retry(timed_out_task, run, new_task)
+- timeout_and_retry(timed_out_task, run, new_task or None if no retry)
 
 **EventBus**: publish(event), subscribe(run_id) -> EventStream
 
@@ -477,6 +500,15 @@ pub struct AppContext {
     pub clock: Arc<dyn Clock>,
     pub config: AppConfig,
 }
+
+pub struct AppConfig {
+    pub default_lease_duration: Duration,   // Used when run has no timeout_seconds
+    pub lease_check_interval: Duration,     // How often sweep_expired_leases runs
+    pub agent_reap_timeout: Duration,       // Agent heartbeat timeout before reaping
+    pub agent_reap_interval: Duration,      // How often reap_stale_agents runs
+    pub default_max_retries: u32,           // Server-side default if client doesn't set
+    pub registry: Option<RegistryConfig>,   // OCI registry info sent to agents
+}
 ```
 
 ### Use Cases
@@ -485,8 +517,10 @@ pub struct AppContext {
 YAML, create Run + Task, save, publish event. No PendingKeyGuard, no TOCTOU dance.
 
 **poll_task**: Verify agent exists, touch liveness, `poll_and_assign` (SELECT FOR UPDATE
-SKIP LOCKED), generate lease epoch from Postgres sequence, resolve secrets, publish event.
-If secret resolution fails, compensating action releases the task.
+SKIP LOCKED), generate lease epoch from Postgres sequence. Lease TTL is determined by:
+`run.timeout_seconds` if set, otherwise `config.default_lease_duration`. Resolve secrets
+via SecretResolver. Publish event. If secret resolution fails, compensating action
+releases the task (timeout the task, retry the run if possible).
 
 **heartbeat**: Touch agent, validate lease if task_id present, renew lease, publish
 progress (ephemeral), check cancellation flag on run.
@@ -525,8 +559,11 @@ This ensures tasks are immediately requeued rather than waiting for lease expiry
 
 ### Background Use Cases
 
-**sweep_expired_leases**: Find tasks with expired leases, timeout each, retry or fail the
-run, publish events.
+**sweep_expired_leases**: Find tasks with expired leases. For each: `task.timeout()`,
+then check `run.can_retry_after_timeout()` (no commit state needed — lease expiry means
+agent never committed). If retryable: `run.retry()`, create new pending task,
+`store.timeout_and_retry(task, run, new_task)`. If not retryable: `run.fail(lease_expired)`,
+`store.timeout_and_retry(task, run, None)`. Publish events.
 
 **reap_stale_agents**: Find agents past heartbeat timeout, deregister each (releasing tasks).
 
@@ -560,7 +597,9 @@ dedicated connection, deserializes each notification payload, and routes to loca
 truncated (progress messages may lose their message field). On subscribe, the current
 run state is fetched from the DB and sent as the first event before streaming live
 notifications. If the LISTEN connection drops, the listener reconnects and subscribers
-are notified of reconnection (clients can re-fetch state).
+are notified of reconnection (clients can re-fetch state). Note: all instances receive
+all notifications and discard events for run_ids with no local subscribers. This fan-out
+is acceptable at expected scale but could become a bottleneck at very high throughput.
 
 **Lease epoch**: Postgres sequence (`SELECT nextval('lease_epoch_seq')`). Monotonic,
 unique across all instances.
@@ -789,7 +828,9 @@ This is a coordinated deploy — old CLI won't work with new controller and vice
 
 **sqlx offline mode**: Use `cargo sqlx prepare` to generate `.sqlx/` metadata files
 checked into the repo. This allows `cargo build` without a live Postgres database.
-CI runs `cargo sqlx prepare --check` to verify metadata is up to date.
+CI runs `cargo sqlx prepare --check` to verify metadata is up to date. Developer
+workflow: after modifying any SQL query or adding a migration, run
+`cargo sqlx prepare --workspace` against a local Postgres with the current schema.
 
 ## Metrics
 
