@@ -212,15 +212,17 @@ impl PipelineStore for PgPipelineStore {
     ) -> Result<Option<(Task, Run)>, RepositoryError> {
         let mut tx = self.pool.begin().await.map_err(box_err)?;
 
-        // Check agent capacity
-        let (count,): (i64,) =
-            sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE agent_id = $1 AND state = 'running'")
-                .bind(agent_id)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(box_err)?;
+        // Check agent capacity — lock the agent's running tasks to prevent concurrent
+        // polls from both seeing below-capacity and each assigning a task.
+        let running_rows = sqlx::query(
+            "SELECT id FROM tasks WHERE agent_id = $1 AND state = 'running' FOR UPDATE",
+        )
+        .bind(agent_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(box_err)?;
 
-        if count >= i64::from(max_concurrent_tasks) {
+        if running_rows.len() >= max_concurrent_tasks as usize {
             tx.commit().await.map_err(box_err)?;
             return Ok(None);
         }
@@ -252,14 +254,30 @@ impl PipelineStore for PgPipelineStore {
         .await
         .map_err(box_err)?;
 
-        // Update run to running
-        sqlx::query(
+        // Update run to running — check that it was actually pending.
+        // If the run was concurrently cancelled/failed, this affects 0 rows.
+        let run_result = sqlx::query(
             "UPDATE runs SET state = 'running', updated_at = now() WHERE id = $1 AND state = 'pending'",
         )
         .bind(task.run_id())
         .execute(&mut *tx)
         .await
         .map_err(box_err)?;
+
+        if run_result.rows_affected() == 0 {
+            // Run is no longer pending (cancelled/failed concurrently).
+            // Rollback task assignment — put it back to pending.
+            sqlx::query(
+                "UPDATE tasks SET state = 'pending', agent_id = NULL, lease_epoch = NULL, lease_expires_at = NULL, updated_at = now() WHERE id = $1",
+            )
+            .bind(task.id())
+            .execute(&mut *tx)
+            .await
+            .map_err(box_err)?;
+
+            tx.commit().await.map_err(box_err)?;
+            return Ok(None);
+        }
 
         // Select updated run
         let run_row = sqlx::query("SELECT * FROM runs WHERE id = $1")

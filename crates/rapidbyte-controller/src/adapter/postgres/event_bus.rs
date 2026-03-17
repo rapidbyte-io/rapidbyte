@@ -123,7 +123,32 @@ impl EventBus for PgEventBus {
                     })
                     .unwrap_or(payload)
                 }
-                other => serde_json::to_string(other).unwrap_or(payload),
+                DomainEvent::RunCompleted { run_id, .. } => {
+                    // Strip metrics, send state change instead
+                    serde_json::to_string(&DomainEvent::RunStateChanged {
+                        run_id: run_id.clone(),
+                        state: crate::domain::run::RunState::Completed,
+                        attempt: 0,
+                    })
+                    .unwrap_or(payload)
+                }
+                DomainEvent::RunFailed { run_id, .. } => {
+                    // Strip error details, send state change instead
+                    serde_json::to_string(&DomainEvent::RunStateChanged {
+                        run_id: run_id.clone(),
+                        state: crate::domain::run::RunState::Failed,
+                        attempt: 0,
+                    })
+                    .unwrap_or(payload)
+                }
+                DomainEvent::RunCancelled { run_id } => {
+                    serde_json::to_string(&DomainEvent::RunStateChanged {
+                        run_id: run_id.clone(),
+                        state: crate::domain::run::RunState::Cancelled,
+                        attempt: 0,
+                    })
+                    .unwrap_or(payload)
+                }
             }
         } else {
             payload
