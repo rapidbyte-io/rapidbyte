@@ -23,14 +23,14 @@ and background cleanup tasks. It has accumulated significant structural issues:
 - Clean hexagonal architecture with enforced layer boundaries
 - Single way of doing things — no legacy code, no bridge patterns
 - All code justified — no `allow(dead_code)`, no clippy suppressions
-- Breaking proto changes are acceptable
-- Remove preview system entirely
-- ~60% code reduction (estimated ~2,150 lines from ~5,350)
+- Breaking proto changes are acceptable (coordinated CLI + controller + agent deploy)
+- Remove preview system and dry_run entirely (can be re-added later)
+- ~45% code reduction (estimated ~3,000 lines from ~5,350)
 
 ## Non-Goals
 
 - Caching layer (Redis/Moka) — not needed; Postgres handles the workload
-- Preview/dry-run data inspection — removed entirely, can be re-added later
+- Preview/dry-run — removed entirely, can be re-added later with a proxy-based design
 - Multiple database backends — Postgres only
 - Long-polling or streaming task assignment — simple poll-based model
 
@@ -56,7 +56,12 @@ Strict rule: arrows only point downward. `domain/` never imports from `applicati
 
 ## RPC Design
 
-10 RPCs total (down from 12), split across two services.
+10 RPCs total, split across two services. The current proto has 10 RPCs (5 PipelineService
++ 5 AgentService). The new design keeps 10 RPCs but changes the composition: removes
+`ReportProgress` (folded into Heartbeat) and adds `Deregister` (clean agent shutdown).
+
+**Breaking change:** This is a wire-incompatible proto rewrite. All field numbers, types,
+and message shapes change. Requires coordinated deployment of CLI, controller, and agent.
 
 ### PipelineService (client-facing)
 
@@ -78,14 +83,20 @@ Strict rule: arrows only point downward. `domain/` never imports from `applicati
 | `Heartbeat` | Liveness + optional progress + lease renewal. Response carries cancellation signal |
 | `CompleteTask` | Report outcome: completed (metrics), failed (error + retry info), or cancelled |
 
-### Removed RPCs
+### Changed RPCs
 
-| Removed | Why |
-|---------|-----|
-| `Dispatch` | Folded into `PollTask` — no reason for two round-trips |
-| `GetSecret` | Secrets resolved server-side in `PollTask` |
-| `ReportRunning` | Implicit: PollTask transitions to Running, first Heartbeat confirms liveness |
-| `ReportProgress` | Folded into `Heartbeat` as optional progress payload |
+| RPC | Change |
+|-----|--------|
+| `ReportProgress` | Removed — folded into `Heartbeat` as optional progress payload |
+| `Deregister` | Added — clean agent shutdown, releases assigned tasks back to queue |
+| `Heartbeat` | Changed — carries optional per-task progress, supports multi-task lease reporting; response carries cancellation signal and renewed lease epochs |
+| `PollTask` | Changed — returns full payload with resolved secrets (no separate Dispatch step). `wait_seconds` long-poll removed for simplicity |
+| `Register` | Changed — response includes registry info; renamed from `RegisterAgent` |
+| `CompleteTask` | Changed — outcome is oneof (completed/failed/cancelled), preview and backend_run_id removed |
+
+Note: The current codebase has no `Dispatch`, `GetSecret`, or `ReportRunning` RPCs in the
+proto despite earlier discussion suggesting their existence. The internal `dispatch.rs` is
+a helper module within the `PollTask` handler, not a separate RPC.
 
 ## Run State Machine
 
@@ -96,14 +107,21 @@ Pending --> Running --> Completed (with metrics)
    '-- (retry: task failed but retryable, new attempt enqueued)
 ```
 
-5 states (down from 9). Removed: Assigned, PreviewReady, TimedOut, Reconciling,
-RecoveryFailed.
+5 states (down from 11). Removed: Assigned, PreviewReady, TimedOut, Reconciling,
+RecoveryFailed, Cancelling.
 
 - **Assigned** — distinction not useful to clients. PollTask transitions directly to Running.
 - **PreviewReady** — preview system removed entirely.
 - **TimedOut** — a timeout is Failed with error_code indicating lease expiry.
 - **Reconciling/RecoveryFailed** — with Postgres as source of truth and lease expiry,
   the system self-heals. No crash-recovery state needed.
+- **Cancelling** — replaced by a `cancel_requested` boolean flag on the runs table.
+  `cancel_run` sets the flag but does NOT change `state`. The run stays `Running`.
+  The heartbeat use case checks the flag and returns `cancel_requested: true` in
+  the response. The agent then completes with `TaskCancelled`, which transitions
+  the run to `Cancelled`. If the agent ignores the cancel and completes normally,
+  the run completes normally. If the lease expires, normal timeout handling applies.
+  This is cleaner than a separate state — cancellation is a request, not a state.
 
 ### Task State Machine
 
@@ -166,20 +184,19 @@ enum CommitState {
 // --- Pipeline Service Messages ---
 
 message SubmitPipelineRequest {
-  string pipeline_yaml = 1;
+  string pipeline_yaml = 1;           // UTF-8 string (changed from bytes)
   string idempotency_key = 2;
   ExecutionOptions options = 3;
 }
 
 message ExecutionOptions {
-  bool dry_run = 1;
-  uint32 max_retries = 2;
-  uint64 timeout_seconds = 3;
+  uint32 max_retries = 1;             // Default 0 = no retries
+  uint64 timeout_seconds = 2;         // Per-task lease timeout override (0 = use server default)
 }
 
 message SubmitPipelineResponse {
   string run_id = 1;
-  bool already_exists = 2;
+  bool already_exists = 2;            // True if idempotency_key matched an existing run
 }
 
 message GetRunRequest {
@@ -194,6 +211,9 @@ message WatchRunRequest {
   string run_id = 1;
 }
 
+// WatchRun sends current state as the first event (catch-up), then streams changes.
+// State changes are durable (persisted + NOTIFY). Progress is ephemeral (NOTIFY only).
+// Notifications are truncated to fit PG's 8KB NOTIFY payload limit.
 message RunEvent {
   string run_id = 1;
   google.protobuf.Timestamp timestamp = 2;
@@ -208,7 +228,7 @@ message RunEvent {
 
 message ProgressDetail {
   string message = 1;
-  optional double progress_pct = 2;
+  optional double progress_pct = 2;   // 0.0-1.0
 }
 
 message CompletionDetail {
@@ -230,24 +250,35 @@ message CancelRunResponse {}
 
 message ListRunsRequest {
   optional RunState state_filter = 1;
-  uint32 page_size = 2;
-  string page_token = 3;
+  uint32 page_size = 2;              // Default 20
+  string page_token = 3;             // Opaque cursor: base64-encoded (created_at, run_id)
 }
 
 message ListRunsResponse {
-  repeated RunDetail runs = 1;
-  string next_page_token = 2;
+  repeated RunSummary runs = 1;
+  string next_page_token = 2;        // Empty if no more results
 }
 
+// RunDetail is the full run view (GetRun, WatchRun).
 message RunDetail {
   string run_id = 1;
-  RunState state = 2;
-  uint32 attempt = 3;
-  uint32 max_retries = 4;
-  optional RunMetrics metrics = 5;
-  optional RunError error = 6;
-  google.protobuf.Timestamp created_at = 7;
-  google.protobuf.Timestamp updated_at = 8;
+  string pipeline_name = 2;          // Extracted from YAML during submission
+  RunState state = 3;
+  uint32 attempt = 4;
+  uint32 max_retries = 5;
+  optional RunMetrics metrics = 6;
+  optional RunError error = 7;
+  google.protobuf.Timestamp created_at = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+// RunSummary is the compact list view (ListRuns).
+message RunSummary {
+  string run_id = 1;
+  string pipeline_name = 2;
+  RunState state = 3;
+  uint32 attempt = 4;
+  google.protobuf.Timestamp created_at = 5;
 }
 
 message RunMetrics {
@@ -266,7 +297,7 @@ message RunError {
 // --- Agent Service Messages ---
 
 message RegisterRequest {
-  string agent_id = 1;
+  string agent_id = 1;               // Agent-generated, stable across restarts
   AgentCapabilities capabilities = 2;
 }
 
@@ -275,7 +306,9 @@ message AgentCapabilities {
   uint32 max_concurrent_tasks = 2;
 }
 
-message RegisterResponse {}
+message RegisterResponse {
+  RegistryInfo registry = 1;         // OCI registry for plugin pulls
+}
 
 message DeregisterRequest {
   string agent_id = 1;
@@ -297,7 +330,7 @@ message PollTaskResponse {
 message TaskAssignment {
   string task_id = 1;
   string run_id = 2;
-  string pipeline_yaml = 3;
+  string pipeline_yaml = 3;          // Secrets already resolved by controller
   ExecutionOptions options = 4;
   uint64 lease_epoch = 5;
   google.protobuf.Timestamp lease_expires_at = 6;
@@ -312,17 +345,27 @@ message RegistryInfo {
 
 message NoTask {}
 
+// Heartbeat supports multi-task agents. Each active lease is reported and renewed.
 message HeartbeatRequest {
   string agent_id = 1;
-  optional string task_id = 2;
-  optional uint64 lease_epoch = 3;
-  optional string progress_message = 4;
-  optional double progress_pct = 5;
+  repeated TaskHeartbeat tasks = 2;   // One entry per active task (supports concurrent tasks)
+}
+
+message TaskHeartbeat {
+  string task_id = 1;
+  uint64 lease_epoch = 2;
+  optional string progress_message = 3;
+  optional double progress_pct = 4;   // 0.0-1.0
 }
 
 message HeartbeatResponse {
-  bool cancel_requested = 1;
-  optional uint64 renewed_lease_epoch = 2;
+  repeated TaskDirective directives = 1;  // Per-task directives (cancel, lease renewal)
+}
+
+message TaskDirective {
+  string task_id = 1;
+  uint64 renewed_lease_epoch = 2;     // New epoch after renewal (0 if task unknown/stale)
+  bool cancel_requested = 3;         // Controller signals agent to cancel this task
 }
 
 message CompleteTaskRequest {
@@ -344,7 +387,7 @@ message TaskFailed {
   string error_code = 1;
   string error_message = 2;
   bool retryable = 3;
-  CommitState commit_state = 4;
+  CommitState commit_state = 4;       // Retry only allowed when BEFORE_COMMIT
 }
 
 message TaskCancelled {}
@@ -359,12 +402,17 @@ Pure business logic, no framework dependencies.
 ### Aggregates
 
 **Run** (`domain/run.rs`):
-- Fields: id, idempotency_key, pipeline_yaml, options, state, current_attempt,
-  max_retries, error, metrics, created_at, updated_at
+- Fields: id, idempotency_key, pipeline_name, pipeline_yaml, state, current_attempt,
+  max_retries, cancel_requested, error, metrics, created_at, updated_at
 - State transition methods: `start()`, `complete(metrics)`, `fail(error)`, `cancel()`,
   `retry()` (returns new attempt number)
-- Decision method: `can_retry(error) -> bool` — checks retryable + before_commit +
-  attempts < max
+- Cancel request: `request_cancel()` sets `cancel_requested = true` without changing state
+- Decision methods:
+  - `can_retry(error) -> bool` — checks retryable + commit_state == BeforeCommit +
+    current_attempt < max_retries + 1
+  - `is_cancel_requested() -> bool`
+- `max_retries` defaults to 0 (proto3 default), meaning no retries unless explicitly set
+- `pipeline_name` is extracted from YAML during submission (via rapidbyte-pipeline-config)
 
 **Task** (`domain/task.rs`):
 - Fields: id, run_id, attempt, state, agent_id, lease, created_at, updated_at
@@ -450,13 +498,30 @@ progress (ephemeral), check cancellation flag on run.
 - Failed + terminal: `task.fail()`, `run.fail(error)`, save both, publish
 - Cancelled: `task.cancel()`, `run.cancel()`, save both, publish
 
-**cancel_run**: `run.cancel()`, cancel assigned task if any, save, publish.
+**cancel_run**: Two cases based on state:
+- Pending (no agent assigned): `run.cancel()` (Pending → Cancelled), cancel the pending
+  task, save, publish RunCancelled event. Immediate.
+- Running (agent executing): `run.request_cancel()` sets `cancel_requested = true`,
+  save. Run stays `Running`. Agent discovers cancellation on next heartbeat via
+  `cancel_requested: true` in `TaskDirective`. Agent then calls `CompleteTask` with
+  `TaskCancelled`, which transitions run to Cancelled. If agent never responds, lease
+  expires and normal timeout handling applies.
 
 **get_run / list_runs**: Direct repository reads.
 
-**watch_run**: `event_bus.subscribe(run_id)` returns stream.
+**watch_run**: `event_bus.subscribe(run_id)` returns stream. On subscribe, the current
+run state is sent as the first event (catch-up), then live events follow via LISTEN/NOTIFY.
 
-**register / deregister**: Create/delete agent. Deregister releases tasks back to queue.
+**register**: Create or upsert agent. Returns registry info. Upsert semantics allow agent
+re-registration after restart without controller-side cleanup.
+
+**deregister**: Clean agent shutdown flow:
+1. Find all tasks currently assigned to the agent (state = Running, agent_id matches)
+2. For each task: `task.timeout()` (Running → TimedOut), save
+3. For each affected run: if `run.can_retry()`, `run.retry()` + create new pending task.
+   Otherwise `run.fail(agent_deregistered)`. Save, publish events.
+4. Delete agent record.
+This ensures tasks are immediately requeued rather than waiting for lease expiry.
 
 ### Background Use Cases
 
@@ -488,14 +553,29 @@ Each focused on one aggregate.
 
 **PgPipelineStore**: Cross-aggregate transactions (BEGIN + multiple operations + COMMIT).
 
-**PgEventBus**: Publish via `pg_notify()`. Subscribe via background `LISTEN` task that
-routes notifications to local `broadcast::channel` per run_id.
+**PgEventBus**: Publish via `pg_notify('run_events', json_payload)`. Subscribe via a
+background listener task (spawned once at startup) that runs `LISTEN run_events` on a
+dedicated connection, deserializes each notification payload, and routes to local
+`broadcast::channel` per run_id. Notifications exceeding PG's 8KB payload limit are
+truncated (progress messages may lose their message field). On subscribe, the current
+run state is fetched from the DB and sent as the first event before streaming live
+notifications. If the LISTEN connection drops, the listener reconnects and subscribers
+are notified of reconnection (clients can re-fetch state).
 
 **Lease epoch**: Postgres sequence (`SELECT nextval('lease_epoch_seq')`). Monotonic,
 unique across all instances.
 
-**poll_and_assign**: `SELECT ... FOR UPDATE SKIP LOCKED` — core of multi-instance
-task distribution. Each controller grabs next available task without blocking others.
+**poll_and_assign**: The exact query:
+```sql
+SELECT * FROM tasks
+WHERE state = 'pending'
+ORDER BY created_at ASC
+LIMIT 1
+FOR UPDATE SKIP LOCKED
+```
+This is the core of multi-instance task distribution. Each controller instance grabs the
+next available pending task without blocking others. The `FOR UPDATE` lock is held within
+the transaction that also updates the task state to `running` and sets agent_id/lease.
 
 ### External Adapters
 
@@ -510,23 +590,24 @@ SecretResolver port.
 CREATE SEQUENCE lease_epoch_seq;
 
 CREATE TABLE runs (
-    id              TEXT PRIMARY KEY,
-    idempotency_key TEXT UNIQUE,
-    pipeline_yaml   TEXT NOT NULL,
-    state           TEXT NOT NULL DEFAULT 'pending',
-    attempt         INTEGER NOT NULL DEFAULT 1,
-    max_retries     INTEGER NOT NULL DEFAULT 0,
-    dry_run         BOOLEAN NOT NULL DEFAULT FALSE,
-    timeout_seconds BIGINT,
-    error_code      TEXT,
-    error_message   TEXT,
-    rows_read       BIGINT,
-    rows_written    BIGINT,
-    bytes_read      BIGINT,
-    bytes_written   BIGINT,
-    duration_ms     BIGINT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    id               TEXT PRIMARY KEY,
+    idempotency_key  TEXT UNIQUE,
+    pipeline_name    TEXT NOT NULL,
+    pipeline_yaml    TEXT NOT NULL,
+    state            TEXT NOT NULL DEFAULT 'pending',
+    cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+    attempt          INTEGER NOT NULL DEFAULT 1,
+    max_retries      INTEGER NOT NULL DEFAULT 0,
+    timeout_seconds  BIGINT,
+    error_code       TEXT,
+    error_message    TEXT,
+    rows_read        BIGINT,
+    rows_written     BIGINT,
+    bytes_read       BIGINT,
+    bytes_written    BIGINT,
+    duration_ms      BIGINT,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX idx_runs_state ON runs(state);
@@ -671,18 +752,63 @@ crates/rapidbyte-controller/
 
 | Current | Refactored |
 |---------|-----------|
-| 12 RPCs | 10 RPCs |
-| 9 run states | 5 run states |
-| ~5,350 lines | ~2,150 lines (estimated) |
-| In-memory first, optional Postgres | Postgres only |
+| 10 RPCs (5+5) | 10 RPCs (5+5, different composition) |
+| 11 run states | 5 run states + cancel_requested flag |
+| ~5,350 lines | ~3,000 lines (estimated) |
+| In-memory first, optional Postgres | Postgres only (source of truth) |
 | Arc<RwLock<HashMap>> state containers | Direct Postgres queries |
 | Snapshot-restore rollback | Postgres transactions |
 | PendingKeyGuard TOCTOU prevention | DB unique constraint |
 | AtomicU64 epoch generator | Postgres sequence |
 | tokio broadcast for WatchRun | Postgres LISTEN/NOTIFY |
 | HMAC ticket signing for preview | Removed (no preview) |
+| Preview system (tickets, TTL, cleanup) | Removed entirely |
+| Cancelling state | cancel_requested boolean flag |
 | 1,800-line monolithic store | ~100-line focused repositories |
 | anyhow + Status + typed errors mixed | 3 typed error enums, clear boundaries |
+| dry_run + limit in ExecutionOptions | Removed (re-add with preview) |
+| bytes pipeline_yaml_utf8 | string pipeline_yaml |
+| Flat GetRunResponse fields | Wrapped in RunDetail message |
+| ReportProgress RPC | Folded into Heartbeat |
+| Single-lease HeartbeatRequest | Multi-task HeartbeatRequest with TaskHeartbeat |
+
+## Prerequisites
+
+**rapidbyte-pipeline-config crate**: Must be created before the controller refactor.
+Extract from `rapidbyte-engine::config::parser`:
+- `reject_malformed_refs(yaml: &str) -> Result<()>` — validates no malformed secret refs
+- `substitute_secrets(yaml: &str, resolver: &dyn SecretResolver) -> Result<String>`
+- `extract_pipeline_name(yaml: &str) -> Result<String>` — parses YAML to extract name
+Both `rapidbyte-engine` and `rapidbyte-controller` will depend on this new crate.
+
+**CLI updates**: The CLI commands that interact with the controller (`distributed_run`,
+`status`, `watch`, `list_runs`, `cancel`) must be updated for the new proto contract.
+This is a coordinated deploy — old CLI won't work with new controller and vice versa.
+
+## Build Requirements
+
+**sqlx offline mode**: Use `cargo sqlx prepare` to generate `.sqlx/` metadata files
+checked into the repo. This allows `cargo build` without a live Postgres database.
+CI runs `cargo sqlx prepare --check` to verify metadata is up to date.
+
+## Metrics
+
+Preserve the following metric instruments (from `rapidbyte_metrics`):
+- `runs_submitted` (counter) — incremented in submit_pipeline use case
+- `runs_completed` (counter, with state label) — incremented in complete_task/cancel/timeout
+- `active_runs` (gauge) — adjusted on state transitions
+- `tasks_completed` (counter, with outcome label) — incremented in complete_task
+- `lease_grants` (counter) — incremented in poll_task
+- `heartbeat_received` (counter) — incremented in heartbeat
+- `active_agents` (gauge) — adjusted on register/deregister/reap
+
+Removed metrics (no longer applicable):
+- `state_persist_duration` — no separate persist step, writes are inline
+- `reconciliation_sweeps` — no reconciliation state
+- `heartbeat_timeouts` — folded into lease expiry
+
+Metrics are recorded in the application layer (use cases), not the domain. Direct
+`tracing` and metric counter calls are acceptable — no port trait needed for metrics.
 
 ## Cargo Dependencies
 
