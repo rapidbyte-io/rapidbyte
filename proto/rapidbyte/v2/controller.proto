@@ -186,6 +186,8 @@ message TaskCompletion {
   uint64 bytes_processed = 5;
   double elapsed_seconds = 6;
   uint64 cursors_advanced = 7;
+  TaskOutcome outcome = 8;
+  optional TaskError error = 9;
 }
 
 message SessionHeartbeat {

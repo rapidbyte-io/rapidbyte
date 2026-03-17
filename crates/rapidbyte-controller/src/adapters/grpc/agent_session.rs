@@ -3,10 +3,10 @@
 use std::pin::Pin;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::{Stream, StreamExt};
-use tonic::Request;
+use tonic::{Code, Request};
 use tracing::warn;
 
 use crate::adapters::grpc::agent_bridge::AgentHandler;
@@ -83,6 +83,7 @@ impl AgentSessionHandler {
         let registered_agent_id = registration.agent_id.clone();
 
         let (out_tx, out_rx) = mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         out_tx
             .send(Ok(ControllerMessage {
                 payload: Some(controller_message::Payload::Accepted(SessionAccepted {
@@ -97,17 +98,35 @@ impl AgentSessionHandler {
             .await
             .map_err(|_| tonic::Status::internal("failed to publish session accepted"))?;
 
+        let close_watch_tx = out_tx.clone();
+        let close_watch_shutdown_tx = shutdown_tx.clone();
+        tokio::spawn(async move {
+            close_watch_tx.closed().await;
+            let _ = close_watch_shutdown_tx.send(true);
+        });
+
         let assignment_handler = handler.clone();
         let assignment_agent_id = registered_agent_id.clone();
         let assignment_tx = out_tx.clone();
+        let mut assignment_shutdown_rx = shutdown_rx.clone();
         tokio::spawn(async move {
             loop {
-                let response = assignment_handler
-                    .poll_task(Request::new(PollTaskRequest {
+                if *assignment_shutdown_rx.borrow() {
+                    break;
+                }
+
+                let response = tokio::select! {
+                    changed = assignment_shutdown_rx.changed() => {
+                        if changed.is_err() || *assignment_shutdown_rx.borrow() {
+                            break;
+                        }
+                        continue;
+                    }
+                    response = assignment_handler.poll_task(Request::new(PollTaskRequest {
                         agent_id: assignment_agent_id.clone(),
                         wait_seconds: 5,
-                    }))
-                    .await;
+                    })) => response,
+                };
 
                 let assignment = match response {
                     Ok(response) => match response.into_inner().result {
@@ -141,6 +160,7 @@ impl AgentSessionHandler {
             }
         });
 
+        let shutdown_on_inbound_end = shutdown_tx;
         tokio::spawn(async move {
             while let Some(incoming) = inbound.next().await {
                 let Ok(message) = incoming else {
@@ -216,32 +236,7 @@ impl AgentSessionHandler {
                         }
                     }
                     Some(agent_message::Payload::Completion(completion)) => {
-                        let failed_error = (!completion.success).then(|| TaskError {
-                            code: "AGENT_SESSION_FAILURE".to_owned(),
-                            message: "task failed via v2 agent session".to_owned(),
-                            retryable: false,
-                            safe_to_retry: false,
-                            commit_state: "before_commit".to_owned(),
-                        });
-                        let request = CompleteTaskRequest {
-                            agent_id,
-                            task_id: completion.task_id,
-                            lease_epoch: completion.lease_epoch,
-                            outcome: if completion.success {
-                                TaskOutcome::Completed as i32
-                            } else {
-                                TaskOutcome::Failed as i32
-                            },
-                            error: failed_error,
-                            metrics: Some(TaskMetrics {
-                                records_processed: completion.records_processed,
-                                bytes_processed: completion.bytes_processed,
-                                elapsed_seconds: completion.elapsed_seconds,
-                                cursors_advanced: completion.cursors_advanced,
-                            }),
-                            preview: None,
-                            backend_run_id: 0,
-                        };
+                        let request = completion_to_complete_task_request(agent_id, completion);
                         if let Err(error) = complete_task_with_retry(&handler, request).await {
                             warn!(error = %error, "failed to bridge v2 completion message");
                         }
@@ -250,10 +245,72 @@ impl AgentSessionHandler {
                 }
             }
 
+            let _ = shutdown_on_inbound_end.send(true);
             drop(out_tx);
         });
 
         Ok(Box::pin(ReceiverStream::new(out_rx)))
+    }
+}
+
+fn completion_to_complete_task_request(
+    agent_id: String,
+    completion: crate::proto::rapidbyte::v2::TaskCompletion,
+) -> CompleteTaskRequest {
+    let outcome = TaskOutcome::try_from(completion.outcome)
+        .ok()
+        .filter(|outcome| *outcome != TaskOutcome::Unspecified)
+        .unwrap_or({
+            if completion.success {
+                TaskOutcome::Completed
+            } else {
+                TaskOutcome::Failed
+            }
+        });
+
+    let error = match outcome {
+        TaskOutcome::Completed | TaskOutcome::Unspecified => None,
+        TaskOutcome::Cancelled => completion.error,
+        TaskOutcome::Failed => completion.error.or_else(|| {
+            Some(TaskError {
+                code: "AGENT_SESSION_FAILURE".to_owned(),
+                message: "task failed via v2 agent session".to_owned(),
+                retryable: false,
+                safe_to_retry: false,
+                commit_state: "before_commit".to_owned(),
+            })
+        }),
+    };
+
+    CompleteTaskRequest {
+        agent_id,
+        task_id: completion.task_id,
+        lease_epoch: completion.lease_epoch,
+        outcome: outcome as i32,
+        error,
+        metrics: Some(TaskMetrics {
+            records_processed: completion.records_processed,
+            bytes_processed: completion.bytes_processed,
+            elapsed_seconds: completion.elapsed_seconds,
+            cursors_advanced: completion.cursors_advanced,
+        }),
+        preview: None,
+        backend_run_id: 0,
+    }
+}
+
+fn is_retryable_complete_task_status(error: &tonic::Status) -> bool {
+    match error.code() {
+        Code::Unavailable | Code::ResourceExhausted | Code::DeadlineExceeded => true,
+        Code::Unknown => {
+            let message = error.message().to_ascii_lowercase();
+            message.contains("transport")
+                || message.contains("connection")
+                || message.contains("timed out")
+                || message.contains("broken pipe")
+                || message.contains("reset by peer")
+        }
+        _ => false,
     }
 }
 
@@ -269,10 +326,16 @@ async fn complete_task_with_retry(
         match handler.complete_task(Request::new(request.clone())).await {
             Ok(_) => return Ok(()),
             Err(error) => {
-                last_error = Some(error);
-                if attempt < MAX_ATTEMPTS {
-                    tokio::time::sleep(RETRY_DELAY).await;
+                if is_retryable_complete_task_status(&error) {
+                    last_error = Some(error);
+                    if attempt < MAX_ATTEMPTS {
+                        tokio::time::sleep(RETRY_DELAY).await;
+                        continue;
+                    }
+                    break;
                 }
+                // Non-transient errors should fail fast instead of retrying.
+                return Err(error);
             }
         }
     }
@@ -290,5 +353,78 @@ impl AgentSession for AgentSessionHandler {
     ) -> Result<tonic::Response<Self::OpenSessionStream>, tonic::Status> {
         let stream = self.open_session_from_stream(request.into_inner()).await?;
         Ok(tonic::Response::new(stream))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn completion_mapping_preserves_failed_error_details() {
+        let request = completion_to_complete_task_request(
+            "agent-1".to_owned(),
+            crate::proto::rapidbyte::v2::TaskCompletion {
+                task_id: "task-1".to_owned(),
+                lease_epoch: 10,
+                success: false,
+                records_processed: 0,
+                bytes_processed: 0,
+                elapsed_seconds: 1.0,
+                cursors_advanced: 0,
+                outcome: TaskOutcome::Failed as i32,
+                error: Some(TaskError {
+                    code: "PLUGIN_FAILURE".to_owned(),
+                    message: "transform exploded".to_owned(),
+                    retryable: true,
+                    safe_to_retry: true,
+                    commit_state: "before_commit".to_owned(),
+                }),
+            },
+        );
+
+        assert_eq!(request.outcome, TaskOutcome::Failed as i32);
+        let error = request.error.expect("failed outcome should include error");
+        assert_eq!(error.code, "PLUGIN_FAILURE");
+        assert!(error.retryable);
+        assert!(error.safe_to_retry);
+        assert_eq!(error.commit_state, "before_commit");
+    }
+
+    #[test]
+    fn completion_mapping_uses_cancelled_outcome() {
+        let request = completion_to_complete_task_request(
+            "agent-1".to_owned(),
+            crate::proto::rapidbyte::v2::TaskCompletion {
+                task_id: "task-1".to_owned(),
+                lease_epoch: 11,
+                success: false,
+                records_processed: 0,
+                bytes_processed: 0,
+                elapsed_seconds: 0.5,
+                cursors_advanced: 0,
+                outcome: TaskOutcome::Cancelled as i32,
+                error: None,
+            },
+        );
+
+        assert_eq!(request.outcome, TaskOutcome::Cancelled as i32);
+        assert!(request.error.is_none());
+    }
+
+    #[test]
+    fn retry_policy_only_retries_transient_statuses() {
+        assert!(is_retryable_complete_task_status(
+            &tonic::Status::unavailable("controller unavailable")
+        ));
+        assert!(is_retryable_complete_task_status(
+            &tonic::Status::resource_exhausted("backpressure")
+        ));
+        assert!(!is_retryable_complete_task_status(
+            &tonic::Status::invalid_argument("bad payload")
+        ));
+        assert!(!is_retryable_complete_task_status(
+            &tonic::Status::internal("state transition failed")
+        ));
     }
 }

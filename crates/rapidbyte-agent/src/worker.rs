@@ -26,7 +26,7 @@ use crate::proto::rapidbyte::v2::agent_session_client::AgentSessionClient;
 use crate::proto::rapidbyte::v2::controller_message;
 use crate::proto::rapidbyte::v2::{
     AgentMessage, ControllerMessage, LeaseStatus, SessionAccepted, SessionHeartbeat, SessionHello,
-    TaskAssignment, TaskCompletion,
+    TaskAssignment, TaskCompletion, TaskError, TaskOutcome,
 };
 use crate::spool::{PreviewKey, PreviewSpool};
 
@@ -571,6 +571,8 @@ async fn process_task(ctx: TaskExecutionContext, task: TaskAssignment) -> anyhow
 
     let _ = progress_handle.await;
 
+    let completion = build_completion(&task, &result);
+
     let preview_prepared = if let Some(dr) = result.dry_run_result {
         ctx.spool.write().await.store(
             PreviewKey {
@@ -589,15 +591,7 @@ async fn process_task(ctx: TaskExecutionContext, task: TaskAssignment) -> anyhow
         .session_outbound
         .send(AgentMessage {
             agent_id: ctx.agent_id.clone(),
-            payload: Some(agent_message::Payload::Completion(TaskCompletion {
-                task_id: task.task_id.clone(),
-                lease_epoch: task.lease_epoch,
-                success: matches!(result.outcome, TaskOutcomeKind::Completed),
-                records_processed: result.metrics.records_processed,
-                bytes_processed: result.metrics.bytes_processed,
-                elapsed_seconds: result.metrics.elapsed_seconds,
-                cursors_advanced: result.metrics.cursors_advanced,
-            })),
+            payload: Some(agent_message::Payload::Completion(completion)),
         })
         .is_err()
     {
@@ -637,6 +631,39 @@ async fn process_task(ctx: TaskExecutionContext, task: TaskAssignment) -> anyhow
         .record(task_start.elapsed().as_secs_f64(), &[]);
 
     Ok(())
+}
+
+fn build_completion(
+    task: &TaskAssignment,
+    result: &executor::TaskExecutionResult,
+) -> TaskCompletion {
+    let (success, outcome, error) = match &result.outcome {
+        TaskOutcomeKind::Completed => (true, TaskOutcome::Completed as i32, None),
+        TaskOutcomeKind::Failed(error) => (
+            false,
+            TaskOutcome::Failed as i32,
+            Some(TaskError {
+                code: error.code.clone(),
+                message: error.message.clone(),
+                retryable: error.retryable,
+                safe_to_retry: error.safe_to_retry,
+                commit_state: error.commit_state.as_str().to_owned(),
+            }),
+        ),
+        TaskOutcomeKind::Cancelled => (false, TaskOutcome::Cancelled as i32, None),
+    };
+
+    TaskCompletion {
+        task_id: task.task_id.clone(),
+        lease_epoch: task.lease_epoch,
+        success,
+        records_processed: result.metrics.records_processed,
+        bytes_processed: result.metrics.bytes_processed,
+        elapsed_seconds: result.metrics.elapsed_seconds,
+        cursors_advanced: result.metrics.cursors_advanced,
+        outcome,
+        error,
+    }
 }
 
 async fn run_worker_pool<F, Fut>(max_tasks: u32, mut make_worker: F) -> anyhow::Result<()>
@@ -720,9 +747,25 @@ async fn heartbeat_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::{TaskErrorInfo, TaskExecutionResult, TaskMetrics, TaskOutcomeKind};
+    use rapidbyte_types::prelude::CommitState;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
+
+    fn test_assignment() -> TaskAssignment {
+        TaskAssignment {
+            run_id: "run-1".to_owned(),
+            task_id: "task-1".to_owned(),
+            lease_epoch: 7,
+            attempt: 1,
+            pipeline_yaml_utf8: b"pipeline: test\n".to_vec(),
+            dry_run: false,
+            limit: None,
+            lease_expires_at: None,
+            execution: None,
+        }
+    }
 
     #[tokio::test]
     async fn max_tasks_allows_parallel_execution() {
@@ -860,5 +903,59 @@ mod tests {
             ..Default::default()
         };
         validate_signing_key_config(&config).unwrap();
+    }
+
+    #[test]
+    fn build_completion_maps_cancelled_outcome() {
+        let completion = build_completion(
+            &test_assignment(),
+            &TaskExecutionResult {
+                outcome: TaskOutcomeKind::Cancelled,
+                metrics: TaskMetrics {
+                    records_processed: 0,
+                    bytes_processed: 0,
+                    elapsed_seconds: 0.1,
+                    cursors_advanced: 0,
+                },
+                dry_run_result: None,
+            },
+        );
+
+        assert!(!completion.success);
+        assert_eq!(completion.outcome, TaskOutcome::Cancelled as i32);
+        assert!(completion.error.is_none());
+    }
+
+    #[test]
+    fn build_completion_preserves_failure_error_details() {
+        let completion = build_completion(
+            &test_assignment(),
+            &TaskExecutionResult {
+                outcome: TaskOutcomeKind::Failed(TaskErrorInfo {
+                    code: "PLUGIN_FAILURE".to_owned(),
+                    message: "transform failed".to_owned(),
+                    retryable: true,
+                    safe_to_retry: true,
+                    commit_state: CommitState::BeforeCommit,
+                }),
+                metrics: TaskMetrics {
+                    records_processed: 5,
+                    bytes_processed: 256,
+                    elapsed_seconds: 0.2,
+                    cursors_advanced: 0,
+                },
+                dry_run_result: None,
+            },
+        );
+
+        assert!(!completion.success);
+        assert_eq!(completion.outcome, TaskOutcome::Failed as i32);
+        let error = completion
+            .error
+            .expect("failed completions should carry error");
+        assert_eq!(error.code, "PLUGIN_FAILURE");
+        assert!(error.retryable);
+        assert!(error.safe_to_retry);
+        assert_eq!(error.commit_state, CommitState::BeforeCommit.as_str());
     }
 }
