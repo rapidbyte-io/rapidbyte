@@ -12,6 +12,7 @@ use rapidbyte_controller::proto::rapidbyte::v2::{
     run_event, ExecutionOptions, GetRunRequest, StreamRunRequest, SubmitRunRequest,
 };
 
+#[allow(clippy::too_many_lines)]
 pub async fn execute(
     controller_url: &str,
     pipeline_path: &Path,
