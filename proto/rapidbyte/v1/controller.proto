@@ -1,34 +1,62 @@
 syntax = "proto3";
-
 package rapidbyte.v1;
 
 import "google/protobuf/timestamp.proto";
 
-// ──────────────────────────────────────────────
-// Pipeline Service — CLI-facing (control plane)
-// ──────────────────────────────────────────────
+// --- Client-facing ---
 
 service PipelineService {
   rpc SubmitPipeline(SubmitPipelineRequest) returns (SubmitPipelineResponse);
-  rpc GetRun(GetRunRequest)                 returns (GetRunResponse);
-  rpc WatchRun(WatchRunRequest)             returns (stream RunEvent);
-  rpc CancelRun(CancelRunRequest)           returns (CancelRunResponse);
-  rpc ListRuns(ListRunsRequest)             returns (ListRunsResponse);
+  rpc GetRun(GetRunRequest) returns (GetRunResponse);
+  rpc WatchRun(WatchRunRequest) returns (stream RunEvent);
+  rpc CancelRun(CancelRunRequest) returns (CancelRunResponse);
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
 }
 
+// --- Agent-facing ---
+
+service AgentService {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
+  rpc PollTask(PollTaskRequest) returns (PollTaskResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc CompleteTask(CompleteTaskRequest) returns (CompleteTaskResponse);
+}
+
+// --- Enums ---
+
+enum RunState {
+  RUN_STATE_UNSPECIFIED = 0;
+  RUN_STATE_PENDING = 1;
+  RUN_STATE_RUNNING = 2;
+  RUN_STATE_COMPLETED = 3;
+  RUN_STATE_FAILED = 4;
+  RUN_STATE_CANCELLED = 5;
+}
+
+enum CommitState {
+  COMMIT_STATE_UNSPECIFIED = 0;
+  COMMIT_STATE_BEFORE_COMMIT = 1;
+  COMMIT_STATE_AFTER_COMMIT_UNKNOWN = 2;
+  COMMIT_STATE_AFTER_COMMIT_CONFIRMED = 3;
+}
+
+// --- Pipeline Service Messages ---
+
 message SubmitPipelineRequest {
-  bytes pipeline_yaml_utf8 = 1;     // Raw YAML as UTF-8 bytes
-  ExecutionOptions execution = 2;
-  string idempotency_key = 3;       // Client-generated, prevents duplicate submissions
+  string pipeline_yaml = 1;
+  string idempotency_key = 2;
+  ExecutionOptions options = 3;
 }
 
 message ExecutionOptions {
-  bool dry_run = 1;
-  optional uint64 limit = 2;        // Max rows per stream (only with dry_run)
+  uint32 max_retries = 1;
+  uint64 timeout_seconds = 2;
 }
 
 message SubmitPipelineResponse {
-  string run_id = 1;                // Controller-assigned UUID v4
+  string run_id = 1;
+  bool already_exists = 2;
 }
 
 message GetRunRequest {
@@ -36,15 +64,7 @@ message GetRunRequest {
 }
 
 message GetRunResponse {
-  string run_id = 1;
-  RunState state = 2;
-  string pipeline_name = 3;
-  google.protobuf.Timestamp submitted_at = 4;
-  optional google.protobuf.Timestamp started_at = 5;
-  optional google.protobuf.Timestamp completed_at = 6;
-  optional TaskRef current_task = 7;
-  optional PreviewAccess preview = 8;
-  optional TaskError last_error = 9;
+  RunDetail run = 1;
 }
 
 message WatchRunRequest {
@@ -53,39 +73,30 @@ message WatchRunRequest {
 
 message RunEvent {
   string run_id = 1;
-  oneof event {
-    ProgressUpdate progress = 2;
-    RunCompleted completed = 3;
-    RunFailed failed = 4;
-    RunCancelled cancelled = 5;
-    RunStatus status = 6;
+  google.protobuf.Timestamp timestamp = 2;
+  RunState state = 3;
+  uint32 attempt = 4;
+  oneof detail {
+    ProgressDetail progress = 5;
+    CompletionDetail completed = 6;
+    FailureDetail failed = 7;
   }
 }
 
-message ProgressUpdate {
-  string stream = 1;
-  string phase = 2;                 // Maps to engine::progress::Phase
-  uint64 records = 3;
-  uint64 bytes = 4;
+message ProgressDetail {
+  string message = 1;
+  optional double progress_pct = 2;
 }
 
-message RunCompleted {
-  uint64 total_records = 1;
-  uint64 total_bytes = 2;
-  double elapsed_seconds = 3;
-  uint64 cursors_advanced = 4;
+message CompletionDetail {
+  RunMetrics metrics = 1;
 }
 
-message RunFailed {
-  TaskError error = 1;
-  uint32 attempt = 2;
-}
-
-message RunCancelled {}
-
-message RunStatus {
-  RunState state = 1;
-  string message = 2;
+message FailureDetail {
+  string error_code = 1;
+  string error_message = 2;
+  bool retryable = 3;
+  CommitState commit_state = 4;
 }
 
 message CancelRunRequest {
@@ -94,195 +105,148 @@ message CancelRunRequest {
 
 message CancelRunResponse {
   bool accepted = 1;
-  string message = 2;              // e.g. "queued run cancelled", "running — cancel best-effort"
 }
 
 message ListRunsRequest {
-  int32 limit = 1;                  // Default 20
-  optional RunState filter_state = 2;
+  optional RunState state_filter = 1;
+  uint32 page_size = 2;
+  string page_token = 3;
 }
 
 message ListRunsResponse {
   repeated RunSummary runs = 1;
+  string next_page_token = 2;
+}
+
+message RunDetail {
+  string run_id = 1;
+  string pipeline_name = 2;
+  RunState state = 3;
+  bool cancel_requested = 4;
+  uint32 attempt = 5;
+  uint32 max_retries = 6;
+  optional RunMetrics metrics = 7;
+  optional RunError error = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
 }
 
 message RunSummary {
   string run_id = 1;
   string pipeline_name = 2;
   RunState state = 3;
-  google.protobuf.Timestamp submitted_at = 4;
+  uint32 attempt = 4;
+  google.protobuf.Timestamp created_at = 5;
 }
 
-// ──────────────────────────────────────────────
-// Agent Service — Agent-facing (control plane)
-// ──────────────────────────────────────────────
-
-service AgentService {
-  rpc RegisterAgent(RegisterAgentRequest)       returns (RegisterAgentResponse);
-  rpc Heartbeat(HeartbeatRequest)               returns (HeartbeatResponse);
-  rpc PollTask(PollTaskRequest)                 returns (PollTaskResponse);
-  rpc ReportProgress(ReportProgressRequest)     returns (ReportProgressResponse);
-  rpc CompleteTask(CompleteTaskRequest)          returns (CompleteTaskResponse);
+message RunMetrics {
+  uint64 rows_read = 1;
+  uint64 rows_written = 2;
+  uint64 bytes_read = 3;
+  uint64 bytes_written = 4;
+  uint64 duration_ms = 5;
 }
 
-message RegisterAgentRequest {
-  uint32 max_tasks = 1;
-  string flight_advertise_endpoint = 2;  // Reachable Flight address for clients
-  string plugin_bundle_hash = 3;         // Hash of local plugin inventory
-  repeated string available_plugins = 4; // Informational in v1.1
-  uint64 memory_bytes = 5;
+message RunError {
+  string code = 1;
+  string message = 2;
 }
 
-message RegisterAgentResponse {
-  string agent_id = 1;              // Controller-assigned UUID v4
-  string registry_url = 2;          // OCI registry URL for plugin pulls (empty = not configured)
-  bool registry_insecure = 3;       // Use HTTP instead of HTTPS for registry
-  string trust_policy = 4;          // Plugin signature policy: "skip", "warn", or "verify"
-  repeated string trusted_key_pems = 5; // Ed25519 public key PEM contents for verification
+// --- Agent Service Messages ---
+
+message RegisterRequest {
+  string agent_id = 1;
+  AgentCapabilities capabilities = 2;
 }
+
+message AgentCapabilities {
+  repeated string plugins = 1;
+  uint32 max_concurrent_tasks = 2;
+}
+
+message RegisterResponse {
+  RegistryInfo registry = 1;
+}
+
+message DeregisterRequest {
+  string agent_id = 1;
+}
+
+message DeregisterResponse {}
 
 message PollTaskRequest {
   string agent_id = 1;
-  uint32 wait_seconds = 2;          // Long-poll timeout (e.g. 30)
 }
 
 message PollTaskResponse {
   oneof result {
-    TaskAssignment task = 1;
+    TaskAssignment assignment = 1;
     NoTask no_task = 2;
   }
 }
 
-message NoTask {}
-
 message TaskAssignment {
-  string task_id = 1;               // UUID v4
+  string task_id = 1;
   string run_id = 2;
-  uint32 attempt = 3;               // Monotonic per run
-  uint64 lease_epoch = 4;           // Monotonic per run, for fencing
-  google.protobuf.Timestamp lease_expires_at = 5;
-  bytes pipeline_yaml_utf8 = 6;     // Full pipeline config
-  ExecutionOptions execution = 7;   // dry_run, limit
+  string pipeline_yaml = 3;
+  ExecutionOptions options = 4;
+  uint64 lease_epoch = 5;
+  google.protobuf.Timestamp lease_expires_at = 6;
+  uint32 attempt = 7;
 }
+
+message RegistryInfo {
+  string url = 1;
+  bool insecure = 2;
+}
+
+message NoTask {}
 
 message HeartbeatRequest {
   string agent_id = 1;
-  repeated ActiveLease active_leases = 2;
-  uint32 active_tasks = 3;
-  double cpu_usage = 4;             // 0.0–1.0
-  uint64 memory_used_bytes = 5;
+  repeated TaskHeartbeat tasks = 2;
 }
 
-message ActiveLease {
+message TaskHeartbeat {
   string task_id = 1;
   uint64 lease_epoch = 2;
+  optional string progress_message = 3;
+  optional double progress_pct = 4;
 }
 
 message HeartbeatResponse {
-  repeated AgentDirective directives = 1;
+  repeated TaskDirective directives = 1;
 }
 
-message AgentDirective {
-  oneof directive {
-    CancelTask cancel_task = 1;
-    // Future: EvictPreview, UpdateConfig, ...
-  }
-}
-
-message CancelTask {
+message TaskDirective {
   string task_id = 1;
-  uint64 lease_epoch = 2;
+  bool acknowledged = 2;
+  bool cancel_requested = 3;
+  google.protobuf.Timestamp lease_expires_at = 4;
 }
-
-message ReportProgressRequest {
-  string agent_id = 1;
-  string task_id = 2;
-  uint64 lease_epoch = 3;
-  ProgressUpdate progress = 4;
-}
-
-message ReportProgressResponse {}
 
 message CompleteTaskRequest {
   string agent_id = 1;
   string task_id = 2;
   uint64 lease_epoch = 3;
-  TaskOutcome outcome = 4;
-  optional TaskError error = 5;     // Set if FAILED or CANCELLED
-  TaskMetrics metrics = 6;
-  optional PreviewAccess preview = 7; // Set if dry_run and preview ready
-  int64 backend_run_id = 8;         // Engine's internal run ID (debugging/reconciliation)
+  oneof outcome {
+    TaskCompleted completed = 4;
+    TaskFailed failed = 5;
+    TaskCancelled cancelled = 6;
+  }
 }
 
-message CompleteTaskResponse {
-  bool acknowledged = 1;            // false if lease_epoch is stale
+message TaskCompleted {
+  RunMetrics metrics = 1;
 }
 
-message TaskMetrics {
-  uint64 records_processed = 1;
-  uint64 bytes_processed = 2;
-  double elapsed_seconds = 3;
-  uint64 cursors_advanced = 4;
-}
-
-message TaskError {
-  string code = 1;                  // Plugin error code
-  string message = 2;
+message TaskFailed {
+  string error_code = 1;
+  string error_message = 2;
   bool retryable = 3;
-  bool safe_to_retry = 4;          // Engine's safety determination
-  string commit_state = 5;         // "before_commit", "after_commit_unknown", "after_commit_confirmed"
+  CommitState commit_state = 4;
 }
 
-// ──────────────────────────────────────────────
-// Shared types
-// ──────────────────────────────────────────────
+message TaskCancelled {}
 
-message TaskRef {
-  string task_id = 1;
-  string agent_id = 2;
-  uint32 attempt = 3;
-  uint64 lease_epoch = 4;
-  google.protobuf.Timestamp assigned_at = 5;
-}
-
-message PreviewAccess {
-  PreviewState state = 1;
-  string flight_endpoint = 2;       // Agent's advertised Flight address
-  bytes ticket = 3;                 // Signed opaque token
-  google.protobuf.Timestamp expires_at = 4;
-  repeated StreamPreview streams = 5;
-}
-
-message StreamPreview {
-  string stream = 1;
-  uint64 rows = 2;
-  bytes ticket = 3;
-}
-
-enum RunState {
-  RUN_STATE_UNSPECIFIED = 0;
-  RUN_STATE_PENDING = 1;
-  RUN_STATE_ASSIGNED = 2;
-  RUN_STATE_RUNNING = 3;
-  RUN_STATE_PREVIEW_READY = 4;
-  RUN_STATE_COMPLETED = 5;
-  RUN_STATE_FAILED = 6;
-  RUN_STATE_CANCELLED = 7;
-  RUN_STATE_RECONCILING = 8;
-  RUN_STATE_RECOVERY_FAILED = 9;
-}
-
-enum TaskOutcome {
-  TASK_OUTCOME_UNSPECIFIED = 0;
-  TASK_OUTCOME_COMPLETED = 1;
-  TASK_OUTCOME_FAILED = 2;
-  TASK_OUTCOME_CANCELLED = 3;
-}
-
-enum PreviewState {
-  PREVIEW_STATE_UNSPECIFIED = 0;
-  PREVIEW_STATE_NONE = 1;
-  PREVIEW_STATE_BUILDING = 2;
-  PREVIEW_STATE_READY = 3;
-  PREVIEW_STATE_EXPIRED = 4;
-}
+message CompleteTaskResponse {}
