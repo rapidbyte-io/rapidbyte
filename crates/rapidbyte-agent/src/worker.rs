@@ -5,9 +5,10 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::task::JoinSet;
 use tokio_stream::wrappers::TcpListenerStream;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::{
     Certificate, Channel, ClientTlsConfig as TonicClientTlsConfig, Endpoint, Identity,
@@ -20,11 +21,12 @@ use opentelemetry::KeyValue;
 use crate::auth::request_with_bearer;
 use crate::executor::{self, TaskOutcomeKind};
 use crate::flight::PreviewFlightService;
-use crate::proto::rapidbyte::v1::agent_service_client::AgentServiceClient;
-use crate::proto::rapidbyte::v1::{
-    agent_directive, poll_task_response, ActiveLease, CompleteTaskRequest, HeartbeatRequest,
-    PollTaskRequest, PreviewAccess, PreviewState, RegisterAgentRequest, TaskError, TaskMetrics,
-    TaskOutcome,
+use crate::proto::rapidbyte::v2::agent_message;
+use crate::proto::rapidbyte::v2::agent_session_client::AgentSessionClient;
+use crate::proto::rapidbyte::v2::controller_message;
+use crate::proto::rapidbyte::v2::{
+    AgentMessage, ControllerMessage, LeaseStatus, SessionAccepted, SessionHeartbeat, SessionHello,
+    TaskAssignment, TaskCompletion,
 };
 use crate::spool::{PreviewKey, PreviewSpool};
 
@@ -97,24 +99,95 @@ impl Default for AgentConfig {
 /// Maps `task_id` to (`lease_epoch`, `cancellation_token`).
 type ActiveLeaseMap = Arc<RwLock<HashMap<String, (u64, CancellationToken)>>>;
 
-const COMPLETE_TASK_RETRY_DELAY: Duration = Duration::from_secs(1);
 const DEFAULT_SIGNING_KEY: &[u8] = b"rapidbyte-dev-signing-key-not-for-production";
 
 #[derive(Clone)]
 struct TaskExecutionContext {
-    channel: Channel,
     agent_id: String,
+    session_outbound: mpsc::UnboundedSender<AgentMessage>,
     active_leases: ActiveLeaseMap,
     spool: Arc<RwLock<PreviewSpool>>,
     otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
     config: AgentConfig,
-    shutdown: CancellationToken,
 }
 
 enum WorkerPoll<T> {
     Task(T),
-    Idle,
     Stop,
+}
+
+/// Bidirectional v2 session handle used for agent-controller communication.
+pub struct V2Session {
+    outbound: mpsc::UnboundedSender<AgentMessage>,
+    inbound: tonic::Streaming<ControllerMessage>,
+}
+
+impl V2Session {
+    /// Send a message to the controller over the open session stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session outbound channel is closed.
+    #[allow(clippy::result_large_err)]
+    pub fn send_message(
+        &self,
+        message: AgentMessage,
+    ) -> Result<(), mpsc::error::SendError<AgentMessage>> {
+        self.outbound.send(message)
+    }
+
+    /// Read the next controller message from the stream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transport stream reports one.
+    pub async fn next_controller_message(
+        &mut self,
+    ) -> Result<Option<ControllerMessage>, tonic::Status> {
+        self.inbound.message().await
+    }
+}
+
+/// Open a v2 bidirectional session and complete the hello/accepted handshake.
+///
+/// # Errors
+///
+/// Returns an error when the stream cannot be opened, the auth token is
+/// invalid, or the server does not acknowledge the hello message.
+pub async fn open_v2_session(
+    channel: Channel,
+    hello: SessionHello,
+    auth_token: Option<&str>,
+) -> anyhow::Result<(V2Session, SessionAccepted)> {
+    let mut client = AgentSessionClient::new(channel);
+    let (outbound, outbound_rx) = mpsc::unbounded_channel();
+    let hello_agent_id = hello.agent_id.clone();
+    outbound
+        .send(AgentMessage {
+            agent_id: hello_agent_id,
+            payload: Some(agent_message::Payload::Hello(hello)),
+        })
+        .map_err(|_| anyhow::anyhow!("failed to queue session hello"))?;
+
+    let inbound = client
+        .open_session(
+            request_with_bearer(UnboundedReceiverStream::new(outbound_rx), auth_token)
+                .map_err(|_| anyhow::anyhow!("Invalid bearer token"))?,
+        )
+        .await?
+        .into_inner();
+
+    let mut session = V2Session { outbound, inbound };
+
+    let accepted = session
+        .next_controller_message()
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("session closed before acceptance"))?;
+    let Some(controller_message::Payload::Accepted(accepted)) = accepted.payload else {
+        anyhow::bail!("session did not return accepted payload")
+    };
+
+    Ok((session, accepted))
 }
 
 /// Run the agent worker loop.
@@ -146,7 +219,6 @@ pub async fn run(
     let flight_addr = flight_listener.local_addr()?;
 
     let channel = connect_channel(&config.controller_url, config.controller_tls.as_ref()).await?;
-    let mut client = AgentServiceClient::new(channel.clone());
 
     // Set up preview spool and Flight server
     let spool = Arc::new(RwLock::new(PreviewSpool::new(config.preview_ttl)));
@@ -170,86 +242,121 @@ pub async fn run(
         }
     });
 
-    // Register with controller
-    let resp = client
-        .register_agent(
-            request_with_bearer(
-                RegisterAgentRequest {
-                    max_tasks: config.max_tasks,
-                    flight_advertise_endpoint: config.flight_advertise.clone(),
-                    plugin_bundle_hash: String::new(),
-                    available_plugins: vec![],
-                    memory_bytes: 0,
-                },
-                config.auth_token.as_deref(),
-            )
-            .map_err(|_| anyhow::anyhow!("Invalid bearer token"))?,
-        )
-        .await?;
-    let registration = resp.into_inner();
-    let agent_id = registration.agent_id;
+    let mut config = config;
+    let (mut session, accepted) = open_v2_session(
+        channel.clone(),
+        SessionHello {
+            agent_id: String::new(),
+            max_tasks: config.max_tasks,
+            flight_advertise_endpoint: config.flight_advertise.clone(),
+            plugin_bundle_hash: String::new(),
+            available_plugins: vec![],
+            memory_bytes: 0,
+        },
+        config.auth_token.as_deref(),
+    )
+    .await?;
+    let agent_id = accepted.agent_id;
     // Controller response is authoritative for registry and trust config.
     // Empty values explicitly mean "not configured" and override any local settings.
-    let mut config = config;
-    if registration.registry_url.is_empty() {
+    if accepted.registry_url.is_empty() {
         config.registry_url = None;
         config.registry_insecure = false;
         info!(agent_id, "Registered with controller");
     } else {
         info!(
             agent_id,
-            registry_url = registration.registry_url,
-            registry_insecure = registration.registry_insecure,
+            registry_url = accepted.registry_url,
+            registry_insecure = accepted.registry_insecure,
             "Registered with controller (registry configured)"
         );
-        config.registry_url = Some(registration.registry_url);
-        config.registry_insecure = registration.registry_insecure;
+        config.registry_url = Some(accepted.registry_url);
+        config.registry_insecure = accepted.registry_insecure;
     }
-    config.trust_policy = if registration.trust_policy.is_empty() {
+    config.trust_policy = if accepted.trust_policy.is_empty() {
         "skip".to_owned()
     } else {
-        registration.trust_policy
+        accepted.trust_policy
     };
-    config.trusted_key_pems = registration.trusted_key_pems;
+    config.trusted_key_pems = accepted.trusted_key_pems;
 
     // Active lease tracking shared between worker and heartbeat
     let active_leases: ActiveLeaseMap = Arc::new(RwLock::new(HashMap::new()));
     let shutdown_token = CancellationToken::new();
 
+    let session_outbound = session.outbound.clone();
+    let (assignment_tx, assignment_rx) = mpsc::channel::<TaskAssignment>(128);
+    let assignment_rx = Arc::new(Mutex::new(assignment_rx));
+    let session_shutdown = shutdown_token.clone();
+    let session_agent_id = agent_id.clone();
+    let session_leases = active_leases.clone();
+    let session_handle = tokio::spawn(async move {
+        loop {
+            if session_shutdown.is_cancelled() {
+                return;
+            }
+            match session.next_controller_message().await {
+                Ok(Some(message)) => match message.payload {
+                    Some(controller_message::Payload::Assignment(assignment)) => {
+                        if assignment_tx.send(assignment).await.is_err() {
+                            return;
+                        }
+                    }
+                    Some(controller_message::Payload::Directive(directive)) => {
+                        if directive.action.eq_ignore_ascii_case("cancel") {
+                            let leases = session_leases.read().await;
+                            if let Some((epoch, token)) = leases.get(&directive.task_id) {
+                                if directive.lease_epoch == 0 || *epoch == directive.lease_epoch {
+                                    token.cancel();
+                                }
+                            }
+                        }
+                    }
+                    Some(controller_message::Payload::Accepted(_)) | None => {}
+                },
+                Ok(None) => return,
+                Err(error) => {
+                    warn!(error = %error, agent_id = %session_agent_id, "Agent session stream ended with error");
+                    return;
+                }
+            }
+        }
+    });
+
     // Spawn heartbeat loop
-    let hb_client = AgentServiceClient::new(channel.clone());
+    let hb_session_outbound = session_outbound.clone();
     let hb_agent_id = agent_id.clone();
     let hb_interval = config.heartbeat_interval;
     let hb_leases = active_leases.clone();
     let hb_spool = spool.clone();
     let hb_shutdown = shutdown_token.clone();
-    let hb_auth_token = config.auth_token.clone();
     let heartbeat_handle = tokio::spawn(async move {
         heartbeat_loop(
-            hb_client,
+            hb_session_outbound,
             hb_agent_id,
             hb_interval,
             hb_leases,
             hb_spool,
             hb_shutdown,
-            hb_auth_token,
         )
         .await;
     });
 
     let worker_pool = run_worker_pool(config.max_tasks, {
-        let channel = channel.clone();
         let agent_id = agent_id.clone();
+        let assignment_rx = assignment_rx.clone();
         let active_leases = active_leases.clone();
+        let session_outbound = session_outbound.clone();
         let spool = spool.clone();
         let otel_guard = otel_guard.clone();
         let config = config.clone();
         let shutdown = shutdown_token.clone();
         move || {
             worker_runner_loop(
-                channel.clone(),
                 agent_id.clone(),
+                assignment_rx.clone(),
                 active_leases.clone(),
+                session_outbound.clone(),
                 spool.clone(),
                 otel_guard.clone(),
                 config.clone(),
@@ -299,6 +406,7 @@ pub async fn run(
     shutdown_token.cancel();
 
     let _ = heartbeat_handle.await;
+    let _ = session_handle.await;
     pool_result?;
 
     info!("Agent stopped");
@@ -335,66 +443,45 @@ async fn connect_channel(
     Ok(endpoint.connect().await?)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn worker_runner_loop(
-    channel: Channel,
     agent_id: String,
+    assignment_rx: Arc<Mutex<mpsc::Receiver<TaskAssignment>>>,
     active_leases: ActiveLeaseMap,
+    session_outbound: mpsc::UnboundedSender<AgentMessage>,
     spool: Arc<RwLock<PreviewSpool>>,
     otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
     config: AgentConfig,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
-    let client = AgentServiceClient::new(channel.clone());
-    let poll_wait_seconds = config.poll_wait_seconds;
-    let poll_auth_token = config.auth_token.clone();
-
     worker_loop(
         || {
             let shutdown = shutdown.clone();
-            let mut poll_client = client.clone();
-            let agent_id = agent_id.clone();
-            let auth_token = poll_auth_token.clone();
+            let assignment_rx = assignment_rx.clone();
             async move {
                 if shutdown.is_cancelled() {
                     return Ok(WorkerPoll::Stop);
                 }
 
-                let resp = poll_client
-                    .poll_task(
-                        request_with_bearer(
-                            PollTaskRequest {
-                                agent_id,
-                                wait_seconds: poll_wait_seconds,
-                            },
-                            auth_token.as_deref(),
-                        )
-                        .map_err(|_| anyhow::anyhow!("Invalid bearer token"))?,
-                    )
-                    .await?
-                    .into_inner();
-
-                Ok(match resp.result {
-                    Some(poll_task_response::Result::Task(task)) => WorkerPoll::Task(task),
-                    Some(poll_task_response::Result::NoTask(_)) | None => {
-                        if shutdown.is_cancelled() {
-                            WorkerPoll::Stop
-                        } else {
-                            WorkerPoll::Idle
-                        }
-                    }
-                })
+                let mut rx = assignment_rx.lock().await;
+                tokio::select! {
+                    () = shutdown.cancelled() => Ok(WorkerPoll::Stop),
+                    assignment = rx.recv() => Ok(match assignment {
+                        Some(task) => WorkerPoll::Task(task),
+                        None => WorkerPoll::Stop,
+                    }),
+                }
             }
         },
         |task| {
             process_task(
                 TaskExecutionContext {
-                    channel: channel.clone(),
                     agent_id: agent_id.clone(),
                     active_leases: active_leases.clone(),
+                    session_outbound: session_outbound.clone(),
                     spool: spool.clone(),
                     otel_guard: otel_guard.clone(),
                     config: config.clone(),
-                    shutdown: shutdown.clone(),
                 },
                 task,
             )
@@ -404,10 +491,7 @@ async fn worker_runner_loop(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn process_task(
-    ctx: TaskExecutionContext,
-    task: crate::proto::rapidbyte::v1::TaskAssignment,
-) -> anyhow::Result<()> {
+async fn process_task(ctx: TaskExecutionContext, task: TaskAssignment) -> anyhow::Result<()> {
     rapidbyte_metrics::instruments::agent::tasks_received().add(1, &[]);
     rapidbyte_metrics::instruments::agent::active_tasks().add(1, &[]);
     let task_start = Instant::now();
@@ -426,19 +510,16 @@ async fn process_task(
         (task.lease_epoch, cancel_token.clone()),
     );
 
-    let exec_opts = task.execution.as_ref();
-    let dry_run = exec_opts.is_some_and(|e| e.dry_run);
-    let limit = exec_opts.and_then(|e| e.limit);
+    let dry_run = task.dry_run;
+    let limit = task.limit;
 
     let (progress_tx, progress_rx) = mpsc::unbounded_channel();
-    let progress_client = AgentServiceClient::new(ctx.channel.clone());
     let progress_handle = tokio::spawn(crate::progress::forward_progress(
         progress_rx,
-        progress_client,
+        ctx.session_outbound.clone(),
         ctx.agent_id.clone(),
         task.task_id.clone(),
         task.lease_epoch,
-        ctx.config.auth_token.clone(),
     ));
 
     let trust_policy = if ctx.config.trust_policy.is_empty() {
@@ -490,31 +571,7 @@ async fn process_task(
 
     let _ = progress_handle.await;
 
-    let (outcome, task_error) = match &result.outcome {
-        TaskOutcomeKind::Completed => (TaskOutcome::Completed as i32, None),
-        TaskOutcomeKind::Failed(info) => (
-            TaskOutcome::Failed as i32,
-            Some(TaskError {
-                code: info.code.clone(),
-                message: info.message.clone(),
-                retryable: info.retryable,
-                safe_to_retry: info.safe_to_retry,
-                commit_state: info.commit_state.as_str().to_owned(),
-            }),
-        ),
-        TaskOutcomeKind::Cancelled => (TaskOutcome::Cancelled as i32, None),
-    };
-
-    let preview = if let Some(dr) = result.dry_run_result {
-        let stream_previews = dr
-            .streams
-            .iter()
-            .map(|stream| crate::proto::rapidbyte::v1::StreamPreview {
-                stream: stream.stream_name.clone(),
-                rows: stream.total_rows,
-                ticket: Vec::new(),
-            })
-            .collect();
+    let preview_prepared = if let Some(dr) = result.dry_run_result {
         ctx.spool.write().await.store(
             PreviewKey {
                 run_id: task.run_id.clone(),
@@ -523,32 +580,37 @@ async fn process_task(
             },
             dr,
         );
-        Some(PreviewAccess {
-            state: PreviewState::Ready.into(),
-            flight_endpoint: ctx.config.flight_advertise.clone(),
-            ticket: Vec::new(),
-            expires_at: None,
-            streams: stream_previews,
-        })
+        true
     } else {
-        None
+        false
     };
 
-    let complete_request = CompleteTaskRequest {
-        agent_id: ctx.agent_id.clone(),
-        task_id: task.task_id.clone(),
-        lease_epoch: task.lease_epoch,
-        outcome,
-        error: task_error,
-        metrics: Some(TaskMetrics {
-            records_processed: result.metrics.records_processed,
-            bytes_processed: result.metrics.bytes_processed,
-            elapsed_seconds: result.metrics.elapsed_seconds,
-            cursors_advanced: result.metrics.cursors_advanced,
-        }),
-        preview,
-        backend_run_id: 0,
-    };
+    if ctx
+        .session_outbound
+        .send(AgentMessage {
+            agent_id: ctx.agent_id.clone(),
+            payload: Some(agent_message::Payload::Completion(TaskCompletion {
+                task_id: task.task_id.clone(),
+                lease_epoch: task.lease_epoch,
+                success: matches!(result.outcome, TaskOutcomeKind::Completed),
+            })),
+        })
+        .is_err()
+    {
+        warn!(
+            task_id = task.task_id,
+            "failed to send completion on v2 session"
+        );
+    }
+
+    if preview_prepared {
+        tracing::debug!(
+            task_id = task.task_id,
+            "preview metadata prepared for v2 completion"
+        );
+    }
+
+    ctx.active_leases.write().await.remove(&task.task_id);
 
     let status_label = match &result.outcome {
         TaskOutcomeKind::Completed => rapidbyte_metrics::labels::STATUS_OK,
@@ -565,27 +627,6 @@ async fn process_task(
     rapidbyte_metrics::instruments::agent::active_tasks().add(-1, &[]);
     rapidbyte_metrics::instruments::agent::task_duration()
         .record(task_start.elapsed().as_secs_f64(), &[]);
-
-    let _ = report_completion_until_terminal(
-        &ctx.active_leases,
-        complete_request,
-        COMPLETE_TASK_RETRY_DELAY,
-        |req| {
-            let mut completion_client = AgentServiceClient::new(ctx.channel.clone());
-            let auth_token = ctx.config.auth_token.clone();
-            async move {
-                completion_client
-                    .complete_task(
-                        request_with_bearer(req, auth_token.as_deref())
-                            .map_err(|_| tonic::Status::unauthenticated("Invalid bearer token"))?,
-                    )
-                    .await
-                    .map(tonic::Response::into_inner)
-            }
-        },
-        ctx.shutdown,
-    )
-    .await;
 
     Ok(())
 }
@@ -617,20 +658,18 @@ where
     loop {
         match poll().await? {
             WorkerPoll::Task(task) => handle_task(task).await?,
-            WorkerPoll::Idle => {}
             WorkerPoll::Stop => return Ok(()),
         }
     }
 }
 
 async fn heartbeat_loop(
-    mut client: AgentServiceClient<Channel>,
+    session_outbound: mpsc::UnboundedSender<AgentMessage>,
     agent_id: String,
     interval: Duration,
     active_leases: ActiveLeaseMap,
     spool: Arc<RwLock<PreviewSpool>>,
     shutdown: CancellationToken,
-    auth_token: Option<String>,
 ) {
     let mut ticker = tokio::time::interval(interval);
     loop {
@@ -644,117 +683,28 @@ async fn heartbeat_loop(
             tracing::debug!(removed, "Evicted expired preview entries");
         }
 
-        let leases: Vec<ActiveLease> = active_leases
+        let leases: Vec<LeaseStatus> = active_leases
             .read()
             .await
             .iter()
-            .map(|(task_id, (epoch, _))| ActiveLease {
+            .map(|(task_id, (epoch, _))| LeaseStatus {
                 task_id: task_id.clone(),
                 lease_epoch: *epoch,
             })
             .collect();
         let active_count = u32::try_from(leases.len()).unwrap_or(u32::MAX);
-        let Ok(request) = request_with_bearer(
-            HeartbeatRequest {
-                agent_id: agent_id.clone(),
+        let message = AgentMessage {
+            agent_id: agent_id.clone(),
+            payload: Some(agent_message::Payload::Heartbeat(SessionHeartbeat {
                 active_leases: leases,
                 active_tasks: active_count,
                 cpu_usage: 0.0,
                 memory_used_bytes: 0,
-            },
-            auth_token.as_deref(),
-        ) else {
-            warn!("Failed to build authenticated heartbeat request: invalid bearer token");
-            break;
+            })),
         };
-        let resp = client.heartbeat(request).await;
-        match resp {
-            Ok(resp) => {
-                for directive in resp.into_inner().directives {
-                    if let Some(agent_directive::Directive::CancelTask(cancel)) =
-                        directive.directive
-                    {
-                        warn!(task_id = cancel.task_id, "Received cancel directive");
-                        // Signal the executor to cancel via the token
-                        let leases = active_leases.read().await;
-                        if let Some((_, token)) = leases.get(&cancel.task_id) {
-                            token.cancel();
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(error = %e, "Heartbeat failed");
-            }
-        }
-    }
-}
-
-async fn report_completion_until_terminal<F, Fut>(
-    active_leases: &ActiveLeaseMap,
-    request: CompleteTaskRequest,
-    retry_delay: Duration,
-    mut send_completion: F,
-    shutdown: CancellationToken,
-) -> bool
-where
-    F: FnMut(CompleteTaskRequest) -> Fut,
-    Fut: Future<Output = Result<crate::proto::rapidbyte::v1::CompleteTaskResponse, tonic::Status>>,
-{
-    fn is_non_retryable_auth_error(code: tonic::Code) -> bool {
-        matches!(
-            code,
-            tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
-        )
-    }
-
-    loop {
-        if shutdown.is_cancelled() {
-            warn!(
-                task_id = request.task_id,
-                "Stopping completion retries because the agent is shutting down"
-            );
-            return false;
-        }
-
-        match send_completion(request.clone()).await {
-            Ok(resp) => {
-                active_leases.write().await.remove(&request.task_id);
-                if resp.acknowledged {
-                    info!(task_id = request.task_id, "Task completed");
-                } else {
-                    warn!(
-                        task_id = request.task_id,
-                        "Stale lease — completion rejected"
-                    );
-                }
-                return resp.acknowledged;
-            }
-            Err(e) => {
-                if is_non_retryable_auth_error(e.code()) {
-                    warn!(
-                        task_id = request.task_id,
-                        error = %e,
-                        "Stopping completion retries because authentication config is invalid"
-                    );
-                    return false;
-                }
-                warn!(
-                    task_id = request.task_id,
-                    error = %e,
-                    "Failed to report completion, retrying while lease stays active"
-                );
-                tokio::select! {
-                    () = shutdown.cancelled() => {
-                        warn!(
-                            task_id = request.task_id,
-                            "Stopping completion retries because the agent is shutting down"
-                        );
-                        return false;
-                    }
-                    () = tokio::time::sleep(retry_delay) => {}
-                }
-            }
+        if session_outbound.send(message).is_err() {
+            warn!("Heartbeat failed: session channel closed");
+            break;
         }
     }
 }
@@ -765,226 +715,6 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
-
-    #[tokio::test]
-    async fn complete_task_transport_failure_keeps_lease_active() {
-        let active_leases: ActiveLeaseMap = Arc::new(RwLock::new(HashMap::new()));
-        active_leases
-            .write()
-            .await
-            .insert("task-1".into(), (42, CancellationToken::new()));
-
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let attempts_for_closure = attempts.clone();
-        let active_for_closure = active_leases.clone();
-        let shutdown = CancellationToken::new();
-        let acknowledged =
-            report_completion_until_terminal(
-                &active_leases,
-                CompleteTaskRequest {
-                    agent_id: "agent-1".into(),
-                    task_id: "task-1".into(),
-                    lease_epoch: 42,
-                    outcome: TaskOutcome::Completed.into(),
-                    error: None,
-                    metrics: Some(TaskMetrics {
-                        records_processed: 1,
-                        bytes_processed: 1,
-                        elapsed_seconds: 0.1,
-                        cursors_advanced: 0,
-                    }),
-                    preview: None,
-                    backend_run_id: 0,
-                },
-                Duration::from_millis(1),
-                move |_req| {
-                    let attempts = attempts_for_closure.clone();
-                    let active_leases = active_for_closure.clone();
-                    async move {
-                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
-                        assert!(active_leases.read().await.contains_key("task-1"));
-                        if attempt == 0 {
-                            Err(tonic::Status::unavailable("controller unavailable"))
-                        } else {
-                            Ok(crate::proto::rapidbyte::v1::CompleteTaskResponse {
-                                acknowledged: true,
-                            })
-                        }
-                    }
-                },
-                shutdown,
-            )
-            .await;
-
-        assert!(acknowledged);
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-        assert!(!active_leases.read().await.contains_key("task-1"));
-    }
-
-    #[tokio::test]
-    async fn completion_retries_stop_on_shutdown() {
-        let active_leases: ActiveLeaseMap = Arc::new(RwLock::new(HashMap::new()));
-        active_leases
-            .write()
-            .await
-            .insert("task-1".into(), (42, CancellationToken::new()));
-        let shutdown = CancellationToken::new();
-
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let attempts_for_closure = attempts.clone();
-        let completion = tokio::spawn({
-            let active_leases = active_leases.clone();
-            let shutdown = shutdown.clone();
-            async move {
-                report_completion_until_terminal(
-                    &active_leases,
-                    CompleteTaskRequest {
-                        agent_id: "agent-1".into(),
-                        task_id: "task-1".into(),
-                        lease_epoch: 42,
-                        outcome: TaskOutcome::Completed.into(),
-                        error: None,
-                        metrics: Some(TaskMetrics {
-                            records_processed: 1,
-                            bytes_processed: 1,
-                            elapsed_seconds: 0.1,
-                            cursors_advanced: 0,
-                        }),
-                        preview: None,
-                        backend_run_id: 0,
-                    },
-                    Duration::from_millis(1),
-                    move |_req| {
-                        let attempts = attempts_for_closure.clone();
-                        async move {
-                            attempts.fetch_add(1, Ordering::SeqCst);
-                            Err(tonic::Status::unavailable("controller unavailable"))
-                        }
-                    },
-                    shutdown,
-                )
-                .await
-            }
-        });
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        shutdown.cancel();
-
-        let acknowledged = tokio::time::timeout(Duration::from_secs(1), completion)
-            .await
-            .expect("completion retry loop should stop on shutdown")
-            .unwrap();
-
-        assert!(!acknowledged);
-        assert!(attempts.load(Ordering::SeqCst) > 0);
-        assert!(active_leases.read().await.contains_key("task-1"));
-    }
-
-    #[tokio::test]
-    async fn completion_retries_stop_on_auth_failures() {
-        for code in [tonic::Code::Unauthenticated, tonic::Code::PermissionDenied] {
-            let active_leases: ActiveLeaseMap = Arc::new(RwLock::new(HashMap::new()));
-            active_leases
-                .write()
-                .await
-                .insert("task-1".into(), (42, CancellationToken::new()));
-            let shutdown = CancellationToken::new();
-
-            let attempts = Arc::new(AtomicUsize::new(0));
-            let attempts_for_closure = attempts.clone();
-            let acknowledged = report_completion_until_terminal(
-                &active_leases,
-                CompleteTaskRequest {
-                    agent_id: "agent-1".into(),
-                    task_id: "task-1".into(),
-                    lease_epoch: 42,
-                    outcome: TaskOutcome::Completed.into(),
-                    error: None,
-                    metrics: Some(TaskMetrics {
-                        records_processed: 1,
-                        bytes_processed: 1,
-                        elapsed_seconds: 0.1,
-                        cursors_advanced: 0,
-                    }),
-                    preview: None,
-                    backend_run_id: 0,
-                },
-                Duration::from_millis(1),
-                move |_req| {
-                    let attempts = attempts_for_closure.clone();
-                    async move {
-                        attempts.fetch_add(1, Ordering::SeqCst);
-                        Err(tonic::Status::new(code, "auth failure"))
-                    }
-                },
-                shutdown,
-            )
-            .await;
-
-            assert!(!acknowledged, "expected {code:?} to stop retries");
-            assert_eq!(attempts.load(Ordering::SeqCst), 1);
-            assert!(active_leases.read().await.contains_key("task-1"));
-        }
-    }
-
-    #[tokio::test]
-    async fn completion_invalid_argument_retries_until_shutdown() {
-        let active_leases: ActiveLeaseMap = Arc::new(RwLock::new(HashMap::new()));
-        active_leases
-            .write()
-            .await
-            .insert("task-1".into(), (42, CancellationToken::new()));
-        let shutdown = CancellationToken::new();
-
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let attempts_for_closure = attempts.clone();
-        let completion = tokio::spawn({
-            let active_leases = active_leases.clone();
-            let shutdown = shutdown.clone();
-            async move {
-                report_completion_until_terminal(
-                    &active_leases,
-                    CompleteTaskRequest {
-                        agent_id: "agent-1".into(),
-                        task_id: "task-1".into(),
-                        lease_epoch: 42,
-                        outcome: TaskOutcome::Completed.into(),
-                        error: None,
-                        metrics: Some(TaskMetrics {
-                            records_processed: 1,
-                            bytes_processed: 1,
-                            elapsed_seconds: 0.1,
-                            cursors_advanced: 0,
-                        }),
-                        preview: None,
-                        backend_run_id: 0,
-                    },
-                    Duration::from_millis(1),
-                    move |_req| {
-                        let attempts = attempts_for_closure.clone();
-                        async move {
-                            attempts.fetch_add(1, Ordering::SeqCst);
-                            Err(tonic::Status::invalid_argument("non-auth validation error"))
-                        }
-                    },
-                    shutdown,
-                )
-                .await
-            }
-        });
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        shutdown.cancel();
-
-        let acknowledged = tokio::time::timeout(Duration::from_secs(1), completion)
-            .await
-            .expect("completion retry loop should stop on shutdown")
-            .unwrap();
-
-        assert!(!acknowledged);
-        assert!(attempts.load(Ordering::SeqCst) > 1);
-        assert!(active_leases.read().await.contains_key("task-1"));
-    }
 
     #[tokio::test]
     async fn max_tasks_allows_parallel_execution() {

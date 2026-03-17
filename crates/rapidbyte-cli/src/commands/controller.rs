@@ -11,8 +11,6 @@ pub async fn execute(
     metadata_database_url: Option<&str>,
     signing_key: Option<&str>,
     auth_token: Option<&str>,
-    allow_unauthenticated: bool,
-    allow_insecure_signing_key: bool,
     reconciliation_timeout: Option<Duration>,
     tls_cert: Option<&Path>,
     tls_key: Option<&Path>,
@@ -29,8 +27,6 @@ pub async fn execute(
         metadata_database_url,
         signing_key,
         auth_token,
-        allow_unauthenticated,
-        allow_insecure_signing_key,
         reconciliation_timeout,
         tls_cert,
         tls_key,
@@ -49,8 +45,6 @@ fn build_config(
     metadata_database_url: Option<&str>,
     signing_key: Option<&str>,
     auth_token: Option<&str>,
-    allow_unauthenticated: bool,
-    allow_insecure_signing_key: bool,
     reconciliation_timeout: Option<Duration>,
     tls_cert: Option<&Path>,
     tls_key: Option<&Path>,
@@ -87,25 +81,18 @@ fn build_config(
         validate_auth_token(token)?;
         config.auth.tokens = vec![token.to_string()];
     }
-    config.auth.allow_unauthenticated = allow_unauthenticated;
-    config.auth.allow_insecure_default_signing_key = allow_insecure_signing_key;
     if let Some(timeout) = reconciliation_timeout {
         config.timers.reconciliation_timeout = timeout;
     }
-    if config.auth.tokens.is_empty() && !config.auth.allow_unauthenticated {
-        anyhow::bail!(
-            "controller requires --auth-token / RAPIDBYTE_AUTH_TOKEN or --allow-unauthenticated"
-        );
+    if config.auth.tokens.is_empty() {
+        anyhow::bail!("controller requires --auth-token / RAPIDBYTE_AUTH_TOKEN");
     }
     if config.auth.signing_key
         == rapidbyte_controller::ControllerConfig::default()
             .auth
             .signing_key
-        && !config.auth.allow_insecure_default_signing_key
     {
-        anyhow::bail!(
-            "controller requires --signing-key / RAPIDBYTE_SIGNING_KEY or --allow-insecure-signing-key"
-        );
+        anyhow::bail!("controller requires --signing-key / RAPIDBYTE_SIGNING_KEY");
     }
     if config.metadata_database_url.is_none() {
         anyhow::bail!(
@@ -142,8 +129,6 @@ mod tests {
             Some("postgresql://localhost/controller"),
             Some("signing"),
             Some("secret"),
-            false,
-            false,
             None,
             None,
             None,
@@ -159,14 +144,12 @@ mod tests {
     }
 
     #[test]
-    fn controller_execute_requires_auth_or_explicit_override() {
+    fn controller_execute_requires_auth_token() {
         let err = build_config(
             "[::]:9090",
             Some("postgresql://localhost/controller"),
             Some("signing"),
             None,
-            false,
-            false,
             None,
             None,
             None,
@@ -182,37 +165,12 @@ mod tests {
     }
 
     #[test]
-    fn controller_execute_allows_explicit_unauthenticated_mode() {
-        let config = build_config(
-            "[::]:9090",
-            Some("postgresql://localhost/controller"),
-            Some("signing"),
-            None,
-            true,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            "skip",
-            vec![],
-        )
-        .unwrap();
-        assert!(config.auth.tokens.is_empty());
-        assert!(config.auth.allow_unauthenticated);
-    }
-
-    #[test]
     fn controller_execute_rejects_empty_auth_token() {
         let err = build_config(
             "[::]:9090",
             Some("postgresql://localhost/controller"),
             Some("signing"),
             Some(""),
-            false,
-            false,
             None,
             None,
             None,
@@ -234,8 +192,6 @@ mod tests {
             Some("postgresql://localhost/controller"),
             Some("signing"),
             Some("   "),
-            false,
-            false,
             None,
             None,
             None,
@@ -257,8 +213,6 @@ mod tests {
             Some("postgresql://localhost/controller"),
             None,
             Some("secret"),
-            false,
-            false,
             None,
             None,
             None,
@@ -276,36 +230,12 @@ mod tests {
     }
 
     #[test]
-    fn controller_execute_allows_insecure_signing_key() {
-        let config = build_config(
-            "[::]:9090",
-            Some("postgresql://localhost/controller"),
-            None,
-            Some("secret"),
-            false,
-            true,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            "skip",
-            vec![],
-        )
-        .unwrap();
-        assert!(config.auth.allow_insecure_default_signing_key);
-    }
-
-    #[test]
     fn controller_execute_requires_metadata_database_url() {
         let err = build_config(
             "[::]:9090",
             None,
             Some("signing"),
             Some("secret"),
-            false,
-            false,
             None,
             None,
             None,
@@ -334,9 +264,7 @@ mod tests {
             "[::]:9090",
             Some("postgresql://localhost/controller"),
             Some("signing"),
-            None,
-            true,
-            false,
+            Some("secret"),
             None,
             Some(cert_path.as_path()),
             Some(key_path.as_path()),
@@ -359,8 +287,6 @@ mod tests {
             Some("   "),
             Some("signing"),
             Some("secret"),
-            false,
-            false,
             None,
             None,
             None,
@@ -384,8 +310,6 @@ mod tests {
             Some("postgresql://localhost/controller"),
             Some("signing"),
             Some("secret"),
-            false,
-            false,
             Some(Duration::from_secs(42)),
             None,
             None,
@@ -409,8 +333,6 @@ mod tests {
             Some("postgresql://localhost/controller"),
             Some("signing"),
             Some("secret"),
-            false,
-            false,
             None,
             None,
             None,

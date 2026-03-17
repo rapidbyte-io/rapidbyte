@@ -6,7 +6,7 @@
 
 use opentelemetry::KeyValue;
 
-use crate::proto::rapidbyte::v1::{
+use crate::proto::rapidbyte::v2::{
     run_event, RunCancelled, RunCompleted, RunEvent, RunFailed, TaskError,
 };
 use crate::run_state::{RunError, RunMetrics, RunState};
@@ -144,6 +144,7 @@ pub async fn finalize_terminal(state: &ControllerState, run_id: &str, outcome: T
         run_id,
         RunEvent {
             run_id: run_id.to_owned(),
+            detail: String::new(),
             event: Some(event),
         },
     );

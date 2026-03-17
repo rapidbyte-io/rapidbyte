@@ -300,10 +300,13 @@ rapidbyte controller \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--listen` | `[::]:9090` | gRPC listen address |
+| `--metadata-database-url` | *(required)* | Postgres metadata backend for durable controller state (`RAPIDBYTE_CONTROLLER_METADATA_DATABASE_URL`) |
 | `--signing-key` | *(required)* | Shared key for preview ticket signing (env: `RAPIDBYTE_SIGNING_KEY`) |
-| `--allow-unauthenticated` | | Disable auth (local dev only) |
-| `--allow-insecure-signing-key` | | Allow built-in dev signing key |
 | `--tls-cert` / `--tls-key` | | PEM cert/key pair for TLS |
+
+Controller V2 migration note: insecure controller escape hatches were removed.
+`--allow-unauthenticated` and `--allow-insecure-signing-key` are no longer
+supported; pass `--auth-token` and `--signing-key` explicitly.
 
 ### Agent
 
@@ -328,8 +331,8 @@ High-level operational rules:
 
 - Distributed mode requires a shared state backend such as Postgres.
 - SQLite is for standalone and local development workflows.
-- Controller auth is required by default.
-- Preview signing keys should be explicitly configured outside local/dev.
+- Controller auth and signing key are required for startup.
+- Insecure controller auth/signing fallback flags were removed in V2.
 - TLS is supported for both control-plane gRPC and Flight preview access.
 
 See [`docs/ARCHITECTUREv2.md`](docs/ARCHITECTUREv2.md) for the detailed

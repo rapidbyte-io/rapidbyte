@@ -5,8 +5,8 @@ use anyhow::Result;
 use crate::commands::transport::{connect_channel, request_with_bearer, TlsClientConfig};
 use crate::Verbosity;
 
-use rapidbyte_controller::proto::rapidbyte::v1::pipeline_service_client::PipelineServiceClient;
-use rapidbyte_controller::proto::rapidbyte::v1::{GetRunRequest, RunState};
+use rapidbyte_controller::proto::rapidbyte::v2::control_plane_client::ControlPlaneClient;
+use rapidbyte_controller::proto::rapidbyte::v2::GetRunRequest;
 
 pub async fn execute(
     controller_url: Option<&str>,
@@ -22,11 +22,11 @@ pub async fn execute(
     })?;
 
     let channel = connect_channel(controller_url, tls).await?;
-    let mut client = PipelineServiceClient::new(channel);
+    let mut client = ControlPlaneClient::new(channel);
     let resp = client
         .get_run(request_with_bearer(
             GetRunRequest {
-                run_id: run_id.to_string(),
+                run_id: run_id.to_owned(),
             },
             auth_token,
         )?)
@@ -35,35 +35,17 @@ pub async fn execute(
 
     if verbosity != Verbosity::Quiet {
         eprintln!("Run: {}", resp.run_id);
-        eprintln!("Pipeline: {}", resp.pipeline_name);
-        eprintln!("State: {}", state_label(resp.state));
-        if let Some(task) = resp.current_task {
-            eprintln!(
-                "Current task: {} on {} (attempt {}, lease {})",
-                task.task_id, task.agent_id, task.attempt, task.lease_epoch
-            );
-        }
-        if let Some(error) = resp.last_error {
-            eprintln!("Last error: {}", error.message);
-        }
+        eprintln!("State: {}", state_label(&resp.state));
     }
 
     Ok(())
 }
 
-fn state_label(state: i32) -> &'static str {
-    match RunState::try_from(state) {
-        Ok(RunState::Pending) => "PENDING",
-        Ok(RunState::Assigned) => "ASSIGNED",
-        Ok(RunState::Running) => "RUNNING",
-        Ok(RunState::Reconciling) => "RECONCILING",
-        Ok(RunState::RecoveryFailed) => "RECOVERY_FAILED",
-        Ok(RunState::PreviewReady) => "PREVIEW_READY",
-        Ok(RunState::Completed) => "COMPLETED",
-        Ok(RunState::Failed) => "FAILED",
-        Ok(RunState::Cancelled) => "CANCELLED",
-        _ => "UNKNOWN",
+fn state_label(state: &str) -> String {
+    if state.trim().is_empty() {
+        return "UNKNOWN".to_owned();
     }
+    state.trim().to_ascii_uppercase()
 }
 
 #[cfg(test)]
@@ -79,15 +61,8 @@ mod tests {
     }
 
     #[test]
-    fn state_label_includes_reconciling() {
-        assert_eq!(state_label(RunState::Reconciling as i32), "RECONCILING");
-    }
-
-    #[test]
-    fn state_label_includes_recovery_failed() {
-        assert_eq!(
-            state_label(RunState::RecoveryFailed as i32),
-            "RECOVERY_FAILED"
-        );
+    fn state_label_handles_empty_and_normal_values() {
+        assert_eq!(state_label(""), "UNKNOWN");
+        assert_eq!(state_label("Accepted"), "ACCEPTED");
     }
 }

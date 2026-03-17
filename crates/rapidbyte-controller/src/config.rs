@@ -15,12 +15,8 @@ pub struct ServerTlsConfig {
 /// Authentication configuration.
 #[derive(Clone)]
 pub struct AuthConfig {
-    /// Bearer tokens for authentication. Empty requires `allow_unauthenticated`.
+    /// Bearer tokens for authentication.
     pub tokens: Vec<String>,
-    /// Explicit escape hatch for local/dev use. Production should configure auth.
-    pub allow_unauthenticated: bool,
-    /// Explicit escape hatch for the built-in development preview signing key.
-    pub allow_insecure_default_signing_key: bool,
     pub signing_key: Vec<u8>,
 }
 
@@ -78,8 +74,6 @@ impl Default for ControllerConfig {
             metadata_database_url: None,
             auth: AuthConfig {
                 tokens: Vec::new(),
-                allow_unauthenticated: false,
-                allow_insecure_default_signing_key: false,
                 signing_key: DEFAULT_SIGNING_KEY.to_vec(),
             },
             timers: TimerConfig {
@@ -117,20 +111,16 @@ pub fn validate(config: &ControllerConfig) -> anyhow::Result<()> {
 
 fn validate_auth_config(config: &ControllerConfig) -> anyhow::Result<()> {
     let has_valid_token = config.auth.tokens.iter().any(|t| !t.trim().is_empty());
-    if !has_valid_token && !config.auth.allow_unauthenticated {
-        anyhow::bail!(
-            "Controller auth is required by default. Set --auth-token / RAPIDBYTE_AUTH_TOKEN or pass --allow-unauthenticated for local development."
-        );
+    if !has_valid_token {
+        anyhow::bail!("Controller auth is required. Set --auth-token / RAPIDBYTE_AUTH_TOKEN.");
     }
     Ok(())
 }
 
 fn validate_signing_key_config(config: &ControllerConfig) -> anyhow::Result<()> {
-    if config.auth.signing_key == DEFAULT_SIGNING_KEY
-        && !config.auth.allow_insecure_default_signing_key
-    {
+    if config.auth.signing_key == DEFAULT_SIGNING_KEY {
         anyhow::bail!(
-            "Controller preview signing key must be set explicitly. Pass --signing-key / RAPIDBYTE_SIGNING_KEY or --allow-insecure-default-signing-key for local development."
+            "Controller preview signing key must be set explicitly. Pass --signing-key / RAPIDBYTE_SIGNING_KEY."
         );
     }
     Ok(())
@@ -177,21 +167,7 @@ mod tests {
     fn auth_is_required_by_default() {
         let config = ControllerConfig::default();
         let err = validate_auth_config(&config).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Controller auth is required by default"));
-    }
-
-    #[test]
-    fn allow_unauthenticated_permits_empty_token_list() {
-        let config = ControllerConfig {
-            auth: AuthConfig {
-                allow_unauthenticated: true,
-                ..ControllerConfig::default().auth
-            },
-            ..Default::default()
-        };
-        validate_auth_config(&config).unwrap();
+        assert!(err.to_string().contains("Controller auth is required"));
     }
 
     #[test]
@@ -199,7 +175,7 @@ mod tests {
         let config = ControllerConfig {
             auth: AuthConfig {
                 tokens: vec!["secret".into()],
-                ..ControllerConfig::default().auth
+                signing_key: DEFAULT_SIGNING_KEY.to_vec(),
             },
             ..Default::default()
         };
@@ -215,7 +191,6 @@ mod tests {
             auth: AuthConfig {
                 tokens: vec!["secret".into()],
                 signing_key: b"signing".to_vec(),
-                ..ControllerConfig::default().auth
             },
             ..Default::default()
         };
@@ -231,7 +206,6 @@ mod tests {
             auth: AuthConfig {
                 tokens: vec!["secret".into()],
                 signing_key: b"signing".to_vec(),
-                ..ControllerConfig::default().auth
             },
             metadata_database_url: Some("   ".into()),
             ..Default::default()
@@ -248,7 +222,6 @@ mod tests {
             auth: AuthConfig {
                 tokens: vec!["secret".into()],
                 signing_key: b"signing".to_vec(),
-                ..ControllerConfig::default().auth
             },
             metadata_database_url: Some("postgresql://localhost/controller".into()),
             ..Default::default()
@@ -257,18 +230,5 @@ mod tests {
             metadata_database_url(&config).unwrap(),
             "postgresql://localhost/controller"
         );
-    }
-
-    #[test]
-    fn allow_insecure_default_signing_key_permits_dev_default() {
-        let config = ControllerConfig {
-            auth: AuthConfig {
-                tokens: vec!["secret".into()],
-                allow_insecure_default_signing_key: true,
-                ..ControllerConfig::default().auth
-            },
-            ..Default::default()
-        };
-        validate_signing_key_config(&config).unwrap();
     }
 }

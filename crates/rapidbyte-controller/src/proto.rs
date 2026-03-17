@@ -1,7 +1,7 @@
 //! Generated protobuf types for the controller control plane.
 
 pub mod rapidbyte {
-    pub mod v1 {
+    pub mod v2 {
         #![allow(
             clippy::doc_markdown,
             clippy::must_use_candidate,
@@ -11,6 +11,6 @@ pub mod rapidbyte {
             clippy::too_many_lines,
             clippy::result_large_err
         )]
-        tonic::include_proto!("rapidbyte.v1");
+        tonic::include_proto!("rapidbyte.v2");
     }
 }

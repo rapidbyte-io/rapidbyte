@@ -1,10 +1,10 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path()?);
     tonic_build::configure()
-        .build_server(false)
+        .build_server(true)
         .build_client(true)
         .compile_protos(
-            &["../../proto/rapidbyte/v1/controller.proto"],
+            &["../../proto/rapidbyte/v2/controller.proto"],
             &["../../proto"],
         )?;
     Ok(())

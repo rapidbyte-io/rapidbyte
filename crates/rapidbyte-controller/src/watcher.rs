@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use tokio::sync::broadcast;
 
-use crate::proto::rapidbyte::v1::RunEvent;
+use crate::proto::rapidbyte::v2::RunEvent;
 
 const CHANNEL_BUFFER: usize = 256;
 
@@ -66,11 +66,12 @@ impl Default for RunWatchers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::rapidbyte::v1::{run_event, ProgressUpdate};
+    use crate::proto::rapidbyte::v2::{run_event, ProgressUpdate};
 
     fn make_progress_event(run_id: &str) -> RunEvent {
         RunEvent {
             run_id: run_id.to_string(),
+            detail: String::new(),
             event: Some(run_event::Event::Progress(ProgressUpdate {
                 stream: "s1".into(),
                 phase: "running".into(),

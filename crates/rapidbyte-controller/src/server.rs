@@ -5,13 +5,24 @@ use std::sync::Arc;
 use tonic::transport::{Identity, Server, ServerTlsConfig as TonicServerTlsConfig};
 use tracing::info;
 
+use crate::adapters::grpc::agent_bridge::AgentHandler;
+use crate::adapters::grpc::agent_session::AgentSessionHandler;
+use crate::adapters::grpc::control_plane::ControlPlaneHandler;
+use crate::adapters::in_memory::clock::SystemClock;
+use crate::adapters::in_memory::event_bus::InMemoryEventBus;
+use crate::adapters::in_memory::id_generator::UuidIdGenerator;
+use crate::adapters::in_memory::repos::InMemoryRunRepository;
+use crate::adapters::in_memory::unit_of_work::InMemoryUnitOfWork;
+use crate::app::cancel_run::CancelRunUseCase;
+use crate::app::get_run::GetRunUseCase;
+use crate::app::list_runs::ListRunsUseCase;
+use crate::app::retry_run::RetryRunUseCase;
+use crate::app::submit_run::SubmitRunUseCase;
 use crate::background;
 use crate::config::{initialize_metadata_store, validate, ControllerConfig, DEFAULT_SIGNING_KEY};
 use crate::middleware::BearerAuthInterceptor;
-use crate::proto::rapidbyte::v1::agent_service_server::AgentServiceServer;
-use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineServiceServer;
-use crate::services::agent::AgentHandler;
-use crate::services::pipeline::PipelineHandler;
+use crate::proto::rapidbyte::v2::agent_session_server::AgentSessionServer;
+use crate::proto::rapidbyte::v2::control_plane_server::ControlPlaneServer;
 use crate::state::ControllerState;
 
 /// Start the controller gRPC server.
@@ -44,11 +55,6 @@ pub async fn run(
             "Using default signing key — set RAPIDBYTE_SIGNING_KEY for production deployments"
         );
     }
-    if config.auth.allow_unauthenticated {
-        tracing::warn!(
-            "Controller authentication is disabled via explicit allow_unauthenticated override"
-        );
-    }
 
     let state =
         ControllerState::from_metadata_store(&config.auth.signing_key, metadata_store).await?;
@@ -69,8 +75,25 @@ pub async fn run(
 
     let auth = BearerAuthInterceptor::new(config.auth.tokens.clone());
 
-    let pipeline_svc =
-        PipelineServiceServer::with_interceptor(PipelineHandler::new(state.clone()), auth.clone());
+    let v2_repo = Arc::new(InMemoryRunRepository::default());
+    let v2_uow = Arc::new(InMemoryUnitOfWork::new(v2_repo.clone()));
+    let control_plane_v2 = ControlPlaneServer::with_interceptor(
+        ControlPlaneHandler::new(
+            SubmitRunUseCase::new(
+                v2_repo.clone(),
+                Arc::new(InMemoryEventBus),
+                Arc::new(SystemClock),
+                Arc::new(UuidIdGenerator),
+                v2_uow.clone(),
+            ),
+            GetRunUseCase::new(v2_repo.clone()),
+            ListRunsUseCase::new(v2_repo.clone()),
+            CancelRunUseCase::new(v2_repo.clone(), v2_uow.clone()),
+            RetryRunUseCase::new(v2_repo, v2_uow),
+        ),
+        auth.clone(),
+    );
+
     // Read trusted key PEM contents from files
     let mut trusted_key_pems: Vec<String> = Vec::new();
     for path in &config.trust.trusted_key_paths {
@@ -80,16 +103,15 @@ pub async fn run(
         trusted_key_pems.push(pem);
     }
 
-    let agent_svc = AgentServiceServer::with_interceptor(
-        AgentHandler::with_trust_config(
-            state,
-            config.registry.url.clone().unwrap_or_default(),
-            config.registry.insecure,
-            config.trust.policy.clone(),
-            trusted_key_pems,
-        ),
-        auth,
+    let agent_handler = AgentHandler::with_trust_config(
+        state,
+        config.registry.url.clone().unwrap_or_default(),
+        config.registry.insecure,
+        config.trust.policy.clone(),
+        trusted_key_pems,
     );
+    let agent_session_v2 =
+        AgentSessionServer::with_interceptor(AgentSessionHandler::new(agent_handler), auth.clone());
 
     info!(addr = %config.listen_addr, "Controller listening");
 
@@ -102,8 +124,8 @@ pub async fn run(
     }
 
     server
-        .add_service(pipeline_svc)
-        .add_service(agent_svc)
+        .add_service(control_plane_v2)
+        .add_service(agent_session_v2)
         .serve(config.listen_addr)
         .await?;
 
@@ -127,7 +149,6 @@ mod tests {
                 auth: crate::config::AuthConfig {
                     tokens: vec!["secret".into()],
                     signing_key: b"test-signing-key".to_vec(),
-                    ..ControllerConfig::default().auth
                 },
                 metrics_listen: Some(addr.to_string()),
                 ..Default::default()

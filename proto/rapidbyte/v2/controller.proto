@@ -1,0 +1,355 @@
+syntax = "proto3";
+
+package rapidbyte.v2;
+
+import "google/protobuf/timestamp.proto";
+
+service ControlPlane {
+  rpc SubmitRun(SubmitRunRequest) returns (SubmitRunResponse);
+  rpc GetRun(GetRunRequest) returns (GetRunResponse);
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+  rpc CancelRun(CancelRunRequest) returns (CancelRunResponse);
+  rpc RetryRun(RetryRunRequest) returns (RetryRunResponse);
+  rpc StreamRun(StreamRunRequest) returns (stream RunEvent);
+}
+
+service AgentSession {
+  rpc OpenSession(stream AgentMessage) returns (stream ControllerMessage);
+}
+
+// Transitional internal bridge service used by the v2 agent session adapter.
+service AgentService {
+  rpc RegisterAgent(RegisterAgentRequest) returns (RegisterAgentResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc PollTask(PollTaskRequest) returns (PollTaskResponse);
+  rpc ReportProgress(ReportProgressRequest) returns (ReportProgressResponse);
+  rpc CompleteTask(CompleteTaskRequest) returns (CompleteTaskResponse);
+}
+
+message SubmitRunRequest {
+  optional string idempotency_key = 1;
+}
+
+message SubmitRunResponse {
+  string run_id = 1;
+}
+
+message GetRunRequest {
+  string run_id = 1;
+}
+
+message GetRunResponse {
+  string run_id = 1;
+  string state = 2;
+}
+
+message ListRunsRequest {
+  optional int32 limit = 1;
+}
+
+message ListRunsResponse {
+  repeated RunSummary runs = 1;
+}
+
+message RunSummary {
+  string run_id = 1;
+  string state = 2;
+}
+
+message CancelRunRequest {
+  string run_id = 1;
+}
+
+message CancelRunResponse {
+  bool accepted = 1;
+  string message = 2;
+}
+
+message RetryRunRequest {
+  string run_id = 1;
+}
+
+message RetryRunResponse {
+  bool accepted = 1;
+}
+
+message StreamRunRequest {
+  string run_id = 1;
+}
+
+message RunEvent {
+  string run_id = 1;
+  string detail = 2;
+  oneof event {
+    ProgressUpdate progress = 3;
+    RunCompleted completed = 4;
+    RunFailed failed = 5;
+    RunCancelled cancelled = 6;
+    RunStatus status = 7;
+  }
+}
+
+message ProgressUpdate {
+  string stream = 1;
+  string phase = 2;
+  uint64 records = 3;
+  uint64 bytes = 4;
+}
+
+message RunCompleted {
+  uint64 total_records = 1;
+  uint64 total_bytes = 2;
+  double elapsed_seconds = 3;
+  uint64 cursors_advanced = 4;
+}
+
+message RunFailed {
+  TaskError error = 1;
+  uint32 attempt = 2;
+}
+
+message RunCancelled {}
+
+message RunStatus {
+  RunState state = 1;
+  string message = 2;
+}
+
+message AgentMessage {
+  string agent_id = 1;
+  oneof payload {
+    SessionHello hello = 2;
+    Progress progress = 3;
+    TaskCompletion completion = 4;
+    SessionHeartbeat heartbeat = 5;
+  }
+}
+
+message ControllerMessage {
+  oneof payload {
+    SessionAccepted accepted = 1;
+    TaskAssignment assignment = 2;
+    TaskDirective directive = 3;
+  }
+}
+
+message SessionHello {
+  string agent_id = 1;
+  uint32 max_tasks = 2;
+  string flight_advertise_endpoint = 3;
+  string plugin_bundle_hash = 4;
+  repeated string available_plugins = 5;
+  uint64 memory_bytes = 6;
+}
+
+message SessionAccepted {
+  string session_id = 1;
+  string agent_id = 2;
+  string registry_url = 3;
+  bool registry_insecure = 4;
+  string trust_policy = 5;
+  repeated string trusted_key_pems = 6;
+}
+
+message TaskAssignment {
+  string run_id = 1;
+  string task_id = 2;
+  uint64 lease_epoch = 3;
+  uint32 attempt = 4;
+  bytes pipeline_yaml_utf8 = 5;
+  bool dry_run = 6;
+  optional uint64 limit = 7;
+  optional google.protobuf.Timestamp lease_expires_at = 8;
+  optional ExecutionOptions execution = 9;
+}
+
+message ExecutionOptions {
+  bool dry_run = 1;
+  optional uint64 limit = 2;
+}
+
+message Progress {
+  string task_id = 1;
+  uint64 lease_epoch = 2;
+  uint64 records = 3;
+}
+
+message TaskCompletion {
+  string task_id = 1;
+  uint64 lease_epoch = 2;
+  bool success = 3;
+}
+
+message SessionHeartbeat {
+  repeated LeaseStatus active_leases = 1;
+  uint32 active_tasks = 2;
+  double cpu_usage = 3;
+  uint64 memory_used_bytes = 4;
+}
+
+message LeaseStatus {
+  string task_id = 1;
+  uint64 lease_epoch = 2;
+}
+
+message TaskDirective {
+  string task_id = 1;
+  string action = 2;
+  uint64 lease_epoch = 3;
+}
+
+message RegisterAgentRequest {
+  uint32 max_tasks = 1;
+  string flight_advertise_endpoint = 2;
+  string plugin_bundle_hash = 3;
+  repeated string available_plugins = 4;
+  uint64 memory_bytes = 5;
+}
+
+message RegisterAgentResponse {
+  string agent_id = 1;
+  string registry_url = 2;
+  bool registry_insecure = 3;
+  string trust_policy = 4;
+  repeated string trusted_key_pems = 5;
+}
+
+message PollTaskRequest {
+  string agent_id = 1;
+  uint32 wait_seconds = 2;
+}
+
+message PollTaskResponse {
+  oneof result {
+    TaskAssignment task = 1;
+    NoTask no_task = 2;
+  }
+}
+
+message NoTask {}
+
+message HeartbeatRequest {
+  string agent_id = 1;
+  repeated ActiveLease active_leases = 2;
+  uint32 active_tasks = 3;
+  double cpu_usage = 4;
+  uint64 memory_used_bytes = 5;
+}
+
+message ActiveLease {
+  string task_id = 1;
+  uint64 lease_epoch = 2;
+}
+
+message HeartbeatResponse {
+  repeated AgentDirective directives = 1;
+}
+
+message AgentDirective {
+  oneof directive {
+    CancelTask cancel_task = 1;
+  }
+}
+
+message CancelTask {
+  string task_id = 1;
+  uint64 lease_epoch = 2;
+}
+
+message ReportProgressRequest {
+  string agent_id = 1;
+  string task_id = 2;
+  uint64 lease_epoch = 3;
+  ProgressUpdate progress = 4;
+}
+
+message ReportProgressResponse {}
+
+message CompleteTaskRequest {
+  string agent_id = 1;
+  string task_id = 2;
+  uint64 lease_epoch = 3;
+  TaskOutcome outcome = 4;
+  optional TaskError error = 5;
+  TaskMetrics metrics = 6;
+  optional PreviewAccess preview = 7;
+  int64 backend_run_id = 8;
+}
+
+message CompleteTaskResponse {
+  bool acknowledged = 1;
+}
+
+message TaskMetrics {
+  uint64 records_processed = 1;
+  uint64 bytes_processed = 2;
+  double elapsed_seconds = 3;
+  uint64 cursors_advanced = 4;
+}
+
+message TaskError {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+  bool safe_to_retry = 4;
+  string commit_state = 5;
+}
+
+message TaskRef {
+  string task_id = 1;
+  string agent_id = 2;
+  uint32 attempt = 3;
+  uint64 lease_epoch = 4;
+  google.protobuf.Timestamp assigned_at = 5;
+}
+
+message PreviewAccess {
+  PreviewState state = 1;
+  string flight_endpoint = 2;
+  bytes ticket = 3;
+  google.protobuf.Timestamp expires_at = 4;
+  repeated StreamPreview streams = 5;
+}
+
+message StreamPreview {
+  string stream = 1;
+  uint64 rows = 2;
+  bytes ticket = 3;
+}
+
+enum RunState {
+  RUN_STATE_UNSPECIFIED = 0;
+  RUN_STATE_PENDING = 1;
+  RUN_STATE_ASSIGNED = 2;
+  RUN_STATE_RUNNING = 3;
+  RUN_STATE_PREVIEW_READY = 4;
+  RUN_STATE_COMPLETED = 5;
+  RUN_STATE_FAILED = 6;
+  RUN_STATE_CANCELLED = 7;
+  RUN_STATE_RECONCILING = 8;
+  RUN_STATE_RECOVERY_FAILED = 9;
+}
+
+enum TaskOutcome {
+  TASK_OUTCOME_UNSPECIFIED = 0;
+  TASK_OUTCOME_COMPLETED = 1;
+  TASK_OUTCOME_FAILED = 2;
+  TASK_OUTCOME_CANCELLED = 3;
+}
+
+enum PreviewState {
+  PREVIEW_STATE_UNSPECIFIED = 0;
+  PREVIEW_STATE_NONE = 1;
+  PREVIEW_STATE_BUILDING = 2;
+  PREVIEW_STATE_READY = 3;
+  PREVIEW_STATE_EXPIRED = 4;
+}
+
+message ApiError {
+  string code = 1;
+  string category = 2;
+  string message = 3;
+  map<string, string> details = 4;
+  string retry_hint = 5;
+  string correlation_id = 6;
+}

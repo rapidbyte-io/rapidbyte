@@ -178,12 +178,6 @@ enum Commands {
         /// Shared signing key for preview tickets (hex or raw string)
         #[arg(long, env = "RAPIDBYTE_SIGNING_KEY")]
         signing_key: Option<String>,
-        /// Explicitly disable controller auth for local development only
-        #[arg(long)]
-        allow_unauthenticated: bool,
-        /// Explicitly allow the built-in insecure development signing key
-        #[arg(long)]
-        allow_insecure_signing_key: bool,
         /// Max time to wait for restart reconciliation before failing recovery
         #[arg(long, env = "RAPIDBYTE_CONTROLLER_RECONCILIATION_TIMEOUT_SECONDS")]
         reconciliation_timeout_seconds: Option<u64>,
@@ -551,8 +545,6 @@ async fn main() -> ExitCode {
             listen,
             metadata_database_url,
             signing_key,
-            allow_unauthenticated,
-            allow_insecure_signing_key,
             reconciliation_timeout_seconds,
             tls_cert,
             tls_key,
@@ -570,8 +562,6 @@ async fn main() -> ExitCode {
                 metadata_database_url.as_deref(),
                 signing_key.as_deref(),
                 cli.auth_token.as_deref(),
-                allow_unauthenticated,
-                allow_insecure_signing_key,
                 reconciliation_timeout_seconds.map(std::time::Duration::from_secs),
                 tls_cert.as_deref(),
                 tls_key.as_deref(),

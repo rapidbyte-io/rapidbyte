@@ -5,8 +5,8 @@ use anyhow::Result;
 use crate::commands::transport::{connect_channel, request_with_bearer, TlsClientConfig};
 use crate::Verbosity;
 
-use rapidbyte_controller::proto::rapidbyte::v1::pipeline_service_client::PipelineServiceClient;
-use rapidbyte_controller::proto::rapidbyte::v1::{ListRunsRequest, RunState};
+use rapidbyte_controller::proto::rapidbyte::v2::control_plane_client::ControlPlaneClient;
+use rapidbyte_controller::proto::rapidbyte::v2::ListRunsRequest;
 
 pub async fn execute(
     controller_url: Option<&str>,
@@ -23,14 +23,14 @@ pub async fn execute(
     })?;
 
     let channel = connect_channel(controller_url, tls).await?;
-    let mut client = PipelineServiceClient::new(channel);
+    let mut client = ControlPlaneClient::new(channel);
 
-    let filter_state = state.map(parse_state_filter).transpose()?;
+    let request_limit = if limit < 0 { 0 } else { limit };
+    let filter_state = state.map(normalize_state);
     let resp = client
         .list_runs(request_with_bearer(
             ListRunsRequest {
-                limit,
-                filter_state,
+                limit: Some(request_limit),
             },
             auth_token,
         )?)
@@ -39,47 +39,25 @@ pub async fn execute(
 
     if verbosity != Verbosity::Quiet {
         for run in resp.runs {
-            eprintln!(
-                "{}  {}  {}",
-                run.run_id,
-                state_label(run.state),
-                run.pipeline_name
-            );
+            let normalized = normalize_state(&run.state);
+            if filter_state
+                .as_ref()
+                .is_some_and(|filter| filter != &normalized)
+            {
+                continue;
+            }
+            eprintln!("{}  {}", run.run_id, normalized);
         }
     }
 
     Ok(())
 }
 
-fn parse_state_filter(value: &str) -> Result<i32> {
-    let state = match value {
-        "pending" => RunState::Pending,
-        "assigned" => RunState::Assigned,
-        "running" => RunState::Running,
-        "reconciling" => RunState::Reconciling,
-        "recovery_failed" => RunState::RecoveryFailed,
-        "preview_ready" => RunState::PreviewReady,
-        "completed" => RunState::Completed,
-        "failed" => RunState::Failed,
-        "cancelled" => RunState::Cancelled,
-        _ => anyhow::bail!("invalid run state filter: {value}"),
-    };
-    Ok(state.into())
-}
-
-fn state_label(state: i32) -> &'static str {
-    match RunState::try_from(state) {
-        Ok(RunState::Pending) => "PENDING",
-        Ok(RunState::Assigned) => "ASSIGNED",
-        Ok(RunState::Running) => "RUNNING",
-        Ok(RunState::Reconciling) => "RECONCILING",
-        Ok(RunState::RecoveryFailed) => "RECOVERY_FAILED",
-        Ok(RunState::PreviewReady) => "PREVIEW_READY",
-        Ok(RunState::Completed) => "COMPLETED",
-        Ok(RunState::Failed) => "FAILED",
-        Ok(RunState::Cancelled) => "CANCELLED",
-        _ => "UNKNOWN",
+fn normalize_state(value: &str) -> String {
+    if value.trim().is_empty() {
+        return "UNKNOWN".to_owned();
     }
+    value.trim().to_ascii_uppercase()
 }
 
 #[cfg(test)]
@@ -95,31 +73,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_state_filter_accepts_reconciling() {
-        assert_eq!(
-            parse_state_filter("reconciling").unwrap(),
-            RunState::Reconciling as i32
-        );
-    }
-
-    #[test]
-    fn state_label_includes_reconciling() {
-        assert_eq!(state_label(RunState::Reconciling as i32), "RECONCILING");
-    }
-
-    #[test]
-    fn parse_state_filter_accepts_recovery_failed() {
-        assert_eq!(
-            parse_state_filter("recovery_failed").unwrap(),
-            RunState::RecoveryFailed as i32
-        );
-    }
-
-    #[test]
-    fn state_label_includes_recovery_failed() {
-        assert_eq!(
-            state_label(RunState::RecoveryFailed as i32),
-            "RECOVERY_FAILED"
-        );
+    fn normalize_state_handles_empty_and_whitespace() {
+        assert_eq!(normalize_state(""), "UNKNOWN");
+        assert_eq!(normalize_state(" accepted "), "ACCEPTED");
     }
 }
