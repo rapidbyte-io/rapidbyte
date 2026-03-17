@@ -35,7 +35,7 @@ fn task_state_to_str(state: TaskState) -> &'static str {
     }
 }
 
-fn task_from_row(row: &sqlx::postgres::PgRow) -> Result<Task, RepositoryError> {
+pub(super) fn task_from_row(row: &sqlx::postgres::PgRow) -> Result<Task, RepositoryError> {
     let id: String = row.try_get("id").map_err(box_err)?;
     let run_id: String = row.try_get("run_id").map_err(box_err)?;
     let attempt: i32 = row.try_get("attempt").map_err(box_err)?;
@@ -119,53 +119,6 @@ impl TaskRepository for PgTaskRepository {
         .map_err(box_err)?;
 
         Ok(())
-    }
-
-    async fn poll_and_assign(
-        &self,
-        agent_id: &str,
-        lease: Lease,
-    ) -> Result<Option<Task>, RepositoryError> {
-        let mut tx = self.pool.begin().await.map_err(box_err)?;
-
-        let row = sqlx::query(
-            "SELECT * FROM tasks WHERE state = 'pending' ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
-        )
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(box_err)?;
-
-        let Some(row) = row else {
-            tx.commit().await.map_err(box_err)?;
-            return Ok(None);
-        };
-
-        let task = task_from_row(&row)?;
-
-        sqlx::query(
-            "UPDATE tasks SET state = 'running', agent_id = $1, lease_epoch = $2, lease_expires_at = $3, updated_at = now() WHERE id = $4",
-        )
-        .bind(agent_id)
-        .bind(lease.epoch().cast_signed())
-        .bind(lease.expires_at())
-        .bind(task.id())
-        .execute(&mut *tx)
-        .await
-        .map_err(box_err)?;
-
-        tx.commit().await.map_err(box_err)?;
-
-        // Reconstruct task with assigned state
-        Ok(Some(Task::from_row(
-            task.id().to_string(),
-            task.run_id().to_string(),
-            task.attempt(),
-            TaskState::Running,
-            Some(agent_id.to_string()),
-            Some(lease),
-            task.created_at(),
-            Utc::now(),
-        )))
     }
 
     async fn find_expired_leases(&self, now: DateTime<Utc>) -> Result<Vec<Task>, RepositoryError> {

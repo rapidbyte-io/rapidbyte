@@ -31,7 +31,7 @@ pub struct TaskAssignment {
 /// # Panics
 ///
 /// Panics if the assigned task has no lease (should never happen after
-/// `poll_and_assign`).
+/// `assign_task`).
 pub async fn poll_task(
     ctx: &AppContext,
     agent_id: &str,
@@ -51,41 +51,25 @@ pub async fn poll_task(
     agent.touch(now);
     ctx.agents.save(&agent).await?;
 
-    // 3. Check agent capacity
-    let running_tasks = ctx.tasks.find_running_by_agent_id(agent_id).await?;
-    if running_tasks.len() >= agent.capabilities().max_concurrent_tasks as usize {
-        return Ok(None); // Agent is at capacity
-    }
-
-    // 5. Get next lease epoch
+    // 3. Get next lease epoch
     let epoch = ctx.tasks.next_lease_epoch().await?;
 
-    // 6. Calculate lease duration (use default config)
+    // 4. Calculate lease duration (use default config)
     let lease_duration = chrono::Duration::from_std(ctx.config.default_lease_duration)
         .unwrap_or_else(|_| chrono::Duration::seconds(300));
     let expires_at = now + lease_duration;
 
-    // 7. Create lease
+    // 5. Create lease
     let lease = Lease::new(epoch, expires_at);
 
-    // 8. Poll and assign
-    let Some(task) = ctx.tasks.poll_and_assign(agent_id, lease).await? else {
+    // 6. Atomically assign task and transition run to Running
+    let Some((task, mut run)) = ctx
+        .store
+        .assign_task(agent_id, agent.capabilities().max_concurrent_tasks, lease)
+        .await?
+    else {
         return Ok(None);
     };
-
-    // 9. Find the run
-    let mut run = ctx
-        .runs
-        .find_by_id(task.run_id())
-        .await?
-        .ok_or_else(|| AppError::NotFound {
-            entity: "Run",
-            id: task.run_id().to_string(),
-        })?;
-
-    // 10. Transition run to Running
-    run.start()?;
-    ctx.runs.save(&run).await?;
 
     // 9. Resolve secrets
     let resolved_yaml = match ctx.secrets.resolve(run.pipeline_yaml()).await {

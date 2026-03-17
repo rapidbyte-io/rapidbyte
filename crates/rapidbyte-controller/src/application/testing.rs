@@ -157,40 +157,6 @@ impl TaskRepository for FakeTaskRepository {
         Ok(())
     }
 
-    async fn poll_and_assign(
-        &self,
-        agent_id: &str,
-        lease: Lease,
-    ) -> Result<Option<Task>, RepositoryError> {
-        let mut map = self.storage.tasks.lock().unwrap();
-        // Find the first pending task ordered by created_at
-        let pending_id = map
-            .values()
-            .filter(|t| t.state() == TaskState::Pending)
-            .min_by_key(|t| t.created_at())
-            .map(|t| t.id().to_string());
-
-        if let Some(id) = pending_id {
-            if let Some(task) = map.get_mut(&id) {
-                // Apply assignment directly via from_row to bypass state machine
-                // (the real DB does an atomic UPDATE ... SET)
-                let assigned = Task::from_row(
-                    task.id().to_string(),
-                    task.run_id().to_string(),
-                    task.attempt(),
-                    TaskState::Running,
-                    Some(agent_id.to_string()),
-                    Some(lease),
-                    task.created_at(),
-                    task.updated_at(),
-                );
-                *task = assigned;
-                return Ok(Some(task.clone()));
-            }
-        }
-        Ok(None)
-    }
-
     async fn find_expired_leases(&self, now: DateTime<Utc>) -> Result<Vec<Task>, RepositoryError> {
         let map = self.storage.tasks.lock().unwrap();
         Ok(map
@@ -343,6 +309,64 @@ impl PipelineStore for FakePipelineStore {
         runs.insert(run.id().to_string(), run.clone());
         tasks.insert(task.id().to_string(), task.clone());
         Ok(())
+    }
+
+    async fn assign_task(
+        &self,
+        agent_id: &str,
+        max_concurrent_tasks: u32,
+        lease: Lease,
+    ) -> Result<Option<(Task, Run)>, RepositoryError> {
+        let mut tasks = self.storage.tasks.lock().unwrap();
+        let mut runs = self.storage.runs.lock().unwrap();
+
+        // 1. Check agent capacity
+        let running_count = tasks
+            .values()
+            .filter(|t| t.state() == TaskState::Running && t.agent_id() == Some(agent_id))
+            .count();
+        if running_count >= max_concurrent_tasks as usize {
+            return Ok(None);
+        }
+
+        // 2. Find first pending task by created_at
+        let pending_id = tasks
+            .values()
+            .filter(|t| t.state() == TaskState::Pending)
+            .min_by_key(|t| t.created_at())
+            .map(|t| t.id().to_string());
+
+        let Some(id) = pending_id else {
+            return Ok(None);
+        };
+
+        // 3. Assign task (set state=Running, agent_id, lease)
+        let task = tasks.get(&id).unwrap();
+        let assigned_task = Task::from_row(
+            task.id().to_string(),
+            task.run_id().to_string(),
+            task.attempt(),
+            TaskState::Running,
+            Some(agent_id.to_string()),
+            Some(lease),
+            task.created_at(),
+            task.updated_at(),
+        );
+        let run_id = assigned_task.run_id().to_string();
+        tasks.insert(id, assigned_task.clone());
+
+        // 4. Find and update the run (set state=Running via run.start())
+        let Some(run) = runs.get(&run_id) else {
+            return Ok(None);
+        };
+        let mut run = run.clone();
+        run.start().map_err(|e| RepositoryError(Box::new(e)))?;
+
+        // 5. Save run
+        runs.insert(run_id, run.clone());
+
+        // 6. Return Some((task, run))
+        Ok(Some((assigned_task, run)))
     }
 
     async fn timeout_and_retry(

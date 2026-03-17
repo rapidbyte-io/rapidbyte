@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 
 use crate::domain::agent::Agent;
-use crate::domain::lease::Lease;
 use crate::domain::run::{Run, RunState};
 use crate::domain::task::Task;
 
@@ -40,11 +39,6 @@ pub trait RunRepository: Send + Sync {
 pub trait TaskRepository: Send + Sync {
     async fn find_by_id(&self, id: &str) -> Result<Option<Task>, RepositoryError>;
     async fn save(&self, task: &Task) -> Result<(), RepositoryError>;
-    async fn poll_and_assign(
-        &self,
-        agent_id: &str,
-        lease: Lease,
-    ) -> Result<Option<Task>, RepositoryError>;
     async fn find_expired_leases(&self, now: DateTime<Utc>) -> Result<Vec<Task>, RepositoryError>;
     async fn find_by_run_id(&self, run_id: &str) -> Result<Vec<Task>, RepositoryError>;
     async fn find_running_by_agent_id(&self, agent_id: &str) -> Result<Vec<Task>, RepositoryError>;

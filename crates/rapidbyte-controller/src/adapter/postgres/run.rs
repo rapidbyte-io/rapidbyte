@@ -33,7 +33,7 @@ fn run_state_to_str(state: RunState) -> &'static str {
     }
 }
 
-fn run_from_row(row: &sqlx::postgres::PgRow) -> Result<Run, RepositoryError> {
+pub(super) fn run_from_row(row: &sqlx::postgres::PgRow) -> Result<Run, RepositoryError> {
     let id: String = row.try_get("id").map_err(box_err)?;
     let idempotency_key: Option<String> = row.try_get("idempotency_key").map_err(box_err)?;
     let pipeline_name: String = row.try_get("pipeline_name").map_err(box_err)?;

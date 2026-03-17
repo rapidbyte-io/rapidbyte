@@ -96,6 +96,39 @@ impl EventBus for PgEventBus {
     async fn publish(&self, event: DomainEvent) -> Result<(), EventBusError> {
         let payload = serde_json::to_string(&event).map_err(|e| EventBusError(Box::new(e)))?;
 
+        // PG NOTIFY payload limit is ~8000 bytes. Truncate oversized payloads
+        // by stripping the message/detail and sending just the state change.
+        let payload = if payload.len() > 7500 {
+            tracing::warn!(
+                len = payload.len(),
+                "NOTIFY payload exceeds safe limit, sending truncated event"
+            );
+            // Build a minimal event with just the essential fields
+            match &event {
+                DomainEvent::RunStateChanged {
+                    run_id,
+                    state,
+                    attempt,
+                } => serde_json::to_string(&DomainEvent::RunStateChanged {
+                    run_id: run_id.clone(),
+                    state: *state,
+                    attempt: *attempt,
+                })
+                .unwrap_or(payload),
+                DomainEvent::ProgressReported { run_id, .. } => {
+                    serde_json::to_string(&DomainEvent::ProgressReported {
+                        run_id: run_id.clone(),
+                        message: "<truncated>".to_string(),
+                        pct: None,
+                    })
+                    .unwrap_or(payload)
+                }
+                other => serde_json::to_string(other).unwrap_or(payload),
+            }
+        } else {
+            payload
+        };
+
         sqlx::query("SELECT pg_notify('run_events', $1)")
             .bind(&payload)
             .execute(&self.pool)

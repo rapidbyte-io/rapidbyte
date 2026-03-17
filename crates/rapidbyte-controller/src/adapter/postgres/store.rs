@@ -1,10 +1,14 @@
 use async_trait::async_trait;
 use sqlx::{PgConnection, PgPool};
 
+use crate::domain::lease::Lease;
 use crate::domain::ports::pipeline_store::PipelineStore;
 use crate::domain::ports::repository::RepositoryError;
 use crate::domain::run::Run;
 use crate::domain::task::Task;
+
+use super::run::run_from_row;
+use super::task::task_from_row;
 
 fn box_err(e: impl std::error::Error + Send + Sync + 'static) -> RepositoryError {
     RepositoryError(Box::new(e))
@@ -198,6 +202,89 @@ impl PipelineStore for PgPipelineStore {
         insert_task(&mut tx, task).await?;
         tx.commit().await.map_err(box_err)?;
         Ok(())
+    }
+
+    async fn assign_task(
+        &self,
+        agent_id: &str,
+        max_concurrent_tasks: u32,
+        lease: Lease,
+    ) -> Result<Option<(Task, Run)>, RepositoryError> {
+        let mut tx = self.pool.begin().await.map_err(box_err)?;
+
+        // Check agent capacity
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM tasks WHERE agent_id = $1 AND state = 'running'")
+                .bind(agent_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(box_err)?;
+
+        if count >= i64::from(max_concurrent_tasks) {
+            tx.commit().await.map_err(box_err)?;
+            return Ok(None);
+        }
+
+        // Poll next pending task
+        let row = sqlx::query(
+            "SELECT * FROM tasks WHERE state = 'pending' ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(box_err)?;
+
+        let Some(row) = row else {
+            tx.commit().await.map_err(box_err)?;
+            return Ok(None);
+        };
+
+        let task = task_from_row(&row)?;
+
+        // Update task to running
+        sqlx::query(
+            "UPDATE tasks SET state = 'running', agent_id = $1, lease_epoch = $2, lease_expires_at = $3, updated_at = now() WHERE id = $4",
+        )
+        .bind(agent_id)
+        .bind(lease.epoch().cast_signed())
+        .bind(lease.expires_at())
+        .bind(task.id())
+        .execute(&mut *tx)
+        .await
+        .map_err(box_err)?;
+
+        // Update run to running
+        sqlx::query(
+            "UPDATE runs SET state = 'running', updated_at = now() WHERE id = $1 AND state = 'pending'",
+        )
+        .bind(task.run_id())
+        .execute(&mut *tx)
+        .await
+        .map_err(box_err)?;
+
+        // Select updated run
+        let run_row = sqlx::query("SELECT * FROM runs WHERE id = $1")
+            .bind(task.run_id())
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(box_err)?;
+
+        let run = run_from_row(&run_row)?;
+
+        tx.commit().await.map_err(box_err)?;
+
+        // Reconstruct task with assigned state
+        let assigned_task = Task::from_row(
+            task.id().to_string(),
+            task.run_id().to_string(),
+            task.attempt(),
+            crate::domain::task::TaskState::Running,
+            Some(agent_id.to_string()),
+            Some(lease),
+            task.created_at(),
+            chrono::Utc::now(),
+        );
+
+        Ok(Some((assigned_task, run)))
     }
 
     async fn complete_run(&self, task: &Task, run: &Run) -> Result<(), RepositoryError> {
