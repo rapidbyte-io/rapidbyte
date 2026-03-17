@@ -477,6 +477,7 @@ fn validate_pipeline_yaml(raw: &[u8]) -> Result<String, Status> {
         .to_owned())
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_list_runs_state(raw: &str) -> Result<RunState, Status> {
     let normalized = raw.trim().to_ascii_uppercase();
     match normalized.as_str() {

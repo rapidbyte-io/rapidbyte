@@ -1,12 +1,14 @@
 //! Lease fencing value object.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub(crate) struct Lease {
     pub(crate) epoch: u64,
     pub(crate) owner_agent_id: String,
     pub(crate) expires_at: std::time::SystemTime,
 }
 
+#[allow(dead_code)]
 impl Lease {
     #[must_use]
     pub(crate) fn new(

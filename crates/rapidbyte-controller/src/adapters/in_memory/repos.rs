@@ -101,8 +101,8 @@ impl RunRepository for InMemoryRunRepository {
             .lock()
             .expect("lock poisoned")
             .values()
-            .cloned()
             .filter(|stored| state.is_none_or(|filter| stored.run.state == filter))
+            .cloned()
             .collect::<Vec<_>>();
         runs.sort_by(|a, b| a.run.id.as_str().cmp(b.run.id.as_str()));
         runs.truncate(limit);

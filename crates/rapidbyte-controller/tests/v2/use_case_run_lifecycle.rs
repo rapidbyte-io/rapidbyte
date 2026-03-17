@@ -80,8 +80,8 @@ impl RunRepository for FakeRunRepository {
             .lock()
             .expect("lock")
             .values()
-            .cloned()
             .filter(|stored| state.is_none_or(|filter| stored.run.state == filter))
+            .cloned()
             .collect::<Vec<_>>();
         values.truncate(limit);
         Ok(values)
