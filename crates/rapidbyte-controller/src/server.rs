@@ -54,13 +54,6 @@ pub async fn run(
             "controller misconfigured: auth tokens are empty and allow_unauthenticated is false — all requests would be rejected"
         );
     }
-    if config.trust.policy != "skip" {
-        tracing::warn!(
-            policy = %config.trust.policy,
-            "trust_policy is configured on the controller but no longer distributed to agents — \
-             agents now use their own --trust-policy setting; this controller setting has no effect"
-        );
-    }
 
     // 1. Connect to Postgres
     let database_url = config

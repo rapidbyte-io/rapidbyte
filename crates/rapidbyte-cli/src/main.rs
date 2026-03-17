@@ -578,8 +578,6 @@ async fn main() -> ExitCode {
                 metrics_listen.as_deref(),
                 ctrl_registry_url,
                 ctrl_registry_insecure,
-                &cli.trust_policy,
-                cli.trust_key.clone(),
                 otel_guard,
                 match try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id) {
                     Some(s) => s,

@@ -55,8 +55,10 @@ pub struct TaskErrorInfo {
 }
 
 pub struct TaskMetrics {
-    pub records_processed: u64,
-    pub bytes_processed: u64,
+    pub records_read: u64,
+    pub records_written: u64,
+    pub bytes_read: u64,
+    pub bytes_written: u64,
     pub elapsed_seconds: f64,
     pub cursors_advanced: u64,
 }
@@ -64,8 +66,10 @@ pub struct TaskMetrics {
 impl TaskMetrics {
     fn zero() -> Self {
         Self {
-            records_processed: 0,
-            bytes_processed: 0,
+            records_read: 0,
+            records_written: 0,
+            bytes_read: 0,
+            bytes_written: 0,
             elapsed_seconds: 0.0,
             cursors_advanced: 0,
         }
@@ -177,8 +181,10 @@ where
         return TaskExecutionResult {
             outcome: TaskOutcomeKind::Cancelled,
             metrics: TaskMetrics {
-                records_processed: 0,
-                bytes_processed: 0,
+                records_read: 0,
+                records_written: 0,
+                bytes_read: 0,
+                bytes_written: 0,
                 elapsed_seconds: elapsed,
                 cursors_advanced: 0,
             },
@@ -203,8 +209,10 @@ where
                 PipelineOutcome::Run(result) => TaskExecutionResult {
                     outcome: TaskOutcomeKind::Completed,
                     metrics: TaskMetrics {
-                        records_processed: result.counts.records_written,
-                        bytes_processed: result.counts.bytes_written,
+                        records_read: result.counts.records_read,
+                        records_written: result.counts.records_written,
+                        bytes_read: result.counts.bytes_read,
+                        bytes_written: result.counts.bytes_written,
                         elapsed_seconds: elapsed,
                         cursors_advanced: 0,
                     },
@@ -213,8 +221,10 @@ where
                 PipelineOutcome::DryRun(dr) => TaskExecutionResult {
                     outcome: TaskOutcomeKind::Completed,
                     metrics: TaskMetrics {
-                        records_processed: dr.streams.iter().map(|s| s.total_rows).sum(),
-                        bytes_processed: dr.streams.iter().map(|s| s.total_bytes).sum(),
+                        records_read: dr.streams.iter().map(|s| s.total_rows).sum(),
+                        records_written: 0,
+                        bytes_read: dr.streams.iter().map(|s| s.total_bytes).sum(),
+                        bytes_written: 0,
                         elapsed_seconds: elapsed,
                         cursors_advanced: 0,
                     },
@@ -228,8 +238,10 @@ where
                 return TaskExecutionResult {
                     outcome: TaskOutcomeKind::Cancelled,
                     metrics: TaskMetrics {
-                        records_processed: 0,
-                        bytes_processed: 0,
+                        records_read: 0,
+                        records_written: 0,
+                        bytes_read: 0,
+                        bytes_written: 0,
                         elapsed_seconds: elapsed,
                         cursors_advanced: 0,
                     },
@@ -255,8 +267,10 @@ where
             TaskExecutionResult {
                 outcome: TaskOutcomeKind::Failed(error_info),
                 metrics: TaskMetrics {
-                    records_processed: 0,
-                    bytes_processed: 0,
+                    records_read: 0,
+                    records_written: 0,
+                    bytes_read: 0,
+                    bytes_written: 0,
                     elapsed_seconds: elapsed,
                     cursors_advanced: 0,
                 },
@@ -399,8 +413,10 @@ destination:
             noop_runner(),
         )
         .await;
-        assert_eq!(result.metrics.records_processed, 0);
-        assert_eq!(result.metrics.bytes_processed, 0);
+        assert_eq!(result.metrics.records_read, 0);
+        assert_eq!(result.metrics.records_written, 0);
+        assert_eq!(result.metrics.bytes_read, 0);
+        assert_eq!(result.metrics.bytes_written, 0);
         assert!(result.metrics.elapsed_seconds.abs() < f64::EPSILON);
     }
 
@@ -469,8 +485,8 @@ destination:
 
         let result = handle.await.unwrap();
         assert!(matches!(result.outcome, TaskOutcomeKind::Completed));
-        assert_eq!(result.metrics.records_processed, 7);
-        assert_eq!(result.metrics.bytes_processed, 128);
+        assert_eq!(result.metrics.records_written, 7);
+        assert_eq!(result.metrics.bytes_written, 128);
     }
 
     #[tokio::test]

@@ -1,5 +1,4 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::time::Duration;
 
 /// Authentication settings for the controller gRPC server.
@@ -60,22 +59,6 @@ pub struct RegistryConfig {
     pub insecure: bool,
 }
 
-/// Signature trust policy configuration.
-#[derive(Debug, Clone)]
-pub struct TrustConfig {
-    pub policy: String,
-    pub trusted_key_paths: Vec<PathBuf>,
-}
-
-impl Default for TrustConfig {
-    fn default() -> Self {
-        Self {
-            policy: "skip".to_string(),
-            trusted_key_paths: vec![],
-        }
-    }
-}
-
 /// Top-level configuration for the controller server.
 #[derive(Debug, Clone)]
 pub struct ControllerConfig {
@@ -86,7 +69,6 @@ pub struct ControllerConfig {
     pub tls: Option<ServerTlsConfig>,
     pub metrics_listen: Option<String>,
     pub registry: RegistryConfig,
-    pub trust: TrustConfig,
 }
 
 impl Default for ControllerConfig {
@@ -99,7 +81,6 @@ impl Default for ControllerConfig {
             tls: None,
             metrics_listen: None,
             registry: RegistryConfig::default(),
-            trust: TrustConfig::default(),
         }
     }
 }
