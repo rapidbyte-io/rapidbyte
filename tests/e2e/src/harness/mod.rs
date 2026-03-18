@@ -3,33 +3,17 @@ mod container;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use rapidbyte_pipeline_config::parser;
 use rapidbyte_pipeline_config::validator;
 use rapidbyte_secrets::SecretProviders;
 use rapidbyte_engine::{ExecutionOptions, PipelineOutcome};
-use rapidbyte_metrics::snapshot::SnapshotReader;
-use opentelemetry_sdk::metrics::SdkMeterProvider;
 use tokio_postgres::NoTls;
 use tokio_util::sync::CancellationToken;
 
 static NEXT_SCHEMA_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Shared meter provider and snapshot reader for all E2E tests.
-/// Initialized once so OnceLock-cached instruments stay bound to a single provider.
-fn e2e_metrics() -> &'static (SdkMeterProvider, SnapshotReader) {
-    static INSTANCE: OnceLock<(SdkMeterProvider, SnapshotReader)> = OnceLock::new();
-    INSTANCE.get_or_init(|| {
-        let reader = SnapshotReader::new();
-        let provider = SdkMeterProvider::builder()
-            .with_reader(reader.build_reader())
-            .build();
-        opentelemetry::global::set_meter_provider(provider.clone());
-        (provider, reader)
-    })
-}
 
 #[derive(Debug, Clone)]
 pub struct HarnessContext {
@@ -270,15 +254,18 @@ impl HarnessContext {
                 .context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let (provider, reader) = e2e_metrics();
-        let outcome = rapidbyte_engine::run_pipeline_compat(
+        let ctx = rapidbyte_engine::build_run_context(
+            &config,
+            None,
+            &rapidbyte_registry::RegistryConfig::default(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let outcome = rapidbyte_engine::run_pipeline(
+            &ctx,
             &config,
             &ExecutionOptions::default(),
-            None,
             CancellationToken::new(),
-            reader,
-            provider,
-            &rapidbyte_registry::RegistryConfig::default(),
         )
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -366,15 +353,18 @@ impl HarnessContext {
                 .context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let (provider, reader) = e2e_metrics();
-        let outcome = rapidbyte_engine::run_pipeline_compat(
+        let ctx = rapidbyte_engine::build_run_context(
+            &config,
+            None,
+            &rapidbyte_registry::RegistryConfig::default(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let outcome = rapidbyte_engine::run_pipeline(
+            &ctx,
             &config,
             &ExecutionOptions::default(),
-            None,
             CancellationToken::new(),
-            reader,
-            provider,
-            &rapidbyte_registry::RegistryConfig::default(),
         )
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -406,15 +396,18 @@ impl HarnessContext {
                 .context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let (provider, reader) = e2e_metrics();
-        let outcome = rapidbyte_engine::run_pipeline_compat(
+        let ctx = rapidbyte_engine::build_run_context(
+            &config,
+            None,
+            &rapidbyte_registry::RegistryConfig::default(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let outcome = rapidbyte_engine::run_pipeline(
+            &ctx,
             &config,
             &ExecutionOptions::default(),
-            None,
             CancellationToken::new(),
-            reader,
-            provider,
-            &rapidbyte_registry::RegistryConfig::default(),
         )
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -520,15 +513,18 @@ impl HarnessContext {
                 .context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let (provider, reader) = e2e_metrics();
-        let outcome = rapidbyte_engine::run_pipeline_compat(
+        let ctx = rapidbyte_engine::build_run_context(
+            &config,
+            None,
+            &rapidbyte_registry::RegistryConfig::default(),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let outcome = rapidbyte_engine::run_pipeline(
+            &ctx,
             &config,
             &ExecutionOptions::default(),
-            None,
             CancellationToken::new(),
-            reader,
-            provider,
-            &rapidbyte_registry::RegistryConfig::default(),
         )
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;

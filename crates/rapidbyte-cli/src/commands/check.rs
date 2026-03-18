@@ -22,7 +22,8 @@ pub async fn execute(
 ) -> Result<()> {
     let config = super::load_pipeline(pipeline_path, secrets).await?;
 
-    let result = rapidbyte_engine::check_pipeline_compat(&config, registry_config).await?;
+    let ctx = rapidbyte_engine::build_lightweight_context(registry_config, &config).await?;
+    let result = rapidbyte_engine::check_pipeline(&ctx, &config).await?;
 
     if verbosity != Verbosity::Quiet {
         if let Some(outcome) = &result.source_manifest {

@@ -472,16 +472,12 @@ async fn process_task(
             meter_provider: ctx.otel_guard.meter_provider(),
             registry_config: &registry_config,
         },
-        |config, options, progress_tx, cancel_token, metrics_runtime, registry_config| {
-            Box::pin(rapidbyte_engine::run_pipeline_compat(
-                config,
-                options,
-                progress_tx,
-                cancel_token,
-                metrics_runtime.snapshot_reader,
-                metrics_runtime.meter_provider,
-                registry_config,
-            ))
+        |config, options, progress_tx, cancel_token, _metrics_runtime, registry_config| {
+            Box::pin(async move {
+                let ctx = rapidbyte_engine::build_run_context(config, progress_tx, registry_config)
+                    .await?;
+                rapidbyte_engine::run_pipeline(&ctx, config, options, cancel_token).await
+            })
         },
     )
     .await;

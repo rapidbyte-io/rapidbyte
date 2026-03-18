@@ -1,6 +1,6 @@
 //! Pipeline execution subcommand (run).
 
-// u64/i64/usize → f64 casts are intentional lossy conversions for display and
+// u64/i64/usize -> f64 casts are intentional lossy conversions for display and
 // timing computations where sub-millisecond precision loss is acceptable.
 #![allow(clippy::cast_precision_loss)]
 
@@ -40,7 +40,7 @@ pub async fn execute(
     controller: Option<&str>,
     auth_token: Option<&str>,
     tls: Option<&TlsClientConfig>,
-    otel_guard: &rapidbyte_metrics::OtelGuard,
+    _otel_guard: &rapidbyte_metrics::OtelGuard,
     registry_config: &rapidbyte_registry::RegistryConfig,
     secrets: &rapidbyte_secrets::SecretProviders,
 ) -> Result<()> {
@@ -110,16 +110,9 @@ pub async fn execute(
             }
         });
     }
-    let outcome = rapidbyte_engine::adapter::orchestrator_compat::run_pipeline_compat(
-        &config,
-        &options,
-        progress_tx,
-        cancel_token,
-        otel_guard.snapshot_reader(),
-        otel_guard.meter_provider(),
-        registry_config,
-    )
-    .await;
+
+    let ctx = rapidbyte_engine::build_run_context(&config, progress_tx, registry_config).await?;
+    let outcome = rapidbyte_engine::run_pipeline(&ctx, &config, &options, cancel_token).await;
     let (cpu_end, peak_rss_mb) = post_pipeline_metrics();
 
     // Wait for spinner to finish before printing results

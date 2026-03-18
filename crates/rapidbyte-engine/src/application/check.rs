@@ -182,7 +182,9 @@ fn config_check(
     config: &serde_json::Value,
     manifest: &rapidbyte_types::manifest::PluginManifest,
 ) -> CheckStatus {
-    match crate::plugin::resolver::validate_config_against_schema(plugin_ref, config, manifest) {
+    match crate::adapter::registry_resolver::validate_config_against_schema(
+        plugin_ref, config, manifest,
+    ) {
         Ok(()) => CheckStatus {
             ok: true,
             message: String::new(),

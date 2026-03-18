@@ -18,14 +18,6 @@ pub mod application;
 pub mod domain;
 
 // ---------------------------------------------------------------------------
-// Internal modules — used by adapter implementations, not part of public API
-// ---------------------------------------------------------------------------
-
-pub(crate) mod error;
-pub mod plugin;
-pub mod runner;
-
-// ---------------------------------------------------------------------------
 // Public re-exports — canonical API surface
 // ---------------------------------------------------------------------------
 
@@ -54,13 +46,11 @@ pub use domain::ports::{
 };
 
 // Adapter implementations
+pub use adapter::engine_factory::{
+    build_discover_context, build_lightweight_context, build_run_context,
+};
 pub use adapter::metrics::OtelMetricsSnapshot;
 pub use adapter::postgres::PgBackend;
 pub use adapter::progress::ChannelProgressReporter;
 pub use adapter::registry_resolver::RegistryPluginResolver;
 pub use adapter::wasm_runner::WasmPluginRunner;
-
-// Compatibility shim for consumers not yet migrated to EngineContext
-pub use adapter::orchestrator_compat::{
-    check_pipeline_compat, discover_plugin_compat, run_pipeline_compat,
-};
