@@ -14,16 +14,13 @@ impl RunRecordRepository for PgBackend {
         pipeline: &PipelineId,
         stream: &StreamName,
     ) -> Result<i64, RepositoryError> {
-        let (id,) = sqlx::query_as::<_, (i64,)>(
-            "INSERT INTO sync_runs (pipeline, stream, status) \
-             VALUES ($1, $2, $3) RETURNING id",
-        )
-        .bind(pipeline.as_str())
-        .bind(stream.as_str())
-        .bind(RunStatus::Running.as_str())
-        .fetch_one(&self.pool)
-        .await
-        .map_err(RepositoryError::other)?;
+        let (id,) = sqlx::query_as::<_, (i64,)>(super::queries::START_RUN)
+            .bind(pipeline.as_str())
+            .bind(stream.as_str())
+            .bind(RunStatus::Running.as_str())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(RepositoryError::other)?;
 
         Ok(id)
     }

@@ -27,9 +27,7 @@ impl StateBackend for PgBackend {
         let mut client = self.sync_pool.checkout()?;
         let rows = client
             .query(
-                "SELECT cursor_field, cursor_value, \
-                 to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
-                 FROM sync_cursors WHERE pipeline = $1 AND stream = $2",
+                super::queries::GET_CURSOR,
                 &[&pipeline.as_str(), &stream.as_str()],
             )
             .map_err(StateError::backend)?;
@@ -82,8 +80,7 @@ impl StateBackend for PgBackend {
         let mut client = self.sync_pool.checkout()?;
         let row = client
             .query_one(
-                "INSERT INTO sync_runs (pipeline, stream, status) \
-                 VALUES ($1, $2, $3) RETURNING id",
+                super::queries::START_RUN,
                 &[
                     &pipeline.as_str(),
                     &stream.as_str(),

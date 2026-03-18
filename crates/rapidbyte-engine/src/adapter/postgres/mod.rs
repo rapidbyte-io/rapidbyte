@@ -13,6 +13,7 @@
 
 mod cursor;
 mod dlq;
+pub(crate) mod queries;
 mod run_record;
 mod state_backend;
 

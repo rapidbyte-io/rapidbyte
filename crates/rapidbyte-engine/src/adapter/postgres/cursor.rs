@@ -15,9 +15,7 @@ impl CursorRepository for PgBackend {
         stream: &StreamName,
     ) -> Result<Option<CursorState>, RepositoryError> {
         let row = sqlx::query_as::<_, (Option<String>, Option<String>, String)>(
-            "SELECT cursor_field, cursor_value, \
-             to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') \
-             FROM sync_cursors WHERE pipeline = $1 AND stream = $2",
+            super::queries::GET_CURSOR,
         )
         .bind(pipeline.as_str())
         .bind(stream.as_str())

@@ -152,6 +152,18 @@ pub async fn run_pipeline(
         let (dst_id, dst_ver) = parse_plugin_id(&pipeline.destination.use_ref);
         let metric_run_label = format!("{}-{attempt}", pipeline.pipeline);
 
+        // Pre-compute loop-invariant values to avoid re-traversing pipeline
+        // structs on every iteration.
+        let source_compression = pipeline
+            .resources
+            .compression
+            .as_ref()
+            .copied()
+            .map(|c| compression_name(c).to_string());
+        let dest_compression = source_compression.clone();
+        let source_config = pipeline.source.config.clone();
+        let dest_config = pipeline.destination.config.clone();
+
         for stream_cfg in &pipeline.source.streams {
             if cancel.is_cancelled() {
                 return Err(PipelineError::Cancelled);
@@ -217,14 +229,9 @@ pub async fn run_pipeline(
                     plugin_id: src_id.clone(),
                     plugin_version: src_ver.clone(),
                     stream_ctx: stream_ctx.clone(),
-                    config: pipeline.source.config.clone(),
+                    config: source_config.clone(),
                     permissions: source_permissions,
-                    compression: pipeline
-                        .resources
-                        .compression
-                        .as_ref()
-                        .copied()
-                        .map(|c| compression_name(c).to_string()),
+                    compression: source_compression.clone(),
                     frame_sender: frame_tx,
                     stats: Arc::clone(&stats),
                     on_batch_emitted: None,
@@ -270,12 +277,7 @@ pub async fn run_pipeline(
                         stream_ctx: stream_ctx.clone(),
                         config: transform.config.clone(),
                         permissions: t_permissions,
-                        compression: pipeline
-                            .resources
-                            .compression
-                            .as_ref()
-                            .copied()
-                            .map(|c| compression_name(c).to_string()),
+                        compression: source_compression.clone(),
                         frame_receiver: rx,
                         frame_sender: next_tx,
                         dlq_records: Arc::new(Mutex::new(Vec::new())),
@@ -322,14 +324,9 @@ pub async fn run_pipeline(
                         plugin_id: dst_id.clone(),
                         plugin_version: dst_ver.clone(),
                         stream_ctx: stream_ctx.clone(),
-                        config: pipeline.destination.config.clone(),
+                        config: dest_config.clone(),
                         permissions: dest_permissions,
-                        compression: pipeline
-                            .resources
-                            .compression
-                            .as_ref()
-                            .copied()
-                            .map(|c| compression_name(c).to_string()),
+                        compression: dest_compression.clone(),
                         frame_receiver: final_rx,
                         dlq_records: Arc::new(Mutex::new(Vec::new())),
                         stats: Arc::clone(&stats),

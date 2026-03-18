@@ -148,7 +148,6 @@ pub fn execute_source_benchmark(
         stream_ctx: &stream_ctx,
         permissions: permissions.as_ref(),
         compression: None,
-        overrides: None,
     };
     let result = run_source_stream(&ctx, sender, &config, stats, None)?;
     let _ = drain.join();
@@ -249,7 +248,6 @@ pub fn execute_destination_benchmark(
         stream_ctx: &stream_ctx,
         permissions: permissions.as_ref(),
         compression: None,
-        overrides: None,
     };
     let result = run_destination_stream(&ctx, receiver, dlq_records, &config, stats)?;
     let otel_snap = bench_reader.flush_and_snapshot_for_run(
@@ -363,7 +361,6 @@ pub fn execute_transform_benchmark(
             stream_ctx: &stream_ctx,
             permissions: permissions.as_ref(),
             compression: None,
-            overrides: None,
         };
         let summary = run_transform_stream(
             &ctx,

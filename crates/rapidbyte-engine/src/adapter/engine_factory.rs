@@ -49,6 +49,32 @@ impl ports::MetricsSnapshot for NoopMetricsSnapshot {
 // StateBackend-to-repository adapter
 // ---------------------------------------------------------------------------
 
+/// Run a blocking `StateBackend` method on the Tokio blocking pool,
+/// converting panics and backend errors into [`RepositoryError`].
+async fn run_on_backend<T, F>(
+    backend: &Arc<dyn rapidbyte_types::state_backend::StateBackend>,
+    op: &str,
+    f: F,
+) -> Result<T, ports::RepositoryError>
+where
+    T: Send + 'static,
+    F: FnOnce(
+            &dyn rapidbyte_types::state_backend::StateBackend,
+        ) -> rapidbyte_types::state_error::Result<T>
+        + Send
+        + 'static,
+{
+    let backend = Arc::clone(backend);
+    tokio::task::spawn_blocking(move || f(&*backend))
+        .await
+        .map_err(|e| {
+            ports::RepositoryError::Other(Box::new(std::io::Error::other(format!(
+                "{op} panicked: {e}"
+            ))))
+        })?
+        .map_err(|e| ports::RepositoryError::Other(Box::new(e)))
+}
+
 /// Wraps a `StateBackend` trait object to implement the hexagonal
 /// repository ports (cursors, runs, DLQ).
 struct StateBackendRepositoryAdapter {
@@ -68,17 +94,8 @@ impl ports::CursorRepository for StateBackendRepositoryAdapter {
         pipeline: &rapidbyte_types::state::PipelineId,
         stream: &rapidbyte_types::state::StreamName,
     ) -> Result<Option<rapidbyte_types::state::CursorState>, ports::RepositoryError> {
-        let backend = Arc::clone(&self.backend);
-        let pipeline = pipeline.clone();
-        let stream = stream.clone();
-        tokio::task::spawn_blocking(move || backend.get_cursor(&pipeline, &stream))
-            .await
-            .map_err(|e| {
-                ports::RepositoryError::Other(Box::new(std::io::Error::other(format!(
-                    "cursor get task panicked: {e}"
-                ))))
-            })?
-            .map_err(|e| ports::RepositoryError::Other(Box::new(e)))
+        let (p, s) = (pipeline.clone(), stream.clone());
+        run_on_backend(&self.backend, "cursor get", move |b| b.get_cursor(&p, &s)).await
     }
 
     async fn set(
@@ -87,18 +104,11 @@ impl ports::CursorRepository for StateBackendRepositoryAdapter {
         stream: &rapidbyte_types::state::StreamName,
         cursor: &rapidbyte_types::state::CursorState,
     ) -> Result<(), ports::RepositoryError> {
-        let backend = Arc::clone(&self.backend);
-        let pipeline = pipeline.clone();
-        let stream = stream.clone();
-        let cursor = cursor.clone();
-        tokio::task::spawn_blocking(move || backend.set_cursor(&pipeline, &stream, &cursor))
-            .await
-            .map_err(|e| {
-                ports::RepositoryError::Other(Box::new(std::io::Error::other(format!(
-                    "cursor set task panicked: {e}"
-                ))))
-            })?
-            .map_err(|e| ports::RepositoryError::Other(Box::new(e)))
+        let (p, s, c) = (pipeline.clone(), stream.clone(), cursor.clone());
+        run_on_backend(&self.backend, "cursor set", move |b| {
+            b.set_cursor(&p, &s, &c)
+        })
+        .await
     }
 
     async fn compare_and_set(
@@ -119,17 +129,8 @@ impl ports::RunRecordRepository for StateBackendRepositoryAdapter {
         pipeline: &rapidbyte_types::state::PipelineId,
         stream: &rapidbyte_types::state::StreamName,
     ) -> Result<i64, ports::RepositoryError> {
-        let backend = Arc::clone(&self.backend);
-        let pipeline = pipeline.clone();
-        let stream = stream.clone();
-        tokio::task::spawn_blocking(move || backend.start_run(&pipeline, &stream))
-            .await
-            .map_err(|e| {
-                ports::RepositoryError::Other(Box::new(std::io::Error::other(format!(
-                    "start_run task panicked: {e}"
-                ))))
-            })?
-            .map_err(|e| ports::RepositoryError::Other(Box::new(e)))
+        let (p, s) = (pipeline.clone(), stream.clone());
+        run_on_backend(&self.backend, "start_run", move |b| b.start_run(&p, &s)).await
     }
 
     #[allow(clippy::similar_names)]
@@ -139,16 +140,11 @@ impl ports::RunRecordRepository for StateBackendRepositoryAdapter {
         status: rapidbyte_types::state::RunStatus,
         stats: &rapidbyte_types::state::RunStats,
     ) -> Result<(), ports::RepositoryError> {
-        let backend = Arc::clone(&self.backend);
         let run_stats = stats.clone();
-        tokio::task::spawn_blocking(move || backend.complete_run(run_id, status, &run_stats))
-            .await
-            .map_err(|e| {
-                ports::RepositoryError::Other(Box::new(std::io::Error::other(format!(
-                    "complete_run task panicked: {e}"
-                ))))
-            })?
-            .map_err(|e| ports::RepositoryError::Other(Box::new(e)))
+        run_on_backend(&self.backend, "complete_run", move |b| {
+            b.complete_run(run_id, status, &run_stats)
+        })
+        .await
     }
 }
 

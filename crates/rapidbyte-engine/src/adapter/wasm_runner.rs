@@ -975,8 +975,6 @@ fn run_discover_impl(
 // functions. These wrappers expose the internal runner logic through
 // the `StreamRunContext` facade that benchmarks expect.
 
-use rapidbyte_runtime::SandboxOverrides;
-
 /// Shared context for running a plugin stream (source, destination, or
 /// transform). Used by the benchmarks crate for direct WASM invocations.
 pub struct StreamRunContext<'a> {
@@ -989,7 +987,6 @@ pub struct StreamRunContext<'a> {
     pub stream_ctx: &'a StreamContext,
     pub permissions: Option<&'a Permissions>,
     pub compression: Option<CompressionCodec>,
-    pub overrides: Option<&'a SandboxOverrides>,
 }
 
 /// Result of running a source plugin for a single stream (benchmark API).
