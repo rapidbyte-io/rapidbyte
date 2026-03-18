@@ -25,9 +25,9 @@ regex = "1"
 jsonschema = "0.28"
 rapidbyte-secrets = { path = "../rapidbyte-secrets" }
 rapidbyte-pipeline-config = { path = "../rapidbyte-pipeline-config" }
+async-trait = { workspace = true }
 
 [dev-dependencies]
-async-trait = { workspace = true }
 bytes = "1"
 tempfile = "3"
 criterion = { workspace = true }

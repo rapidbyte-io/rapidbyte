@@ -22,6 +22,7 @@
 
 pub mod arrow;
 pub mod config;
+pub mod domain;
 pub mod error;
 pub(crate) mod finalizers;
 pub mod orchestrator;
