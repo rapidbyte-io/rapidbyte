@@ -128,20 +128,26 @@ impl PipelineService for PipelineGrpcService {
     ) -> Result<Response<Self::WatchRunStream>, Status> {
         let run_id = req.into_inner().run_id;
 
-        // Validate run exists first (prevents unbounded subscriber map growth
-        // from requests for non-existent run IDs)
-        let run = crate::application::query::get_run(&self.ctx, &run_id)
-            .await
-            .map_err(convert::app_error_to_status)?;
-
-        // Subscribe after validation (small window for missed events, but
-        // the initial state catch-up covers it for state changes)
+        // Subscribe FIRST to avoid missing events between snapshot and subscribe.
+        // If the run doesn't exist, the subscriber is dropped on error return
+        // and the broadcast entry is cleaned up below.
         let event_stream = self
             .ctx
             .event_bus
             .subscribe(&run_id)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
+        // Validate run exists and get current state for catch-up
+        let run = match crate::application::query::get_run(&self.ctx, &run_id).await {
+            Ok(run) => run,
+            Err(e) => {
+                // Drop the subscriber — clean up the broadcast entry if no receivers remain
+                drop(event_stream);
+                self.ctx.event_bus.cleanup(&run_id).await;
+                return Err(convert::app_error_to_status(e));
+            }
+        };
         let initial = convert::run_state_to_event(&run);
 
         // Map domain events to proto events

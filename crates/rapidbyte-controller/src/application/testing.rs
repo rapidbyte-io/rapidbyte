@@ -454,6 +454,10 @@ impl EventBus for FakeEventBus {
         });
         Ok(Box::pin(stream))
     }
+
+    async fn cleanup(&self, _run_id: &str) {
+        // No-op for test fakes
+    }
 }
 
 // ---------------------------------------------------------------------------

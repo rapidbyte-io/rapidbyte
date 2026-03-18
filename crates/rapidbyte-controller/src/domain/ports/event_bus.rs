@@ -15,4 +15,6 @@ pub type EventStream = Pin<Box<dyn Stream<Item = DomainEvent> + Send>>;
 pub trait EventBus: Send + Sync {
     async fn publish(&self, event: DomainEvent) -> Result<(), EventBusError>;
     async fn subscribe(&self, run_id: &str) -> Result<EventStream, EventBusError>;
+    /// Remove the broadcast entry for a `run_id` if no active receivers remain.
+    async fn cleanup(&self, run_id: &str);
 }

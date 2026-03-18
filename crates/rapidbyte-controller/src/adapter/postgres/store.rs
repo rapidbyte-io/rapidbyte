@@ -359,8 +359,33 @@ impl PipelineStore for PgPipelineStore {
 
     async fn cancel_pending_run(&self, run: &Run, task: &Task) -> Result<(), RepositoryError> {
         let mut tx = self.pool.begin().await.map_err(box_err)?;
-        update_run(&mut tx, run).await?;
-        update_task(&mut tx, task).await?;
+
+        // Only cancel the run if it's still pending (prevents overwriting a concurrent assignment)
+        let run_result = sqlx::query(
+            "UPDATE runs SET state = 'cancelled', cancel_requested = TRUE, updated_at = now() WHERE id = $1 AND state = 'pending'",
+        )
+        .bind(run.id())
+        .execute(&mut *tx)
+        .await
+        .map_err(box_err)?;
+
+        if run_result.rows_affected() == 0 {
+            // Run was concurrently assigned — cancel is no longer valid for pending path
+            tx.commit().await.map_err(box_err)?;
+            return Err(RepositoryError(Box::from(
+                "run is no longer pending (concurrent assignment)",
+            )));
+        }
+
+        // Only cancel the task if it's still pending
+        sqlx::query(
+            "UPDATE tasks SET state = 'cancelled', updated_at = now() WHERE id = $1 AND state = 'pending'",
+        )
+        .bind(task.id())
+        .execute(&mut *tx)
+        .await
+        .map_err(box_err)?;
+
         tx.commit().await.map_err(box_err)?;
         Ok(())
     }

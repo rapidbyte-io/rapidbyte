@@ -174,4 +174,13 @@ impl EventBus for PgEventBus {
 
         Ok(Box::pin(stream))
     }
+
+    async fn cleanup(&self, run_id: &str) {
+        let mut subs = self.subscribers.write().await;
+        if let Some(tx) = subs.get(run_id) {
+            if tx.receiver_count() == 0 {
+                subs.remove(run_id);
+            }
+        }
+    }
 }
