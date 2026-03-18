@@ -1,8 +1,8 @@
 use proptest::prelude::*;
-use rapidbyte_engine::config::parser;
-use rapidbyte_engine::config::validator;
+use rapidbyte_pipeline_config::parser;
+use rapidbyte_pipeline_config::validator;
 
-fn parse_pipeline_sync(yaml: &str) -> rapidbyte_engine::config::types::PipelineConfig {
+fn parse_pipeline_sync(yaml: &str) -> rapidbyte_pipeline_config::types::PipelineConfig {
     tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(parser::parse_pipeline(

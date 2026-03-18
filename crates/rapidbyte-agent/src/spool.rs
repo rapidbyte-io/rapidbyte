@@ -10,9 +10,7 @@ use arrow::datatypes::SchemaRef;
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use rapidbyte_engine::outcome::SourceTiming;
-use rapidbyte_engine::DryRunResult;
-use rapidbyte_engine::DryRunStreamResult;
+use rapidbyte_engine::{DryRunResult, DryRunStreamResult, SourceTiming};
 use uuid::Uuid;
 
 const DEFAULT_SPILL_THRESHOLD_BYTES: usize = 8 * 1024 * 1024;
@@ -332,8 +330,8 @@ mod tests {
     use arrow::array::Int32Array;
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use rapidbyte_engine::outcome::SourceTiming;
     use rapidbyte_engine::DryRunStreamResult;
+    use rapidbyte_engine::SourceTiming;
     use std::sync::Arc;
 
     fn make_dry_run_result() -> DryRunResult {

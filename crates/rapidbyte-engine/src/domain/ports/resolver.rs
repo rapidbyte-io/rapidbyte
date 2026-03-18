@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use rapidbyte_types::manifest::PluginManifest;
 use rapidbyte_types::wire::PluginKind;
 
-use crate::error::PipelineError;
+use crate::domain::error::PipelineError;
 
 // ---------------------------------------------------------------------------
 // Types

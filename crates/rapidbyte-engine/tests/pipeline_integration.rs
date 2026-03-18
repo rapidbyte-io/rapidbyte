@@ -3,9 +3,9 @@
 //! These tests verify the full pipeline processing path from YAML parsing
 //! through validation, using real fixture files.
 
-use rapidbyte_engine::config::parser;
-use rapidbyte_engine::config::types::PipelineWriteMode;
-use rapidbyte_engine::config::validator;
+use rapidbyte_pipeline_config::parser;
+use rapidbyte_pipeline_config::types::PipelineWriteMode;
+use rapidbyte_pipeline_config::validator;
 use rapidbyte_secrets::SecretProviders;
 use rapidbyte_state::{SqliteStateBackend, StateBackend};
 use rapidbyte_types::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
@@ -258,11 +258,11 @@ fn test_arrow_ipc_realistic_schema() {
     .unwrap();
 
     // Encode to IPC
-    let ipc_bytes = rapidbyte_engine::arrow::record_batch_to_ipc(&batch).unwrap();
+    let ipc_bytes = rapidbyte_types::arrow::record_batch_to_ipc(&batch).unwrap();
     assert!(!ipc_bytes.is_empty());
 
     // Decode back
-    let decoded = rapidbyte_engine::arrow::ipc_to_record_batches(&ipc_bytes).unwrap();
+    let decoded = rapidbyte_types::arrow::ipc_to_record_batches(&ipc_bytes).unwrap();
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].num_rows(), 3);
     assert_eq!(decoded[0].num_columns(), 4);

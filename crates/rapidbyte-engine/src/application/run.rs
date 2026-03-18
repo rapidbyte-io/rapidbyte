@@ -23,20 +23,6 @@ use crate::domain::outcome::{
 use crate::domain::ports::runner::{DestinationRunParams, SourceOutcome, SourceRunParams};
 use crate::domain::progress::{Phase, ProgressEvent};
 use crate::domain::retry::{RetryDecision, RetryPolicy};
-use crate::error::PipelineError as OldPipelineError;
-
-// ---------------------------------------------------------------------------
-// Error conversion
-// ---------------------------------------------------------------------------
-
-/// Convert the old `PipelineError` (used by port traits) into the new
-/// domain `PipelineError`.
-fn from_old_error(e: OldPipelineError) -> PipelineError {
-    match e {
-        OldPipelineError::Plugin(pe) => PipelineError::Plugin(pe),
-        OldPipelineError::Infrastructure(ae) => PipelineError::Infrastructure(ae),
-    }
-}
 
 /// Convert a `CompressionCodec` enum into its wire-format string name.
 fn compression_name(codec: rapidbyte_types::compression::CompressionCodec) -> String {
@@ -117,8 +103,7 @@ pub async fn run_pipeline(
                 rapidbyte_types::wire::PluginKind::Source,
                 Some(&pipeline.source.config),
             )
-            .await
-            .map_err(from_old_error)?;
+            .await?;
 
         let dest_resolved = ctx
             .resolver
@@ -127,8 +112,7 @@ pub async fn run_pipeline(
                 rapidbyte_types::wire::PluginKind::Destination,
                 Some(&pipeline.destination.config),
             )
-            .await
-            .map_err(from_old_error)?;
+            .await?;
 
         // Resolve transforms
         let mut transform_resolved = Vec::with_capacity(pipeline.transforms.len());
@@ -140,8 +124,7 @@ pub async fn run_pipeline(
                     rapidbyte_types::wire::PluginKind::Transform,
                     Some(&transform.config),
                 )
-                .await
-                .map_err(from_old_error)?;
+                .await?;
             transform_resolved.push(resolved);
         }
 
@@ -159,7 +142,7 @@ pub async fn run_pipeline(
         let mut total_dest_secs: f64 = 0.0;
         let mut total_transform_secs: f64 = 0.0;
         let mut dry_run_streams: Vec<DryRunStreamResult> = Vec::new();
-        let mut stream_error: Option<OldPipelineError> = None;
+        let mut stream_error: Option<PipelineError> = None;
 
         let (src_id, src_ver) = parse_plugin_id(&pipeline.source.use_ref);
         let (dst_id, dst_ver) = parse_plugin_id(&pipeline.destination.use_ref);
@@ -398,7 +381,7 @@ pub async fn run_pipeline(
                 tokio::time::sleep(retry_delay).await;
                 continue;
             }
-            return Err(from_old_error(err));
+            return Err(err);
         }
 
         // 6. Finalization
@@ -480,19 +463,19 @@ pub async fn run_pipeline(
 /// approves, `None` if the error should propagate.
 fn evaluate_retry(
     policy: &RetryPolicy,
-    err: &OldPipelineError,
+    err: &PipelineError,
     attempt: u32,
 ) -> Option<std::time::Duration> {
     let pe = match err {
-        OldPipelineError::Plugin(pe) => pe,
-        OldPipelineError::Infrastructure(_) => return None,
+        PipelineError::Plugin(pe) => pe,
+        PipelineError::Infrastructure(_) | PipelineError::Cancelled => return None,
     };
 
     let decision = policy.should_retry(
         attempt,
         pe.retryable,
         pe.safe_to_retry,
-        &pe.category.default_backoff(),
+        pe.category.default_backoff(),
         pe.retry_after_ms.map(std::time::Duration::from_millis),
     );
 
@@ -817,7 +800,7 @@ destination:
         tc.resolver.register("src", test_resolved_plugin());
         tc.resolver.register("dst", test_resolved_plugin());
         tc.runner
-            .enqueue_source(Err(OldPipelineError::infra("WASM load failed")));
+            .enqueue_source(Err(PipelineError::infra("WASM load failed")));
 
         let pipeline = test_pipeline_config("src", "dst", &["users"]);
         let cancel = CancellationToken::new();

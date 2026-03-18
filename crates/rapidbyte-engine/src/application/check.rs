@@ -8,9 +8,9 @@ use rapidbyte_pipeline_config::PipelineConfig;
 use rapidbyte_types::wire::PluginKind;
 
 use crate::application::context::EngineContext;
+use crate::domain::error::PipelineError;
 use crate::domain::outcome::{CheckResult, CheckStatus};
 use crate::domain::ports::runner::ValidateParams;
-use crate::error::PipelineError;
 
 /// Resolve and validate all plugins in a pipeline configuration.
 ///
@@ -28,6 +28,7 @@ use crate::error::PipelineError;
 /// component (resolution failures are fatal). Individual validation
 /// failures are captured in the returned `CheckResult` rather than
 /// causing an early return.
+#[allow(clippy::too_many_lines)]
 pub async fn check_pipeline(
     ctx: &EngineContext,
     pipeline: &PipelineConfig,

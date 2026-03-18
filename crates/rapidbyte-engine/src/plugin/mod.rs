@@ -1,5 +1,3 @@
-//! Plugin lifecycle management: resolution, manifest validation, module loading, and sandbox configuration.
+//! Plugin lifecycle management: resolution and manifest validation.
 
-pub mod loader;
 pub mod resolver;
-pub mod sandbox;

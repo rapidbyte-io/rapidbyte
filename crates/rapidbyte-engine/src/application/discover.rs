@@ -4,8 +4,8 @@
 //! list of streams the plugin can sync.
 
 use crate::application::context::EngineContext;
+use crate::domain::error::PipelineError;
 use crate::domain::ports::runner::{DiscoverParams, DiscoveredStream};
-use crate::error::PipelineError;
 use rapidbyte_types::wire::PluginKind;
 
 /// Resolve a source plugin and discover available streams.

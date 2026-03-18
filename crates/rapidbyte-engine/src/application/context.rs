@@ -6,7 +6,10 @@
 
 use std::sync::Arc;
 
-use crate::domain::ports::*;
+use crate::domain::ports::{
+    CursorRepository, DlqRepository, MetricsSnapshot, PluginResolver, PluginRunner,
+    RunRecordRepository,
+};
 use crate::domain::progress::ProgressReporter;
 
 /// Tunable engine knobs that are not per-pipeline.

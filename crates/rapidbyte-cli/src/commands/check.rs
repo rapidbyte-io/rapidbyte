@@ -7,8 +7,6 @@ use console::style;
 use rapidbyte_engine::CheckStatus;
 use rapidbyte_types::error::{ValidationResult, ValidationStatus};
 
-use rapidbyte_engine::orchestrator;
-
 use crate::Verbosity;
 
 /// Execute the `check` command: validate pipeline config and plugin connectivity.
@@ -24,7 +22,7 @@ pub async fn execute(
 ) -> Result<()> {
     let config = super::load_pipeline(pipeline_path, secrets).await?;
 
-    let result = orchestrator::check_pipeline(&config, registry_config).await?;
+    let result = rapidbyte_engine::check_pipeline_compat(&config, registry_config).await?;
 
     if verbosity != Verbosity::Quiet {
         if let Some(outcome) = &result.source_manifest {

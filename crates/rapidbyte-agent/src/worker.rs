@@ -473,7 +473,7 @@ async fn process_task(
             registry_config: &registry_config,
         },
         |config, options, progress_tx, cancel_token, metrics_runtime, registry_config| {
-            Box::pin(rapidbyte_engine::orchestrator::run_pipeline(
+            Box::pin(rapidbyte_engine::run_pipeline_compat(
                 config,
                 options,
                 progress_tx,

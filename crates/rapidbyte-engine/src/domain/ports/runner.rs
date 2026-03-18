@@ -16,7 +16,7 @@ use rapidbyte_types::metric::{ReadSummary, TransformSummary, WriteSummary};
 use rapidbyte_types::state::RunStats;
 use rapidbyte_types::stream::StreamContext;
 
-use crate::error::PipelineError;
+use crate::domain::error::PipelineError;
 
 // ---------------------------------------------------------------------------
 // Param structs

@@ -9,6 +9,8 @@ use opentelemetry_sdk::metrics::SdkMeterProvider;
 use rapidbyte_engine::runner::{
     run_destination_stream, run_source_stream, run_transform_stream, StreamRunContext,
 };
+// NOTE: These still use the internal runner module. The runner module remains
+// pub for benchmark access until benchmarks are rewritten to use run_pipeline.
 use rapidbyte_metrics::snapshot::SnapshotReader;
 use rapidbyte_runtime::{
     load_plugin_manifest, parse_plugin_ref, resolve_plugin_path, Frame, WasmRuntime,

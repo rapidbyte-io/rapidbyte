@@ -1,20 +1,38 @@
-//! Verify that plugin module items are publicly accessible.
+//! Verify that key hexagonal API types are publicly accessible.
 
-use rapidbyte_engine::plugin::resolver::{resolve_plugins, ResolvedPlugins};
-use rapidbyte_engine::plugin::sandbox::build_sandbox_overrides;
+use rapidbyte_engine::{
+    check_pipeline, discover_plugin, run_pipeline, EngineConfig, EngineContext, PipelineError,
+};
 
 #[test]
-fn resolve_types_are_public() {
-    // Compile-time check: these types are importable from outside the crate.
-    // `resolve_plugins` is async so we verify it's callable and returns the right type.
-    let _ = resolve_plugins;
-    let _ = build_sandbox_overrides;
+fn hexagonal_api_types_are_public() {
+    // Compile-time check: these types/functions are importable from outside the crate.
+    let _ = check_pipeline;
+    let _ = discover_plugin;
+    let _ = run_pipeline;
 
-    // Verify ResolvedPlugins fields are accessible.
-    fn _assert_resolved_plugins_fields(r: &ResolvedPlugins) {
-        let _ = &r.source_wasm;
-        let _ = &r.dest_wasm;
-        let _ = &r.source_manifest;
-        let _ = &r.dest_manifest;
+    // Verify EngineContext fields are accessible.
+    fn _assert_engine_context_fields(ctx: &EngineContext) {
+        let _ = &ctx.runner;
+        let _ = &ctx.resolver;
+        let _ = &ctx.cursors;
+        let _ = &ctx.runs;
+        let _ = &ctx.dlq;
+        let _ = &ctx.progress;
+        let _ = &ctx.metrics;
+        let _ = &ctx.config;
+    }
+
+    fn _assert_engine_config_fields(cfg: &EngineConfig) {
+        let _ = cfg.max_retries;
+        let _ = cfg.channel_capacity;
+    }
+
+    fn _assert_pipeline_error_variants(err: PipelineError) {
+        match err {
+            PipelineError::Plugin(_) => {}
+            PipelineError::Infrastructure(_) => {}
+            PipelineError::Cancelled => {}
+        }
     }
 }

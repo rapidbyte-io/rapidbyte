@@ -12,6 +12,7 @@
 //! | `wasm_runner`       | `WasmPluginRunner`         | `PluginRunner`   |
 
 pub mod metrics;
+pub mod orchestrator_compat;
 pub mod postgres;
 pub mod progress;
 pub mod registry_resolver;

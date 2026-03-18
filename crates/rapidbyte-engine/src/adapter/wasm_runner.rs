@@ -9,13 +9,22 @@ use async_trait::async_trait;
 use rapidbyte_runtime::WasmRuntime;
 use rapidbyte_state::StateBackend;
 
+use crate::domain::error::PipelineError;
 use crate::domain::ports::runner::{
     CheckComponentStatus, DestinationOutcome, DestinationRunParams, DiscoverParams,
     DiscoveredStream, PluginRunner, SourceOutcome, SourceRunParams, TransformOutcome,
     TransformRunParams, ValidateParams,
 };
-use crate::error::PipelineError;
+use crate::error::PipelineError as OldPipelineError;
 use crate::runner::StreamRunContext;
+
+/// Convert old `PipelineError` to domain `PipelineError`.
+fn from_old_error(e: OldPipelineError) -> PipelineError {
+    match e {
+        OldPipelineError::Plugin(pe) => PipelineError::Plugin(pe),
+        OldPipelineError::Infrastructure(ae) => PipelineError::Infrastructure(ae),
+    }
+}
 
 /// Adapter that implements [`PluginRunner`] by delegating to the WASM runtime
 /// and existing runner functions in [`crate::runner`].
@@ -82,7 +91,7 @@ impl PluginRunner for WasmPluginRunner {
         .await
         .map_err(|e| PipelineError::infra(format!("source task panicked: {e}")))?;
 
-        let outcome = result?;
+        let outcome = result.map_err(from_old_error)?;
         Ok(SourceOutcome {
             duration_secs: outcome.duration_secs,
             summary: outcome.summary,
@@ -126,7 +135,7 @@ impl PluginRunner for WasmPluginRunner {
         .await
         .map_err(|e| PipelineError::infra(format!("transform task panicked: {e}")))?;
 
-        let outcome = result?;
+        let outcome = result.map_err(from_old_error)?;
         Ok(TransformOutcome {
             duration_secs: outcome.duration_secs,
             summary: outcome.summary,
@@ -168,7 +177,7 @@ impl PluginRunner for WasmPluginRunner {
         .await
         .map_err(|e| PipelineError::infra(format!("destination task panicked: {e}")))?;
 
-        let outcome = result?;
+        let outcome = result.map_err(from_old_error)?;
         Ok(DestinationOutcome {
             duration_secs: outcome.duration_secs,
             summary: outcome.summary,

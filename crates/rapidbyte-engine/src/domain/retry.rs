@@ -38,7 +38,7 @@ impl RetryPolicy {
         attempt: u32,
         retryable: bool,
         safe_to_retry: bool,
-        backoff_class: &BackoffClass,
+        backoff_class: BackoffClass,
         retry_after_hint: Option<Duration>,
     ) -> RetryDecision {
         if !retryable || !safe_to_retry {
@@ -60,7 +60,7 @@ impl RetryPolicy {
     ///
     /// Base delays: Fast = 100ms, Normal = 1s, Slow = 5s.
     /// Doubles on each subsequent attempt, capped at 60 seconds.
-    fn compute_backoff(attempt: u32, class: &BackoffClass) -> Duration {
+    fn compute_backoff(attempt: u32, class: BackoffClass) -> Duration {
         let base_ms: u64 = match class {
             BackoffClass::Fast => 100,
             BackoffClass::Normal => 1_000,
@@ -78,7 +78,7 @@ mod tests {
     #[test]
     fn gives_up_when_not_retryable() {
         let policy = RetryPolicy::new(3);
-        let decision = policy.should_retry(1, false, true, &BackoffClass::Normal, None);
+        let decision = policy.should_retry(1, false, true, BackoffClass::Normal, None);
         assert!(matches!(decision, RetryDecision::GiveUp { .. }));
         if let RetryDecision::GiveUp { reason } = decision {
             assert!(reason.contains("not retryable"));
@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn gives_up_when_not_safe_to_retry() {
         let policy = RetryPolicy::new(3);
-        let decision = policy.should_retry(1, true, false, &BackoffClass::Normal, None);
+        let decision = policy.should_retry(1, true, false, BackoffClass::Normal, None);
         assert!(matches!(decision, RetryDecision::GiveUp { .. }));
         if let RetryDecision::GiveUp { reason } = decision {
             assert!(reason.contains("not retryable"));
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn retries_with_fast_backoff() {
         let policy = RetryPolicy::new(5);
-        let decision = policy.should_retry(1, true, true, &BackoffClass::Fast, None);
+        let decision = policy.should_retry(1, true, true, BackoffClass::Fast, None);
         match decision {
             RetryDecision::Retry { delay } => {
                 assert_eq!(delay, Duration::from_millis(100));
@@ -111,7 +111,7 @@ mod tests {
     fn exponential_backoff_doubles() {
         let policy = RetryPolicy::new(10);
 
-        let d2 = policy.should_retry(2, true, true, &BackoffClass::Fast, None);
+        let d2 = policy.should_retry(2, true, true, BackoffClass::Fast, None);
         match d2 {
             RetryDecision::Retry { delay } => {
                 assert_eq!(delay, Duration::from_millis(200));
@@ -119,7 +119,7 @@ mod tests {
             RetryDecision::GiveUp { .. } => panic!("expected Retry"),
         }
 
-        let d3 = policy.should_retry(3, true, true, &BackoffClass::Fast, None);
+        let d3 = policy.should_retry(3, true, true, BackoffClass::Fast, None);
         match d3 {
             RetryDecision::Retry { delay } => {
                 assert_eq!(delay, Duration::from_millis(400));
@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn backoff_capped_at_60_seconds() {
         let policy = RetryPolicy::new(100);
-        let decision = policy.should_retry(30, true, true, &BackoffClass::Normal, None);
+        let decision = policy.should_retry(30, true, true, BackoffClass::Normal, None);
         match decision {
             RetryDecision::Retry { delay } => {
                 assert_eq!(delay, Duration::from_millis(60_000));
@@ -144,7 +144,7 @@ mod tests {
     fn respects_retry_after_hint() {
         let policy = RetryPolicy::new(5);
         let hint = Some(Duration::from_millis(7500));
-        let decision = policy.should_retry(1, true, true, &BackoffClass::Fast, hint);
+        let decision = policy.should_retry(1, true, true, BackoffClass::Fast, hint);
         match decision {
             RetryDecision::Retry { delay } => {
                 assert_eq!(delay, Duration::from_millis(7500));
@@ -156,7 +156,7 @@ mod tests {
     #[test]
     fn gives_up_after_max_attempts() {
         let policy = RetryPolicy::new(3);
-        let decision = policy.should_retry(3, true, true, &BackoffClass::Normal, None);
+        let decision = policy.should_retry(3, true, true, BackoffClass::Normal, None);
         assert!(matches!(decision, RetryDecision::GiveUp { .. }));
         if let RetryDecision::GiveUp { reason } = decision {
             assert!(reason.contains("max attempts"));

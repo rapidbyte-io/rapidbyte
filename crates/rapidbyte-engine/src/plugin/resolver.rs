@@ -27,7 +27,7 @@ pub struct ResolvedPlugins {
 /// Returns `PipelineError::Infrastructure` if plugin paths cannot be resolved
 /// or manifests fail validation.
 pub async fn resolve_plugins(
-    config: &crate::config::types::PipelineConfig,
+    config: &rapidbyte_pipeline_config::types::PipelineConfig,
     registry_config: &RegistryConfig,
 ) -> Result<ResolvedPlugins, PipelineError> {
     let source_wasm = rapidbyte_runtime::resolve_plugin(

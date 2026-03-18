@@ -4,7 +4,6 @@ use std::path::Path;
 
 use anyhow::Result;
 use console::style;
-use rapidbyte_engine::orchestrator;
 use rapidbyte_types::wire::SyncMode;
 
 use crate::Verbosity;
@@ -23,7 +22,7 @@ pub async fn execute(
     let config = super::load_pipeline(pipeline_path, secrets).await?;
 
     // Discover catalog from source plugin
-    let catalog = orchestrator::discover_plugin(
+    let catalog = rapidbyte_engine::discover_plugin_compat(
         &config.source.use_ref,
         &config.source.config,
         registry_config,

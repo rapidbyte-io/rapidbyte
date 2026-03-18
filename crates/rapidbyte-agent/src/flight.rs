@@ -256,7 +256,7 @@ mod tests {
     use arrow::array::{Int32Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use rapidbyte_engine::outcome::SourceTiming;
+    use rapidbyte_engine::SourceTiming;
     use rapidbyte_engine::{DryRunResult, DryRunStreamResult};
     use tokio_stream::StreamExt;
 

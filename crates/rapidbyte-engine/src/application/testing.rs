@@ -13,6 +13,7 @@ use rapidbyte_types::envelope::DlqRecord;
 use rapidbyte_types::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
 use rapidbyte_types::wire::PluginKind;
 
+use crate::domain::error::PipelineError;
 use crate::domain::ports::cursor::CursorRepository;
 use crate::domain::ports::dlq::DlqRepository;
 use crate::domain::ports::metrics::MetricsSnapshot;
@@ -25,7 +26,6 @@ use crate::domain::ports::runner::{
 };
 use crate::domain::ports::RepositoryError;
 use crate::domain::progress::{ProgressEvent, ProgressReporter};
-use crate::error::PipelineError;
 
 use super::context::{EngineConfig, EngineContext};
 

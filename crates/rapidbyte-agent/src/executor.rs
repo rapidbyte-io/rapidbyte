@@ -3,9 +3,9 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use rapidbyte_engine::outcome::{ExecutionOptions, PipelineOutcome};
-use rapidbyte_engine::progress::ProgressEvent;
-use rapidbyte_engine::PipelineError;
+use rapidbyte_engine::domain::error::PipelineError;
+use rapidbyte_engine::ProgressEvent;
+use rapidbyte_engine::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_pipeline_config::parser;
 use rapidbyte_pipeline_config::validator;
 use rapidbyte_types::prelude::CommitState;
@@ -82,7 +82,7 @@ fn is_pre_commit_cancellation(error: &PipelineError) -> bool {
             plugin_error.code == "CANCELLED"
                 && matches!(plugin_error.commit_state, Some(CommitState::BeforeCommit))
         }
-        PipelineError::Infrastructure(_) => false,
+        PipelineError::Infrastructure(_) | PipelineError::Cancelled => false,
     }
 }
 
@@ -263,6 +263,13 @@ where
                     safe_to_retry: false,
                     commit_state: CommitState::BeforeCommit,
                 },
+                PipelineError::Cancelled => TaskErrorInfo {
+                    code: "CANCELLED".into(),
+                    message: "pipeline cancelled".into(),
+                    retryable: true,
+                    safe_to_retry: true,
+                    commit_state: CommitState::BeforeCommit,
+                },
             };
             TaskExecutionResult {
                 outcome: TaskOutcomeKind::Failed(error_info),
@@ -283,9 +290,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapidbyte_engine::outcome::PipelineOutcome;
-    use rapidbyte_engine::outcome::{DestTiming, PipelineCounts, PipelineResult, SourceTiming};
-    use rapidbyte_engine::PipelineError;
+    use rapidbyte_engine::domain::error::PipelineError;
+    use rapidbyte_engine::{
+        DestTiming, PipelineCounts, PipelineOutcome, PipelineResult, SourceTiming,
+    };
     use rapidbyte_metrics::snapshot::SnapshotReader;
     use rapidbyte_types::error::{CommitState, PluginError};
     use std::sync::Arc;

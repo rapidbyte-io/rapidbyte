@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use rapidbyte_registry::RegistryConfig;
 use rapidbyte_types::wire::PluginKind;
 
+use crate::domain::error::PipelineError;
 use crate::domain::ports::resolver::{PluginResolver, ResolvedPlugin};
-use crate::error::PipelineError;
 use crate::plugin::resolver::{load_and_validate_manifest, validate_config_against_schema};
 
 /// Plugin resolver that uses the OCI registry (with local filesystem fallback).

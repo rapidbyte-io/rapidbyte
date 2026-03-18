@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use rapidbyte_pipeline_config::parser;
 use rapidbyte_pipeline_config::validator;
 use rapidbyte_secrets::SecretProviders;
-use rapidbyte_engine::outcome::{ExecutionOptions, PipelineOutcome};
+use rapidbyte_engine::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_metrics::snapshot::SnapshotReader;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
 use tokio_postgres::NoTls;
@@ -271,7 +271,7 @@ impl HarnessContext {
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
         let (provider, reader) = e2e_metrics();
-        let outcome = rapidbyte_engine::orchestrator::run_pipeline(
+        let outcome = rapidbyte_engine::run_pipeline_compat(
             &config,
             &ExecutionOptions::default(),
             None,
@@ -281,7 +281,7 @@ impl HarnessContext {
             &rapidbyte_registry::RegistryConfig::default(),
         )
         .await
-        .context("pipeline execution failed")?;
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let run = match outcome {
             PipelineOutcome::Run(run) => run,
@@ -367,7 +367,7 @@ impl HarnessContext {
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
         let (provider, reader) = e2e_metrics();
-        let outcome = rapidbyte_engine::orchestrator::run_pipeline(
+        let outcome = rapidbyte_engine::run_pipeline_compat(
             &config,
             &ExecutionOptions::default(),
             None,
@@ -377,7 +377,7 @@ impl HarnessContext {
             &rapidbyte_registry::RegistryConfig::default(),
         )
         .await
-        .context("pipeline execution failed")?;
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let run = match outcome {
             PipelineOutcome::Run(run) => run,
@@ -407,7 +407,7 @@ impl HarnessContext {
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
         let (provider, reader) = e2e_metrics();
-        let outcome = rapidbyte_engine::orchestrator::run_pipeline(
+        let outcome = rapidbyte_engine::run_pipeline_compat(
             &config,
             &ExecutionOptions::default(),
             None,
@@ -417,7 +417,7 @@ impl HarnessContext {
             &rapidbyte_registry::RegistryConfig::default(),
         )
         .await
-        .context("pipeline execution failed")?;
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let run = match outcome {
             PipelineOutcome::Run(run) => run,
@@ -521,7 +521,7 @@ impl HarnessContext {
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
         let (provider, reader) = e2e_metrics();
-        let outcome = rapidbyte_engine::orchestrator::run_pipeline(
+        let outcome = rapidbyte_engine::run_pipeline_compat(
             &config,
             &ExecutionOptions::default(),
             None,
@@ -531,7 +531,7 @@ impl HarnessContext {
             &rapidbyte_registry::RegistryConfig::default(),
         )
         .await
-        .context("pipeline execution failed")?;
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let run = match outcome {
             PipelineOutcome::Run(run) => run,
