@@ -76,10 +76,7 @@ pub async fn execute(
                 let state = RunState::try_from(event.state).ok();
                 match state {
                     Some(RunState::Cancelled) => {
-                        if verbosity != Verbosity::Quiet {
-                            eprintln!("Run cancelled");
-                        }
-                        return Ok(());
+                        anyhow::bail!("Run was cancelled");
                     }
                     Some(RunState::Completed) => {
                         if verbosity != Verbosity::Quiet {

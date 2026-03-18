@@ -166,20 +166,21 @@ impl PipelineService for PipelineGrpcService {
         };
 
         let snapshot_state = run.state();
+        let snapshot_attempt = run.current_attempt();
         let initial = convert::run_state_to_event(&run);
 
-        // Filter subscription events: skip any state-change events that don't
-        // advance past the snapshot (prevents out-of-order regression). Progress
-        // events are always forwarded since they're ephemeral.
-        let snapshot_proto_state = convert::run_state_to_proto(snapshot_state);
+        // Filter subscription events: skip events that exactly match the snapshot
+        // (state AND attempt), which are duplicates from events queued between
+        // subscribe and get_run. Events with different attempts (retries) or
+        // different states always pass through.
         let deduped = event_stream.filter_map(move |event| {
-            let dominated = match &event {
-                crate::domain::event::DomainEvent::RunStateChanged { state, .. } => {
-                    convert::run_state_to_proto(*state) <= snapshot_proto_state
+            let is_duplicate = match &event {
+                crate::domain::event::DomainEvent::RunStateChanged { state, attempt, .. } => {
+                    *state == snapshot_state && *attempt == snapshot_attempt
                 }
                 _ => false, // progress/completed/failed/cancelled always pass
             };
-            if dominated {
+            if is_duplicate {
                 None
             } else {
                 Some(event)
