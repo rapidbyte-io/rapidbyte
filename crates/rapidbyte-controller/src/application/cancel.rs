@@ -47,18 +47,24 @@ pub async fn cancel_run(ctx: &AppContext, run_id: &str) -> Result<CancelResult, 
                 pending_task.cancel_pending()?;
                 run.cancel()?;
 
-                if ctx
-                    .store
-                    .cancel_pending_run(&run, &pending_task)
-                    .await
-                    .is_ok()
-                {
-                    ctx.event_bus
-                        .publish(DomainEvent::RunCancelled {
-                            run_id: run_id.to_string(),
-                        })
-                        .await?;
-                    return Ok(CancelResult { accepted: true });
+                match ctx.store.cancel_pending_run(&run, &pending_task).await {
+                    Ok(()) => {
+                        ctx.event_bus
+                            .publish(DomainEvent::RunCancelled {
+                                run_id: run_id.to_string(),
+                            })
+                            .await?;
+                        return Ok(CancelResult { accepted: true });
+                    }
+                    Err(e) => {
+                        // Distinguish state conflict (expected race) from real storage errors.
+                        // State conflict: "run is no longer pending" — fall through to Running path.
+                        // Real error: propagate.
+                        let msg = e.to_string();
+                        if !msg.contains("no longer pending") {
+                            return Err(AppError::Repository(e));
+                        }
+                    }
                 }
             }
 

@@ -96,12 +96,12 @@ pub async fn heartbeat(
         task.set_updated_at(now);
         ctx.tasks.save(&task).await?;
 
-        // 2d. Publish progress if provided
-        if let Some(ref message) = input.progress_message {
+        // 2d. Publish progress if any progress data provided
+        if input.progress_message.is_some() || input.progress_pct.is_some() {
             ctx.event_bus
                 .publish(DomainEvent::ProgressReported {
                     run_id: task.run_id().to_string(),
-                    message: message.clone(),
+                    message: input.progress_message.clone().unwrap_or_default(),
                     pct: input.progress_pct,
                 })
                 .await?;
@@ -455,5 +455,33 @@ mod tests {
         // Agent's last_seen_at should be updated
         let updated = tc.ctx.agents.find_by_id("agent-1").await.unwrap().unwrap();
         assert!(updated.last_seen_at() > now);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_pct_only_publishes_progress() {
+        let tc = fake_context();
+        let (task_id, _run_id, epoch) = setup_running_task(&tc).await;
+
+        let _directives = heartbeat(
+            &tc.ctx,
+            "agent-1",
+            vec![TaskHeartbeatInput {
+                task_id,
+                lease_epoch: epoch,
+                progress_message: None,
+                progress_pct: Some(0.75),
+            }],
+        )
+        .await
+        .unwrap();
+
+        let events = tc.event_bus.published_events();
+        let progress = events
+            .iter()
+            .find(|e| matches!(e, DomainEvent::ProgressReported { pct: Some(_), .. }));
+        assert!(
+            progress.is_some(),
+            "progress_pct without message should still publish"
+        );
     }
 }
