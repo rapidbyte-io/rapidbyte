@@ -30,6 +30,7 @@ postgres = { workspace = true }
 
 [features]
 test-support = []
+integration = []
 
 [dev-dependencies]
 bytes = "1"
@@ -37,6 +38,8 @@ tempfile = "3"
 criterion = { workspace = true }
 proptest = "1"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
 
 [[bench]]
 name = "arrow_codec"

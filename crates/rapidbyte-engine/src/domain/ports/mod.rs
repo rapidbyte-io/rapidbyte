@@ -67,3 +67,27 @@ pub use runner::{
     DiscoveredStream, PluginRunner, SourceOutcome, SourceRunParams, TransformOutcome,
     TransformRunParams, ValidateParams,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_conflict_returns_true_for_conflict() {
+        let err = RepositoryError::Conflict("race condition".into());
+        assert!(err.is_conflict());
+    }
+
+    #[test]
+    fn is_conflict_returns_false_for_other() {
+        let err = RepositoryError::other(std::io::Error::other("boom"));
+        assert!(!err.is_conflict());
+    }
+
+    #[test]
+    fn other_wraps_error() {
+        let inner = std::io::Error::other("db failed");
+        let err = RepositoryError::other(inner);
+        assert!(err.to_string().contains("db failed"));
+    }
+}

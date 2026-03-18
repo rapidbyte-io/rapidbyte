@@ -163,4 +163,36 @@ mod tests {
             assert!(reason.contains("3"));
         }
     }
+
+    #[test]
+    fn retry_attempt_zero_uses_base_delay() {
+        let policy = RetryPolicy::new(3);
+        match policy.should_retry(0, true, true, BackoffClass::Fast, None) {
+            RetryDecision::Retry { delay } => {
+                assert_eq!(delay, Duration::from_millis(100));
+            }
+            RetryDecision::GiveUp { .. } => panic!("expected Retry"),
+        }
+    }
+
+    #[test]
+    fn max_attempts_one_means_no_retries() {
+        let policy = RetryPolicy::new(1);
+        match policy.should_retry(1, true, true, BackoffClass::Normal, None) {
+            RetryDecision::GiveUp { .. } => {} // expected
+            RetryDecision::Retry { .. } => panic!("expected GiveUp"),
+        }
+    }
+
+    #[test]
+    fn retry_after_hint_overrides_even_slow_class() {
+        let policy = RetryPolicy::new(5);
+        let hint = Some(Duration::from_millis(200));
+        match policy.should_retry(1, true, true, BackoffClass::Slow, hint) {
+            RetryDecision::Retry { delay } => {
+                assert_eq!(delay, Duration::from_millis(200));
+            }
+            RetryDecision::GiveUp { .. } => panic!("expected Retry"),
+        }
+    }
 }

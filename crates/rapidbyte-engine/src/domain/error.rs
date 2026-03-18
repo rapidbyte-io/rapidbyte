@@ -132,4 +132,16 @@ mod tests {
         let err = PipelineError::infra("something broke");
         assert!(err.plugin_error().is_none());
     }
+
+    #[test]
+    fn infra_error_displays_message() {
+        let err = PipelineError::infra("db down");
+        assert!(err.to_string().contains("db down"));
+    }
+
+    #[test]
+    fn cancelled_displays_message() {
+        let err = PipelineError::Cancelled;
+        assert_eq!(err.to_string(), "pipeline cancelled");
+    }
 }
