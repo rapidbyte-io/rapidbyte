@@ -7,9 +7,87 @@ use rapidbyte_pipeline_config::parser;
 use rapidbyte_pipeline_config::types::PipelineWriteMode;
 use rapidbyte_pipeline_config::validator;
 use rapidbyte_secrets::SecretProviders;
-use rapidbyte_state::{SqliteStateBackend, StateBackend};
 use rapidbyte_types::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
+use rapidbyte_types::state_backend::StateBackend;
+use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
+
+/// In-memory state backend for integration tests (replaces SqliteStateBackend).
+struct FakeStateBackend {
+    cursors: Mutex<HashMap<(String, String), CursorState>>,
+    next_run_id: Mutex<i64>,
+}
+
+impl FakeStateBackend {
+    fn new() -> Self {
+        Self {
+            cursors: Mutex::new(HashMap::new()),
+            next_run_id: Mutex::new(1),
+        }
+    }
+}
+
+impl StateBackend for FakeStateBackend {
+    fn get_cursor(
+        &self,
+        pipeline: &PipelineId,
+        stream: &StreamName,
+    ) -> rapidbyte_types::state_error::Result<Option<CursorState>> {
+        Ok(self
+            .cursors
+            .lock()
+            .unwrap()
+            .get(&(pipeline.to_string(), stream.to_string()))
+            .cloned())
+    }
+    fn set_cursor(
+        &self,
+        pipeline: &PipelineId,
+        stream: &StreamName,
+        cursor: &CursorState,
+    ) -> rapidbyte_types::state_error::Result<()> {
+        self.cursors
+            .lock()
+            .unwrap()
+            .insert((pipeline.to_string(), stream.to_string()), cursor.clone());
+        Ok(())
+    }
+    fn start_run(
+        &self,
+        _: &PipelineId,
+        _: &StreamName,
+    ) -> rapidbyte_types::state_error::Result<i64> {
+        let mut id = self.next_run_id.lock().unwrap();
+        let current = *id;
+        *id += 1;
+        Ok(current)
+    }
+    fn complete_run(
+        &self,
+        _: i64,
+        _: RunStatus,
+        _: &RunStats,
+    ) -> rapidbyte_types::state_error::Result<()> {
+        Ok(())
+    }
+    fn compare_and_set(
+        &self,
+        _: &PipelineId,
+        _: &StreamName,
+        _: Option<&str>,
+        _: &str,
+    ) -> rapidbyte_types::state_error::Result<bool> {
+        Ok(true)
+    }
+    fn insert_dlq_records(
+        &self,
+        _: &PipelineId,
+        _: i64,
+        _: &[rapidbyte_types::envelope::DlqRecord],
+    ) -> rapidbyte_types::state_error::Result<u64> {
+        Ok(0)
+    }
+}
 
 static PLUGIN_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -109,7 +187,7 @@ async fn test_parse_and_validate_invalid_fixture() {
 /// Test full state backend lifecycle: create run, set cursors, complete run.
 #[test]
 fn test_state_backend_full_lifecycle() {
-    let state = SqliteStateBackend::in_memory().expect("Failed to create in-memory state");
+    let state = FakeStateBackend::new();
 
     // Start a run
     let run_id = state

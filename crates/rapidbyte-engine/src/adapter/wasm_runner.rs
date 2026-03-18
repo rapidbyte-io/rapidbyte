@@ -26,6 +26,7 @@ use rapidbyte_types::state_backend::StateBackend;
 use rapidbyte_types::stream::StreamContext;
 use rapidbyte_types::wire::PluginKind;
 
+use crate::adapter::engine_factory::noop_state_backend;
 use crate::domain::error::PipelineError;
 use crate::domain::ports::runner::{
     CheckComponentStatus, DestinationOutcome, DestinationRunParams, DiscoverParams,
@@ -779,13 +780,12 @@ fn validate_plugin_impl(
     permissions: Option<&Permissions>,
 ) -> anyhow::Result<ValidationResult> {
     use rapidbyte_runtime::{dest_validation_to_sdk, transform_validation_to_sdk};
-    use rapidbyte_state::SqliteStateBackend;
 
     tracing::info!(plugin = plugin_id, version = plugin_version, kind = ?kind, "Validating plugin");
 
     let runtime = WasmRuntime::new()?;
     let module = runtime.load_module(wasm_path)?;
-    let state = Arc::new(SqliteStateBackend::in_memory()?);
+    let state = noop_state_backend();
 
     let mut builder = ComponentHostState::builder()
         .pipeline("check")
@@ -904,12 +904,10 @@ fn run_discover_impl(
     config: &serde_json::Value,
     permissions: Option<&Permissions>,
 ) -> anyhow::Result<Catalog> {
-    use rapidbyte_state::SqliteStateBackend;
-
     let runtime = WasmRuntime::new()?;
     let module = runtime.load_module(wasm_path)?;
 
-    let state = Arc::new(SqliteStateBackend::in_memory()?);
+    let state = noop_state_backend();
     let mut builder = ComponentHostState::builder()
         .pipeline("discover")
         .plugin_id(plugin_id)

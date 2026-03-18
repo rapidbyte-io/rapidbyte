@@ -29,6 +29,67 @@ impl ProgressReporter for NoopProgressReporter {
     fn report(&self, _event: ProgressEvent) {}
 }
 
+/// No-op state backend used by discover/validate contexts that don't persist state.
+struct NoopStateBackend;
+
+/// Returns an `Arc<dyn StateBackend>` backed by a no-op implementation.
+///
+/// Used for contexts that don't need real state persistence (discover,
+/// validate).
+pub(crate) fn noop_state_backend() -> Arc<dyn rapidbyte_types::state_backend::StateBackend> {
+    Arc::new(NoopStateBackend)
+}
+
+impl rapidbyte_types::state_backend::StateBackend for NoopStateBackend {
+    fn get_cursor(
+        &self,
+        _pipeline: &rapidbyte_types::state::PipelineId,
+        _stream: &rapidbyte_types::state::StreamName,
+    ) -> rapidbyte_types::state_error::Result<Option<rapidbyte_types::state::CursorState>> {
+        Ok(None)
+    }
+    fn set_cursor(
+        &self,
+        _pipeline: &rapidbyte_types::state::PipelineId,
+        _stream: &rapidbyte_types::state::StreamName,
+        _cursor: &rapidbyte_types::state::CursorState,
+    ) -> rapidbyte_types::state_error::Result<()> {
+        Ok(())
+    }
+    fn start_run(
+        &self,
+        _pipeline: &rapidbyte_types::state::PipelineId,
+        _stream: &rapidbyte_types::state::StreamName,
+    ) -> rapidbyte_types::state_error::Result<i64> {
+        Ok(1)
+    }
+    fn complete_run(
+        &self,
+        _run_id: i64,
+        _status: rapidbyte_types::state::RunStatus,
+        _stats: &rapidbyte_types::state::RunStats,
+    ) -> rapidbyte_types::state_error::Result<()> {
+        Ok(())
+    }
+    fn compare_and_set(
+        &self,
+        _pipeline: &rapidbyte_types::state::PipelineId,
+        _stream: &rapidbyte_types::state::StreamName,
+        _expected: Option<&str>,
+        _new_value: &str,
+    ) -> rapidbyte_types::state_error::Result<bool> {
+        Ok(true)
+    }
+    fn insert_dlq_records(
+        &self,
+        _pipeline: &rapidbyte_types::state::PipelineId,
+        _run_id: i64,
+        _records: &[rapidbyte_types::envelope::DlqRecord],
+    ) -> rapidbyte_types::state_error::Result<u64> {
+        Ok(0)
+    }
+}
+
 struct NoopMetricsSnapshot;
 
 impl ports::MetricsSnapshot for NoopMetricsSnapshot {
@@ -176,15 +237,16 @@ pub async fn build_run_context(
     progress_tx: Option<tokio_mpsc::UnboundedSender<ProgressEvent>>,
     registry_config: &RegistryConfig,
 ) -> Result<EngineContext, PipelineError> {
-    let state_connection = config.state.connection.clone().unwrap_or_else(|| {
-        rapidbyte_state::default_connection(rapidbyte_state::BackendKind::Sqlite)
-    });
-    let state_backend = tokio::task::spawn_blocking(move || {
-        rapidbyte_state::open_backend(rapidbyte_state::BackendKind::Sqlite, &state_connection)
-    })
-    .await
-    .map_err(|e| PipelineError::infra(format!("state backend task panicked: {e}")))?
-    .map_err(PipelineError::Infrastructure)?;
+    let state_connection = config
+        .state
+        .connection
+        .clone()
+        .ok_or_else(|| PipelineError::infra("state.connection is required (Postgres URL)"))?;
+    let pg = crate::adapter::postgres::PgBackend::connect(&state_connection)
+        .await
+        .map_err(PipelineError::Infrastructure)?;
+    let pg = Arc::new(pg);
+    let state_backend = pg.as_state_backend();
 
     let wasm_runtime =
         rapidbyte_runtime::WasmRuntime::new().map_err(PipelineError::Infrastructure)?;
@@ -237,12 +299,10 @@ pub async fn build_lightweight_context(
 pub async fn build_discover_context(
     registry_config: &RegistryConfig,
 ) -> Result<EngineContext, anyhow::Error> {
-    let state_backend = tokio::task::spawn_blocking(|| {
-        let conn = rapidbyte_state::default_connection(rapidbyte_state::BackendKind::Sqlite);
-        rapidbyte_state::open_backend(rapidbyte_state::BackendKind::Sqlite, &conn)
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("state backend task panicked: {e}"))??;
+    // Discover context requires a state backend — use an in-memory fake since
+    // discover only needs WASM plugin invocation, not real state persistence.
+    let state_backend: std::sync::Arc<dyn rapidbyte_types::state_backend::StateBackend> =
+        Arc::new(NoopStateBackend);
 
     let wasm_runtime = rapidbyte_runtime::WasmRuntime::new()?;
     let runner = Arc::new(WasmPluginRunner::new(wasm_runtime, state_backend.clone()));

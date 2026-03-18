@@ -1172,8 +1172,81 @@ mod tests {
     use opentelemetry::global;
     use opentelemetry_sdk::metrics::data::{Histogram, Sum};
     use opentelemetry_sdk::metrics::InMemoryMetricExporter;
-    use rapidbyte_state::SqliteStateBackend;
+    use std::collections::HashMap;
     use std::sync::LazyLock;
+
+    /// Minimal in-memory state backend for tests (replaces SqliteStateBackend).
+    struct FakeStateBackend {
+        cursors: Mutex<HashMap<(String, String), rapidbyte_types::state::CursorState>>,
+    }
+
+    impl FakeStateBackend {
+        fn new() -> Self {
+            Self {
+                cursors: Mutex::new(HashMap::new()),
+            }
+        }
+    }
+
+    impl StateBackend for FakeStateBackend {
+        fn get_cursor(
+            &self,
+            pipeline: &rapidbyte_types::state::PipelineId,
+            stream: &rapidbyte_types::state::StreamName,
+        ) -> rapidbyte_types::state_error::Result<Option<rapidbyte_types::state::CursorState>>
+        {
+            Ok(self
+                .cursors
+                .lock()
+                .unwrap()
+                .get(&(pipeline.to_string(), stream.to_string()))
+                .cloned())
+        }
+        fn set_cursor(
+            &self,
+            pipeline: &rapidbyte_types::state::PipelineId,
+            stream: &rapidbyte_types::state::StreamName,
+            cursor: &rapidbyte_types::state::CursorState,
+        ) -> rapidbyte_types::state_error::Result<()> {
+            self.cursors
+                .lock()
+                .unwrap()
+                .insert((pipeline.to_string(), stream.to_string()), cursor.clone());
+            Ok(())
+        }
+        fn start_run(
+            &self,
+            _: &rapidbyte_types::state::PipelineId,
+            _: &rapidbyte_types::state::StreamName,
+        ) -> rapidbyte_types::state_error::Result<i64> {
+            Ok(1)
+        }
+        fn complete_run(
+            &self,
+            _: i64,
+            _: rapidbyte_types::state::RunStatus,
+            _: &rapidbyte_types::state::RunStats,
+        ) -> rapidbyte_types::state_error::Result<()> {
+            Ok(())
+        }
+        fn compare_and_set(
+            &self,
+            _: &rapidbyte_types::state::PipelineId,
+            _: &rapidbyte_types::state::StreamName,
+            _: Option<&str>,
+            _: &str,
+        ) -> rapidbyte_types::state_error::Result<bool> {
+            Ok(true)
+        }
+        fn insert_dlq_records(
+            &self,
+            _: &rapidbyte_types::state::PipelineId,
+            _: i64,
+            _: &[rapidbyte_types::envelope::DlqRecord],
+        ) -> rapidbyte_types::state_error::Result<u64> {
+            Ok(0)
+        }
+    }
 
     static METRIC_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -1222,7 +1295,7 @@ mod tests {
     }
 
     fn test_host_state() -> ComponentHostState {
-        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let state: Arc<dyn StateBackend> = Arc::new(FakeStateBackend::new());
         ComponentHostState::builder()
             .pipeline("test-pipeline")
             .plugin_id("postgres")
@@ -1248,7 +1321,7 @@ mod tests {
 
     #[test]
     fn builder_custom_dlq_limit() {
-        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let state = Arc::new(FakeStateBackend::new()) as Arc<dyn StateBackend>;
         let host = ComponentHostState::builder()
             .pipeline("p")
             .plugin_id("c")
@@ -1262,7 +1335,7 @@ mod tests {
 
     #[test]
     fn builder_missing_required_field_returns_error() {
-        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let state = Arc::new(FakeStateBackend::new()) as Arc<dyn StateBackend>;
         let result = ComponentHostState::builder()
             .plugin_id("c")
             .stream("s")
@@ -1301,7 +1374,7 @@ mod tests {
 
     #[test]
     fn scoped_state_key_plugin_scope_uses_instance_key() {
-        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let state = Arc::new(FakeStateBackend::new()) as Arc<dyn StateBackend>;
         let host = ComponentHostState::builder()
             .pipeline("p")
             .plugin_id("postgres")
@@ -1432,7 +1505,7 @@ mod tests {
         let (provider, exporter) = rapidbyte_metrics::test_support::exporter_test_provider();
         global::set_meter_provider(provider.clone());
 
-        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let state = Arc::new(FakeStateBackend::new()) as Arc<dyn StateBackend>;
         let host = ComponentHostState::builder()
             .pipeline("test-pipeline")
             .plugin_id("postgres")
@@ -1470,7 +1543,7 @@ mod tests {
         let (provider, exporter) = rapidbyte_metrics::test_support::exporter_test_provider();
         global::set_meter_provider(provider.clone());
 
-        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let state = Arc::new(FakeStateBackend::new()) as Arc<dyn StateBackend>;
         let host = ComponentHostState::builder()
             .pipeline("test-pipeline")
             .plugin_id("postgres")
@@ -1510,7 +1583,7 @@ mod tests {
         let (provider, exporter) = rapidbyte_metrics::test_support::exporter_test_provider();
         global::set_meter_provider(provider.clone());
 
-        let state = Arc::new(SqliteStateBackend::in_memory().unwrap());
+        let state = Arc::new(FakeStateBackend::new()) as Arc<dyn StateBackend>;
         let host = ComponentHostState::builder()
             .pipeline("test-pipeline")
             .plugin_id("postgres")
