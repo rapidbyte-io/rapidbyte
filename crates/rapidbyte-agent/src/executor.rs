@@ -90,7 +90,7 @@ fn is_pre_commit_cancellation(error: &PipelineError) -> bool {
 pub async fn execute_task<R>(task: TaskConfig<'_>, run_pipeline: R) -> TaskExecutionResult
 where
     R: for<'a> FnOnce(
-        &'a rapidbyte_engine::config::types::PipelineConfig,
+        &'a rapidbyte_pipeline_config::PipelineConfig,
         &'a ExecutionOptions,
         Option<mpsc::UnboundedSender<ProgressEvent>>,
         CancellationToken,
@@ -339,7 +339,7 @@ destination:
     }
 
     fn noop_runner() -> impl for<'a> FnOnce(
-        &'a rapidbyte_engine::config::types::PipelineConfig,
+        &'a rapidbyte_pipeline_config::PipelineConfig,
         &'a ExecutionOptions,
         Option<mpsc::UnboundedSender<ProgressEvent>>,
         CancellationToken,
