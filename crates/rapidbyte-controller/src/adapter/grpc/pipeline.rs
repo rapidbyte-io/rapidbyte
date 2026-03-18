@@ -235,3 +235,251 @@ impl Drop for CleanupStream {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio_stream::StreamExt;
+    use tonic::Request;
+
+    use crate::application::testing::fake_context;
+    use crate::proto::rapidbyte::v1 as pb;
+    use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineService;
+
+    use super::PipelineGrpcService;
+
+    const YAML: &str = "pipeline: test-pipe\nversion: '1.0'";
+
+    #[tokio::test]
+    async fn submit_empty_idempotency_key_treated_as_none() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+
+        let first = svc
+            .submit_pipeline(Request::new(pb::SubmitPipelineRequest {
+                pipeline_yaml: YAML.to_string(),
+                idempotency_key: String::new(),
+                options: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let second = svc
+            .submit_pipeline(Request::new(pb::SubmitPipelineRequest {
+                pipeline_yaml: YAML.to_string(),
+                idempotency_key: String::new(),
+                options: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // "" is treated as None, so each call creates a new run
+        assert_ne!(first.run_id, second.run_id);
+        assert!(!first.already_exists);
+        assert!(!second.already_exists);
+    }
+
+    #[tokio::test]
+    async fn submit_options_default_when_missing() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+
+        let resp = svc
+            .submit_pipeline(Request::new(pb::SubmitPipelineRequest {
+                pipeline_yaml: YAML.to_string(),
+                idempotency_key: String::new(),
+                options: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Verify max_retries defaults to 0 via get_run
+        let run_resp = svc
+            .get_run(Request::new(pb::GetRunRequest {
+                run_id: resp.run_id,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let detail = run_resp.run.unwrap();
+        assert_eq!(detail.max_retries, 0);
+    }
+
+    #[tokio::test]
+    async fn list_runs_page_size_zero_defaults_to_twenty() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+
+        // Submit 25 runs
+        for _ in 0..25 {
+            svc.submit_pipeline(Request::new(pb::SubmitPipelineRequest {
+                pipeline_yaml: YAML.to_string(),
+                idempotency_key: String::new(),
+                options: None,
+            }))
+            .await
+            .unwrap();
+        }
+
+        let resp = svc
+            .list_runs(Request::new(pb::ListRunsRequest {
+                state_filter: None,
+                page_size: 0,
+                page_token: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.runs.len(), 20);
+    }
+
+    #[tokio::test]
+    async fn list_runs_page_size_clamped_to_thousand() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+
+        // Submit one run so the response is not empty
+        svc.submit_pipeline(Request::new(pb::SubmitPipelineRequest {
+            pipeline_yaml: YAML.to_string(),
+            idempotency_key: String::new(),
+            options: None,
+        }))
+        .await
+        .unwrap();
+
+        let resp = svc
+            .list_runs(Request::new(pb::ListRunsRequest {
+                state_filter: None,
+                page_size: 5000,
+                page_token: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Should not error and should return valid results
+        assert_eq!(resp.runs.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn list_runs_unknown_state_filter_returns_invalid_argument() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+
+        let status = svc
+            .list_runs(Request::new(pb::ListRunsRequest {
+                state_filter: Some(99),
+                page_size: 10,
+                page_token: String::new(),
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn cancel_run_returns_accepted_field() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+
+        // Submit a pipeline (Pending)
+        let submit = svc
+            .submit_pipeline(Request::new(pb::SubmitPipelineRequest {
+                pipeline_yaml: YAML.to_string(),
+                idempotency_key: String::new(),
+                options: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Cancel the Pending run → accepted=true
+        let first_cancel = svc
+            .cancel_run(Request::new(pb::CancelRunRequest {
+                run_id: submit.run_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(first_cancel.accepted);
+
+        // Cancel the same run again (now Cancelled) → accepted=false
+        let second_cancel = svc
+            .cancel_run(Request::new(pb::CancelRunRequest {
+                run_id: submit.run_id,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!second_cancel.accepted);
+    }
+
+    #[tokio::test]
+    async fn watch_run_dedup_skips_exact_snapshot_match() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+
+        // Submit a pipeline
+        let submit = svc
+            .submit_pipeline(Request::new(pb::SubmitPipelineRequest {
+                pipeline_yaml: YAML.to_string(),
+                idempotency_key: String::new(),
+                options: None,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // Watch the run
+        let mut stream = svc
+            .watch_run(Request::new(pb::WatchRunRequest {
+                run_id: submit.run_id.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        // First event should be the initial state (Pending)
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.run_id, submit.run_id);
+        assert_eq!(
+            first.state,
+            crate::adapter::grpc::convert::run_state_to_proto(
+                crate::domain::run::RunState::Pending
+            )
+        );
+
+        // Publish a duplicate RunStateChanged (same state + attempt as snapshot)
+        ctx.event_bus
+            .publish(crate::domain::event::DomainEvent::RunStateChanged {
+                run_id: submit.run_id.clone(),
+                state: crate::domain::run::RunState::Pending,
+                attempt: 1,
+            })
+            .await
+            .unwrap();
+
+        // The dedup filter should skip this duplicate. Verify no second event
+        // arrives within 100ms.
+        let timeout_result =
+            tokio::time::timeout(std::time::Duration::from_millis(100), stream.next()).await;
+        assert!(
+            timeout_result.is_err(),
+            "expected no event within 100ms (dedup should have filtered the duplicate)"
+        );
+    }
+}

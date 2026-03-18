@@ -22,6 +22,336 @@ impl AgentGrpcService {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tonic::Request;
+
+    use crate::application::testing::fake_context;
+    use crate::proto::rapidbyte::v1 as pb;
+    use crate::proto::rapidbyte::v1::agent_service_server::AgentService;
+
+    use super::AgentGrpcService;
+
+    /// Helper: register agent + submit pipeline + poll via the application layer,
+    /// returning (task_id, run_id, lease_epoch).
+    async fn setup_running_task(
+        ctx: &crate::application::context::AppContext,
+        agent_id: &str,
+        max_concurrent_tasks: u32,
+    ) -> (String, String, u64) {
+        let now = ctx.clock.now();
+        let agent = crate::domain::agent::Agent::new(
+            agent_id.to_string(),
+            crate::domain::agent::AgentCapabilities {
+                plugins: vec![],
+                max_concurrent_tasks,
+            },
+            now,
+        );
+        ctx.agents.save(&agent).await.unwrap();
+
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        let _submit =
+            crate::application::submit::submit_pipeline(ctx, None, yaml.to_string(), 2, Some(60))
+                .await
+                .unwrap();
+
+        let assignment = crate::application::poll::poll_task(ctx, agent_id)
+            .await
+            .unwrap()
+            .unwrap();
+        (
+            assignment.task_id,
+            assignment.run_id,
+            assignment.lease_epoch,
+        )
+    }
+
+    #[tokio::test]
+    async fn register_missing_capabilities_defaults_to_one() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+        let svc = AgentGrpcService::new(Arc::clone(&ctx));
+
+        // Register with capabilities = None
+        svc.register(Request::new(pb::RegisterRequest {
+            agent_id: "agent-1".to_string(),
+            capabilities: None,
+        }))
+        .await
+        .unwrap();
+
+        // Submit a pipeline and poll — max_concurrent_tasks=1 should allow one task
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        crate::application::submit::submit_pipeline(&ctx, None, yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+
+        let resp = svc
+            .poll_task(Request::new(pb::PollTaskRequest {
+                agent_id: "agent-1".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            matches!(
+                resp.result,
+                Some(pb::poll_task_response::Result::Assignment(_))
+            ),
+            "expected assignment, got {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_zero_capacity_normalized_to_one() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+        let svc = AgentGrpcService::new(Arc::clone(&ctx));
+
+        // Register with max_concurrent_tasks = 0
+        svc.register(Request::new(pb::RegisterRequest {
+            agent_id: "agent-1".to_string(),
+            capabilities: Some(pb::AgentCapabilities {
+                max_concurrent_tasks: 0,
+                plugins: vec![],
+            }),
+        }))
+        .await
+        .unwrap();
+
+        // Submit and poll
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        crate::application::submit::submit_pipeline(&ctx, None, yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+
+        let resp = svc
+            .poll_task(Request::new(pb::PollTaskRequest {
+                agent_id: "agent-1".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            matches!(
+                resp.result,
+                Some(pb::poll_task_response::Result::Assignment(_))
+            ),
+            "expected assignment, got {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_task_missing_outcome_returns_invalid_argument() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+        let (task_id, _run_id, lease_epoch) = setup_running_task(&ctx, "agent-1", 4).await;
+        let svc = AgentGrpcService::new(Arc::clone(&ctx));
+
+        let status = svc
+            .complete_task(Request::new(pb::CompleteTaskRequest {
+                agent_id: "agent-1".to_string(),
+                task_id,
+                lease_epoch,
+                outcome: None,
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn complete_task_unknown_commit_state_returns_invalid_argument() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+        let (task_id, _run_id, lease_epoch) = setup_running_task(&ctx, "agent-1", 4).await;
+        let svc = AgentGrpcService::new(Arc::clone(&ctx));
+
+        let status = svc
+            .complete_task(Request::new(pb::CompleteTaskRequest {
+                agent_id: "agent-1".to_string(),
+                task_id,
+                lease_epoch,
+                outcome: Some(pb::complete_task_request::Outcome::Failed(pb::TaskFailed {
+                    error_code: "E1".to_string(),
+                    error_message: "msg".to_string(),
+                    retryable: false,
+                    commit_state: 99,
+                })),
+            }))
+            .await
+            .unwrap_err();
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn complete_task_completed_maps_metrics() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+        let (task_id, run_id, lease_epoch) = setup_running_task(&ctx, "agent-1", 4).await;
+        let svc = AgentGrpcService::new(Arc::clone(&ctx));
+
+        svc.complete_task(Request::new(pb::CompleteTaskRequest {
+            agent_id: "agent-1".to_string(),
+            task_id,
+            lease_epoch,
+            outcome: Some(pb::complete_task_request::Outcome::Completed(
+                pb::TaskCompleted {
+                    metrics: Some(pb::RunMetrics {
+                        rows_read: 10,
+                        rows_written: 5,
+                        bytes_read: 100,
+                        bytes_written: 50,
+                        duration_ms: 1000,
+                    }),
+                },
+            )),
+        }))
+        .await
+        .unwrap();
+
+        // Verify via app query
+        let run = crate::application::query::get_run(&ctx, &run_id)
+            .await
+            .unwrap();
+        assert_eq!(run.state(), crate::domain::run::RunState::Completed);
+        let m = run.metrics().unwrap();
+        assert_eq!(m.rows_read, 10);
+        assert_eq!(m.rows_written, 5);
+    }
+
+    #[tokio::test]
+    async fn complete_task_failed_maps_error_fields() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+        let (task_id, run_id, lease_epoch) = setup_running_task(&ctx, "agent-1", 4).await;
+        let svc = AgentGrpcService::new(Arc::clone(&ctx));
+
+        svc.complete_task(Request::new(pb::CompleteTaskRequest {
+            agent_id: "agent-1".to_string(),
+            task_id,
+            lease_epoch,
+            outcome: Some(pb::complete_task_request::Outcome::Failed(pb::TaskFailed {
+                error_code: "E1".to_string(),
+                error_message: "msg".to_string(),
+                retryable: false,
+                commit_state: pb::CommitState::BeforeCommit.into(),
+            })),
+        }))
+        .await
+        .unwrap();
+
+        // Verify run is Failed
+        let run = crate::application::query::get_run(&ctx, &run_id)
+            .await
+            .unwrap();
+        assert_eq!(run.state(), crate::domain::run::RunState::Failed);
+        let e = run.error().unwrap();
+        assert_eq!(e.code, "E1");
+        assert_eq!(e.message, "msg");
+    }
+
+    #[tokio::test]
+    async fn heartbeat_maps_multiple_tasks_to_directives() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+
+        // Register agent with max=2 via app layer
+        let now = ctx.clock.now();
+        let agent = crate::domain::agent::Agent::new(
+            "agent-1".to_string(),
+            crate::domain::agent::AgentCapabilities {
+                plugins: vec![],
+                max_concurrent_tasks: 2,
+            },
+            now,
+        );
+        ctx.agents.save(&agent).await.unwrap();
+
+        // Submit and poll 2 tasks
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        crate::application::submit::submit_pipeline(&ctx, None, yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+        crate::application::submit::submit_pipeline(&ctx, None, yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+
+        let a1 = crate::application::poll::poll_task(&ctx, "agent-1")
+            .await
+            .unwrap()
+            .unwrap();
+        let a2 = crate::application::poll::poll_task(&ctx, "agent-1")
+            .await
+            .unwrap()
+            .unwrap();
+
+        let svc = AgentGrpcService::new(Arc::clone(&ctx));
+
+        let resp = svc
+            .heartbeat(Request::new(pb::HeartbeatRequest {
+                agent_id: "agent-1".to_string(),
+                tasks: vec![
+                    pb::TaskHeartbeat {
+                        task_id: a1.task_id.clone(),
+                        lease_epoch: a1.lease_epoch,
+                        progress_message: None,
+                        progress_pct: None,
+                    },
+                    pb::TaskHeartbeat {
+                        task_id: a2.task_id.clone(),
+                        lease_epoch: a2.lease_epoch,
+                        progress_message: None,
+                        progress_pct: None,
+                    },
+                ],
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(resp.directives.len(), 2);
+        assert!(resp.directives[0].acknowledged);
+        assert!(resp.directives[1].acknowledged);
+    }
+
+    #[tokio::test]
+    async fn poll_task_no_task_returns_no_task_variant() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+        let svc = AgentGrpcService::new(Arc::clone(&ctx));
+
+        // Register agent but don't submit any pipeline
+        svc.register(Request::new(pb::RegisterRequest {
+            agent_id: "agent-1".to_string(),
+            capabilities: Some(pb::AgentCapabilities {
+                max_concurrent_tasks: 4,
+                plugins: vec![],
+            }),
+        }))
+        .await
+        .unwrap();
+
+        let resp = svc
+            .poll_task(Request::new(pb::PollTaskRequest {
+                agent_id: "agent-1".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(
+            matches!(resp.result, Some(pb::poll_task_response::Result::NoTask(_))),
+            "expected NoTask, got {resp:?}"
+        );
+    }
+}
+
 #[tonic::async_trait]
 impl AgentService for AgentGrpcService {
     async fn register(
