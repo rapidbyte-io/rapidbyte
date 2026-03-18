@@ -8,7 +8,9 @@
 //! | `metrics`           | `OtelMetricsSnapshot`      | `MetricsSnapshot`|
 //! | `progress`          | `ChannelProgressReporter`  | `ProgressReporter`|
 //! | `registry_resolver` | `RegistryPluginResolver`   | `PluginResolver` |
+//! | `wasm_runner`       | `WasmPluginRunner`         | `PluginRunner`   |
 
 pub mod metrics;
 pub mod progress;
 pub mod registry_resolver;
+pub mod wasm_runner;
