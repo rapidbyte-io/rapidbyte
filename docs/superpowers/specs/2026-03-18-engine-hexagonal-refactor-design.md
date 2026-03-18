@@ -65,7 +65,7 @@ rapidbyte-engine (lean orchestration, hexagonal)
     ├── registry_resolver.rs        ← impl PluginResolver (OCI registry)
     └── postgres/                   ← impl CursorRepository, RunRecordRepository, DlqRepository, StateBackend
 migrations/
-    └── 0001_initial.sql            ← SQLx versioned migration (cursors, runs, DLQ tables)
+    └── 0001_engine_initial.sql     ← SQLx versioned migration (cursors, runs, DLQ tables)
 ```
 
 ### Crate Removed
@@ -168,6 +168,9 @@ pub enum PipelineError {
     Plugin(PluginError),
     /// Infrastructure failure (WASM load, state backend, channel closed). Never retryable.
     Infrastructure(anyhow::Error),
+    /// Graceful cancellation (via CancellationToken). Distinct from Plugin/Infrastructure
+    /// so callers (CLI, agent) can distinguish cancellation from real failures for reporting.
+    Cancelled,
 }
 
 impl PipelineError {
@@ -298,7 +301,7 @@ pub async fn run_pipeline(
 ) -> Result<PipelineOutcome, PipelineError> { ... }
 ```
 
-The `CancellationToken` (from `tokio_util::sync`) enables graceful shutdown. The orchestrator checks `cancel.is_cancelled()` at phase boundaries (before resolve, before execute, between retry attempts). When cancelled, returns `PipelineError::Infrastructure` with a cancellation message.
+The `CancellationToken` (from `tokio_util::sync`) enables graceful shutdown. The orchestrator checks `cancel.is_cancelled()` at phase boundaries (before resolve, before execute, between retry attempts). When cancelled, returns `PipelineError::Cancelled`.
 
 Internal flow:
 1. Resolve plugins via `ctx.resolver`
@@ -345,6 +348,7 @@ pub struct TestContext {
     pub runs: Arc<FakeRunRecordRepository>,
     pub dlq: Arc<FakeDlqRepository>,
     pub progress: Arc<FakeProgressReporter>,
+    pub metrics: Arc<FakeMetricsSnapshot>,
 }
 
 pub fn fake_context() -> TestContext { ... }
@@ -429,9 +433,16 @@ Both trait sets are backed by the same Postgres database. The `as_state_backend(
 
 ```rust
 pub struct PgBackend {
-    pool: PgPool,                              // async (sqlx) — for repository ports
-    sync_client: Arc<Mutex<postgres::Client>>,  // sync — for StateBackend trait
+    pool: PgPool,            // async (sqlx) — for repository ports
+    sync_pool: ClientPool,   // sync connection pool — for StateBackend trait
 }
+
+// ClientPool: small pool of sync postgres::Client connections (1-8, based on parallelism).
+// Needed because multiple WASM plugin streams may call StateBackend concurrently
+// during parallel stream execution. Carried over from the existing PostgresStateBackend.
+//
+// Temporal ordering guarantees correctness between async and sync paths:
+// orchestration reads (async) happen before/after WASM execution (sync), never concurrently.
 
 impl PgBackend {
     pub async fn connect(connstr: &str) -> Result<Self, PipelineError> { ... }
@@ -464,40 +475,48 @@ crates/rapidbyte-engine/migrations/
 └── 0001_initial.sql
 ```
 
-`0001_initial.sql` creates the state tables (migrated from `rapidbyte-state`):
+`0001_engine_initial.sql` creates the state tables (migrated from `rapidbyte-state`). Column names match the existing `CursorState`, `RunStats`, and `DlqRecord` types from `rapidbyte-types`. Timestamps upgraded from `TEXT` (ISO 8601 strings) to `TIMESTAMPTZ` (native Postgres).
+
+Note: the filename is prefixed with `engine_` to avoid migration checksum collisions with the controller's `0001_initial.sql` if both crates connect to the same Postgres database. SQLx tracks applied migrations in `_sqlx_migrations` and would error on checksum mismatch if two crates share a migration number with different content.
 
 ```sql
 CREATE TABLE IF NOT EXISTS sync_cursors (
-    pipeline   TEXT NOT NULL,
-    stream     TEXT NOT NULL,
+    pipeline     TEXT NOT NULL,
+    stream       TEXT NOT NULL,
+    cursor_field TEXT,
     cursor_value TEXT,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (pipeline, stream)
 );
 
 CREATE TABLE IF NOT EXISTS sync_runs (
-    id         BIGSERIAL PRIMARY KEY,
-    pipeline   TEXT NOT NULL,
-    stream     TEXT NOT NULL,
-    status     TEXT NOT NULL DEFAULT 'running',
-    rows_read  BIGINT DEFAULT 0,
-    rows_written BIGINT DEFAULT 0,
-    bytes_written BIGINT DEFAULT 0,
-    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    finished_at TIMESTAMPTZ
+    id              BIGSERIAL PRIMARY KEY,
+    pipeline        TEXT NOT NULL,
+    stream          TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    started_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at     TIMESTAMPTZ,
+    records_read    BIGINT DEFAULT 0,
+    records_written BIGINT DEFAULT 0,
+    bytes_read      BIGINT DEFAULT 0,
+    bytes_written   BIGINT DEFAULT 0,
+    error_message   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS dlq_records (
-    id         BIGSERIAL PRIMARY KEY,
-    pipeline   TEXT NOT NULL,
-    run_id     BIGINT NOT NULL REFERENCES sync_runs(id),
-    record     JSONB NOT NULL,
-    error      TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    id             BIGSERIAL PRIMARY KEY,
+    pipeline       TEXT NOT NULL,
+    run_id         BIGINT NOT NULL REFERENCES sync_runs(id),
+    stream_name    TEXT NOT NULL,
+    record_json    TEXT NOT NULL,
+    error_message  TEXT NOT NULL,
+    error_category TEXT NOT NULL,
+    failed_at      TIMESTAMPTZ NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_sync_runs_pipeline ON sync_runs(pipeline, stream);
-CREATE INDEX IF NOT EXISTS idx_dlq_records_run ON dlq_records(run_id);
+CREATE INDEX IF NOT EXISTS idx_dlq_pipeline_run ON dlq_records(pipeline, run_id);
 ```
 
 Migrations are applied at startup via `backend.migrate()` before constructing `EngineContext`. SQLx tracks applied migrations in `_sqlx_migrations` table — each migration runs exactly once.
@@ -566,7 +585,7 @@ types (leaf — gains StateBackend trait + Arrow IPC)
 ```
 crates/rapidbyte-engine/
 ├── migrations/
-│   └── 0001_initial.sql            # sync_cursors, sync_runs, dlq_records tables
+│   └── 0001_engine_initial.sql     # sync_cursors, sync_runs, dlq_records tables
 ├── src/
 │   ├── lib.rs
 ├── domain/
@@ -646,6 +665,29 @@ pub use domain::progress::ProgressReporter;
 - `pipeline/` module — private, inside `run.rs`
 - `arrow` module — moved to `rapidbyte-types`
 - `config/` module — moved to `rapidbyte-pipeline-config`
+
+## Config Changes
+
+When config types move to `rapidbyte-pipeline-config`, `StateConfig` is simplified since Postgres is the only backend:
+
+```rust
+// Before (in engine/config/types.rs)
+pub struct StateConfig {
+    pub backend: StateBackendKind,  // Sqlite | Postgres
+    pub connection: Option<String>,
+}
+
+// After (in rapidbyte-pipeline-config/types.rs)
+pub struct StateConfig {
+    pub connection: String,  // Postgres connection string, required
+}
+```
+
+- The `backend` field is removed — there is only Postgres
+- `connection` becomes required (no default to SQLite)
+- Existing pipeline YAML files with `state.backend: sqlite` will fail validation with a clear error
+- Pipeline YAML files omitting `state:` entirely will fail validation (connection is required)
+- The YAML format simplifies to `state: { connection: "postgres://..." }`
 
 ## Breaking Changes
 
