@@ -3,20 +3,12 @@
 //! Delegates to the sync [`ClientPool`](super::ClientPool) so that the
 //! legacy `StateBackend` trait (blocking I/O) works from any thread.
 
-use chrono::Utc;
 use rapidbyte_types::envelope::DlqRecord;
 use rapidbyte_types::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
 use rapidbyte_types::state_backend::StateBackend;
 use rapidbyte_types::state_error::StateError;
 
 use super::PgBackend;
-
-impl PgBackend {
-    /// Current UTC time as ISO-8601 string.
-    fn now_iso() -> String {
-        Utc::now().to_rfc3339()
-    }
-}
 
 impl StateBackend for PgBackend {
     fn get_cursor(
@@ -57,15 +49,14 @@ impl StateBackend for PgBackend {
         client
             .execute(
                 "INSERT INTO sync_cursors (pipeline, stream, cursor_field, cursor_value, updated_at) \
-                 VALUES ($1, $2, $3, $4, $5) \
+                 VALUES ($1, $2, $3, $4, now()) \
                  ON CONFLICT (pipeline, stream) \
-                 DO UPDATE SET cursor_field = $3, cursor_value = $4, updated_at = $5",
+                 DO UPDATE SET cursor_field = $3, cursor_value = $4, updated_at = now()",
                 &[
                     &pipeline.as_str(),
                     &stream.as_str(),
                     &cursor.cursor_field,
                     &cursor.cursor_value,
-                    &cursor.updated_at,
                 ],
             )
             .map_err(StateError::backend)?;
@@ -101,8 +92,7 @@ impl StateBackend for PgBackend {
         let mut client = self.sync_pool.checkout()?;
         client
             .execute(
-                "UPDATE sync_runs SET status = $1, \
-                 finished_at = to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), \
+                "UPDATE sync_runs SET status = $1, finished_at = now(), \
                  records_read = $2, records_written = $3, \
                  bytes_read = $4, bytes_written = $5, error_message = $6 \
                  WHERE id = $7",
@@ -128,16 +118,14 @@ impl StateBackend for PgBackend {
         new_value: &str,
     ) -> rapidbyte_types::state_error::Result<bool> {
         let mut client = self.sync_pool.checkout()?;
-        let now = Self::now_iso();
 
         let rows_affected = match expected {
             Some(expected_val) => client
                 .execute(
-                    "UPDATE sync_cursors SET cursor_value = $1, updated_at = $2 \
-                     WHERE pipeline = $3 AND stream = $4 AND cursor_value = $5",
+                    "UPDATE sync_cursors SET cursor_value = $1, updated_at = now() \
+                     WHERE pipeline = $2 AND stream = $3 AND cursor_value = $4",
                     &[
                         &new_value,
-                        &now,
                         &pipeline.as_str(),
                         &stream.as_str(),
                         &expected_val,
@@ -147,8 +135,8 @@ impl StateBackend for PgBackend {
             None => client
                 .execute(
                     "INSERT INTO sync_cursors (pipeline, stream, cursor_value, updated_at) \
-                     VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-                    &[&pipeline.as_str(), &stream.as_str(), &new_value, &now],
+                     VALUES ($1, $2, $3, now()) ON CONFLICT DO NOTHING",
+                    &[&pipeline.as_str(), &stream.as_str(), &new_value],
                 )
                 .map_err(StateError::backend)?,
         };
@@ -170,13 +158,12 @@ impl StateBackend for PgBackend {
         let mut tx = client
             .transaction()
             .map_err(|e| StateError::backend_context("insert_dlq_records: begin tx", e))?;
-        let stmt = tx
-            .prepare(
-                "INSERT INTO dlq_records \
+        let query = "INSERT INTO dlq_records \
                  (pipeline, run_id, stream_name, record_json, \
                   error_message, error_category, failed_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            )
+                 VALUES ($1, $2, $3, $4, $5, $6, $7::text::timestamptz)";
+        let stmt = tx
+            .prepare(query)
             .map_err(|e| StateError::backend_context("insert_dlq_records: prepare", e))?;
 
         for record in records {

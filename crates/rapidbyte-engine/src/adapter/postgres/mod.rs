@@ -46,7 +46,17 @@ impl PgBackend {
     /// Returns an error if either pool fails to connect.
     pub async fn connect(connstr: &str) -> Result<Self, anyhow::Error> {
         let pool = PgPool::connect(connstr).await?;
-        let sync_pool = ClientPool::new(connstr, 4)?;
+
+        // The sync `postgres` crate creates its own tokio current-thread
+        // runtime inside `Client::connect`.  That panics if the current
+        // thread already has a runtime entered (nested `block_on`).
+        // Spawning the pool creation on a dedicated OS thread avoids the
+        // conflict.
+        let connstr_owned = connstr.to_owned();
+        let sync_pool = std::thread::spawn(move || ClientPool::new(&connstr_owned, 4))
+            .join()
+            .expect("sync pool thread panicked")?;
+
         Ok(Self { pool, sync_pool })
     }
 
