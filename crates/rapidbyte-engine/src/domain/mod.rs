@@ -4,4 +4,8 @@
 //! expressed as trait interfaces here so the core orchestration logic can
 //! be tested in isolation.
 
+pub mod error;
+pub mod outcome;
 pub mod ports;
+pub mod progress;
+pub mod retry;
