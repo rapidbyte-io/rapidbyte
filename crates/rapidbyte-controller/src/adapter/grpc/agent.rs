@@ -83,10 +83,7 @@ impl AgentService for AgentGrpcService {
                     max_retries: a.max_retries,
                     timeout_seconds: a.timeout_seconds.unwrap_or(0),
                 });
-                let lease_expires_at = Some(prost_types::Timestamp {
-                    seconds: a.lease_expires_at.timestamp(),
-                    nanos: a.lease_expires_at.timestamp_subsec_nanos().cast_signed(),
-                });
+                let lease_expires_at = Some(convert::to_proto_timestamp(a.lease_expires_at));
                 pb::poll_task_response::Result::Assignment(pb::TaskAssignment {
                     task_id: a.task_id,
                     run_id: a.run_id,
@@ -131,10 +128,7 @@ impl AgentService for AgentGrpcService {
                 task_id: d.task_id,
                 acknowledged: d.acknowledged,
                 cancel_requested: d.cancel_requested,
-                lease_expires_at: Some(prost_types::Timestamp {
-                    seconds: d.lease_expires_at.timestamp(),
-                    nanos: d.lease_expires_at.timestamp_subsec_nanos().cast_signed(),
-                }),
+                lease_expires_at: Some(convert::to_proto_timestamp(d.lease_expires_at)),
             })
             .collect();
 

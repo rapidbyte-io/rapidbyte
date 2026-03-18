@@ -9,12 +9,9 @@ use crate::domain::ports::repository::RepositoryError;
 use crate::domain::run::Run;
 use crate::domain::task::Task;
 
-use super::run::run_from_row;
-use super::task::task_from_row;
-
-fn box_err(e: impl std::error::Error + Send + Sync + 'static) -> RepositoryError {
-    RepositoryError(Box::new(e))
-}
+use super::error::box_err;
+use super::run::{run_from_row, run_state_to_str};
+use super::task::{task_from_row, task_state_to_str};
 
 pub struct PgPipelineStore {
     pool: PgPool,
@@ -44,14 +41,6 @@ async fn insert_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
         None => (None, None, None, None, None),
     };
 
-    let state_str = match run.state() {
-        crate::domain::run::RunState::Pending => "pending",
-        crate::domain::run::RunState::Running => "running",
-        crate::domain::run::RunState::Completed => "completed",
-        crate::domain::run::RunState::Failed => "failed",
-        crate::domain::run::RunState::Cancelled => "cancelled",
-    };
-
     sqlx::query(
         "INSERT INTO runs (id, idempotency_key, pipeline_name, pipeline_yaml, state, cancel_requested, attempt, max_retries, timeout_seconds, error_code, error_message, rows_read, rows_written, bytes_read, bytes_written, duration_ms, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
@@ -60,7 +49,7 @@ async fn insert_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
     .bind(run.idempotency_key())
     .bind(run.pipeline_name())
     .bind(run.pipeline_yaml())
-    .bind(state_str)
+    .bind(run_state_to_str(run.state()))
     .bind(run.is_cancel_requested())
     .bind(run.current_attempt().cast_signed())
     .bind(run.max_retries().cast_signed())
@@ -98,18 +87,10 @@ async fn update_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
         None => (None, None, None, None, None),
     };
 
-    let state_str = match run.state() {
-        crate::domain::run::RunState::Pending => "pending",
-        crate::domain::run::RunState::Running => "running",
-        crate::domain::run::RunState::Completed => "completed",
-        crate::domain::run::RunState::Failed => "failed",
-        crate::domain::run::RunState::Cancelled => "cancelled",
-    };
-
     sqlx::query(
         "UPDATE runs SET state = $1, cancel_requested = $2, attempt = $3, max_retries = $4, timeout_seconds = $5, error_code = $6, error_message = $7, rows_read = $8, rows_written = $9, bytes_read = $10, bytes_written = $11, duration_ms = $12, updated_at = $13 WHERE id = $14",
     )
-    .bind(state_str)
+    .bind(run_state_to_str(run.state()))
     .bind(run.is_cancel_requested())
     .bind(run.current_attempt().cast_signed())
     .bind(run.max_retries().cast_signed())
@@ -136,15 +117,6 @@ async fn insert_task(conn: &mut PgConnection, task: &Task) -> Result<(), Reposit
         None => (None, None),
     };
 
-    let state_str = match task.state() {
-        crate::domain::task::TaskState::Pending => "pending",
-        crate::domain::task::TaskState::Running => "running",
-        crate::domain::task::TaskState::Completed => "completed",
-        crate::domain::task::TaskState::Failed => "failed",
-        crate::domain::task::TaskState::Cancelled => "cancelled",
-        crate::domain::task::TaskState::TimedOut => "timed_out",
-    };
-
     sqlx::query(
         "INSERT INTO tasks (id, run_id, attempt, state, agent_id, lease_epoch, lease_expires_at, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
@@ -152,7 +124,7 @@ async fn insert_task(conn: &mut PgConnection, task: &Task) -> Result<(), Reposit
     .bind(task.id())
     .bind(task.run_id())
     .bind(task.attempt().cast_signed())
-    .bind(state_str)
+    .bind(task_state_to_str(task.state()))
     .bind(task.agent_id())
     .bind(lease_epoch)
     .bind(lease_expires_at)
@@ -171,19 +143,10 @@ async fn update_task(conn: &mut PgConnection, task: &Task) -> Result<(), Reposit
         None => (None, None),
     };
 
-    let state_str = match task.state() {
-        crate::domain::task::TaskState::Pending => "pending",
-        crate::domain::task::TaskState::Running => "running",
-        crate::domain::task::TaskState::Completed => "completed",
-        crate::domain::task::TaskState::Failed => "failed",
-        crate::domain::task::TaskState::Cancelled => "cancelled",
-        crate::domain::task::TaskState::TimedOut => "timed_out",
-    };
-
     sqlx::query(
         "UPDATE tasks SET state = $1, agent_id = $2, lease_epoch = $3, lease_expires_at = $4, updated_at = $5 WHERE id = $6",
     )
-    .bind(state_str)
+    .bind(task_state_to_str(task.state()))
     .bind(task.agent_id())
     .bind(lease_epoch)
     .bind(lease_expires_at)

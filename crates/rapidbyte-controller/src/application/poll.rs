@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 
 use crate::application::context::AppContext;
 use crate::application::error::AppError;
+use crate::application::timeout::handle_task_timeout;
 use crate::domain::event::DomainEvent;
 use crate::domain::lease::Lease;
 use crate::domain::run::RunState;
@@ -79,39 +80,14 @@ pub async fn poll_task(
             let mut task = task;
             task.timeout()?;
 
-            if run.can_retry_after_timeout() {
-                let new_attempt = run.retry()?;
-                let new_task_id = uuid::Uuid::new_v4().to_string();
-                let new_task = crate::domain::task::Task::new(
-                    new_task_id,
-                    run.id().to_string(),
-                    new_attempt,
-                    now,
-                );
-                ctx.store
-                    .timeout_and_retry(&task, &run, Some(&new_task))
-                    .await?;
-                ctx.event_bus
-                    .publish(DomainEvent::RunStateChanged {
-                        run_id: run.id().to_string(),
-                        state: RunState::Pending,
-                        attempt: new_attempt,
-                    })
-                    .await?;
-            } else {
-                let error = crate::domain::run::RunError {
-                    code: "SECRET_RESOLUTION_FAILED".to_string(),
-                    message: e.to_string(),
-                };
-                run.fail(error.clone())?;
-                ctx.store.fail_run(&task, &run).await?;
-                ctx.event_bus
-                    .publish(DomainEvent::RunFailed {
-                        run_id: run.id().to_string(),
-                        error,
-                    })
-                    .await?;
-            }
+            handle_task_timeout(
+                ctx,
+                &task,
+                &mut run,
+                "SECRET_RESOLUTION_FAILED",
+                &e.to_string(),
+            )
+            .await?;
 
             return Err(AppError::SecretResolution(e.to_string()));
         }

@@ -6,9 +6,7 @@ use crate::domain::lease::Lease;
 use crate::domain::ports::repository::{RepositoryError, TaskRepository};
 use crate::domain::task::{Task, TaskState};
 
-fn box_err(e: impl std::error::Error + Send + Sync + 'static) -> RepositoryError {
-    RepositoryError(Box::new(e))
-}
+use super::error::box_err;
 
 fn parse_task_state(s: &str) -> Result<TaskState, RepositoryError> {
     match s {
@@ -24,7 +22,7 @@ fn parse_task_state(s: &str) -> Result<TaskState, RepositoryError> {
     }
 }
 
-fn task_state_to_str(state: TaskState) -> &'static str {
+pub(super) fn task_state_to_str(state: TaskState) -> &'static str {
     match state {
         TaskState::Pending => "pending",
         TaskState::Running => "running",

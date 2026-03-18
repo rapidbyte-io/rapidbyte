@@ -5,9 +5,7 @@ use sqlx::{PgPool, Row};
 use crate::domain::agent::{Agent, AgentCapabilities};
 use crate::domain::ports::repository::{AgentRepository, RepositoryError};
 
-fn box_err(e: impl std::error::Error + Send + Sync + 'static) -> RepositoryError {
-    RepositoryError(Box::new(e))
-}
+use super::error::box_err;
 
 fn agent_from_row(row: &sqlx::postgres::PgRow) -> Result<Agent, RepositoryError> {
     let id: String = row.try_get("id").map_err(box_err)?;

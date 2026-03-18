@@ -1,9 +1,7 @@
 use crate::application::context::AppContext;
 use crate::application::error::AppError;
+use crate::application::timeout::handle_task_timeout;
 use crate::domain::agent::{Agent, AgentCapabilities};
-use crate::domain::event::DomainEvent;
-use crate::domain::run::{RunError, RunState};
-use crate::domain::task::Task;
 
 /// Register (or re-register) an agent.
 ///
@@ -44,8 +42,6 @@ pub async fn deregister(ctx: &AppContext, agent_id: &str) -> Result<(), AppError
     // 2. Find running tasks for this agent
     let running_tasks = ctx.tasks.find_running_by_agent_id(agent_id).await?;
 
-    let now = ctx.clock.now();
-
     // 3. Handle each running task
     for mut task in running_tasks {
         task.timeout()?;
@@ -59,43 +55,14 @@ pub async fn deregister(ctx: &AppContext, agent_id: &str) -> Result<(), AppError
                     id: task.run_id().to_string(),
                 })?;
 
-        if run.is_cancel_requested() {
-            // Honour the pending cancellation
-            run.cancel()?;
-            ctx.store.timeout_and_retry(&task, &run, None).await?;
-            ctx.event_bus
-                .publish(DomainEvent::RunCancelled {
-                    run_id: run.id().to_string(),
-                })
-                .await?;
-        } else if run.can_retry_after_timeout() {
-            let new_attempt = run.retry()?;
-            let new_task_id = uuid::Uuid::new_v4().to_string();
-            let new_task = Task::new(new_task_id, run.id().to_string(), new_attempt, now);
-            ctx.store
-                .timeout_and_retry(&task, &run, Some(&new_task))
-                .await?;
-            ctx.event_bus
-                .publish(DomainEvent::RunStateChanged {
-                    run_id: run.id().to_string(),
-                    state: RunState::Pending,
-                    attempt: new_attempt,
-                })
-                .await?;
-        } else {
-            let error = RunError {
-                code: "AGENT_DEREGISTERED".to_string(),
-                message: format!("Agent {agent_id} deregistered while task was running"),
-            };
-            run.fail(error.clone())?;
-            ctx.store.timeout_and_retry(&task, &run, None).await?;
-            ctx.event_bus
-                .publish(DomainEvent::RunFailed {
-                    run_id: run.id().to_string(),
-                    error,
-                })
-                .await?;
-        }
+        handle_task_timeout(
+            ctx,
+            &task,
+            &mut run,
+            "AGENT_DEREGISTERED",
+            &format!("Agent {agent_id} deregistered while task was running"),
+        )
+        .await?;
     }
 
     // 4. Delete agent

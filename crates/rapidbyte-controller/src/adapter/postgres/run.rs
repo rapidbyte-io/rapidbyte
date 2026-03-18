@@ -6,9 +6,7 @@ use crate::domain::ports::repository::{
 };
 use crate::domain::run::{Run, RunError, RunMetrics, RunState};
 
-fn box_err(e: impl std::error::Error + Send + Sync + 'static) -> RepositoryError {
-    RepositoryError(Box::new(e))
-}
+use super::error::box_err;
 
 fn parse_run_state(s: &str) -> Result<RunState, RepositoryError> {
     match s {
@@ -23,7 +21,7 @@ fn parse_run_state(s: &str) -> Result<RunState, RepositoryError> {
     }
 }
 
-fn run_state_to_str(state: RunState) -> &'static str {
+pub(super) fn run_state_to_str(state: RunState) -> &'static str {
     match state {
         RunState::Pending => "pending",
         RunState::Running => "running",

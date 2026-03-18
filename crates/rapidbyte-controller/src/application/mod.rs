@@ -8,6 +8,7 @@ pub mod poll;
 pub mod query;
 pub mod register;
 pub mod submit;
+pub mod timeout;
 
 #[cfg(test)]
 pub mod testing;

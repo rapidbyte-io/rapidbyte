@@ -1,8 +1,6 @@
 use crate::application::context::AppContext;
 use crate::application::error::AppError;
-use crate::domain::event::DomainEvent;
-use crate::domain::run::{RunError, RunState};
-use crate::domain::task::Task;
+use crate::application::timeout::handle_task_timeout;
 
 /// Sweep all tasks whose leases have expired and either retry or fail their runs.
 ///
@@ -25,43 +23,14 @@ pub async fn sweep_expired_leases(ctx: &AppContext) -> Result<(), AppError> {
                     id: task.run_id().to_string(),
                 })?;
 
-        if run.is_cancel_requested() {
-            // Honour the pending cancellation
-            run.cancel()?;
-            ctx.store.timeout_and_retry(&task, &run, None).await?;
-            ctx.event_bus
-                .publish(DomainEvent::RunCancelled {
-                    run_id: run.id().to_string(),
-                })
-                .await?;
-        } else if run.can_retry_after_timeout() {
-            let new_attempt = run.retry()?;
-            let new_task_id = uuid::Uuid::new_v4().to_string();
-            let new_task = Task::new(new_task_id, run.id().to_string(), new_attempt, now);
-            ctx.store
-                .timeout_and_retry(&task, &run, Some(&new_task))
-                .await?;
-            ctx.event_bus
-                .publish(DomainEvent::RunStateChanged {
-                    run_id: run.id().to_string(),
-                    state: RunState::Pending,
-                    attempt: new_attempt,
-                })
-                .await?;
-        } else {
-            let error = RunError {
-                code: "LEASE_EXPIRED".to_string(),
-                message: "Task lease expired without heartbeat".to_string(),
-            };
-            run.fail(error.clone())?;
-            ctx.store.timeout_and_retry(&task, &run, None).await?;
-            ctx.event_bus
-                .publish(DomainEvent::RunFailed {
-                    run_id: run.id().to_string(),
-                    error,
-                })
-                .await?;
-        }
+        handle_task_timeout(
+            ctx,
+            &task,
+            &mut run,
+            "LEASE_EXPIRED",
+            "Task lease expired without heartbeat",
+        )
+        .await?;
     }
 
     Ok(())

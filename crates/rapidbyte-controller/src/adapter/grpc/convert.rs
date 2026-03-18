@@ -32,7 +32,8 @@ pub fn app_error_to_status(err: AppError) -> Status {
     }
 }
 
-fn to_proto_timestamp(dt: DateTime<Utc>) -> prost_types::Timestamp {
+#[must_use]
+pub fn to_proto_timestamp(dt: DateTime<Utc>) -> prost_types::Timestamp {
     prost_types::Timestamp {
         seconds: dt.timestamp(),
         nanos: dt.timestamp_subsec_nanos().cast_signed(),

@@ -38,16 +38,14 @@ pub async fn cancel_run(ctx: &AppContext, run_id: &str) -> Result<CancelResult, 
             Ok(CancelResult { accepted: false })
         }
 
-        // Pending: attempt immediate cancellation
         RunState::Pending => {
-            run.cancel()?;
-
-            // Find and cancel the pending task for this run
+            // Find pending task for this run
             let tasks = ctx.tasks.find_by_run_id(run_id).await?;
             let pending_task = tasks.into_iter().find(|t| t.state() == TaskState::Pending);
 
             if let Some(mut pending_task) = pending_task {
                 pending_task.cancel_pending()?;
+                run.cancel()?;
 
                 if ctx
                     .store
@@ -62,29 +60,11 @@ pub async fn cancel_run(ctx: &AppContext, run_id: &str) -> Result<CancelResult, 
                         .await?;
                     return Ok(CancelResult { accepted: true });
                 }
-
-                // Run was concurrently assigned by poll — fall through to
-                // Running path. Re-fetch the run to get current state.
-                let run = ctx
-                    .runs
-                    .find_by_id(run_id)
-                    .await?
-                    .ok_or_else(|| AppError::NotFound {
-                        entity: "Run",
-                        id: run_id.to_string(),
-                    })?;
-                if run.state() == RunState::Running {
-                    let mut run = run;
-                    run.request_cancel();
-                    ctx.runs.save(&run).await?;
-                    return Ok(CancelResult { accepted: true });
-                }
-                // Some other terminal state — reject
-                return Ok(CancelResult { accepted: false });
             }
 
-            // No pending task found — might already be assigned. Set cancel flag.
-            let run = ctx
+            // Run was concurrently assigned — set cancel flag instead.
+            // Re-fetch once to get current state.
+            let mut run = ctx
                 .runs
                 .find_by_id(run_id)
                 .await?
@@ -92,17 +72,23 @@ pub async fn cancel_run(ctx: &AppContext, run_id: &str) -> Result<CancelResult, 
                     entity: "Run",
                     id: run_id.to_string(),
                 })?;
-            if run.state() == RunState::Running {
-                let mut run = run;
-                run.request_cancel();
-                ctx.runs.save(&run).await?;
-                return Ok(CancelResult { accepted: true });
+
+            match run.state() {
+                RunState::Running => {
+                    run.request_cancel();
+                    ctx.runs.save(&run).await?;
+                    Ok(CancelResult { accepted: true })
+                }
+                RunState::Completed | RunState::Failed | RunState::Cancelled => {
+                    Ok(CancelResult { accepted: false })
+                }
+                RunState::Pending => {
+                    // Still pending but no pending task — shouldn't happen, but handle gracefully
+                    run.request_cancel();
+                    ctx.runs.save(&run).await?;
+                    Ok(CancelResult { accepted: true })
+                }
             }
-            Ok(CancelResult {
-                accepted: run.state() != RunState::Completed
-                    && run.state() != RunState::Failed
-                    && run.state() != RunState::Cancelled,
-            })
         }
 
         // Running: set flag, agent learns via heartbeat
