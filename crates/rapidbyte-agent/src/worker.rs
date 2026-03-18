@@ -20,11 +20,12 @@ use opentelemetry::KeyValue;
 use crate::auth::request_with_bearer;
 use crate::executor::{self, TaskOutcomeKind};
 use crate::flight::PreviewFlightService;
+use crate::progress::ProgressSnapshot;
 use crate::proto::rapidbyte::v1::agent_service_client::AgentServiceClient;
 use crate::proto::rapidbyte::v1::{
-    agent_directive, poll_task_response, ActiveLease, CompleteTaskRequest, HeartbeatRequest,
-    PollTaskRequest, PreviewAccess, PreviewState, RegisterAgentRequest, TaskError, TaskMetrics,
-    TaskOutcome,
+    complete_task_request, poll_task_response, AgentCapabilities, CompleteTaskRequest,
+    HeartbeatRequest, PollTaskRequest, RegisterRequest, RunMetrics, TaskCancelled, TaskCompleted,
+    TaskFailed, TaskHeartbeat,
 };
 use crate::spool::{PreviewKey, PreviewSpool};
 
@@ -94,8 +95,14 @@ impl Default for AgentConfig {
 }
 
 /// Shared state for tracking active leases across worker and heartbeat.
-/// Maps `task_id` to (`lease_epoch`, `cancellation_token`).
-type ActiveLeaseMap = Arc<RwLock<HashMap<String, (u64, CancellationToken)>>>;
+/// Maps `task_id` to (`lease_epoch`, `cancellation_token`, `progress_snapshot`).
+type ActiveLeaseMap = Arc<RwLock<HashMap<String, LeaseEntry>>>;
+
+struct LeaseEntry {
+    lease_epoch: u64,
+    cancel_token: CancellationToken,
+    progress: Arc<RwLock<ProgressSnapshot>>,
+}
 
 const COMPLETE_TASK_RETRY_DELAY: Duration = Duration::from_secs(1);
 const DEFAULT_SIGNING_KEY: &[u8] = b"rapidbyte-dev-signing-key-not-for-production";
@@ -171,15 +178,16 @@ pub async fn run(
     });
 
     // Register with controller
+    let agent_id = uuid::Uuid::new_v4().to_string();
     let resp = client
-        .register_agent(
+        .register(
             request_with_bearer(
-                RegisterAgentRequest {
-                    max_tasks: config.max_tasks,
-                    flight_advertise_endpoint: config.flight_advertise.clone(),
-                    plugin_bundle_hash: String::new(),
-                    available_plugins: vec![],
-                    memory_bytes: 0,
+                RegisterRequest {
+                    agent_id: agent_id.clone(),
+                    capabilities: Some(AgentCapabilities {
+                        plugins: vec![],
+                        max_concurrent_tasks: config.max_tasks,
+                    }),
                 },
                 config.auth_token.as_deref(),
             )
@@ -187,30 +195,28 @@ pub async fn run(
         )
         .await?;
     let registration = resp.into_inner();
-    let agent_id = registration.agent_id;
-    // Controller response is authoritative for registry and trust config.
-    // Empty values explicitly mean "not configured" and override any local settings.
+    // Controller response is authoritative for registry config.
     let mut config = config;
-    if registration.registry_url.is_empty() {
+    if let Some(registry) = registration.registry {
+        if registry.url.is_empty() {
+            config.registry_url = None;
+            config.registry_insecure = false;
+            info!(agent_id, "Registered with controller");
+        } else {
+            info!(
+                agent_id,
+                registry_url = registry.url,
+                registry_insecure = registry.insecure,
+                "Registered with controller (registry configured)"
+            );
+            config.registry_url = Some(registry.url);
+            config.registry_insecure = registry.insecure;
+        }
+    } else {
         config.registry_url = None;
         config.registry_insecure = false;
-        info!(agent_id, "Registered with controller");
-    } else {
-        info!(
-            agent_id,
-            registry_url = registration.registry_url,
-            registry_insecure = registration.registry_insecure,
-            "Registered with controller (registry configured)"
-        );
-        config.registry_url = Some(registration.registry_url);
-        config.registry_insecure = registration.registry_insecure;
+        info!(agent_id, "Registered with controller (no registry)");
     }
-    config.trust_policy = if registration.trust_policy.is_empty() {
-        "skip".to_owned()
-    } else {
-        registration.trust_policy
-    };
-    config.trusted_key_pems = registration.trusted_key_pems;
 
     // Active lease tracking shared between worker and heartbeat
     let active_leases: ActiveLeaseMap = Arc::new(RwLock::new(HashMap::new()));
@@ -345,7 +351,6 @@ async fn worker_runner_loop(
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
     let client = AgentServiceClient::new(channel.clone());
-    let poll_wait_seconds = config.poll_wait_seconds;
     let poll_auth_token = config.auth_token.clone();
 
     worker_loop(
@@ -361,20 +366,14 @@ async fn worker_runner_loop(
 
                 let resp = poll_client
                     .poll_task(
-                        request_with_bearer(
-                            PollTaskRequest {
-                                agent_id,
-                                wait_seconds: poll_wait_seconds,
-                            },
-                            auth_token.as_deref(),
-                        )
-                        .map_err(|_| anyhow::anyhow!("Invalid bearer token"))?,
+                        request_with_bearer(PollTaskRequest { agent_id }, auth_token.as_deref())
+                            .map_err(|_| anyhow::anyhow!("Invalid bearer token"))?,
                     )
                     .await?
                     .into_inner();
 
                 Ok(match resp.result {
-                    Some(poll_task_response::Result::Task(task)) => WorkerPoll::Task(task),
+                    Some(poll_task_response::Result::Assignment(task)) => WorkerPoll::Task(task),
                     Some(poll_task_response::Result::NoTask(_)) | None => {
                         if shutdown.is_cancelled() {
                             WorkerPoll::Stop
@@ -421,24 +420,23 @@ async fn process_task(
     );
 
     let cancel_token = CancellationToken::new();
+    let progress_snapshot = Arc::new(RwLock::new(ProgressSnapshot::default()));
     ctx.active_leases.write().await.insert(
         task.task_id.clone(),
-        (task.lease_epoch, cancel_token.clone()),
+        LeaseEntry {
+            lease_epoch: task.lease_epoch,
+            cancel_token: cancel_token.clone(),
+            progress: progress_snapshot.clone(),
+        },
     );
 
-    let exec_opts = task.execution.as_ref();
-    let dry_run = exec_opts.is_some_and(|e| e.dry_run);
-    let limit = exec_opts.and_then(|e| e.limit);
+    let dry_run = false;
+    let limit = None;
 
     let (progress_tx, progress_rx) = mpsc::unbounded_channel();
-    let progress_client = AgentServiceClient::new(ctx.channel.clone());
-    let progress_handle = tokio::spawn(crate::progress::forward_progress(
+    let progress_handle = tokio::spawn(crate::progress::collect_progress(
         progress_rx,
-        progress_client,
-        ctx.agent_id.clone(),
-        task.task_id.clone(),
-        task.lease_epoch,
-        ctx.config.auth_token.clone(),
+        progress_snapshot,
     ));
 
     let trust_policy = if ctx.config.trust_policy.is_empty() {
@@ -465,7 +463,7 @@ async fn process_task(
     };
     let result = executor::execute_task(
         executor::TaskConfig {
-            pipeline_yaml: &task.pipeline_yaml_utf8,
+            pipeline_yaml: task.pipeline_yaml.as_bytes(),
             dry_run,
             limit,
             progress_tx: Some(progress_tx),
@@ -490,31 +488,8 @@ async fn process_task(
 
     let _ = progress_handle.await;
 
-    let (outcome, task_error) = match &result.outcome {
-        TaskOutcomeKind::Completed => (TaskOutcome::Completed as i32, None),
-        TaskOutcomeKind::Failed(info) => (
-            TaskOutcome::Failed as i32,
-            Some(TaskError {
-                code: info.code.clone(),
-                message: info.message.clone(),
-                retryable: info.retryable,
-                safe_to_retry: info.safe_to_retry,
-                commit_state: info.commit_state.as_str().to_owned(),
-            }),
-        ),
-        TaskOutcomeKind::Cancelled => (TaskOutcome::Cancelled as i32, None),
-    };
-
-    let preview = if let Some(dr) = result.dry_run_result {
-        let stream_previews = dr
-            .streams
-            .iter()
-            .map(|stream| crate::proto::rapidbyte::v1::StreamPreview {
-                stream: stream.stream_name.clone(),
-                rows: stream.total_rows,
-                ticket: Vec::new(),
-            })
-            .collect();
+    // Store preview data in spool if dry-run produced results
+    if let Some(dr) = result.dry_run_result {
         ctx.spool.write().await.store(
             PreviewKey {
                 run_id: task.run_id.clone(),
@@ -523,31 +498,47 @@ async fn process_task(
             },
             dr,
         );
-        Some(PreviewAccess {
-            state: PreviewState::Ready.into(),
-            flight_endpoint: ctx.config.flight_advertise.clone(),
-            ticket: Vec::new(),
-            expires_at: None,
-            streams: stream_previews,
-        })
-    } else {
-        None
+    }
+
+    let proto_outcome = match &result.outcome {
+        TaskOutcomeKind::Completed => complete_task_request::Outcome::Completed(TaskCompleted {
+            metrics: Some(RunMetrics {
+                rows_read: result.metrics.records_read,
+                rows_written: result.metrics.records_written,
+                bytes_read: result.metrics.bytes_read,
+                bytes_written: result.metrics.bytes_written,
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                duration_ms: { (result.metrics.elapsed_seconds * 1000.0).max(0.0) as u64 },
+            }),
+        }),
+        TaskOutcomeKind::Failed(info) => {
+            use crate::proto::rapidbyte::v1::CommitState as ProtoCommitState;
+            let commit_state = match info.commit_state {
+                rapidbyte_types::prelude::CommitState::BeforeCommit => {
+                    ProtoCommitState::BeforeCommit as i32
+                }
+                rapidbyte_types::prelude::CommitState::AfterCommitUnknown => {
+                    ProtoCommitState::AfterCommitUnknown as i32
+                }
+                rapidbyte_types::prelude::CommitState::AfterCommitConfirmed => {
+                    ProtoCommitState::AfterCommitConfirmed as i32
+                }
+            };
+            complete_task_request::Outcome::Failed(TaskFailed {
+                error_code: info.code.clone(),
+                error_message: info.message.clone(),
+                retryable: info.retryable,
+                commit_state,
+            })
+        }
+        TaskOutcomeKind::Cancelled => complete_task_request::Outcome::Cancelled(TaskCancelled {}),
     };
 
     let complete_request = CompleteTaskRequest {
         agent_id: ctx.agent_id.clone(),
         task_id: task.task_id.clone(),
         lease_epoch: task.lease_epoch,
-        outcome,
-        error: task_error,
-        metrics: Some(TaskMetrics {
-            records_processed: result.metrics.records_processed,
-            bytes_processed: result.metrics.bytes_processed,
-            elapsed_seconds: result.metrics.elapsed_seconds,
-            cursors_advanced: result.metrics.cursors_advanced,
-        }),
-        preview,
-        backend_run_id: 0,
+        outcome: Some(proto_outcome),
     };
 
     let status_label = match &result.outcome {
@@ -644,23 +635,28 @@ async fn heartbeat_loop(
             tracing::debug!(removed, "Evicted expired preview entries");
         }
 
-        let leases: Vec<ActiveLease> = active_leases
-            .read()
-            .await
-            .iter()
-            .map(|(task_id, (epoch, _))| ActiveLease {
-                task_id: task_id.clone(),
-                lease_epoch: *epoch,
-            })
-            .collect();
-        let active_count = u32::try_from(leases.len()).unwrap_or(u32::MAX);
+        // Build TaskHeartbeat for each active lease, including latest progress.
+        // Take the snapshot (replace with empty) so unchanged progress isn't re-sent.
+        let tasks: Vec<TaskHeartbeat> = {
+            let leases = active_leases.read().await;
+            let mut tasks = Vec::with_capacity(leases.len());
+            for (task_id, entry) in leases.iter() {
+                let mut snap = entry.progress.write().await;
+                let heartbeat = TaskHeartbeat {
+                    task_id: task_id.clone(),
+                    lease_epoch: entry.lease_epoch,
+                    progress_message: snap.message.take(),
+                    progress_pct: snap.progress_pct.take(),
+                };
+                tasks.push(heartbeat);
+            }
+            tasks
+        };
+
         let Ok(request) = request_with_bearer(
             HeartbeatRequest {
                 agent_id: agent_id.clone(),
-                active_leases: leases,
-                active_tasks: active_count,
-                cpu_usage: 0.0,
-                memory_used_bytes: 0,
+                tasks,
             },
             auth_token.as_deref(),
         ) else {
@@ -671,14 +667,12 @@ async fn heartbeat_loop(
         match resp {
             Ok(resp) => {
                 for directive in resp.into_inner().directives {
-                    if let Some(agent_directive::Directive::CancelTask(cancel)) =
-                        directive.directive
-                    {
-                        warn!(task_id = cancel.task_id, "Received cancel directive");
+                    if directive.cancel_requested {
+                        warn!(task_id = directive.task_id, "Received cancel directive");
                         // Signal the executor to cancel via the token
                         let leases = active_leases.read().await;
-                        if let Some((_, token)) = leases.get(&cancel.task_id) {
-                            token.cancel();
+                        if let Some(entry) = leases.get(&directive.task_id) {
+                            entry.cancel_token.cancel();
                         }
                     }
                 }
@@ -701,10 +695,15 @@ where
     F: FnMut(CompleteTaskRequest) -> Fut,
     Fut: Future<Output = Result<crate::proto::rapidbyte::v1::CompleteTaskResponse, tonic::Status>>,
 {
-    fn is_non_retryable_auth_error(code: tonic::Code) -> bool {
+    fn is_non_retryable(code: tonic::Code) -> bool {
         matches!(
             code,
-            tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
+            tonic::Code::Unauthenticated
+                | tonic::Code::PermissionDenied
+                | tonic::Code::Aborted        // lease mismatch/expired
+                | tonic::Code::FailedPrecondition // invalid state transition
+                | tonic::Code::NotFound        // task/run no longer exists
+                | tonic::Code::InvalidArgument // malformed request
         )
     }
 
@@ -718,24 +717,26 @@ where
         }
 
         match send_completion(request.clone()).await {
-            Ok(resp) => {
-                active_leases.write().await.remove(&request.task_id);
-                if resp.acknowledged {
-                    info!(task_id = request.task_id, "Task completed");
-                } else {
-                    warn!(
-                        task_id = request.task_id,
-                        "Stale lease — completion rejected"
-                    );
+            Ok(_resp) => {
+                {
+                    let mut leases = active_leases.write().await;
+                    if leases
+                        .get(&request.task_id)
+                        .is_some_and(|e| e.lease_epoch == request.lease_epoch)
+                    {
+                        leases.remove(&request.task_id);
+                    }
                 }
-                return resp.acknowledged;
+                info!(task_id = request.task_id, "Task completed");
+                return true;
             }
             Err(e) => {
-                if is_non_retryable_auth_error(e.code()) {
+                if is_non_retryable(e.code()) {
                     warn!(
                         task_id = request.task_id,
+                        code = ?e.code(),
                         error = %e,
-                        "Stopping completion retries because authentication config is invalid"
+                        "Stopping completion retries — non-retryable error"
                     );
                     return false;
                 }
@@ -766,55 +767,63 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
+    fn test_lease_entry() -> LeaseEntry {
+        LeaseEntry {
+            lease_epoch: 42,
+            cancel_token: CancellationToken::new(),
+            progress: Arc::new(RwLock::new(ProgressSnapshot::default())),
+        }
+    }
+
+    fn test_complete_request() -> CompleteTaskRequest {
+        CompleteTaskRequest {
+            agent_id: "agent-1".into(),
+            task_id: "task-1".into(),
+            lease_epoch: 42,
+            outcome: Some(complete_task_request::Outcome::Completed(TaskCompleted {
+                metrics: Some(RunMetrics {
+                    rows_read: 1,
+                    rows_written: 1,
+                    bytes_read: 1,
+                    bytes_written: 1,
+                    duration_ms: 100,
+                }),
+            })),
+        }
+    }
+
     #[tokio::test]
     async fn complete_task_transport_failure_keeps_lease_active() {
         let active_leases: ActiveLeaseMap = Arc::new(RwLock::new(HashMap::new()));
         active_leases
             .write()
             .await
-            .insert("task-1".into(), (42, CancellationToken::new()));
+            .insert("task-1".into(), test_lease_entry());
 
         let attempts = Arc::new(AtomicUsize::new(0));
         let attempts_for_closure = attempts.clone();
         let active_for_closure = active_leases.clone();
         let shutdown = CancellationToken::new();
-        let acknowledged =
-            report_completion_until_terminal(
-                &active_leases,
-                CompleteTaskRequest {
-                    agent_id: "agent-1".into(),
-                    task_id: "task-1".into(),
-                    lease_epoch: 42,
-                    outcome: TaskOutcome::Completed.into(),
-                    error: None,
-                    metrics: Some(TaskMetrics {
-                        records_processed: 1,
-                        bytes_processed: 1,
-                        elapsed_seconds: 0.1,
-                        cursors_advanced: 0,
-                    }),
-                    preview: None,
-                    backend_run_id: 0,
-                },
-                Duration::from_millis(1),
-                move |_req| {
-                    let attempts = attempts_for_closure.clone();
-                    let active_leases = active_for_closure.clone();
-                    async move {
-                        let attempt = attempts.fetch_add(1, Ordering::SeqCst);
-                        assert!(active_leases.read().await.contains_key("task-1"));
-                        if attempt == 0 {
-                            Err(tonic::Status::unavailable("controller unavailable"))
-                        } else {
-                            Ok(crate::proto::rapidbyte::v1::CompleteTaskResponse {
-                                acknowledged: true,
-                            })
-                        }
+        let acknowledged = report_completion_until_terminal(
+            &active_leases,
+            test_complete_request(),
+            Duration::from_millis(1),
+            move |_req| {
+                let attempts = attempts_for_closure.clone();
+                let active_leases = active_for_closure.clone();
+                async move {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    assert!(active_leases.read().await.contains_key("task-1"));
+                    if attempt == 0 {
+                        Err(tonic::Status::unavailable("controller unavailable"))
+                    } else {
+                        Ok(crate::proto::rapidbyte::v1::CompleteTaskResponse {})
                     }
-                },
-                shutdown,
-            )
-            .await;
+                }
+            },
+            shutdown,
+        )
+        .await;
 
         assert!(acknowledged);
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
@@ -827,7 +836,7 @@ mod tests {
         active_leases
             .write()
             .await
-            .insert("task-1".into(), (42, CancellationToken::new()));
+            .insert("task-1".into(), test_lease_entry());
         let shutdown = CancellationToken::new();
 
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -838,21 +847,7 @@ mod tests {
             async move {
                 report_completion_until_terminal(
                     &active_leases,
-                    CompleteTaskRequest {
-                        agent_id: "agent-1".into(),
-                        task_id: "task-1".into(),
-                        lease_epoch: 42,
-                        outcome: TaskOutcome::Completed.into(),
-                        error: None,
-                        metrics: Some(TaskMetrics {
-                            records_processed: 1,
-                            bytes_processed: 1,
-                            elapsed_seconds: 0.1,
-                            cursors_advanced: 0,
-                        }),
-                        preview: None,
-                        backend_run_id: 0,
-                    },
+                    test_complete_request(),
                     Duration::from_millis(1),
                     move |_req| {
                         let attempts = attempts_for_closure.clone();
@@ -887,28 +882,14 @@ mod tests {
             active_leases
                 .write()
                 .await
-                .insert("task-1".into(), (42, CancellationToken::new()));
+                .insert("task-1".into(), test_lease_entry());
             let shutdown = CancellationToken::new();
 
             let attempts = Arc::new(AtomicUsize::new(0));
             let attempts_for_closure = attempts.clone();
             let acknowledged = report_completion_until_terminal(
                 &active_leases,
-                CompleteTaskRequest {
-                    agent_id: "agent-1".into(),
-                    task_id: "task-1".into(),
-                    lease_epoch: 42,
-                    outcome: TaskOutcome::Completed.into(),
-                    error: None,
-                    metrics: Some(TaskMetrics {
-                        records_processed: 1,
-                        bytes_processed: 1,
-                        elapsed_seconds: 0.1,
-                        cursors_advanced: 0,
-                    }),
-                    preview: None,
-                    backend_run_id: 0,
-                },
+                test_complete_request(),
                 Duration::from_millis(1),
                 move |_req| {
                     let attempts = attempts_for_closure.clone();
@@ -928,12 +909,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completion_invalid_argument_retries_until_shutdown() {
+    async fn completion_invalid_argument_stops_immediately() {
         let active_leases: ActiveLeaseMap = Arc::new(RwLock::new(HashMap::new()));
         active_leases
             .write()
             .await
-            .insert("task-1".into(), (42, CancellationToken::new()));
+            .insert("task-1".into(), test_lease_entry());
         let shutdown = CancellationToken::new();
 
         let attempts = Arc::new(AtomicUsize::new(0));
@@ -944,21 +925,7 @@ mod tests {
             async move {
                 report_completion_until_terminal(
                     &active_leases,
-                    CompleteTaskRequest {
-                        agent_id: "agent-1".into(),
-                        task_id: "task-1".into(),
-                        lease_epoch: 42,
-                        outcome: TaskOutcome::Completed.into(),
-                        error: None,
-                        metrics: Some(TaskMetrics {
-                            records_processed: 1,
-                            bytes_processed: 1,
-                            elapsed_seconds: 0.1,
-                            cursors_advanced: 0,
-                        }),
-                        preview: None,
-                        backend_run_id: 0,
-                    },
+                    test_complete_request(),
                     Duration::from_millis(1),
                     move |_req| {
                         let attempts = attempts_for_closure.clone();
@@ -973,16 +940,15 @@ mod tests {
             }
         });
 
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        shutdown.cancel();
-
         let acknowledged = tokio::time::timeout(Duration::from_secs(1), completion)
             .await
-            .expect("completion retry loop should stop on shutdown")
+            .expect("should stop immediately without retrying")
             .unwrap();
 
+        // InvalidArgument is non-retryable: stops after 1 attempt, not acknowledged
         assert!(!acknowledged);
-        assert!(attempts.load(Ordering::SeqCst) > 1);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        // Lease is NOT removed on non-retryable errors (agent doesn't know if it's safe)
         assert!(active_leases.read().await.contains_key("task-1"));
     }
 

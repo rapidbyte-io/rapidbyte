@@ -38,9 +38,11 @@ types (leaf — no internal deps)
   ├── state    → types
   ├── runtime  → types, state
   ├── sdk      → types
-  └── engine   → types, runtime, state
+  ├── pipeline-config → secrets
+  └── engine   → types, runtime, state, pipeline-config
+      ├── controller → types, pipeline-config, secrets, metrics
       ├── dev  → engine, runtime, types, state
-      └── cli  → engine, runtime, types, dev
+      └── cli  → engine, runtime, types, dev, controller
 ```
 
 Pure data types and enums belong in `types`. Host-only config types (YAML parsing) stay in `engine/config/`.

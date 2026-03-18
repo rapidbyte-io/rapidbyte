@@ -15,6 +15,7 @@ members = [
     "crates/rapidbyte-state",
     "crates/rapidbyte-types",
     "crates/rapidbyte-secrets",
+    "crates/rapidbyte-pipeline-config",
 ]
 # Plugins target wasm32-wasip2 — build separately
 exclude = [

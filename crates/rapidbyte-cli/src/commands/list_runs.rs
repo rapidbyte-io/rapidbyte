@@ -29,8 +29,13 @@ pub async fn execute(
     let resp = client
         .list_runs(request_with_bearer(
             ListRunsRequest {
-                limit,
-                filter_state,
+                state_filter: filter_state,
+                page_size: if limit <= 0 {
+                    0 // let the server apply its default (20)
+                } else {
+                    u32::try_from(limit).unwrap_or(1000).min(1000)
+                },
+                page_token: String::new(),
             },
             auth_token,
         )?)
@@ -40,11 +45,15 @@ pub async fn execute(
     if verbosity != Verbosity::Quiet {
         for run in resp.runs {
             eprintln!(
-                "{}  {}  {}",
+                "{}  {}  {}  attempt {}",
                 run.run_id,
                 state_label(run.state),
-                run.pipeline_name
+                run.pipeline_name,
+                run.attempt,
             );
+        }
+        if !resp.next_page_token.is_empty() {
+            eprintln!("(more results available)");
         }
     }
 
@@ -54,11 +63,7 @@ pub async fn execute(
 fn parse_state_filter(value: &str) -> Result<i32> {
     let state = match value {
         "pending" => RunState::Pending,
-        "assigned" => RunState::Assigned,
         "running" => RunState::Running,
-        "reconciling" => RunState::Reconciling,
-        "recovery_failed" => RunState::RecoveryFailed,
-        "preview_ready" => RunState::PreviewReady,
         "completed" => RunState::Completed,
         "failed" => RunState::Failed,
         "cancelled" => RunState::Cancelled,
@@ -70,11 +75,7 @@ fn parse_state_filter(value: &str) -> Result<i32> {
 fn state_label(state: i32) -> &'static str {
     match RunState::try_from(state) {
         Ok(RunState::Pending) => "PENDING",
-        Ok(RunState::Assigned) => "ASSIGNED",
         Ok(RunState::Running) => "RUNNING",
-        Ok(RunState::Reconciling) => "RECONCILING",
-        Ok(RunState::RecoveryFailed) => "RECOVERY_FAILED",
-        Ok(RunState::PreviewReady) => "PREVIEW_READY",
         Ok(RunState::Completed) => "COMPLETED",
         Ok(RunState::Failed) => "FAILED",
         Ok(RunState::Cancelled) => "CANCELLED",
@@ -95,31 +96,18 @@ mod tests {
     }
 
     #[test]
-    fn parse_state_filter_accepts_reconciling() {
+    fn parse_state_filter_accepts_running() {
         assert_eq!(
-            parse_state_filter("reconciling").unwrap(),
-            RunState::Reconciling as i32
+            parse_state_filter("running").unwrap(),
+            RunState::Running as i32
         );
     }
 
     #[test]
-    fn state_label_includes_reconciling() {
-        assert_eq!(state_label(RunState::Reconciling as i32), "RECONCILING");
-    }
-
-    #[test]
-    fn parse_state_filter_accepts_recovery_failed() {
-        assert_eq!(
-            parse_state_filter("recovery_failed").unwrap(),
-            RunState::RecoveryFailed as i32
-        );
-    }
-
-    #[test]
-    fn state_label_includes_recovery_failed() {
-        assert_eq!(
-            state_label(RunState::RecoveryFailed as i32),
-            "RECOVERY_FAILED"
-        );
+    fn parse_state_filter_rejects_removed_states() {
+        assert!(parse_state_filter("assigned").is_err());
+        assert!(parse_state_filter("reconciling").is_err());
+        assert!(parse_state_filter("recovery_failed").is_err());
+        assert!(parse_state_filter("preview_ready").is_err());
     }
 }

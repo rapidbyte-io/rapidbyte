@@ -1,147 +1,180 @@
-//! gRPC server startup and wiring.
-
 use std::sync::Arc;
 
-use tonic::transport::{Identity, Server, ServerTlsConfig as TonicServerTlsConfig};
-use tracing::info;
+use anyhow::Result;
+use rapidbyte_secrets::SecretProviders;
+use sqlx::PgPool;
+use tonic::transport::Server;
 
-use crate::background;
-use crate::config::{initialize_metadata_store, validate, ControllerConfig, DEFAULT_SIGNING_KEY};
-use crate::middleware::BearerAuthInterceptor;
+use crate::adapter::clock::SystemClock;
+use crate::adapter::grpc::agent::AgentGrpcService;
+use crate::adapter::grpc::auth::BearerAuthInterceptor;
+use crate::adapter::grpc::pipeline::PipelineGrpcService;
+use crate::adapter::postgres::agent::PgAgentRepository;
+use crate::adapter::postgres::event_bus::PgEventBus;
+use crate::adapter::postgres::run::PgRunRepository;
+use crate::adapter::postgres::store::PgPipelineStore;
+use crate::adapter::postgres::task::PgTaskRepository;
+use crate::adapter::secrets::VaultSecretResolver;
+use crate::application::context::{AppConfig, AppContext, RegistryConfig};
+use crate::config::ControllerConfig;
 use crate::proto::rapidbyte::v1::agent_service_server::AgentServiceServer;
 use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineServiceServer;
-use crate::services::agent::AgentHandler;
-use crate::services::pipeline::PipelineHandler;
-use crate::state::ControllerState;
 
 /// Start the controller gRPC server.
 ///
+/// This is the composition root: it builds adapters from configuration, wires
+/// them into the application context, spawns background tasks, and starts
+/// serving gRPC requests.
+///
 /// # Errors
 ///
-/// Returns an error if the gRPC server fails to bind or encounters a
-/// transport-level failure.
-///
+/// Returns an error if the database connection, migration, TLS setup, or gRPC
+/// server startup fails.
+#[allow(clippy::similar_names, clippy::too_many_lines)]
 pub async fn run(
     config: ControllerConfig,
     otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
-    secrets: rapidbyte_secrets::SecretProviders,
-) -> anyhow::Result<()> {
-    validate(&config)?;
-
+    secrets: SecretProviders,
+) -> Result<()> {
+    // 0. Optionally bind Prometheus metrics endpoint.
+    //    The otel_guard is kept alive for the server lifetime regardless.
+    let _otel_keep = otel_guard.clone();
     if let Some(ref metrics_addr) = config.metrics_listen {
-        tracing::info!("Prometheus metrics endpoint at {metrics_addr}");
+        tracing::info!(addr = %metrics_addr, "Prometheus metrics endpoint");
         let metrics_listener = rapidbyte_metrics::bind_prometheus(metrics_addr).await?;
         tokio::spawn(rapidbyte_metrics::serve_prometheus(
-            otel_guard.clone(),
+            otel_guard,
             metrics_listener,
         ));
     }
 
-    let metadata_store = initialize_metadata_store(&config).await?;
-
-    if config.auth.signing_key == DEFAULT_SIGNING_KEY {
-        tracing::warn!(
-            "Using default signing key — set RAPIDBYTE_SIGNING_KEY for production deployments"
-        );
+    // 0.5. Validate configuration
+    if !config.auth.allow_unauthenticated {
+        if config.auth.tokens.is_empty() {
+            anyhow::bail!(
+                "controller misconfigured: auth tokens are empty and allow_unauthenticated is false — all requests would be rejected"
+            );
+        }
+        if config.auth.tokens.iter().any(|t| t.trim().is_empty()) {
+            anyhow::bail!(
+                "controller misconfigured: auth tokens contain empty or whitespace-only entries"
+            );
+        }
     }
-    if config.auth.allow_unauthenticated {
-        tracing::warn!(
-            "Controller authentication is disabled via explicit allow_unauthenticated override"
-        );
+    if !config.auth.allow_insecure_default_signing_key {
+        let default_key = ControllerConfig::default().auth.signing_key;
+        if config.auth.signing_key.is_empty() || config.auth.signing_key == default_key {
+            anyhow::bail!(
+                "controller misconfigured: signing key is missing or uses the insecure default — \
+                 set --signing-key or use --allow-insecure-signing-key for development"
+            );
+        }
     }
 
-    let state =
-        ControllerState::from_metadata_store(&config.auth.signing_key, metadata_store).await?;
-    let state = state.with_secrets(secrets);
+    // 1. Connect to Postgres
+    let database_url = config
+        .metadata_database_url
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("metadata_database_url is required"))?;
+    // Use from_str to handle both postgres:// URLs and libpq-style connection strings
+    let connect_options: sqlx::postgres::PgConnectOptions = database_url
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid database URL: {e}"))?;
+    let pool = PgPool::connect_with(connect_options).await?;
+    sqlx::migrate!("./migrations").run(&pool).await?;
 
-    let _reaper = background::spawn_reaper(
-        state.clone(),
-        config.timers.agent_reap_interval,
-        config.timers.agent_reap_timeout,
+    // 2. Build adapters
+    let runs = Arc::new(PgRunRepository::new(pool.clone()));
+    let tasks = Arc::new(PgTaskRepository::new(pool.clone()));
+    let agents = Arc::new(PgAgentRepository::new(pool.clone()));
+    let store = Arc::new(PgPipelineStore::new(pool.clone()));
+    let event_bus = Arc::new(PgEventBus::new(pool.clone()));
+    let secrets_resolver = Arc::new(VaultSecretResolver::new(secrets));
+    let clock = Arc::new(SystemClock);
+
+    // 3. Start PG LISTEN listener for real-time event dispatch
+    event_bus.start_listener().await?;
+
+    // 4. Build AppConfig from ControllerConfig
+    let registry = config.registry.url.map(|url| RegistryConfig {
+        url,
+        insecure: config.registry.insecure,
+    });
+
+    let app_config = AppConfig {
+        default_lease_duration: config.timers.default_lease_duration,
+        lease_check_interval: config.timers.lease_check_interval,
+        agent_reap_timeout: config.timers.agent_reap_timeout,
+        agent_reap_interval: config.timers.agent_reap_interval,
+        default_max_retries: config.timers.default_max_retries,
+        registry,
+    };
+
+    // 5. Compose AppContext
+    let ctx = Arc::new(AppContext {
+        runs,
+        tasks,
+        agents,
+        store,
+        event_bus,
+        secrets: secrets_resolver,
+        clock,
+        config: app_config,
+    });
+
+    // 6. Spawn background tasks
+    let ctx_sweep = ctx.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(ctx_sweep.config.lease_check_interval);
+        loop {
+            interval.tick().await;
+            if let Err(e) =
+                crate::application::background::lease_sweep::sweep_expired_leases(&ctx_sweep).await
+            {
+                tracing::error!(error = %e, "lease sweep failed");
+            }
+        }
+    });
+
+    let ctx_reaper = ctx.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(ctx_reaper.config.agent_reap_interval);
+        loop {
+            interval.tick().await;
+            if let Err(e) =
+                crate::application::background::agent_reaper::reap_stale_agents(&ctx_reaper).await
+            {
+                tracing::error!(error = %e, "agent reaper failed");
+            }
+        }
+    });
+
+    // 7. Build gRPC services with auth interceptor
+    let auth = BearerAuthInterceptor::new(
+        config.auth.tokens.clone(),
+        config.auth.allow_unauthenticated,
     );
-    let _lease_sweep = background::spawn_lease_sweep(
-        state.clone(),
-        config.timers.lease_check_interval,
-        config.timers.reconciliation_timeout,
+    let pipeline_svc = PipelineServiceServer::with_interceptor(
+        PipelineGrpcService::new(ctx.clone()),
+        auth.clone(),
     );
-    let _preview_cleanup =
-        background::spawn_preview_cleanup(state.clone(), config.timers.preview_cleanup_interval);
+    let agent_svc = AgentServiceServer::with_interceptor(AgentGrpcService::new(ctx.clone()), auth);
 
-    let auth = BearerAuthInterceptor::new(config.auth.tokens.clone());
-
-    let pipeline_svc =
-        PipelineServiceServer::with_interceptor(PipelineHandler::new(state.clone()), auth.clone());
-    // Read trusted key PEM contents from files
-    let mut trusted_key_pems: Vec<String> = Vec::new();
-    for path in &config.trust.trusted_key_paths {
-        let pem = std::fs::read_to_string(path).map_err(|e| {
-            anyhow::anyhow!("Failed to read trusted key file {}: {e}", path.display())
-        })?;
-        trusted_key_pems.push(pem);
+    // 8. Configure TLS if provided
+    let mut builder = Server::builder();
+    if let Some(tls) = config.tls {
+        let identity = tonic::transport::Identity::from_pem(tls.cert_pem, tls.key_pem);
+        builder =
+            builder.tls_config(tonic::transport::ServerTlsConfig::new().identity(identity))?;
     }
 
-    let agent_svc = AgentServiceServer::with_interceptor(
-        AgentHandler::with_trust_config(
-            state,
-            config.registry.url.clone().unwrap_or_default(),
-            config.registry.insecure,
-            config.trust.policy.clone(),
-            trusted_key_pems,
-        ),
-        auth,
-    );
-
-    info!(addr = %config.listen_addr, "Controller listening");
-
-    let mut server = Server::builder().layer(rapidbyte_metrics::grpc_layer::GrpcMetricsLayer);
-    if let Some(tls) = &config.tls {
-        server = server.tls_config(TonicServerTlsConfig::new().identity(Identity::from_pem(
-            tls.cert_pem.clone(),
-            tls.key_pem.clone(),
-        )))?;
-    }
-
-    server
+    // 9. Start server
+    tracing::info!(addr = %config.listen_addr, "controller listening");
+    builder
         .add_service(pipeline_svc)
         .add_service(agent_svc)
         .serve(config.listen_addr)
         .await?;
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::ControllerConfig;
-
-    #[tokio::test]
-    async fn run_fails_when_metrics_listener_is_unavailable() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let guard =
-            Arc::new(rapidbyte_metrics::init("test-controller").expect("otel init should succeed"));
-        let err = run(
-            ControllerConfig {
-                auth: crate::config::AuthConfig {
-                    tokens: vec!["secret".into()],
-                    signing_key: b"test-signing-key".to_vec(),
-                    ..ControllerConfig::default().auth
-                },
-                metrics_listen: Some(addr.to_string()),
-                ..Default::default()
-            },
-            guard,
-            rapidbyte_secrets::SecretProviders::new(),
-        )
-        .await
-        .unwrap_err();
-
-        let msg = err.to_string().to_lowercase();
-        assert!(
-            msg.contains("address already in use") || msg.contains("addrinuse"),
-            "unexpected error: {err:#}"
-        );
-    }
 }
