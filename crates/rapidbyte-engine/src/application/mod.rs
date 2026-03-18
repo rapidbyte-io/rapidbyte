@@ -1,11 +1,15 @@
 //! Application layer: DI context, use-case orchestration, and testing fakes.
 //!
-//! | Module    | Responsibility |
-//! |-----------|----------------|
-//! | `context` | [`EngineContext`] DI container and [`EngineConfig`] |
-//! | `testing` | In-memory fakes and [`TestContext`] factory (test / `test-support` only) |
+//! | Module     | Responsibility |
+//! |------------|----------------|
+//! | `check`    | [`check_pipeline`] — resolve and validate all pipeline plugins |
+//! | `context`  | [`EngineContext`] DI container and [`EngineConfig`] |
+//! | `discover` | [`discover_plugin`] — resolve a source plugin and discover streams |
+//! | `testing`  | In-memory fakes and [`TestContext`] factory (test / `test-support` only) |
 
+pub mod check;
 pub mod context;
+pub mod discover;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;

@@ -1,0 +1,139 @@
+//! Discover-plugin use case.
+//!
+//! Resolves a source plugin and runs stream discovery, returning the
+//! list of streams the plugin can sync.
+
+use crate::application::context::EngineContext;
+use crate::domain::ports::runner::{DiscoverParams, DiscoveredStream};
+use crate::error::PipelineError;
+use rapidbyte_types::wire::PluginKind;
+
+/// Resolve a source plugin and discover available streams.
+///
+/// This is the simplest use case: resolve the plugin reference to a
+/// WASM module path, then invoke the plugin's discover operation.
+///
+/// # Errors
+///
+/// Returns `PipelineError` if resolution or discovery fails.
+pub async fn discover_plugin(
+    ctx: &EngineContext,
+    source_ref: &str,
+    config_json: Option<&serde_json::Value>,
+) -> Result<Vec<DiscoveredStream>, PipelineError> {
+    let resolved = ctx
+        .resolver
+        .resolve(source_ref, PluginKind::Source, config_json)
+        .await?;
+
+    let manifest = resolved.manifest.as_ref();
+    let permissions = manifest.map(|m| m.permissions.clone());
+    let (plugin_id, plugin_version) = parse_plugin_id(source_ref);
+
+    let params = DiscoverParams {
+        wasm_path: resolved.wasm_path,
+        plugin_id,
+        plugin_version,
+        config: config_json.cloned().unwrap_or(serde_json::Value::Null),
+        permissions,
+    };
+
+    ctx.runner.discover(&params).await
+}
+
+/// Split a plugin reference like `"rapidbyte/source-postgres:1.0"` into
+/// `(id, version)`. Falls back to `("unknown", "0.0.0")` for bare names.
+fn parse_plugin_id(plugin_ref: &str) -> (String, String) {
+    if let Some((id, ver)) = plugin_ref.rsplit_once(':') {
+        (id.to_string(), ver.to_string())
+    } else {
+        (plugin_ref.to_string(), "0.0.0".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::application::testing::fake_context;
+    use crate::domain::ports::resolver::ResolvedPlugin;
+    use std::path::PathBuf;
+
+    fn test_resolved_plugin() -> ResolvedPlugin {
+        ResolvedPlugin {
+            wasm_path: PathBuf::from("/tmp/test.wasm"),
+            manifest: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn discover_resolves_and_discovers() {
+        let tc = fake_context();
+        tc.resolver.register("source-pg", test_resolved_plugin());
+        tc.runner.enqueue_discover(Ok(vec![DiscoveredStream {
+            name: "users".into(),
+            catalog_json: "{}".into(),
+        }]));
+
+        let streams = discover_plugin(&tc.ctx, "source-pg", None).await.unwrap();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].name, "users");
+    }
+
+    #[tokio::test]
+    async fn discover_returns_error_on_resolution_failure() {
+        let tc = fake_context();
+        // Don't register any plugin — resolver will return an error.
+        let result = discover_plugin(&tc.ctx, "nonexistent", None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn discover_returns_error_on_runner_failure() {
+        let tc = fake_context();
+        tc.resolver.register("source-pg", test_resolved_plugin());
+        tc.runner
+            .enqueue_discover(Err(PipelineError::infra("discover failed")));
+
+        let result = discover_plugin(&tc.ctx, "source-pg", None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("discover failed"));
+    }
+
+    #[tokio::test]
+    async fn discover_passes_config_through() {
+        let tc = fake_context();
+        tc.resolver.register("source-pg", test_resolved_plugin());
+        tc.runner.enqueue_discover(Ok(vec![
+            DiscoveredStream {
+                name: "orders".into(),
+                catalog_json: r#"{"schema":"public"}"#.into(),
+            },
+            DiscoveredStream {
+                name: "products".into(),
+                catalog_json: "{}".into(),
+            },
+        ]));
+
+        let config = serde_json::json!({"host": "localhost"});
+        let streams = discover_plugin(&tc.ctx, "source-pg", Some(&config))
+            .await
+            .unwrap();
+        assert_eq!(streams.len(), 2);
+        assert_eq!(streams[0].name, "orders");
+        assert_eq!(streams[1].name, "products");
+    }
+
+    #[test]
+    fn parse_plugin_id_with_version() {
+        let (id, ver) = parse_plugin_id("rapidbyte/source-postgres:1.2.0");
+        assert_eq!(id, "rapidbyte/source-postgres");
+        assert_eq!(ver, "1.2.0");
+    }
+
+    #[test]
+    fn parse_plugin_id_bare_name() {
+        let (id, ver) = parse_plugin_id("postgres");
+        assert_eq!(id, "postgres");
+        assert_eq!(ver, "0.0.0");
+    }
+}
