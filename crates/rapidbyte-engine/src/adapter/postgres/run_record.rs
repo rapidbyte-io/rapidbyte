@@ -1,0 +1,57 @@
+//! `RunRecordRepository` implementation for [`PgBackend`].
+
+use async_trait::async_trait;
+use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
+
+use crate::domain::ports::{RepositoryError, RunRecordRepository};
+
+use super::PgBackend;
+
+#[async_trait]
+impl RunRecordRepository for PgBackend {
+    async fn start(
+        &self,
+        pipeline: &PipelineId,
+        stream: &StreamName,
+    ) -> Result<i64, RepositoryError> {
+        let (id,) = sqlx::query_as::<_, (i64,)>(
+            "INSERT INTO sync_runs (pipeline, stream, status) \
+             VALUES ($1, $2, $3) RETURNING id",
+        )
+        .bind(pipeline.as_str())
+        .bind(stream.as_str())
+        .bind(RunStatus::Running.as_str())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(RepositoryError::other)?;
+
+        Ok(id)
+    }
+
+    #[allow(clippy::cast_possible_wrap, clippy::similar_names)]
+    async fn complete(
+        &self,
+        run_id: i64,
+        status: RunStatus,
+        stats: &RunStats,
+    ) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "UPDATE sync_runs SET status = $1, finished_at = now(), \
+             records_read = $2, records_written = $3, \
+             bytes_read = $4, bytes_written = $5, error_message = $6 \
+             WHERE id = $7",
+        )
+        .bind(status.as_str())
+        .bind(stats.records_read as i64)
+        .bind(stats.records_written as i64)
+        .bind(stats.bytes_read as i64)
+        .bind(stats.bytes_written as i64)
+        .bind(&stats.error_message)
+        .bind(run_id)
+        .execute(&self.pool)
+        .await
+        .map_err(RepositoryError::other)?;
+
+        Ok(())
+    }
+}
