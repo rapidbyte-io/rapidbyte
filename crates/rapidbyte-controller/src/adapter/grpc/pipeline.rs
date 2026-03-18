@@ -129,8 +129,6 @@ impl PipelineService for PipelineGrpcService {
         let run_id = req.into_inner().run_id;
 
         // Subscribe FIRST to avoid missing events between snapshot and subscribe.
-        // If the run doesn't exist, the subscriber is dropped on error return
-        // and the broadcast entry is cleaned up below.
         let event_stream = self
             .ctx
             .event_bus
@@ -138,25 +136,82 @@ impl PipelineService for PipelineGrpcService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        // Validate run exists and get current state for catch-up
+        // Validate run exists and get current state for catch-up.
         let run = match crate::application::query::get_run(&self.ctx, &run_id).await {
             Ok(run) => run,
             Err(e) => {
-                // Drop the subscriber — clean up the broadcast entry if no receivers remain
                 drop(event_stream);
                 self.ctx.event_bus.cleanup(&run_id).await;
                 return Err(convert::app_error_to_status(e));
             }
         };
+
+        let snapshot_state = run.state();
         let initial = convert::run_state_to_event(&run);
 
-        // Map domain events to proto events
-        let mapped = event_stream.map(|event| Ok(convert::domain_event_to_run_event(&event)));
+        // Filter subscription events: skip any state-change events that don't
+        // advance past the snapshot (prevents out-of-order regression). Progress
+        // events are always forwarded since they're ephemeral.
+        let snapshot_proto_state = convert::run_state_to_proto(snapshot_state);
+        let deduped = event_stream.filter_map(move |event| {
+            let dominated = match &event {
+                crate::domain::event::DomainEvent::RunStateChanged { state, .. } => {
+                    convert::run_state_to_proto(*state) <= snapshot_proto_state
+                }
+                _ => false, // progress/completed/failed/cancelled always pass
+            };
+            if dominated {
+                None
+            } else {
+                Some(event)
+            }
+        });
 
-        // Prepend the initial event
+        let mapped = deduped.map(|event| Ok(convert::domain_event_to_run_event(&event)));
+
+        // Emit snapshot as first event, then live events
         let initial_stream = tokio_stream::once(Ok(initial));
-        let combined = initial_stream.chain(mapped);
 
-        Ok(Response::new(Box::pin(combined)))
+        // Wrap in a cleanup stream that removes the subscriber entry on drop
+        let event_bus = self.ctx.event_bus.clone();
+        let cleanup_run_id = run_id.clone();
+        let combined = initial_stream.chain(mapped);
+        let with_cleanup = CleanupStream {
+            inner: Box::pin(combined),
+            event_bus: Some(event_bus),
+            run_id: cleanup_run_id,
+        };
+
+        Ok(Response::new(Box::pin(with_cleanup)))
+    }
+}
+
+use crate::domain::ports::event_bus::EventBus;
+use std::task::{Context, Poll};
+
+/// A stream wrapper that cleans up the event bus subscriber entry when dropped.
+struct CleanupStream {
+    inner: Pin<Box<dyn Stream<Item = Result<pb::RunEvent, Status>> + Send>>,
+    event_bus: Option<Arc<dyn EventBus>>,
+    run_id: String,
+}
+
+impl Stream for CleanupStream {
+    type Item = Result<pb::RunEvent, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+impl Drop for CleanupStream {
+    fn drop(&mut self) {
+        if let Some(bus) = self.event_bus.take() {
+            let run_id = self.run_id.clone();
+            // Spawn cleanup as a background task since Drop can't be async
+            tokio::spawn(async move {
+                bus.cleanup(&run_id).await;
+            });
+        }
     }
 }
