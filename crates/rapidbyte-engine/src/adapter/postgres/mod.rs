@@ -44,6 +44,10 @@ impl PgBackend {
     /// # Errors
     ///
     /// Returns an error if either pool fails to connect.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the OS thread spawned for sync pool creation cannot be joined.
     pub async fn connect(connstr: &str) -> Result<Self, anyhow::Error> {
         let pool = PgPool::connect(connstr).await?;
 
