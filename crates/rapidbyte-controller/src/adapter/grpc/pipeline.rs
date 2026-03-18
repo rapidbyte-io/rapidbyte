@@ -106,7 +106,7 @@ impl PipelineService for PipelineGrpcService {
             &self.ctx,
             RunFilter { state },
             Pagination {
-                page_size: req.page_size,
+                page_size: req.page_size.clamp(1, 1000),
                 page_token,
             },
         )

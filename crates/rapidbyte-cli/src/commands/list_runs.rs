@@ -30,7 +30,7 @@ pub async fn execute(
         .list_runs(request_with_bearer(
             ListRunsRequest {
                 state_filter: filter_state,
-                page_size: u32::try_from(limit).unwrap_or(u32::MAX),
+                page_size: u32::try_from(limit).unwrap_or(100).min(1000),
                 page_token: String::new(),
             },
             auth_token,
