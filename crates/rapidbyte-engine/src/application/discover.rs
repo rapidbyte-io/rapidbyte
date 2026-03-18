@@ -117,4 +117,60 @@ mod tests {
         assert_eq!(id, "postgres");
         assert_eq!(ver, "0.0.0");
     }
+
+    // -------------------------------------------------------------------
+    // Test: Discover returns multiple streams
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn discover_returns_multiple_streams() {
+        let tc = fake_context();
+        tc.resolver.register("source-pg", test_resolved_plugin());
+        tc.runner.enqueue_discover(Ok(vec![
+            DiscoveredStream {
+                name: "users".into(),
+                catalog_json: "{}".into(),
+            },
+            DiscoveredStream {
+                name: "orders".into(),
+                catalog_json: "{}".into(),
+            },
+            DiscoveredStream {
+                name: "products".into(),
+                catalog_json: "{}".into(),
+            },
+            DiscoveredStream {
+                name: "invoices".into(),
+                catalog_json: "{}".into(),
+            },
+            DiscoveredStream {
+                name: "payments".into(),
+                catalog_json: "{}".into(),
+            },
+        ]));
+
+        let streams = discover_plugin(&tc.ctx, "source-pg", None).await.unwrap();
+        assert_eq!(streams.len(), 5);
+        assert_eq!(streams[0].name, "users");
+        assert_eq!(streams[4].name, "payments");
+    }
+
+    // -------------------------------------------------------------------
+    // Test: Discover with no config
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn discover_with_no_config() {
+        let tc = fake_context();
+        tc.resolver.register("source-pg", test_resolved_plugin());
+        tc.runner.enqueue_discover(Ok(vec![DiscoveredStream {
+            name: "public.events".into(),
+            catalog_json: "{}".into(),
+        }]));
+
+        // Pass None for config
+        let streams = discover_plugin(&tc.ctx, "source-pg", None).await.unwrap();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].name, "public.events");
+    }
 }

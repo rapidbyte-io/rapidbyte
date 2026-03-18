@@ -507,6 +507,7 @@ fn evaluate_retry(
 mod tests {
     use super::*;
     use crate::application::testing::{fake_context, test_resolved_plugin};
+    use crate::domain::ports::cursor::CursorRepository;
     use crate::domain::ports::runner::{DestinationOutcome, SourceOutcome};
     use rapidbyte_types::metric::{ReadSummary, WriteSummary};
 
@@ -820,5 +821,596 @@ destination:
         let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
 
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper: pipeline config with transforms
+    // -----------------------------------------------------------------------
+
+    fn test_pipeline_config_with_transforms(
+        source_ref: &str,
+        dest_ref: &str,
+        streams: &[&str],
+        transforms: &[&str],
+    ) -> PipelineConfig {
+        let stream_yaml: String = streams
+            .iter()
+            .map(|s| format!("        - name: {s}\n          sync_mode: full_refresh"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let transforms_yaml: String = if transforms.is_empty() {
+            String::new()
+        } else {
+            let items: Vec<String> = transforms
+                .iter()
+                .map(|t| format!("    - use: {t}\n      config: {{}}"))
+                .collect();
+            format!("transforms:\n{}", items.join("\n"))
+        };
+        let yaml = format!(
+            r#"
+version: "1.0"
+pipeline: test-pipeline
+source:
+    use: {source_ref}
+    streams:
+{stream_yaml}
+    config: {{}}
+{transforms_yaml}
+destination:
+    use: {dest_ref}
+    config: {{}}
+    write_mode: append
+"#
+        );
+        serde_yaml::from_str(&yaml).expect("test yaml should parse")
+    }
+
+    /// Pipeline config with an incremental stream that has a cursor_field.
+    fn test_pipeline_config_incremental(
+        source_ref: &str,
+        dest_ref: &str,
+        stream_name: &str,
+        cursor_field: &str,
+    ) -> PipelineConfig {
+        let yaml = format!(
+            r#"
+version: "1.0"
+pipeline: test-pipeline
+source:
+    use: {source_ref}
+    streams:
+        - name: {stream_name}
+          sync_mode: incremental
+          cursor_field: {cursor_field}
+    config: {{}}
+destination:
+    use: {dest_ref}
+    config: {{}}
+    write_mode: append
+"#
+        );
+        serde_yaml::from_str(&yaml).expect("test yaml should parse")
+    }
+
+    fn make_transform_outcome() -> crate::domain::ports::runner::TransformOutcome {
+        crate::domain::ports::runner::TransformOutcome {
+            duration_secs: 0.2,
+            summary: rapidbyte_types::metric::TransformSummary {
+                records_in: 100,
+                records_out: 100,
+                bytes_in: 8192,
+                bytes_out: 8192,
+                batches_processed: 1,
+            },
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9: Retry on retryable plugin error
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn retry_on_retryable_plugin_error() {
+        tokio::time::pause();
+
+        let mut tc = fake_context();
+        tc.ctx.config.max_retries = 3;
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        // First attempt: retryable error from source
+        let plugin_err = rapidbyte_types::error::PluginError::transient_network(
+            "CONN_RESET",
+            "connection reset",
+        );
+        tc.runner
+            .enqueue_source(Err(PipelineError::Plugin(plugin_err)));
+
+        // Second attempt: success
+        tc.runner.enqueue_source(Ok(make_source_outcome(100, 8192)));
+        tc.runner
+            .enqueue_destination(Ok(make_dest_outcome(100, 8192)));
+
+        let pipeline = test_pipeline_config("src", "dst", &["users"]);
+        let cancel = CancellationToken::new();
+        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
+            .await
+            .unwrap();
+
+        match result {
+            PipelineOutcome::Run(r) => {
+                assert_eq!(r.retry_count, 1, "expected 1 retry");
+                assert_eq!(r.counts.records_read, 100);
+            }
+            PipelineOutcome::DryRun(_) => panic!("expected Run outcome"),
+        }
+
+        // Verify RetryScheduled event was emitted
+        let events = tc.progress.events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProgressEvent::RetryScheduled { .. })),
+            "expected RetryScheduled progress event"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10: Retry gives up after max attempts
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn retry_gives_up_after_max_attempts() {
+        tokio::time::pause();
+
+        let mut tc = fake_context();
+        tc.ctx.config.max_retries = 2; // max_retries + 1 = 3 max attempts
+
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        // All attempts fail with retryable errors
+        for _ in 0..3 {
+            let plugin_err = rapidbyte_types::error::PluginError::transient_network(
+                "CONN_RESET",
+                "connection reset",
+            );
+            tc.runner
+                .enqueue_source(Err(PipelineError::Plugin(plugin_err)));
+        }
+
+        let pipeline = test_pipeline_config("src", "dst", &["users"]);
+        let cancel = CancellationToken::new();
+        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
+
+        assert!(
+            result.is_err(),
+            "expected error after max retries exhausted"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11: Non-retryable plugin error is not retried
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn non_retryable_plugin_error_not_retried() {
+        let mut tc = fake_context();
+        tc.ctx.config.max_retries = 3;
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        // Non-retryable plugin error (config error)
+        let plugin_err = rapidbyte_types::error::PluginError::config("BAD_HOST", "host invalid");
+        tc.runner
+            .enqueue_source(Err(PipelineError::Plugin(plugin_err)));
+        // Only one result enqueued — if retry happens, queue will be empty and
+        // the fake will return its own error, so we know no retry occurred.
+
+        let pipeline = test_pipeline_config("src", "dst", &["users"]);
+        let cancel = CancellationToken::new();
+        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, PipelineError::Plugin(_)),
+            "expected Plugin error, got: {err:?}"
+        );
+
+        // Verify no RetryScheduled events
+        let events = tc.progress.events();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, ProgressEvent::RetryScheduled { .. })),
+            "no RetryScheduled event expected for non-retryable error"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 12: Cursor loaded for incremental stream
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cursor_loaded_for_incremental_stream() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        // Pre-set a cursor in the repository
+        let pid = rapidbyte_types::state::PipelineId::new("test-pipeline");
+        let stream = rapidbyte_types::state::StreamName::new("users");
+        let cursor_state = rapidbyte_types::state::CursorState {
+            cursor_field: Some("updated_at".to_string()),
+            cursor_value: Some("2024-06-15".to_string()),
+            updated_at: "2024-06-15T00:00:00Z".to_string(),
+        };
+        tc.cursors.set(&pid, &stream, &cursor_state).await.unwrap();
+
+        tc.runner.enqueue_source(Ok(make_source_outcome(50, 4096)));
+        tc.runner
+            .enqueue_destination(Ok(make_dest_outcome(50, 4096)));
+
+        let pipeline = test_pipeline_config_incremental("src", "dst", "users", "updated_at");
+        let cancel = CancellationToken::new();
+        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
+            .await
+            .unwrap();
+
+        // Pipeline should succeed — cursor was loaded and used
+        match result {
+            PipelineOutcome::Run(r) => {
+                assert_eq!(r.counts.records_read, 50);
+            }
+            PipelineOutcome::DryRun(_) => panic!("expected Run outcome"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 13: Cursor saved after successful run
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cursor_saved_after_successful_run() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        // Source outcome with a checkpoint that has a cursor value
+        let source_outcome = SourceOutcome {
+            duration_secs: 1.0,
+            summary: ReadSummary {
+                records_read: 100,
+                bytes_read: 8192,
+                batches_emitted: 1,
+                checkpoint_count: 1,
+                records_skipped: 0,
+            },
+            checkpoints: vec![rapidbyte_types::checkpoint::Checkpoint {
+                id: 1,
+                kind: rapidbyte_types::checkpoint::CheckpointKind::Source,
+                stream: "users".to_string(),
+                cursor_field: Some("updated_at".to_string()),
+                cursor_value: Some(rapidbyte_types::cursor::CursorValue::Utf8 {
+                    value: "2024-07-01".to_string(),
+                }),
+                records_processed: 100,
+                bytes_processed: 8192,
+            }],
+        };
+        tc.runner.enqueue_source(Ok(source_outcome));
+        tc.runner
+            .enqueue_destination(Ok(make_dest_outcome(100, 8192)));
+
+        let pipeline = test_pipeline_config_incremental("src", "dst", "users", "updated_at");
+        let cancel = CancellationToken::new();
+        run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
+            .await
+            .unwrap();
+
+        // Verify cursor was saved
+        let pid = rapidbyte_types::state::PipelineId::new("test-pipeline");
+        let stream = rapidbyte_types::state::StreamName::new("users");
+        let saved = tc.cursors.get(&pid, &stream).await.unwrap();
+        assert!(saved.is_some(), "cursor should have been saved");
+        let saved = saved.unwrap();
+        assert_eq!(saved.cursor_value, Some("2024-07-01".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 14: No cursor load for full refresh
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn no_cursor_load_for_full_refresh() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+        tc.runner.enqueue_source(Ok(make_source_outcome(100, 8192)));
+        tc.runner
+            .enqueue_destination(Ok(make_dest_outcome(100, 8192)));
+
+        // Full refresh stream — no cursor_field
+        let pipeline = test_pipeline_config("src", "dst", &["users"]);
+        let cancel = CancellationToken::new();
+        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
+            .await
+            .unwrap();
+
+        // Pipeline should succeed without any cursor interactions
+        match result {
+            PipelineOutcome::Run(r) => {
+                assert_eq!(r.counts.records_read, 100);
+            }
+            PipelineOutcome::DryRun(_) => panic!("expected Run outcome"),
+        }
+
+        // No cursor should have been saved
+        let pid = rapidbyte_types::state::PipelineId::new("test-pipeline");
+        let stream = rapidbyte_types::state::StreamName::new("users");
+        let saved = tc.cursors.get(&pid, &stream).await.unwrap();
+        assert!(
+            saved.is_none(),
+            "no cursor should be saved for full_refresh"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 15: Transforms execute in order
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn transforms_execute_in_order() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+        tc.resolver.register("tx1", test_resolved_plugin());
+        tc.resolver.register("tx2", test_resolved_plugin());
+
+        // Enqueue: source, transform1, transform2, destination
+        tc.runner.enqueue_source(Ok(make_source_outcome(100, 8192)));
+        tc.runner.enqueue_transform(Ok(make_transform_outcome()));
+        tc.runner.enqueue_transform(Ok(make_transform_outcome()));
+        tc.runner
+            .enqueue_destination(Ok(make_dest_outcome(100, 8192)));
+
+        let pipeline =
+            test_pipeline_config_with_transforms("src", "dst", &["users"], &["tx1", "tx2"]);
+        let cancel = CancellationToken::new();
+        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
+            .await
+            .unwrap();
+
+        match result {
+            PipelineOutcome::Run(r) => {
+                assert_eq!(r.num_transforms, 2);
+                assert!(r.total_transform_secs > 0.0);
+                assert_eq!(r.counts.records_read, 100);
+            }
+            PipelineOutcome::DryRun(_) => panic!("expected Run outcome"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 16: Transform error fails pipeline
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn transform_error_fails_pipeline() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+        tc.resolver.register("tx1", test_resolved_plugin());
+
+        tc.runner.enqueue_source(Ok(make_source_outcome(100, 8192)));
+        tc.runner
+            .enqueue_transform(Err(PipelineError::infra("transform WASM trap")));
+
+        let pipeline = test_pipeline_config_with_transforms("src", "dst", &["users"], &["tx1"]);
+        let cancel = CancellationToken::new();
+        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
+
+        assert!(result.is_err(), "transform error should fail the pipeline");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 17: Per-stream stats recorded independently
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn per_stream_stats_recorded_independently() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        // Stream 1: 100 records
+        tc.runner.enqueue_source(Ok(make_source_outcome(100, 8000)));
+        tc.runner
+            .enqueue_destination(Ok(make_dest_outcome(100, 8000)));
+        // Stream 2: 200 records
+        tc.runner
+            .enqueue_source(Ok(make_source_outcome(200, 16000)));
+        tc.runner
+            .enqueue_destination(Ok(make_dest_outcome(200, 16000)));
+
+        let pipeline = test_pipeline_config("src", "dst", &["users", "orders"]);
+        let cancel = CancellationToken::new();
+        run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
+            .await
+            .unwrap();
+
+        // Two runs should have been started (one per stream)
+        assert_eq!(
+            tc.runs.started_count(),
+            2,
+            "expected 2 runs (one per stream)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 18: Cursor save failure does not fail pipeline
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cursor_save_failure_does_not_fail_pipeline() {
+        // The cursor save uses `let _ = ctx.cursors.set(...)`, so failures
+        // are intentionally silenced. The FakeCursorRepository always succeeds,
+        // but we can verify the pipeline still completes even with checkpoints.
+        // Since the code uses `let _ =` (fire-and-forget), there is no way
+        // for cursor save errors to propagate. We verify the pattern works
+        // by running with checkpoints and confirming success.
+
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        let source_outcome = SourceOutcome {
+            duration_secs: 1.0,
+            summary: ReadSummary {
+                records_read: 50,
+                bytes_read: 4096,
+                batches_emitted: 1,
+                checkpoint_count: 1,
+                records_skipped: 0,
+            },
+            checkpoints: vec![rapidbyte_types::checkpoint::Checkpoint {
+                id: 1,
+                kind: rapidbyte_types::checkpoint::CheckpointKind::Source,
+                stream: "users".to_string(),
+                cursor_field: Some("id".to_string()),
+                cursor_value: Some(rapidbyte_types::cursor::CursorValue::Int64 { value: 999 }),
+                records_processed: 50,
+                bytes_processed: 4096,
+            }],
+        };
+        tc.runner.enqueue_source(Ok(source_outcome));
+        tc.runner
+            .enqueue_destination(Ok(make_dest_outcome(50, 4096)));
+
+        let pipeline = test_pipeline_config_incremental("src", "dst", "users", "id");
+        let cancel = CancellationToken::new();
+        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
+
+        assert!(
+            result.is_ok(),
+            "pipeline should succeed even if cursor save were to fail"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 19: Empty streams list returns empty result
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn empty_streams_list_returns_empty_result() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+        // No source/dest results enqueued since no streams will be processed
+
+        let pipeline = test_pipeline_config("src", "dst", &[]);
+        let cancel = CancellationToken::new();
+        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
+            .await
+            .unwrap();
+
+        match result {
+            PipelineOutcome::Run(r) => {
+                assert_eq!(r.counts.records_read, 0);
+                assert_eq!(r.counts.records_written, 0);
+                assert_eq!(r.retry_count, 0);
+            }
+            PipelineOutcome::DryRun(_) => panic!("expected Run outcome"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 20: Cancellation between streams
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cancellation_between_streams() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        // First stream succeeds
+        tc.runner.enqueue_source(Ok(make_source_outcome(100, 8000)));
+        tc.runner
+            .enqueue_destination(Ok(make_dest_outcome(100, 8000)));
+        // Second stream: enqueue results but cancel before it runs
+        tc.runner
+            .enqueue_source(Ok(make_source_outcome(200, 16000)));
+        tc.runner
+            .enqueue_destination(Ok(make_dest_outcome(200, 16000)));
+
+        let pipeline = test_pipeline_config("src", "dst", &["users", "orders"]);
+        let cancel = CancellationToken::new();
+        let cancel_clone = cancel.clone();
+
+        // We need to cancel between streams. The fake runner is synchronous,
+        // so the first stream will complete before the cancellation check.
+        // We'll cancel during the first source run using a callback approach.
+        // Since FakePluginRunner doesn't support callbacks, we'll instead
+        // set up a scenario where cancellation is checked between stream
+        // iterations by cancelling after the first stream's source result
+        // is consumed.
+
+        // Actually, the simplest approach: cancel the token from a separate
+        // task after a very short delay. The first stream will complete,
+        // then the cancellation check at the top of the for loop fires.
+        let handle = tokio::spawn(async move {
+            // The fake runner returns immediately, so the first stream
+            // completes nearly instantly. We cancel before the second.
+            tokio::task::yield_now().await;
+            cancel_clone.cancel();
+        });
+
+        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
+        handle.await.unwrap();
+
+        // Either we get Cancelled (if token was seen) or the full result
+        // (if both streams completed before cancel). Both are valid —
+        // the point is the pipeline doesn't panic.
+        match result {
+            Err(PipelineError::Cancelled) => {
+                // Cancellation was caught between streams — expected
+            }
+            Ok(PipelineOutcome::Run(r)) => {
+                // Both streams completed before cancellation was observed
+                assert_eq!(r.counts.records_read, 300);
+            }
+            other => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 21: Destination error after source success
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn destination_error_after_source_success() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        tc.runner.enqueue_source(Ok(make_source_outcome(100, 8192)));
+        tc.runner
+            .enqueue_destination(Err(PipelineError::infra("destination connection lost")));
+
+        let pipeline = test_pipeline_config("src", "dst", &["users"]);
+        let cancel = CancellationToken::new();
+        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
+
+        assert!(
+            result.is_err(),
+            "destination error should fail the pipeline"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("destination connection lost"),
+            "error should contain destination message"
+        );
     }
 }

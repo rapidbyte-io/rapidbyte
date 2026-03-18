@@ -625,6 +625,97 @@ mod tests {
         assert_eq!(events.len(), 1);
     }
 
+    // -------------------------------------------------------------------
+    // Test: FakeDlqRepository records insertions
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fake_dlq_repository_records_insertions() {
+        use rapidbyte_types::envelope::Timestamp;
+        use rapidbyte_types::error::ErrorCategory;
+
+        let tc = fake_context();
+        let pid = PipelineId::new("test-pipe");
+        let records = vec![
+            DlqRecord {
+                stream_name: "users".to_string(),
+                record_json: r#"{"id": 1}"#.to_string(),
+                error_message: "bad data".to_string(),
+                error_category: ErrorCategory::Data,
+                failed_at: Timestamp::new("2024-01-01T00:00:00Z"),
+            },
+            DlqRecord {
+                stream_name: "users".to_string(),
+                record_json: r#"{"id": 2}"#.to_string(),
+                error_message: "null violation".to_string(),
+                error_category: ErrorCategory::Data,
+                failed_at: Timestamp::new("2024-01-01T00:00:01Z"),
+            },
+        ];
+
+        let count = tc.ctx.dlq.insert(&pid, 1, &records).await.unwrap();
+        assert_eq!(count, 2);
+
+        let inserted = tc.dlq.inserted_records();
+        assert_eq!(inserted.len(), 2);
+        assert_eq!(inserted[0].error_message, "bad data");
+        assert_eq!(inserted[1].error_message, "null violation");
+    }
+
+    // -------------------------------------------------------------------
+    // Test: FakeRunRecordRepository tracks completions
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fake_run_record_tracks_completions() {
+        let tc = fake_context();
+        let pid = PipelineId::new("test-pipe");
+
+        // Start two runs
+        let id1 = tc
+            .ctx
+            .runs
+            .start(&pid, &StreamName::new("users"))
+            .await
+            .unwrap();
+        let id2 = tc
+            .ctx
+            .runs
+            .start(&pid, &StreamName::new("orders"))
+            .await
+            .unwrap();
+
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert_eq!(tc.runs.started_count(), 2);
+    }
+
+    // -------------------------------------------------------------------
+    // Test: FakeResolver returns error for unknown plugin
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fake_resolver_returns_error_for_unknown() {
+        let tc = fake_context();
+        // Don't register any plugin
+        let result = tc
+            .ctx
+            .resolver
+            .resolve(
+                "nonexistent-plugin",
+                rapidbyte_types::wire::PluginKind::Source,
+                None,
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("nonexistent-plugin"),
+            "error should mention the plugin ref"
+        );
+    }
+
     /// Build a minimal `SourceRunParams` for testing. The fake runner
     /// ignores the params, so the values don't matter.
     fn make_source_params() -> SourceRunParams {

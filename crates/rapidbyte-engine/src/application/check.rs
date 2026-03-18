@@ -369,4 +369,134 @@ destination:
         assert!(result.source_config.is_none());
         assert!(result.destination_config.is_none());
     }
+
+    // -------------------------------------------------------------------
+    // Test: Check with no transforms
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn check_with_no_transforms() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+
+        // Pipeline with empty transforms (test_pipeline_config has none)
+        let pipeline = test_pipeline_config();
+        let result = check_pipeline(&tc.ctx, &pipeline).await.unwrap();
+
+        assert!(result.transform_validations.is_empty());
+        assert!(result.transform_configs.is_empty());
+        assert_eq!(result.source_validation.status, ValidationStatus::Success);
+        assert_eq!(
+            result.destination_validation.status,
+            ValidationStatus::Success
+        );
+        assert!(result.state.ok);
+    }
+
+    // -------------------------------------------------------------------
+    // Test: Check transform resolution failure
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn check_transform_resolution_failure() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+        // Don't register "sql-transform" — resolution will fail
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+
+        let pipeline = test_pipeline_config_with_transform();
+        let result = check_pipeline(&tc.ctx, &pipeline).await;
+
+        assert!(
+            result.is_err(),
+            "transform resolution failure should return error"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Test: Check multiple transforms all validated
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn check_multiple_transforms_all_validated() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+        tc.resolver.register("tx1", test_resolved_plugin());
+        tc.resolver.register("tx2", test_resolved_plugin());
+        tc.resolver.register("tx3", test_resolved_plugin());
+
+        // source + destination + 3 transforms = 5 validate calls
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+
+        let pipeline: PipelineConfig = serde_yaml::from_str(
+            r#"
+version: "1.0"
+pipeline: test-pipeline-multi-tx
+source:
+    use: src
+    config: {}
+    streams:
+        - name: users
+          sync_mode: full_refresh
+transforms:
+    - use: tx1
+      config: {}
+    - use: tx2
+      config: {}
+    - use: tx3
+      config: {}
+destination:
+    use: dst
+    config: {}
+    write_mode: append
+"#,
+        )
+        .expect("test yaml should parse");
+
+        let result = check_pipeline(&tc.ctx, &pipeline).await.unwrap();
+
+        assert_eq!(result.transform_validations.len(), 3);
+        for v in &result.transform_validations {
+            assert_eq!(v.status, ValidationStatus::Success);
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Test: Check mixed validation results
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn check_mixed_validation_results() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        // Source validation succeeds, destination validation fails
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner
+            .enqueue_validate(Ok(failed_validation("cannot connect to destination")));
+
+        let pipeline = test_pipeline_config();
+        let result = check_pipeline(&tc.ctx, &pipeline).await.unwrap();
+
+        assert_eq!(result.source_validation.status, ValidationStatus::Success);
+        assert_eq!(
+            result.destination_validation.status,
+            ValidationStatus::Failed
+        );
+        assert_eq!(
+            result.destination_validation.message,
+            "cannot connect to destination"
+        );
+    }
 }
