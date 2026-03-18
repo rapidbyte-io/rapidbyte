@@ -66,8 +66,13 @@ impl TestMetadataSchema {
             .await
             .expect("schema creation should succeed");
 
+        // Build a scoped URL compatible with sqlx's PgConnectOptions parser.
+        // sqlx supports options[key]=value in the query string.
+        let sep = if admin_url.contains('?') { "&" } else { "?" };
+        let scoped_url = format!("{admin_url}{sep}options[search_path]={schema}");
+
         Self {
-            scoped_url: format!("{admin_url} options='-c search_path={schema}'"),
+            scoped_url,
             admin_client,
             connection_task,
             schema,

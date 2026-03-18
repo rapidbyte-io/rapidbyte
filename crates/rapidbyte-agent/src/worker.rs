@@ -907,7 +907,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completion_invalid_argument_retries_until_shutdown() {
+    async fn completion_invalid_argument_stops_immediately() {
         let active_leases: ActiveLeaseMap = Arc::new(RwLock::new(HashMap::new()));
         active_leases
             .write()
@@ -938,16 +938,15 @@ mod tests {
             }
         });
 
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        shutdown.cancel();
-
         let acknowledged = tokio::time::timeout(Duration::from_secs(1), completion)
             .await
-            .expect("completion retry loop should stop on shutdown")
+            .expect("should stop immediately without retrying")
             .unwrap();
 
+        // InvalidArgument is non-retryable: stops after 1 attempt, not acknowledged
         assert!(!acknowledged);
-        assert!(attempts.load(Ordering::SeqCst) > 1);
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        // Lease is NOT removed on non-retryable errors (agent doesn't know if it's safe)
         assert!(active_leases.read().await.contains_key("task-1"));
     }
 
