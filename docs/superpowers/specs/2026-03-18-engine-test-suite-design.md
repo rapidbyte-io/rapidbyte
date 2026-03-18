@@ -6,7 +6,7 @@
 
 ## Goals
 
-- Achieve test density comparable to `rapidbyte-controller` (~95 tests, up from 43)
+- Achieve test density comparable to `rapidbyte-controller` (~115 tests, up from 40 unit + 9 integration = 49 total)
 - Cover all happy paths, error paths, and edge cases across domain/application/adapter layers
 - Unit tests use fakes (fast, no I/O); integration tests use real infrastructure (testcontainers + test WASM plugins)
 - Integration tests gated behind `#[cfg(feature = "integration")]` so `cargo test` stays fast
@@ -20,18 +20,18 @@ Unit tests (fakes, fast)          Integration tests (real infra, slow)
 domain/error.rs (8)               postgres_integration.rs (15)
 domain/retry.rs (10)                └── testcontainers Postgres
 domain/ports/mod.rs (3)           wasm_runner_integration.rs (8)
-application/run.rs (20)             └── test WASM plugins
+application/run.rs (21)             └── test WASM plugins
 application/check.rs (10)        pipeline_integration.rs (6, existing)
 application/discover.rs (8)       policy_proptest.rs (2, existing)
 application/testing.rs (7)        resolve_visibility.rs (1, existing)
-adapter/wasm_runner.rs (5)
-adapter/engine_factory.rs (3)
-adapter/progress.rs (1)
-adapter/registry_resolver.rs (2)
+adapter/wasm_runner.rs (7)
+adapter/engine_factory.rs (5)
+adapter/progress.rs (2)
+adapter/registry_resolver.rs (4)
 ```
 
-`cargo test` runs 63 unit tests (~1 second).
-`cargo test --features integration` runs all 95 tests (~30 seconds with container startup).
+`cargo test` runs 83 unit tests (~1 second).
+`cargo test --features integration` runs all 115 tests (~30 seconds with container startup).
 
 ## Domain Layer Tests
 
@@ -109,6 +109,12 @@ New tests:
 |------|----------|
 | `per_stream_stats_recorded_independently` | 2 streams with different row counts — each run record gets its own counts |
 
+**Cursor error handling:**
+
+| Test | Verifies |
+|------|----------|
+| `cursor_save_failure_does_not_fail_pipeline` | Inject `RepositoryError` on cursor set — pipeline still succeeds (documents fire-and-forget semantics) |
+
 **Edge cases:**
 
 | Test | Verifies |
@@ -117,13 +123,15 @@ New tests:
 | `cancellation_between_streams` | Cancel after first stream — second not executed, `Cancelled` returned |
 | `destination_error_after_source_success` | Source OK, destination fails — error propagated |
 
+**Note:** Retry tests MUST use `tokio::time::pause()` at the start to avoid real sleeps during backoff delays. This keeps tests instant and deterministic.
+
 ### check.rs — 10 tests (6 existing + 4 new)
 
 | Test | Verifies |
 |------|----------|
 | `check_with_no_transforms` | Empty transforms list — only source + dest validated |
 | `check_transform_resolution_failure` | Transform doesn't resolve — error propagated |
-| `check_multiple_transforms_all_validated` | 3 transforms — all appear in CheckResult.components |
+| `check_multiple_transforms_all_validated` | 3 transforms — all appear in `CheckResult.transform_validations` (len == 3) |
 | `check_mixed_validation_results` | Source OK, dest fails — both statuses captured, no early return |
 
 ### discover.rs — 8 tests (6 existing + 2 new)
@@ -143,28 +151,42 @@ New tests:
 
 ## Adapter Layer Unit Tests
 
-### wasm_runner.rs — 5 tests (1 existing + 4 new)
+### wasm_runner.rs — 7 tests (1 existing + 6 new)
 
 | Test | Verifies |
 |------|----------|
 | `parse_compression_lz4` | `parse_compression(Some("lz4"))` returns `Ok(Some(Lz4))` |
+| `parse_compression_zstd` | `parse_compression(Some("zstd"))` returns `Ok(Some(Zstd))` |
 | `parse_compression_none` | `parse_compression(None)` returns `Ok(None)` |
+| `parse_compression_empty_string_returns_none` | `parse_compression(Some(""))` returns `Ok(None)` |
 | `parse_compression_invalid` | `parse_compression(Some("brotli"))` returns error |
-| `plugin_instance_key_format` | Key follows expected pattern |
+| `plugin_instance_key_without_ordinal` | Key without instance ordinal follows expected pattern |
 
-### engine_factory.rs — 3 new tests
+### engine_factory.rs — 5 new tests
 
 | Test | Verifies |
 |------|----------|
 | `run_on_backend_propagates_result` | Successful backend call returns Ok through spawn_blocking |
 | `run_on_backend_converts_state_error` | `StateError` maps to `RepositoryError::Other` |
 | `run_on_backend_handles_panic` | Panicking closure maps to `RepositoryError::Other` |
+| `cas_adapter_stub_returns_true` | `StateBackendRepositoryAdapter::compare_and_set` always returns `Ok(true)` — documents intentional stub behavior |
+| `dlq_adapter_stub_returns_zero` | `StateBackendRepositoryAdapter::insert` always returns `Ok(0)` — documents intentional stub behavior |
 
-### progress.rs — 1 new test
+### progress.rs — 2 new tests
 
 | Test | Verifies |
 |------|----------|
 | `channel_reporter_sends_events` | Report events, verify receiver gets them |
+| `channel_reporter_does_not_panic_when_receiver_dropped` | Drop receiver, then report — no panic (documents best-effort semantics) |
+
+### registry_resolver.rs — 4 tests (2 existing + 2 new)
+
+Existing tests cover manifest protocol version compatibility (V5 rejection, V6 acceptance).
+
+| Test | Verifies |
+|------|----------|
+| `config_matches_schema_passes` | Valid config against JSON Schema — no error |
+| `config_violates_schema_returns_error_with_details` | Invalid config — returns error with field-level details |
 
 ## Integration Tests
 
@@ -301,15 +323,33 @@ test-support = []  # existing
 | spawn_blocking panic | `engine_factory::run_on_backend_handles_panic` |
 | Missing plugin | `discover::discover_returns_error_on_resolution_failure` |
 | Invalid compression | `wasm_runner::parse_compression_invalid` |
+| Cursor save failure | `run::cursor_save_failure_does_not_fail_pipeline` |
+| CAS stub (adapter) | `engine_factory::cas_adapter_stub_returns_true` |
+| Dropped progress channel | `progress::channel_reporter_does_not_panic_when_receiver_dropped` |
 
 ## Test Counts
 
 | Layer | Unit | Integration | Total |
 |-------|------|-------------|-------|
 | Domain | 21 | — | 21 |
-| Application | 45 | — | 45 |
-| Adapter | 11 | — | 11 |
+| Application | 46 | — | 46 |
+| Adapter | 16 | — | 16 |
 | Integration | — | 32 | 32 |
-| **Total** | **77** | **32** | **95** |*
+| **Total** | **83** | **32** | **115** |
 
-*Includes 9 pre-existing integration tests (pipeline_integration, policy_proptest, resolve_visibility).
+Breakdown: 40 existing unit + 9 existing integration + 43 new unit + 23 new integration = 115 total.
+
+## Test Plugin Build Artifacts
+
+Test WASM plugins build to `crates/rapidbyte-engine/tests/fixtures/plugins/<name>/target/wasm32-wasip2/debug/<name>.wasm`. Integration tests locate them via:
+```rust
+fn test_plugin_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/plugins")
+        .join(name)
+        .join("target/wasm32-wasip2/debug")
+        .join(format!("{name}.wasm"))
+}
+```
+
+CI must run `just build-test-plugins` before `cargo test --features integration`. Tests that can't find the WASM binaries print a skip message and return early (not panic).
