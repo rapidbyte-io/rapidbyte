@@ -31,3 +31,36 @@ impl ProgressReporter for ChannelProgressReporter {
         let _ = self.tx.send(event);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::progress::Phase;
+
+    #[test]
+    fn channel_reporter_sends_events() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let reporter = ChannelProgressReporter::new(tx);
+        reporter.report(ProgressEvent::PhaseChanged {
+            phase: Phase::Running,
+        });
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(
+            event,
+            ProgressEvent::PhaseChanged {
+                phase: Phase::Running
+            }
+        ));
+    }
+
+    #[test]
+    fn channel_reporter_does_not_panic_when_receiver_dropped() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let reporter = ChannelProgressReporter::new(tx);
+        drop(rx);
+        reporter.report(ProgressEvent::PhaseChanged {
+            phase: Phase::Finalizing,
+        });
+        // No panic = test passes
+    }
+}

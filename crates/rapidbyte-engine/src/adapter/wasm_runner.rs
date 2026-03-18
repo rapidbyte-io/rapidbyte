@@ -1124,10 +1124,78 @@ pub fn run_transform_stream_bench(
 
 #[cfg(test)]
 mod tests {
-    use super::handle_close_result;
+    use super::{handle_close_result, parse_compression, plugin_instance_key};
+    use rapidbyte_runtime::CompressionCodec;
+    use rapidbyte_types::catalog::SchemaHint;
+    use rapidbyte_types::stream::StreamContext;
+    use rapidbyte_types::wire::SyncMode;
 
     #[test]
     fn test_handle_close_result_ok() {
         handle_close_result::<String, _>(Ok(Ok(())), "Source", "users", |e| e);
+    }
+
+    #[test]
+    fn parse_compression_lz4() {
+        let result = parse_compression(Some("lz4")).unwrap();
+        assert!(matches!(result, Some(CompressionCodec::Lz4)));
+    }
+
+    #[test]
+    fn parse_compression_zstd() {
+        let result = parse_compression(Some("zstd")).unwrap();
+        assert!(matches!(result, Some(CompressionCodec::Zstd)));
+    }
+
+    #[test]
+    fn parse_compression_none_input() {
+        let result = parse_compression(None).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_compression_empty_string_returns_none() {
+        let result = parse_compression(Some("")).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_compression_invalid_returns_error() {
+        let result = parse_compression(Some("brotli"));
+        assert!(result.is_err());
+    }
+
+    fn test_stream_ctx(stream_name: &str, partition_index: Option<u32>) -> StreamContext {
+        StreamContext {
+            stream_name: stream_name.to_string(),
+            source_stream_name: None,
+            schema: SchemaHint::Columns(vec![]),
+            sync_mode: SyncMode::FullRefresh,
+            cursor_info: None,
+            limits: Default::default(),
+            policies: Default::default(),
+            write_mode: None,
+            selected_columns: None,
+            partition_key: None,
+            partition_count: None,
+            partition_index,
+            effective_parallelism: None,
+            partition_strategy: None,
+            copy_flush_bytes_override: None,
+        }
+    }
+
+    #[test]
+    fn plugin_instance_key_without_ordinal() {
+        let ctx = test_stream_ctx("public.users", Some(2));
+        let key = plugin_instance_key("source", "rapidbyte/source-pg", &ctx, None);
+        assert_eq!(key, "source:rapidbyte/source-pg:public.users:p2");
+    }
+
+    #[test]
+    fn plugin_instance_key_with_ordinal() {
+        let ctx = test_stream_ctx("public.orders", None);
+        let key = plugin_instance_key("transform", "rapidbyte/transform-sql", &ctx, Some(3));
+        assert_eq!(key, "transform:rapidbyte/transform-sql:public.orders:p0:i3");
     }
 }

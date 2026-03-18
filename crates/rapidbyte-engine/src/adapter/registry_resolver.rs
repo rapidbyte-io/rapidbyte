@@ -210,4 +210,39 @@ mod tests {
         assert!(message.contains("host=V6"));
         assert!(message.contains("rebuild the plugin against rapidbyte:plugin@6.0.0"));
     }
+
+    fn manifest_with_schema(schema: serde_json::Value) -> PluginManifest {
+        PluginManifest {
+            config_schema: Some(schema),
+            ..test_source_manifest(ProtocolVersion::V6)
+        }
+    }
+
+    #[test]
+    fn config_matches_schema_passes() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "host": { "type": "string" } },
+            "required": ["host"]
+        });
+        let manifest = manifest_with_schema(schema);
+        let config = serde_json::json!({ "host": "localhost" });
+        let result = validate_config_against_schema("test-plugin", &config, &manifest);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn config_violates_schema_returns_error_with_details() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": { "host": { "type": "string" } },
+            "required": ["host"]
+        });
+        let manifest = manifest_with_schema(schema);
+        let config = serde_json::json!({ "port": 5432 }); // missing "host"
+        let result = validate_config_against_schema("test-plugin", &config, &manifest);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("test-plugin"));
+    }
 }

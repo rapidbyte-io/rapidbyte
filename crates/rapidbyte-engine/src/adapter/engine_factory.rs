@@ -265,3 +265,71 @@ pub async fn build_discover_context(
         },
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rapidbyte_types::state::{PipelineId, StreamName};
+
+    #[tokio::test]
+    async fn run_on_backend_propagates_result() {
+        let backend = noop_state_backend();
+        let result = run_on_backend(&backend, "test", |b| {
+            b.get_cursor(&PipelineId::new("p"), &StreamName::new("s"))
+        })
+        .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none()); // NoopStateBackend returns None
+    }
+
+    #[tokio::test]
+    async fn run_on_backend_handles_panic() {
+        let backend = noop_state_backend();
+        let result: Result<(), _> = run_on_backend(&backend, "panic", |_| {
+            panic!("test panic");
+        })
+        .await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("panic"));
+    }
+
+    #[tokio::test]
+    async fn cas_adapter_stub_returns_true() {
+        let backend = noop_state_backend();
+        let adapter = StateBackendRepositoryAdapter::new(backend);
+        let result = ports::CursorRepository::compare_and_set(
+            &adapter,
+            &PipelineId::new("p"),
+            &StreamName::new("s"),
+            Some("old"),
+            "new",
+        )
+        .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap()); // stub always returns true
+    }
+
+    #[tokio::test]
+    async fn dlq_adapter_stub_returns_zero() {
+        let backend = noop_state_backend();
+        let adapter = StateBackendRepositoryAdapter::new(backend);
+        let result = ports::DlqRepository::insert(&adapter, &PipelineId::new("p"), 1, &[]).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 0); // stub always returns 0
+    }
+
+    #[tokio::test]
+    async fn cursor_get_returns_none_for_noop_backend() {
+        let backend = noop_state_backend();
+        let adapter = StateBackendRepositoryAdapter::new(backend);
+        let result = ports::CursorRepository::get(
+            &adapter,
+            &PipelineId::new("pipeline-1"),
+            &StreamName::new("stream-1"),
+        )
+        .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+}
