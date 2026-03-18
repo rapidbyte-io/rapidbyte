@@ -9,7 +9,8 @@
 - Rewrite engine internals from scratch using hexagonal architecture (domain / application / adapter layers)
 - Extract config types, parsing, and validation to `rapidbyte-pipeline-config`
 - Extract Arrow IPC codec to `rapidbyte-types`
-- Eliminate `rapidbyte-state` crate — trait moves to `types`, implementations become engine adapters
+- Eliminate `rapidbyte-state` crate — trait moves to `types`, Postgres implementation becomes engine adapter
+- Drop SQLite state backend support — Postgres only, matching the controller
 - Clean cut: no legacy code, no bridge layers, no `v2_` prefixes, no `allow(dead_code)`
 - Breaking changes to public API are acceptable
 - All code must be coherent, justified, and pass `clippy::pedantic` without suppression
@@ -62,13 +63,14 @@ rapidbyte-engine (lean orchestration, hexagonal)
 └── adapter/
     ├── wasm_runner.rs              ← impl PluginRunner (Wasmtime)
     ├── registry_resolver.rs        ← impl PluginResolver (OCI registry)
-    ├── sqlite/                     ← impl CursorRepository, RunRecordRepository, DlqRepository
-    └── postgres/                   ← impl CursorRepository, RunRecordRepository, DlqRepository
+    └── postgres/                   ← impl CursorRepository, RunRecordRepository, DlqRepository, StateBackend
+migrations/
+    └── 0001_initial.sql            ← SQLx versioned migration (cursors, runs, DLQ tables)
 ```
 
 ### Crate Removed
 
-`rapidbyte-state` — trait moves to `rapidbyte-types::state`, SQLite/Postgres implementations become engine adapter modules.
+`rapidbyte-state` — trait moves to `rapidbyte-types::state`, Postgres implementation becomes an engine adapter module. SQLite support is dropped entirely.
 
 ## Domain Layer
 
@@ -109,9 +111,9 @@ pub trait PluginResolver: Send + Sync {
 
 #### Focused State Repositories
 
-Three focused traits replace the monolithic `StateBackend` at the orchestration level. All are async to support both SQLite (via `spawn_blocking`) and Postgres (native async via `sqlx`), matching the controller's async repository pattern.
+Three focused traits replace the monolithic `StateBackend` at the orchestration level. All are async, using `sqlx` with Postgres — matching the controller's async repository pattern.
 
-Note: these are engine-internal orchestration ports. The monolithic `StateBackend` trait (moved to `rapidbyte-types`) continues to serve the runtime's host imports during WASM execution. The engine's adapter structs (`SqliteBackend`, `PgBackend`) implement *both* the focused repository traits (for orchestration) and the `StateBackend` trait (for runtime host imports). See the "Dual-Trait Pattern" section under Adapter Layer.
+Note: these are engine-internal orchestration ports. The monolithic `StateBackend` trait (moved to `rapidbyte-types`) continues to serve the runtime's host imports during WASM execution. The engine's `PgBackend` adapter implements *both* the focused repository traits (for orchestration) and the `StateBackend` trait (for runtime host imports). See the "Dual-Trait Pattern" section under Adapter Layer.
 
 ```rust
 #[async_trait]
@@ -412,62 +414,101 @@ pub struct OtelMetricsSnapshot {
 impl MetricsSnapshot for OtelMetricsSnapshot { ... }
 ```
 
-### State Backend Adapters
+### Postgres State Adapter
 
-Single struct per backend implements all three repository traits.
+Postgres-only. SQLite support is dropped — Postgres is the single state backend, matching the controller.
 
 #### Dual-Trait Pattern
 
-Each backend adapter (`SqliteBackend`, `PgBackend`) implements **two sets of traits**:
+`PgBackend` implements **two sets of traits**:
 
-1. **Focused repository ports** (`CursorRepository`, `RunRecordRepository`, `DlqRepository`) — used by the engine's orchestration layer for stream planning, finalization, and DLQ handling.
-2. **Monolithic `StateBackend` trait** (from `rapidbyte-types`) — used by the runtime's host imports during WASM plugin execution (cursor reads/writes, DLQ inserts within plugin calls).
+1. **Focused repository ports** (`CursorRepository`, `RunRecordRepository`, `DlqRepository`) — used by the engine's orchestration layer for stream planning, finalization, and DLQ handling. These are async, using `sqlx`.
+2. **Monolithic `StateBackend` trait** (from `rapidbyte-types`) — used by the runtime's host imports during WASM plugin execution (cursor reads/writes, DLQ inserts within plugin calls). This is synchronous; `PgBackend` uses a dedicated blocking `postgres::Client` connection for this trait.
 
-Both trait sets are backed by the same underlying database connection/pool. The `as_state_backend()` method returns an `Arc<dyn StateBackend>` that the engine passes to `WasmPluginRunner` at construction time.
-
-#### SQLite
-
-```rust
-pub struct SqliteBackend {
-    conn: Arc<Mutex<rusqlite::Connection>>,
-}
-
-impl SqliteBackend {
-    pub fn open(path: &Path) -> Result<Self, PipelineError> { ... }
-    pub fn in_memory() -> Result<Self, PipelineError> { ... }
-
-    /// Returns an Arc<dyn StateBackend> for runtime host imports.
-    /// Shares the same underlying connection.
-    pub fn as_state_backend(&self) -> Arc<dyn StateBackend> { ... }
-}
-
-// Focused repository ports (for engine orchestration)
-impl CursorRepository for SqliteBackend { ... }
-impl RunRecordRepository for SqliteBackend { ... }
-impl DlqRepository for SqliteBackend { ... }
-
-// Monolithic trait (for runtime host imports)
-impl StateBackend for SqliteBackend { ... }
-```
-
-#### Postgres
+Both trait sets are backed by the same Postgres database. The `as_state_backend()` method returns an `Arc<dyn StateBackend>` that the engine passes to `WasmPluginRunner` at construction time.
 
 ```rust
 pub struct PgBackend {
-    pool: PgPool,
+    pool: PgPool,                              // async (sqlx) — for repository ports
+    sync_client: Arc<Mutex<postgres::Client>>,  // sync — for StateBackend trait
 }
 
+impl PgBackend {
+    pub async fn connect(connstr: &str) -> Result<Self, PipelineError> { ... }
+
+    /// Run SQLx migrations (creates/updates tables).
+    pub async fn migrate(&self) -> Result<(), PipelineError> {
+        sqlx::migrate!("./migrations").run(&self.pool).await?;
+        Ok(())
+    }
+
+    /// Returns an Arc<dyn StateBackend> for runtime host imports.
+    pub fn as_state_backend(&self) -> Arc<dyn StateBackend> { ... }
+}
+
+// Focused repository ports (for engine orchestration, async)
 impl CursorRepository for PgBackend { ... }
 impl RunRecordRepository for PgBackend { ... }
 impl DlqRepository for PgBackend { ... }
+
+// Monolithic trait (for runtime host imports, sync)
+impl StateBackend for PgBackend { ... }
 ```
+
+#### Migrations
+
+SQLx versioned migrations, same pattern as the controller. Stored in `crates/rapidbyte-engine/migrations/`.
+
+```
+crates/rapidbyte-engine/migrations/
+└── 0001_initial.sql
+```
+
+`0001_initial.sql` creates the state tables (migrated from `rapidbyte-state`):
+
+```sql
+CREATE TABLE IF NOT EXISTS sync_cursors (
+    pipeline   TEXT NOT NULL,
+    stream     TEXT NOT NULL,
+    cursor_value TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (pipeline, stream)
+);
+
+CREATE TABLE IF NOT EXISTS sync_runs (
+    id         BIGSERIAL PRIMARY KEY,
+    pipeline   TEXT NOT NULL,
+    stream     TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'running',
+    rows_read  BIGINT DEFAULT 0,
+    rows_written BIGINT DEFAULT 0,
+    bytes_written BIGINT DEFAULT 0,
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS dlq_records (
+    id         BIGSERIAL PRIMARY KEY,
+    pipeline   TEXT NOT NULL,
+    run_id     BIGINT NOT NULL REFERENCES sync_runs(id),
+    record     JSONB NOT NULL,
+    error      TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_runs_pipeline ON sync_runs(pipeline, stream);
+CREATE INDEX IF NOT EXISTS idx_dlq_records_run ON dlq_records(run_id);
+```
+
+Migrations are applied at startup via `backend.migrate()` before constructing `EngineContext`. SQLx tracks applied migrations in `_sqlx_migrations` table — each migration runs exactly once.
 
 ### Wiring Example
 
 Callers (CLI, agent) construct `EngineContext` with real adapters:
 
 ```rust
-let backend = SqliteBackend::open(&db_path)?;
+let backend = PgBackend::connect(&connstr).await?;
+backend.migrate().await?;
 let state_backend = backend.as_state_backend();
 let backend = Arc::new(backend);
 
@@ -508,8 +549,7 @@ types (leaf — gains StateBackend trait + Arrow IPC)
   └── engine → types, runtime, pipeline-config, registry, secrets, metrics
   │     domain:       error, retry, outcome, progress, port traits
   │     application:  run/check/discover use cases, EngineContext DI
-  │     adapter:      WasmPluginRunner, RegistryPluginResolver,
-  │                   SqliteBackend, PgBackend
+  │     adapter:      WasmPluginRunner, RegistryPluginResolver, PgBackend
   │
   ├── controller → types, pipeline-config, secrets, metrics (unchanged)
   ├── agent → engine, types, pipeline-config
@@ -524,8 +564,11 @@ types (leaf — gains StateBackend trait + Arrow IPC)
 ## Complete Engine Module Layout
 
 ```
-crates/rapidbyte-engine/src/
-├── lib.rs
+crates/rapidbyte-engine/
+├── migrations/
+│   └── 0001_initial.sql            # sync_cursors, sync_runs, dlq_records tables
+├── src/
+│   ├── lib.rs
 ├── domain/
 │   ├── mod.rs
 │   ├── ports/
@@ -554,16 +597,12 @@ crates/rapidbyte-engine/src/
     ├── registry_resolver.rs        # RegistryPluginResolver
     ├── progress.rs                 # ChannelProgressReporter
     ├── metrics.rs                  # OtelMetricsSnapshot
-    ├── sqlite/
-    │   ├── mod.rs                  # SqliteBackend
-    │   ├── cursor.rs
-    │   ├── run_record.rs
-    │   └── dlq.rs
     └── postgres/
-        ├── mod.rs                  # PgBackend
-        ├── cursor.rs
-        ├── run_record.rs
-        └── dlq.rs
+        ├── mod.rs                  # PgBackend (connect, migrate, as_state_backend)
+        ├── cursor.rs               # impl CursorRepository
+        ├── run_record.rs           # impl RunRecordRepository
+        ├── dlq.rs                  # impl DlqRepository
+        └── state_backend.rs        # impl StateBackend (sync, for runtime host imports)
 ```
 
 ## Public API Surface
@@ -615,8 +654,10 @@ pub use domain::progress::ProgressReporter;
 3. Benchmarks rewritten to use `run_pipeline()` instead of `run_*_stream()`
 4. CLI/agent must construct `EngineContext` with adapters (explicit DI, no implicit wiring)
 5. `rapidbyte-state` crate removed from workspace; `StateBackend` trait moves to `rapidbyte-types`
-6. Engine's `runner/`, `plugin/`, `pipeline/`, `finalizers/` modules no longer public
-7. `run_pipeline()` signature gains `cancel: CancellationToken` parameter
-8. `PipelineError::Plugin` wraps `PluginError` (struct variant → tuple variant)
-9. `ProgressEvent` variants renamed: `PhaseChange` → `PhaseChanged`, `Retry` → `RetryScheduled`; new `StreamStarted` variant added
-10. `CheckResult` simplified from per-component-type fields to `Vec<CheckComponentStatus>` (each entry carries component name and kind)
+6. SQLite state backend dropped — Postgres is the only supported state backend
+7. Engine's `runner/`, `plugin/`, `pipeline/`, `finalizers/` modules no longer public
+8. `run_pipeline()` signature gains `cancel: CancellationToken` parameter
+9. `PipelineError::Plugin` wraps `PluginError` (struct variant → tuple variant)
+10. `ProgressEvent` variants renamed: `PhaseChange` → `PhaseChanged`, `Retry` → `RetryScheduled`; new `StreamStarted` variant added
+11. `CheckResult` simplified from per-component-type fields to `Vec<CheckComponentStatus>` (each entry carries component name and kind)
+12. State backend requires Postgres — engine runs SQLx migrations at startup via `PgBackend::migrate()`
