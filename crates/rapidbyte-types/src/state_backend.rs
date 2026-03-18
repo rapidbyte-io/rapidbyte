@@ -85,6 +85,67 @@ pub trait StateBackend: Send + Sync {
     ) -> state_error::Result<u64>;
 }
 
+// ---------------------------------------------------------------------------
+// No-op implementation
+// ---------------------------------------------------------------------------
+
+/// No-op [`StateBackend`] that discards all writes and returns empty
+/// defaults. Useful for contexts that don't need real persistence
+/// (discover, validate, dev REPL).
+pub struct NoopStateBackend;
+
+impl StateBackend for NoopStateBackend {
+    fn get_cursor(
+        &self,
+        _pipeline: &PipelineId,
+        _stream: &StreamName,
+    ) -> state_error::Result<Option<CursorState>> {
+        Ok(None)
+    }
+    fn set_cursor(
+        &self,
+        _pipeline: &PipelineId,
+        _stream: &StreamName,
+        _cursor: &CursorState,
+    ) -> state_error::Result<()> {
+        Ok(())
+    }
+    fn start_run(&self, _pipeline: &PipelineId, _stream: &StreamName) -> state_error::Result<i64> {
+        Ok(1)
+    }
+    fn complete_run(
+        &self,
+        _run_id: i64,
+        _status: RunStatus,
+        _stats: &RunStats,
+    ) -> state_error::Result<()> {
+        Ok(())
+    }
+    fn compare_and_set(
+        &self,
+        _pipeline: &PipelineId,
+        _stream: &StreamName,
+        _expected: Option<&str>,
+        _new_value: &str,
+    ) -> state_error::Result<bool> {
+        Ok(true)
+    }
+    fn insert_dlq_records(
+        &self,
+        _pipeline: &PipelineId,
+        _run_id: i64,
+        _records: &[DlqRecord],
+    ) -> state_error::Result<u64> {
+        Ok(0)
+    }
+}
+
+/// Returns an `Arc<dyn StateBackend>` backed by a [`NoopStateBackend`].
+#[must_use]
+pub fn noop_state_backend() -> std::sync::Arc<dyn StateBackend> {
+    std::sync::Arc::new(NoopStateBackend)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +154,25 @@ mod tests {
     #[test]
     fn trait_is_object_safe() {
         fn _assert_object_safe(_: &dyn StateBackend) {}
+    }
+
+    #[test]
+    fn noop_backend_returns_defaults() {
+        let backend = NoopStateBackend;
+        let pid = PipelineId::new("test");
+        let stream = StreamName::new("s");
+        assert!(backend.get_cursor(&pid, &stream).unwrap().is_none());
+        assert!(backend
+            .set_cursor(
+                &pid,
+                &stream,
+                &CursorState {
+                    cursor_field: None,
+                    cursor_value: None,
+                    updated_at: String::new(),
+                }
+            )
+            .is_ok());
+        assert_eq!(backend.start_run(&pid, &stream).unwrap(), 1);
     }
 }

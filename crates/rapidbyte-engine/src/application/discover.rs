@@ -4,6 +4,7 @@
 //! list of streams the plugin can sync.
 
 use crate::application::context::EngineContext;
+use crate::application::parse_plugin_id;
 use crate::domain::error::PipelineError;
 use crate::domain::ports::runner::{DiscoverParams, DiscoveredStream};
 use rapidbyte_types::wire::PluginKind;
@@ -39,16 +40,6 @@ pub async fn discover_plugin(
     };
 
     ctx.runner.discover(&params).await
-}
-
-/// Split a plugin reference like `"rapidbyte/source-postgres:1.0"` into
-/// `(id, version)`. Falls back to `("unknown", "0.0.0")` for bare names.
-fn parse_plugin_id(plugin_ref: &str) -> (String, String) {
-    if let Some((id, ver)) = plugin_ref.rsplit_once(':') {
-        (id.to_string(), ver.to_string())
-    } else {
-        (plugin_ref.to_string(), "0.0.0".to_string())
-    }
 }
 
 #[cfg(test)]

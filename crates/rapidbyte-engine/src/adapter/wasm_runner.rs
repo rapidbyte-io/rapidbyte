@@ -156,6 +156,7 @@ impl PluginRunner for WasmPluginRunner {
         params: &ValidateParams,
     ) -> Result<CheckComponentStatus, PipelineError> {
         let validation = validate_plugin_impl(
+            &self.runtime,
             &params.wasm_path,
             params.kind,
             &params.plugin_id,
@@ -174,6 +175,7 @@ impl PluginRunner for WasmPluginRunner {
         params: &DiscoverParams,
     ) -> Result<Vec<DiscoveredStream>, PipelineError> {
         let catalog = run_discover_impl(
+            &self.runtime,
             &params.wasm_path,
             &params.plugin_id,
             &params.plugin_version,
@@ -186,13 +188,17 @@ impl PluginRunner for WasmPluginRunner {
             .streams
             .into_iter()
             .map(|s| {
-                let catalog_json = serde_json::to_string(&s).unwrap_or_default();
-                DiscoveredStream {
-                    name: s.name,
-                    catalog_json,
+                let catalog_json = serde_json::to_string(&s)
+                    .map_err(|e| PipelineError::infra(format!("failed to serialize catalog: {e}")));
+                match catalog_json {
+                    Ok(json) => Ok(DiscoveredStream {
+                        name: s.name,
+                        catalog_json: json,
+                    }),
+                    Err(e) => Err(e),
                 }
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(streams)
     }
@@ -771,6 +777,7 @@ fn run_transform_stream(
 /// entrypoint in-process.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn validate_plugin_impl(
+    runtime: &WasmRuntime,
     wasm_path: &std::path::Path,
     kind: PluginKind,
     plugin_id: &str,
@@ -783,7 +790,6 @@ fn validate_plugin_impl(
 
     tracing::info!(plugin = plugin_id, version = plugin_version, kind = ?kind, "Validating plugin");
 
-    let runtime = WasmRuntime::new()?;
     let module = runtime.load_module(wasm_path)?;
     let state = noop_state_backend();
 
@@ -898,13 +904,13 @@ fn validate_plugin_impl(
 
 /// Discover available streams from a source plugin.
 fn run_discover_impl(
+    runtime: &WasmRuntime,
     wasm_path: &std::path::Path,
     plugin_id: &str,
     plugin_version: &str,
     config: &serde_json::Value,
     permissions: Option<&Permissions>,
 ) -> anyhow::Result<Catalog> {
-    let runtime = WasmRuntime::new()?;
     let module = runtime.load_module(wasm_path)?;
 
     let state = noop_state_backend();

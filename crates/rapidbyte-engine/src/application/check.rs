@@ -8,6 +8,7 @@ use rapidbyte_pipeline_config::PipelineConfig;
 use rapidbyte_types::wire::PluginKind;
 
 use crate::application::context::EngineContext;
+use crate::application::parse_plugin_id;
 use crate::domain::error::PipelineError;
 use crate::domain::outcome::{CheckResult, CheckStatus};
 use crate::domain::ports::runner::ValidateParams;
@@ -203,15 +204,6 @@ fn first_stream_name(pipeline: &PipelineConfig) -> String {
         .streams
         .first()
         .map_or_else(|| "check".to_string(), |s| s.name.clone())
-}
-
-/// Split a plugin reference into (id, version).
-fn parse_plugin_id(plugin_ref: &str) -> (String, String) {
-    if let Some((id, ver)) = plugin_ref.rsplit_once(':') {
-        (id.to_string(), ver.to_string())
-    } else {
-        (plugin_ref.to_string(), "0.0.0".to_string())
-    }
 }
 
 #[cfg(test)]

@@ -24,68 +24,13 @@ use rapidbyte_runtime::{
 };
 use rapidbyte_types::catalog::{Catalog, SchemaHint};
 use rapidbyte_types::manifest::Permissions;
-use rapidbyte_types::state_backend::StateBackend;
+use rapidbyte_types::state_backend::{NoopStateBackend, StateBackend};
 use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
 use rapidbyte_types::wire::{PluginKind, SyncMode};
 
 use crate::commands::{self, Command};
 use crate::display;
 use crate::workspace::ArrowWorkspace;
-
-// ── No-op state backend for dev shell ──────────────────────────────
-
-/// Minimal no-op state backend for the dev REPL (replaces SQLite in-memory).
-struct NoopStateBackend;
-
-impl StateBackend for NoopStateBackend {
-    fn get_cursor(
-        &self,
-        _: &rapidbyte_types::state::PipelineId,
-        _: &rapidbyte_types::state::StreamName,
-    ) -> rapidbyte_types::state_error::Result<Option<rapidbyte_types::state::CursorState>> {
-        Ok(None)
-    }
-    fn set_cursor(
-        &self,
-        _: &rapidbyte_types::state::PipelineId,
-        _: &rapidbyte_types::state::StreamName,
-        _: &rapidbyte_types::state::CursorState,
-    ) -> rapidbyte_types::state_error::Result<()> {
-        Ok(())
-    }
-    fn start_run(
-        &self,
-        _: &rapidbyte_types::state::PipelineId,
-        _: &rapidbyte_types::state::StreamName,
-    ) -> rapidbyte_types::state_error::Result<i64> {
-        Ok(1)
-    }
-    fn complete_run(
-        &self,
-        _: i64,
-        _: rapidbyte_types::state::RunStatus,
-        _: &rapidbyte_types::state::RunStats,
-    ) -> rapidbyte_types::state_error::Result<()> {
-        Ok(())
-    }
-    fn compare_and_set(
-        &self,
-        _: &rapidbyte_types::state::PipelineId,
-        _: &rapidbyte_types::state::StreamName,
-        _: Option<&str>,
-        _: &str,
-    ) -> rapidbyte_types::state_error::Result<bool> {
-        Ok(true)
-    }
-    fn insert_dlq_records(
-        &self,
-        _: &rapidbyte_types::state::PipelineId,
-        _: i64,
-        _: &[rapidbyte_types::envelope::DlqRecord],
-    ) -> rapidbyte_types::state_error::Result<u64> {
-        Ok(0)
-    }
-}
 
 // ── State types ────────────────────────────────────────────────────
 

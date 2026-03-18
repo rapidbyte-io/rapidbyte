@@ -57,7 +57,7 @@ pub mod prelude {
     pub use crate::manifest::PluginManifest;
     pub use crate::metric::{ReadSummary, TransformSummary, WriteSummary};
     pub use crate::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
-    pub use crate::state_backend::StateBackend;
+    pub use crate::state_backend::{noop_state_backend, NoopStateBackend, StateBackend};
     pub use crate::state_error::StateError;
     pub use crate::stream::{StreamContext, StreamLimits, StreamPolicies};
     pub use crate::wire::{Feature, PluginInfo, PluginKind, ProtocolVersion, SyncMode, WriteMode};

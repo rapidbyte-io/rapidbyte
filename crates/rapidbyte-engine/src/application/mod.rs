@@ -15,3 +15,13 @@ pub mod run;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
+
+/// Split a plugin reference like `"rapidbyte/source-postgres:1.0"` into
+/// `(id, version)`. Falls back to `("plugin_ref", "0.0.0")` for bare names.
+pub(crate) fn parse_plugin_id(plugin_ref: &str) -> (String, String) {
+    if let Some((id, ver)) = plugin_ref.rsplit_once(':') {
+        (id.to_string(), ver.to_string())
+    } else {
+        (plugin_ref.to_string(), "0.0.0".to_string())
+    }
+}

@@ -3,6 +3,7 @@
 //! [`run_pipeline`] owns the retry loop and orchestrates the entire pipeline
 //! execution: resolve plugins, load cursors, execute streams, finalize.
 
+use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
 
@@ -15,6 +16,7 @@ use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
 use rapidbyte_runtime::Frame;
 
 use crate::application::context::EngineContext;
+use crate::application::parse_plugin_id;
 use crate::domain::error::PipelineError;
 use crate::domain::outcome::{
     DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineCounts, PipelineOutcome,
@@ -143,6 +145,8 @@ pub async fn run_pipeline(
         let mut total_transform_secs: f64 = 0.0;
         let mut dry_run_streams: Vec<DryRunStreamResult> = Vec::new();
         let mut stream_error: Option<PipelineError> = None;
+        // Per-stream stats: (records_read, records_written, bytes_read, bytes_written)
+        let mut per_stream_stats: HashMap<String, (u64, u64, u64, u64)> = HashMap::new();
 
         let (src_id, src_ver) = parse_plugin_id(&pipeline.source.use_ref);
         let (dst_id, dst_ver) = parse_plugin_id(&pipeline.destination.use_ref);
@@ -241,6 +245,13 @@ pub async fn run_pipeline(
             total_records_read += source_outcome.summary.records_read;
             total_bytes_read += source_outcome.summary.bytes_read;
 
+            // Initialize per-stream stats with source counts
+            let stream_stat = per_stream_stats
+                .entry(stream_name.clone())
+                .or_insert((0, 0, 0, 0));
+            stream_stat.0 += source_outcome.summary.records_read;
+            stream_stat.2 += source_outcome.summary.bytes_read;
+
             // Run transforms (sequential pipeline)
             let mut current_rx = Some(frame_rx);
             for (i, transform) in pipeline.transforms.iter().enumerate() {
@@ -338,6 +349,13 @@ pub async fn run_pipeline(
                         total_dest_secs += outcome.duration_secs;
                         total_records_written += outcome.summary.records_written;
                         total_bytes_written += outcome.summary.bytes_written;
+
+                        // Record per-stream destination counts
+                        let stream_stat = per_stream_stats
+                            .entry(stream_name.clone())
+                            .or_insert((0, 0, 0, 0));
+                        stream_stat.1 += outcome.summary.records_written;
+                        stream_stat.3 += outcome.summary.bytes_written;
                     }
                     Err(e) => {
                         stream_error = Some(e);
@@ -391,7 +409,7 @@ pub async fn run_pipeline(
 
         let duration_secs = overall_start.elapsed().as_secs_f64();
 
-        // Record runs for each stream
+        // Record runs for each stream with per-stream stats
         for stream_cfg in &pipeline.source.streams {
             let stream_name = StreamName::new(&stream_cfg.name);
             let run_id = ctx
@@ -400,11 +418,15 @@ pub async fn run_pipeline(
                 .await
                 .map_err(|e| PipelineError::infra(format!("run start failed: {e}")))?;
 
+            let (sr, sw, br, bw) = per_stream_stats
+                .get(&stream_cfg.name)
+                .copied()
+                .unwrap_or((0, 0, 0, 0));
             let run_stats = RunStats {
-                records_read: total_records_read,
-                records_written: total_records_written,
-                bytes_read: total_bytes_read,
-                bytes_written: total_bytes_written,
+                records_read: sr,
+                records_written: sw,
+                bytes_read: br,
+                bytes_written: bw,
                 error_message: None,
             };
 
@@ -485,15 +507,6 @@ fn evaluate_retry(
             info!(reason, "giving up on retries");
             None
         }
-    }
-}
-
-/// Split a plugin reference into (id, version).
-fn parse_plugin_id(plugin_ref: &str) -> (String, String) {
-    if let Some((id, ver)) = plugin_ref.rsplit_once(':') {
-        (id.to_string(), ver.to_string())
-    } else {
-        (plugin_ref.to_string(), "0.0.0".to_string())
     }
 }
 
