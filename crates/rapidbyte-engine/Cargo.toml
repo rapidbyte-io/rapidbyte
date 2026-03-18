@@ -27,6 +27,9 @@ rapidbyte-secrets = { path = "../rapidbyte-secrets" }
 rapidbyte-pipeline-config = { path = "../rapidbyte-pipeline-config" }
 async-trait = { workspace = true }
 
+[features]
+test-support = []
+
 [dev-dependencies]
 bytes = "1"
 tempfile = "3"
