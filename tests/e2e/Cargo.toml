@@ -19,6 +19,7 @@ tempfile = "3"
 rusqlite = { version = "0.31", features = ["bundled"] }
 
 rapidbyte-engine = { path = "../../crates/rapidbyte-engine" }
+rapidbyte-pipeline-config = { path = "../../crates/rapidbyte-pipeline-config" }
 rapidbyte-secrets = { path = "../../crates/rapidbyte-secrets" }
 rapidbyte-metrics = { path = "../../crates/rapidbyte-metrics" }
 rapidbyte-registry = { path = "../../crates/rapidbyte-registry" }

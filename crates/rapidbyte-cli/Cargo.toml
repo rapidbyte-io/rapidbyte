@@ -13,6 +13,7 @@ rapidbyte-controller = { path = "../rapidbyte-controller" }
 rapidbyte-metrics = { path = "../rapidbyte-metrics" }
 rapidbyte-dev = { path = "../rapidbyte-dev" }
 rapidbyte-engine = { path = "../rapidbyte-engine" }
+rapidbyte-pipeline-config = { path = "../rapidbyte-pipeline-config" }
 rapidbyte-secrets = { path = "../rapidbyte-secrets" }
 rapidbyte-registry = { path = "../rapidbyte-registry" }
 rapidbyte-runtime = { path = "../rapidbyte-runtime" }

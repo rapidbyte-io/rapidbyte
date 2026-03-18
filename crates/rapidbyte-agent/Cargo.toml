@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 rapidbyte-types = { path = "../rapidbyte-types" }
 rapidbyte-engine = { path = "../rapidbyte-engine" }
+rapidbyte-pipeline-config = { path = "../rapidbyte-pipeline-config" }
 rapidbyte-secrets = { path = "../rapidbyte-secrets" }
 rapidbyte-metrics = { path = "../rapidbyte-metrics" }
 opentelemetry = { workspace = true }

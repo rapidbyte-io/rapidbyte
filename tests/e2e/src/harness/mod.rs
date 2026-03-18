@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
-use rapidbyte_engine::config::parser;
-use rapidbyte_engine::config::validator;
+use rapidbyte_pipeline_config::parser;
+use rapidbyte_pipeline_config::validator;
 use rapidbyte_secrets::SecretProviders;
 use rapidbyte_engine::outcome::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_metrics::snapshot::SnapshotReader;

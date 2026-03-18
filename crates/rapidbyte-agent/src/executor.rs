@@ -3,11 +3,11 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use rapidbyte_engine::config::parser;
-use rapidbyte_engine::config::validator;
 use rapidbyte_engine::outcome::{ExecutionOptions, PipelineOutcome};
 use rapidbyte_engine::progress::ProgressEvent;
 use rapidbyte_engine::PipelineError;
+use rapidbyte_pipeline_config::parser;
+use rapidbyte_pipeline_config::validator;
 use rapidbyte_types::prelude::CommitState;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;

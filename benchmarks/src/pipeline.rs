@@ -127,13 +127,13 @@ fn str_key(value: &str) -> YamlValue {
 mod tests {
     use std::fs;
 
-    use rapidbyte_engine::config::types::{PipelineConfig, PipelineWriteMode};
+    use rapidbyte_pipeline_config::types::{PipelineConfig, PipelineWriteMode};
     use rapidbyte_types::wire::SyncMode;
 
     fn parse_pipeline_sync(yaml: &str) -> PipelineConfig {
         tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(rapidbyte_engine::config::parser::parse_pipeline(
+            .block_on(rapidbyte_pipeline_config::parser::parse_pipeline(
                 yaml,
                 &rapidbyte_secrets::SecretProviders::new(),
             ))

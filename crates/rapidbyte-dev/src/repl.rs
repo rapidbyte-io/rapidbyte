@@ -434,7 +434,7 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
         while let Ok(frame) = rx.try_recv() {
             match frame {
                 Frame::Data { payload: bytes, .. } => {
-                    let decoded = rapidbyte_engine::arrow::ipc_to_record_batches(&bytes)?;
+                    let decoded = rapidbyte_types::arrow::ipc_to_record_batches(&bytes)?;
                     all_batches.extend(decoded);
                 }
                 Frame::EndStream => break,

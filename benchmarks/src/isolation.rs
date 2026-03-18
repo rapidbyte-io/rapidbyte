@@ -6,7 +6,6 @@ use arrow::array::{Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use bytes::Bytes;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
-use rapidbyte_engine::arrow::record_batch_to_ipc;
 use rapidbyte_engine::runner::{
     run_destination_stream, run_source_stream, run_transform_stream, StreamRunContext,
 };
@@ -15,6 +14,7 @@ use rapidbyte_runtime::{
     load_plugin_manifest, parse_plugin_ref, resolve_plugin_path, Frame, WasmRuntime,
 };
 use rapidbyte_state::SqliteStateBackend;
+use rapidbyte_types::arrow::record_batch_to_ipc;
 use rapidbyte_types::catalog::SchemaHint;
 use rapidbyte_types::state::RunStats;
 use rapidbyte_types::stream::{DataErrorPolicy, StreamContext, StreamLimits, StreamPolicies};
