@@ -1,8 +1,15 @@
-//! Arrow data type identifiers for cross-boundary schema exchange.
+//! Arrow data type identifiers and IPC codec utilities.
 //!
 //! Maps database column types to a portable subset of Apache Arrow
 //! logical types. Used in [`crate::catalog::ColumnSchema`] to describe
 //! stream schemas without depending on the Arrow crate itself.
+//!
+//! The [`ipc`] submodule provides Arrow IPC serialization/deserialization
+//! helpers for `RecordBatch` transport between pipeline stages.
+
+mod ipc;
+
+pub use ipc::*;
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

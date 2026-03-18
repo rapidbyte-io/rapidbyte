@@ -5233,6 +5233,8 @@ dependencies = [
 name = "rapidbyte-types"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "arrow",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
