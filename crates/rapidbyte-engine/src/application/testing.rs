@@ -30,6 +30,22 @@ use crate::domain::progress::{ProgressEvent, ProgressReporter};
 use super::context::{EngineConfig, EngineContext};
 
 // ---------------------------------------------------------------------------
+// Shared test helpers
+// ---------------------------------------------------------------------------
+
+/// Create a [`ResolvedPlugin`] with a dummy WASM path and no manifest.
+///
+/// Useful in unit tests that need a resolved plugin but don't care about
+/// the actual WASM binary or manifest contents.
+#[must_use]
+pub fn test_resolved_plugin() -> ResolvedPlugin {
+    ResolvedPlugin {
+        wasm_path: std::path::PathBuf::from("/tmp/test.wasm"),
+        manifest: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FakePluginRunner
 // ---------------------------------------------------------------------------
 

@@ -4,7 +4,7 @@
 //! list of streams the plugin can sync.
 
 use crate::application::context::EngineContext;
-use crate::application::parse_plugin_id;
+use crate::application::{extract_permissions, parse_plugin_id};
 use crate::domain::error::PipelineError;
 use crate::domain::ports::runner::{DiscoverParams, DiscoveredStream};
 use rapidbyte_types::wire::PluginKind;
@@ -27,8 +27,7 @@ pub async fn discover_plugin(
         .resolve(source_ref, PluginKind::Source, config_json)
         .await?;
 
-    let manifest = resolved.manifest.as_ref();
-    let permissions = manifest.map(|m| m.permissions.clone());
+    let permissions = extract_permissions(&resolved);
     let (plugin_id, plugin_version) = parse_plugin_id(source_ref);
 
     let params = DiscoverParams {
@@ -45,16 +44,7 @@ pub async fn discover_plugin(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::testing::fake_context;
-    use crate::domain::ports::resolver::ResolvedPlugin;
-    use std::path::PathBuf;
-
-    fn test_resolved_plugin() -> ResolvedPlugin {
-        ResolvedPlugin {
-            wasm_path: PathBuf::from("/tmp/test.wasm"),
-            manifest: None,
-        }
-    }
+    use crate::application::testing::{fake_context, test_resolved_plugin};
 
     #[tokio::test]
     async fn discover_resolves_and_discovers() {

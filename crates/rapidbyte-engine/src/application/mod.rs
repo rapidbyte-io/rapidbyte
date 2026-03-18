@@ -25,3 +25,13 @@ pub(crate) fn parse_plugin_id(plugin_ref: &str) -> (String, String) {
         (plugin_ref.to_string(), "0.0.0".to_string())
     }
 }
+
+/// Extract the WASI sandbox permissions from a resolved plugin's manifest.
+///
+/// Returns `None` when the plugin has no embedded manifest, or `Some(permissions)`
+/// when one is present.
+pub(crate) fn extract_permissions(
+    resolved: &crate::domain::ports::resolver::ResolvedPlugin,
+) -> Option<rapidbyte_types::manifest::Permissions> {
+    resolved.manifest.as_ref().map(|m| m.permissions.clone())
+}

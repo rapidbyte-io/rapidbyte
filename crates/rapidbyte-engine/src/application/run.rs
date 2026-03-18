@@ -16,7 +16,7 @@ use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
 use rapidbyte_runtime::Frame;
 
 use crate::application::context::EngineContext;
-use crate::application::parse_plugin_id;
+use crate::application::{extract_permissions, parse_plugin_id};
 use crate::domain::error::PipelineError;
 use crate::domain::outcome::{
     DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineCounts, PipelineOutcome,
@@ -27,11 +27,11 @@ use crate::domain::progress::{Phase, ProgressEvent};
 use crate::domain::retry::{RetryDecision, RetryPolicy};
 
 /// Convert a `CompressionCodec` enum into its wire-format string name.
-fn compression_name(codec: rapidbyte_types::compression::CompressionCodec) -> String {
+fn compression_name(codec: rapidbyte_types::compression::CompressionCodec) -> &'static str {
     use rapidbyte_types::compression::CompressionCodec;
     match codec {
-        CompressionCodec::Lz4 => "lz4".to_string(),
-        CompressionCodec::Zstd => "zstd".to_string(),
+        CompressionCodec::Lz4 => "lz4",
+        CompressionCodec::Zstd => "zstd",
     }
 }
 
@@ -150,6 +150,7 @@ pub async fn run_pipeline(
 
         let (src_id, src_ver) = parse_plugin_id(&pipeline.source.use_ref);
         let (dst_id, dst_ver) = parse_plugin_id(&pipeline.destination.use_ref);
+        let metric_run_label = format!("{}-{attempt}", pipeline.pipeline);
 
         for stream_cfg in &pipeline.source.streams {
             if cancel.is_cancelled() {
@@ -204,10 +205,7 @@ pub async fn run_pipeline(
             let (frame_tx, frame_rx) = mpsc::sync_channel::<Frame>(ctx.config.channel_capacity);
 
             let stats = Arc::new(Mutex::new(RunStats::default()));
-            let source_permissions = source_resolved
-                .manifest
-                .as_ref()
-                .map(|m| m.permissions.clone());
+            let source_permissions = extract_permissions(&source_resolved);
 
             // Run source
             let source_result = ctx
@@ -215,7 +213,7 @@ pub async fn run_pipeline(
                 .run_source(SourceRunParams {
                     wasm_path: source_resolved.wasm_path.clone(),
                     pipeline_name: pipeline.pipeline.clone(),
-                    metric_run_label: format!("{}-{attempt}", pipeline.pipeline),
+                    metric_run_label: metric_run_label.clone(),
                     plugin_id: src_id.clone(),
                     plugin_version: src_ver.clone(),
                     stream_ctx: stream_ctx.clone(),
@@ -226,7 +224,7 @@ pub async fn run_pipeline(
                         .compression
                         .as_ref()
                         .copied()
-                        .map(compression_name),
+                        .map(|c| compression_name(c).to_string()),
                     frame_sender: frame_tx,
                     stats: Arc::clone(&stats),
                     on_batch_emitted: None,
@@ -257,10 +255,7 @@ pub async fn run_pipeline(
             for (i, transform) in pipeline.transforms.iter().enumerate() {
                 let (next_tx, next_rx) = mpsc::sync_channel::<Frame>(ctx.config.channel_capacity);
 
-                let t_permissions = transform_resolved[i]
-                    .manifest
-                    .as_ref()
-                    .map(|m| m.permissions.clone());
+                let t_permissions = extract_permissions(&transform_resolved[i]);
                 let (t_id, t_ver) = parse_plugin_id(&transform.use_ref);
 
                 let rx = current_rx.take().expect("receiver should be available");
@@ -269,7 +264,7 @@ pub async fn run_pipeline(
                     .run_transform(crate::domain::ports::runner::TransformRunParams {
                         wasm_path: transform_resolved[i].wasm_path.clone(),
                         pipeline_name: pipeline.pipeline.clone(),
-                        metric_run_label: format!("{}-{attempt}", pipeline.pipeline),
+                        metric_run_label: metric_run_label.clone(),
                         plugin_id: t_id,
                         plugin_version: t_ver,
                         stream_ctx: stream_ctx.clone(),
@@ -280,7 +275,7 @@ pub async fn run_pipeline(
                             .compression
                             .as_ref()
                             .copied()
-                            .map(compression_name),
+                            .map(|c| compression_name(c).to_string()),
                         frame_receiver: rx,
                         frame_sender: next_tx,
                         dlq_records: Arc::new(Mutex::new(Vec::new())),
@@ -315,10 +310,7 @@ pub async fn run_pipeline(
                 });
             } else {
                 // Run destination
-                let dest_permissions = dest_resolved
-                    .manifest
-                    .as_ref()
-                    .map(|m| m.permissions.clone());
+                let dest_permissions = extract_permissions(&dest_resolved);
 
                 let final_rx = current_rx.take().expect("receiver should be available");
                 let dest_result = ctx
@@ -326,7 +318,7 @@ pub async fn run_pipeline(
                     .run_destination(DestinationRunParams {
                         wasm_path: dest_resolved.wasm_path.clone(),
                         pipeline_name: pipeline.pipeline.clone(),
-                        metric_run_label: format!("{}-{attempt}", pipeline.pipeline),
+                        metric_run_label: metric_run_label.clone(),
                         plugin_id: dst_id.clone(),
                         plugin_version: dst_ver.clone(),
                         stream_ctx: stream_ctx.clone(),
@@ -337,7 +329,7 @@ pub async fn run_pipeline(
                             .compression
                             .as_ref()
                             .copied()
-                            .map(compression_name),
+                            .map(|c| compression_name(c).to_string()),
                         frame_receiver: final_rx,
                         dlq_records: Arc::new(Mutex::new(Vec::new())),
                         stats: Arc::clone(&stats),
@@ -517,18 +509,9 @@ fn evaluate_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::testing::fake_context;
-    use crate::domain::ports::resolver::ResolvedPlugin;
+    use crate::application::testing::{fake_context, test_resolved_plugin};
     use crate::domain::ports::runner::{DestinationOutcome, SourceOutcome};
     use rapidbyte_types::metric::{ReadSummary, WriteSummary};
-    use std::path::PathBuf;
-
-    fn test_resolved_plugin() -> ResolvedPlugin {
-        ResolvedPlugin {
-            wasm_path: PathBuf::from("/tmp/test.wasm"),
-            manifest: None,
-        }
-    }
 
     fn test_pipeline_config(source_ref: &str, dest_ref: &str, streams: &[&str]) -> PipelineConfig {
         let stream_yaml: String = streams

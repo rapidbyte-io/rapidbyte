@@ -8,7 +8,7 @@ use rapidbyte_pipeline_config::PipelineConfig;
 use rapidbyte_types::wire::PluginKind;
 
 use crate::application::context::EngineContext;
-use crate::application::parse_plugin_id;
+use crate::application::{extract_permissions, parse_plugin_id};
 use crate::domain::error::PipelineError;
 use crate::domain::outcome::{CheckResult, CheckStatus};
 use crate::domain::ports::runner::ValidateParams;
@@ -55,10 +55,7 @@ pub async fn check_pipeline(
         .map(|manifest| config_check(&pipeline.source.use_ref, &pipeline.source.config, manifest));
 
     let (src_id, src_ver) = parse_plugin_id(&pipeline.source.use_ref);
-    let source_permissions = source_resolved
-        .manifest
-        .as_ref()
-        .map(|m| m.permissions.clone());
+    let source_permissions = extract_permissions(&source_resolved);
 
     let source_validation = ctx
         .runner
@@ -97,10 +94,7 @@ pub async fn check_pipeline(
     });
 
     let (dst_id, dst_ver) = parse_plugin_id(&pipeline.destination.use_ref);
-    let dest_permissions = dest_resolved
-        .manifest
-        .as_ref()
-        .map(|m| m.permissions.clone());
+    let dest_permissions = extract_permissions(&dest_resolved);
 
     let destination_validation = ctx
         .runner
@@ -138,10 +132,7 @@ pub async fn check_pipeline(
         }
 
         let (t_id, t_ver) = parse_plugin_id(&transform.use_ref);
-        let transform_permissions = transform_resolved
-            .manifest
-            .as_ref()
-            .map(|m| m.permissions.clone());
+        let transform_permissions = extract_permissions(&transform_resolved);
 
         let validation = ctx
             .runner
@@ -209,18 +200,9 @@ fn first_stream_name(pipeline: &PipelineConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::testing::fake_context;
-    use crate::domain::ports::resolver::ResolvedPlugin;
+    use crate::application::testing::{fake_context, test_resolved_plugin};
     use crate::domain::ports::runner::CheckComponentStatus;
     use rapidbyte_types::error::{ValidationResult, ValidationStatus};
-    use std::path::PathBuf;
-
-    fn test_resolved_plugin() -> ResolvedPlugin {
-        ResolvedPlugin {
-            wasm_path: PathBuf::from("/tmp/test.wasm"),
-            manifest: None,
-        }
-    }
 
     fn ok_validation() -> CheckComponentStatus {
         CheckComponentStatus {
