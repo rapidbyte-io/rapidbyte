@@ -74,13 +74,14 @@ rapidbyte-engine (lean orchestration, hexagonal)
 
 ### Ports
 
-Six port traits define the engine's boundaries. All are `Send + Sync`.
+Six port traits define the engine's boundaries. All are `Send + Sync`. Async port traits use `#[async_trait]` for object safety (`Arc<dyn Trait>`), matching the controller pattern.
 
 #### PluginRunner
 
 Executes a plugin for a single stream. The WASM runtime is the only real implementation; tests use fakes.
 
 ```rust
+#[async_trait]
 pub trait PluginRunner: Send + Sync {
     async fn run_source(&self, ctx: &SourceRunParams) -> Result<SourceOutcome, PipelineError>;
     async fn run_transform(&self, ctx: &TransformRunParams) -> Result<TransformOutcome, PipelineError>;
@@ -95,6 +96,7 @@ pub trait PluginRunner: Send + Sync {
 Resolves plugin references to loadable modules with validated manifests.
 
 ```rust
+#[async_trait]
 pub trait PluginResolver: Send + Sync {
     async fn resolve(
         &self,
@@ -107,25 +109,30 @@ pub trait PluginResolver: Send + Sync {
 
 #### Focused State Repositories
 
-Three focused traits replace the monolithic `StateBackend` at the orchestration level.
+Three focused traits replace the monolithic `StateBackend` at the orchestration level. All are async to support both SQLite (via `spawn_blocking`) and Postgres (native async via `sqlx`), matching the controller's async repository pattern.
+
+Note: these are engine-internal orchestration ports. The monolithic `StateBackend` trait (moved to `rapidbyte-types`) continues to serve the runtime's host imports during WASM execution. The engine's adapter structs (`SqliteBackend`, `PgBackend`) implement *both* the focused repository traits (for orchestration) and the `StateBackend` trait (for runtime host imports). See the "Dual-Trait Pattern" section under Adapter Layer.
 
 ```rust
+#[async_trait]
 pub trait CursorRepository: Send + Sync {
-    fn get(&self, pipeline: &PipelineId, stream: &StreamName) -> Result<Option<CursorState>, RepositoryError>;
-    fn set(&self, pipeline: &PipelineId, stream: &StreamName, cursor: &CursorState) -> Result<(), RepositoryError>;
-    fn compare_and_set(
+    async fn get(&self, pipeline: &PipelineId, stream: &StreamName) -> Result<Option<CursorState>, RepositoryError>;
+    async fn set(&self, pipeline: &PipelineId, stream: &StreamName, cursor: &CursorState) -> Result<(), RepositoryError>;
+    async fn compare_and_set(
         &self, pipeline: &PipelineId, stream: &StreamName,
         expected: Option<&str>, new_value: &str,
     ) -> Result<bool, RepositoryError>;
 }
 
+#[async_trait]
 pub trait RunRecordRepository: Send + Sync {
-    fn start(&self, pipeline: &PipelineId, stream: &StreamName) -> Result<i64, RepositoryError>;
-    fn complete(&self, run_id: i64, status: RunStatus, stats: &RunStats) -> Result<(), RepositoryError>;
+    async fn start(&self, pipeline: &PipelineId, stream: &StreamName) -> Result<i64, RepositoryError>;
+    async fn complete(&self, run_id: i64, status: RunStatus, stats: &RunStats) -> Result<(), RepositoryError>;
 }
 
+#[async_trait]
 pub trait DlqRepository: Send + Sync {
-    fn insert(&self, pipeline: &PipelineId, run_id: i64, records: &[DlqRecord]) -> Result<u64, RepositoryError>;
+    async fn insert(&self, pipeline: &PipelineId, run_id: i64, records: &[DlqRecord]) -> Result<u64, RepositoryError>;
 }
 ```
 
@@ -139,24 +146,47 @@ pub trait ProgressReporter: Send + Sync {
 }
 ```
 
+#### MetricsSnapshot
+
+Provides access to OpenTelemetry metric snapshots for computing timing breakdowns (`SourceTiming`, `DestTiming`, WASM overhead). The real implementation reads from `rapidbyte-metrics::snapshot::SnapshotReader`; tests return empty/fixed snapshots.
+
+```rust
+pub trait MetricsSnapshot: Send + Sync {
+    fn snapshot_for_run(&self) -> RunMetricsSnapshot;
+}
+```
+
 ### Error Types
 
-`PipelineError` is factual — it carries what happened, not what to do about it.
+`PipelineError` is factual — it carries what happened, not what to do about it. The `Plugin` variant wraps the existing `PluginError` from `rapidbyte-types::error` (which carries `retryable`, `safe_to_retry`, `ErrorCategory`, `code`, `scope`, `commit_state`, `retry_after_ms`, etc.) rather than flattening its fields. This preserves the full error structure and avoids a lossy conversion boundary.
 
 ```rust
 pub enum PipelineError {
-    Plugin {
-        kind: PluginKind,
-        message: String,
-        retryable: bool,
-        safe_to_retry: bool,
-        backoff_class: BackoffClass,
-        retry_after: Option<Duration>,
-        commit_state: CommitState,
-    },
+    /// Error originating from a plugin. Wraps the existing PluginError from rapidbyte-types.
+    Plugin(PluginError),
+    /// Infrastructure failure (WASM load, state backend, channel closed). Never retryable.
     Infrastructure(anyhow::Error),
 }
+
+impl PipelineError {
+    pub fn infra(msg: impl Into<String>) -> Self { ... }
+    pub fn plugin_error(&self) -> Option<&PluginError> { ... }
+
+    /// Extract retry-relevant fields from the wrapped PluginError for RetryPolicy.
+    pub fn retry_params(&self) -> Option<RetryParams> { ... }
+}
+
+/// Extracted retry-relevant fields, passed to RetryPolicy::should_retry().
+pub struct RetryParams {
+    pub retryable: bool,
+    pub safe_to_retry: bool,
+    pub backoff_class: BackoffClass,
+    pub retry_after: Option<Duration>,
+    pub commit_state: CommitState,
+}
 ```
+
+The `WasmPluginRunner` adapter converts runtime-level errors to `PipelineError::Plugin(PluginError)` using the existing `source_error_to_sdk()` / `dest_error_to_sdk()` / `transform_error_to_sdk()` conversion functions. The `BackoffClass` is derived from `PluginError::category` at the conversion boundary.
 
 `RepositoryError` follows the controller pattern:
 
@@ -244,6 +274,7 @@ pub struct EngineContext {
     pub runs: Arc<dyn RunRecordRepository>,
     pub dlq: Arc<dyn DlqRepository>,
     pub progress: Arc<dyn ProgressReporter>,
+    pub metrics: Arc<dyn MetricsSnapshot>,
     pub config: EngineConfig,
 }
 ```
@@ -261,8 +292,11 @@ pub async fn run_pipeline(
     ctx: &EngineContext,
     pipeline: &PipelineConfig,
     options: &ExecutionOptions,
+    cancel: CancellationToken,
 ) -> Result<PipelineOutcome, PipelineError> { ... }
 ```
+
+The `CancellationToken` (from `tokio_util::sync`) enables graceful shutdown. The orchestrator checks `cancel.is_cancelled()` at phase boundaries (before resolve, before execute, between retry attempts). When cancelled, returns `PipelineError::Infrastructure` with a cancellation message.
 
 Internal flow:
 1. Resolve plugins via `ctx.resolver`
@@ -297,6 +331,8 @@ pub async fn discover_plugin(
 ### Testing Infrastructure
 
 All fakes live in `application/testing.rs`. No mocking libraries — fakes are written once and reused.
+
+**Visibility:** Gated behind `#[cfg(any(test, feature = "test-support"))]`. Intra-crate unit tests get fakes via `#[cfg(test)]`; external integration test crates and benchmarks enable the `test-support` feature. Fakes are never compiled in release builds.
 
 ```rust
 pub struct TestContext {
@@ -344,9 +380,50 @@ pub struct RegistryPluginResolver {
 impl PluginResolver for RegistryPluginResolver { ... }
 ```
 
+### ChannelProgressReporter
+
+Adapter that sends progress events over an `mpsc` channel. Used by CLI and agent to bridge progress events to their respective UI/streaming layers.
+
+```rust
+pub struct ChannelProgressReporter {
+    tx: mpsc::UnboundedSender<ProgressEvent>,
+}
+
+impl ChannelProgressReporter {
+    pub fn new(tx: mpsc::UnboundedSender<ProgressEvent>) -> Self { Self { tx } }
+}
+
+impl ProgressReporter for ChannelProgressReporter {
+    fn report(&self, event: ProgressEvent) {
+        let _ = self.tx.send(event); // Best-effort, dropped if receiver closed
+    }
+}
+```
+
+### OtelMetricsSnapshot
+
+Adapter wrapping `rapidbyte-metrics` snapshot reader.
+
+```rust
+pub struct OtelMetricsSnapshot {
+    reader: SnapshotReader,
+}
+
+impl MetricsSnapshot for OtelMetricsSnapshot { ... }
+```
+
 ### State Backend Adapters
 
 Single struct per backend implements all three repository traits.
+
+#### Dual-Trait Pattern
+
+Each backend adapter (`SqliteBackend`, `PgBackend`) implements **two sets of traits**:
+
+1. **Focused repository ports** (`CursorRepository`, `RunRecordRepository`, `DlqRepository`) — used by the engine's orchestration layer for stream planning, finalization, and DLQ handling.
+2. **Monolithic `StateBackend` trait** (from `rapidbyte-types`) — used by the runtime's host imports during WASM plugin execution (cursor reads/writes, DLQ inserts within plugin calls).
+
+Both trait sets are backed by the same underlying database connection/pool. The `as_state_backend()` method returns an `Arc<dyn StateBackend>` that the engine passes to `WasmPluginRunner` at construction time.
 
 #### SQLite
 
@@ -358,12 +435,19 @@ pub struct SqliteBackend {
 impl SqliteBackend {
     pub fn open(path: &Path) -> Result<Self, PipelineError> { ... }
     pub fn in_memory() -> Result<Self, PipelineError> { ... }
+
+    /// Returns an Arc<dyn StateBackend> for runtime host imports.
+    /// Shares the same underlying connection.
     pub fn as_state_backend(&self) -> Arc<dyn StateBackend> { ... }
 }
 
+// Focused repository ports (for engine orchestration)
 impl CursorRepository for SqliteBackend { ... }
 impl RunRecordRepository for SqliteBackend { ... }
 impl DlqRepository for SqliteBackend { ... }
+
+// Monolithic trait (for runtime host imports)
+impl StateBackend for SqliteBackend { ... }
 ```
 
 #### Postgres
@@ -396,8 +480,12 @@ let ctx = EngineContext {
     runs: Arc::clone(&backend) as Arc<dyn RunRecordRepository>,
     dlq: Arc::clone(&backend) as Arc<dyn DlqRepository>,
     progress: Arc::new(ChannelProgressReporter::new(tx)),
+    metrics: Arc::new(OtelMetricsSnapshot::new(snapshot_reader)),
     config: engine_config,
 };
+
+let cancel = CancellationToken::new();
+let outcome = run_pipeline(&ctx, &pipeline, &options, cancel.clone()).await?;
 ```
 
 ## Dependency Graph After Refactor
@@ -447,11 +535,12 @@ crates/rapidbyte-engine/src/
 │   │   ├── cursor.rs               # CursorRepository
 │   │   ├── run_record.rs           # RunRecordRepository
 │   │   ├── dlq.rs                  # DlqRepository
-│   │   └── progress.rs             # ProgressReporter
-│   ├── error.rs                    # PipelineError, RepositoryError
+│   │   └── metrics.rs              # MetricsSnapshot
+│   │   # Note: ProgressReporter lives in domain/progress.rs alongside Phase/ProgressEvent
+│   ├── error.rs                    # PipelineError, RepositoryError, RetryParams
 │   ├── retry.rs                    # RetryPolicy, BackoffClass, RetryDecision
 │   ├── outcome.rs                  # PipelineOutcome, PipelineResult, CheckResult, etc.
-│   └── progress.rs                 # Phase, ProgressEvent
+│   └── progress.rs                 # Phase, ProgressEvent, ProgressReporter trait
 ├── application/
 │   ├── mod.rs
 │   ├── context.rs                  # EngineContext, EngineConfig
@@ -463,6 +552,8 @@ crates/rapidbyte-engine/src/
     ├── mod.rs
     ├── wasm_runner.rs              # WasmPluginRunner
     ├── registry_resolver.rs        # RegistryPluginResolver
+    ├── progress.rs                 # ChannelProgressReporter
+    ├── metrics.rs                  # OtelMetricsSnapshot
     ├── sqlite/
     │   ├── mod.rs                  # SqliteBackend
     │   ├── cursor.rs
@@ -491,9 +582,10 @@ pub use domain::outcome::{
 };
 pub use domain::progress::{Phase, ProgressEvent};
 pub use domain::ports::{
-    CursorRepository, DlqRepository, PluginResolver,
-    PluginRunner, ProgressReporter, RunRecordRepository,
+    CursorRepository, DlqRepository, MetricsSnapshot, PluginResolver,
+    PluginRunner, RunRecordRepository,
 };
+pub use domain::progress::ProgressReporter;
 ```
 
 ### Consumer Migration
@@ -522,5 +614,9 @@ pub use domain::ports::{
 2. All `rapidbyte_engine::arrow::*` imports → `rapidbyte_types::arrow::*`
 3. Benchmarks rewritten to use `run_pipeline()` instead of `run_*_stream()`
 4. CLI/agent must construct `EngineContext` with adapters (explicit DI, no implicit wiring)
-5. `rapidbyte-state` crate removed from workspace
+5. `rapidbyte-state` crate removed from workspace; `StateBackend` trait moves to `rapidbyte-types`
 6. Engine's `runner/`, `plugin/`, `pipeline/`, `finalizers/` modules no longer public
+7. `run_pipeline()` signature gains `cancel: CancellationToken` parameter
+8. `PipelineError::Plugin` wraps `PluginError` (struct variant → tuple variant)
+9. `ProgressEvent` variants renamed: `PhaseChange` → `PhaseChanged`, `Retry` → `RetryScheduled`; new `StreamStarted` variant added
+10. `CheckResult` simplified from per-component-type fields to `Vec<CheckComponentStatus>` (each entry carries component name and kind)
