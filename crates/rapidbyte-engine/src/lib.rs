@@ -17,11 +17,13 @@
 //! | `plugin`           | Plugin resolution, manifest validation, module loading |
 //! | `progress`         | Progress event types and ProgressSender for live CLI updates |
 //! | `runner`           | Per-kind plugin runners (source, dest, transform, validate) |
+//! | `adapter`          | Concrete adapter implementations for port traits |
 //! | `application`      | DI context, use-case orchestration, testing fakes |
 //! | `domain`           | Port traits, domain errors, outcomes, progress, retry |
 
 #![warn(clippy::pedantic)]
 
+pub mod adapter;
 pub mod application;
 pub mod arrow;
 pub mod config;
