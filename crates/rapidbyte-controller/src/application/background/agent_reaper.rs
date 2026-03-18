@@ -31,6 +31,7 @@ mod tests {
     use crate::application::submit::submit_pipeline;
     use crate::application::testing::fake_context;
     use crate::domain::agent::AgentCapabilities;
+    use crate::domain::ports::clock::Clock;
     use crate::domain::run::RunState;
     use crate::domain::task::TaskState;
 
@@ -93,5 +94,44 @@ mod tests {
 
         let agent = tc.ctx.agents.find_by_id("agent-1").await.unwrap();
         assert!(agent.is_some());
+    }
+
+    #[tokio::test]
+    async fn reaper_doesnt_touch_fresh_agents() {
+        let tc = fake_context();
+        register(&tc.ctx, "agent-stale", caps()).await.unwrap();
+        register(&tc.ctx, "agent-fresh", caps()).await.unwrap();
+
+        // Advance clock by 50s (agent_reap_timeout=60s, so both are still fresh)
+        tc.clock.advance(chrono::Duration::seconds(50));
+
+        // Touch agent-fresh to keep it alive
+        {
+            let now = tc.clock.now();
+            let mut agent = tc
+                .ctx
+                .agents
+                .find_by_id("agent-fresh")
+                .await
+                .unwrap()
+                .unwrap();
+            agent.touch(now);
+            tc.ctx.agents.save(&agent).await.unwrap();
+        }
+
+        // Advance clock another 11s (total 61s from start)
+        // agent-stale last_seen_at = start -> 61s ago -> stale
+        // agent-fresh last_seen_at = start+50s -> 11s ago -> fresh
+        tc.clock.advance(chrono::Duration::seconds(11));
+
+        reap_stale_agents(&tc.ctx).await.unwrap();
+
+        // agent-stale should be removed
+        let stale = tc.ctx.agents.find_by_id("agent-stale").await.unwrap();
+        assert!(stale.is_none());
+
+        // agent-fresh should still be present
+        let fresh = tc.ctx.agents.find_by_id("agent-fresh").await.unwrap();
+        assert!(fresh.is_some());
     }
 }

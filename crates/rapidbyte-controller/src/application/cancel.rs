@@ -212,4 +212,116 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AppError::NotFound { .. }));
     }
+
+    #[tokio::test]
+    async fn cancel_pending_race_falls_through() {
+        let tc = fake_context();
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+
+        // Manually change the task state to Running (simulating concurrent poll)
+        {
+            let now = tc.ctx.clock.now();
+            let agent = Agent::new(
+                "agent-1".to_string(),
+                AgentCapabilities {
+                    plugins: vec![],
+                    max_concurrent_tasks: 4,
+                },
+                now,
+            );
+            tc.ctx.agents.save(&agent).await.unwrap();
+            // Poll to actually assign the task (transitions task to Running and run to Running)
+            let _assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
+        }
+
+        // Now the run is Running but cancel_run sees it — should set cancel_requested
+        let result = cancel_run(&tc.ctx, &submit.run_id).await.unwrap();
+        assert!(result.accepted);
+
+        let run = tc
+            .ctx
+            .runs
+            .find_by_id(&submit.run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state(), RunState::Running);
+        assert!(run.is_cancel_requested());
+    }
+
+    #[tokio::test]
+    async fn cancel_running_then_complete_cancelled() {
+        let tc = fake_context();
+        let now = tc.ctx.clock.now();
+        let agent = Agent::new(
+            "agent-1".to_string(),
+            AgentCapabilities {
+                plugins: vec![],
+                max_concurrent_tasks: 4,
+            },
+            now,
+        );
+        tc.ctx.agents.save(&agent).await.unwrap();
+
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+        let assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
+
+        // Cancel (sets flag)
+        let result = cancel_run(&tc.ctx, &submit.run_id).await.unwrap();
+        assert!(result.accepted);
+
+        // Complete with TaskOutcome::Cancelled
+        crate::application::complete::complete_task(
+            &tc.ctx,
+            "agent-1",
+            &assignment.task_id,
+            assignment.lease_epoch,
+            crate::application::complete::TaskOutcome::Cancelled,
+        )
+        .await
+        .unwrap();
+
+        let run = tc
+            .ctx
+            .runs
+            .find_by_id(&submit.run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state(), RunState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn cancel_idempotent() {
+        let tc = fake_context();
+        let now = tc.ctx.clock.now();
+        let agent = Agent::new(
+            "agent-1".to_string(),
+            AgentCapabilities {
+                plugins: vec![],
+                max_concurrent_tasks: 4,
+            },
+            now,
+        );
+        tc.ctx.agents.save(&agent).await.unwrap();
+
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+        let _assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
+
+        // Cancel twice — both should succeed
+        let first = cancel_run(&tc.ctx, &submit.run_id).await.unwrap();
+        assert!(first.accepted);
+
+        let second = cancel_run(&tc.ctx, &submit.run_id).await.unwrap();
+        assert!(second.accepted);
+    }
 }

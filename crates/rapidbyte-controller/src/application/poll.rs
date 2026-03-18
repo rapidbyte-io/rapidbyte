@@ -264,4 +264,143 @@ mod tests {
         assert_eq!(task.state(), TaskState::Running);
         assert_eq!(task.agent_id(), Some("agent-1"));
     }
+
+    #[tokio::test]
+    async fn poll_secret_resolution_failure_compensates() {
+        use crate::application::context::{AppConfig, AppContext};
+        use crate::application::testing::{
+            FakeAgentRepository, FakeClock, FakeEventBus, FakePipelineStore, FakeRunRepository,
+            FakeStorage, FakeTaskRepository,
+        };
+        use crate::domain::ports::secrets::{SecretError, SecretResolver};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        struct FailingSecretResolver;
+        #[async_trait::async_trait]
+        impl SecretResolver for FailingSecretResolver {
+            async fn resolve(&self, _yaml: &str) -> Result<String, SecretError> {
+                Err(SecretError("vault unavailable".to_string()))
+            }
+        }
+
+        let storage = FakeStorage::new();
+        let event_bus = Arc::new(FakeEventBus::new());
+        let clock = Arc::new(FakeClock::new(chrono::Utc::now()));
+
+        let ctx = AppContext {
+            runs: Arc::new(FakeRunRepository::new(storage.clone())),
+            tasks: Arc::new(FakeTaskRepository::new(storage.clone())),
+            agents: Arc::new(FakeAgentRepository::new(storage.clone())),
+            store: Arc::new(FakePipelineStore::new(storage.clone())),
+            event_bus: Arc::clone(&event_bus) as Arc<dyn crate::domain::ports::event_bus::EventBus>,
+            secrets: Arc::new(FailingSecretResolver),
+            clock: Arc::clone(&clock) as Arc<dyn crate::domain::ports::clock::Clock>,
+            config: AppConfig {
+                default_lease_duration: Duration::from_secs(300),
+                lease_check_interval: Duration::from_secs(30),
+                agent_reap_timeout: Duration::from_secs(60),
+                agent_reap_interval: Duration::from_secs(30),
+                default_max_retries: 0,
+                registry: None,
+            },
+        };
+
+        // Register agent
+        let now = clock.now();
+        let agent = Agent::new(
+            "agent-1".to_string(),
+            AgentCapabilities {
+                plugins: vec![],
+                max_concurrent_tasks: 4,
+            },
+            now,
+        );
+        ctx.agents.save(&agent).await.unwrap();
+
+        // Submit pipeline with max_retries=2
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        let submit =
+            crate::application::submit::submit_pipeline(&ctx, None, yaml.to_string(), 2, None)
+                .await
+                .unwrap();
+
+        // Poll should return error due to secret resolution failure
+        let result = poll_task(&ctx, "agent-1").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::SecretResolution(_)));
+
+        // The run should have been compensated (retried back to Pending)
+        let run = ctx.runs.find_by_id(&submit.run_id).await.unwrap().unwrap();
+        assert_eq!(run.state(), RunState::Pending);
+        assert_eq!(run.current_attempt(), 2);
+    }
+
+    #[tokio::test]
+    async fn poll_returns_resolved_yaml() {
+        let tc = fake_context();
+        let (_agent_id, _run_id) = setup_agent_and_run(&tc).await;
+
+        let assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
+        // FakeSecretResolver returns input unchanged
+        assert!(assignment.pipeline_yaml.contains("test-pipe"));
+        assert!(assignment.pipeline_yaml.contains("version"));
+    }
+
+    #[tokio::test]
+    async fn poll_lease_epoch_increments() {
+        let tc = fake_context();
+        let now = tc.clock.now();
+        let agent = Agent::new(
+            "agent-1".to_string(),
+            AgentCapabilities {
+                plugins: vec![],
+                max_concurrent_tasks: 4,
+            },
+            now,
+        );
+        tc.ctx.agents.save(&agent).await.unwrap();
+
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+
+        let a1 = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
+        let a2 = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
+
+        assert!(a1.lease_epoch < a2.lease_epoch);
+    }
+
+    #[tokio::test]
+    async fn poll_agent_at_capacity_returns_none() {
+        let tc = fake_context();
+        let now = tc.clock.now();
+        let agent = Agent::new(
+            "agent-1".to_string(),
+            AgentCapabilities {
+                plugins: vec![],
+                max_concurrent_tasks: 1,
+            },
+            now,
+        );
+        tc.ctx.agents.save(&agent).await.unwrap();
+
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+
+        let first = poll_task(&tc.ctx, "agent-1").await.unwrap();
+        assert!(first.is_some());
+
+        let second = poll_task(&tc.ctx, "agent-1").await.unwrap();
+        assert!(second.is_none());
+    }
 }

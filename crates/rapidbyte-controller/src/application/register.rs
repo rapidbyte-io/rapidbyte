@@ -214,4 +214,101 @@ mod tests {
             .find(|e| matches!(e, DomainEvent::RunFailed { .. }));
         assert!(failed.is_some());
     }
+
+    #[tokio::test]
+    async fn deregister_cancel_requested_run_gets_cancelled() {
+        let tc = fake_context();
+        register(&tc.ctx, "agent-1", caps()).await.unwrap();
+
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, None)
+            .await
+            .unwrap();
+        let _assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
+
+        // Request cancel on the run
+        {
+            let mut run = tc
+                .ctx
+                .runs
+                .find_by_id(&submit.run_id)
+                .await
+                .unwrap()
+                .unwrap();
+            run.request_cancel();
+            tc.ctx.runs.save(&run).await.unwrap();
+        }
+
+        deregister(&tc.ctx, "agent-1").await.unwrap();
+
+        // Run should be Cancelled (not retried)
+        let run = tc
+            .ctx
+            .runs
+            .find_by_id(&submit.run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state(), RunState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn register_with_zero_capacity() {
+        let tc = fake_context();
+        let zero_caps = AgentCapabilities {
+            plugins: vec![],
+            max_concurrent_tasks: 0,
+        };
+        register(&tc.ctx, "agent-zero", zero_caps).await.unwrap();
+
+        let agent = tc.ctx.agents.find_by_id("agent-zero").await.unwrap();
+        assert!(agent.is_some());
+        assert_eq!(agent.unwrap().capabilities().max_concurrent_tasks, 0);
+    }
+
+    #[tokio::test]
+    async fn deregister_multiple_running_tasks() {
+        let tc = fake_context();
+        let multi_caps = AgentCapabilities {
+            plugins: vec![],
+            max_concurrent_tasks: 3,
+        };
+        register(&tc.ctx, "agent-1", multi_caps).await.unwrap();
+
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        let s1 = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, None)
+            .await
+            .unwrap();
+        let s2 = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, None)
+            .await
+            .unwrap();
+        let s3 = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, None)
+            .await
+            .unwrap();
+
+        let a1 = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
+        let a2 = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
+        let a3 = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
+
+        deregister(&tc.ctx, "agent-1").await.unwrap();
+
+        // All 3 tasks should be timed out
+        let t1 = tc.ctx.tasks.find_by_id(&a1.task_id).await.unwrap().unwrap();
+        let t2 = tc.ctx.tasks.find_by_id(&a2.task_id).await.unwrap().unwrap();
+        let t3 = tc.ctx.tasks.find_by_id(&a3.task_id).await.unwrap().unwrap();
+        assert_eq!(t1.state(), TaskState::TimedOut);
+        assert_eq!(t2.state(), TaskState::TimedOut);
+        assert_eq!(t3.state(), TaskState::TimedOut);
+
+        // All 3 runs should be retried (back to Pending)
+        let r1 = tc.ctx.runs.find_by_id(&s1.run_id).await.unwrap().unwrap();
+        let r2 = tc.ctx.runs.find_by_id(&s2.run_id).await.unwrap().unwrap();
+        let r3 = tc.ctx.runs.find_by_id(&s3.run_id).await.unwrap().unwrap();
+        assert_eq!(r1.state(), RunState::Pending);
+        assert_eq!(r2.state(), RunState::Pending);
+        assert_eq!(r3.state(), RunState::Pending);
+        assert_eq!(r1.current_attempt(), 2);
+        assert_eq!(r2.current_attempt(), 2);
+        assert_eq!(r3.current_attempt(), 2);
+    }
 }

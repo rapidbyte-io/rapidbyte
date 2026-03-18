@@ -143,4 +143,90 @@ mod tests {
         let events = tc.event_bus.published_events();
         assert!(events.is_empty());
     }
+
+    #[tokio::test]
+    async fn lease_sweep_cancel_requested_gets_cancelled() {
+        let tc = fake_context();
+        register(&tc.ctx, "agent-1", caps()).await.unwrap();
+
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, None)
+            .await
+            .unwrap();
+        let _assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
+
+        // Request cancel
+        {
+            let mut run = tc
+                .ctx
+                .runs
+                .find_by_id(&submit.run_id)
+                .await
+                .unwrap()
+                .unwrap();
+            run.request_cancel();
+            tc.ctx.runs.save(&run).await.unwrap();
+        }
+
+        // Advance clock past lease expiry
+        tc.clock.advance(chrono::Duration::seconds(301));
+
+        sweep_expired_leases(&tc.ctx).await.unwrap();
+
+        // Run should be Cancelled (not retried)
+        let run = tc
+            .ctx
+            .runs
+            .find_by_id(&submit.run_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.state(), RunState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn lease_sweep_multiple_expired_tasks() {
+        let tc = fake_context();
+        let multi_caps = AgentCapabilities {
+            plugins: vec![],
+            max_concurrent_tasks: 4,
+        };
+        register(&tc.ctx, "agent-1", multi_caps).await.unwrap();
+
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        let s1 = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, None)
+            .await
+            .unwrap();
+        let s2 = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, None)
+            .await
+            .unwrap();
+        let s3 = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, None)
+            .await
+            .unwrap();
+
+        let a1 = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
+        let a2 = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
+        let a3 = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
+
+        // Advance clock past lease expiry
+        tc.clock.advance(chrono::Duration::seconds(301));
+
+        sweep_expired_leases(&tc.ctx).await.unwrap();
+
+        // All 3 tasks should be timed out
+        let t1 = tc.ctx.tasks.find_by_id(&a1.task_id).await.unwrap().unwrap();
+        let t2 = tc.ctx.tasks.find_by_id(&a2.task_id).await.unwrap().unwrap();
+        let t3 = tc.ctx.tasks.find_by_id(&a3.task_id).await.unwrap().unwrap();
+        assert_eq!(t1.state(), TaskState::TimedOut);
+        assert_eq!(t2.state(), TaskState::TimedOut);
+        assert_eq!(t3.state(), TaskState::TimedOut);
+
+        // All 3 runs should be retried
+        let r1 = tc.ctx.runs.find_by_id(&s1.run_id).await.unwrap().unwrap();
+        let r2 = tc.ctx.runs.find_by_id(&s2.run_id).await.unwrap().unwrap();
+        let r3 = tc.ctx.runs.find_by_id(&s3.run_id).await.unwrap().unwrap();
+        assert_eq!(r1.state(), RunState::Pending);
+        assert_eq!(r2.state(), RunState::Pending);
+        assert_eq!(r3.state(), RunState::Pending);
+    }
 }

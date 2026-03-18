@@ -120,4 +120,71 @@ mod tests {
         .unwrap();
         assert_eq!(empty_page.runs.len(), 0);
     }
+
+    #[tokio::test]
+    async fn list_runs_empty_result() {
+        let tc = fake_context();
+
+        let page = list_runs(
+            &tc.ctx,
+            RunFilter { state: None },
+            Pagination {
+                page_size: 10,
+                page_token: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(page.runs.is_empty());
+        assert!(page.next_page_token.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_runs_pagination() {
+        let tc = fake_context();
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+
+        let page = list_runs(
+            &tc.ctx,
+            RunFilter { state: None },
+            Pagination {
+                page_size: 2,
+                page_token: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(page.runs.len(), 2);
+        assert!(page.next_page_token.is_some());
+    }
+
+    #[tokio::test]
+    async fn list_runs_default_page_size() {
+        let tc = fake_context();
+
+        // page_size=0 should work (returns empty result since 0 items requested)
+        let page = list_runs(
+            &tc.ctx,
+            RunFilter { state: None },
+            Pagination {
+                page_size: 0,
+                page_token: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(page.runs.is_empty());
+    }
 }

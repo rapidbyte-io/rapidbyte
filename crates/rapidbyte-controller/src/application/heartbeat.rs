@@ -325,4 +325,135 @@ mod tests {
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), AppError::NotFound { .. }));
     }
+
+    #[tokio::test]
+    async fn heartbeat_multiple_tasks() {
+        let tc = fake_context();
+        let now = tc.clock.now();
+        let agent = Agent::new(
+            "agent-1".to_string(),
+            AgentCapabilities {
+                plugins: vec![],
+                max_concurrent_tasks: 4,
+            },
+            now,
+        );
+        tc.ctx.agents.save(&agent).await.unwrap();
+
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+
+        let a1 = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
+        let a2 = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
+
+        let directives = heartbeat(
+            &tc.ctx,
+            "agent-1",
+            vec![
+                TaskHeartbeatInput {
+                    task_id: a1.task_id.clone(),
+                    lease_epoch: a1.lease_epoch,
+                    progress_message: None,
+                    progress_pct: None,
+                },
+                TaskHeartbeatInput {
+                    task_id: a2.task_id.clone(),
+                    lease_epoch: a2.lease_epoch,
+                    progress_message: None,
+                    progress_pct: None,
+                },
+            ],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(directives.len(), 2);
+        assert!(directives[0].acknowledged);
+        assert!(directives[1].acknowledged);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_unknown_task_acknowledged_false() {
+        let tc = fake_context();
+        let now = tc.clock.now();
+        let agent = Agent::new(
+            "agent-1".to_string(),
+            AgentCapabilities {
+                plugins: vec![],
+                max_concurrent_tasks: 4,
+            },
+            now,
+        );
+        tc.ctx.agents.save(&agent).await.unwrap();
+
+        let directives = heartbeat(
+            &tc.ctx,
+            "agent-1",
+            vec![TaskHeartbeatInput {
+                task_id: "nonexistent-task".to_string(),
+                lease_epoch: 1,
+                progress_message: None,
+                progress_pct: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(directives.len(), 1);
+        assert!(!directives[0].acknowledged);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_expired_lease_rejected() {
+        let tc = fake_context();
+        let (task_id, _run_id, epoch) = setup_running_task(&tc).await;
+
+        // Advance clock past lease expiry (default 300s)
+        tc.clock.advance(chrono::Duration::seconds(301));
+
+        let directives = heartbeat(
+            &tc.ctx,
+            "agent-1",
+            vec![TaskHeartbeatInput {
+                task_id: task_id.clone(),
+                lease_epoch: epoch,
+                progress_message: None,
+                progress_pct: None,
+            }],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(directives.len(), 1);
+        assert!(!directives[0].acknowledged);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_without_tasks_touches_agent() {
+        let tc = fake_context();
+        let now = tc.clock.now();
+        let agent = Agent::new(
+            "agent-1".to_string(),
+            AgentCapabilities {
+                plugins: vec![],
+                max_concurrent_tasks: 4,
+            },
+            now,
+        );
+        tc.ctx.agents.save(&agent).await.unwrap();
+
+        tc.clock.advance(chrono::Duration::seconds(10));
+
+        let directives = heartbeat(&tc.ctx, "agent-1", vec![]).await.unwrap();
+        assert!(directives.is_empty());
+
+        // Agent's last_seen_at should be updated
+        let updated = tc.ctx.agents.find_by_id("agent-1").await.unwrap().unwrap();
+        assert!(updated.last_seen_at() > now);
+    }
 }

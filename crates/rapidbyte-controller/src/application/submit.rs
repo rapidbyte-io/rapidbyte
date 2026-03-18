@@ -188,4 +188,50 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn submit_with_max_retries_zero() {
+        let tc = fake_context();
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+
+        let result = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+
+        let runs = tc.storage.runs.lock().unwrap();
+        let run = runs.get(&result.run_id).unwrap();
+        assert_eq!(run.max_retries(), 0);
+    }
+
+    #[tokio::test]
+    async fn submit_with_timeout_seconds() {
+        let tc = fake_context();
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+
+        let result = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, Some(60))
+            .await
+            .unwrap();
+
+        let runs = tc.storage.runs.lock().unwrap();
+        let run = runs.get(&result.run_id).unwrap();
+        assert_eq!(run.timeout_seconds(), Some(60));
+    }
+
+    #[tokio::test]
+    async fn submit_idempotency_sequential_dedup() {
+        let tc = fake_context();
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        let key = "dedup-key".to_string();
+
+        let first = submit_pipeline(&tc.ctx, Some(key.clone()), yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+        assert!(!first.already_exists);
+
+        let second = submit_pipeline(&tc.ctx, Some(key.clone()), yaml.to_string(), 0, None)
+            .await
+            .unwrap();
+        assert!(second.already_exists);
+        assert_eq!(second.run_id, first.run_id);
+    }
 }

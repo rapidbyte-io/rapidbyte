@@ -444,4 +444,64 @@ mod tests {
         // Should NOT have been retried (attempt should still be 1)
         assert_eq!(run.current_attempt(), 1);
     }
+
+    #[tokio::test]
+    async fn complete_unknown_task_not_found() {
+        let tc = fake_context();
+        let result = complete_task(
+            &tc.ctx,
+            "agent-1",
+            "nonexistent-task",
+            1,
+            TaskOutcome::Completed {
+                metrics: sample_metrics(),
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), AppError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn complete_unknown_agent_mismatch() {
+        let tc = fake_context();
+        let (task_id, _run_id, epoch) = setup_running_task(&tc).await;
+
+        // Complete as "agent-2" when task is assigned to "agent-1"
+        let result = complete_task(
+            &tc.ctx,
+            "agent-2",
+            &task_id,
+            epoch,
+            TaskOutcome::Completed {
+                metrics: sample_metrics(),
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn complete_expired_lease_rejected() {
+        let tc = fake_context();
+        let (task_id, _run_id, epoch) = setup_running_task(&tc).await;
+
+        // Advance clock past lease expiry (300s)
+        tc.clock.advance(chrono::Duration::seconds(301));
+
+        let result = complete_task(
+            &tc.ctx,
+            "agent-1",
+            &task_id,
+            epoch,
+            TaskOutcome::Completed {
+                metrics: sample_metrics(),
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
 }
