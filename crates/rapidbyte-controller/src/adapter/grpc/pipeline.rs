@@ -93,20 +93,39 @@ impl PipelineService for PipelineGrpcService {
         req: Request<pb::ListRunsRequest>,
     ) -> Result<Response<pb::ListRunsResponse>, Status> {
         let req = req.into_inner();
-        let state = req
-            .state_filter
-            .and_then(convert::proto_to_run_state_filter);
+
+        // Validate state_filter: reject unknown enum values instead of silently ignoring
+        let state = if let Some(raw) = req.state_filter {
+            if raw == 0 {
+                // UNSPECIFIED → no filter
+                None
+            } else {
+                Some(convert::proto_to_run_state_filter(raw).ok_or_else(|| {
+                    Status::invalid_argument(format!("unknown state_filter value: {raw}"))
+                })?)
+            }
+        } else {
+            None
+        };
+
         let page_token = if req.page_token.is_empty() {
             None
         } else {
             Some(req.page_token)
         };
 
+        // Default page_size to 20 when 0 (proto default), cap at 1000
+        let page_size = if req.page_size == 0 {
+            20
+        } else {
+            req.page_size.min(1000)
+        };
+
         let page = crate::application::query::list_runs(
             &self.ctx,
             RunFilter { state },
             Pagination {
-                page_size: req.page_size.clamp(1, 1000),
+                page_size,
                 page_token,
             },
         )
