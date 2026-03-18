@@ -103,7 +103,7 @@ impl Default for FakePluginRunner {
 
 #[async_trait]
 impl PluginRunner for FakePluginRunner {
-    async fn run_source(&self, _params: &SourceRunParams) -> Result<SourceOutcome, PipelineError> {
+    async fn run_source(&self, _params: SourceRunParams) -> Result<SourceOutcome, PipelineError> {
         self.source_results
             .lock()
             .unwrap()
@@ -117,7 +117,7 @@ impl PluginRunner for FakePluginRunner {
 
     async fn run_transform(
         &self,
-        _params: &TransformRunParams,
+        _params: TransformRunParams,
     ) -> Result<TransformOutcome, PipelineError> {
         self.transform_results
             .lock()
@@ -132,7 +132,7 @@ impl PluginRunner for FakePluginRunner {
 
     async fn run_destination(
         &self,
-        _params: &DestinationRunParams,
+        _params: DestinationRunParams,
     ) -> Result<DestinationOutcome, PipelineError> {
         self.dest_results
             .lock()
@@ -564,7 +564,7 @@ mod tests {
         // Call through the trait-object in EngineContext.
         // We need a SourceRunParams, but the runner ignores it.
         let params = make_source_params();
-        let result = tc.ctx.runner.run_source(&params).await;
+        let result = tc.ctx.runner.run_source(params).await;
         assert!(result.is_ok());
         let out = result.unwrap();
         assert_eq!(out.summary.records_read, 42);
@@ -574,7 +574,7 @@ mod tests {
     async fn fake_runner_returns_error_when_queue_empty() {
         let tc = fake_context();
         let params = make_source_params();
-        let result = tc.ctx.runner.run_source(&params).await;
+        let result = tc.ctx.runner.run_source(params).await;
         assert!(result.is_err());
     }
 
@@ -615,12 +615,13 @@ mod tests {
         use std::path::PathBuf;
         use std::sync::{mpsc, Arc, Mutex};
 
+        use rapidbyte_runtime::Frame;
         use rapidbyte_types::catalog::SchemaHint;
         use rapidbyte_types::state::RunStats;
         use rapidbyte_types::stream::StreamContext;
         use rapidbyte_types::wire::SyncMode;
 
-        let (tx, _rx) = mpsc::sync_channel(1);
+        let (tx, _rx) = mpsc::sync_channel::<Frame>(1);
         SourceRunParams {
             wasm_path: PathBuf::from("/tmp/fake.wasm"),
             pipeline_name: "test".to_string(),

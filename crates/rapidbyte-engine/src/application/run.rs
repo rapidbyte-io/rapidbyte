@@ -12,6 +12,8 @@ use tracing::{info, warn};
 use rapidbyte_pipeline_config::PipelineConfig;
 use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
 
+use rapidbyte_runtime::Frame;
+
 use crate::application::context::EngineContext;
 use crate::domain::error::PipelineError;
 use crate::domain::outcome::{
@@ -212,7 +214,7 @@ pub async fn run_pipeline(
             };
 
             // Create channel for frame transport
-            let (frame_tx, frame_rx) = mpsc::sync_channel::<Vec<u8>>(ctx.config.channel_capacity);
+            let (frame_tx, frame_rx) = mpsc::sync_channel::<Frame>(ctx.config.channel_capacity);
 
             let stats = Arc::new(Mutex::new(RunStats::default()));
             let source_permissions = source_resolved
@@ -223,7 +225,7 @@ pub async fn run_pipeline(
             // Run source
             let source_result = ctx
                 .runner
-                .run_source(&SourceRunParams {
+                .run_source(SourceRunParams {
                     wasm_path: source_resolved.wasm_path.clone(),
                     pipeline_name: pipeline.pipeline.clone(),
                     metric_run_label: format!("{}-{attempt}", pipeline.pipeline),
@@ -259,7 +261,7 @@ pub async fn run_pipeline(
             // Run transforms (sequential pipeline)
             let mut current_rx = Some(frame_rx);
             for (i, transform) in pipeline.transforms.iter().enumerate() {
-                let (next_tx, next_rx) = mpsc::sync_channel::<Vec<u8>>(ctx.config.channel_capacity);
+                let (next_tx, next_rx) = mpsc::sync_channel::<Frame>(ctx.config.channel_capacity);
 
                 let t_permissions = transform_resolved[i]
                     .manifest
@@ -270,7 +272,7 @@ pub async fn run_pipeline(
                 let rx = current_rx.take().expect("receiver should be available");
                 let transform_result = ctx
                     .runner
-                    .run_transform(&crate::domain::ports::runner::TransformRunParams {
+                    .run_transform(crate::domain::ports::runner::TransformRunParams {
                         wasm_path: transform_resolved[i].wasm_path.clone(),
                         pipeline_name: pipeline.pipeline.clone(),
                         metric_run_label: format!("{}-{attempt}", pipeline.pipeline),
@@ -327,7 +329,7 @@ pub async fn run_pipeline(
                 let final_rx = current_rx.take().expect("receiver should be available");
                 let dest_result = ctx
                     .runner
-                    .run_destination(&DestinationRunParams {
+                    .run_destination(DestinationRunParams {
                         wasm_path: dest_resolved.wasm_path.clone(),
                         pipeline_name: pipeline.pipeline.clone(),
                         metric_run_label: format!("{}-{attempt}", pipeline.pipeline),

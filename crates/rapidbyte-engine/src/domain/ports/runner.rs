@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 
 use async_trait::async_trait;
+use rapidbyte_runtime::Frame;
 use rapidbyte_types::checkpoint::Checkpoint;
 use rapidbyte_types::envelope::DlqRecord;
 use rapidbyte_types::error::ValidationResult;
@@ -42,7 +43,7 @@ pub struct SourceRunParams {
     /// Compression codec to use for frame transport.
     pub compression: Option<String>,
     /// Channel sender for emitting frames to the next stage.
-    pub frame_sender: mpsc::SyncSender<Vec<u8>>,
+    pub frame_sender: mpsc::SyncSender<Frame>,
     /// Shared run stats accumulator.
     pub stats: Arc<Mutex<RunStats>>,
     /// Optional callback invoked after each batch is emitted.
@@ -70,9 +71,9 @@ pub struct TransformRunParams {
     /// Compression codec to use for frame transport.
     pub compression: Option<String>,
     /// Channel receiver for incoming frames.
-    pub frame_receiver: mpsc::Receiver<Vec<u8>>,
+    pub frame_receiver: mpsc::Receiver<Frame>,
     /// Channel sender for outgoing frames.
-    pub frame_sender: mpsc::SyncSender<Vec<u8>>,
+    pub frame_sender: mpsc::SyncSender<Frame>,
     /// Shared DLQ record accumulator.
     pub dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     /// Zero-based index of this transform in the pipeline.
@@ -100,7 +101,7 @@ pub struct DestinationRunParams {
     /// Compression codec to use for frame transport.
     pub compression: Option<String>,
     /// Channel receiver for incoming frames.
-    pub frame_receiver: mpsc::Receiver<Vec<u8>>,
+    pub frame_receiver: mpsc::Receiver<Frame>,
     /// Shared DLQ record accumulator.
     pub dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     /// Shared run stats accumulator.
@@ -198,22 +199,25 @@ pub struct DiscoveredStream {
 /// Port for executing plugin operations (source, transform, destination,
 /// validate, discover).
 ///
+/// The `run_*` methods take params by value because they consume channels
+/// (receivers are not cloneable).
+///
 /// Implemented by the WASM runtime adapter in the infrastructure layer.
 #[async_trait]
 pub trait PluginRunner: Send + Sync {
     /// Run a source plugin for a single stream.
-    async fn run_source(&self, params: &SourceRunParams) -> Result<SourceOutcome, PipelineError>;
+    async fn run_source(&self, params: SourceRunParams) -> Result<SourceOutcome, PipelineError>;
 
     /// Run a transform plugin for a single stream.
     async fn run_transform(
         &self,
-        params: &TransformRunParams,
+        params: TransformRunParams,
     ) -> Result<TransformOutcome, PipelineError>;
 
     /// Run a destination plugin for a single stream.
     async fn run_destination(
         &self,
-        params: &DestinationRunParams,
+        params: DestinationRunParams,
     ) -> Result<DestinationOutcome, PipelineError>;
 
     /// Validate a plugin configuration.
