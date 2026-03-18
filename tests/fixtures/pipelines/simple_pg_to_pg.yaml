@@ -26,5 +26,4 @@ destination:
     schema: raw
   write_mode: append
 
-state:
-  backend: sqlite
+state: {}

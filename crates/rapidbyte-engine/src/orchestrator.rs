@@ -94,14 +94,11 @@ impl PipelineAttempt<'_> {
             )
             .map_err(PipelineError::Infrastructure)?;
         }
-        let state_backend_kind = config.state.backend;
-        let state_connection = config
-            .state
-            .connection
-            .clone()
-            .unwrap_or_else(|| rapidbyte_state::default_connection(state_backend_kind));
+        let state_connection = config.state.connection.clone().unwrap_or_else(|| {
+            rapidbyte_state::default_connection(rapidbyte_state::BackendKind::Postgres)
+        });
         let state = tokio::task::spawn_blocking(move || {
-            rapidbyte_state::open_backend(state_backend_kind, &state_connection)
+            rapidbyte_state::open_backend(rapidbyte_state::BackendKind::Postgres, &state_connection)
         })
         .await
         .map_err(|e| PipelineError::task_panicked("open_state_backend", e))?
@@ -658,12 +655,10 @@ pub async fn check_pipeline(
     });
 
     let state = {
-        let connection = config
-            .state
-            .connection
-            .clone()
-            .unwrap_or_else(|| rapidbyte_state::default_connection(config.state.backend));
-        match rapidbyte_state::open_backend(config.state.backend, &connection) {
+        let connection = config.state.connection.clone().unwrap_or_else(|| {
+            rapidbyte_state::default_connection(rapidbyte_state::BackendKind::Postgres)
+        });
+        match rapidbyte_state::open_backend(rapidbyte_state::BackendKind::Postgres, &connection) {
             Ok(_) => {
                 tracing::info!("State backend: OK");
                 CheckStatus {

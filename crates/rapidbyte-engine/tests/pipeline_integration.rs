@@ -4,7 +4,7 @@
 //! through validation, using real fixture files.
 
 use rapidbyte_engine::config::parser;
-use rapidbyte_engine::config::types::{PipelineWriteMode, StateBackendKind};
+use rapidbyte_engine::config::types::PipelineWriteMode;
 use rapidbyte_engine::config::validator;
 use rapidbyte_secrets::SecretProviders;
 use rapidbyte_state::{SqliteStateBackend, StateBackend};
@@ -70,7 +70,8 @@ async fn test_parse_and_validate_fixture_pipeline() {
     assert_eq!(config.destination.use_ref, "postgres");
     assert_eq!(config.destination.write_mode, PipelineWriteMode::Append);
     assert_eq!(config.destination.config["schema"], "raw");
-    assert_eq!(config.state.backend, StateBackendKind::Sqlite);
+    // state.connection is None when not specified in YAML
+    assert!(config.state.connection.is_none());
 
     // Validate should pass
     validator::validate_pipeline(&config).expect("Validation should pass");

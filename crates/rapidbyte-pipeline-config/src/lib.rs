@@ -1,10 +1,23 @@
-//! Pipeline YAML variable substitution and secret resolution.
+//! Pipeline configuration: types, YAML parsing, validation, and secret resolution.
 //!
 //! Supports two kinds of references in pipeline YAML:
 //! - `${ENV_VAR}` — resolved from the process environment
 //! - `${prefix:path#key}` — resolved via a registered [`SecretProvider`]
 
 #![warn(clippy::pedantic)]
+
+pub mod parser;
+pub mod types;
+pub mod validator;
+
+// Re-export commonly used items at the crate root.
+pub use parser::{parse_pipeline, parse_resolved};
+pub use types::{
+    parse_byte_size, AutotuneConfig, DestinationConfig, PipelineConfig, PipelineLimits,
+    PipelineParallelism, PipelinePermissions, PipelineWriteMode, ResourceConfig, SourceConfig,
+    StateConfig, StreamConfig, TransformConfig, MAX_FLUSH_CHUNK_BYTES, MIN_FLUSH_CHUNK_BYTES,
+};
+pub use validator::validate_pipeline;
 
 use std::collections::HashMap;
 use std::sync::LazyLock;

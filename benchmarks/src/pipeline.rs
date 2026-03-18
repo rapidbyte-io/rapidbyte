@@ -100,10 +100,6 @@ fn render_state_mapping(
     let mut state = Mapping::new();
     if scenario.benchmark.execution_mode == crate::scenario::BenchmarkExecutionMode::Distributed {
         state.insert(
-            str_key("backend"),
-            YamlValue::String("postgres".to_string()),
-        );
-        state.insert(
             str_key("connection"),
             YamlValue::String(format!(
                 "host={} port={} user={} password={} dbname={}",
@@ -114,14 +110,11 @@ fn render_state_mapping(
                 env.source.database
             )),
         );
-    } else {
-        state.insert(str_key("backend"), YamlValue::String("sqlite".to_string()));
-        if let Some(path) = state_connection {
-            state.insert(
-                str_key("connection"),
-                YamlValue::String(path.display().to_string()),
-            );
-        }
+    } else if let Some(path) = state_connection {
+        state.insert(
+            str_key("connection"),
+            YamlValue::String(path.display().to_string()),
+        );
     }
     YamlValue::Mapping(state)
 }
@@ -134,7 +127,7 @@ fn str_key(value: &str) -> YamlValue {
 mod tests {
     use std::fs;
 
-    use rapidbyte_engine::config::types::{PipelineConfig, PipelineWriteMode, StateBackendKind};
+    use rapidbyte_engine::config::types::{PipelineConfig, PipelineWriteMode};
     use rapidbyte_types::wire::SyncMode;
 
     fn parse_pipeline_sync(yaml: &str) -> PipelineConfig {
@@ -234,7 +227,6 @@ mod tests {
         let yaml = fs::read_to_string(&rendered.path).expect("read rendered pipeline");
         let parsed = parse_pipeline_sync(&yaml);
 
-        assert_eq!(parsed.state.backend, StateBackendKind::Postgres);
         let connection = parsed
             .state
             .connection
