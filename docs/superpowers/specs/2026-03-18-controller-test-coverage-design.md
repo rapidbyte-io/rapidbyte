@@ -7,16 +7,16 @@
 ## Context
 
 The controller crate was rewritten with hexagonal architecture. Current state:
-- 150 tests total (77 domain, 43 application, 30 adapter)
+- 146 tests total (71 domain, 43 application, 32 adapter gRPC)
 - Domain layer: good state machine coverage, missing edge cases
 - Application layer: happy paths covered, missing error paths and `timeout.rs` (0 tests)
-- Adapter gRPC handlers: 0 tests for `agent.rs` and `pipeline.rs`
+- Adapter gRPC handlers: 0 tests for `agent.rs` and `pipeline.rs` (convert: 25, auth: 7)
 - Adapter Postgres: 0 tests across 5 files (~1100 lines)
 - Integration tests: none
 
 ## Goals
 
-- 104 new tests bringing total to ~254
+- 103 new tests bringing total to ~249
 - Cover all layers: domain edge cases, application error paths, gRPC handlers, Postgres SQL
 - Postgres integration tests use testcontainers (real DB, no mocks)
 - Unit tests run without infrastructure (`cargo test`)
@@ -63,7 +63,7 @@ integration = []
 
 | Test | What it verifies |
 |------|-----------------|
-| `retry_clears_metrics` | Metrics reset to None on retry |
+| `retry_preserves_metrics` | Metrics survive retry (not cleared, only error cleared) |
 | `retry_increments_attempt_correctly` | Attempt 3 → retry → attempt 4 |
 | `can_retry_after_error_with_max_retries_zero` | max_retries=0 → never retry |
 | `can_retry_after_timeout_with_max_retries_zero` | Same boundary for timeout path |
@@ -73,7 +73,7 @@ integration = []
 | `new_with_empty_pipeline_name` | Empty string is valid at domain level |
 | `retry_from_failed_fails` | Failed is terminal, retry returns InvalidTransition |
 | `retry_from_cancelled_fails` | Cancelled is terminal |
-| `updated_at_advances_on_each_transition` | Each transition calls Utc::now() |
+| `updated_at_changes_on_transition` | updated_at differs from created_at after a transition (uses >= to avoid flakiness from Utc::now() wall clock) |
 | `from_row_with_all_none_optionals` | No error, no metrics, no timeout → valid Run |
 
 ### task.rs (+6 tests)
@@ -84,8 +84,8 @@ integration = []
 | `cancel_pending_success` | Pending → Cancelled via cancel_pending() |
 | `assign_sets_agent_and_lease` | Fields populated after assign() |
 | `timeout_preserves_agent_and_lease` | State changes but agent/lease remain for audit |
-| `validate_lease_pending_task_no_assignment` | Pending task with no agent/lease → InvalidTransition |
 | `from_row_with_no_lease` | None agent, None lease → valid Task |
+| `updated_at_changes_on_assign` | updated_at differs from created_at after assign (>= check) |
 
 ### lease.rs (+2 tests)
 
@@ -113,11 +113,10 @@ integration = []
 | `handle_timeout_cancel_takes_priority_over_retry` | cancel_requested + retries → Cancelled (not retried) |
 | `handle_timeout_error_message_preserved` | Error code/message in RunFailed event match inputs |
 
-### submit.rs (+4 tests)
+### submit.rs (+3 tests)
 
 | Test | What it verifies |
 |------|-----------------|
-| `submit_with_empty_idempotency_key_treated_as_none` | Some("") doesn't deduplicate |
 | `submit_with_max_retries_zero` | Run created with 0 retries |
 | `submit_with_timeout_seconds` | timeout_seconds flows through to Run |
 | `submit_idempotency_race_returns_existing` | Store failure → fallback lookup returns existing run |
@@ -307,8 +306,12 @@ cargo test -p rapidbyte-controller --features integration
 
 | Category | Existing | New | Total |
 |----------|----------|-----|-------|
-| Domain | 77 | 22 | 99 |
-| Application | 43 | 32 | 75 |
-| Adapter gRPC | 30 | 15 | 45 |
+| Domain | 71 | 22 | 93 |
+| Application | 43 | 31 | 74 |
+| Adapter gRPC | 32 | 15 | 47 |
 | Adapter Postgres | 0 | 35 | 35 |
-| **Total** | **150** | **104** | **254** |
+| **Total** | **146** | **103** | **249** |
+
+Note: The `testing` module is `#[cfg(test)]` which is sufficient for all inline
+unit tests. Integration tests in `tests/postgres/` use real `PgPool` and do not
+need the fake infrastructure.
