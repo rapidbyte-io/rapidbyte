@@ -34,21 +34,13 @@ pub async fn heartbeat(
     tasks: Vec<TaskHeartbeatInput>,
 ) -> Result<Vec<TaskDirectiveOutput>, AppError> {
     // 1. Find agent, touch, save
-    let mut agent = ctx
-        .agents
-        .find_by_id(agent_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound {
-            entity: "Agent",
-            id: agent_id.to_string(),
-        })?;
+    let mut agent = ctx.find_agent(agent_id).await?;
 
     let now = ctx.clock.now();
     agent.touch(now);
     ctx.agents.save(&agent).await?;
 
-    let lease_duration = chrono::Duration::from_std(ctx.config.default_lease_duration)
-        .unwrap_or_else(|_| chrono::Duration::seconds(300));
+    let lease_duration = ctx.config.lease_duration_chrono();
 
     let mut directives = Vec::with_capacity(tasks.len());
 
@@ -130,37 +122,10 @@ mod tests {
     use super::*;
     use crate::application::poll::poll_task;
     use crate::application::submit::submit_pipeline;
-    use crate::application::testing::fake_context;
+    use crate::application::testing::{fake_context, setup_running_task};
     use crate::domain::agent::{Agent, AgentCapabilities};
     use crate::domain::event::DomainEvent;
     use crate::domain::ports::clock::Clock;
-
-    async fn setup_running_task(
-        tc: &crate::application::testing::TestContext,
-    ) -> (String, String, u64) {
-        let now = tc.clock.now();
-        let agent = Agent::new(
-            "agent-1".to_string(),
-            AgentCapabilities {
-                plugins: vec![],
-                max_concurrent_tasks: 4,
-            },
-            now,
-        );
-        tc.ctx.agents.save(&agent).await.unwrap();
-
-        let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let _submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, Some(60))
-            .await
-            .unwrap();
-
-        let assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
-        (
-            assignment.task_id,
-            assignment.run_id,
-            assignment.lease_epoch,
-        )
-    }
 
     #[tokio::test]
     async fn agent_liveness_updated() {

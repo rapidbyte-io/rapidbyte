@@ -510,6 +510,42 @@ impl Clock for FakeClock {
 // TestContext + factory
 // ---------------------------------------------------------------------------
 
+/// Set up an agent, submit a pipeline, and poll a task.
+/// Returns `(task_id, run_id, lease_epoch)`.
+///
+/// # Panics
+///
+/// Panics if any repository operation fails (test-only helper).
+pub async fn setup_running_task(tc: &TestContext) -> (String, String, u64) {
+    use crate::application::poll::poll_task;
+    use crate::application::submit::submit_pipeline;
+    use crate::domain::agent::{Agent, AgentCapabilities};
+    use crate::domain::ports::clock::Clock;
+
+    let now = tc.clock.now();
+    let agent = Agent::new(
+        "agent-1".to_string(),
+        AgentCapabilities {
+            plugins: vec![],
+            max_concurrent_tasks: 4,
+        },
+        now,
+    );
+    tc.ctx.agents.save(&agent).await.unwrap();
+
+    let yaml = "pipeline: test-pipe\nversion: '1.0'";
+    let _submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, Some(60))
+        .await
+        .unwrap();
+
+    let assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
+    (
+        assignment.task_id,
+        assignment.run_id,
+        assignment.lease_epoch,
+    )
+}
+
 pub struct TestContext {
     pub ctx: AppContext,
     pub storage: FakeStorage,

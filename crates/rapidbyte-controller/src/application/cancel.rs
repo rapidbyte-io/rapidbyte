@@ -23,14 +23,7 @@ pub struct CancelResult {
 /// event-bus error on failure.
 pub async fn cancel_run(ctx: &AppContext, run_id: &str) -> Result<CancelResult, AppError> {
     // 1. Find run
-    let mut run = ctx
-        .runs
-        .find_by_id(run_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound {
-            entity: "Run",
-            id: run_id.to_string(),
-        })?;
+    let mut run = ctx.find_run(run_id).await?;
 
     match run.state() {
         // Terminal states: reject
@@ -68,14 +61,7 @@ pub async fn cancel_run(ctx: &AppContext, run_id: &str) -> Result<CancelResult, 
 
             // Run was concurrently assigned — set cancel flag instead.
             // Re-fetch once to get current state.
-            let mut run = ctx
-                .runs
-                .find_by_id(run_id)
-                .await?
-                .ok_or_else(|| AppError::NotFound {
-                    entity: "Run",
-                    id: run_id.to_string(),
-                })?;
+            let mut run = ctx.find_run(run_id).await?;
 
             match run.state() {
                 RunState::Running => {

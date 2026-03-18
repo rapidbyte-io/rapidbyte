@@ -29,15 +29,8 @@ pub async fn register(
 /// Returns `AppError::NotFound` if the agent does not exist, or a repository /
 /// event-bus error on failure.
 pub async fn deregister(ctx: &AppContext, agent_id: &str) -> Result<(), AppError> {
-    // 1. Find agent
-    let _agent = ctx
-        .agents
-        .find_by_id(agent_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound {
-            entity: "Agent",
-            id: agent_id.to_string(),
-        })?;
+    // 1. Verify agent exists before proceeding
+    ctx.find_agent(agent_id).await?;
 
     // 2. Find running tasks for this agent
     let running_tasks = ctx.tasks.find_running_by_agent_id(agent_id).await?;
@@ -46,14 +39,7 @@ pub async fn deregister(ctx: &AppContext, agent_id: &str) -> Result<(), AppError
     for mut task in running_tasks {
         task.timeout()?;
 
-        let mut run =
-            ctx.runs
-                .find_by_id(task.run_id())
-                .await?
-                .ok_or_else(|| AppError::NotFound {
-                    entity: "Run",
-                    id: task.run_id().to_string(),
-                })?;
+        let mut run = ctx.find_run(task.run_id()).await?;
 
         handle_task_timeout(
             ctx,

@@ -9,13 +9,7 @@ use crate::domain::run::Run;
 ///
 /// Returns `AppError::NotFound` if no run with the given id exists.
 pub async fn get_run(ctx: &AppContext, run_id: &str) -> Result<Run, AppError> {
-    ctx.runs
-        .find_by_id(run_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound {
-            entity: "Run",
-            id: run_id.to_string(),
-        })
+    ctx.find_run(run_id).await
 }
 
 /// List runs with optional filtering and pagination.

@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use crate::application::context::AppContext;
 use crate::application::error::AppError;
 use crate::application::timeout::handle_task_timeout;
+
 use crate::domain::event::DomainEvent;
 use crate::domain::lease::Lease;
 use crate::domain::run::RunState;
@@ -38,14 +39,7 @@ pub async fn poll_task(
     agent_id: &str,
 ) -> Result<Option<TaskAssignment>, AppError> {
     // 1. Find agent
-    let mut agent = ctx
-        .agents
-        .find_by_id(agent_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound {
-            entity: "Agent",
-            id: agent_id.to_string(),
-        })?;
+    let mut agent = ctx.find_agent(agent_id).await?;
 
     // 2. Touch agent liveness
     let now = ctx.clock.now();
@@ -56,8 +50,7 @@ pub async fn poll_task(
     let epoch = ctx.tasks.next_lease_epoch().await?;
 
     // 4. Calculate lease duration (use default config)
-    let lease_duration = chrono::Duration::from_std(ctx.config.default_lease_duration)
-        .unwrap_or_else(|_| chrono::Duration::seconds(300));
+    let lease_duration = ctx.config.lease_duration_chrono();
     let expires_at = now + lease_duration;
 
     // 5. Create lease

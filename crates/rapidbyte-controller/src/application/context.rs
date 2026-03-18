@@ -7,6 +7,8 @@ use crate::domain::ports::pipeline_store::PipelineStore;
 use crate::domain::ports::repository::{AgentRepository, RunRepository, TaskRepository};
 use crate::domain::ports::secrets::SecretResolver;
 
+use super::error::AppError;
+
 pub struct RegistryConfig {
     pub url: String,
     pub insecure: bool,
@@ -21,6 +23,14 @@ pub struct AppConfig {
     pub registry: Option<RegistryConfig>,
 }
 
+impl AppConfig {
+    #[must_use]
+    pub fn lease_duration_chrono(&self) -> chrono::Duration {
+        chrono::Duration::from_std(self.default_lease_duration)
+            .unwrap_or_else(|_| chrono::Duration::seconds(300))
+    }
+}
+
 pub struct AppContext {
     pub runs: Arc<dyn RunRepository>,
     pub tasks: Arc<dyn TaskRepository>,
@@ -30,4 +40,54 @@ pub struct AppContext {
     pub secrets: Arc<dyn SecretResolver>,
     pub clock: Arc<dyn Clock>,
     pub config: AppConfig,
+}
+
+impl AppContext {
+    /// Find an agent by id, returning `NotFound` if it does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AppError::NotFound` or a repository error.
+    pub async fn find_agent(
+        &self,
+        agent_id: &str,
+    ) -> Result<crate::domain::agent::Agent, AppError> {
+        self.agents
+            .find_by_id(agent_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound {
+                entity: "Agent",
+                id: agent_id.to_string(),
+            })
+    }
+
+    /// Find a run by id, returning `NotFound` if it does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AppError::NotFound` or a repository error.
+    pub async fn find_run(&self, run_id: &str) -> Result<crate::domain::run::Run, AppError> {
+        self.runs
+            .find_by_id(run_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound {
+                entity: "Run",
+                id: run_id.to_string(),
+            })
+    }
+
+    /// Find a task by id, returning `NotFound` if it does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AppError::NotFound` or a repository error.
+    pub async fn find_task(&self, task_id: &str) -> Result<crate::domain::task::Task, AppError> {
+        self.tasks
+            .find_by_id(task_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound {
+                entity: "Task",
+                id: task_id.to_string(),
+            })
+    }
 }

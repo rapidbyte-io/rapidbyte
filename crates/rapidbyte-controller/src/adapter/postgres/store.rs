@@ -1,6 +1,7 @@
 use std::hash::{Hash, Hasher};
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
 
 use crate::domain::lease::Lease;
@@ -12,6 +13,41 @@ use crate::domain::task::Task;
 use super::error::box_err;
 use super::run::{run_from_row, run_state_to_str};
 use super::task::{task_from_row, task_state_to_str};
+
+fn extract_run_error(run: &Run) -> (Option<&str>, Option<&str>) {
+    match run.error() {
+        Some(e) => (Some(e.code.as_str()), Some(e.message.as_str())),
+        None => (None, None),
+    }
+}
+
+type RunMetricsTuple = (
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+    Option<i64>,
+);
+
+fn extract_run_metrics(run: &Run) -> RunMetricsTuple {
+    match run.metrics() {
+        Some(m) => (
+            Some(m.rows_read.cast_signed()),
+            Some(m.rows_written.cast_signed()),
+            Some(m.bytes_read.cast_signed()),
+            Some(m.bytes_written.cast_signed()),
+            Some(m.duration_ms.cast_signed()),
+        ),
+        None => (None, None, None, None, None),
+    }
+}
+
+fn extract_task_lease(task: &Task) -> (Option<i64>, Option<DateTime<Utc>>) {
+    match task.lease() {
+        Some(l) => (Some(l.epoch().cast_signed()), Some(l.expires_at())),
+        None => (None, None),
+    }
+}
 
 pub struct PgPipelineStore {
     pool: PgPool,
@@ -25,21 +61,9 @@ impl PgPipelineStore {
 }
 
 async fn insert_run(conn: &mut PgConnection, run: &Run) -> Result<(), RepositoryError> {
-    let (error_code, error_message) = match run.error() {
-        Some(e) => (Some(e.code.as_str()), Some(e.message.as_str())),
-        None => (None, None),
-    };
-
-    let (rows_read, rows_written, bytes_read, bytes_written, duration_ms) = match run.metrics() {
-        Some(m) => (
-            Some(m.rows_read.cast_signed()),
-            Some(m.rows_written.cast_signed()),
-            Some(m.bytes_read.cast_signed()),
-            Some(m.bytes_written.cast_signed()),
-            Some(m.duration_ms.cast_signed()),
-        ),
-        None => (None, None, None, None, None),
-    };
+    let (error_code, error_message) = extract_run_error(run);
+    let (rows_read, rows_written, bytes_read, bytes_written, duration_ms) =
+        extract_run_metrics(run);
 
     sqlx::query(
         "INSERT INTO runs (id, idempotency_key, pipeline_name, pipeline_yaml, state, cancel_requested, attempt, max_retries, timeout_seconds, error_code, error_message, rows_read, rows_written, bytes_read, bytes_written, duration_ms, created_at, updated_at)
@@ -71,21 +95,9 @@ async fn insert_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
 }
 
 async fn update_run(conn: &mut PgConnection, run: &Run) -> Result<(), RepositoryError> {
-    let (error_code, error_message) = match run.error() {
-        Some(e) => (Some(e.code.as_str()), Some(e.message.as_str())),
-        None => (None, None),
-    };
-
-    let (rows_read, rows_written, bytes_read, bytes_written, duration_ms) = match run.metrics() {
-        Some(m) => (
-            Some(m.rows_read.cast_signed()),
-            Some(m.rows_written.cast_signed()),
-            Some(m.bytes_read.cast_signed()),
-            Some(m.bytes_written.cast_signed()),
-            Some(m.duration_ms.cast_signed()),
-        ),
-        None => (None, None, None, None, None),
-    };
+    let (error_code, error_message) = extract_run_error(run);
+    let (rows_read, rows_written, bytes_read, bytes_written, duration_ms) =
+        extract_run_metrics(run);
 
     sqlx::query(
         "UPDATE runs SET state = $1, cancel_requested = $2, attempt = $3, max_retries = $4, timeout_seconds = $5, error_code = $6, error_message = $7, rows_read = $8, rows_written = $9, bytes_read = $10, bytes_written = $11, duration_ms = $12, updated_at = $13 WHERE id = $14",
@@ -112,10 +124,7 @@ async fn update_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
 }
 
 async fn insert_task(conn: &mut PgConnection, task: &Task) -> Result<(), RepositoryError> {
-    let (lease_epoch, lease_expires_at) = match task.lease() {
-        Some(l) => (Some(l.epoch().cast_signed()), Some(l.expires_at())),
-        None => (None, None),
-    };
+    let (lease_epoch, lease_expires_at) = extract_task_lease(task);
 
     sqlx::query(
         "INSERT INTO tasks (id, run_id, attempt, state, agent_id, lease_epoch, lease_expires_at, created_at, updated_at)
@@ -138,10 +147,7 @@ async fn insert_task(conn: &mut PgConnection, task: &Task) -> Result<(), Reposit
 }
 
 async fn update_task(conn: &mut PgConnection, task: &Task) -> Result<(), RepositoryError> {
-    let (lease_epoch, lease_expires_at) = match task.lease() {
-        Some(l) => (Some(l.epoch().cast_signed()), Some(l.expires_at())),
-        None => (None, None),
-    };
+    let (lease_epoch, lease_expires_at) = extract_task_lease(task);
 
     sqlx::query(
         "UPDATE tasks SET state = $1, agent_id = $2, lease_epoch = $3, lease_expires_at = $4, updated_at = $5 WHERE id = $6",
@@ -233,15 +239,16 @@ impl PipelineStore for PgPipelineStore {
 
         // Update run to running — check that it was actually pending.
         // If the run was concurrently cancelled/failed, this affects 0 rows.
-        let run_result = sqlx::query(
-            "UPDATE runs SET state = 'running', updated_at = now() WHERE id = $1 AND state = 'pending'",
+        // Use RETURNING to avoid an extra SELECT round-trip.
+        let run_row = sqlx::query(
+            "UPDATE runs SET state = 'running', updated_at = now() WHERE id = $1 AND state = 'pending' RETURNING *",
         )
         .bind(task.run_id())
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(box_err)?;
 
-        if run_result.rows_affected() == 0 {
+        let Some(run_row) = run_row else {
             // Run is no longer pending (cancelled/failed concurrently).
             // Rollback task assignment — put it back to pending.
             sqlx::query(
@@ -254,14 +261,7 @@ impl PipelineStore for PgPipelineStore {
 
             tx.commit().await.map_err(box_err)?;
             return Ok(None);
-        }
-
-        // Select updated run
-        let run_row = sqlx::query("SELECT * FROM runs WHERE id = $1")
-            .bind(task.run_id())
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(box_err)?;
+        };
 
         let run = run_from_row(&run_row)?;
 

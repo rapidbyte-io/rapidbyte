@@ -14,14 +14,7 @@ pub async fn sweep_expired_leases(ctx: &AppContext) -> Result<(), AppError> {
     for mut task in expired_tasks {
         task.timeout()?;
 
-        let mut run =
-            ctx.runs
-                .find_by_id(task.run_id())
-                .await?
-                .ok_or_else(|| AppError::NotFound {
-                    entity: "Run",
-                    id: task.run_id().to_string(),
-                })?;
+        let mut run = ctx.find_run(task.run_id()).await?;
 
         handle_task_timeout(
             ctx,

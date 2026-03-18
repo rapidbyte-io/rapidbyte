@@ -35,26 +35,12 @@ pub async fn complete_task(
     outcome: TaskOutcome,
 ) -> Result<(), AppError> {
     // 1. Find task, validate lease
-    let mut task = ctx
-        .tasks
-        .find_by_id(task_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound {
-            entity: "Task",
-            id: task_id.to_string(),
-        })?;
+    let mut task = ctx.find_task(task_id).await?;
     let now = ctx.clock.now();
     task.validate_lease(agent_id, lease_epoch, now)?;
 
     // 2. Find run
-    let mut run = ctx
-        .runs
-        .find_by_id(task.run_id())
-        .await?
-        .ok_or_else(|| AppError::NotFound {
-            entity: "Run",
-            id: task.run_id().to_string(),
-        })?;
+    let mut run = ctx.find_run(task.run_id()).await?;
 
     let now = ctx.clock.now();
 
@@ -124,39 +110,12 @@ mod tests {
     use super::*;
     use crate::application::poll::poll_task;
     use crate::application::submit::submit_pipeline;
-    use crate::application::testing::fake_context;
+    use crate::application::testing::{fake_context, setup_running_task};
     use crate::domain::agent::{Agent, AgentCapabilities};
     use crate::domain::event::DomainEvent;
     use crate::domain::ports::clock::Clock;
     use crate::domain::run::{RunMetrics, RunState};
     use crate::domain::task::TaskState;
-
-    async fn setup_running_task(
-        tc: &crate::application::testing::TestContext,
-    ) -> (String, String, u64) {
-        let now = tc.clock.now();
-        let agent = Agent::new(
-            "agent-1".to_string(),
-            AgentCapabilities {
-                plugins: vec![],
-                max_concurrent_tasks: 4,
-            },
-            now,
-        );
-        tc.ctx.agents.save(&agent).await.unwrap();
-
-        let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let _submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, Some(60))
-            .await
-            .unwrap();
-
-        let assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
-        (
-            assignment.task_id,
-            assignment.run_id,
-            assignment.lease_epoch,
-        )
-    }
 
     fn sample_metrics() -> RunMetrics {
         RunMetrics {
