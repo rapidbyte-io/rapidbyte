@@ -635,18 +635,20 @@ async fn heartbeat_loop(
             tracing::debug!(removed, "Evicted expired preview entries");
         }
 
-        // Build TaskHeartbeat for each active lease, including latest progress
+        // Build TaskHeartbeat for each active lease, including latest progress.
+        // Take the snapshot (replace with empty) so unchanged progress isn't re-sent.
         let tasks: Vec<TaskHeartbeat> = {
             let leases = active_leases.read().await;
             let mut tasks = Vec::with_capacity(leases.len());
             for (task_id, entry) in leases.iter() {
-                let snap = entry.progress.read().await;
-                tasks.push(TaskHeartbeat {
+                let mut snap = entry.progress.write().await;
+                let heartbeat = TaskHeartbeat {
                     task_id: task_id.clone(),
                     lease_epoch: entry.lease_epoch,
-                    progress_message: snap.message.clone(),
-                    progress_pct: snap.progress_pct,
-                });
+                    progress_message: snap.message.take(),
+                    progress_pct: snap.progress_pct.take(),
+                };
+                tasks.push(heartbeat);
             }
             tasks
         };
