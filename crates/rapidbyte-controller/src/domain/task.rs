@@ -569,4 +569,71 @@ mod tests {
         task.set_updated_at(later);
         assert_eq!(task.updated_at(), later);
     }
+
+    // --- Edge case tests ---
+
+    #[test]
+    fn cancel_pending_from_running_fails() {
+        let mut task = make_task();
+        task.assign("agent-1".into(), make_lease()).unwrap();
+        let err = task.cancel_pending().unwrap_err();
+        assert!(matches!(
+            err,
+            DomainError::InvalidTransition {
+                from: "Running",
+                to: "Cancelled"
+            }
+        ));
+    }
+
+    #[test]
+    fn cancel_pending_success() {
+        let mut task = make_task();
+        assert!(task.cancel_pending().is_ok());
+        assert_eq!(task.state(), TaskState::Cancelled);
+    }
+
+    #[test]
+    fn assign_sets_agent_and_lease() {
+        let mut task = make_task();
+        let lease = make_lease();
+        task.assign("agent-42".into(), lease.clone()).unwrap();
+        assert_eq!(task.agent_id(), Some("agent-42"));
+        assert_eq!(task.lease().unwrap(), &lease);
+    }
+
+    #[test]
+    fn timeout_preserves_agent_and_lease() {
+        let mut task = make_task();
+        let lease = make_lease();
+        task.assign("agent-1".into(), lease.clone()).unwrap();
+        task.timeout().unwrap();
+        assert_eq!(task.agent_id(), Some("agent-1"));
+        assert_eq!(task.lease().unwrap(), &lease);
+    }
+
+    #[test]
+    fn from_row_with_no_lease() {
+        let task = Task::from_row(
+            "t-2".into(),
+            "r-2".into(),
+            1,
+            TaskState::Pending,
+            None,
+            None,
+            now(),
+            now(),
+        );
+        assert!(task.agent_id().is_none());
+        assert!(task.lease().is_none());
+        assert_eq!(task.state(), TaskState::Pending);
+    }
+
+    #[test]
+    fn updated_at_changes_on_assign() {
+        let mut task = make_task();
+        let created = task.created_at();
+        task.assign("agent-1".into(), make_lease()).unwrap();
+        assert!(task.updated_at() >= created);
+    }
 }

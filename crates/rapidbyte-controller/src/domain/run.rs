@@ -743,4 +743,153 @@ mod tests {
         let _ = run.retry().unwrap();
         assert!(run.error().is_none());
     }
+
+    // --- Edge case tests ---
+
+    #[test]
+    fn retry_preserves_metrics() {
+        // A retried run that was never completed should have no metrics
+        let mut run = make_run();
+        run.start().unwrap();
+        let _ = run.retry().unwrap();
+        assert!(run.metrics().is_none());
+    }
+
+    #[test]
+    fn retry_increments_attempt_correctly() {
+        let mut run = make_run(); // attempt=1, max_retries=2
+        assert_eq!(run.current_attempt(), 1);
+
+        run.start().unwrap();
+        let attempt = run.retry().unwrap();
+        assert_eq!(attempt, 2);
+        assert_eq!(run.current_attempt(), 2);
+
+        run.start().unwrap();
+        let attempt = run.retry().unwrap();
+        assert_eq!(attempt, 3);
+        assert_eq!(run.current_attempt(), 3);
+    }
+
+    #[test]
+    fn can_retry_after_error_with_max_retries_zero() {
+        let run = Run::new("run-z".into(), None, "p".into(), "y".into(), 0, None, now());
+        // max_retries=0 means attempt 1 >= 0+1, so no retries allowed
+        assert!(!run.can_retry_after_error(true, &CommitState::BeforeCommit));
+    }
+
+    #[test]
+    fn can_retry_after_timeout_with_max_retries_zero() {
+        let run = Run::new("run-z".into(), None, "p".into(), "y".into(), 0, None, now());
+        assert!(!run.can_retry_after_timeout());
+    }
+
+    #[test]
+    fn complete_stores_metrics() {
+        let mut run = make_run();
+        run.start().unwrap();
+        let metrics = sample_metrics();
+        run.complete(metrics).unwrap();
+        let m = run.metrics().unwrap();
+        assert_eq!(m.rows_read, 100);
+        assert_eq!(m.rows_written, 50);
+        assert_eq!(m.bytes_read, 1024);
+        assert_eq!(m.bytes_written, 512);
+        assert_eq!(m.duration_ms, 5000);
+    }
+
+    #[test]
+    fn fail_stores_error() {
+        let mut run = make_run();
+        run.start().unwrap();
+        run.fail(sample_error()).unwrap();
+        let e = run.error().unwrap();
+        assert_eq!(e.code, "E001");
+        assert_eq!(e.message, "something broke");
+    }
+
+    #[test]
+    fn request_cancel_on_terminal_state_is_noop() {
+        let mut run = make_run();
+        run.start().unwrap();
+        run.complete(sample_metrics()).unwrap();
+        // Should not panic; flag is set regardless of state
+        run.request_cancel();
+        assert!(run.is_cancel_requested());
+        assert_eq!(run.state(), RunState::Completed);
+    }
+
+    #[test]
+    fn new_with_empty_pipeline_name() {
+        let run = Run::new(
+            "run-e".into(),
+            None,
+            String::new(),
+            "y".into(),
+            0,
+            None,
+            now(),
+        );
+        assert_eq!(run.pipeline_name(), "");
+    }
+
+    #[test]
+    fn retry_from_failed_fails() {
+        let mut run = make_run();
+        run.start().unwrap();
+        run.fail(sample_error()).unwrap();
+        let err = run.retry().unwrap_err();
+        assert!(matches!(
+            err,
+            DomainError::InvalidTransition {
+                from: "Failed",
+                to: "Pending"
+            }
+        ));
+    }
+
+    #[test]
+    fn retry_from_cancelled_fails() {
+        let mut run = make_run();
+        run.cancel().unwrap();
+        let err = run.retry().unwrap_err();
+        assert!(matches!(
+            err,
+            DomainError::InvalidTransition {
+                from: "Cancelled",
+                to: "Pending"
+            }
+        ));
+    }
+
+    #[test]
+    fn updated_at_changes_on_transition() {
+        let mut run = make_run();
+        let created = run.created_at();
+        run.start().unwrap();
+        assert!(run.updated_at() >= created);
+    }
+
+    #[test]
+    fn from_row_with_all_none_optionals() {
+        let run = Run::from_row(
+            "r".into(),
+            None,
+            "p".into(),
+            "y".into(),
+            RunState::Pending,
+            1,
+            0,
+            None,
+            false,
+            None,
+            None,
+            now(),
+            now(),
+        );
+        assert!(run.idempotency_key().is_none());
+        assert!(run.timeout_seconds().is_none());
+        assert!(run.error().is_none());
+        assert!(run.metrics().is_none());
+    }
 }

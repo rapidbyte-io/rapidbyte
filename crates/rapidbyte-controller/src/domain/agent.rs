@@ -141,4 +141,23 @@ mod tests {
         assert_eq!(agent.last_seen_at(), last_seen);
         assert_eq!(agent.registered_at(), registered);
     }
+
+    // --- Edge case tests ---
+
+    #[test]
+    fn is_alive_with_zero_timeout() {
+        let agent = Agent::new("agent-1".into(), make_capabilities(), now());
+        // Zero duration timeout means any elapsed time (even 0) fails: 0 < 0 is false
+        assert!(!agent.is_alive(now(), Duration::zero()));
+    }
+
+    #[test]
+    fn touch_then_is_alive() {
+        let mut agent = Agent::new("agent-1".into(), make_capabilities(), now());
+        // Advance time by 30 seconds
+        let later = now() + Duration::seconds(30);
+        agent.touch(later);
+        // Check is_alive with 60s timeout at the same moment as touch
+        assert!(agent.is_alive(later, Duration::seconds(60)));
+    }
 }

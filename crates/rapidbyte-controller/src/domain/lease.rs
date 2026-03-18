@@ -90,4 +90,22 @@ mod tests {
         let cloned = lease.clone();
         assert_eq!(lease, cloned);
     }
+
+    // --- Edge case tests ---
+
+    #[test]
+    fn extend_with_zero_duration() {
+        let lease = Lease::new(1, fixed_time(1000));
+        let now = fixed_time(1500);
+        let extended = lease.extend(Duration::zero(), now);
+        assert_eq!(extended.expires_at(), now);
+    }
+
+    #[test]
+    fn is_expired_at_exact_now_equals_expires() {
+        // The implementation uses `now >= self.expires_at`, so exact equality means expired
+        let expires = fixed_time(1000);
+        let lease = Lease::new(1, expires);
+        assert!(lease.is_expired(fixed_time(1000)));
+    }
 }
