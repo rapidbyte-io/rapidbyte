@@ -15,12 +15,12 @@ use wasmtime::component::ResourceTable;
 use wasmtime::StoreLimits;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
-use rapidbyte_state::StateBackend;
 use rapidbyte_types::checkpoint::{Checkpoint, CheckpointKind, StateScope};
 use rapidbyte_types::envelope::{DlqRecord, Timestamp};
 use rapidbyte_types::error::{ErrorCategory, PluginError};
 use rapidbyte_types::manifest::Permissions;
 use rapidbyte_types::state::{CursorState, PipelineId, StreamName};
+use rapidbyte_types::state_backend::StateBackend;
 
 use crate::acl::{derive_network_acl, NetworkAcl};
 use crate::compression::CompressionCodec;

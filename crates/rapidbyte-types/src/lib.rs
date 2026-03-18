@@ -15,6 +15,8 @@
 //! | `manifest`     | Plugin manifest and permission types |
 //! | `metric`       | Metric, summary types (read/write/transform) |
 //! | `state`        | Run state, pipeline ID, cursor state types |
+//! | `state_backend`| `StateBackend` trait (storage contract) |
+//! | `state_error`  | `StateError` type for backend operations |
 //! | `stream`       | Stream context, limits, policies |
 //! | `wire`         | Wire protocol enums (sync mode, write mode, role) |
 
@@ -31,6 +33,8 @@ pub mod format;
 pub mod manifest;
 pub mod metric;
 pub mod state;
+pub mod state_backend;
+pub mod state_error;
 pub mod stream;
 pub mod wire;
 
@@ -53,6 +57,8 @@ pub mod prelude {
     pub use crate::manifest::PluginManifest;
     pub use crate::metric::{ReadSummary, TransformSummary, WriteSummary};
     pub use crate::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
+    pub use crate::state_backend::StateBackend;
+    pub use crate::state_error::StateError;
     pub use crate::stream::{StreamContext, StreamLimits, StreamPolicies};
     pub use crate::wire::{Feature, PluginInfo, PluginKind, ProtocolVersion, SyncMode, WriteMode};
 }
