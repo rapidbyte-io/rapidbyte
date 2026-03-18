@@ -693,10 +693,15 @@ where
     F: FnMut(CompleteTaskRequest) -> Fut,
     Fut: Future<Output = Result<crate::proto::rapidbyte::v1::CompleteTaskResponse, tonic::Status>>,
 {
-    fn is_non_retryable_auth_error(code: tonic::Code) -> bool {
+    fn is_non_retryable(code: tonic::Code) -> bool {
         matches!(
             code,
-            tonic::Code::Unauthenticated | tonic::Code::PermissionDenied
+            tonic::Code::Unauthenticated
+                | tonic::Code::PermissionDenied
+                | tonic::Code::Aborted        // lease mismatch/expired
+                | tonic::Code::FailedPrecondition // invalid state transition
+                | tonic::Code::NotFound        // task/run no longer exists
+                | tonic::Code::InvalidArgument // malformed request
         )
     }
 
@@ -724,11 +729,12 @@ where
                 return true;
             }
             Err(e) => {
-                if is_non_retryable_auth_error(e.code()) {
+                if is_non_retryable(e.code()) {
                     warn!(
                         task_id = request.task_id,
+                        code = ?e.code(),
                         error = %e,
-                        "Stopping completion retries because authentication config is invalid"
+                        "Stopping completion retries — non-retryable error"
                     );
                     return false;
                 }

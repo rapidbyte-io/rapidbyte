@@ -360,7 +360,8 @@ impl PipelineStore for FakePipelineStore {
             return Ok(None);
         };
         let mut run = run.clone();
-        run.start().map_err(|e| RepositoryError(Box::new(e)))?;
+        run.start()
+            .map_err(|e| RepositoryError::Other(Box::new(e)))?;
 
         // 5. Save run
         runs.insert(run_id, run.clone());

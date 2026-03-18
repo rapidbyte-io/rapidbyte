@@ -6,8 +6,22 @@ use crate::domain::run::{Run, RunState};
 use crate::domain::task::Task;
 
 #[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct RepositoryError(pub Box<dyn std::error::Error + Send + Sync>);
+pub enum RepositoryError {
+    /// A state conflict occurred (e.g., row was concurrently modified).
+    #[error("conflict: {0}")]
+    Conflict(String),
+    /// Any other storage error.
+    #[error("{0}")]
+    Other(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl RepositoryError {
+    /// Returns true if this is a state conflict (expected race), not a real failure.
+    #[must_use]
+    pub fn is_conflict(&self) -> bool {
+        matches!(self, Self::Conflict(_))
+    }
+}
 
 pub struct RunFilter {
     pub state: Option<RunState>,

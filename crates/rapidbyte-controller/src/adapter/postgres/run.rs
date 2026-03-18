@@ -15,7 +15,7 @@ fn parse_run_state(s: &str) -> Result<RunState, RepositoryError> {
         "completed" => Ok(RunState::Completed),
         "failed" => Ok(RunState::Failed),
         "cancelled" => Ok(RunState::Cancelled),
-        other => Err(RepositoryError(Box::from(format!(
+        other => Err(RepositoryError::Other(Box::from(format!(
             "unknown run state in database: {other}"
         )))),
     }
@@ -206,11 +206,11 @@ impl RunRepository for PgRunRepository {
         let rows = if let Some(ref token) = pagination.page_token {
             let parts: Vec<&str> = token.splitn(2, '|').collect();
             if parts.len() != 2 {
-                return Err(RepositoryError(Box::from("invalid page token")));
+                return Err(RepositoryError::Other(Box::from("invalid page token")));
             }
             let cursor_ts: chrono::DateTime<chrono::Utc> = parts[0]
                 .parse()
-                .map_err(|e: chrono::ParseError| RepositoryError(Box::new(e)))?;
+                .map_err(|e: chrono::ParseError| RepositoryError::Other(Box::new(e)))?;
             let cursor_id = parts[1];
 
             if let Some(ref state) = filter.state {

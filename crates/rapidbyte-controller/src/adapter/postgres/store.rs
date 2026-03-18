@@ -335,9 +335,9 @@ impl PipelineStore for PgPipelineStore {
         if run_result.rows_affected() == 0 {
             // Run was concurrently assigned — cancel is no longer valid for pending path
             tx.commit().await.map_err(box_err)?;
-            return Err(RepositoryError(Box::from(
-                "run is no longer pending (concurrent assignment)",
-            )));
+            return Err(RepositoryError::Conflict(
+                "run is no longer pending (concurrent assignment)".into(),
+            ));
         }
 
         // Only cancel the task if it's still pending

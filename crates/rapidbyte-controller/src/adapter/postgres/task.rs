@@ -16,7 +16,7 @@ fn parse_task_state(s: &str) -> Result<TaskState, RepositoryError> {
         "failed" => Ok(TaskState::Failed),
         "cancelled" => Ok(TaskState::Cancelled),
         "timed_out" => Ok(TaskState::TimedOut),
-        other => Err(RepositoryError(Box::from(format!(
+        other => Err(RepositoryError::Other(Box::from(format!(
             "unknown task state in database: {other}"
         )))),
     }

@@ -58,12 +58,10 @@ pub async fn cancel_run(ctx: &AppContext, run_id: &str) -> Result<CancelResult, 
                     }
                     Err(e) => {
                         // Distinguish state conflict (expected race) from real storage errors.
-                        // State conflict: "run is no longer pending" — fall through to Running path.
-                        // Real error: propagate.
-                        let msg = e.to_string();
-                        if !msg.contains("no longer pending") {
+                        if !e.is_conflict() {
                             return Err(AppError::Repository(e));
                         }
+                        // Conflict: run was concurrently assigned — fall through to Running path.
                     }
                 }
             }
