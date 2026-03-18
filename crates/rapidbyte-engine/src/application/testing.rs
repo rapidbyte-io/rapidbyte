@@ -325,6 +325,17 @@ impl FakeRunRecordRepository {
     }
 }
 
+impl FakeRunRecordRepository {
+    /// Return the number of runs that have been started.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
+    #[must_use]
+    pub fn started_count(&self) -> usize {
+        self.runs.lock().unwrap().len()
+    }
+}
+
 impl Default for FakeRunRecordRepository {
     fn default() -> Self {
         Self::new()
