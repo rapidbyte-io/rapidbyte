@@ -96,6 +96,10 @@ pub async fn execute(
     let outcome = rapidbyte_engine::run_pipeline(&ctx, &config, cancel_token).await;
     let (cpu_end, peak_rss_mb) = post_pipeline_metrics();
 
+    // Drop context to release the progress sender, allowing the spinner
+    // loop to exit when rx.recv() returns None.
+    drop(ctx);
+
     // Wait for spinner to finish before printing results
     if let Some(handle) = spinner_handle {
         let _ = handle.await;

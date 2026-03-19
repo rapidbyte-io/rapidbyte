@@ -17,7 +17,7 @@ const UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10
 /// Shared counters updated by progress events, read by spinner tick.
 struct Counters {
     total_batches: AtomicU64,
-    total_rows: AtomicU64,
+    total_bytes: AtomicU64,
     streams_done: AtomicU64,
     total_streams: AtomicU64,
 }
@@ -44,7 +44,7 @@ pub fn spawn_progress_spinner(
 
         let counters = Arc::new(Counters {
             total_batches: AtomicU64::new(0),
-            total_rows: AtomicU64::new(0),
+            total_bytes: AtomicU64::new(0),
             streams_done: AtomicU64::new(0),
             total_streams: AtomicU64::new(total_streams),
         });
@@ -74,9 +74,9 @@ pub fn spawn_progress_spinner(
                     }
                     Phase::Finalizing => spinner.set_message("Finalizing..."),
                 },
-                ProgressEvent::BatchEmitted { rows, .. } => {
+                ProgressEvent::BatchEmitted { bytes, .. } => {
                     counters.total_batches.fetch_add(1, Ordering::Relaxed);
-                    counters.total_rows.fetch_add(rows, Ordering::Relaxed);
+                    counters.total_bytes.fetch_add(bytes, Ordering::Relaxed);
                     if last_update.elapsed() >= UPDATE_INTERVAL {
                         update_running_message(&spinner, &counters);
                         last_update = Instant::now();
@@ -104,13 +104,13 @@ pub fn spawn_progress_spinner(
 
 fn update_running_message(spinner: &ProgressBar, counters: &Arc<Counters>) {
     let batches = counters.total_batches.load(Ordering::Relaxed);
-    let rows = counters.total_rows.load(Ordering::Relaxed);
+    let bytes = counters.total_bytes.load(Ordering::Relaxed);
     let done = counters.streams_done.load(Ordering::Relaxed);
     let total = counters.total_streams.load(Ordering::Relaxed);
 
     let msg = format!(
-        "Running \u{2014} {} rows | {} batches | {} of {} streams done",
-        format::format_count(rows),
+        "Running \u{2014} {} | {} batches | {} of {} streams done",
+        format::format_bytes(bytes),
         format::format_count(batches),
         done,
         total,
@@ -143,7 +143,7 @@ mod tests {
         assert_eq!(
             classify(&ProgressEvent::BatchEmitted {
                 stream: "users".to_string(),
-                rows: 42
+                bytes: 42
             }),
             "batch"
         );

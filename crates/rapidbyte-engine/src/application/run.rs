@@ -354,10 +354,10 @@ pub async fn run_pipeline(
                     on_batch_emitted: {
                         let progress = Arc::clone(&ctx.progress);
                         let sn = stream_name.clone();
-                        Some(Arc::new(move |rows: u64| {
+                        Some(Arc::new(move |bytes: u64| {
                             progress.report(ProgressEvent::BatchEmitted {
                                 stream: sn.clone(),
-                                rows,
+                                bytes,
                             });
                         }))
                     },

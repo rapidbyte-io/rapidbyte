@@ -27,8 +27,8 @@ pub async fn collect_progress(
 ) {
     while let Some(event) = rx.recv().await {
         let update = match &event {
-            ProgressEvent::BatchEmitted { rows, .. } => ProgressSnapshot {
-                message: Some(format!("processing ({rows} rows)")),
+            ProgressEvent::BatchEmitted { bytes, .. } => ProgressSnapshot {
+                message: Some(format!("processing ({bytes} bytes)")),
                 progress_pct: None,
             },
             ProgressEvent::StreamCompleted { stream } => ProgressSnapshot {
