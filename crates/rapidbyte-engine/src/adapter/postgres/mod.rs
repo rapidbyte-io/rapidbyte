@@ -1,8 +1,12 @@
 //! `PostgreSQL`-backed adapter implementing repository ports and `StateBackend`.
 //!
 //! [`PgBackend`] combines an async [`sqlx::PgPool`] for the hexagonal
-//! repository traits and a sync [`ClientPool`] for the legacy
+//! repository traits and a channel-based bridge for the legacy
 //! [`StateBackend`](rapidbyte_types::state_backend::StateBackend) trait.
+//!
+//! The bridge sends requests through an `mpsc` channel to a background
+//! async task that executes sqlx queries on the shared `PgPool`, avoiding
+//! the nested-runtime panics that the old sync `postgres` crate caused.
 //!
 //! | Sub-module        | Trait                  |
 //! |-------------------|------------------------|
@@ -17,51 +21,40 @@ pub(crate) mod queries;
 mod run_record;
 mod state_backend;
 
-use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 
-use postgres::{Client, NoTls};
 use sqlx::PgPool;
+use tokio::sync::mpsc;
 
+use rapidbyte_types::envelope::DlqRecord;
+use rapidbyte_types::state::{CursorState, RunStats, RunStatus};
 use rapidbyte_types::state_backend::StateBackend;
 use rapidbyte_types::state_error::StateError;
 
-/// `PostgreSQL`-backed adapter combining async (sqlx) and sync (postgres)
-/// connection pools.
+/// `PostgreSQL`-backed adapter combining async (sqlx) repository ports
+/// and a channel-based bridge for the sync `StateBackend` trait.
 ///
 /// Use [`PgBackend::connect`] to create an instance, then call
 /// [`migrate`](PgBackend::migrate) to apply pending DDL migrations.
 pub struct PgBackend {
     /// Async pool used by repository port implementations.
     pool: PgPool,
-    /// Sync pool used by the legacy `StateBackend` trait.
-    sync_pool: ClientPool,
+    /// Channel sender for the `StateBackend` bridge worker.
+    state_tx: mpsc::Sender<StateRequest>,
 }
 
 impl PgBackend {
-    /// Connect to a `PostgreSQL` database and set up both connection pools.
+    /// Connect to a `PostgreSQL` database and spawn the state backend worker.
     ///
     /// # Errors
     ///
-    /// Returns an error if either pool fails to connect.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the OS thread spawned for sync pool creation cannot be joined.
+    /// Returns an error if the pool fails to connect.
     pub async fn connect(connstr: &str) -> Result<Self, anyhow::Error> {
         let pool = PgPool::connect(connstr).await?;
-
-        // The sync `postgres` crate creates its own tokio current-thread
-        // runtime inside `Client::connect`.  That panics if the current
-        // thread already has a runtime entered (nested `block_on`).
-        // Spawning the pool creation on a dedicated OS thread avoids the
-        // conflict.
-        let connstr_owned = connstr.to_owned();
-        let sync_pool = std::thread::spawn(move || ClientPool::new(&connstr_owned, 4))
-            .join()
-            .expect("sync pool thread panicked")?;
-
-        Ok(Self { pool, sync_pool })
+        let (tx, rx) = mpsc::channel(64);
+        let worker_pool = pool.clone();
+        tokio::spawn(async move { state_backend_worker(worker_pool, rx).await });
+        Ok(Self { pool, state_tx: tx })
     }
 
     /// Run pending SQL migrations against the database.
@@ -82,74 +75,212 @@ impl PgBackend {
 }
 
 // ---------------------------------------------------------------------------
-// Sync connection pool (ported from rapidbyte-state)
+// Channel-based bridge: request enum + async worker
 // ---------------------------------------------------------------------------
 
-/// Small blocking connection pool backed by `postgres::Client`.
-///
-/// Uses a `Mutex<Vec<Client>>` with a `Condvar` for thread-safe checkout.
-pub(crate) struct ClientPool {
-    clients: Mutex<Vec<Client>>,
-    available: Condvar,
+/// A request sent from a sync `StateBackend` method to the async worker.
+enum StateRequest {
+    GetCursor {
+        pipeline: String,
+        stream: String,
+        reply:
+            tokio::sync::oneshot::Sender<rapidbyte_types::state_error::Result<Option<CursorState>>>,
+    },
+    SetCursor {
+        pipeline: String,
+        stream: String,
+        cursor: CursorState,
+        reply: tokio::sync::oneshot::Sender<rapidbyte_types::state_error::Result<()>>,
+    },
+    StartRun {
+        pipeline: String,
+        stream: String,
+        reply: tokio::sync::oneshot::Sender<rapidbyte_types::state_error::Result<i64>>,
+    },
+    CompleteRun {
+        run_id: i64,
+        status: RunStatus,
+        stats: RunStats,
+        reply: tokio::sync::oneshot::Sender<rapidbyte_types::state_error::Result<()>>,
+    },
+    CompareAndSet {
+        pipeline: String,
+        stream: String,
+        expected: Option<String>,
+        new_value: String,
+        reply: tokio::sync::oneshot::Sender<rapidbyte_types::state_error::Result<bool>>,
+    },
+    InsertDlqRecords {
+        pipeline: String,
+        run_id: i64,
+        records: Vec<DlqRecord>,
+        reply: tokio::sync::oneshot::Sender<rapidbyte_types::state_error::Result<u64>>,
+    },
 }
 
-/// RAII guard that returns a `Client` to the pool on drop.
-pub(crate) struct PooledClient<'a> {
-    pool: &'a ClientPool,
-    client: Option<Client>,
-}
-
-impl ClientPool {
-    /// Create a new pool with `size` connections to `connstr`.
-    fn new(connstr: &str, size: usize) -> Result<Self, StateError> {
-        let mut clients = Vec::with_capacity(size);
-        for _ in 0..size {
-            clients.push(Client::connect(connstr, NoTls).map_err(StateError::backend)?);
-        }
-        Ok(Self {
-            clients: Mutex::new(clients),
-            available: Condvar::new(),
-        })
-    }
-
-    /// Check out a connection, blocking until one is available.
-    fn checkout(&self) -> Result<PooledClient<'_>, StateError> {
-        let mut clients = self.clients.lock().map_err(|_| StateError::LockPoisoned)?;
-        loop {
-            if let Some(client) = clients.pop() {
-                return Ok(PooledClient {
-                    pool: self,
-                    client: Some(client),
-                });
+/// Background async task that processes [`StateRequest`]s using sqlx.
+#[allow(clippy::cast_possible_wrap)]
+async fn state_backend_worker(pool: PgPool, mut rx: mpsc::Receiver<StateRequest>) {
+    while let Some(req) = rx.recv().await {
+        match req {
+            StateRequest::GetCursor {
+                pipeline,
+                stream,
+                reply,
+            } => {
+                let result = sqlx::query_as::<_, (Option<String>, Option<String>, String)>(
+                    queries::GET_CURSOR,
+                )
+                .bind(&pipeline)
+                .bind(&stream)
+                .fetch_optional(&pool)
+                .await
+                .map(|row| {
+                    row.map(|(cursor_field, cursor_value, updated_at)| CursorState {
+                        cursor_field,
+                        cursor_value,
+                        updated_at,
+                    })
+                })
+                .map_err(StateError::backend);
+                let _ = reply.send(result);
             }
-            clients = self
-                .available
-                .wait(clients)
-                .map_err(|_| StateError::LockPoisoned)?;
-        }
-    }
-}
+            StateRequest::SetCursor {
+                pipeline,
+                stream,
+                cursor,
+                reply,
+            } => {
+                let result = sqlx::query(
+                    "INSERT INTO sync_cursors (pipeline, stream, cursor_field, cursor_value, updated_at) \
+                     VALUES ($1, $2, $3, $4, now()) \
+                     ON CONFLICT (pipeline, stream) \
+                     DO UPDATE SET cursor_field = $3, cursor_value = $4, updated_at = now()",
+                )
+                .bind(&pipeline)
+                .bind(&stream)
+                .bind(&cursor.cursor_field)
+                .bind(&cursor.cursor_value)
+                .execute(&pool)
+                .await
+                .map(|_| ())
+                .map_err(StateError::backend);
+                let _ = reply.send(result);
+            }
+            StateRequest::StartRun {
+                pipeline,
+                stream,
+                reply,
+            } => {
+                let result = sqlx::query_as::<_, (i64,)>(queries::START_RUN)
+                    .bind(&pipeline)
+                    .bind(&stream)
+                    .bind(RunStatus::Running.as_str())
+                    .fetch_one(&pool)
+                    .await
+                    .map(|(id,)| id)
+                    .map_err(StateError::backend);
+                let _ = reply.send(result);
+            }
+            StateRequest::CompleteRun {
+                run_id,
+                status,
+                stats,
+                reply,
+            } => {
+                let result = sqlx::query(
+                    "UPDATE sync_runs SET status = $1, finished_at = now(), \
+                     records_read = $2, records_written = $3, \
+                     bytes_read = $4, bytes_written = $5, error_message = $6 \
+                     WHERE id = $7",
+                )
+                .bind(status.as_str())
+                .bind(stats.records_read as i64)
+                .bind(stats.records_written as i64)
+                .bind(stats.bytes_read as i64)
+                .bind(stats.bytes_written as i64)
+                .bind(&stats.error_message)
+                .bind(run_id)
+                .execute(&pool)
+                .await
+                .map(|_| ())
+                .map_err(StateError::backend);
+                let _ = reply.send(result);
+            }
+            StateRequest::CompareAndSet {
+                pipeline,
+                stream,
+                expected,
+                new_value,
+                reply,
+            } => {
+                let result = match expected {
+                    Some(expected_val) => sqlx::query(
+                        "UPDATE sync_cursors SET cursor_value = $1, updated_at = now() \
+                         WHERE pipeline = $2 AND stream = $3 AND cursor_value = $4",
+                    )
+                    .bind(&new_value)
+                    .bind(&pipeline)
+                    .bind(&stream)
+                    .bind(&expected_val)
+                    .execute(&pool)
+                    .await
+                    .map(|r| r.rows_affected() > 0)
+                    .map_err(StateError::backend),
+                    None => sqlx::query(
+                        "INSERT INTO sync_cursors (pipeline, stream, cursor_value, updated_at) \
+                         VALUES ($1, $2, $3, now()) ON CONFLICT DO NOTHING",
+                    )
+                    .bind(&pipeline)
+                    .bind(&stream)
+                    .bind(&new_value)
+                    .execute(&pool)
+                    .await
+                    .map(|r| r.rows_affected() > 0)
+                    .map_err(StateError::backend),
+                };
+                let _ = reply.send(result);
+            }
+            StateRequest::InsertDlqRecords {
+                pipeline,
+                run_id,
+                records,
+                reply,
+            } => {
+                let result = async {
+                    let mut tx = pool.begin().await.map_err(|e| {
+                        StateError::backend_context("insert_dlq_records: begin tx", e)
+                    })?;
 
-impl Deref for PooledClient<'_> {
-    type Target = Client;
+                    for record in &records {
+                        sqlx::query(
+                            "INSERT INTO dlq_records \
+                             (pipeline, run_id, stream_name, record_json, \
+                              error_message, error_category, failed_at) \
+                             VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)",
+                        )
+                        .bind(&pipeline)
+                        .bind(run_id)
+                        .bind(&record.stream_name)
+                        .bind(&record.record_json)
+                        .bind(&record.error_message)
+                        .bind(record.error_category.as_str())
+                        .bind(record.failed_at.as_str())
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| {
+                            StateError::backend_context("insert_dlq_records: execute", e)
+                        })?;
+                    }
 
-    fn deref(&self) -> &Self::Target {
-        self.client.as_ref().expect("pooled client missing")
-    }
-}
+                    tx.commit().await.map_err(|e| {
+                        StateError::backend_context("insert_dlq_records: commit", e)
+                    })?;
 
-impl DerefMut for PooledClient<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.client.as_mut().expect("pooled client missing")
-    }
-}
-
-impl Drop for PooledClient<'_> {
-    fn drop(&mut self) {
-        if let Some(client) = self.client.take() {
-            if let Ok(mut clients) = self.pool.clients.lock() {
-                clients.push(client);
-                self.pool.available.notify_one();
+                    Ok(records.len() as u64)
+                }
+                .await;
+                let _ = reply.send(result);
             }
         }
     }

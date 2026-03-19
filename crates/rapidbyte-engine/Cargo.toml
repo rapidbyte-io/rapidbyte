@@ -26,7 +26,6 @@ rapidbyte-secrets = { path = "../rapidbyte-secrets" }
 rapidbyte-pipeline-config = { path = "../rapidbyte-pipeline-config" }
 async-trait = { workspace = true }
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "migrate"] }
-postgres = { workspace = true }
 
 [features]
 test-support = []

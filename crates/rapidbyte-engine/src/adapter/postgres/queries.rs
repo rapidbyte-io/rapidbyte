@@ -1,12 +1,9 @@
-//! Shared SQL query constants used by both async (sqlx) and sync (postgres)
-//! implementations.
+//! Shared SQL query constants used by both the async repository port
+//! implementations and the `StateBackend` channel-based bridge.
 //!
 //! Only queries that are **identical** between `cursor.rs` / `run_record.rs`
-//! (async) and `state_backend.rs` (sync) live here. Queries that differ
-//! (e.g., `SET_CURSOR` uses `now()` in async but a host-supplied timestamp
-//! in sync, `COMPLETE_RUN` uses `finished_at = now()` vs
-//! `to_char(now() AT TIME ZONE ...)`) stay inline with a comment explaining
-//! the divergence.
+//! (async) and `state_backend.rs` (sync bridge) live here. Queries that
+//! differ stay inline with a comment explaining the divergence.
 
 /// Fetch the current cursor for a (pipeline, stream) pair.
 ///

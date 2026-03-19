@@ -5066,7 +5066,6 @@ dependencies = [
  "jsonschema",
  "opentelemetry",
  "opentelemetry_sdk",
- "postgres",
  "proptest",
  "rapidbyte-metrics",
  "rapidbyte-pipeline-config",
