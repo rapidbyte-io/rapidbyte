@@ -204,6 +204,11 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
         );
     }
 
+    // State connection is required (Postgres-only backend)
+    if config.state.connection.as_deref().is_none_or(str::is_empty) {
+        errors.push("state.connection is required (Postgres connection URL)".to_string());
+    }
+
     if errors.is_empty() {
         Ok(())
     } else {
@@ -233,6 +238,8 @@ destination:
   config:
     host: localhost
   write_mode: append
+state:
+  connection: "postgres://localhost/test"
 "#
     }
 
@@ -414,6 +421,8 @@ destination:
     host: localhost
   write_mode: upsert
   primary_key: [id]
+state:
+  connection: "postgres://localhost/test"
 "#;
         let config = parse_pipeline(yaml, &SecretProviders::new()).await.unwrap();
         assert!(validate_pipeline(&config).is_ok());
@@ -437,6 +446,8 @@ destination:
   config:
     host: localhost
   write_mode: append
+state:
+  connection: "postgres://localhost/test"
 "#;
         let config = parse_pipeline(yaml, &SecretProviders::new()).await.unwrap();
         assert!(validate_pipeline(&config).is_ok());
@@ -559,6 +570,8 @@ destination:
   config:
     host: localhost
   write_mode: replace
+state:
+  connection: "postgres://localhost/test"
 "#;
         let config = parse_pipeline(yaml, &SecretProviders::new()).await.unwrap();
         assert!(validate_pipeline(&config).is_ok());
@@ -585,6 +598,8 @@ destination:
   use: postgres
   config: {}
   write_mode: append
+state:
+  connection: "postgres://localhost/test"
 "#;
         let config = parse_pipeline(yaml, &SecretProviders::new()).await.unwrap();
         assert!(validate_pipeline(&config).is_ok());

@@ -164,8 +164,8 @@ async fn test_parse_and_validate_fixture_pipeline() {
     assert_eq!(config.destination.use_ref, "postgres");
     assert_eq!(config.destination.write_mode, PipelineWriteMode::Append);
     assert_eq!(config.destination.config["schema"], "raw");
-    // state.connection is None when not specified in YAML
-    assert!(config.state.connection.is_none());
+    // state.connection is set (required for Postgres-only backend)
+    assert!(config.state.connection.is_some());
 
     // Validate should pass
     validator::validate_pipeline(&config).expect("Validation should pass");

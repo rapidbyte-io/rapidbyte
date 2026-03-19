@@ -26,4 +26,5 @@ destination:
     schema: raw
   write_mode: append
 
-state: {}
+state:
+  connection: "postgres://postgres:postgres@${TEST_SOURCE_PG_HOST}:${TEST_SOURCE_PG_PORT}/source_test"
