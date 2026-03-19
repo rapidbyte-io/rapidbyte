@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex};
 
 use async_trait::async_trait;
-use rapidbyte_runtime::Frame;
+use rapidbyte_runtime::{Frame, SandboxOverrides};
 use rapidbyte_types::checkpoint::Checkpoint;
 use rapidbyte_types::envelope::DlqRecord;
 use rapidbyte_types::error::ValidationResult;
@@ -40,6 +40,8 @@ pub struct SourceRunParams {
     pub config: serde_json::Value,
     /// Manifest-declared permissions.
     pub permissions: Option<Permissions>,
+    /// Pipeline-level sandbox overrides (permissions/limits from YAML config).
+    pub sandbox_overrides: Option<SandboxOverrides>,
     /// Compression codec to use for frame transport.
     pub compression: Option<String>,
     /// Channel sender for emitting frames to the next stage.
@@ -68,6 +70,8 @@ pub struct TransformRunParams {
     pub config: serde_json::Value,
     /// Manifest-declared permissions.
     pub permissions: Option<Permissions>,
+    /// Pipeline-level sandbox overrides (permissions/limits from YAML config).
+    pub sandbox_overrides: Option<SandboxOverrides>,
     /// Compression codec to use for frame transport.
     pub compression: Option<String>,
     /// Channel receiver for incoming frames.
@@ -98,6 +102,8 @@ pub struct DestinationRunParams {
     pub config: serde_json::Value,
     /// Manifest-declared permissions.
     pub permissions: Option<Permissions>,
+    /// Pipeline-level sandbox overrides (permissions/limits from YAML config).
+    pub sandbox_overrides: Option<SandboxOverrides>,
     /// Compression codec to use for frame transport.
     pub compression: Option<String>,
     /// Channel receiver for incoming frames.

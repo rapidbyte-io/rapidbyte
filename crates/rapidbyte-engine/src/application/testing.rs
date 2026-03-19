@@ -755,6 +755,7 @@ mod tests {
             },
             config: serde_json::Value::Null,
             permissions: None,
+            sandbox_overrides: None,
             compression: None,
             frame_sender: tx,
             stats: Arc::new(Mutex::new(RunStats::default())),

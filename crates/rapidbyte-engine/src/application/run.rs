@@ -10,16 +10,18 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use rapidbyte_pipeline_config::{parse_byte_size, PipelineConfig, ResourceConfig};
+use rapidbyte_pipeline_config::{
+    parse_byte_size, PipelineConfig, PipelineLimits, PipelinePermissions, ResourceConfig,
+};
 use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
 use rapidbyte_types::stream::StreamLimits;
 
-use rapidbyte_runtime::Frame;
+use rapidbyte_runtime::{Frame, SandboxOverrides};
 
 use crate::application::context::EngineContext;
 use crate::application::{extract_permissions, parse_plugin_id};
 use crate::domain::error::PipelineError;
-use crate::domain::outcome::{PipelineCounts, PipelineResult, SourceTiming};
+use crate::domain::outcome::{PipelineCounts, PipelineResult, SourceTiming, StreamShardMetric};
 use crate::domain::ports::runner::{
     DestinationRunParams, SourceOutcome, SourceRunParams, TransformRunParams,
 };
@@ -70,6 +72,35 @@ fn build_stream_limits(resources: &ResourceConfig) -> StreamLimits {
         max_inflight_batches: resources.max_inflight_batches,
         ..StreamLimits::default()
     }
+}
+
+/// Build [`SandboxOverrides`] from pipeline YAML permission and limit overrides.
+///
+/// Returns `None` when neither permissions nor limits are specified in the
+/// pipeline config. When set, the overrides are intersected with manifest
+/// permissions by the runtime's `build_wasi_ctx`.
+fn build_sandbox_overrides(
+    permissions: Option<&PipelinePermissions>,
+    limits: Option<&PipelineLimits>,
+) -> Option<SandboxOverrides> {
+    let has_perms = permissions.is_some();
+    let has_limits = limits.is_some();
+    if !has_perms && !has_limits {
+        return None;
+    }
+
+    let max_memory_bytes = limits
+        .and_then(|l| l.max_memory.as_deref())
+        .and_then(|s| parse_byte_size(s).ok());
+    let timeout_seconds = limits.and_then(|l| l.timeout_seconds);
+
+    Some(SandboxOverrides {
+        allowed_hosts: permissions.and_then(|p| p.network.allowed_hosts.clone()),
+        allowed_vars: permissions.and_then(|p| p.env.allowed_vars.clone()),
+        allowed_preopens: permissions.and_then(|p| p.fs.allowed_preopens.clone()),
+        max_memory_bytes,
+        timeout_seconds,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -269,11 +300,11 @@ pub async fn run_pipeline(
             let (src_tx, mut current_rx) = mpsc::sync_channel::<Frame>(ctx.config.channel_capacity);
 
             // Spawn source
-            // TODO: merge pipeline YAML permission/limit overrides (pipeline.source.permissions,
-            // pipeline.source.limits) with manifest permissions. Currently only manifest-level
-            // permissions are passed; YAML overrides for timeout_seconds, max_memory, and
-            // network/env/fs permissions are dropped.
             let source_permissions = extract_permissions(&source_resolved);
+            let source_overrides = build_sandbox_overrides(
+                pipeline.source.permissions.as_ref(),
+                pipeline.source.limits.as_ref(),
+            );
             let source_handle = {
                 let runner = Arc::clone(&ctx.runner);
                 let params = SourceRunParams {
@@ -285,6 +316,7 @@ pub async fn run_pipeline(
                     stream_ctx: stream_ctx.clone(),
                     config: source_config.clone(),
                     permissions: source_permissions,
+                    sandbox_overrides: source_overrides,
                     compression: source_compression.clone(),
                     frame_sender: src_tx,
                     stats: Arc::clone(&stats),
@@ -298,9 +330,11 @@ pub async fn run_pipeline(
             for (i, transform) in pipeline.transforms.iter().enumerate() {
                 let (next_tx, next_rx) = mpsc::sync_channel::<Frame>(ctx.config.channel_capacity);
 
-                // TODO: merge pipeline YAML permission/limit overrides (transform.permissions,
-                // transform.limits) with manifest permissions.
                 let t_permissions = extract_permissions(&transform_resolved[i]);
+                let t_overrides = build_sandbox_overrides(
+                    transform.permissions.as_ref(),
+                    transform.limits.as_ref(),
+                );
                 let (t_id, t_ver) = parse_plugin_id(&transform.use_ref);
 
                 let runner = Arc::clone(&ctx.runner);
@@ -313,6 +347,7 @@ pub async fn run_pipeline(
                     stream_ctx: stream_ctx.clone(),
                     config: transform.config.clone(),
                     permissions: t_permissions,
+                    sandbox_overrides: t_overrides,
                     compression: source_compression.clone(),
                     frame_receiver: current_rx,
                     frame_sender: next_tx,
@@ -327,9 +362,11 @@ pub async fn run_pipeline(
             }
 
             // Spawn destination (consumes from last channel)
-            // TODO: merge pipeline YAML permission/limit overrides (pipeline.destination.permissions,
-            // pipeline.destination.limits) with manifest permissions.
             let dest_permissions = extract_permissions(&dest_resolved);
+            let dest_overrides = build_sandbox_overrides(
+                pipeline.destination.permissions.as_ref(),
+                pipeline.destination.limits.as_ref(),
+            );
             let dest_handle = {
                 let runner = Arc::clone(&ctx.runner);
                 let params = DestinationRunParams {
@@ -341,6 +378,7 @@ pub async fn run_pipeline(
                     stream_ctx: stream_ctx.clone(),
                     config: dest_config.clone(),
                     permissions: dest_permissions,
+                    sandbox_overrides: dest_overrides,
                     compression: dest_compression.clone(),
                     frame_receiver: current_rx,
                     dlq_records: Arc::clone(&stream_dlq),
@@ -528,6 +566,25 @@ pub async fn run_pipeline(
 
         let duration_secs = overall_start.elapsed().as_secs_f64();
 
+        // Build per-stream metrics from collected stats
+        let stream_metrics: Vec<StreamShardMetric> = per_stream_stats
+            .iter()
+            .map(|(name, (rr, rw, br, bw))| StreamShardMetric {
+                stream_name: name.clone(),
+                records_read: *rr,
+                records_written: *rw,
+                bytes_read: *br,
+                bytes_written: *bw,
+                // Per-stream timing not tracked yet — use 0.0
+                source_duration_secs: 0.0,
+                dest_duration_secs: 0.0,
+                dest_wasm_instantiation_secs: 0.0,
+                dest_frame_receive_secs: 0.0,
+                partition_index: None,
+                partition_count: None,
+            })
+            .collect();
+
         // 7. Return result
         let result = PipelineResult {
             counts: PipelineCounts {
@@ -551,7 +608,7 @@ pub async fn run_pipeline(
             wasm_overhead_secs: 0.0,
             retry_count: attempt.saturating_sub(1),
             parallelism: 1,
-            stream_metrics: vec![],
+            stream_metrics,
         };
 
         return Ok(result);

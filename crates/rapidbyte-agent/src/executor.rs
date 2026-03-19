@@ -78,7 +78,8 @@ fn is_pre_commit_cancellation(error: &PipelineError) -> bool {
             plugin_error.code == "CANCELLED"
                 && matches!(plugin_error.commit_state, Some(CommitState::BeforeCommit))
         }
-        PipelineError::Infrastructure(_) | PipelineError::Cancelled => false,
+        PipelineError::Infrastructure(_) => false,
+        PipelineError::Cancelled => true,
     }
 }
 

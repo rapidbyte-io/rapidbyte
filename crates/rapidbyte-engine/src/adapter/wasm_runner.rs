@@ -14,7 +14,8 @@ use rapidbyte_runtime::wasmtime_reexport::HasSelf;
 use rapidbyte_runtime::{
     create_component_linker, dest_bindings, dest_error_to_sdk, source_bindings,
     source_error_to_sdk, source_validation_to_sdk, transform_bindings, transform_error_to_sdk,
-    ComponentHostState, CompressionCodec, Frame, HostTimings, LoadedComponent, WasmRuntime,
+    ComponentHostState, CompressionCodec, Frame, HostTimings, LoadedComponent, SandboxOverrides,
+    WasmRuntime,
 };
 use rapidbyte_types::catalog::Catalog;
 use rapidbyte_types::checkpoint::Checkpoint;
@@ -75,6 +76,7 @@ impl PluginRunner for WasmPluginRunner {
                 &params.plugin_version,
                 &params.stream_ctx,
                 params.permissions.as_ref(),
+                params.sandbox_overrides.as_ref(),
                 compression,
                 params.frame_sender,
                 &params.config,
@@ -107,6 +109,7 @@ impl PluginRunner for WasmPluginRunner {
                 &params.plugin_version,
                 &params.stream_ctx,
                 params.permissions.as_ref(),
+                params.sandbox_overrides.as_ref(),
                 compression,
                 params.frame_receiver,
                 params.frame_sender,
@@ -140,6 +143,7 @@ impl PluginRunner for WasmPluginRunner {
                 &params.plugin_version,
                 &params.stream_ctx,
                 params.permissions.as_ref(),
+                params.sandbox_overrides.as_ref(),
                 compression,
                 params.frame_receiver,
                 params.dlq_records,
@@ -382,6 +386,7 @@ fn run_source_stream(
     plugin_version: &str,
     stream_ctx: &StreamContext,
     permissions: Option<&Permissions>,
+    overrides: Option<&SandboxOverrides>,
     compression: Option<CompressionCodec>,
     frame_sender: mpsc::SyncSender<Frame>,
     source_config: &serde_json::Value,
@@ -404,15 +409,20 @@ fn run_source_stream(
         "source",
         source_config,
         None,
-    )
-    .sender(frame_sender.clone())
-    .source_checkpoints(source_checkpoints.clone());
+    );
+    if let Some(ovr) = overrides {
+        builder = builder.overrides(ovr);
+    }
+    builder = builder
+        .sender(frame_sender.clone())
+        .source_checkpoints(source_checkpoints.clone());
     if let Some(cb) = on_batch_emitted {
         builder = builder.on_emit(cb);
     }
     let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
-    let mut store = component.new_store(host_state, None);
+    let timeout = overrides.and_then(|o| o.timeout_seconds);
+    let mut store = component.new_store(host_state, timeout);
     let linker = create_component_linker(&component.engine, "source", |linker| {
         source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(linker, |state| state)
             .context("Failed to add rapidbyte source host imports")?;
@@ -529,6 +539,7 @@ fn run_destination_stream(
     plugin_version: &str,
     stream_ctx: &StreamContext,
     permissions: Option<&Permissions>,
+    overrides: Option<&SandboxOverrides>,
     compression: Option<CompressionCodec>,
     frame_receiver: mpsc::Receiver<Frame>,
     dlq_records: Arc<Mutex<Vec<rapidbyte_types::envelope::DlqRecord>>>,
@@ -540,7 +551,7 @@ fn run_destination_stream(
 
     let dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let builder = build_base_host_state(
+    let mut builder = build_base_host_state(
         component,
         state_backend,
         pipeline_name,
@@ -552,13 +563,18 @@ fn run_destination_stream(
         "destination",
         dest_config,
         None,
-    )
-    .receiver(frame_receiver)
-    .dest_checkpoints(dest_checkpoints.clone())
-    .dlq_records(dlq_records.clone());
+    );
+    if let Some(ovr) = overrides {
+        builder = builder.overrides(ovr);
+    }
+    let builder = builder
+        .receiver(frame_receiver)
+        .dest_checkpoints(dest_checkpoints.clone())
+        .dlq_records(dlq_records.clone());
     let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
-    let mut store = component.new_store(host_state, None);
+    let timeout = overrides.and_then(|o| o.timeout_seconds);
+    let mut store = component.new_store(host_state, timeout);
     let linker = create_component_linker(&component.engine, "destination", |linker| {
         dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(linker, |state| state)
             .context("Failed to add rapidbyte destination host imports")?;
@@ -669,7 +685,11 @@ fn run_destination_stream(
 
 // ── Transform runner ────────────────────────────────────────────────
 
-#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
 fn run_transform_stream(
     component: &LoadedComponent,
     state_backend: Arc<dyn StateBackend>,
@@ -679,6 +699,7 @@ fn run_transform_stream(
     plugin_version: &str,
     stream_ctx: &StreamContext,
     permissions: Option<&Permissions>,
+    overrides: Option<&SandboxOverrides>,
     compression: Option<CompressionCodec>,
     frame_receiver: mpsc::Receiver<Frame>,
     frame_sender: mpsc::SyncSender<Frame>,
@@ -691,7 +712,7 @@ fn run_transform_stream(
     let source_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
     let dest_checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
 
-    let builder = build_base_host_state(
+    let mut builder = build_base_host_state(
         component,
         state_backend,
         pipeline_name,
@@ -703,15 +724,20 @@ fn run_transform_stream(
         "transform",
         transform_config,
         Some(transform_index),
-    )
-    .sender(frame_sender.clone())
-    .receiver(frame_receiver)
-    .dlq_records(dlq_records)
-    .source_checkpoints(source_checkpoints)
-    .dest_checkpoints(dest_checkpoints);
+    );
+    if let Some(ovr) = overrides {
+        builder = builder.overrides(ovr);
+    }
+    let builder = builder
+        .sender(frame_sender.clone())
+        .receiver(frame_receiver)
+        .dlq_records(dlq_records)
+        .source_checkpoints(source_checkpoints)
+        .dest_checkpoints(dest_checkpoints);
     let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
-    let mut store = component.new_store(host_state, None);
+    let timeout = overrides.and_then(|o| o.timeout_seconds);
+    let mut store = component.new_store(host_state, timeout);
     let linker = create_component_linker(&component.engine, "transform", |linker| {
         transform_bindings::RapidbyteTransform::add_to_linker::<_, HasSelf<_>>(linker, |state| {
             state
@@ -1055,6 +1081,7 @@ pub fn run_source_stream_bench(
         ctx.plugin_version,
         ctx.stream_ctx,
         ctx.permissions,
+        None, // No sandbox overrides for benchmarks
         ctx.compression,
         frame_sender,
         source_config,
@@ -1091,6 +1118,7 @@ pub fn run_destination_stream_bench(
         ctx.plugin_version,
         ctx.stream_ctx,
         ctx.permissions,
+        None, // No sandbox overrides for benchmarks
         ctx.compression,
         frame_receiver,
         dlq_records,
@@ -1130,6 +1158,7 @@ pub fn run_transform_stream_bench(
         ctx.plugin_version,
         ctx.stream_ctx,
         ctx.permissions,
+        None, // No sandbox overrides for benchmarks
         ctx.compression,
         frame_receiver,
         frame_sender,
