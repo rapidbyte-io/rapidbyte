@@ -177,13 +177,15 @@ pub async fn check_pipeline(
             )
             .await?;
 
-        if let Some(manifest) = transform_resolved.manifest.as_ref() {
-            transform_configs.push(config_check(
-                &transform.use_ref,
-                &transform.config,
-                manifest,
-            ));
-        }
+        // Always push a result per transform to maintain positional alignment
+        // with pipeline.transforms (CLI labels by index).
+        transform_configs.push(match transform_resolved.manifest.as_ref() {
+            Some(manifest) => config_check(&transform.use_ref, &transform.config, manifest),
+            None => CheckStatus {
+                ok: true,
+                message: String::new(),
+            },
+        });
 
         let (t_id, t_ver) = parse_plugin_id(&transform.use_ref);
         let transform_permissions = extract_permissions(&transform_resolved);
