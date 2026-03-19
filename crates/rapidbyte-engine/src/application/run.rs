@@ -1780,4 +1780,107 @@ destination:
         // Pipeline should succeed — empty cursor treated as "no cursor"
         assert_eq!(result.counts.records_read, 100);
     }
+
+    // -----------------------------------------------------------------------
+    // Test: Tie-breaker cursor loaded as JSON (composite state)
+    // -----------------------------------------------------------------------
+
+    fn test_pipeline_config_incremental_with_tie_breaker(
+        source_ref: &str,
+        dest_ref: &str,
+        stream_name: &str,
+        cursor_field: &str,
+        tie_breaker_field: &str,
+    ) -> PipelineConfig {
+        let yaml = format!(
+            r#"
+version: "1.0"
+pipeline: test-pipeline
+source:
+    use: {source_ref}
+    streams:
+        - name: {stream_name}
+          sync_mode: incremental
+          cursor_field: {cursor_field}
+          tie_breaker_field: {tie_breaker_field}
+    config: {{}}
+destination:
+    use: {dest_ref}
+    config: {{}}
+    write_mode: append
+"#
+        );
+        serde_yaml::from_str(&yaml).expect("test yaml should parse")
+    }
+
+    #[tokio::test]
+    async fn tie_breaker_cursor_loaded_as_json() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        // Pre-set a composite JSON cursor (tie-breaker format)
+        let pid = rapidbyte_types::state::PipelineId::new("test-pipeline");
+        let stream = rapidbyte_types::state::StreamName::new("events");
+        let composite_cursor = rapidbyte_types::state::CursorState {
+            cursor_field: Some("updated_at".to_string()),
+            cursor_value: Some(r#"{"cursor":"2024-07-01","tie_breaker":"uuid-123"}"#.to_string()),
+            updated_at: "2024-07-01T00:00:00Z".to_string(),
+        };
+        tc.cursors
+            .set(&pid, &stream, &composite_cursor)
+            .await
+            .unwrap();
+
+        tc.runner.enqueue_source(Ok(make_source_outcome(50, 4096)));
+        tc.runner
+            .enqueue_destination(Ok(make_dest_outcome(50, 4096)));
+
+        let pipeline = test_pipeline_config_incremental_with_tie_breaker(
+            "src",
+            "dst",
+            "events",
+            "updated_at",
+            "id",
+        );
+        let cancel = CancellationToken::new();
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
+
+        // Pipeline should succeed with tie-breaker cursor loaded
+        assert_eq!(result.counts.records_read, 50);
+    }
+
+    #[tokio::test]
+    async fn tie_breaker_scalar_cursor_falls_back_to_utf8() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        // Pre-set a plain scalar cursor (legacy format, not JSON)
+        let pid = rapidbyte_types::state::PipelineId::new("test-pipeline");
+        let stream = rapidbyte_types::state::StreamName::new("events");
+        let scalar_cursor = rapidbyte_types::state::CursorState {
+            cursor_field: Some("updated_at".to_string()),
+            cursor_value: Some("2024-07-01".to_string()),
+            updated_at: "2024-07-01T00:00:00Z".to_string(),
+        };
+        tc.cursors.set(&pid, &stream, &scalar_cursor).await.unwrap();
+
+        tc.runner.enqueue_source(Ok(make_source_outcome(50, 4096)));
+        tc.runner
+            .enqueue_destination(Ok(make_dest_outcome(50, 4096)));
+
+        let pipeline = test_pipeline_config_incremental_with_tie_breaker(
+            "src",
+            "dst",
+            "events",
+            "updated_at",
+            "id",
+        );
+        let cancel = CancellationToken::new();
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
+
+        // Pipeline should succeed — scalar cursor falls back to Utf8
+        assert_eq!(result.counts.records_read, 50);
+    }
 }
