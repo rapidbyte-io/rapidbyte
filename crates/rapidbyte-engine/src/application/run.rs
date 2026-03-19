@@ -85,26 +85,36 @@ fn build_stream_limits(resources: &ResourceConfig) -> StreamLimits {
 /// limits. Uses `min(manifest, pipeline)` for resource limits — pipeline config
 /// can only narrow plugin-declared limits, never widen them (per PROTOCOL.md).
 /// If only one side specifies a limit, that value is used directly.
+///
+/// Returns an error if a memory limit string is present but malformed, to
+/// prevent silently degrading into no memory cap.
 fn build_sandbox_overrides(
     yaml_permissions: Option<&PipelinePermissions>,
     yaml_limits: Option<&PipelineLimits>,
     manifest: Option<&rapidbyte_types::manifest::PluginManifest>,
-) -> Option<SandboxOverrides> {
+) -> Result<Option<SandboxOverrides>, PipelineError> {
     let manifest_limits = manifest.map(|m| &m.limits);
     let has_yaml = yaml_permissions.is_some() || yaml_limits.is_some();
     let has_manifest =
         manifest_limits.is_some_and(|l| l.max_memory.is_some() || l.timeout_seconds.is_some());
 
     if !has_yaml && !has_manifest {
-        return None;
+        return Ok(None);
     }
+    // (unreachable without at least one limit source)
 
-    let yaml_memory = yaml_limits
-        .and_then(|l| l.max_memory.as_deref())
-        .and_then(|s| parse_byte_size(s).ok());
-    let manifest_memory = manifest_limits
-        .and_then(|l| l.max_memory.as_deref())
-        .and_then(|s| parse_byte_size(s).ok());
+    let yaml_memory = match yaml_limits.and_then(|l| l.max_memory.as_deref()) {
+        Some(s) => Some(parse_byte_size(s).map_err(|e| {
+            PipelineError::infra(format!("invalid pipeline max_memory '{s}': {e}"))
+        })?),
+        None => None,
+    };
+    let manifest_memory = match manifest_limits.and_then(|l| l.max_memory.as_deref()) {
+        Some(s) => Some(parse_byte_size(s).map_err(|e| {
+            PipelineError::infra(format!("invalid manifest max_memory '{s}': {e}"))
+        })?),
+        None => None,
+    };
 
     // min(manifest, pipeline) — pipeline can only narrow, never widen
     let max_memory_bytes = match (yaml_memory, manifest_memory) {
@@ -124,13 +134,13 @@ fn build_sandbox_overrides(
         (None, None) => None,
     };
 
-    Some(SandboxOverrides {
+    Ok(Some(SandboxOverrides {
         allowed_hosts: yaml_permissions.and_then(|p| p.network.allowed_hosts.clone()),
         allowed_vars: yaml_permissions.and_then(|p| p.env.allowed_vars.clone()),
         allowed_preopens: yaml_permissions.and_then(|p| p.fs.allowed_preopens.clone()),
         max_memory_bytes,
         timeout_seconds,
-    })
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -348,7 +358,7 @@ pub async fn run_pipeline(
                 pipeline.source.permissions.as_ref(),
                 pipeline.source.limits.as_ref(),
                 source_resolved.manifest.as_ref(),
-            );
+            )?;
             let source_handle = {
                 let runner = Arc::clone(&ctx.runner);
                 let params = SourceRunParams {
@@ -379,7 +389,7 @@ pub async fn run_pipeline(
                     transform.permissions.as_ref(),
                     transform.limits.as_ref(),
                     transform_resolved[i].manifest.as_ref(),
-                );
+                )?;
                 let (t_id, t_ver) = parse_plugin_id(&transform.use_ref);
 
                 let runner = Arc::clone(&ctx.runner);
@@ -412,7 +422,7 @@ pub async fn run_pipeline(
                 pipeline.destination.permissions.as_ref(),
                 pipeline.destination.limits.as_ref(),
                 dest_resolved.manifest.as_ref(),
-            );
+            )?;
             let dest_handle = {
                 let runner = Arc::clone(&ctx.runner);
                 let params = DestinationRunParams {
@@ -1572,7 +1582,9 @@ destination:
             timeout_seconds: None,
         };
         let manifest = manifest_with_limits(Some("256mb"), None);
-        let overrides = build_sandbox_overrides(None, Some(&yaml_limits), Some(&manifest)).unwrap();
+        let overrides = build_sandbox_overrides(None, Some(&yaml_limits), Some(&manifest))
+            .unwrap()
+            .unwrap();
         // min(512mb, 256mb) = 256mb
         assert_eq!(overrides.max_memory_bytes, Some(256 * 1024 * 1024));
     }
@@ -1584,7 +1596,9 @@ destination:
             timeout_seconds: Some(600),
         };
         let manifest = manifest_with_limits(None, Some(300));
-        let overrides = build_sandbox_overrides(None, Some(&yaml_limits), Some(&manifest)).unwrap();
+        let overrides = build_sandbox_overrides(None, Some(&yaml_limits), Some(&manifest))
+            .unwrap()
+            .unwrap();
         // min(600, 300) = 300
         assert_eq!(overrides.timeout_seconds, Some(300));
     }
@@ -1592,7 +1606,9 @@ destination:
     #[test]
     fn sandbox_overrides_manifest_only() {
         let manifest = manifest_with_limits(Some("128mb"), Some(60));
-        let overrides = build_sandbox_overrides(None, None, Some(&manifest)).unwrap();
+        let overrides = build_sandbox_overrides(None, None, Some(&manifest))
+            .unwrap()
+            .unwrap();
         assert_eq!(overrides.max_memory_bytes, Some(128 * 1024 * 1024));
         assert_eq!(overrides.timeout_seconds, Some(60));
     }
@@ -1603,7 +1619,9 @@ destination:
             max_memory: Some("64mb".into()),
             timeout_seconds: Some(30),
         };
-        let overrides = build_sandbox_overrides(None, Some(&yaml_limits), None).unwrap();
+        let overrides = build_sandbox_overrides(None, Some(&yaml_limits), None)
+            .unwrap()
+            .unwrap();
         assert_eq!(overrides.max_memory_bytes, Some(64 * 1024 * 1024));
         assert_eq!(overrides.timeout_seconds, Some(30));
     }
@@ -1611,7 +1629,7 @@ destination:
     #[test]
     fn sandbox_overrides_none_when_no_limits() {
         let manifest = manifest_with_limits(None, None);
-        let overrides = build_sandbox_overrides(None, None, Some(&manifest));
+        let overrides = build_sandbox_overrides(None, None, Some(&manifest)).unwrap();
         assert!(overrides.is_none());
     }
 
@@ -1623,8 +1641,37 @@ destination:
             timeout_seconds: Some(3600),
         };
         let manifest = manifest_with_limits(Some("256mb"), Some(300));
-        let overrides = build_sandbox_overrides(None, Some(&yaml_limits), Some(&manifest)).unwrap();
+        let overrides = build_sandbox_overrides(None, Some(&yaml_limits), Some(&manifest))
+            .unwrap()
+            .unwrap();
         assert_eq!(overrides.max_memory_bytes, Some(256 * 1024 * 1024));
         assert_eq!(overrides.timeout_seconds, Some(300));
+    }
+
+    #[test]
+    fn sandbox_overrides_malformed_manifest_memory_fails() {
+        let manifest = manifest_with_limits(Some("256megabytes"), None);
+        let result = build_sandbox_overrides(None, None, Some(&manifest));
+        assert!(result.is_err(), "malformed manifest max_memory should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("invalid manifest max_memory"),
+            "error should mention manifest: {err}"
+        );
+    }
+
+    #[test]
+    fn sandbox_overrides_malformed_yaml_memory_fails() {
+        let yaml_limits = PipelineLimits {
+            max_memory: Some("not-a-size".into()),
+            timeout_seconds: None,
+        };
+        let result = build_sandbox_overrides(None, Some(&yaml_limits), None);
+        assert!(result.is_err(), "malformed pipeline max_memory should fail");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("invalid pipeline max_memory"),
+            "error should mention pipeline: {err}"
+        );
     }
 }
