@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use rapidbyte_pipeline_config::parser;
 use rapidbyte_pipeline_config::validator;
 use rapidbyte_secrets::SecretProviders;
-use rapidbyte_engine::{ExecutionOptions, PipelineOutcome};
+use rapidbyte_engine::PipelineResult;
 use tokio_postgres::NoTls;
 use tokio_util::sync::CancellationToken;
 
@@ -275,19 +275,9 @@ impl HarnessContext {
         )
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let outcome = rapidbyte_engine::run_pipeline(
-            &ctx,
-            &config,
-            &ExecutionOptions::default(),
-            CancellationToken::new(),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        let run = match outcome {
-            PipelineOutcome::Run(run) => run,
-            PipelineOutcome::DryRun(_) => anyhow::bail!("expected run outcome for e2e test"),
-        };
+        let run = rapidbyte_engine::run_pipeline(&ctx, &config, CancellationToken::new())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         Ok(RunSummary {
             records_read: run.counts.records_read,
@@ -374,19 +364,9 @@ impl HarnessContext {
         )
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let outcome = rapidbyte_engine::run_pipeline(
-            &ctx,
-            &config,
-            &ExecutionOptions::default(),
-            CancellationToken::new(),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        let run = match outcome {
-            PipelineOutcome::Run(run) => run,
-            PipelineOutcome::DryRun(_) => anyhow::bail!("expected run outcome for e2e test"),
-        };
+        let run = rapidbyte_engine::run_pipeline(&ctx, &config, CancellationToken::new())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         Ok(RunSummary {
             records_read: run.counts.records_read,
@@ -417,19 +397,9 @@ impl HarnessContext {
         )
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let outcome = rapidbyte_engine::run_pipeline(
-            &ctx,
-            &config,
-            &ExecutionOptions::default(),
-            CancellationToken::new(),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        let run = match outcome {
-            PipelineOutcome::Run(run) => run,
-            PipelineOutcome::DryRun(_) => anyhow::bail!("expected run outcome for e2e test"),
-        };
+        let run = rapidbyte_engine::run_pipeline(&ctx, &config, CancellationToken::new())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         Ok(RunSummary {
             records_read: run.counts.records_read,
@@ -534,19 +504,9 @@ impl HarnessContext {
         )
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let outcome = rapidbyte_engine::run_pipeline(
-            &ctx,
-            &config,
-            &ExecutionOptions::default(),
-            CancellationToken::new(),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        let run = match outcome {
-            PipelineOutcome::Run(run) => run,
-            PipelineOutcome::DryRun(_) => anyhow::bail!("expected run outcome for e2e test"),
-        };
+        let run = rapidbyte_engine::run_pipeline(&ctx, &config, CancellationToken::new())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let _ = client
             .query("SELECT pg_drop_replication_slot($1)", &[&slot])

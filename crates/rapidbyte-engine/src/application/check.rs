@@ -134,19 +134,34 @@ pub async fn check_pipeline(
         let (t_id, t_ver) = parse_plugin_id(&transform.use_ref);
         let transform_permissions = extract_permissions(&transform_resolved);
 
-        let validation = ctx
-            .runner
-            .validate_plugin(&ValidateParams {
-                wasm_path: transform_resolved.wasm_path,
-                kind: PluginKind::Transform,
-                plugin_id: t_id,
-                plugin_version: t_ver,
-                config: transform.config.clone(),
-                stream_name: first_stream_name(pipeline),
-                permissions: transform_permissions,
-            })
-            .await?;
-        transform_validations.push(validation.validation);
+        // Validate the transform against every source stream so that
+        // stream-specific failures are not missed.
+        let stream_names: Vec<String> = if pipeline.source.streams.is_empty() {
+            vec!["check".to_string()]
+        } else {
+            pipeline
+                .source
+                .streams
+                .iter()
+                .map(|s| s.name.clone())
+                .collect()
+        };
+
+        for stream_name in stream_names {
+            let validation = ctx
+                .runner
+                .validate_plugin(&ValidateParams {
+                    wasm_path: transform_resolved.wasm_path.clone(),
+                    kind: PluginKind::Transform,
+                    plugin_id: t_id.clone(),
+                    plugin_version: t_ver.clone(),
+                    config: transform.config.clone(),
+                    stream_name,
+                    permissions: transform_permissions.clone(),
+                })
+                .await?;
+            transform_validations.push(validation.validation);
+        }
     }
 
     // -- State (placeholder: always OK in this use case) --
@@ -469,6 +484,67 @@ destination:
         for v in &result.transform_validations {
             assert_eq!(v.status, ValidationStatus::Success);
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Test: Transform validation covers all streams
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn check_transform_validates_all_streams() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+        tc.resolver
+            .register("sql-transform", test_resolved_plugin());
+
+        // source + destination + 1 transform * 2 streams = 4 validate calls
+        tc.runner.enqueue_validate(Ok(ok_validation())); // source
+        tc.runner.enqueue_validate(Ok(ok_validation())); // destination
+        tc.runner.enqueue_validate(Ok(ok_validation())); // transform for stream 1
+        tc.runner
+            .enqueue_validate(Ok(failed_validation("transform fails on orders"))); // transform for stream 2
+
+        let pipeline: PipelineConfig = serde_yaml::from_str(
+            r#"
+version: "1.0"
+pipeline: test-multi-stream-tx
+source:
+    use: src
+    config: {}
+    streams:
+        - name: users
+          sync_mode: full_refresh
+        - name: orders
+          sync_mode: full_refresh
+transforms:
+    - use: sql-transform
+      config:
+          query: "SELECT * FROM input"
+destination:
+    use: dst
+    config: {}
+    write_mode: append
+"#,
+        )
+        .expect("test yaml should parse");
+
+        let result = check_pipeline(&tc.ctx, &pipeline).await.unwrap();
+
+        // 1 transform * 2 streams = 2 transform validations
+        assert_eq!(result.transform_validations.len(), 2);
+        assert_eq!(
+            result.transform_validations[0].status,
+            ValidationStatus::Success
+        );
+        assert_eq!(
+            result.transform_validations[1].status,
+            ValidationStatus::Failed
+        );
+        assert_eq!(
+            result.transform_validations[1].message,
+            "transform fails on orders"
+        );
     }
 
     // -------------------------------------------------------------------

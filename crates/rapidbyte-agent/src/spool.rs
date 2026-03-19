@@ -1,4 +1,4 @@
-//! Preview spool — holds dry-run results for Flight replay.
+//! Preview spool — holds preview results for Flight replay.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -10,8 +10,23 @@ use arrow::datatypes::SchemaRef;
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use rapidbyte_engine::{DryRunResult, DryRunStreamResult, SourceTiming};
 use uuid::Uuid;
+
+/// Result of a preview pipeline execution (stored in the spool).
+#[derive(Debug)]
+pub struct PreviewResult {
+    pub streams: Vec<PreviewStreamResult>,
+    pub duration_secs: f64,
+}
+
+/// Result of a single stream in a preview.
+#[derive(Debug)]
+pub struct PreviewStreamResult {
+    pub stream_name: String,
+    pub batches: Vec<RecordBatch>,
+    pub total_rows: u64,
+    pub total_bytes: u64,
+}
 
 const DEFAULT_SPILL_THRESHOLD_BYTES: usize = 8 * 1024 * 1024;
 
@@ -30,9 +45,6 @@ pub struct PreviewSpool {
 
 struct SpoolEntry {
     streams: Vec<StoredStream>,
-    source: SourceTiming,
-    num_transforms: usize,
-    total_transform_secs: f64,
     duration_secs: f64,
     created_at: Instant,
     created_at_wall: SystemTime,
@@ -104,7 +116,7 @@ impl PreviewSpool {
             .record(self.entries.len() as f64, &[]);
     }
 
-    pub fn store(&mut self, key: PreviewKey, result: DryRunResult) {
+    pub fn store(&mut self, key: PreviewKey, result: PreviewResult) {
         if let Some(old) = self.entries.remove(&key) {
             remove_entry_files(old);
         }
@@ -118,9 +130,6 @@ impl PreviewSpool {
             key,
             SpoolEntry {
                 streams,
-                source: result.source,
-                num_transforms: result.num_transforms,
-                total_transform_secs: result.total_transform_secs,
                 duration_secs: result.duration_secs,
                 created_at: Instant::now(),
                 created_at_wall: SystemTime::now(),
@@ -156,7 +165,7 @@ impl PreviewSpool {
     }
 
     #[must_use]
-    pub fn get(&self, key: &PreviewKey) -> Option<DryRunResult> {
+    pub fn get(&self, key: &PreviewKey) -> Option<PreviewResult> {
         let entry = self.entries.get(key)?;
         if entry.created_at.elapsed() >= entry.ttl {
             return None;
@@ -168,7 +177,7 @@ impl PreviewSpool {
             .map(|stored| {
                 load_batches(&stored.storage)
                     .ok()
-                    .map(|batches| DryRunStreamResult {
+                    .map(|batches| PreviewStreamResult {
                         stream_name: stored.stream_name.clone(),
                         batches,
                         total_rows: stored.total_rows,
@@ -177,11 +186,8 @@ impl PreviewSpool {
             })
             .collect::<Option<Vec<_>>>()?;
 
-        Some(DryRunResult {
+        Some(PreviewResult {
             streams,
-            source: entry.source.clone(),
-            num_transforms: entry.num_transforms,
-            total_transform_secs: entry.total_transform_secs,
             duration_secs: entry.duration_secs,
         })
     }
@@ -239,8 +245,8 @@ impl PreviewSpool {
         count
     }
 
-    fn store_stream(&self, stream: DryRunStreamResult) -> StoredStream {
-        let DryRunStreamResult {
+    fn store_stream(&self, stream: PreviewStreamResult) -> StoredStream {
+        let PreviewStreamResult {
             stream_name,
             batches,
             total_rows,
@@ -330,16 +336,11 @@ mod tests {
     use arrow::array::Int32Array;
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use rapidbyte_engine::DryRunStreamResult;
-    use rapidbyte_engine::SourceTiming;
     use std::sync::Arc;
 
-    fn make_dry_run_result() -> DryRunResult {
-        DryRunResult {
+    fn make_preview_result() -> PreviewResult {
+        PreviewResult {
             streams: vec![],
-            source: SourceTiming::default(),
-            num_transforms: 0,
-            total_transform_secs: 0.0,
             duration_secs: 1.0,
         }
     }
@@ -352,7 +353,7 @@ mod tests {
             task_id: "t1".into(),
             lease_epoch: 1,
         };
-        spool.store(key.clone(), make_dry_run_result());
+        spool.store(key.clone(), make_preview_result());
         assert!(spool.get(&key).is_some());
     }
 
@@ -364,7 +365,7 @@ mod tests {
             task_id: "t1".into(),
             lease_epoch: 1,
         };
-        spool.store(key.clone(), make_dry_run_result());
+        spool.store(key.clone(), make_preview_result());
         std::thread::sleep(Duration::from_millis(10));
         assert!(spool.get(&key).is_none());
     }
@@ -377,7 +378,7 @@ mod tests {
             task_id: "t1".into(),
             lease_epoch: 1,
         };
-        spool.store(key.clone(), make_dry_run_result());
+        spool.store(key.clone(), make_preview_result());
         std::thread::sleep(Duration::from_millis(10));
 
         assert!(spool.get(&key).is_none());
@@ -397,16 +398,13 @@ mod tests {
         let batch =
             RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1, 2, 3, 4]))])
                 .unwrap();
-        let result = DryRunResult {
-            streams: vec![DryRunStreamResult {
+        let result = PreviewResult {
+            streams: vec![PreviewStreamResult {
                 stream_name: "users".into(),
                 batches: vec![batch],
                 total_rows: 4,
                 total_bytes: 16,
             }],
-            source: SourceTiming::default(),
-            num_transforms: 0,
-            total_transform_secs: 0.0,
             duration_secs: 1.0,
         };
         spool.store(key.clone(), result);
@@ -430,7 +428,7 @@ mod tests {
             task_id: "t1".into(),
             lease_epoch: 1,
         };
-        spool.store(expired.clone(), make_dry_run_result());
+        spool.store(expired.clone(), make_preview_result());
         std::thread::sleep(Duration::from_millis(10));
 
         // Store a fresh one
@@ -440,7 +438,7 @@ mod tests {
             task_id: "t2".into(),
             lease_epoch: 2,
         };
-        spool.store(fresh.clone(), make_dry_run_result());
+        spool.store(fresh.clone(), make_preview_result());
 
         let removed = spool.cleanup_expired();
         assert_eq!(removed, 1);
@@ -472,16 +470,13 @@ mod tests {
         let batch =
             RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1, 2, 3, 4]))])
                 .unwrap();
-        let result = DryRunResult {
-            streams: vec![DryRunStreamResult {
+        let result = PreviewResult {
+            streams: vec![PreviewStreamResult {
                 stream_name: "users".into(),
                 batches: vec![batch],
                 total_rows: 4,
                 total_bytes: 16,
             }],
-            source: SourceTiming::default(),
-            num_transforms: 0,
-            total_transform_secs: 0.0,
             duration_secs: 1.0,
         };
 
@@ -509,16 +504,13 @@ mod tests {
         let batch =
             RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1, 2, 3, 4]))])
                 .unwrap();
-        let result = DryRunResult {
-            streams: vec![DryRunStreamResult {
+        let result = PreviewResult {
+            streams: vec![PreviewStreamResult {
                 stream_name: "users".into(),
                 batches: vec![batch],
                 total_rows: 4,
                 total_bytes: 16,
             }],
-            source: SourceTiming::default(),
-            num_transforms: 0,
-            total_transform_secs: 0.0,
             duration_secs: 1.0,
         };
         spool.store(key.clone(), result);

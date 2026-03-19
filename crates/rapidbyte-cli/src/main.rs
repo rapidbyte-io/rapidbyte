@@ -116,12 +116,6 @@ enum Commands {
     Run {
         /// Path to pipeline YAML file
         pipeline: PathBuf,
-        /// Preview mode: skip destination, print output to stdout
-        #[arg(long)]
-        dry_run: bool,
-        /// Maximum rows to read per stream (implies --dry-run)
-        #[arg(long)]
-        limit: Option<u64>,
     },
     /// Show the current status of a distributed run
     Status {
@@ -462,11 +456,7 @@ async fn main() -> ExitCode {
     let vault_secret_id = cli.vault_secret_id.as_deref();
 
     let result = match cli.command {
-        Commands::Run {
-            pipeline,
-            dry_run,
-            limit,
-        } => {
+        Commands::Run { pipeline } => {
             let controller_url = resolve_controller_url(cli.controller.clone(), false);
             // Only build secret providers for local mode — distributed mode
             // delegates secret resolution to the controller.
@@ -482,8 +472,6 @@ async fn main() -> ExitCode {
             };
             commands::run::execute(
                 &pipeline,
-                dry_run,
-                limit,
                 verbosity,
                 controller_url.as_deref(),
                 cli.auth_token.as_deref(),

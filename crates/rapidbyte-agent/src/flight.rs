@@ -253,11 +253,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use crate::spool::{PreviewResult, PreviewStreamResult};
     use arrow::array::{Int32Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use arrow::record_batch::RecordBatch;
-    use rapidbyte_engine::SourceTiming;
-    use rapidbyte_engine::{DryRunResult, DryRunStreamResult};
     use tokio_stream::StreamExt;
 
     fn sign_ticket(key: &[u8], payload: &crate::ticket::TicketPayload) -> Vec<u8> {
@@ -291,40 +290,34 @@ mod tests {
         RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(vec!["a", "b"]))]).unwrap()
     }
 
-    fn dry_run_result() -> DryRunResult {
-        DryRunResult {
+    fn dry_run_result() -> PreviewResult {
+        PreviewResult {
             streams: vec![
-                DryRunStreamResult {
+                PreviewStreamResult {
                     stream_name: "users".into(),
                     batches: vec![users_batch()],
                     total_rows: 3,
                     total_bytes: 12,
                 },
-                DryRunStreamResult {
+                PreviewStreamResult {
                     stream_name: "orders".into(),
                     batches: vec![orders_batch()],
                     total_rows: 2,
                     total_bytes: 8,
                 },
             ],
-            source: SourceTiming::default(),
-            num_transforms: 0,
-            total_transform_secs: 0.0,
             duration_secs: 1.0,
         }
     }
 
-    fn empty_stream_result() -> DryRunResult {
-        DryRunResult {
-            streams: vec![DryRunStreamResult {
+    fn empty_stream_result() -> PreviewResult {
+        PreviewResult {
+            streams: vec![PreviewStreamResult {
                 stream_name: "empty".into(),
                 batches: vec![],
                 total_rows: 0,
                 total_bytes: 0,
             }],
-            source: SourceTiming::default(),
-            num_transforms: 0,
-            total_transform_secs: 0.0,
             duration_secs: 1.0,
         }
     }

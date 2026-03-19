@@ -1,34 +1,13 @@
-//! Pipeline operation output types: results, timings, dry-run data, and check statuses.
+//! Pipeline operation output types: results, timings, and check statuses.
 //!
 //! These are pure data containers ported from the legacy `outcome` module to
 //! live alongside the domain model.
 
-use arrow::record_batch::RecordBatch;
 use rapidbyte_types::error::ValidationResult;
-
-// ---------------------------------------------------------------------------
-// Execution input
-// ---------------------------------------------------------------------------
-
-/// Runtime execution options (not part of pipeline YAML config).
-#[derive(Debug, Clone, Default)]
-pub struct ExecutionOptions {
-    /// Skip destination, print output to stdout.
-    pub dry_run: bool,
-    /// Maximum rows to read per stream (only used with `dry_run`).
-    pub limit: Option<u64>,
-}
 
 // ---------------------------------------------------------------------------
 // Pipeline run output
 // ---------------------------------------------------------------------------
-
-/// Either a normal pipeline result or a dry-run result.
-#[derive(Debug)]
-pub enum PipelineOutcome {
-    Run(PipelineResult),
-    DryRun(DryRunResult),
-}
 
 /// Result of a pipeline run.
 #[derive(Debug, Clone)]
@@ -101,29 +80,6 @@ pub struct StreamShardMetric {
     pub dest_duration_secs: f64,
     pub dest_wasm_instantiation_secs: f64,
     pub dest_frame_receive_secs: f64,
-}
-
-// ---------------------------------------------------------------------------
-// Dry-run output
-// ---------------------------------------------------------------------------
-
-/// Result of a dry-run pipeline execution.
-#[derive(Debug)]
-pub struct DryRunResult {
-    pub streams: Vec<DryRunStreamResult>,
-    pub source: SourceTiming,
-    pub num_transforms: usize,
-    pub total_transform_secs: f64,
-    pub duration_secs: f64,
-}
-
-/// Result of a single stream in dry-run mode.
-#[derive(Debug)]
-pub struct DryRunStreamResult {
-    pub stream_name: String,
-    pub batches: Vec<RecordBatch>,
-    pub total_rows: u64,
-    pub total_bytes: u64,
 }
 
 // ---------------------------------------------------------------------------

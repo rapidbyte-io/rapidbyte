@@ -233,17 +233,38 @@ pub async fn build_run_context(
     })
 }
 
-/// Build a lightweight [`EngineContext`] for check and discover operations.
+/// Build a lightweight [`EngineContext`] for check operations.
+///
+/// Uses a no-op state backend so that `rapidbyte check` does not
+/// require a Postgres connection.
 ///
 /// # Errors
 ///
-/// Returns `PipelineError` if the state backend or WASM runtime cannot
-/// be initialised.
+/// Returns `PipelineError` if the WASM runtime cannot be initialised.
 pub async fn build_lightweight_context(
     registry_config: &RegistryConfig,
-    config: &PipelineConfig,
+    _config: &PipelineConfig,
 ) -> Result<EngineContext, PipelineError> {
-    build_run_context(config, None, registry_config).await
+    let state_backend = noop_state_backend();
+    let wasm_runtime =
+        rapidbyte_runtime::WasmRuntime::new().map_err(PipelineError::Infrastructure)?;
+    let runner = Arc::new(WasmPluginRunner::new(wasm_runtime, state_backend.clone()));
+    let resolver = Arc::new(RegistryPluginResolver::new(registry_config.clone()));
+    let dummy = Arc::new(StateBackendRepositoryAdapter::new(state_backend));
+
+    Ok(EngineContext {
+        runner,
+        resolver,
+        cursors: Arc::clone(&dummy) as Arc<dyn ports::CursorRepository>,
+        runs: Arc::clone(&dummy) as Arc<dyn ports::RunRecordRepository>,
+        dlq: Arc::clone(&dummy) as Arc<dyn ports::DlqRepository>,
+        progress: Arc::new(NoopProgressReporter),
+        metrics: Arc::new(NoopMetricsSnapshot),
+        config: EngineConfig {
+            max_retries: 0,
+            channel_capacity: 64,
+        },
+    })
 }
 
 /// Build a lightweight [`EngineContext`] for discover operations that

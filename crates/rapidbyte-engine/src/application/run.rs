@@ -18,10 +18,7 @@ use rapidbyte_runtime::Frame;
 use crate::application::context::EngineContext;
 use crate::application::{extract_permissions, parse_plugin_id};
 use crate::domain::error::PipelineError;
-use crate::domain::outcome::{
-    DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineCounts, PipelineOutcome,
-    PipelineResult, SourceTiming,
-};
+use crate::domain::outcome::{PipelineCounts, PipelineResult, SourceTiming};
 use crate::domain::ports::runner::{DestinationRunParams, SourceOutcome, SourceRunParams};
 use crate::domain::progress::{Phase, ProgressEvent};
 use crate::domain::retry::{RetryDecision, RetryPolicy};
@@ -77,9 +74,8 @@ fn cursor_value_to_string(cv: &rapidbyte_types::cursor::CursorValue) -> String {
 pub async fn run_pipeline(
     ctx: &EngineContext,
     pipeline: &PipelineConfig,
-    options: &ExecutionOptions,
     cancel: CancellationToken,
-) -> Result<PipelineOutcome, PipelineError> {
+) -> Result<PipelineResult, PipelineError> {
     let retry_policy = RetryPolicy::new(ctx.config.max_retries.saturating_add(1));
     let pipeline_id = PipelineId::new(&pipeline.pipeline);
     let mut attempt: u32 = 0;
@@ -143,7 +139,6 @@ pub async fn run_pipeline(
         let mut total_source_secs: f64 = 0.0;
         let mut total_dest_secs: f64 = 0.0;
         let mut total_transform_secs: f64 = 0.0;
-        let mut dry_run_streams: Vec<DryRunStreamResult> = Vec::new();
         let mut stream_error: Option<PipelineError> = None;
         // Per-stream stats: (records_read, records_written, bytes_read, bytes_written)
         let mut per_stream_stats: HashMap<String, (u64, u64, u64, u64)> = HashMap::new();
@@ -317,54 +312,44 @@ pub async fn run_pipeline(
                 break;
             }
 
-            // Dry run: skip destination, collect source outcome info
-            if options.dry_run {
-                dry_run_streams.push(DryRunStreamResult {
-                    stream_name: stream_name.clone(),
-                    batches: vec![],
-                    total_rows: source_outcome.summary.records_read,
-                    total_bytes: source_outcome.summary.bytes_read,
-                });
-            } else {
-                // Run destination
-                let dest_permissions = extract_permissions(&dest_resolved);
+            // Run destination
+            let dest_permissions = extract_permissions(&dest_resolved);
 
-                let final_rx = current_rx.take().expect("receiver should be available");
-                let dest_result = ctx
-                    .runner
-                    .run_destination(DestinationRunParams {
-                        wasm_path: dest_resolved.wasm_path.clone(),
-                        pipeline_name: pipeline.pipeline.clone(),
-                        metric_run_label: metric_run_label.clone(),
-                        plugin_id: dst_id.clone(),
-                        plugin_version: dst_ver.clone(),
-                        stream_ctx: stream_ctx.clone(),
-                        config: dest_config.clone(),
-                        permissions: dest_permissions,
-                        compression: dest_compression.clone(),
-                        frame_receiver: final_rx,
-                        dlq_records: Arc::clone(&stream_dlq),
-                        stats: Arc::clone(&stats),
-                    })
-                    .await;
+            let final_rx = current_rx.take().expect("receiver should be available");
+            let dest_result = ctx
+                .runner
+                .run_destination(DestinationRunParams {
+                    wasm_path: dest_resolved.wasm_path.clone(),
+                    pipeline_name: pipeline.pipeline.clone(),
+                    metric_run_label: metric_run_label.clone(),
+                    plugin_id: dst_id.clone(),
+                    plugin_version: dst_ver.clone(),
+                    stream_ctx: stream_ctx.clone(),
+                    config: dest_config.clone(),
+                    permissions: dest_permissions,
+                    compression: dest_compression.clone(),
+                    frame_receiver: final_rx,
+                    dlq_records: Arc::clone(&stream_dlq),
+                    stats: Arc::clone(&stats),
+                })
+                .await;
 
-                match dest_result {
-                    Ok(outcome) => {
-                        total_dest_secs += outcome.duration_secs;
-                        total_records_written += outcome.summary.records_written;
-                        total_bytes_written += outcome.summary.bytes_written;
+            match dest_result {
+                Ok(outcome) => {
+                    total_dest_secs += outcome.duration_secs;
+                    total_records_written += outcome.summary.records_written;
+                    total_bytes_written += outcome.summary.bytes_written;
 
-                        // Record per-stream destination counts
-                        let stream_stat = per_stream_stats
-                            .entry(stream_name.clone())
-                            .or_insert((0, 0, 0, 0));
-                        stream_stat.1 += outcome.summary.records_written;
-                        stream_stat.3 += outcome.summary.bytes_written;
-                    }
-                    Err(e) => {
-                        stream_error = Some(e);
-                        break;
-                    }
+                    // Record per-stream destination counts
+                    let stream_stat = per_stream_stats
+                        .entry(stream_name.clone())
+                        .or_insert((0, 0, 0, 0));
+                    stream_stat.1 += outcome.summary.records_written;
+                    stream_stat.3 += outcome.summary.bytes_written;
+                }
+                Err(e) => {
+                    stream_error = Some(e);
+                    break;
                 }
             }
 
@@ -376,10 +361,13 @@ pub async fn run_pipeline(
                         cursor_value: Some(cursor_value_to_string(cursor_value)),
                         updated_at: chrono::Utc::now().to_rfc3339(),
                     };
-                    let _ = ctx
+                    if let Err(e) = ctx
                         .cursors
                         .set(&pipeline_id, &StreamName::new(stream_name), &cursor_state)
-                        .await;
+                        .await
+                    {
+                        warn!(stream = stream_name, error = %e, "failed to save cursor (non-fatal)");
+                    }
                 }
             }
 
@@ -448,24 +436,13 @@ pub async fn run_pipeline(
 
             // Save DLQ records for this stream (if any)
             if let Some(dlq_batch) = per_stream_dlq.get(&stream_cfg.name) {
-                let _ = ctx.dlq.insert(&pipeline_id, run_id, dlq_batch).await;
+                if let Err(e) = ctx.dlq.insert(&pipeline_id, run_id, dlq_batch).await {
+                    warn!(run_id, error = %e, "failed to save DLQ records (non-fatal)");
+                }
             }
         }
 
-        // 7. Return outcome
-        if options.dry_run {
-            return Ok(PipelineOutcome::DryRun(DryRunResult {
-                streams: dry_run_streams,
-                source: SourceTiming {
-                    duration_secs: total_source_secs,
-                    ..SourceTiming::default()
-                },
-                num_transforms: pipeline.transforms.len(),
-                total_transform_secs,
-                duration_secs,
-            }));
-        }
-
+        // 7. Return result
         let result = PipelineResult {
             counts: PipelineCounts {
                 records_read: total_records_read,
@@ -491,7 +468,7 @@ pub async fn run_pipeline(
             stream_metrics: vec![],
         };
 
-        return Ok(PipelineOutcome::Run(result));
+        return Ok(result);
     }
 }
 
@@ -607,21 +584,14 @@ destination:
 
         let pipeline = test_pipeline_config("src", "dst", &["users"]);
         let cancel = CancellationToken::new();
-        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
-            .await
-            .unwrap();
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
 
-        match result {
-            PipelineOutcome::Run(r) => {
-                assert_eq!(r.counts.records_read, 100);
-                assert_eq!(r.counts.records_written, 100);
-                assert_eq!(r.counts.bytes_read, 8192);
-                assert_eq!(r.counts.bytes_written, 8192);
-                assert_eq!(r.retry_count, 0);
-                assert_eq!(r.parallelism, 1);
-            }
-            PipelineOutcome::DryRun(_) => panic!("expected Run outcome"),
-        }
+        assert_eq!(result.counts.records_read, 100);
+        assert_eq!(result.counts.records_written, 100);
+        assert_eq!(result.counts.bytes_read, 8192);
+        assert_eq!(result.counts.bytes_written, 8192);
+        assert_eq!(result.retry_count, 0);
+        assert_eq!(result.parallelism, 1);
     }
 
     // -----------------------------------------------------------------------
@@ -639,7 +609,7 @@ destination:
         let cancel = CancellationToken::new();
         cancel.cancel();
 
-        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await;
 
         assert!(matches!(result, Err(PipelineError::Cancelled)));
     }
@@ -659,9 +629,7 @@ destination:
 
         let pipeline = test_pipeline_config("src", "dst", &["users"]);
         let cancel = CancellationToken::new();
-        run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
-            .await
-            .unwrap();
+        run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
 
         let events = tc.progress.events();
 
@@ -733,9 +701,7 @@ destination:
 
         let pipeline = test_pipeline_config("src", "dst", &["orders"]);
         let cancel = CancellationToken::new();
-        run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
-            .await
-            .unwrap();
+        run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
 
         // Verify a run was started (the fake auto-increments from 1)
         let started = tc.runs.started_count();
@@ -743,39 +709,7 @@ destination:
     }
 
     // -----------------------------------------------------------------------
-    // Test 5: Dry run skips destination
-    // -----------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn run_pipeline_dry_run_skips_destination() {
-        let tc = fake_context();
-        tc.resolver.register("src", test_resolved_plugin());
-        tc.resolver.register("dst", test_resolved_plugin());
-        tc.runner.enqueue_source(Ok(make_source_outcome(75, 6000)));
-        // Do NOT enqueue a destination result — it should not be called
-
-        let pipeline = test_pipeline_config("src", "dst", &["users"]);
-        let cancel = CancellationToken::new();
-        let opts = ExecutionOptions {
-            dry_run: true,
-            limit: None,
-        };
-        let result = run_pipeline(&tc.ctx, &pipeline, &opts, cancel)
-            .await
-            .unwrap();
-
-        match result {
-            PipelineOutcome::DryRun(r) => {
-                assert_eq!(r.streams.len(), 1);
-                assert_eq!(r.streams[0].stream_name, "users");
-                assert_eq!(r.streams[0].total_rows, 75);
-            }
-            PipelineOutcome::Run(_) => panic!("expected DryRun outcome"),
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Test 6: Multiple streams
+    // Test 5: Multiple streams
     // -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -794,19 +728,12 @@ destination:
 
         let pipeline = test_pipeline_config("src", "dst", &["users", "orders"]);
         let cancel = CancellationToken::new();
-        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
-            .await
-            .unwrap();
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
 
-        match result {
-            PipelineOutcome::Run(r) => {
-                assert_eq!(r.counts.records_read, 300);
-                assert_eq!(r.counts.records_written, 300);
-                assert_eq!(r.counts.bytes_read, 24000);
-                assert_eq!(r.counts.bytes_written, 24000);
-            }
-            PipelineOutcome::DryRun(_) => panic!("expected Run outcome"),
-        }
+        assert_eq!(result.counts.records_read, 300);
+        assert_eq!(result.counts.records_written, 300);
+        assert_eq!(result.counts.bytes_read, 24000);
+        assert_eq!(result.counts.bytes_written, 24000);
     }
 
     // -----------------------------------------------------------------------
@@ -825,7 +752,7 @@ destination:
 
         let pipeline = test_pipeline_config("src", "dst", &["users"]);
         let cancel = CancellationToken::new();
-        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await;
 
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -845,7 +772,7 @@ destination:
         // Don't register any plugins — resolver will fail
         let pipeline = test_pipeline_config("nonexistent-src", "dst", &["users"]);
         let cancel = CancellationToken::new();
-        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await;
 
         assert!(result.is_err());
     }
@@ -961,17 +888,10 @@ destination:
 
         let pipeline = test_pipeline_config("src", "dst", &["users"]);
         let cancel = CancellationToken::new();
-        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
-            .await
-            .unwrap();
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
 
-        match result {
-            PipelineOutcome::Run(r) => {
-                assert_eq!(r.retry_count, 1, "expected 1 retry");
-                assert_eq!(r.counts.records_read, 100);
-            }
-            PipelineOutcome::DryRun(_) => panic!("expected Run outcome"),
-        }
+        assert_eq!(result.retry_count, 1, "expected 1 retry");
+        assert_eq!(result.counts.records_read, 100);
 
         // Verify RetryScheduled event was emitted
         let events = tc.progress.events();
@@ -1009,7 +929,7 @@ destination:
 
         let pipeline = test_pipeline_config("src", "dst", &["users"]);
         let cancel = CancellationToken::new();
-        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await;
 
         assert!(
             result.is_err(),
@@ -1037,7 +957,7 @@ destination:
 
         let pipeline = test_pipeline_config("src", "dst", &["users"]);
         let cancel = CancellationToken::new();
-        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await;
 
         let err = result.unwrap_err();
         assert!(
@@ -1081,17 +1001,10 @@ destination:
 
         let pipeline = test_pipeline_config_incremental("src", "dst", "users", "updated_at");
         let cancel = CancellationToken::new();
-        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
-            .await
-            .unwrap();
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
 
         // Pipeline should succeed — cursor was loaded and used
-        match result {
-            PipelineOutcome::Run(r) => {
-                assert_eq!(r.counts.records_read, 50);
-            }
-            PipelineOutcome::DryRun(_) => panic!("expected Run outcome"),
-        }
+        assert_eq!(result.counts.records_read, 50);
     }
 
     // -----------------------------------------------------------------------
@@ -1132,9 +1045,7 @@ destination:
 
         let pipeline = test_pipeline_config_incremental("src", "dst", "users", "updated_at");
         let cancel = CancellationToken::new();
-        run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
-            .await
-            .unwrap();
+        run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
 
         // Verify cursor was saved
         let pid = rapidbyte_types::state::PipelineId::new("test-pipeline");
@@ -1161,17 +1072,10 @@ destination:
         // Full refresh stream — no cursor_field
         let pipeline = test_pipeline_config("src", "dst", &["users"]);
         let cancel = CancellationToken::new();
-        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
-            .await
-            .unwrap();
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
 
         // Pipeline should succeed without any cursor interactions
-        match result {
-            PipelineOutcome::Run(r) => {
-                assert_eq!(r.counts.records_read, 100);
-            }
-            PipelineOutcome::DryRun(_) => panic!("expected Run outcome"),
-        }
+        assert_eq!(result.counts.records_read, 100);
 
         // No cursor should have been saved
         let pid = rapidbyte_types::state::PipelineId::new("test-pipeline");
@@ -1205,18 +1109,11 @@ destination:
         let pipeline =
             test_pipeline_config_with_transforms("src", "dst", &["users"], &["tx1", "tx2"]);
         let cancel = CancellationToken::new();
-        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
-            .await
-            .unwrap();
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
 
-        match result {
-            PipelineOutcome::Run(r) => {
-                assert_eq!(r.num_transforms, 2);
-                assert!(r.total_transform_secs > 0.0);
-                assert_eq!(r.counts.records_read, 100);
-            }
-            PipelineOutcome::DryRun(_) => panic!("expected Run outcome"),
-        }
+        assert_eq!(result.num_transforms, 2);
+        assert!(result.total_transform_secs > 0.0);
+        assert_eq!(result.counts.records_read, 100);
     }
 
     // -----------------------------------------------------------------------
@@ -1236,7 +1133,7 @@ destination:
 
         let pipeline = test_pipeline_config_with_transforms("src", "dst", &["users"], &["tx1"]);
         let cancel = CancellationToken::new();
-        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await;
 
         assert!(result.is_err(), "transform error should fail the pipeline");
     }
@@ -1263,9 +1160,7 @@ destination:
 
         let pipeline = test_pipeline_config("src", "dst", &["users", "orders"]);
         let cancel = CancellationToken::new();
-        run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
-            .await
-            .unwrap();
+        run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
 
         // Two runs should have been started (one per stream)
         assert_eq!(
@@ -1317,7 +1212,7 @@ destination:
 
         let pipeline = test_pipeline_config_incremental("src", "dst", "users", "id");
         let cancel = CancellationToken::new();
-        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await;
 
         assert!(
             result.is_ok(),
@@ -1338,18 +1233,11 @@ destination:
 
         let pipeline = test_pipeline_config("src", "dst", &[]);
         let cancel = CancellationToken::new();
-        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel)
-            .await
-            .unwrap();
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
 
-        match result {
-            PipelineOutcome::Run(r) => {
-                assert_eq!(r.counts.records_read, 0);
-                assert_eq!(r.counts.records_written, 0);
-                assert_eq!(r.retry_count, 0);
-            }
-            PipelineOutcome::DryRun(_) => panic!("expected Run outcome"),
-        }
+        assert_eq!(result.counts.records_read, 0);
+        assert_eq!(result.counts.records_written, 0);
+        assert_eq!(result.retry_count, 0);
     }
 
     // -----------------------------------------------------------------------
@@ -1394,7 +1282,7 @@ destination:
             cancel_clone.cancel();
         });
 
-        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await;
         handle.await.unwrap();
 
         // Either we get Cancelled (if token was seen) or the full result
@@ -1404,11 +1292,11 @@ destination:
             Err(PipelineError::Cancelled) => {
                 // Cancellation was caught between streams — expected
             }
-            Ok(PipelineOutcome::Run(r)) => {
+            Ok(r) => {
                 // Both streams completed before cancellation was observed
                 assert_eq!(r.counts.records_read, 300);
             }
-            other => panic!("unexpected result: {other:?}"),
+            Err(other) => panic!("unexpected error: {other:?}"),
         }
     }
 
@@ -1428,7 +1316,7 @@ destination:
 
         let pipeline = test_pipeline_config("src", "dst", &["users"]);
         let cancel = CancellationToken::new();
-        let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await;
 
         assert!(
             result.is_err(),
