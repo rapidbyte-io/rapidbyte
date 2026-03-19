@@ -12,6 +12,9 @@ use rapidbyte_engine::{ExecutionOptions, PipelineOutcome};
 use tokio_postgres::NoTls;
 use tokio_util::sync::CancellationToken;
 
+/// Counter used to ensure unique pipeline names across concurrent tests,
+/// avoiding state-table collisions.
+
 static NEXT_SCHEMA_ID: AtomicU64 = AtomicU64::new(1);
 
 
@@ -79,32 +82,44 @@ pub async fn bootstrap() -> Result<HarnessContext> {
 }
 
 impl HarnessContext {
-    pub fn read_dlq_rows(&self, state_db_path: &std::path::Path) -> Result<Vec<DlqRow>> {
-        let conn = rusqlite::Connection::open(state_db_path)
-            .with_context(|| format!("failed to open sqlite state db {}", state_db_path.display()))?;
-        let mut stmt = conn
-            .prepare(
+    /// Returns the Postgres connection URL for state storage.
+    pub fn state_connection(&self) -> String {
+        format!(
+            "postgres://{}:{}@{}:{}/{}",
+            self.postgres_user,
+            self.postgres_pass,
+            self.postgres_host,
+            self.postgres_port,
+            self.postgres_db,
+        )
+    }
+
+    pub async fn read_dlq_rows(&self, state_connection: &str) -> Result<Vec<DlqRow>> {
+        let (client, connection) = tokio_postgres::connect(state_connection, NoTls)
+            .await
+            .context("failed to connect to postgres for dlq read")?;
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        let rows = client
+            .query(
                 "SELECT stream_name, record_json, error_message, error_category \
                  FROM dlq_records ORDER BY id ASC",
+                &[],
             )
-            .context("failed to prepare dlq query")?;
-
-        let mapped = stmt
-            .query_map([], |row| {
-                Ok(DlqRow {
-                    stream_name: row.get(0)?,
-                    record_json: row.get(1)?,
-                    error_message: row.get(2)?,
-                    error_category: row.get(3)?,
-                })
-            })
+            .await
             .context("failed to query dlq rows")?;
 
-        let mut rows = Vec::new();
-        for row in mapped {
-            rows.push(row.context("failed to decode dlq row")?);
-        }
-        Ok(rows)
+        Ok(rows
+            .iter()
+            .map(|row| DlqRow {
+                stream_name: row.get(0),
+                record_json: row.get(1),
+                error_message: row.get(2),
+                error_category: row.get(3),
+            })
+            .collect())
     }
 
     pub async fn allocate_schema_pair(&self, test_name: &str) -> Result<SchemaPair> {
@@ -213,11 +228,10 @@ impl HarnessContext {
     }
 
     pub async fn run_full_refresh_pipeline(&self, schemas: &SchemaPair) -> Result<RunSummary> {
-        let state_file =
-            tempfile::NamedTempFile::new().context("failed to create state db file")?;
+        let state_conn = self.state_connection();
         self.run_pipeline(
             schemas,
-            state_file.path(),
+            &state_conn,
             &PipelinePolicies {
                 sync_mode: "full_refresh",
                 write_mode: "append",
@@ -233,7 +247,7 @@ impl HarnessContext {
     pub async fn run_pipeline(
         &self,
         schemas: &SchemaPair,
-        state_db_path: &std::path::Path,
+        state_connection: &str,
         policies: &PipelinePolicies<'_>,
     ) -> Result<RunSummary> {
         let pipeline_yaml = render_pipeline_yaml(
@@ -241,7 +255,7 @@ impl HarnessContext {
             schemas,
             policies.sync_mode,
             policies.write_mode,
-            state_db_path,
+            state_connection,
             policies.compression,
             policies.on_data_error,
             policies.schema_evolution_block,
@@ -343,9 +357,9 @@ impl HarnessContext {
         &self,
         schemas: &SchemaPair,
         query: &str,
-        state_db_path: &std::path::Path,
+        state_connection: &str,
     ) -> Result<RunSummary> {
-        let pipeline_yaml = render_transform_yaml(self, schemas, query, state_db_path);
+        let pipeline_yaml = render_transform_yaml(self, schemas, query, state_connection);
 
         let config =
             parser::parse_pipeline(&pipeline_yaml, &SecretProviders::new())
@@ -385,10 +399,10 @@ impl HarnessContext {
         schemas: &SchemaPair,
         rules_yaml: &str,
         on_data_error: &str,
-        state_db_path: &std::path::Path,
+        state_connection: &str,
     ) -> Result<RunSummary> {
         let pipeline_yaml =
-            render_validate_transform_yaml(self, schemas, rules_yaml, on_data_error, state_db_path);
+            render_validate_transform_yaml(self, schemas, rules_yaml, on_data_error, state_connection);
 
         let config =
             parser::parse_pipeline(&pipeline_yaml, &SecretProviders::new())
@@ -460,7 +474,7 @@ impl HarnessContext {
     pub async fn run_cdc_pipeline(
         &self,
         schemas: &SchemaPair,
-        state_db_path: &std::path::Path,
+        state_connection: &str,
     ) -> Result<RunSummary> {
         let slot = format!("rapidbyte_{}", schemas.source_users_table);
         let publication = format!("rapidbyte_{}", schemas.source_users_table);
@@ -505,7 +519,7 @@ impl HarnessContext {
             .await
             .context("failed to seed cdc change stream")?;
 
-        let pipeline_yaml = render_cdc_yaml(self, schemas, &slot, &publication, state_db_path);
+        let pipeline_yaml = render_cdc_yaml(self, schemas, &slot, &publication, state_connection);
 
         let config =
             parser::parse_pipeline(&pipeline_yaml, &SecretProviders::new())
@@ -595,7 +609,7 @@ fn render_pipeline_yaml(
     schemas: &SchemaPair,
     sync_mode: &str,
     write_mode: &str,
-    state_db_path: &std::path::Path,
+    state_connection: &str,
     compression: Option<&str>,
     on_data_error: Option<&str>,
     schema_evolution_block: Option<&str>,
@@ -649,8 +663,7 @@ destination:
   write_mode: {write_mode}{primary_key}{on_data_error}{schema_evolution}
 
 state:
-  backend: sqlite
-  connection: {state_db_path}
+  connection: {state_connection}
 {resources}
 "#,
         users_table = schemas.source_users_table,
@@ -670,7 +683,7 @@ state:
         dest_password = context.postgres_pass,
         dest_database = context.postgres_db,
         dest_schema = schemas.destination_schema,
-        state_db_path = state_db_path.display(),
+        state_connection = state_connection,
         resources = resources,
         on_data_error = on_data_error,
         schema_evolution = schema_evolution,
@@ -716,7 +729,7 @@ fn render_transform_yaml(
     context: &HarnessContext,
     schemas: &SchemaPair,
     query: &str,
-    state_db_path: &std::path::Path,
+    state_connection: &str,
 ) -> String {
     format!(
         r#"version: "1.0"
@@ -752,8 +765,7 @@ destination:
   write_mode: append
 
 state:
-  backend: sqlite
-  connection: {state_db_path}
+  connection: {state_connection}
 
 resources:
   parallelism: 1
@@ -766,7 +778,7 @@ resources:
         users_table = schemas.source_users_table,
         dest_schema = schemas.destination_schema,
         query = query,
-        state_db_path = state_db_path.display(),
+        state_connection = state_connection,
     )
 }
 
@@ -775,7 +787,7 @@ fn render_validate_transform_yaml(
     schemas: &SchemaPair,
     rules_yaml: &str,
     on_data_error: &str,
-    state_db_path: &std::path::Path,
+    state_connection: &str,
 ) -> String {
     let rules = indent_block(rules_yaml, 8);
     format!(
@@ -813,8 +825,7 @@ destination:
   on_data_error: {on_data_error}
 
 state:
-  backend: sqlite
-  connection: {state_db_path}
+  connection: {state_connection}
 
 resources:
   parallelism: 1
@@ -827,7 +838,7 @@ resources:
         users_table = schemas.source_users_table,
         dest_schema = schemas.destination_schema,
         on_data_error = on_data_error,
-        state_db_path = state_db_path.display(),
+        state_connection = state_connection,
         rules = rules,
     )
 }
@@ -847,7 +858,7 @@ fn render_cdc_yaml(
     schemas: &SchemaPair,
     slot: &str,
     publication: &str,
-    state_db_path: &std::path::Path,
+    state_connection: &str,
 ) -> String {
     format!(
         r#"version: "1.0"
@@ -879,8 +890,7 @@ destination:
   write_mode: append
 
 state:
-  backend: sqlite
-  connection: {state_db_path}
+  connection: {state_connection}
 "#,
         host = context.postgres_host,
         port = context.postgres_port,
@@ -891,7 +901,7 @@ state:
         publication = publication,
         users_table = schemas.source_users_table,
         dest_schema = schemas.destination_schema,
-        state_db_path = state_db_path.display(),
+        state_connection = state_connection,
     )
 }
 

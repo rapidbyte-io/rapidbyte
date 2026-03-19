@@ -7,12 +7,11 @@ async fn cdc_reads_insert_update_delete_changes() {
         .allocate_schema_pair("cdc")
         .await
         .expect("schema allocation must succeed");
-    let temp = tempfile::tempdir().expect("must create tempdir for sqlite state");
-    let state_path = temp.path().join("cdc_state.db");
+    let state_conn = context.state_connection();
 
     let result = async {
         let run = context
-            .run_cdc_pipeline(&schemas, &state_path)
+            .run_cdc_pipeline(&schemas, &state_conn)
             .await
             .expect("cdc pipeline should succeed");
 
