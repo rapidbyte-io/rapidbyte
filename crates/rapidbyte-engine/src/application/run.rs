@@ -308,9 +308,10 @@ pub async fn run_pipeline(
                     .await
                     .map_err(|e| PipelineError::infra(format!("cursor load failed: {e}")))?
                     .and_then(|cs| cs.cursor_value)
-                    // Treat empty strings as "no cursor" — historical rows may
-                    // contain "" from a prior bug where CursorValue::Null was
-                    // serialized as an empty string.
+                    // Treat empty strings as "no cursor". Empty strings are never
+                    // valid cursor positions (cursors are timestamps, IDs, LSNs —
+                    // monotonically ordered values). The only source of "" was a
+                    // prior bug serializing CursorValue::Null as empty string.
                     .filter(|v| !v.is_empty())
                     .map(|v| {
                         if is_cdc {
