@@ -80,37 +80,23 @@ pub fn write_rendered_pipeline(
 }
 
 fn render_state_mapping(
-    scenario: &ScenarioManifest,
+    _scenario: &ScenarioManifest,
     env: &crate::scenario::PostgresBenchmarkEnvironment,
 ) -> YamlValue {
     let mut state = Mapping::new();
-    if scenario.benchmark.execution_mode == crate::scenario::BenchmarkExecutionMode::Distributed {
-        state.insert(
-            str_key("connection"),
-            YamlValue::String(format!(
-                "host={} port={} user={} password={} dbname={}",
-                env.source.host,
-                env.source.port,
-                env.source.user,
-                env.source.password,
-                env.source.database
-            )),
-        );
-    } else {
-        // Non-distributed mode: use the source Postgres instance for state storage.
-        // (SQLite support was removed; all state is Postgres-only.)
-        state.insert(
-            str_key("connection"),
-            YamlValue::String(format!(
-                "postgres://{}:{}@{}:{}/{}",
-                env.source.user,
-                env.source.password,
-                env.source.host,
-                env.source.port,
-                env.source.database,
-            )),
-        );
-    }
+    // Both distributed and non-distributed use postgres:// URL format.
+    // The engine's PgBackend::connect() uses sqlx which expects URL format.
+    state.insert(
+        str_key("connection"),
+        YamlValue::String(format!(
+            "postgres://{}:{}@{}:{}/{}",
+            env.source.user,
+            env.source.password,
+            env.source.host,
+            env.source.port,
+            env.source.database,
+        )),
+    );
     YamlValue::Mapping(state)
 }
 
@@ -229,8 +215,9 @@ mod tests {
             .state
             .connection
             .expect("distributed pipeline should pin postgres state connection");
-        assert!(connection.contains("host=source-db"));
-        assert!(connection.contains("dbname=bench_source"));
+        assert!(connection.starts_with("postgres://"));
+        assert!(connection.contains("source-db"));
+        assert!(connection.contains("bench_source"));
     }
 
     #[test]
