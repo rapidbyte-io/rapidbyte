@@ -529,9 +529,14 @@ pub async fn run_pipeline(
                         ),
                     );
 
-                    // Save cursor updates from source checkpoints
+                    // Save cursor updates from source checkpoints.
+                    // Skip null cursor values — they indicate "no position" and
+                    // must not overwrite a previously saved concrete cursor.
                     for checkpoint in &source_outcome.checkpoints {
                         if let Some(ref cursor_value) = checkpoint.cursor_value {
+                            if matches!(cursor_value, rapidbyte_types::cursor::CursorValue::Null) {
+                                continue;
+                            }
                             let cursor_state = rapidbyte_types::state::CursorState {
                                 cursor_field: checkpoint.cursor_field.clone(),
                                 cursor_value: Some(cursor_value_to_string(cursor_value)),
