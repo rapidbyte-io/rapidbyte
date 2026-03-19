@@ -308,6 +308,10 @@ pub async fn run_pipeline(
                     .await
                     .map_err(|e| PipelineError::infra(format!("cursor load failed: {e}")))?
                     .and_then(|cs| cs.cursor_value)
+                    // Treat empty strings as "no cursor" — historical rows may
+                    // contain "" from a prior bug where CursorValue::Null was
+                    // serialized as an empty string.
+                    .filter(|v| !v.is_empty())
                     .map(|v| {
                         if is_cdc {
                             rapidbyte_types::cursor::CursorValue::Lsn { value: v }
@@ -1703,5 +1707,98 @@ destination:
             err.contains("invalid pipeline max_memory"),
             "error should mention pipeline: {err}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Null cursor checkpoint does not overwrite existing cursor
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn null_checkpoint_does_not_overwrite_existing_cursor() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        // Pre-set a valid cursor
+        let pid = rapidbyte_types::state::PipelineId::new("test-pipeline");
+        let stream = rapidbyte_types::state::StreamName::new("users");
+        let existing_cursor = rapidbyte_types::state::CursorState {
+            cursor_field: Some("updated_at".to_string()),
+            cursor_value: Some("2024-07-01".to_string()),
+            updated_at: "2024-07-01T00:00:00Z".to_string(),
+        };
+        tc.cursors
+            .set(&pid, &stream, &existing_cursor)
+            .await
+            .unwrap();
+
+        // Source emits a checkpoint with CursorValue::Null
+        let source_outcome = SourceOutcome {
+            duration_secs: 1.0,
+            summary: ReadSummary {
+                records_read: 50,
+                bytes_read: 4096,
+                batches_emitted: 1,
+                checkpoint_count: 1,
+                records_skipped: 0,
+            },
+            checkpoints: vec![rapidbyte_types::checkpoint::Checkpoint {
+                id: 1,
+                kind: rapidbyte_types::checkpoint::CheckpointKind::Source,
+                stream: "users".to_string(),
+                cursor_field: Some("updated_at".to_string()),
+                cursor_value: Some(rapidbyte_types::cursor::CursorValue::Null),
+                records_processed: 50,
+                bytes_processed: 4096,
+            }],
+        };
+        tc.runner.enqueue_source(Ok(source_outcome));
+        tc.runner
+            .enqueue_destination(Ok(make_dest_outcome(50, 4096)));
+
+        let pipeline = test_pipeline_config_incremental("src", "dst", "users", "updated_at");
+        let cancel = CancellationToken::new();
+        run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
+
+        // The existing cursor should NOT have been overwritten
+        let saved = tc.cursors.get(&pid, &stream).await.unwrap();
+        assert!(saved.is_some(), "cursor should still exist");
+        assert_eq!(
+            saved.unwrap().cursor_value,
+            Some("2024-07-01".to_string()),
+            "null checkpoint must not overwrite existing cursor"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Empty-string historical cursor treated as no cursor
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn empty_string_cursor_treated_as_no_cursor() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        // Pre-set a cursor with empty string (historical bug data)
+        let pid = rapidbyte_types::state::PipelineId::new("test-pipeline");
+        let stream = rapidbyte_types::state::StreamName::new("users");
+        let bad_cursor = rapidbyte_types::state::CursorState {
+            cursor_field: Some("updated_at".to_string()),
+            cursor_value: Some(String::new()), // empty string from old bug
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+        tc.cursors.set(&pid, &stream, &bad_cursor).await.unwrap();
+
+        tc.runner.enqueue_source(Ok(make_source_outcome(100, 8192)));
+        tc.runner
+            .enqueue_destination(Ok(make_dest_outcome(100, 8192)));
+
+        let pipeline = test_pipeline_config_incremental("src", "dst", "users", "updated_at");
+        let cancel = CancellationToken::new();
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
+
+        // Pipeline should succeed — empty cursor treated as "no cursor"
+        assert_eq!(result.counts.records_read, 100);
     }
 }
