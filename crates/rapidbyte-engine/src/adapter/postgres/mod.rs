@@ -120,6 +120,7 @@ enum StateRequest {
 
 /// Background async task that processes [`StateRequest`]s using sqlx.
 #[allow(clippy::cast_possible_wrap)]
+#[allow(clippy::too_many_lines)]
 async fn state_backend_worker(pool: PgPool, mut rx: mpsc::Receiver<StateRequest>) {
     while let Some(req) = rx.recv().await {
         match req {
@@ -151,20 +152,15 @@ async fn state_backend_worker(pool: PgPool, mut rx: mpsc::Receiver<StateRequest>
                 cursor,
                 reply,
             } => {
-                let result = sqlx::query(
-                    "INSERT INTO sync_cursors (pipeline, stream, cursor_field, cursor_value, updated_at) \
-                     VALUES ($1, $2, $3, $4, now()) \
-                     ON CONFLICT (pipeline, stream) \
-                     DO UPDATE SET cursor_field = $3, cursor_value = $4, updated_at = now()",
-                )
-                .bind(&pipeline)
-                .bind(&stream)
-                .bind(&cursor.cursor_field)
-                .bind(&cursor.cursor_value)
-                .execute(&pool)
-                .await
-                .map(|_| ())
-                .map_err(StateError::backend);
+                let result = sqlx::query(queries::SET_CURSOR)
+                    .bind(&pipeline)
+                    .bind(&stream)
+                    .bind(&cursor.cursor_field)
+                    .bind(&cursor.cursor_value)
+                    .execute(&pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(StateError::backend);
                 let _ = reply.send(result);
             }
             StateRequest::StartRun {
@@ -188,23 +184,18 @@ async fn state_backend_worker(pool: PgPool, mut rx: mpsc::Receiver<StateRequest>
                 stats,
                 reply,
             } => {
-                let result = sqlx::query(
-                    "UPDATE sync_runs SET status = $1, finished_at = now(), \
-                     records_read = $2, records_written = $3, \
-                     bytes_read = $4, bytes_written = $5, error_message = $6 \
-                     WHERE id = $7",
-                )
-                .bind(status.as_str())
-                .bind(stats.records_read as i64)
-                .bind(stats.records_written as i64)
-                .bind(stats.bytes_read as i64)
-                .bind(stats.bytes_written as i64)
-                .bind(&stats.error_message)
-                .bind(run_id)
-                .execute(&pool)
-                .await
-                .map(|_| ())
-                .map_err(StateError::backend);
+                let result = sqlx::query(queries::COMPLETE_RUN)
+                    .bind(status.as_str())
+                    .bind(stats.records_read as i64)
+                    .bind(stats.records_written as i64)
+                    .bind(stats.bytes_read as i64)
+                    .bind(stats.bytes_written as i64)
+                    .bind(&stats.error_message)
+                    .bind(run_id)
+                    .execute(&pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(StateError::backend);
                 let _ = reply.send(result);
             }
             StateRequest::CompareAndSet {
@@ -215,29 +206,23 @@ async fn state_backend_worker(pool: PgPool, mut rx: mpsc::Receiver<StateRequest>
                 reply,
             } => {
                 let result = match expected {
-                    Some(expected_val) => sqlx::query(
-                        "UPDATE sync_cursors SET cursor_value = $1, updated_at = now() \
-                         WHERE pipeline = $2 AND stream = $3 AND cursor_value = $4",
-                    )
-                    .bind(&new_value)
-                    .bind(&pipeline)
-                    .bind(&stream)
-                    .bind(&expected_val)
-                    .execute(&pool)
-                    .await
-                    .map(|r| r.rows_affected() > 0)
-                    .map_err(StateError::backend),
-                    None => sqlx::query(
-                        "INSERT INTO sync_cursors (pipeline, stream, cursor_value, updated_at) \
-                         VALUES ($1, $2, $3, now()) ON CONFLICT DO NOTHING",
-                    )
-                    .bind(&pipeline)
-                    .bind(&stream)
-                    .bind(&new_value)
-                    .execute(&pool)
-                    .await
-                    .map(|r| r.rows_affected() > 0)
-                    .map_err(StateError::backend),
+                    Some(expected_val) => sqlx::query(queries::CAS_UPDATE_CURSOR)
+                        .bind(&new_value)
+                        .bind(&pipeline)
+                        .bind(&stream)
+                        .bind(&expected_val)
+                        .execute(&pool)
+                        .await
+                        .map(|r| r.rows_affected() > 0)
+                        .map_err(StateError::backend),
+                    None => sqlx::query(queries::CAS_INSERT_CURSOR)
+                        .bind(&pipeline)
+                        .bind(&stream)
+                        .bind(&new_value)
+                        .execute(&pool)
+                        .await
+                        .map(|r| r.rows_affected() > 0)
+                        .map_err(StateError::backend),
                 };
                 let _ = reply.send(result);
             }
@@ -253,24 +238,19 @@ async fn state_backend_worker(pool: PgPool, mut rx: mpsc::Receiver<StateRequest>
                     })?;
 
                     for record in &records {
-                        sqlx::query(
-                            "INSERT INTO dlq_records \
-                             (pipeline, run_id, stream_name, record_json, \
-                              error_message, error_category, failed_at) \
-                             VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)",
-                        )
-                        .bind(&pipeline)
-                        .bind(run_id)
-                        .bind(&record.stream_name)
-                        .bind(&record.record_json)
-                        .bind(&record.error_message)
-                        .bind(record.error_category.as_str())
-                        .bind(record.failed_at.as_str())
-                        .execute(&mut *tx)
-                        .await
-                        .map_err(|e| {
-                            StateError::backend_context("insert_dlq_records: execute", e)
-                        })?;
+                        sqlx::query(queries::INSERT_DLQ_RECORD)
+                            .bind(&pipeline)
+                            .bind(run_id)
+                            .bind(&record.stream_name)
+                            .bind(&record.record_json)
+                            .bind(&record.error_message)
+                            .bind(record.error_category.as_str())
+                            .bind(record.failed_at.as_str())
+                            .execute(&mut *tx)
+                            .await
+                            .map_err(|e| {
+                                StateError::backend_context("insert_dlq_records: execute", e)
+                            })?;
                     }
 
                     tx.commit().await.map_err(|e| {

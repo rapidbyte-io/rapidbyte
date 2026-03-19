@@ -32,22 +32,17 @@ impl RunRecordRepository for PgBackend {
         status: RunStatus,
         stats: &RunStats,
     ) -> Result<(), RepositoryError> {
-        sqlx::query(
-            "UPDATE sync_runs SET status = $1, finished_at = now(), \
-             records_read = $2, records_written = $3, \
-             bytes_read = $4, bytes_written = $5, error_message = $6 \
-             WHERE id = $7",
-        )
-        .bind(status.as_str())
-        .bind(stats.records_read as i64)
-        .bind(stats.records_written as i64)
-        .bind(stats.bytes_read as i64)
-        .bind(stats.bytes_written as i64)
-        .bind(&stats.error_message)
-        .bind(run_id)
-        .execute(&self.pool)
-        .await
-        .map_err(RepositoryError::other)?;
+        sqlx::query(super::queries::COMPLETE_RUN)
+            .bind(status.as_str())
+            .bind(stats.records_read as i64)
+            .bind(stats.records_written as i64)
+            .bind(stats.bytes_read as i64)
+            .bind(stats.bytes_written as i64)
+            .bind(&stats.error_message)
+            .bind(run_id)
+            .execute(&self.pool)
+            .await
+            .map_err(RepositoryError::other)?;
 
         Ok(())
     }

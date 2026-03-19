@@ -113,12 +113,18 @@ impl ports::CursorRepository for StateBackendRepositoryAdapter {
 
     async fn compare_and_set(
         &self,
-        _pipeline: &rapidbyte_types::state::PipelineId,
-        _stream: &rapidbyte_types::state::StreamName,
-        _expected: Option<&str>,
-        _new_value: &str,
+        pipeline: &rapidbyte_types::state::PipelineId,
+        stream: &rapidbyte_types::state::StreamName,
+        expected: Option<&str>,
+        new_value: &str,
     ) -> Result<bool, ports::RepositoryError> {
-        Ok(true)
+        let (p, s) = (pipeline.clone(), stream.clone());
+        let exp = expected.map(String::from);
+        let nv = new_value.to_string();
+        run_on_backend(&self.backend, "compare_and_set", move |b| {
+            b.compare_and_set(&p, &s, exp.as_deref(), &nv)
+        })
+        .await
     }
 }
 

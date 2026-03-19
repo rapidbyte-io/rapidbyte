@@ -75,6 +75,7 @@ impl StateBackend for PgBackend {
         rx.blocking_recv().map_err(|_| response_dropped())?
     }
 
+    #[allow(clippy::similar_names)]
     fn complete_run(
         &self,
         run_id: i64,
