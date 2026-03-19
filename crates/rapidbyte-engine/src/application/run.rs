@@ -11,10 +11,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use rapidbyte_pipeline_config::{
-    parse_byte_size, PipelineConfig, PipelineLimits, PipelinePermissions, ResourceConfig,
+    parse_byte_size, PipelineConfig, PipelineLimits, PipelineParallelism, PipelinePermissions,
+    ResourceConfig,
 };
 use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
 use rapidbyte_types::stream::StreamLimits;
+use rapidbyte_types::wire::SyncMode;
 
 use rapidbyte_runtime::{Frame, SandboxOverrides};
 
@@ -239,8 +241,12 @@ pub async fn run_pipeline(
                 stream: stream_name.clone(),
             });
 
-            // Load cursor for incremental streams
-            let cursor_info = if let Some(cursor_field) = &stream_cfg.cursor_field {
+            // Load cursor for incremental and CDC streams
+            let cursor_info = if stream_cfg.sync_mode == SyncMode::FullRefresh {
+                // Full refresh never uses cursors
+                None
+            } else {
+                // Both Incremental and Cdc need cursor state
                 let last_value = ctx
                     .cursors
                     .get(&pipeline_id, &StreamName::new(stream_name))
@@ -249,14 +255,20 @@ pub async fn run_pipeline(
                     .and_then(|cs| cs.cursor_value)
                     .map(|v| rapidbyte_types::cursor::CursorValue::Utf8 { value: v });
 
+                // cursor_field is required for Incremental, optional for Cdc
+                let cursor_field = stream_cfg.cursor_field.clone().unwrap_or_default();
+                let cursor_type = if stream_cfg.sync_mode == SyncMode::Cdc {
+                    rapidbyte_types::cursor::CursorType::Lsn
+                } else {
+                    rapidbyte_types::cursor::CursorType::Utf8
+                };
+
                 Some(rapidbyte_types::cursor::CursorInfo {
-                    cursor_field: cursor_field.clone(),
+                    cursor_field,
                     tie_breaker_field: stream_cfg.tie_breaker_field.clone(),
-                    cursor_type: rapidbyte_types::cursor::CursorType::Utf8,
+                    cursor_type,
                     last_value,
                 })
-            } else {
-                None
             };
 
             // Build stream context with limits from pipeline resources
@@ -281,7 +293,10 @@ pub async fn run_pipeline(
                 partition_key: stream_cfg.partition_key.clone(),
                 partition_count: None,
                 partition_index: None,
-                effective_parallelism: None,
+                effective_parallelism: Some(match pipeline.resources.parallelism {
+                    PipelineParallelism::Auto => 1,
+                    PipelineParallelism::Manual(n) => n,
+                }),
                 partition_strategy: None,
                 copy_flush_bytes_override: None,
             };
@@ -468,7 +483,10 @@ pub async fn run_pipeline(
 
                     // Collect DLQ records from this stream
                     let dlq_batch: Vec<rapidbyte_types::envelope::DlqRecord> =
-                        std::mem::take(&mut *stream_dlq.lock().unwrap());
+                        match stream_dlq.lock() {
+                            Ok(mut guard) => std::mem::take(&mut *guard),
+                            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+                        };
                     if !dlq_batch.is_empty() {
                         per_stream_dlq.insert(stream_name.clone(), dlq_batch);
                     }
@@ -521,7 +539,10 @@ pub async fn run_pipeline(
 
                     // Persist any DLQ records accumulated before the error
                     let dlq_batch: Vec<rapidbyte_types::envelope::DlqRecord> =
-                        std::mem::take(&mut *stream_dlq.lock().unwrap());
+                        match stream_dlq.lock() {
+                            Ok(mut guard) => std::mem::take(&mut *guard),
+                            Err(poisoned) => std::mem::take(&mut *poisoned.into_inner()),
+                        };
                     if !dlq_batch.is_empty() {
                         if let Err(dlq_err) = ctx.dlq.insert(&pipeline_id, run_id, &dlq_batch).await
                         {
@@ -607,7 +628,10 @@ pub async fn run_pipeline(
             duration_secs,
             wasm_overhead_secs: 0.0,
             retry_count: attempt.saturating_sub(1),
-            parallelism: 1,
+            parallelism: match pipeline.resources.parallelism {
+                PipelineParallelism::Auto => 1,
+                PipelineParallelism::Manual(n) => n,
+            },
             stream_metrics,
         };
 
