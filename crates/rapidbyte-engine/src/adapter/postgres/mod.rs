@@ -63,7 +63,10 @@ impl PgBackend {
     ///
     /// Returns an error if any migration fails.
     pub async fn migrate(&self) -> Result<(), anyhow::Error> {
-        sqlx::migrate!("./migrations").run(&self.pool).await?;
+        sqlx::migrate!("./migrations")
+            .set_ignore_missing(true)
+            .run(&self.pool)
+            .await?;
         Ok(())
     }
 
