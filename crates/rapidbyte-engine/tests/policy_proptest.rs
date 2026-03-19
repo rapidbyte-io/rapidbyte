@@ -48,7 +48,7 @@ destination:
   write_mode: upsert
   primary_key: {primary_key_yaml}
 state:
-  backend: sqlite
+  connection: "postgres://localhost/test"
 "#
         );
 
@@ -96,7 +96,7 @@ destination:
     schema: raw
   write_mode: append
 state:
-  backend: sqlite
+  connection: "postgres://localhost/test"
 "#
         );
 
