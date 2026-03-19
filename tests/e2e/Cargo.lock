@@ -3277,20 +3277,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "postgres"
-version = "0.19.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e7c48ece1c6cda0db61b058c1721378da76855140e9214339fa1317decacb176"
-dependencies = [
- "bytes",
- "fallible-iterator 0.2.0",
- "futures-util",
- "log",
- "tokio",
- "tokio-postgres",
-]
-
-[[package]]
 name = "postgres-protocol"
 version = "0.6.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3627,7 +3613,6 @@ dependencies = [
  "jsonschema",
  "opentelemetry",
  "opentelemetry_sdk",
- "postgres",
  "rapidbyte-metrics",
  "rapidbyte-pipeline-config",
  "rapidbyte-registry",

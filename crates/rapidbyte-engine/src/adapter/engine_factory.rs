@@ -188,6 +188,7 @@ pub async fn build_run_context(
     let pg = crate::adapter::postgres::PgBackend::connect(&state_connection)
         .await
         .map_err(PipelineError::Infrastructure)?;
+    pg.migrate().await.map_err(PipelineError::Infrastructure)?;
     let pg = Arc::new(pg);
     let state_backend = pg.as_state_backend();
 
