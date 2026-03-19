@@ -637,6 +637,97 @@ destination:
     }
 
     // -------------------------------------------------------------------
+    // Test: N transforms × M streams with mixed outcomes per transform
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn check_multi_transform_multi_stream_keeps_worst_per_transform() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+        tc.resolver.register("tx-a", test_resolved_plugin());
+        tc.resolver.register("tx-b", test_resolved_plugin());
+
+        // 2 streams × (source + dest + 2 transforms) = 2+2+4 = 8 validate calls
+        // Source: ok, ok
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        // Destination: ok, ok
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        // Transform tx-a: FAILS on stream users, ok on stream orders
+        tc.runner
+            .enqueue_validate(Ok(failed_validation("tx-a fails on users")));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        // Transform tx-b: ok on stream users, FAILS on stream orders
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner
+            .enqueue_validate(Ok(failed_validation("tx-b fails on orders")));
+
+        let pipeline: PipelineConfig = serde_yaml::from_str(
+            r#"
+version: "1.0"
+pipeline: test-n-transforms-m-streams
+source:
+    use: src
+    config: {}
+    streams:
+        - name: users
+          sync_mode: full_refresh
+        - name: orders
+          sync_mode: full_refresh
+transforms:
+    - use: tx-a
+      config: {}
+    - use: tx-b
+      config: {}
+destination:
+    use: dst
+    config: {}
+    write_mode: append
+"#,
+        )
+        .expect("test yaml should parse");
+
+        let result = check_pipeline(&tc.ctx, &pipeline).await.unwrap();
+
+        // 2 transforms, each keeping worst-of-2-streams
+        assert_eq!(
+            result.transform_validations.len(),
+            2,
+            "should have exactly 1 validation per transform"
+        );
+
+        // tx-a (index 0): failed on users → worst is Failed
+        assert_eq!(
+            result.transform_validations[0].status,
+            ValidationStatus::Failed,
+            "transform 0 (tx-a) should show failure from stream 'users'"
+        );
+        assert!(
+            result.transform_validations[0]
+                .message
+                .contains("tx-a fails on users"),
+            "transform 0 message should reference 'tx-a fails on users', got: {}",
+            result.transform_validations[0].message
+        );
+
+        // tx-b (index 1): failed on orders → worst is Failed
+        assert_eq!(
+            result.transform_validations[1].status,
+            ValidationStatus::Failed,
+            "transform 1 (tx-b) should show failure from stream 'orders'"
+        );
+        assert!(
+            result.transform_validations[1]
+                .message
+                .contains("tx-b fails on orders"),
+            "transform 1 message should reference 'tx-b fails on orders', got: {}",
+            result.transform_validations[1].message
+        );
+    }
+
+    // -------------------------------------------------------------------
     // Test: Check mixed validation results
     // -------------------------------------------------------------------
 
