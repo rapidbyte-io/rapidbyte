@@ -82,7 +82,9 @@ fn build_stream_limits(resources: &ResourceConfig) -> StreamLimits {
 /// pipeline config. When set, the overrides are intersected with manifest
 /// permissions by the runtime's `build_wasi_ctx`.
 /// Build sandbox overrides by merging pipeline YAML overrides with manifest
-/// defaults. Pipeline YAML values take precedence; manifest values fill gaps.
+/// limits. Uses `min(manifest, pipeline)` for resource limits — pipeline config
+/// can only narrow plugin-declared limits, never widen them (per PROTOCOL.md).
+/// If only one side specifies a limit, that value is used directly.
 fn build_sandbox_overrides(
     yaml_permissions: Option<&PipelinePermissions>,
     yaml_limits: Option<&PipelineLimits>,
@@ -97,19 +99,30 @@ fn build_sandbox_overrides(
         return None;
     }
 
-    // Pipeline YAML limits override manifest limits
-    let max_memory_bytes = yaml_limits
+    let yaml_memory = yaml_limits
         .and_then(|l| l.max_memory.as_deref())
-        .and_then(|s| parse_byte_size(s).ok())
-        .or_else(|| {
-            manifest_limits
-                .and_then(|l| l.max_memory.as_deref())
-                .and_then(|s| parse_byte_size(s).ok())
-        });
+        .and_then(|s| parse_byte_size(s).ok());
+    let manifest_memory = manifest_limits
+        .and_then(|l| l.max_memory.as_deref())
+        .and_then(|s| parse_byte_size(s).ok());
 
-    let timeout_seconds = yaml_limits
-        .and_then(|l| l.timeout_seconds)
-        .or_else(|| manifest_limits.and_then(|l| l.timeout_seconds));
+    // min(manifest, pipeline) — pipeline can only narrow, never widen
+    let max_memory_bytes = match (yaml_memory, manifest_memory) {
+        (Some(y), Some(m)) => Some(y.min(m)),
+        (Some(y), None) => Some(y),
+        (None, Some(m)) => Some(m),
+        (None, None) => None,
+    };
+
+    let yaml_timeout = yaml_limits.and_then(|l| l.timeout_seconds);
+    let manifest_timeout = manifest_limits.and_then(|l| l.timeout_seconds);
+
+    let timeout_seconds = match (yaml_timeout, manifest_timeout) {
+        (Some(y), Some(m)) => Some(y.min(m)),
+        (Some(y), None) => Some(y),
+        (None, Some(m)) => Some(m),
+        (None, None) => None,
+    };
 
     Some(SandboxOverrides {
         allowed_hosts: yaml_permissions.and_then(|p| p.network.allowed_hosts.clone()),
@@ -1523,5 +1536,95 @@ destination:
             err.to_string().contains("destination connection lost"),
             "error should contain destination message"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Sandbox override merge semantics
+    // -----------------------------------------------------------------------
+
+    fn manifest_with_limits(
+        max_memory: Option<&str>,
+        timeout: Option<u64>,
+    ) -> rapidbyte_types::manifest::PluginManifest {
+        rapidbyte_types::manifest::PluginManifest {
+            id: "test".into(),
+            name: "test".into(),
+            version: "0.1.0".into(),
+            description: String::new(),
+            author: None,
+            license: None,
+            protocol_version: rapidbyte_types::wire::ProtocolVersion::V6,
+            permissions: rapidbyte_types::manifest::Permissions::default(),
+            limits: rapidbyte_types::manifest::ResourceLimits {
+                max_memory: max_memory.map(String::from),
+                timeout_seconds: timeout,
+                min_memory: None,
+            },
+            roles: rapidbyte_types::manifest::Roles::default(),
+            config_schema: None,
+        }
+    }
+
+    #[test]
+    fn sandbox_overrides_min_narrows_memory() {
+        let yaml_limits = PipelineLimits {
+            max_memory: Some("512mb".into()),
+            timeout_seconds: None,
+        };
+        let manifest = manifest_with_limits(Some("256mb"), None);
+        let overrides = build_sandbox_overrides(None, Some(&yaml_limits), Some(&manifest)).unwrap();
+        // min(512mb, 256mb) = 256mb
+        assert_eq!(overrides.max_memory_bytes, Some(256 * 1024 * 1024));
+    }
+
+    #[test]
+    fn sandbox_overrides_min_narrows_timeout() {
+        let yaml_limits = PipelineLimits {
+            max_memory: None,
+            timeout_seconds: Some(600),
+        };
+        let manifest = manifest_with_limits(None, Some(300));
+        let overrides = build_sandbox_overrides(None, Some(&yaml_limits), Some(&manifest)).unwrap();
+        // min(600, 300) = 300
+        assert_eq!(overrides.timeout_seconds, Some(300));
+    }
+
+    #[test]
+    fn sandbox_overrides_manifest_only() {
+        let manifest = manifest_with_limits(Some("128mb"), Some(60));
+        let overrides = build_sandbox_overrides(None, None, Some(&manifest)).unwrap();
+        assert_eq!(overrides.max_memory_bytes, Some(128 * 1024 * 1024));
+        assert_eq!(overrides.timeout_seconds, Some(60));
+    }
+
+    #[test]
+    fn sandbox_overrides_yaml_only() {
+        let yaml_limits = PipelineLimits {
+            max_memory: Some("64mb".into()),
+            timeout_seconds: Some(30),
+        };
+        let overrides = build_sandbox_overrides(None, Some(&yaml_limits), None).unwrap();
+        assert_eq!(overrides.max_memory_bytes, Some(64 * 1024 * 1024));
+        assert_eq!(overrides.timeout_seconds, Some(30));
+    }
+
+    #[test]
+    fn sandbox_overrides_none_when_no_limits() {
+        let manifest = manifest_with_limits(None, None);
+        let overrides = build_sandbox_overrides(None, None, Some(&manifest));
+        assert!(overrides.is_none());
+    }
+
+    #[test]
+    fn sandbox_overrides_pipeline_cannot_widen_manifest() {
+        // Pipeline says 1gb but manifest says 256mb — should get 256mb
+        let yaml_limits = PipelineLimits {
+            max_memory: Some("1gb".into()),
+            timeout_seconds: Some(3600),
+        };
+        let manifest = manifest_with_limits(Some("256mb"), Some(300));
+        let overrides = build_sandbox_overrides(None, Some(&yaml_limits), Some(&manifest)).unwrap();
+        assert_eq!(overrides.max_memory_bytes, Some(256 * 1024 * 1024));
+        assert_eq!(overrides.timeout_seconds, Some(300));
     }
 }
