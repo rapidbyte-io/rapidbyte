@@ -4,7 +4,7 @@
 //! list of streams the plugin can sync.
 
 use crate::application::context::EngineContext;
-use crate::application::{extract_permissions, parse_plugin_id};
+use crate::application::{build_sandbox_overrides, extract_permissions, parse_plugin_id};
 use crate::domain::error::PipelineError;
 use crate::domain::ports::runner::{DiscoverParams, DiscoveredStream};
 use rapidbyte_types::wire::PluginKind;
@@ -28,6 +28,9 @@ pub async fn discover_plugin(
         .await?;
 
     let permissions = extract_permissions(&resolved);
+    // Apply manifest-declared resource limits (no pipeline YAML overrides
+    // since discover operates outside a pipeline context).
+    let sandbox_overrides = build_sandbox_overrides(None, None, resolved.manifest.as_ref())?;
     let (plugin_id, plugin_version) = parse_plugin_id(source_ref);
 
     let params = DiscoverParams {
@@ -36,7 +39,7 @@ pub async fn discover_plugin(
         plugin_version,
         config: config_json.cloned().unwrap_or(serde_json::Value::Null),
         permissions,
-        sandbox_overrides: None,
+        sandbox_overrides,
     };
 
     ctx.runner.discover(&params).await
