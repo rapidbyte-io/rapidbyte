@@ -152,11 +152,18 @@ impl ports::RunRecordRepository for StateBackendRepositoryAdapter {
 impl ports::DlqRepository for StateBackendRepositoryAdapter {
     async fn insert(
         &self,
-        _pipeline: &rapidbyte_types::state::PipelineId,
-        _run_id: i64,
-        _records: &[rapidbyte_types::envelope::DlqRecord],
+        pipeline: &rapidbyte_types::state::PipelineId,
+        run_id: i64,
+        records: &[rapidbyte_types::envelope::DlqRecord],
     ) -> Result<u64, ports::RepositoryError> {
-        Ok(0)
+        if records.is_empty() {
+            return Ok(0);
+        }
+        let (p, recs) = (pipeline.clone(), records.to_vec());
+        run_on_backend(&self.backend, "insert_dlq", move |b| {
+            b.insert_dlq_records(&p, run_id, &recs)
+        })
+        .await
     }
 }
 
