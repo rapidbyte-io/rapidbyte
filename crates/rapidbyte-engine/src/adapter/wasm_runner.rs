@@ -864,7 +864,8 @@ fn validate_plugin_impl(
     }
     let host_state = builder.build()?;
 
-    let mut store = module.new_store(host_state, None);
+    let timeout = sandbox_overrides.and_then(|o| o.timeout_seconds);
+    let mut store = module.new_store(host_state, timeout);
     let config_json = serde_json::to_string(config)?;
 
     match kind {
@@ -986,7 +987,8 @@ fn run_discover_impl(
     }
     let host_state = builder.build()?;
 
-    let mut store = module.new_store(host_state, None);
+    let timeout = sandbox_overrides.and_then(|o| o.timeout_seconds);
+    let mut store = module.new_store(host_state, timeout);
     let linker = create_component_linker(&module.engine, "source", |linker| {
         source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(linker, |state| state)?;
         Ok(())
