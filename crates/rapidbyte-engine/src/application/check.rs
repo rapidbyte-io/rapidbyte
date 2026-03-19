@@ -5,7 +5,7 @@
 //! every component.
 
 use rapidbyte_pipeline_config::PipelineConfig;
-use rapidbyte_types::error::ValidationStatus;
+use rapidbyte_types::error::{ValidationResult, ValidationStatus};
 use rapidbyte_types::wire::PluginKind;
 
 use crate::application::context::EngineContext;
@@ -208,7 +208,10 @@ pub async fn check_pipeline(
                 .collect()
         };
 
-        for stream_name in stream_names {
+        // Validate against all streams, keep the worst result per transform
+        // to maintain 1:1 alignment with pipeline.transforms for CLI labeling.
+        let mut worst_validation: Option<ValidationResult> = None;
+        for stream_name in &stream_names {
             let validation = ctx
                 .runner
                 .validate_plugin(&ValidateParams {
@@ -223,18 +226,19 @@ pub async fn check_pipeline(
                 })
                 .await?;
 
-            // Issue 6: Include stream and transform name in the validation
-            // message so the CLI can display which stream/transform pair
-            // each entry belongs to (N_transforms x N_streams entries).
             let mut result = validation.validation;
-            if result.message.is_empty() {
-                result.message = format!("[{}/{}]", transform.use_ref, stream_name);
-            } else {
-                result.message =
-                    format!("[{}/{}] {}", transform.use_ref, stream_name, result.message);
+            if !result.message.is_empty() {
+                result.message = format!("[stream: {}] {}", stream_name, result.message);
             }
-            transform_validations.push(result);
+
+            let dominated = worst_validation
+                .as_ref()
+                .is_none_or(|prev| validation_severity(&result) > validation_severity(prev));
+            if dominated {
+                worst_validation = Some(result);
+            }
         }
+        transform_validations.push(worst_validation.expect("at least one stream name"));
     }
 
     // -- State --
@@ -265,7 +269,11 @@ pub async fn check_pipeline(
 /// Return a numeric severity for a validation status so we can keep the
 /// worst result across streams: Failed (2) > Warning (1) > Ok (0).
 fn severity(status: &CheckComponentStatus) -> u8 {
-    match status.validation.status {
+    validation_severity(&status.validation)
+}
+
+fn validation_severity(result: &ValidationResult) -> u8 {
+    match result.status {
         ValidationStatus::Failed => 2,
         ValidationStatus::Warning => 1,
         ValidationStatus::Success => 0,
@@ -613,22 +621,18 @@ destination:
 
         let result = check_pipeline(&tc.ctx, &pipeline).await.unwrap();
 
-        // 1 transform * 2 streams = 2 transform validations
-        assert_eq!(result.transform_validations.len(), 2);
+        // 1 transform, worst-of-2-streams = 1 validation (keeps the failure)
+        assert_eq!(result.transform_validations.len(), 1);
         assert_eq!(
             result.transform_validations[0].status,
-            ValidationStatus::Success
-        );
-        assert_eq!(
-            result.transform_validations[1].status,
             ValidationStatus::Failed
         );
         assert!(
-            result.transform_validations[1]
+            result.transform_validations[0]
                 .message
                 .contains("transform fails on orders"),
             "expected transform failure message, got: {}",
-            result.transform_validations[1].message
+            result.transform_validations[0].message
         );
     }
 
