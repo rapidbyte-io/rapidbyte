@@ -72,12 +72,28 @@ impl StateBackend for FakeStateBackend {
     }
     fn compare_and_set(
         &self,
-        _: &PipelineId,
-        _: &StreamName,
-        _: Option<&str>,
-        _: &str,
+        pipeline: &PipelineId,
+        stream: &StreamName,
+        expected: Option<&str>,
+        new_value: &str,
     ) -> rapidbyte_types::state_error::Result<bool> {
-        Ok(true)
+        let key = (pipeline.to_string(), stream.to_string());
+        let mut cursors = self.cursors.lock().unwrap();
+        let current = cursors.get(&key).and_then(|c| c.cursor_value.as_deref());
+        if current == expected {
+            let prev_field = cursors.get(&key).and_then(|c| c.cursor_field.clone());
+            cursors.insert(
+                key,
+                CursorState {
+                    cursor_field: prev_field,
+                    cursor_value: Some(new_value.to_string()),
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                },
+            );
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
     fn insert_dlq_records(
         &self,

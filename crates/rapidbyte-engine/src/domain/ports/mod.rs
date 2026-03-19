@@ -35,8 +35,8 @@ pub enum RepositoryError {
     #[error("conflict: {0}")]
     Conflict(String),
     /// Any other storage error.
-    #[error("{0}")]
-    Other(Box<dyn std::error::Error + Send + Sync>),
+    #[error("repository error: {0}")]
+    Other(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl RepositoryError {

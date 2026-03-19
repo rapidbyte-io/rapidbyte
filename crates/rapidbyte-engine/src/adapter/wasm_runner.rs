@@ -155,16 +155,30 @@ impl PluginRunner for WasmPluginRunner {
         &self,
         params: &ValidateParams,
     ) -> Result<CheckComponentStatus, PipelineError> {
-        let validation = validate_plugin_impl(
-            &self.runtime,
-            &params.wasm_path,
-            params.kind,
-            &params.plugin_id,
-            &params.plugin_version,
-            &params.config,
-            &params.stream_name,
-            params.permissions.as_ref(),
-        )
+        let component = self
+            .runtime
+            .load_module(&params.wasm_path)
+            .map_err(PipelineError::Infrastructure)?;
+        let kind = params.kind;
+        let plugin_id = params.plugin_id.clone();
+        let plugin_version = params.plugin_version.clone();
+        let config = params.config.clone();
+        let stream_name = params.stream_name.clone();
+        let permissions = params.permissions.clone();
+
+        let validation = tokio::task::spawn_blocking(move || {
+            validate_plugin_impl(
+                &component,
+                kind,
+                &plugin_id,
+                &plugin_version,
+                &config,
+                &stream_name,
+                permissions.as_ref(),
+            )
+        })
+        .await
+        .map_err(|e| PipelineError::infra(format!("validate task panicked: {e}")))?
         .map_err(PipelineError::Infrastructure)?;
 
         Ok(CheckComponentStatus { validation })
@@ -174,14 +188,26 @@ impl PluginRunner for WasmPluginRunner {
         &self,
         params: &DiscoverParams,
     ) -> Result<Vec<DiscoveredStream>, PipelineError> {
-        let catalog = run_discover_impl(
-            &self.runtime,
-            &params.wasm_path,
-            &params.plugin_id,
-            &params.plugin_version,
-            &params.config,
-            params.permissions.as_ref(),
-        )
+        let component = self
+            .runtime
+            .load_module(&params.wasm_path)
+            .map_err(PipelineError::Infrastructure)?;
+        let plugin_id = params.plugin_id.clone();
+        let plugin_version = params.plugin_version.clone();
+        let config = params.config.clone();
+        let permissions = params.permissions.clone();
+
+        let catalog = tokio::task::spawn_blocking(move || {
+            run_discover_impl(
+                &component,
+                &plugin_id,
+                &plugin_version,
+                &config,
+                permissions.as_ref(),
+            )
+        })
+        .await
+        .map_err(|e| PipelineError::infra(format!("discover task panicked: {e}")))?
         .map_err(PipelineError::Infrastructure)?;
 
         let streams = catalog
@@ -777,8 +803,7 @@ fn run_transform_stream(
 /// entrypoint in-process.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn validate_plugin_impl(
-    runtime: &WasmRuntime,
-    wasm_path: &std::path::Path,
+    module: &LoadedComponent,
     kind: PluginKind,
     plugin_id: &str,
     plugin_version: &str,
@@ -790,7 +815,6 @@ fn validate_plugin_impl(
 
     tracing::info!(plugin = plugin_id, version = plugin_version, kind = ?kind, "Validating plugin");
 
-    let module = runtime.load_module(wasm_path)?;
     let state = noop_state_backend();
 
     let mut builder = ComponentHostState::builder()
@@ -904,15 +928,12 @@ fn validate_plugin_impl(
 
 /// Discover available streams from a source plugin.
 fn run_discover_impl(
-    runtime: &WasmRuntime,
-    wasm_path: &std::path::Path,
+    module: &LoadedComponent,
     plugin_id: &str,
     plugin_version: &str,
     config: &serde_json::Value,
     permissions: Option<&Permissions>,
 ) -> anyhow::Result<Catalog> {
-    let module = runtime.load_module(wasm_path)?;
-
     let state = noop_state_backend();
     let mut builder = ComponentHostState::builder()
         .pipeline("discover")

@@ -1,5 +1,11 @@
 //! Pipeline configuration: types, YAML parsing, validation, and secret resolution.
 //!
+//! | Module      | Responsibility |
+//! |-------------|----------------|
+//! | `parser`    | YAML parsing with variable/secret substitution |
+//! | `types`     | Pipeline configuration structs |
+//! | `validator` | Semantic validation and consistency checks |
+//!
 //! Supports two kinds of references in pipeline YAML:
 //! - `${ENV_VAR}` — resolved from the process environment
 //! - `${prefix:path#key}` — resolved via a registered [`SecretProvider`]

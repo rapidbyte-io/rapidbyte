@@ -32,7 +32,7 @@ impl RunRecordRepository for PgBackend {
         status: RunStatus,
         stats: &RunStats,
     ) -> Result<(), RepositoryError> {
-        sqlx::query(super::queries::COMPLETE_RUN)
+        let result = sqlx::query(super::queries::COMPLETE_RUN)
             .bind(status.as_str())
             .bind(stats.records_read as i64)
             .bind(stats.records_written as i64)
@@ -43,6 +43,12 @@ impl RunRecordRepository for PgBackend {
             .execute(&self.pool)
             .await
             .map_err(RepositoryError::other)?;
+
+        if result.rows_affected() == 0 {
+            return Err(RepositoryError::other(std::io::Error::other(format!(
+                "run {run_id} not found"
+            ))));
+        }
 
         Ok(())
     }

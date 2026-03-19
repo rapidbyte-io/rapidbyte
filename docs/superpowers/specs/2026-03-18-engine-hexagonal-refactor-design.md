@@ -231,8 +231,6 @@ Backoff computation: `base_ms * 2^(attempt-1)`, capped at 60s. Base values: Fast
 Clean data containers, no business logic.
 
 ```rust
-pub enum PipelineOutcome { Run(PipelineResult), DryRun(DryRunResult) }
-
 pub struct PipelineResult {
     pub counts: PipelineCounts,
     pub source_timing: SourceTiming,
@@ -241,8 +239,6 @@ pub struct PipelineResult {
     pub retry_count: u32,
 }
 
-pub struct DryRunResult { pub streams: Vec<DryRunStreamResult> }
-pub struct DryRunStreamResult { pub stream_name: String, pub batches: Vec<RecordBatch> }
 pub struct CheckResult { pub components: Vec<CheckComponentStatus> }
 pub enum CheckStatus { Ok, Warning(String), Error(String) }
 ```
@@ -296,9 +292,8 @@ The core orchestration use case. Owns the retry loop.
 pub async fn run_pipeline(
     ctx: &EngineContext,
     pipeline: &PipelineConfig,
-    options: &ExecutionOptions,
     cancel: CancellationToken,
-) -> Result<PipelineOutcome, PipelineError> { ... }
+) -> Result<PipelineResult, PipelineError> { ... }
 ```
 
 The `CancellationToken` (from `tokio_util::sync`) enables graceful shutdown. The orchestrator checks `cancel.is_cancelled()` at phase boundaries (before resolve, before execute, between retry attempts). When cancelled, returns `PipelineError::Cancelled`.
@@ -545,7 +540,7 @@ let ctx = EngineContext {
 };
 
 let cancel = CancellationToken::new();
-let outcome = run_pipeline(&ctx, &pipeline, &options, cancel.clone()).await?;
+let result = run_pipeline(&ctx, &pipeline, cancel.clone()).await?;
 ```
 
 ## Dependency Graph After Refactor
@@ -601,7 +596,7 @@ crates/rapidbyte-engine/
 │   │   # Note: ProgressReporter lives in domain/progress.rs alongside Phase/ProgressEvent
 │   ├── error.rs                    # PipelineError, RepositoryError, RetryParams
 │   ├── retry.rs                    # RetryPolicy, BackoffClass, RetryDecision
-│   ├── outcome.rs                  # PipelineOutcome, PipelineResult, CheckResult, etc.
+│   ├── outcome.rs                  # PipelineResult, CheckResult, etc.
 │   └── progress.rs                 # Phase, ProgressEvent, ProgressReporter trait
 ├── application/
 │   ├── mod.rs
@@ -635,8 +630,7 @@ pub use application::check::check_pipeline;
 pub use application::discover::discover_plugin;
 pub use domain::error::PipelineError;
 pub use domain::outcome::{
-    CheckResult, CheckStatus, DryRunResult, DryRunStreamResult,
-    ExecutionOptions, PipelineOutcome, PipelineResult,
+    CheckResult, CheckStatus, PipelineResult,
 };
 pub use domain::progress::{Phase, ProgressEvent};
 pub use domain::ports::{

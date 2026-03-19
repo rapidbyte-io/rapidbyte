@@ -501,7 +501,10 @@ pub async fn run_pipeline(
                     attempt,
                     delay: retry_delay,
                 });
-                tokio::time::sleep(retry_delay).await;
+                tokio::select! {
+                    () = tokio::time::sleep(retry_delay) => {},
+                    () = cancel.cancelled() => return Err(PipelineError::Cancelled),
+                }
                 continue;
             }
             return Err(err);

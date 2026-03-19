@@ -174,15 +174,10 @@ This is the largest test addition. All tests use `fake_context()`.
 
       let pipeline = test_pipeline_config("src", "dst", &["users"]);
       let cancel = CancellationToken::new();
-      let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await.unwrap();
+      let result = run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
 
-      match result {
-          PipelineOutcome::Run(r) => {
-              assert_eq!(r.retry_count, 1);
-              assert_eq!(r.counts.records_read, 50);
-          }
-          _ => panic!("expected Run outcome"),
-      }
+      assert_eq!(result.retry_count, 1);
+      assert_eq!(result.counts.records_read, 50);
       // Verify RetryScheduled event was emitted
       let events = tc.progress.events();
       assert!(events.iter().any(|e| matches!(e, ProgressEvent::RetryScheduled { .. })));
@@ -200,7 +195,7 @@ This is the largest test addition. All tests use `fake_context()`.
       }
       let pipeline = test_pipeline_config("src", "dst", &["users"]);
       let cancel = CancellationToken::new();
-      let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
+      let result = run_pipeline(&tc.ctx, &pipeline, cancel).await;
       assert!(result.is_err());
   }
 
@@ -213,7 +208,7 @@ This is the largest test addition. All tests use `fake_context()`.
       // Don't enqueue a second source — if retry happens, it'll panic on empty queue
       let pipeline = test_pipeline_config("src", "dst", &["users"]);
       let cancel = CancellationToken::new();
-      let result = run_pipeline(&tc.ctx, &pipeline, &ExecutionOptions::default(), cancel).await;
+      let result = run_pipeline(&tc.ctx, &pipeline, cancel).await;
       assert!(result.is_err());
   }
   ```
@@ -786,7 +781,7 @@ Requires test plugins from Task 6. All tests gated behind `#[cfg(feature = "inte
       // Create EngineContext with real WasmPluginRunner
       // Use test source + test destination
       // Call run_pipeline
-      // Verify PipelineOutcome::Run with correct counts
+      // Verify PipelineResult with correct counts
   }
   ```
 

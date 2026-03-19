@@ -5,13 +5,14 @@
 //! every component.
 
 use rapidbyte_pipeline_config::PipelineConfig;
+use rapidbyte_types::error::ValidationStatus;
 use rapidbyte_types::wire::PluginKind;
 
 use crate::application::context::EngineContext;
 use crate::application::{extract_permissions, parse_plugin_id};
 use crate::domain::error::PipelineError;
 use crate::domain::outcome::{CheckResult, CheckStatus};
-use crate::domain::ports::runner::ValidateParams;
+use crate::domain::ports::runner::{CheckComponentStatus, ValidateParams};
 
 /// Resolve and validate all plugins in a pipeline configuration.
 ///
@@ -29,7 +30,7 @@ use crate::domain::ports::runner::ValidateParams;
 /// component (resolution failures are fatal). Individual validation
 /// failures are captured in the returned `CheckResult` rather than
 /// causing an early return.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::missing_panics_doc)]
 pub async fn check_pipeline(
     ctx: &EngineContext,
     pipeline: &PipelineConfig,
@@ -57,18 +58,45 @@ pub async fn check_pipeline(
     let (src_id, src_ver) = parse_plugin_id(&pipeline.source.use_ref);
     let source_permissions = extract_permissions(&source_resolved);
 
-    let source_validation = ctx
-        .runner
-        .validate_plugin(&ValidateParams {
-            wasm_path: source_resolved.wasm_path,
-            kind: PluginKind::Source,
-            plugin_id: src_id,
-            plugin_version: src_ver,
-            config: pipeline.source.config.clone(),
-            stream_name: first_stream_name(pipeline),
-            permissions: source_permissions,
-        })
-        .await?;
+    let source_stream_names: Vec<String> = if pipeline.source.streams.is_empty() {
+        vec!["check".to_string()]
+    } else {
+        pipeline
+            .source
+            .streams
+            .iter()
+            .map(|s| s.name.clone())
+            .collect()
+    };
+
+    // Validate the source against every stream so stream-specific failures
+    // are not missed.
+    let mut source_validation = None;
+    for stream_name in &source_stream_names {
+        let validation = ctx
+            .runner
+            .validate_plugin(&ValidateParams {
+                wasm_path: source_resolved.wasm_path.clone(),
+                kind: PluginKind::Source,
+                plugin_id: src_id.clone(),
+                plugin_version: src_ver.clone(),
+                config: pipeline.source.config.clone(),
+                stream_name: stream_name.clone(),
+                permissions: source_permissions.clone(),
+            })
+            .await?;
+
+        // Keep the first failed result, or the last successful one.
+        let dominated = source_validation
+            .as_ref()
+            .is_none_or(|prev: &CheckComponentStatus| {
+                prev.validation.status != ValidationStatus::Failed
+            });
+        if dominated {
+            source_validation = Some(validation);
+        }
+    }
+    let source_validation = source_validation.expect("at least one stream name");
 
     // -- Destination --
     let dest_resolved = ctx
@@ -96,18 +124,34 @@ pub async fn check_pipeline(
     let (dst_id, dst_ver) = parse_plugin_id(&pipeline.destination.use_ref);
     let dest_permissions = extract_permissions(&dest_resolved);
 
-    let destination_validation = ctx
-        .runner
-        .validate_plugin(&ValidateParams {
-            wasm_path: dest_resolved.wasm_path,
-            kind: PluginKind::Destination,
-            plugin_id: dst_id,
-            plugin_version: dst_ver,
-            config: pipeline.destination.config.clone(),
-            stream_name: first_stream_name(pipeline),
-            permissions: dest_permissions,
-        })
-        .await?;
+    // Validate the destination against every stream so stream-specific
+    // failures are not missed.
+    let mut destination_validation = None;
+    for stream_name in &source_stream_names {
+        let validation = ctx
+            .runner
+            .validate_plugin(&ValidateParams {
+                wasm_path: dest_resolved.wasm_path.clone(),
+                kind: PluginKind::Destination,
+                plugin_id: dst_id.clone(),
+                plugin_version: dst_ver.clone(),
+                config: pipeline.destination.config.clone(),
+                stream_name: stream_name.clone(),
+                permissions: dest_permissions.clone(),
+            })
+            .await?;
+
+        let dominated =
+            destination_validation
+                .as_ref()
+                .is_none_or(|prev: &CheckComponentStatus| {
+                    prev.validation.status != ValidationStatus::Failed
+                });
+        if dominated {
+            destination_validation = Some(validation);
+        }
+    }
+    let destination_validation = destination_validation.expect("at least one stream name");
 
     // -- Transforms --
     let mut transform_configs = Vec::with_capacity(pipeline.transforms.len());
@@ -218,15 +262,6 @@ fn config_check(
             message: e.to_string(),
         },
     }
-}
-
-/// Extract the first stream name from the pipeline, falling back to "check".
-fn first_stream_name(pipeline: &PipelineConfig) -> String {
-    pipeline
-        .source
-        .streams
-        .first()
-        .map_or_else(|| "check".to_string(), |s| s.name.clone())
 }
 
 #[cfg(test)]
@@ -515,9 +550,11 @@ destination:
         tc.resolver
             .register("sql-transform", test_resolved_plugin());
 
-        // source + destination + 1 transform * 2 streams = 4 validate calls
-        tc.runner.enqueue_validate(Ok(ok_validation())); // source
-        tc.runner.enqueue_validate(Ok(ok_validation())); // destination
+        // source * 2 streams + destination * 2 streams + 1 transform * 2 streams = 6 validate calls
+        tc.runner.enqueue_validate(Ok(ok_validation())); // source for stream 1
+        tc.runner.enqueue_validate(Ok(ok_validation())); // source for stream 2
+        tc.runner.enqueue_validate(Ok(ok_validation())); // destination for stream 1
+        tc.runner.enqueue_validate(Ok(ok_validation())); // destination for stream 2
         tc.runner.enqueue_validate(Ok(ok_validation())); // transform for stream 1
         tc.runner
             .enqueue_validate(Ok(failed_validation("transform fails on orders"))); // transform for stream 2

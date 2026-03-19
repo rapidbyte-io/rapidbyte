@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use console::style;
 use rapidbyte_types::wire::SyncMode;
 
@@ -30,13 +30,16 @@ pub async fn execute(
         Some(&config.source.config),
     )
     .await
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    .map_err(anyhow::Error::from)?;
 
     // Convert DiscoveredStream to Catalog
     let catalog_streams: Vec<rapidbyte_types::catalog::Stream> = discovered_streams
         .into_iter()
-        .filter_map(|s| serde_json::from_str(&s.catalog_json).ok())
-        .collect();
+        .map(|s| {
+            serde_json::from_str(&s.catalog_json)
+                .with_context(|| format!("malformed catalog for stream '{}'", s.name))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let catalog = rapidbyte_types::catalog::Catalog {
         streams: catalog_streams,
