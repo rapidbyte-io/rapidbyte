@@ -893,7 +893,7 @@ destination:
         serde_yaml::from_str(&yaml).expect("test yaml should parse")
     }
 
-    /// Pipeline config with an incremental stream that has a cursor_field.
+    /// Pipeline config with an incremental stream that has a `cursor_field`.
     fn test_pipeline_config_incremental(
         source_ref: &str,
         dest_ref: &str,

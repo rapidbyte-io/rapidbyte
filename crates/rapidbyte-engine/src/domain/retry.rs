@@ -160,7 +160,7 @@ mod tests {
         assert!(matches!(decision, RetryDecision::GiveUp { .. }));
         if let RetryDecision::GiveUp { reason } = decision {
             assert!(reason.contains("max attempts"));
-            assert!(reason.contains("3"));
+            assert!(reason.contains('3'));
         }
     }
 

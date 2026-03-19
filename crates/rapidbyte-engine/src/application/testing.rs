@@ -50,6 +50,7 @@ pub fn test_resolved_plugin() -> ResolvedPlugin {
 // ---------------------------------------------------------------------------
 
 /// Queue-based fake that returns pre-enqueued results in FIFO order.
+#[allow(clippy::struct_field_names)]
 pub struct FakePluginRunner {
     source_results: Mutex<VecDeque<Result<SourceOutcome, PipelineError>>>,
     transform_results: Mutex<VecDeque<Result<TransformOutcome, PipelineError>>>,
@@ -725,7 +726,7 @@ mod tests {
         use rapidbyte_runtime::Frame;
         use rapidbyte_types::catalog::SchemaHint;
         use rapidbyte_types::state::RunStats;
-        use rapidbyte_types::stream::StreamContext;
+        use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
         use rapidbyte_types::wire::SyncMode;
 
         let (tx, _rx) = mpsc::sync_channel::<Frame>(1);
@@ -741,8 +742,8 @@ mod tests {
                 schema: SchemaHint::Columns(vec![]),
                 sync_mode: SyncMode::FullRefresh,
                 cursor_info: None,
-                limits: Default::default(),
-                policies: Default::default(),
+                limits: StreamLimits::default(),
+                policies: StreamPolicies::default(),
                 write_mode: None,
                 selected_columns: None,
                 partition_key: None,

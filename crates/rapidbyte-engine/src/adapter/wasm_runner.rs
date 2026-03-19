@@ -1127,7 +1127,7 @@ mod tests {
     use super::{handle_close_result, parse_compression, plugin_instance_key};
     use rapidbyte_runtime::CompressionCodec;
     use rapidbyte_types::catalog::SchemaHint;
-    use rapidbyte_types::stream::StreamContext;
+    use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
     use rapidbyte_types::wire::SyncMode;
 
     #[test]
@@ -1172,8 +1172,8 @@ mod tests {
             schema: SchemaHint::Columns(vec![]),
             sync_mode: SyncMode::FullRefresh,
             cursor_info: None,
-            limits: Default::default(),
-            policies: Default::default(),
+            limits: StreamLimits::default(),
+            policies: StreamPolicies::default(),
             write_mode: None,
             selected_columns: None,
             partition_key: None,

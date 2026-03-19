@@ -1175,7 +1175,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::LazyLock;
 
-    /// Minimal in-memory state backend for tests (replaces SqliteStateBackend).
+    /// Minimal in-memory state backend for tests (replaces `SqliteStateBackend`).
     struct FakeStateBackend {
         cursors: Mutex<HashMap<(String, String), rapidbyte_types::state::CursorState>>,
     }
