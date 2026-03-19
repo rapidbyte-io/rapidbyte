@@ -269,6 +269,10 @@ pub async fn run_pipeline(
             let (src_tx, mut current_rx) = mpsc::sync_channel::<Frame>(ctx.config.channel_capacity);
 
             // Spawn source
+            // TODO: merge pipeline YAML permission/limit overrides (pipeline.source.permissions,
+            // pipeline.source.limits) with manifest permissions. Currently only manifest-level
+            // permissions are passed; YAML overrides for timeout_seconds, max_memory, and
+            // network/env/fs permissions are dropped.
             let source_permissions = extract_permissions(&source_resolved);
             let source_handle = {
                 let runner = Arc::clone(&ctx.runner);
@@ -294,6 +298,8 @@ pub async fn run_pipeline(
             for (i, transform) in pipeline.transforms.iter().enumerate() {
                 let (next_tx, next_rx) = mpsc::sync_channel::<Frame>(ctx.config.channel_capacity);
 
+                // TODO: merge pipeline YAML permission/limit overrides (transform.permissions,
+                // transform.limits) with manifest permissions.
                 let t_permissions = extract_permissions(&transform_resolved[i]);
                 let (t_id, t_ver) = parse_plugin_id(&transform.use_ref);
 
@@ -321,6 +327,8 @@ pub async fn run_pipeline(
             }
 
             // Spawn destination (consumes from last channel)
+            // TODO: merge pipeline YAML permission/limit overrides (pipeline.destination.permissions,
+            // pipeline.destination.limits) with manifest permissions.
             let dest_permissions = extract_permissions(&dest_resolved);
             let dest_handle = {
                 let runner = Arc::clone(&ctx.runner);
@@ -439,10 +447,13 @@ pub async fn run_pipeline(
                         bytes_written: bw,
                         error_message: None,
                     };
-                    ctx.runs
+                    if let Err(e) = ctx
+                        .runs
                         .complete(run_id, RunStatus::Completed, &run_stats)
                         .await
-                        .map_err(|e| PipelineError::infra(format!("run complete failed: {e}")))?;
+                    {
+                        warn!(run_id, error = %e, "failed to record run completion (non-fatal)");
+                    }
 
                     // Save DLQ records for this stream (if any)
                     if let Some(dlq_batch) = per_stream_dlq.get(stream_name) {

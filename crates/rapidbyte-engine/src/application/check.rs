@@ -86,12 +86,11 @@ pub async fn check_pipeline(
             })
             .await?;
 
-        // Keep the first failed result, or the last successful one.
-        let dominated = source_validation
-            .as_ref()
-            .is_none_or(|prev: &CheckComponentStatus| {
-                prev.validation.status != ValidationStatus::Failed
-            });
+        // Keep the worst validation result across all streams
+        let dominated = match source_validation.as_ref() {
+            None => true,
+            Some(prev) => severity(&validation) > severity(prev),
+        };
         if dominated {
             source_validation = Some(validation);
         }
@@ -141,12 +140,11 @@ pub async fn check_pipeline(
             })
             .await?;
 
-        let dominated =
-            destination_validation
-                .as_ref()
-                .is_none_or(|prev: &CheckComponentStatus| {
-                    prev.validation.status != ValidationStatus::Failed
-                });
+        // Keep the worst validation result across all streams
+        let dominated = match destination_validation.as_ref() {
+            None => true,
+            Some(prev) => severity(&validation) > severity(prev),
+        };
         if dominated {
             destination_validation = Some(validation);
         }
@@ -242,6 +240,16 @@ pub async fn check_pipeline(
         transform_validations,
         state,
     })
+}
+
+/// Return a numeric severity for a validation status so we can keep the
+/// worst result across streams: Failed (2) > Warning (1) > Ok (0).
+fn severity(status: &CheckComponentStatus) -> u8 {
+    match status.validation.status {
+        ValidationStatus::Failed => 2,
+        ValidationStatus::Warning => 1,
+        ValidationStatus::Success => 0,
+    }
 }
 
 /// Validate plugin config against the manifest's JSON schema (if any).

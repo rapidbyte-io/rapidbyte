@@ -39,7 +39,7 @@ rapidbyte-engine (big, mixed concerns)
 rapidbyte-types (leaf)
 ├── ... existing protocol types ...
 ├── arrow.rs                        ← MOVED from engine (IPC codec)
-└── state.rs                        ← StateBackend trait (moved from rapidbyte-state)
+└── state_backend.rs                ← StateBackend trait (moved from rapidbyte-state)
 
 rapidbyte-pipeline-config (expanded)
 ├── ... existing substitution ...
@@ -467,7 +467,7 @@ SQLx versioned migrations, same pattern as the controller. Stored in `crates/rap
 
 ```
 crates/rapidbyte-engine/migrations/
-└── 0001_initial.sql
+└── 0001_engine_initial.sql
 ```
 
 `0001_engine_initial.sql` creates the state tables (migrated from `rapidbyte-state`). Column names match the existing `CursorState`, `RunStats`, and `DlqRecord` types from `rapidbyte-types`. Timestamps upgraded from `TEXT` (ISO 8601 strings) to `TIMESTAMPTZ` (native Postgres).
