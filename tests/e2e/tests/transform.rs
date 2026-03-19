@@ -214,7 +214,7 @@ async fn validate_transform_dlq_continues_and_writes_valid_rows() {
         assert_eq!(run.records_written, 2);
 
         let dlq_rows = context
-            .read_dlq_rows(&state_conn)
+            .read_dlq_rows(&state_conn, "e2e_validate_transform")
             .await
             .expect("should read persisted dlq rows");
         assert_eq!(dlq_rows.len(), 1);

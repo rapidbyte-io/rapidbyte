@@ -94,7 +94,11 @@ impl HarnessContext {
         )
     }
 
-    pub async fn read_dlq_rows(&self, state_connection: &str) -> Result<Vec<DlqRow>> {
+    pub async fn read_dlq_rows(
+        &self,
+        state_connection: &str,
+        pipeline_name: &str,
+    ) -> Result<Vec<DlqRow>> {
         let (client, connection) = tokio_postgres::connect(state_connection, NoTls)
             .await
             .context("failed to connect to postgres for dlq read")?;
@@ -105,8 +109,8 @@ impl HarnessContext {
         let rows = client
             .query(
                 "SELECT stream_name, record_json, error_message, error_category \
-                 FROM dlq_records ORDER BY id ASC",
-                &[],
+                 FROM dlq_records WHERE pipeline = $1 ORDER BY id ASC",
+                &[&pipeline_name],
             )
             .await
             .context("failed to query dlq rows")?;
