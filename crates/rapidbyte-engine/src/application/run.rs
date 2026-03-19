@@ -58,22 +58,32 @@ fn cursor_value_to_string(cv: &rapidbyte_types::cursor::CursorValue) -> String {
 
 /// Build [`StreamLimits`] from the pipeline's [`ResourceConfig`].
 ///
-/// Parses human-readable byte sizes (e.g. "64mb") into numeric values,
-/// falling back to [`StreamLimits`] defaults on parse failure.
-fn build_stream_limits(resources: &ResourceConfig) -> StreamLimits {
-    let max_batch_bytes = parse_byte_size(&resources.max_batch_bytes)
-        .unwrap_or(StreamLimits::DEFAULT_MAX_BATCH_BYTES);
-    let checkpoint_interval_bytes = parse_byte_size(&resources.checkpoint_interval_bytes)
-        .unwrap_or(StreamLimits::DEFAULT_CHECKPOINT_INTERVAL_BYTES);
+/// Parses human-readable byte sizes (e.g. "64mb") into numeric values.
+/// Returns an error if configured values are malformed, to prevent silent
+/// misconfiguration from changing memory/flush behavior.
+fn build_stream_limits(resources: &ResourceConfig) -> Result<StreamLimits, PipelineError> {
+    let max_batch_bytes = parse_byte_size(&resources.max_batch_bytes).map_err(|e| {
+        PipelineError::infra(format!(
+            "invalid max_batch_bytes '{}': {e}",
+            resources.max_batch_bytes
+        ))
+    })?;
+    let checkpoint_interval_bytes =
+        parse_byte_size(&resources.checkpoint_interval_bytes).map_err(|e| {
+            PipelineError::infra(format!(
+                "invalid checkpoint_interval_bytes '{}': {e}",
+                resources.checkpoint_interval_bytes
+            ))
+        })?;
 
-    StreamLimits {
+    Ok(StreamLimits {
         max_batch_bytes,
         checkpoint_interval_bytes,
         checkpoint_interval_rows: resources.checkpoint_interval_rows,
         checkpoint_interval_seconds: resources.checkpoint_interval_seconds,
         max_inflight_batches: resources.max_inflight_batches,
         ..StreamLimits::default()
-    }
+    })
 }
 
 /// Build [`SandboxOverrides`] from pipeline YAML permission and limit overrides.
@@ -258,7 +268,7 @@ pub async fn run_pipeline(
 
         // Issue 3: Build StreamLimits from pipeline resources instead of
         // using defaults. Channel capacity also comes from config.
-        let stream_limits = build_stream_limits(&pipeline.resources);
+        let stream_limits = build_stream_limits(&pipeline.resources)?;
 
         for stream_cfg in &pipeline.source.streams {
             if cancel.is_cancelled() {
@@ -285,20 +295,35 @@ pub async fn run_pipeline(
                 None
             } else {
                 // Both Incremental and Cdc need cursor state
+                let is_cdc = stream_cfg.sync_mode == SyncMode::Cdc;
+                let cursor_type = if is_cdc {
+                    rapidbyte_types::cursor::CursorType::Lsn
+                } else {
+                    rapidbyte_types::cursor::CursorType::Utf8
+                };
+
                 let last_value = ctx
                     .cursors
                     .get(&pipeline_id, &StreamName::new(stream_name))
                     .await
                     .map_err(|e| PipelineError::infra(format!("cursor load failed: {e}")))?
                     .and_then(|cs| cs.cursor_value)
-                    .map(|v| rapidbyte_types::cursor::CursorValue::Utf8 { value: v });
+                    .map(|v| {
+                        if is_cdc {
+                            rapidbyte_types::cursor::CursorValue::Lsn { value: v }
+                        } else {
+                            rapidbyte_types::cursor::CursorValue::Utf8 { value: v }
+                        }
+                    });
 
-                // cursor_field is required for Incremental, optional for Cdc
-                let cursor_field = stream_cfg.cursor_field.clone().unwrap_or_default();
-                let cursor_type = if stream_cfg.sync_mode == SyncMode::Cdc {
-                    rapidbyte_types::cursor::CursorType::Lsn
+                // CDC defaults cursor_field to "lsn"; Incremental requires it from config
+                let cursor_field = if is_cdc {
+                    stream_cfg
+                        .cursor_field
+                        .clone()
+                        .unwrap_or_else(|| "lsn".to_string())
                 } else {
-                    rapidbyte_types::cursor::CursorType::Utf8
+                    stream_cfg.cursor_field.clone().unwrap_or_default()
                 };
 
                 Some(rapidbyte_types::cursor::CursorInfo {
