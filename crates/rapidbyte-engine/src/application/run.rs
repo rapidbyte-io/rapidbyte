@@ -147,6 +147,9 @@ pub async fn run_pipeline(
         let mut stream_error: Option<PipelineError> = None;
         // Per-stream stats: (records_read, records_written, bytes_read, bytes_written)
         let mut per_stream_stats: HashMap<String, (u64, u64, u64, u64)> = HashMap::new();
+        // Per-stream DLQ records accumulated during transform/destination execution
+        let mut per_stream_dlq: HashMap<String, Vec<rapidbyte_types::envelope::DlqRecord>> =
+            HashMap::new();
 
         let (src_id, src_ver) = parse_plugin_id(&pipeline.source.use_ref);
         let (dst_id, dst_ver) = parse_plugin_id(&pipeline.destination.use_ref);
@@ -269,6 +272,10 @@ pub async fn run_pipeline(
             stream_stat.0 += source_outcome.summary.records_read;
             stream_stat.2 += source_outcome.summary.bytes_read;
 
+            // Shared DLQ accumulator for this stream (across transforms + destination)
+            let stream_dlq: Arc<Mutex<Vec<rapidbyte_types::envelope::DlqRecord>>> =
+                Arc::new(Mutex::new(Vec::new()));
+
             // Run transforms (sequential pipeline)
             let mut current_rx = Some(frame_rx);
             for (i, transform) in pipeline.transforms.iter().enumerate() {
@@ -292,7 +299,7 @@ pub async fn run_pipeline(
                         compression: source_compression.clone(),
                         frame_receiver: rx,
                         frame_sender: next_tx,
-                        dlq_records: Arc::new(Mutex::new(Vec::new())),
+                        dlq_records: Arc::clone(&stream_dlq),
                         transform_index: i,
                     })
                     .await;
@@ -340,7 +347,7 @@ pub async fn run_pipeline(
                         permissions: dest_permissions,
                         compression: dest_compression.clone(),
                         frame_receiver: final_rx,
-                        dlq_records: Arc::new(Mutex::new(Vec::new())),
+                        dlq_records: Arc::clone(&stream_dlq),
                         stats: Arc::clone(&stats),
                     })
                     .await;
@@ -378,6 +385,13 @@ pub async fn run_pipeline(
                         .set(&pipeline_id, &StreamName::new(stream_name), &cursor_state)
                         .await;
                 }
+            }
+
+            // Collect DLQ records from this stream
+            let dlq_batch: Vec<rapidbyte_types::envelope::DlqRecord> =
+                std::mem::take(&mut *stream_dlq.lock().unwrap());
+            if !dlq_batch.is_empty() {
+                per_stream_dlq.insert(stream_name.clone(), dlq_batch);
             }
 
             ctx.progress.report(ProgressEvent::StreamCompleted {
@@ -435,6 +449,11 @@ pub async fn run_pipeline(
                 .complete(run_id, RunStatus::Completed, &run_stats)
                 .await
                 .map_err(|e| PipelineError::infra(format!("run complete failed: {e}")))?;
+
+            // Save DLQ records for this stream (if any)
+            if let Some(dlq_batch) = per_stream_dlq.get(&stream_cfg.name) {
+                let _ = ctx.dlq.insert(&pipeline_id, run_id, dlq_batch).await;
+            }
         }
 
         // 7. Return outcome
