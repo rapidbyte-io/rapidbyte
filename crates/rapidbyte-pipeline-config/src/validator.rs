@@ -204,10 +204,9 @@ pub fn validate_pipeline(config: &PipelineConfig) -> Result<()> {
         );
     }
 
-    // State connection is required (Postgres-only backend)
-    if config.state.connection.as_deref().is_none_or(str::is_empty) {
-        errors.push("state.connection is required (Postgres connection URL)".to_string());
-    }
+    // Note: state.connection is validated at runtime in build_run_context(),
+    // not here. Check and discover flows use lightweight/noop state contexts
+    // and don't need a real connection string.
 
     if errors.is_empty() {
         Ok(())

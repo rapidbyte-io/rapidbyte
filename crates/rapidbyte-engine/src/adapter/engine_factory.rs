@@ -196,7 +196,10 @@ pub async fn build_run_context(
     let state_connection = config
         .state
         .connection
-        .clone()
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
         .ok_or_else(|| PipelineError::infra("state.connection is required (Postgres URL)"))?;
     let pg = crate::adapter::postgres::PgBackend::connect(&state_connection)
         .await
