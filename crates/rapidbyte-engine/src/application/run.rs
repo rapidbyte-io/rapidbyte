@@ -202,7 +202,14 @@ pub async fn run_pipeline(
                 sync_mode: stream_cfg.sync_mode,
                 cursor_info,
                 limits: rapidbyte_types::stream::StreamLimits::default(),
-                policies: rapidbyte_types::stream::StreamPolicies::default(),
+                policies: rapidbyte_types::stream::StreamPolicies {
+                    on_data_error: pipeline.destination.on_data_error,
+                    schema_evolution: pipeline
+                        .destination
+                        .schema_evolution
+                        .clone()
+                        .unwrap_or_default(),
+                },
                 write_mode: Some(
                     pipeline
                         .destination
