@@ -1,4 +1,4 @@
-//! Arrow Flight server for dry-run preview replay.
+//! Arrow Flight server for preview replay.
 //!
 //! Validates signed tickets and streams `RecordBatches` from the preview spool.
 
@@ -290,7 +290,7 @@ mod tests {
         RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(vec!["a", "b"]))]).unwrap()
     }
 
-    fn dry_run_result() -> PreviewResult {
+    fn preview_result() -> PreviewResult {
         PreviewResult {
             streams: vec![
                 PreviewStreamResult {
@@ -331,7 +331,7 @@ mod tests {
                 task_id: "task-1".into(),
                 lease_epoch: 1,
             },
-            dry_run_result(),
+            preview_result(),
         );
 
         let ticket = sign_ticket(
@@ -412,7 +412,7 @@ mod tests {
                 task_id: "task-1".into(),
                 lease_epoch: 1,
             },
-            dry_run_result(),
+            preview_result(),
         );
 
         let ticket = sign_ticket(
@@ -490,7 +490,7 @@ mod tests {
                 task_id: "task-1".into(),
                 lease_epoch: 1,
             },
-            dry_run_result(),
+            preview_result(),
         );
 
         let ticket = sign_ticket(
@@ -530,7 +530,7 @@ mod tests {
                 task_id: "task-1".into(),
                 lease_epoch: 1,
             },
-            dry_run_result(),
+            preview_result(),
         );
 
         let ticket = sign_ticket(
@@ -571,7 +571,7 @@ mod tests {
                 task_id: "task-1".into(),
                 lease_epoch: 7,
             },
-            dry_run_result(),
+            preview_result(),
         );
 
         let err = service
