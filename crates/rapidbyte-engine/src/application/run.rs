@@ -10,8 +10,9 @@ use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use rapidbyte_pipeline_config::PipelineConfig;
+use rapidbyte_pipeline_config::{parse_byte_size, PipelineConfig, ResourceConfig};
 use rapidbyte_types::state::{PipelineId, RunStats, RunStatus, StreamName};
+use rapidbyte_types::stream::StreamLimits;
 
 use rapidbyte_runtime::Frame;
 
@@ -19,7 +20,9 @@ use crate::application::context::EngineContext;
 use crate::application::{extract_permissions, parse_plugin_id};
 use crate::domain::error::PipelineError;
 use crate::domain::outcome::{PipelineCounts, PipelineResult, SourceTiming};
-use crate::domain::ports::runner::{DestinationRunParams, SourceOutcome, SourceRunParams};
+use crate::domain::ports::runner::{
+    DestinationRunParams, SourceOutcome, SourceRunParams, TransformRunParams,
+};
 use crate::domain::progress::{Phase, ProgressEvent};
 use crate::domain::retry::{RetryDecision, RetryPolicy};
 
@@ -46,6 +49,26 @@ fn cursor_value_to_string(cv: &rapidbyte_types::cursor::CursorValue) -> String {
         | CursorValue::Lsn { value } => value.clone(),
         CursorValue::Json { value } => value.to_string(),
         _ => format!("{cv:?}"),
+    }
+}
+
+/// Build [`StreamLimits`] from the pipeline's [`ResourceConfig`].
+///
+/// Parses human-readable byte sizes (e.g. "64mb") into numeric values,
+/// falling back to [`StreamLimits`] defaults on parse failure.
+fn build_stream_limits(resources: &ResourceConfig) -> StreamLimits {
+    let max_batch_bytes = parse_byte_size(&resources.max_batch_bytes)
+        .unwrap_or(StreamLimits::DEFAULT_MAX_BATCH_BYTES);
+    let checkpoint_interval_bytes = parse_byte_size(&resources.checkpoint_interval_bytes)
+        .unwrap_or(StreamLimits::DEFAULT_CHECKPOINT_INTERVAL_BYTES);
+
+    StreamLimits {
+        max_batch_bytes,
+        checkpoint_interval_bytes,
+        checkpoint_interval_rows: resources.checkpoint_interval_rows,
+        checkpoint_interval_seconds: resources.checkpoint_interval_seconds,
+        max_inflight_batches: resources.max_inflight_batches,
+        ..StreamLimits::default()
     }
 }
 
@@ -162,12 +185,25 @@ pub async fn run_pipeline(
         let source_config = pipeline.source.config.clone();
         let dest_config = pipeline.destination.config.clone();
 
+        // Issue 3: Build StreamLimits from pipeline resources instead of
+        // using defaults. Channel capacity also comes from config.
+        let stream_limits = build_stream_limits(&pipeline.resources);
+
         for stream_cfg in &pipeline.source.streams {
             if cancel.is_cancelled() {
                 return Err(PipelineError::Cancelled);
             }
 
             let stream_name = &stream_cfg.name;
+
+            // Issue 2: Start run record BEFORE stream execution so that
+            // failed runs are also persisted.
+            let run_id = ctx
+                .runs
+                .start(&pipeline_id, &StreamName::new(stream_name))
+                .await
+                .map_err(|e| PipelineError::infra(format!("run start failed: {e}")))?;
+
             ctx.progress.report(ProgressEvent::StreamStarted {
                 stream: stream_name.clone(),
             });
@@ -192,14 +228,14 @@ pub async fn run_pipeline(
                 None
             };
 
-            // Build stream context
+            // Build stream context with limits from pipeline resources
             let stream_ctx = rapidbyte_types::stream::StreamContext {
                 stream_name: stream_name.clone(),
                 source_stream_name: None,
                 schema: rapidbyte_types::catalog::SchemaHint::Columns(vec![]),
                 sync_mode: stream_cfg.sync_mode,
                 cursor_info,
-                limits: rapidbyte_types::stream::StreamLimits::default(),
+                limits: stream_limits.clone(),
                 policies: rapidbyte_types::stream::StreamPolicies {
                     on_data_error: pipeline.destination.on_data_error,
                     schema_evolution: pipeline.destination.schema_evolution.unwrap_or_default(),
@@ -219,16 +255,24 @@ pub async fn run_pipeline(
                 copy_flush_bytes_override: None,
             };
 
-            // Create channel for frame transport
-            let (frame_tx, frame_rx) = mpsc::sync_channel::<Frame>(ctx.config.channel_capacity);
-
+            // Shared DLQ accumulator for this stream (across transforms + destination)
+            let stream_dlq: Arc<Mutex<Vec<rapidbyte_types::envelope::DlqRecord>>> =
+                Arc::new(Mutex::new(Vec::new()));
             let stats = Arc::new(Mutex::new(RunStats::default()));
-            let source_permissions = extract_permissions(&source_resolved);
 
-            // Run source
-            let source_result = ctx
-                .runner
-                .run_source(SourceRunParams {
+            // Issue 1 fix: Spawn source, transforms, and destination as
+            // concurrent tasks connected by bounded channels. Without
+            // concurrency the bounded channel blocks forever once the
+            // source emits more frames than the channel capacity.
+
+            // Build the channel chain: source -> [transform0 -> ... -> transformN] -> destination
+            let (src_tx, mut current_rx) = mpsc::sync_channel::<Frame>(ctx.config.channel_capacity);
+
+            // Spawn source
+            let source_permissions = extract_permissions(&source_resolved);
+            let source_handle = {
+                let runner = Arc::clone(&ctx.runner);
+                let params = SourceRunParams {
                     wasm_path: source_resolved.wasm_path.clone(),
                     pipeline_name: pipeline.pipeline.clone(),
                     metric_run_label: metric_run_label.clone(),
@@ -238,87 +282,49 @@ pub async fn run_pipeline(
                     config: source_config.clone(),
                     permissions: source_permissions,
                     compression: source_compression.clone(),
-                    frame_sender: frame_tx,
+                    frame_sender: src_tx,
                     stats: Arc::clone(&stats),
                     on_batch_emitted: None,
-                })
-                .await;
-
-            let source_outcome: SourceOutcome = match source_result {
-                Ok(outcome) => outcome,
-                Err(e) => {
-                    stream_error = Some(e);
-                    break;
-                }
+                };
+                tokio::spawn(async move { runner.run_source(params).await })
             };
 
-            total_source_secs += source_outcome.duration_secs;
-            total_records_read += source_outcome.summary.records_read;
-            total_bytes_read += source_outcome.summary.bytes_read;
-
-            // Initialize per-stream stats with source counts
-            let stream_stat = per_stream_stats
-                .entry(stream_name.clone())
-                .or_insert((0, 0, 0, 0));
-            stream_stat.0 += source_outcome.summary.records_read;
-            stream_stat.2 += source_outcome.summary.bytes_read;
-
-            // Shared DLQ accumulator for this stream (across transforms + destination)
-            let stream_dlq: Arc<Mutex<Vec<rapidbyte_types::envelope::DlqRecord>>> =
-                Arc::new(Mutex::new(Vec::new()));
-
-            // Run transforms (sequential pipeline)
-            let mut current_rx = Some(frame_rx);
+            // Spawn transforms (chained, each consuming from previous, sending to next)
+            let mut transform_handles = Vec::with_capacity(pipeline.transforms.len());
             for (i, transform) in pipeline.transforms.iter().enumerate() {
                 let (next_tx, next_rx) = mpsc::sync_channel::<Frame>(ctx.config.channel_capacity);
 
                 let t_permissions = extract_permissions(&transform_resolved[i]);
                 let (t_id, t_ver) = parse_plugin_id(&transform.use_ref);
 
-                let rx = current_rx.take().expect("receiver should be available");
-                let transform_result = ctx
-                    .runner
-                    .run_transform(crate::domain::ports::runner::TransformRunParams {
-                        wasm_path: transform_resolved[i].wasm_path.clone(),
-                        pipeline_name: pipeline.pipeline.clone(),
-                        metric_run_label: metric_run_label.clone(),
-                        plugin_id: t_id,
-                        plugin_version: t_ver,
-                        stream_ctx: stream_ctx.clone(),
-                        config: transform.config.clone(),
-                        permissions: t_permissions,
-                        compression: source_compression.clone(),
-                        frame_receiver: rx,
-                        frame_sender: next_tx,
-                        dlq_records: Arc::clone(&stream_dlq),
-                        transform_index: i,
-                    })
-                    .await;
+                let runner = Arc::clone(&ctx.runner);
+                let params = TransformRunParams {
+                    wasm_path: transform_resolved[i].wasm_path.clone(),
+                    pipeline_name: pipeline.pipeline.clone(),
+                    metric_run_label: metric_run_label.clone(),
+                    plugin_id: t_id,
+                    plugin_version: t_ver,
+                    stream_ctx: stream_ctx.clone(),
+                    config: transform.config.clone(),
+                    permissions: t_permissions,
+                    compression: source_compression.clone(),
+                    frame_receiver: current_rx,
+                    frame_sender: next_tx,
+                    dlq_records: Arc::clone(&stream_dlq),
+                    transform_index: i,
+                };
+                transform_handles.push(tokio::spawn(
+                    async move { runner.run_transform(params).await },
+                ));
 
-                match transform_result {
-                    Ok(outcome) => {
-                        total_transform_secs += outcome.duration_secs;
-                    }
-                    Err(e) => {
-                        stream_error = Some(e);
-                        break;
-                    }
-                }
-
-                current_rx = Some(next_rx);
+                current_rx = next_rx;
             }
 
-            if stream_error.is_some() {
-                break;
-            }
-
-            // Run destination
+            // Spawn destination (consumes from last channel)
             let dest_permissions = extract_permissions(&dest_resolved);
-
-            let final_rx = current_rx.take().expect("receiver should be available");
-            let dest_result = ctx
-                .runner
-                .run_destination(DestinationRunParams {
+            let dest_handle = {
+                let runner = Arc::clone(&ctx.runner);
+                let params = DestinationRunParams {
                     wasm_path: dest_resolved.wasm_path.clone(),
                     pipeline_name: pipeline.pipeline.clone(),
                     metric_run_label: metric_run_label.clone(),
@@ -328,59 +334,159 @@ pub async fn run_pipeline(
                     config: dest_config.clone(),
                     permissions: dest_permissions,
                     compression: dest_compression.clone(),
-                    frame_receiver: final_rx,
+                    frame_receiver: current_rx,
                     dlq_records: Arc::clone(&stream_dlq),
                     stats: Arc::clone(&stats),
-                })
-                .await;
+                };
+                tokio::spawn(async move { runner.run_destination(params).await })
+            };
 
-            match dest_result {
-                Ok(outcome) => {
-                    total_dest_secs += outcome.duration_secs;
-                    total_records_written += outcome.summary.records_written;
-                    total_bytes_written += outcome.summary.bytes_written;
+            // Await all stages concurrently — they run in parallel via the
+            // bounded channels. We collect results in order.
+            let source_result = source_handle
+                .await
+                .map_err(|e| PipelineError::infra(format!("source task panicked: {e}")))?;
 
-                    // Record per-stream destination counts
-                    let stream_stat = per_stream_stats
-                        .entry(stream_name.clone())
-                        .or_insert((0, 0, 0, 0));
-                    stream_stat.1 += outcome.summary.records_written;
-                    stream_stat.3 += outcome.summary.bytes_written;
+            let mut transform_results = Vec::with_capacity(transform_handles.len());
+            for handle in transform_handles {
+                let result = handle
+                    .await
+                    .map_err(|e| PipelineError::infra(format!("transform task panicked: {e}")))?;
+                transform_results.push(result);
+            }
+
+            let dest_result = dest_handle
+                .await
+                .map_err(|e| PipelineError::infra(format!("destination task panicked: {e}")))?;
+
+            // Determine if any stage failed
+            let stream_result: Result<
+                (
+                    SourceOutcome,
+                    Vec<crate::domain::ports::runner::TransformOutcome>,
+                    crate::domain::ports::runner::DestinationOutcome,
+                ),
+                PipelineError,
+            > = (|| {
+                let source_outcome = source_result?;
+                let mut t_outcomes = Vec::with_capacity(transform_results.len());
+                for t_result in transform_results {
+                    t_outcomes.push(t_result?);
                 }
-                Err(e) => {
-                    stream_error = Some(e);
+                let dest_outcome = dest_result?;
+                Ok((source_outcome, t_outcomes, dest_outcome))
+            })();
+
+            match stream_result {
+                Ok((source_outcome, t_outcomes, dest_outcome)) => {
+                    total_source_secs += source_outcome.duration_secs;
+                    total_records_read += source_outcome.summary.records_read;
+                    total_bytes_read += source_outcome.summary.bytes_read;
+
+                    for t_outcome in &t_outcomes {
+                        total_transform_secs += t_outcome.duration_secs;
+                    }
+
+                    total_dest_secs += dest_outcome.duration_secs;
+                    total_records_written += dest_outcome.summary.records_written;
+                    total_bytes_written += dest_outcome.summary.bytes_written;
+
+                    // Record per-stream stats
+                    per_stream_stats.insert(
+                        stream_name.clone(),
+                        (
+                            source_outcome.summary.records_read,
+                            dest_outcome.summary.records_written,
+                            source_outcome.summary.bytes_read,
+                            dest_outcome.summary.bytes_written,
+                        ),
+                    );
+
+                    // Save cursor updates from source checkpoints
+                    for checkpoint in &source_outcome.checkpoints {
+                        if let Some(ref cursor_value) = checkpoint.cursor_value {
+                            let cursor_state = rapidbyte_types::state::CursorState {
+                                cursor_field: checkpoint.cursor_field.clone(),
+                                cursor_value: Some(cursor_value_to_string(cursor_value)),
+                                updated_at: chrono::Utc::now().to_rfc3339(),
+                            };
+                            if let Err(e) = ctx
+                                .cursors
+                                .set(&pipeline_id, &StreamName::new(stream_name), &cursor_state)
+                                .await
+                            {
+                                warn!(stream = stream_name, error = %e, "failed to save cursor (non-fatal)");
+                            }
+                        }
+                    }
+
+                    // Collect DLQ records from this stream
+                    let dlq_batch: Vec<rapidbyte_types::envelope::DlqRecord> =
+                        std::mem::take(&mut *stream_dlq.lock().unwrap());
+                    if !dlq_batch.is_empty() {
+                        per_stream_dlq.insert(stream_name.clone(), dlq_batch);
+                    }
+
+                    // Issue 2: Complete run record with success
+                    let (sr, sw, br, bw) = per_stream_stats
+                        .get(stream_name)
+                        .copied()
+                        .unwrap_or((0, 0, 0, 0));
+                    let run_stats = RunStats {
+                        records_read: sr,
+                        records_written: sw,
+                        bytes_read: br,
+                        bytes_written: bw,
+                        error_message: None,
+                    };
+                    ctx.runs
+                        .complete(run_id, RunStatus::Completed, &run_stats)
+                        .await
+                        .map_err(|e| PipelineError::infra(format!("run complete failed: {e}")))?;
+
+                    // Save DLQ records for this stream (if any)
+                    if let Some(dlq_batch) = per_stream_dlq.get(stream_name) {
+                        if let Err(e) = ctx.dlq.insert(&pipeline_id, run_id, dlq_batch).await {
+                            warn!(run_id, error = %e, "failed to save DLQ records (non-fatal)");
+                        }
+                    }
+
+                    ctx.progress.report(ProgressEvent::StreamCompleted {
+                        stream: stream_name.clone(),
+                    });
+                }
+                Err(ref e) => {
+                    // Issue 2: Complete run record with failure so errors
+                    // have an audit trail in the state backend.
+                    let error_stats = RunStats {
+                        error_message: Some(e.to_string()),
+                        ..RunStats::default()
+                    };
+                    if let Err(persist_err) = ctx
+                        .runs
+                        .complete(run_id, RunStatus::Failed, &error_stats)
+                        .await
+                    {
+                        warn!(run_id, error = %persist_err, "failed to record run failure (non-fatal)");
+                    }
+
+                    // Persist any DLQ records accumulated before the error
+                    let dlq_batch: Vec<rapidbyte_types::envelope::DlqRecord> =
+                        std::mem::take(&mut *stream_dlq.lock().unwrap());
+                    if !dlq_batch.is_empty() {
+                        if let Err(dlq_err) = ctx.dlq.insert(&pipeline_id, run_id, &dlq_batch).await
+                        {
+                            warn!(run_id, error = %dlq_err, "failed to save DLQ records on error (non-fatal)");
+                        }
+                    }
+
+                    stream_error = Some(match stream_result {
+                        Err(e) => e,
+                        Ok(_) => unreachable!(),
+                    });
                     break;
                 }
             }
-
-            // Save cursor updates from source checkpoints
-            for checkpoint in &source_outcome.checkpoints {
-                if let Some(ref cursor_value) = checkpoint.cursor_value {
-                    let cursor_state = rapidbyte_types::state::CursorState {
-                        cursor_field: checkpoint.cursor_field.clone(),
-                        cursor_value: Some(cursor_value_to_string(cursor_value)),
-                        updated_at: chrono::Utc::now().to_rfc3339(),
-                    };
-                    if let Err(e) = ctx
-                        .cursors
-                        .set(&pipeline_id, &StreamName::new(stream_name), &cursor_state)
-                        .await
-                    {
-                        warn!(stream = stream_name, error = %e, "failed to save cursor (non-fatal)");
-                    }
-                }
-            }
-
-            // Collect DLQ records from this stream
-            let dlq_batch: Vec<rapidbyte_types::envelope::DlqRecord> =
-                std::mem::take(&mut *stream_dlq.lock().unwrap());
-            if !dlq_batch.is_empty() {
-                per_stream_dlq.insert(stream_name.clone(), dlq_batch);
-            }
-
-            ctx.progress.report(ProgressEvent::StreamCompleted {
-                stream: stream_name.clone(),
-            });
         }
 
         // 5. Handle errors with retry logic
@@ -407,40 +513,6 @@ pub async fn run_pipeline(
         });
 
         let duration_secs = overall_start.elapsed().as_secs_f64();
-
-        // Record runs for each stream with per-stream stats
-        for stream_cfg in &pipeline.source.streams {
-            let stream_name = StreamName::new(&stream_cfg.name);
-            let run_id = ctx
-                .runs
-                .start(&pipeline_id, &stream_name)
-                .await
-                .map_err(|e| PipelineError::infra(format!("run start failed: {e}")))?;
-
-            let (sr, sw, br, bw) = per_stream_stats
-                .get(&stream_cfg.name)
-                .copied()
-                .unwrap_or((0, 0, 0, 0));
-            let run_stats = RunStats {
-                records_read: sr,
-                records_written: sw,
-                bytes_read: br,
-                bytes_written: bw,
-                error_message: None,
-            };
-
-            ctx.runs
-                .complete(run_id, RunStatus::Completed, &run_stats)
-                .await
-                .map_err(|e| PipelineError::infra(format!("run complete failed: {e}")))?;
-
-            // Save DLQ records for this stream (if any)
-            if let Some(dlq_batch) = per_stream_dlq.get(&stream_cfg.name) {
-                if let Err(e) = ctx.dlq.insert(&pipeline_id, run_id, dlq_batch).await {
-                    warn!(run_id, error = %e, "failed to save DLQ records (non-fatal)");
-                }
-            }
-        }
 
         // 7. Return result
         let result = PipelineResult {
@@ -749,6 +821,8 @@ destination:
         tc.resolver.register("dst", test_resolved_plugin());
         tc.runner
             .enqueue_source(Err(PipelineError::infra("WASM load failed")));
+        // Dummy destination result since stages run concurrently
+        tc.runner.enqueue_destination(Ok(make_dest_outcome(0, 0)));
 
         let pipeline = test_pipeline_config("src", "dst", &["users"]);
         let cancel = CancellationToken::new();
@@ -873,13 +947,17 @@ destination:
         tc.resolver.register("src", test_resolved_plugin());
         tc.resolver.register("dst", test_resolved_plugin());
 
-        // First attempt: retryable error from source
+        // First attempt: retryable error from source.
+        // With concurrent spawning, destination is also spawned on the
+        // first attempt (even though source will fail). Enqueue a dummy
+        // destination result so the fake queue doesn't run dry.
         let plugin_err = rapidbyte_types::error::PluginError::transient_network(
             "CONN_RESET",
             "connection reset",
         );
         tc.runner
             .enqueue_source(Err(PipelineError::Plugin(plugin_err)));
+        tc.runner.enqueue_destination(Ok(make_dest_outcome(0, 0)));
 
         // Second attempt: success
         tc.runner.enqueue_source(Ok(make_source_outcome(100, 8192)));
@@ -917,7 +995,9 @@ destination:
         tc.resolver.register("src", test_resolved_plugin());
         tc.resolver.register("dst", test_resolved_plugin());
 
-        // All attempts fail with retryable errors
+        // All attempts fail with retryable errors.
+        // Enqueue a dummy destination result per attempt since stages run
+        // concurrently.
         for _ in 0..3 {
             let plugin_err = rapidbyte_types::error::PluginError::transient_network(
                 "CONN_RESET",
@@ -925,6 +1005,7 @@ destination:
             );
             tc.runner
                 .enqueue_source(Err(PipelineError::Plugin(plugin_err)));
+            tc.runner.enqueue_destination(Ok(make_dest_outcome(0, 0)));
         }
 
         let pipeline = test_pipeline_config("src", "dst", &["users"]);
@@ -948,12 +1029,12 @@ destination:
         tc.resolver.register("src", test_resolved_plugin());
         tc.resolver.register("dst", test_resolved_plugin());
 
-        // Non-retryable plugin error (config error)
+        // Non-retryable plugin error (config error).
+        // Enqueue a dummy destination result since stages run concurrently.
         let plugin_err = rapidbyte_types::error::PluginError::config("BAD_HOST", "host invalid");
         tc.runner
             .enqueue_source(Err(PipelineError::Plugin(plugin_err)));
-        // Only one result enqueued — if retry happens, queue will be empty and
-        // the fake will return its own error, so we know no retry occurred.
+        tc.runner.enqueue_destination(Ok(make_dest_outcome(0, 0)));
 
         let pipeline = test_pipeline_config("src", "dst", &["users"]);
         let cancel = CancellationToken::new();
@@ -1130,6 +1211,8 @@ destination:
         tc.runner.enqueue_source(Ok(make_source_outcome(100, 8192)));
         tc.runner
             .enqueue_transform(Err(PipelineError::infra("transform WASM trap")));
+        // Dummy destination result since stages run concurrently
+        tc.runner.enqueue_destination(Ok(make_dest_outcome(0, 0)));
 
         let pipeline = test_pipeline_config_with_transforms("src", "dst", &["users"], &["tx1"]);
         let cancel = CancellationToken::new();

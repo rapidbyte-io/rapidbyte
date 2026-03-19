@@ -156,18 +156,35 @@ pub async fn check_pipeline(
                     plugin_id: t_id.clone(),
                     plugin_version: t_ver.clone(),
                     config: transform.config.clone(),
-                    stream_name,
+                    stream_name: stream_name.clone(),
                     permissions: transform_permissions.clone(),
                 })
                 .await?;
-            transform_validations.push(validation.validation);
+
+            // Issue 6: Include stream and transform name in the validation
+            // message so the CLI can display which stream/transform pair
+            // each entry belongs to (N_transforms x N_streams entries).
+            let mut result = validation.validation;
+            if result.message.is_empty() {
+                result.message = format!("[{}/{}]", transform.use_ref, stream_name);
+            } else {
+                result.message =
+                    format!("[{}/{}] {}", transform.use_ref, stream_name, result.message);
+            }
+            transform_validations.push(result);
         }
     }
 
-    // -- State (placeholder: always OK in this use case) --
+    // -- State --
+    // State connectivity is intentionally not validated during `check`.
+    // The check use case validates plugin WASM modules and configuration
+    // schemas, not infrastructure connectivity. State backend connectivity
+    // is validated at run time when `build_run_context` connects to the
+    // Postgres backend. The lightweight context used here has a no-op
+    // state backend, so a real connectivity test is not possible.
     let state = CheckStatus {
         ok: true,
-        message: String::new(),
+        message: "state backend not validated during check (validated at run time)".into(),
     };
 
     Ok(CheckResult {
@@ -541,9 +558,12 @@ destination:
             result.transform_validations[1].status,
             ValidationStatus::Failed
         );
-        assert_eq!(
-            result.transform_validations[1].message,
-            "transform fails on orders"
+        assert!(
+            result.transform_validations[1]
+                .message
+                .contains("transform fails on orders"),
+            "expected transform failure message, got: {}",
+            result.transform_validations[1].message
         );
     }
 

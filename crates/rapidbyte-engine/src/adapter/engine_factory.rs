@@ -228,7 +228,7 @@ pub async fn build_run_context(
         metrics,
         config: EngineConfig {
             max_retries: config.resources.max_retries,
-            channel_capacity: 64,
+            channel_capacity: config.resources.max_inflight_batches.max(1) as usize,
         },
     })
 }
