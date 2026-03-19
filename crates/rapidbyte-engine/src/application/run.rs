@@ -81,25 +81,40 @@ fn build_stream_limits(resources: &ResourceConfig) -> StreamLimits {
 /// Returns `None` when neither permissions nor limits are specified in the
 /// pipeline config. When set, the overrides are intersected with manifest
 /// permissions by the runtime's `build_wasi_ctx`.
+/// Build sandbox overrides by merging pipeline YAML overrides with manifest
+/// defaults. Pipeline YAML values take precedence; manifest values fill gaps.
 fn build_sandbox_overrides(
-    permissions: Option<&PipelinePermissions>,
-    limits: Option<&PipelineLimits>,
+    yaml_permissions: Option<&PipelinePermissions>,
+    yaml_limits: Option<&PipelineLimits>,
+    manifest: Option<&rapidbyte_types::manifest::PluginManifest>,
 ) -> Option<SandboxOverrides> {
-    let has_perms = permissions.is_some();
-    let has_limits = limits.is_some();
-    if !has_perms && !has_limits {
+    let manifest_limits = manifest.map(|m| &m.limits);
+    let has_yaml = yaml_permissions.is_some() || yaml_limits.is_some();
+    let has_manifest =
+        manifest_limits.is_some_and(|l| l.max_memory.is_some() || l.timeout_seconds.is_some());
+
+    if !has_yaml && !has_manifest {
         return None;
     }
 
-    let max_memory_bytes = limits
+    // Pipeline YAML limits override manifest limits
+    let max_memory_bytes = yaml_limits
         .and_then(|l| l.max_memory.as_deref())
-        .and_then(|s| parse_byte_size(s).ok());
-    let timeout_seconds = limits.and_then(|l| l.timeout_seconds);
+        .and_then(|s| parse_byte_size(s).ok())
+        .or_else(|| {
+            manifest_limits
+                .and_then(|l| l.max_memory.as_deref())
+                .and_then(|s| parse_byte_size(s).ok())
+        });
+
+    let timeout_seconds = yaml_limits
+        .and_then(|l| l.timeout_seconds)
+        .or_else(|| manifest_limits.and_then(|l| l.timeout_seconds));
 
     Some(SandboxOverrides {
-        allowed_hosts: permissions.and_then(|p| p.network.allowed_hosts.clone()),
-        allowed_vars: permissions.and_then(|p| p.env.allowed_vars.clone()),
-        allowed_preopens: permissions.and_then(|p| p.fs.allowed_preopens.clone()),
+        allowed_hosts: yaml_permissions.and_then(|p| p.network.allowed_hosts.clone()),
+        allowed_vars: yaml_permissions.and_then(|p| p.env.allowed_vars.clone()),
+        allowed_preopens: yaml_permissions.and_then(|p| p.fs.allowed_preopens.clone()),
         max_memory_bytes,
         timeout_seconds,
     })
@@ -319,6 +334,7 @@ pub async fn run_pipeline(
             let source_overrides = build_sandbox_overrides(
                 pipeline.source.permissions.as_ref(),
                 pipeline.source.limits.as_ref(),
+                source_resolved.manifest.as_ref(),
             );
             let source_handle = {
                 let runner = Arc::clone(&ctx.runner);
@@ -349,6 +365,7 @@ pub async fn run_pipeline(
                 let t_overrides = build_sandbox_overrides(
                     transform.permissions.as_ref(),
                     transform.limits.as_ref(),
+                    transform_resolved[i].manifest.as_ref(),
                 );
                 let (t_id, t_ver) = parse_plugin_id(&transform.use_ref);
 
@@ -381,6 +398,7 @@ pub async fn run_pipeline(
             let dest_overrides = build_sandbox_overrides(
                 pipeline.destination.permissions.as_ref(),
                 pipeline.destination.limits.as_ref(),
+                dest_resolved.manifest.as_ref(),
             );
             let dest_handle = {
                 let runner = Arc::clone(&ctx.runner);
