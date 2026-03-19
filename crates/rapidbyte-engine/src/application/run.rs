@@ -186,8 +186,13 @@ pub async fn run_pipeline(
         let mut total_dest_secs: f64 = 0.0;
         let mut total_transform_secs: f64 = 0.0;
         let mut stream_error: Option<PipelineError> = None;
-        // Per-stream stats: (records_read, records_written, bytes_read, bytes_written)
-        let mut per_stream_stats: HashMap<String, (u64, u64, u64, u64)> = HashMap::new();
+        // Per-stream stats: (records_read, records_written, bytes_read, bytes_written,
+        //                    source_secs, dest_secs, dest_wasm_secs, dest_recv_secs)
+        #[allow(clippy::type_complexity)]
+        let mut per_stream_stats: HashMap<
+            String,
+            (u64, u64, u64, u64, f64, f64, f64, f64),
+        > = HashMap::new();
         // Per-stream DLQ records accumulated during transform/destination execution
         let mut per_stream_dlq: HashMap<String, Vec<rapidbyte_types::envelope::DlqRecord>> =
             HashMap::new();
@@ -346,7 +351,16 @@ pub async fn run_pipeline(
                     compression: source_compression.clone(),
                     frame_sender: src_tx,
                     stats: Arc::clone(&stats),
-                    on_batch_emitted: None,
+                    on_batch_emitted: {
+                        let progress = Arc::clone(&ctx.progress);
+                        let sn = stream_name.clone();
+                        Some(Arc::new(move |rows: u64| {
+                            progress.report(ProgressEvent::BatchEmitted {
+                                stream: sn.clone(),
+                                rows,
+                            });
+                        }))
+                    },
                 };
                 tokio::spawn(async move { runner.run_source(params).await })
             };
@@ -465,7 +479,7 @@ pub async fn run_pipeline(
                     total_records_written += dest_outcome.summary.records_written;
                     total_bytes_written += dest_outcome.summary.bytes_written;
 
-                    // Record per-stream stats
+                    // Record per-stream stats including timing
                     per_stream_stats.insert(
                         stream_name.clone(),
                         (
@@ -473,6 +487,10 @@ pub async fn run_pipeline(
                             dest_outcome.summary.records_written,
                             source_outcome.summary.bytes_read,
                             dest_outcome.summary.bytes_written,
+                            source_outcome.duration_secs,
+                            dest_outcome.duration_secs,
+                            dest_outcome.wasm_instantiation_secs,
+                            dest_outcome.frame_receive_secs,
                         ),
                     );
 
@@ -510,10 +528,10 @@ pub async fn run_pipeline(
                     }
 
                     // Issue 2: Complete run record with success
-                    let (sr, sw, br, bw) = per_stream_stats
+                    let (sr, sw, br, bw, _, _, _, _) = per_stream_stats
                         .get(stream_name)
                         .copied()
-                        .unwrap_or((0, 0, 0, 0));
+                        .unwrap_or_default();
                     let run_stats = RunStats {
                         records_read: sr,
                         records_written: sw,
@@ -608,20 +626,23 @@ pub async fn run_pipeline(
         // Build per-stream metrics from collected stats
         let stream_metrics: Vec<StreamShardMetric> = per_stream_stats
             .iter()
-            .map(|(name, (rr, rw, br, bw))| StreamShardMetric {
-                stream_name: name.clone(),
-                records_read: *rr,
-                records_written: *rw,
-                bytes_read: *br,
-                bytes_written: *bw,
-                // Per-stream timing not tracked yet — use 0.0
-                source_duration_secs: 0.0,
-                dest_duration_secs: 0.0,
-                dest_wasm_instantiation_secs: 0.0,
-                dest_frame_receive_secs: 0.0,
-                partition_index: None,
-                partition_count: None,
-            })
+            .map(
+                |(name, (rr, rw, br, bw, src_secs, dst_secs, dst_wasm, dst_recv))| {
+                    StreamShardMetric {
+                        stream_name: name.clone(),
+                        records_read: *rr,
+                        records_written: *rw,
+                        bytes_read: *br,
+                        bytes_written: *bw,
+                        source_duration_secs: *src_secs,
+                        dest_duration_secs: *dst_secs,
+                        dest_wasm_instantiation_secs: *dst_wasm,
+                        dest_frame_receive_secs: *dst_recv,
+                        partition_index: None,
+                        partition_count: None,
+                    }
+                },
+            )
             .collect();
 
         // 7. Return result
