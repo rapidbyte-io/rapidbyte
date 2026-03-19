@@ -14,27 +14,18 @@ pub struct RenderedPipeline {
 }
 
 #[cfg(test)]
-fn render_pipeline_yaml(scenario: &ScenarioManifest) -> Result<String> {
+fn render_pipeline_yaml_from_scenario(scenario: &ScenarioManifest) -> Result<String> {
     let env = scenario
         .environment
         .postgres
         .as_ref()
         .with_context(|| format!("scenario {} is missing postgres environment", scenario.id))?;
-    render_pipeline_yaml_with_environment_and_state(scenario, env, None)
+    render_pipeline_yaml(scenario, env)
 }
 
-#[cfg(test)]
-fn render_pipeline_yaml_for_environment(
+fn render_pipeline_yaml(
     scenario: &ScenarioManifest,
     env: &crate::scenario::PostgresBenchmarkEnvironment,
-) -> Result<String> {
-    render_pipeline_yaml_with_environment_and_state(scenario, env, None)
-}
-
-fn render_pipeline_yaml_with_environment_and_state(
-    scenario: &ScenarioManifest,
-    env: &crate::scenario::PostgresBenchmarkEnvironment,
-    state_connection: Option<&Path>,
 ) -> Result<String> {
     if scenario.kind != BenchmarkKind::Pipeline {
         bail!("scenario {} is not a pipeline benchmark", scenario.id);
@@ -65,10 +56,7 @@ fn render_pipeline_yaml_with_environment_and_state(
             ),
         );
     }
-    root.insert(
-        str_key("state"),
-        render_state_mapping(scenario, env, state_connection),
-    );
+    root.insert(str_key("state"), render_state_mapping(scenario, env));
 
     serde_yaml::to_string(&root).context("failed to serialize rendered pipeline")
 }
@@ -84,8 +72,7 @@ pub fn write_rendered_pipeline(
             temp_root.display()
         )
     })?;
-    let state_path = temp_root.join(format!("{}.state.db", scenario.id));
-    let yaml = render_pipeline_yaml_with_environment_and_state(scenario, env, Some(&state_path))?;
+    let yaml = render_pipeline_yaml(scenario, env)?;
     let path = temp_root.join(format!("{}.yaml", scenario.id));
     fs::write(&path, &yaml)
         .with_context(|| format!("failed to write rendered pipeline {}", path.display()))?;
@@ -95,7 +82,6 @@ pub fn write_rendered_pipeline(
 fn render_state_mapping(
     scenario: &ScenarioManifest,
     env: &crate::scenario::PostgresBenchmarkEnvironment,
-    state_connection: Option<&Path>,
 ) -> YamlValue {
     let mut state = Mapping::new();
     if scenario.benchmark.execution_mode == crate::scenario::BenchmarkExecutionMode::Distributed {
@@ -110,10 +96,19 @@ fn render_state_mapping(
                 env.source.database
             )),
         );
-    } else if let Some(path) = state_connection {
+    } else {
+        // Non-distributed mode: use the source Postgres instance for state storage.
+        // (SQLite support was removed; all state is Postgres-only.)
         state.insert(
             str_key("connection"),
-            YamlValue::String(path.display().to_string()),
+            YamlValue::String(format!(
+                "postgres://{}:{}@{}:{}/{}",
+                env.source.user,
+                env.source.password,
+                env.source.host,
+                env.source.port,
+                env.source.database,
+            )),
         );
     }
     YamlValue::Mapping(state)
@@ -153,7 +148,7 @@ mod tests {
     fn renders_valid_postgres_pipeline_yaml() {
         let scenario = sample_postgres_pipeline("insert");
 
-        let yaml = render_pipeline_yaml(&scenario).expect("render pipeline yaml");
+        let yaml = render_pipeline_yaml_from_scenario(&scenario).expect("render pipeline yaml");
         let parsed = parse_pipeline_sync(&yaml);
 
         assert_eq!(parsed.pipeline, "benchmark_pg_dest_insert");
@@ -169,7 +164,7 @@ mod tests {
     fn renders_destination_load_method_override() {
         let scenario = sample_postgres_pipeline("copy");
 
-        let yaml = render_pipeline_yaml(&scenario).expect("render pipeline yaml");
+        let yaml = render_pipeline_yaml_from_scenario(&scenario).expect("render pipeline yaml");
         let parsed = parse_pipeline_sync(&yaml);
 
         assert_eq!(parsed.destination.config["load_method"], "copy");
@@ -197,7 +192,7 @@ mod tests {
     }
 
     #[test]
-    fn writes_rendered_pipeline_with_isolated_state_db_path() {
+    fn writes_rendered_pipeline_with_postgres_state_connection() {
         let scenario = sample_postgres_pipeline("insert");
         let temp_root = temp_dir("pipeline-state");
 
@@ -210,9 +205,12 @@ mod tests {
         let connection = parsed
             .state
             .connection
-            .expect("rendered pipeline should pin state db path");
-        assert!(connection.starts_with(temp_root.to_string_lossy().as_ref()));
-        assert!(connection.ends_with("pg_dest_insert.state.db"));
+            .expect("rendered pipeline should have postgres state connection");
+        assert!(
+            connection.starts_with("postgres://"),
+            "state connection should be a postgres URL, got: {connection}"
+        );
+        assert!(connection.contains("bench_source"));
     }
 
     #[test]
@@ -258,8 +256,7 @@ mod tests {
             },
         };
 
-        let yaml =
-            render_pipeline_yaml_for_environment(&scenario, &resolved).expect("render pipeline");
+        let yaml = render_pipeline_yaml(&scenario, &resolved).expect("render pipeline");
         let parsed = parse_pipeline_sync(&yaml);
 
         assert_eq!(parsed.source.config["host"], "source-db");
@@ -298,7 +295,7 @@ mod tests {
             )]),
         }];
 
-        let yaml = render_pipeline_yaml(&scenario).expect("render pipeline yaml");
+        let yaml = render_pipeline_yaml_from_scenario(&scenario).expect("render pipeline yaml");
         let parsed = parse_pipeline_sync(&yaml);
 
         assert_eq!(parsed.transforms.len(), 1);
