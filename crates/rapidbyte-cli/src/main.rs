@@ -607,9 +607,9 @@ async fn main() -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            if verbosity != Verbosity::Quiet {
-                eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
-            }
+            // Always print errors to stderr, even in quiet mode.
+            // --quiet suppresses progress/info, not errors.
+            eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
             ExitCode::FAILURE
         }
     }
