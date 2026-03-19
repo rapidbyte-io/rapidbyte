@@ -263,6 +263,16 @@ pub async fn run_pipeline(
                     .map(|v| {
                         if is_cdc {
                             rapidbyte_types::cursor::CursorValue::Lsn { value: v }
+                        } else if stream_cfg.tie_breaker_field.is_some() {
+                            // Tie-breaker streams store composite JSON cursor
+                            // state. Try JSON parse first; fall back to Utf8
+                            // if the persisted value isn't valid JSON.
+                            match serde_json::from_str::<serde_json::Value>(&v) {
+                                Ok(json) if json.is_object() => {
+                                    rapidbyte_types::cursor::CursorValue::Json { value: json }
+                                }
+                                _ => rapidbyte_types::cursor::CursorValue::Utf8 { value: v },
+                            }
                         } else {
                             rapidbyte_types::cursor::CursorValue::Utf8 { value: v }
                         }
@@ -306,6 +316,11 @@ pub async fn run_pipeline(
                 ),
                 selected_columns: stream_cfg.columns.clone(),
                 partition_key: stream_cfg.partition_key.clone(),
+                // TODO: partition planner — partition_count/partition_index
+                // are not yet computed. The old planner/scheduler (~500 lines)
+                // was removed during the hexagonal refactor. Re-implementing
+                // partitioned reads requires a planner that splits streams
+                // into partition tasks based on resources.parallelism.
                 partition_count: None,
                 partition_index: None,
                 effective_parallelism: Some(match pipeline.resources.parallelism {
