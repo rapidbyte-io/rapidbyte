@@ -203,7 +203,12 @@ pub async fn run_pipeline(
                 cursor_info,
                 limits: rapidbyte_types::stream::StreamLimits::default(),
                 policies: rapidbyte_types::stream::StreamPolicies::default(),
-                write_mode: None,
+                write_mode: Some(
+                    pipeline
+                        .destination
+                        .write_mode
+                        .to_protocol(pipeline.destination.primary_key.clone()),
+                ),
                 selected_columns: stream_cfg.columns.clone(),
                 partition_key: stream_cfg.partition_key.clone(),
                 partition_count: None,
