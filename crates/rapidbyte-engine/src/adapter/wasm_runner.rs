@@ -169,6 +169,7 @@ impl PluginRunner for WasmPluginRunner {
         let config = params.config.clone();
         let stream_name = params.stream_name.clone();
         let permissions = params.permissions.clone();
+        let sandbox_overrides = params.sandbox_overrides.clone();
 
         let validation = tokio::task::spawn_blocking(move || {
             validate_plugin_impl(
@@ -179,6 +180,7 @@ impl PluginRunner for WasmPluginRunner {
                 &config,
                 &stream_name,
                 permissions.as_ref(),
+                sandbox_overrides.as_ref(),
             )
         })
         .await
@@ -200,6 +202,7 @@ impl PluginRunner for WasmPluginRunner {
         let plugin_version = params.plugin_version.clone();
         let config = params.config.clone();
         let permissions = params.permissions.clone();
+        let sandbox_overrides = params.sandbox_overrides.clone();
 
         let catalog = tokio::task::spawn_blocking(move || {
             run_discover_impl(
@@ -208,6 +211,7 @@ impl PluginRunner for WasmPluginRunner {
                 &plugin_version,
                 &config,
                 permissions.as_ref(),
+                sandbox_overrides.as_ref(),
             )
         })
         .await
@@ -836,6 +840,7 @@ fn validate_plugin_impl(
     config: &serde_json::Value,
     stream_name: &str,
     permissions: Option<&Permissions>,
+    sandbox_overrides: Option<&SandboxOverrides>,
 ) -> anyhow::Result<ValidationResult> {
     use rapidbyte_runtime::{dest_validation_to_sdk, transform_validation_to_sdk};
 
@@ -853,6 +858,9 @@ fn validate_plugin_impl(
         .compression(None);
     if let Some(p) = permissions {
         builder = builder.permissions(p);
+    }
+    if let Some(ovr) = sandbox_overrides {
+        builder = builder.overrides(ovr);
     }
     let host_state = builder.build()?;
 
@@ -959,6 +967,7 @@ fn run_discover_impl(
     plugin_version: &str,
     config: &serde_json::Value,
     permissions: Option<&Permissions>,
+    sandbox_overrides: Option<&SandboxOverrides>,
 ) -> anyhow::Result<Catalog> {
     let state = noop_state_backend();
     let mut builder = ComponentHostState::builder()
@@ -971,6 +980,9 @@ fn run_discover_impl(
         .compression(None);
     if let Some(p) = permissions {
         builder = builder.permissions(p);
+    }
+    if let Some(ovr) = sandbox_overrides {
+        builder = builder.overrides(ovr);
     }
     let host_state = builder.build()?;
 

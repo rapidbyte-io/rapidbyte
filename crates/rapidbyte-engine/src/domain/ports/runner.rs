@@ -130,6 +130,8 @@ pub struct ValidateParams {
     pub stream_name: String,
     /// Manifest-declared permissions.
     pub permissions: Option<Permissions>,
+    /// Pipeline-level sandbox overrides (permissions/limits from YAML config).
+    pub sandbox_overrides: Option<SandboxOverrides>,
 }
 
 /// Parameters for discovering available streams from a source plugin.
@@ -144,6 +146,8 @@ pub struct DiscoverParams {
     pub config: serde_json::Value,
     /// Manifest-declared permissions.
     pub permissions: Option<Permissions>,
+    /// Pipeline-level sandbox overrides (permissions/limits from YAML config).
+    pub sandbox_overrides: Option<SandboxOverrides>,
 }
 
 // ---------------------------------------------------------------------------

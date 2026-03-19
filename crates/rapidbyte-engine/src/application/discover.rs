@@ -36,6 +36,7 @@ pub async fn discover_plugin(
         plugin_version,
         config: config_json.cloned().unwrap_or(serde_json::Value::Null),
         permissions,
+        sandbox_overrides: None,
     };
 
     ctx.runner.discover(&params).await

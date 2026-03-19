@@ -473,6 +473,7 @@ async fn test_validate_source_plugin() {
             config: serde_json::json!({"row_count": 10}),
             stream_name: "test-stream".into(),
             permissions: None,
+            sandbox_overrides: None,
         })
         .await
         .expect("validation should succeed");
@@ -500,6 +501,7 @@ async fn test_validate_destination_plugin() {
             config: serde_json::json!({}),
             stream_name: "test-stream".into(),
             permissions: None,
+            sandbox_overrides: None,
         })
         .await
         .expect("validation should succeed");
@@ -525,6 +527,7 @@ async fn test_discover_source_streams() {
             plugin_version: "0.1.0".into(),
             config: serde_json::json!({}),
             permissions: None,
+            sandbox_overrides: None,
         })
         .await
         .expect("discover should succeed");

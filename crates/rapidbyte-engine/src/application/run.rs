@@ -86,71 +86,13 @@ fn build_stream_limits(resources: &ResourceConfig) -> Result<StreamLimits, Pipel
     })
 }
 
-/// Build [`SandboxOverrides`] from pipeline YAML permission and limit overrides.
-///
-/// Returns `None` when neither permissions nor limits are specified in the
-/// pipeline config. When set, the overrides are intersected with manifest
-/// permissions by the runtime's `build_wasi_ctx`.
-/// Build sandbox overrides by merging pipeline YAML overrides with manifest
-/// limits. Uses `min(manifest, pipeline)` for resource limits — pipeline config
-/// can only narrow plugin-declared limits, never widen them (per PROTOCOL.md).
-/// If only one side specifies a limit, that value is used directly.
-///
-/// Returns an error if a memory limit string is present but malformed, to
-/// prevent silently degrading into no memory cap.
+/// Delegate to the shared `build_sandbox_overrides` in `application/mod.rs`.
 fn build_sandbox_overrides(
     yaml_permissions: Option<&PipelinePermissions>,
     yaml_limits: Option<&PipelineLimits>,
     manifest: Option<&rapidbyte_types::manifest::PluginManifest>,
 ) -> Result<Option<SandboxOverrides>, PipelineError> {
-    let manifest_limits = manifest.map(|m| &m.limits);
-    let has_yaml = yaml_permissions.is_some() || yaml_limits.is_some();
-    let has_manifest =
-        manifest_limits.is_some_and(|l| l.max_memory.is_some() || l.timeout_seconds.is_some());
-
-    if !has_yaml && !has_manifest {
-        return Ok(None);
-    }
-    // (unreachable without at least one limit source)
-
-    let yaml_memory = match yaml_limits.and_then(|l| l.max_memory.as_deref()) {
-        Some(s) => Some(parse_byte_size(s).map_err(|e| {
-            PipelineError::infra(format!("invalid pipeline max_memory '{s}': {e}"))
-        })?),
-        None => None,
-    };
-    let manifest_memory = match manifest_limits.and_then(|l| l.max_memory.as_deref()) {
-        Some(s) => Some(parse_byte_size(s).map_err(|e| {
-            PipelineError::infra(format!("invalid manifest max_memory '{s}': {e}"))
-        })?),
-        None => None,
-    };
-
-    // min(manifest, pipeline) — pipeline can only narrow, never widen
-    let max_memory_bytes = match (yaml_memory, manifest_memory) {
-        (Some(y), Some(m)) => Some(y.min(m)),
-        (Some(y), None) => Some(y),
-        (None, Some(m)) => Some(m),
-        (None, None) => None,
-    };
-
-    let yaml_timeout = yaml_limits.and_then(|l| l.timeout_seconds);
-    let manifest_timeout = manifest_limits.and_then(|l| l.timeout_seconds);
-
-    let timeout_seconds = match (yaml_timeout, manifest_timeout) {
-        (Some(y), Some(m)) => Some(y.min(m)),
-        (Some(y), None) => Some(y),
-        (None, Some(m)) => Some(m),
-        (None, None) => None,
-    };
-
-    Ok(Some(SandboxOverrides {
-        allowed_hosts: yaml_permissions.and_then(|p| p.network.allowed_hosts.clone()),
-        allowed_vars: yaml_permissions.and_then(|p| p.env.allowed_vars.clone()),
-        allowed_preopens: yaml_permissions.and_then(|p| p.fs.allowed_preopens.clone()),
-        max_memory_bytes,
-        timeout_seconds,
-    }))
+    crate::application::build_sandbox_overrides(yaml_permissions, yaml_limits, manifest)
 }
 
 // ---------------------------------------------------------------------------

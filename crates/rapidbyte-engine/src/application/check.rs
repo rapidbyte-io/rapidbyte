@@ -9,7 +9,7 @@ use rapidbyte_types::error::ValidationStatus;
 use rapidbyte_types::wire::PluginKind;
 
 use crate::application::context::EngineContext;
-use crate::application::{extract_permissions, parse_plugin_id};
+use crate::application::{build_sandbox_overrides, extract_permissions, parse_plugin_id};
 use crate::domain::error::PipelineError;
 use crate::domain::outcome::{CheckResult, CheckStatus};
 use crate::domain::ports::runner::{CheckComponentStatus, ValidateParams};
@@ -57,6 +57,11 @@ pub async fn check_pipeline(
 
     let (src_id, src_ver) = parse_plugin_id(&pipeline.source.use_ref);
     let source_permissions = extract_permissions(&source_resolved);
+    let source_overrides = build_sandbox_overrides(
+        pipeline.source.permissions.as_ref(),
+        pipeline.source.limits.as_ref(),
+        source_resolved.manifest.as_ref(),
+    )?;
 
     let source_stream_names: Vec<String> = if pipeline.source.streams.is_empty() {
         vec!["check".to_string()]
@@ -83,6 +88,7 @@ pub async fn check_pipeline(
                 config: pipeline.source.config.clone(),
                 stream_name: stream_name.clone(),
                 permissions: source_permissions.clone(),
+                sandbox_overrides: source_overrides.clone(),
             })
             .await?;
 
@@ -122,6 +128,11 @@ pub async fn check_pipeline(
 
     let (dst_id, dst_ver) = parse_plugin_id(&pipeline.destination.use_ref);
     let dest_permissions = extract_permissions(&dest_resolved);
+    let dest_overrides = build_sandbox_overrides(
+        pipeline.destination.permissions.as_ref(),
+        pipeline.destination.limits.as_ref(),
+        dest_resolved.manifest.as_ref(),
+    )?;
 
     // Validate the destination against every stream so stream-specific
     // failures are not missed.
@@ -137,6 +148,7 @@ pub async fn check_pipeline(
                 config: pipeline.destination.config.clone(),
                 stream_name: stream_name.clone(),
                 permissions: dest_permissions.clone(),
+                sandbox_overrides: dest_overrides.clone(),
             })
             .await?;
 
@@ -175,6 +187,11 @@ pub async fn check_pipeline(
 
         let (t_id, t_ver) = parse_plugin_id(&transform.use_ref);
         let transform_permissions = extract_permissions(&transform_resolved);
+        let transform_overrides = build_sandbox_overrides(
+            transform.permissions.as_ref(),
+            transform.limits.as_ref(),
+            transform_resolved.manifest.as_ref(),
+        )?;
 
         // Validate the transform against every source stream so that
         // stream-specific failures are not missed.
@@ -200,6 +217,7 @@ pub async fn check_pipeline(
                     config: transform.config.clone(),
                     stream_name: stream_name.clone(),
                     permissions: transform_permissions.clone(),
+                    sandbox_overrides: transform_overrides.clone(),
                 })
                 .await?;
 
