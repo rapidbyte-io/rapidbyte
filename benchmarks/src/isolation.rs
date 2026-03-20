@@ -6,20 +6,75 @@ use arrow::array::{Int32Array, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use bytes::Bytes;
 use opentelemetry_sdk::metrics::SdkMeterProvider;
-use rapidbyte_engine::arrow::record_batch_to_ipc;
-use rapidbyte_engine::runner::{
-    run_destination_stream, run_source_stream, run_transform_stream, StreamRunContext,
+use rapidbyte_engine::adapter::wasm_runner::{
+    run_destination_stream_bench as run_destination_stream,
+    run_source_stream_bench as run_source_stream,
+    run_transform_stream_bench as run_transform_stream, StreamRunContext,
 };
 use rapidbyte_metrics::snapshot::SnapshotReader;
 use rapidbyte_runtime::{
     load_plugin_manifest, parse_plugin_ref, resolve_plugin_path, Frame, WasmRuntime,
 };
-use rapidbyte_state::SqliteStateBackend;
+use rapidbyte_types::arrow::record_batch_to_ipc;
 use rapidbyte_types::catalog::SchemaHint;
 use rapidbyte_types::state::RunStats;
+use rapidbyte_types::state_backend::StateBackend;
 use rapidbyte_types::stream::{DataErrorPolicy, StreamContext, StreamLimits, StreamPolicies};
 use rapidbyte_types::wire::{PluginKind, SyncMode, WriteMode};
 use serde_yaml::{Mapping, Value as YamlValue};
+
+/// No-op state backend for benchmarks (replaces SQLite in-memory).
+struct NoopStateBackend;
+
+impl StateBackend for NoopStateBackend {
+    fn get_cursor(
+        &self,
+        _: &rapidbyte_types::state::PipelineId,
+        _: &rapidbyte_types::state::StreamName,
+    ) -> rapidbyte_types::state_error::Result<Option<rapidbyte_types::state::CursorState>> {
+        Ok(None)
+    }
+    fn set_cursor(
+        &self,
+        _: &rapidbyte_types::state::PipelineId,
+        _: &rapidbyte_types::state::StreamName,
+        _: &rapidbyte_types::state::CursorState,
+    ) -> rapidbyte_types::state_error::Result<()> {
+        Ok(())
+    }
+    fn start_run(
+        &self,
+        _: &rapidbyte_types::state::PipelineId,
+        _: &rapidbyte_types::state::StreamName,
+    ) -> rapidbyte_types::state_error::Result<i64> {
+        Ok(1)
+    }
+    fn complete_run(
+        &self,
+        _: i64,
+        _: rapidbyte_types::state::RunStatus,
+        _: &rapidbyte_types::state::RunStats,
+    ) -> rapidbyte_types::state_error::Result<()> {
+        Ok(())
+    }
+    fn compare_and_set(
+        &self,
+        _: &rapidbyte_types::state::PipelineId,
+        _: &rapidbyte_types::state::StreamName,
+        _: Option<&str>,
+        _: &str,
+    ) -> rapidbyte_types::state_error::Result<bool> {
+        Ok(true)
+    }
+    fn insert_dlq_records(
+        &self,
+        _: &rapidbyte_types::state::PipelineId,
+        _: i64,
+        _: &[rapidbyte_types::envelope::DlqRecord],
+    ) -> rapidbyte_types::state_error::Result<u64> {
+        Ok(0)
+    }
+}
 
 use crate::adapters::resolve_scenario_adapters;
 use crate::artifact::ArtifactCorrectness;
@@ -71,7 +126,7 @@ pub fn execute_source_benchmark(
         .as_ref()
         .map(|manifest| manifest.permissions.clone());
     let (plugin_id, plugin_version) = parse_plugin_ref(&plugin_ref);
-    let state = Arc::new(SqliteStateBackend::in_memory()?);
+    let state = Arc::new(NoopStateBackend) as Arc<dyn StateBackend>;
     let stats = Arc::new(Mutex::new(RunStats::default()));
     let (bench_provider, bench_reader) = benchmark_metrics();
     opentelemetry::global::set_meter_provider(bench_provider.clone());
@@ -93,7 +148,6 @@ pub fn execute_source_benchmark(
         stream_ctx: &stream_ctx,
         permissions: permissions.as_ref(),
         compression: None,
-        overrides: None,
     };
     let result = run_source_stream(&ctx, sender, &config, stats, None)?;
     let _ = drain.join();
@@ -177,7 +231,7 @@ pub fn execute_destination_benchmark(
         .as_ref()
         .map(|manifest| manifest.permissions.clone());
     let (plugin_id, plugin_version) = parse_plugin_ref(&plugin_ref);
-    let state = Arc::new(SqliteStateBackend::in_memory()?);
+    let state = Arc::new(NoopStateBackend) as Arc<dyn StateBackend>;
     let stats = Arc::new(Mutex::new(RunStats::default()));
     let dlq_records = Arc::new(Mutex::new(Vec::new()));
     let (bench_provider, bench_reader) = benchmark_metrics();
@@ -194,7 +248,6 @@ pub fn execute_destination_benchmark(
         stream_ctx: &stream_ctx,
         permissions: permissions.as_ref(),
         compression: None,
-        overrides: None,
     };
     let result = run_destination_stream(&ctx, receiver, dlq_records, &config, stats)?;
     let otel_snap = bench_reader.flush_and_snapshot_for_run(
@@ -264,7 +317,7 @@ pub fn execute_transform_benchmark(
     let (bench_provider, _bench_reader) = benchmark_metrics();
     opentelemetry::global::set_meter_provider(bench_provider.clone());
     let runtime = WasmRuntime::new()?;
-    let state = Arc::new(SqliteStateBackend::in_memory()?);
+    let state = Arc::new(NoopStateBackend) as Arc<dyn StateBackend>;
     let dlq_records = Arc::new(Mutex::new(Vec::new()));
     let channel_capacity = batches.len().saturating_mul(4).max(8);
     let (first_sender, first_receiver) = mpsc::sync_channel(channel_capacity);
@@ -308,7 +361,6 @@ pub fn execute_transform_benchmark(
             stream_ctx: &stream_ctx,
             permissions: permissions.as_ref(),
             compression: None,
-            overrides: None,
         };
         let summary = run_transform_stream(
             &ctx,

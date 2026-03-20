@@ -15,9 +15,7 @@ async fn output_equivalence_with_autotune_enabled_and_disabled() {
         .await
         .expect("schema allocation must succeed");
 
-    let temp = tempfile::tempdir().expect("must create tempdir for sqlite state");
-    let enabled_state = temp.path().join("autotune_enabled.db");
-    let disabled_state = temp.path().join("autotune_disabled.db");
+    let state_conn = context.state_connection();
 
     let result = async {
         context
@@ -32,7 +30,7 @@ async fn output_equivalence_with_autotune_enabled_and_disabled() {
         context
             .run_pipeline(
                 &enabled_schemas,
-                &enabled_state,
+                &state_conn,
                 &PipelinePolicies {
                     sync_mode: "full_refresh",
                     write_mode: "replace",
@@ -52,7 +50,7 @@ async fn output_equivalence_with_autotune_enabled_and_disabled() {
         context
             .run_pipeline(
                 &disabled_schemas,
-                &disabled_state,
+                &state_conn,
                 &PipelinePolicies {
                     sync_mode: "full_refresh",
                     write_mode: "replace",
@@ -127,8 +125,7 @@ async fn manual_autotune_pins_run_successfully() {
         .allocate_schema_pair("autotune_pins")
         .await
         .expect("schema allocation must succeed");
-    let temp = tempfile::tempdir().expect("must create tempdir for sqlite state");
-    let state_path = temp.path().join("autotune_pins_state.db");
+    let state_conn = context.state_connection();
 
     let result = async {
         context
@@ -146,7 +143,7 @@ async fn manual_autotune_pins_run_successfully() {
         let summary = context
             .run_pipeline(
                 &schemas,
-                &state_path,
+                &state_conn,
                 &PipelinePolicies {
                     sync_mode: "full_refresh",
                     write_mode: "replace",

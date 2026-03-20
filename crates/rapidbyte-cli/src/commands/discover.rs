@@ -2,9 +2,8 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use console::style;
-use rapidbyte_engine::orchestrator;
 use rapidbyte_types::wire::SyncMode;
 
 use crate::Verbosity;
@@ -14,6 +13,7 @@ use crate::Verbosity;
 /// # Errors
 ///
 /// Returns `Err` if pipeline parsing, validation, or schema discovery fails.
+#[allow(clippy::too_many_lines)]
 pub async fn execute(
     pipeline_path: &Path,
     verbosity: Verbosity,
@@ -23,12 +23,27 @@ pub async fn execute(
     let config = super::load_pipeline(pipeline_path, secrets).await?;
 
     // Discover catalog from source plugin
-    let catalog = orchestrator::discover_plugin(
+    let ctx = rapidbyte_engine::build_discover_context(registry_config).await?;
+    let discovered_streams = rapidbyte_engine::discover_plugin(
+        &ctx,
         &config.source.use_ref,
-        &config.source.config,
-        registry_config,
+        Some(&config.source.config),
     )
-    .await?;
+    .await
+    .map_err(anyhow::Error::from)?;
+
+    // Convert DiscoveredStream to Catalog
+    let catalog_streams: Vec<rapidbyte_types::catalog::Stream> = discovered_streams
+        .into_iter()
+        .map(|s| {
+            serde_json::from_str(&s.catalog_json)
+                .with_context(|| format!("malformed catalog for stream '{}'", s.name))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let catalog = rapidbyte_types::catalog::Catalog {
+        streams: catalog_streams,
+    };
 
     // Human-readable output to stderr (skip in quiet mode)
     if verbosity != Verbosity::Quiet {

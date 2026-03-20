@@ -8,7 +8,6 @@ rapidbyte-types = { path = "../rapidbyte-types" }
 rapidbyte-runtime = { path = "../rapidbyte-runtime" }
 rapidbyte-registry = { path = "../rapidbyte-registry" }
 rapidbyte-metrics = { path = "../rapidbyte-metrics" }
-rapidbyte-state = { path = "../rapidbyte-state", features = ["postgres"] }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 tokio = { workspace = true }
@@ -25,14 +24,21 @@ regex = "1"
 jsonschema = "0.28"
 rapidbyte-secrets = { path = "../rapidbyte-secrets" }
 rapidbyte-pipeline-config = { path = "../rapidbyte-pipeline-config" }
+async-trait = { workspace = true }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "migrate"] }
+
+[features]
+test-support = []
+integration = []
 
 [dev-dependencies]
-async-trait = { workspace = true }
 bytes = "1"
 tempfile = "3"
 criterion = { workspace = true }
 proptest = "1"
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
 
 [[bench]]
 name = "arrow_codec"

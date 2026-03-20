@@ -3,13 +3,107 @@
 //! These tests verify the full pipeline processing path from YAML parsing
 //! through validation, using real fixture files.
 
-use rapidbyte_engine::config::parser;
-use rapidbyte_engine::config::types::{PipelineWriteMode, StateBackendKind};
-use rapidbyte_engine::config::validator;
+use rapidbyte_pipeline_config::parser;
+use rapidbyte_pipeline_config::types::PipelineWriteMode;
+use rapidbyte_pipeline_config::validator;
 use rapidbyte_secrets::SecretProviders;
-use rapidbyte_state::{SqliteStateBackend, StateBackend};
 use rapidbyte_types::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
+use rapidbyte_types::state_backend::StateBackend;
+use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
+
+/// In-memory state backend for integration tests (replaces SqliteStateBackend).
+struct FakeStateBackend {
+    cursors: Mutex<HashMap<(String, String), CursorState>>,
+    next_run_id: Mutex<i64>,
+}
+
+impl FakeStateBackend {
+    fn new() -> Self {
+        Self {
+            cursors: Mutex::new(HashMap::new()),
+            next_run_id: Mutex::new(1),
+        }
+    }
+}
+
+impl StateBackend for FakeStateBackend {
+    fn get_cursor(
+        &self,
+        pipeline: &PipelineId,
+        stream: &StreamName,
+    ) -> rapidbyte_types::state_error::Result<Option<CursorState>> {
+        Ok(self
+            .cursors
+            .lock()
+            .unwrap()
+            .get(&(pipeline.to_string(), stream.to_string()))
+            .cloned())
+    }
+    fn set_cursor(
+        &self,
+        pipeline: &PipelineId,
+        stream: &StreamName,
+        cursor: &CursorState,
+    ) -> rapidbyte_types::state_error::Result<()> {
+        self.cursors
+            .lock()
+            .unwrap()
+            .insert((pipeline.to_string(), stream.to_string()), cursor.clone());
+        Ok(())
+    }
+    fn start_run(
+        &self,
+        _: &PipelineId,
+        _: &StreamName,
+    ) -> rapidbyte_types::state_error::Result<i64> {
+        let mut id = self.next_run_id.lock().unwrap();
+        let current = *id;
+        *id += 1;
+        Ok(current)
+    }
+    fn complete_run(
+        &self,
+        _: i64,
+        _: RunStatus,
+        _: &RunStats,
+    ) -> rapidbyte_types::state_error::Result<()> {
+        Ok(())
+    }
+    fn compare_and_set(
+        &self,
+        pipeline: &PipelineId,
+        stream: &StreamName,
+        expected: Option<&str>,
+        new_value: &str,
+    ) -> rapidbyte_types::state_error::Result<bool> {
+        let key = (pipeline.to_string(), stream.to_string());
+        let mut cursors = self.cursors.lock().unwrap();
+        let current = cursors.get(&key).and_then(|c| c.cursor_value.as_deref());
+        if current == expected {
+            let prev_field = cursors.get(&key).and_then(|c| c.cursor_field.clone());
+            cursors.insert(
+                key,
+                CursorState {
+                    cursor_field: prev_field,
+                    cursor_value: Some(new_value.to_string()),
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                },
+            );
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+    fn insert_dlq_records(
+        &self,
+        _: &PipelineId,
+        _: i64,
+        _: &[rapidbyte_types::envelope::DlqRecord],
+    ) -> rapidbyte_types::state_error::Result<u64> {
+        Ok(0)
+    }
+}
 
 static PLUGIN_ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -70,7 +164,8 @@ async fn test_parse_and_validate_fixture_pipeline() {
     assert_eq!(config.destination.use_ref, "postgres");
     assert_eq!(config.destination.write_mode, PipelineWriteMode::Append);
     assert_eq!(config.destination.config["schema"], "raw");
-    assert_eq!(config.state.backend, StateBackendKind::Sqlite);
+    // state.connection is set (required for Postgres-only backend)
+    assert!(config.state.connection.is_some());
 
     // Validate should pass
     validator::validate_pipeline(&config).expect("Validation should pass");
@@ -108,7 +203,7 @@ async fn test_parse_and_validate_invalid_fixture() {
 /// Test full state backend lifecycle: create run, set cursors, complete run.
 #[test]
 fn test_state_backend_full_lifecycle() {
-    let state = SqliteStateBackend::in_memory().expect("Failed to create in-memory state");
+    let state = FakeStateBackend::new();
 
     // Start a run
     let run_id = state
@@ -257,11 +352,11 @@ fn test_arrow_ipc_realistic_schema() {
     .unwrap();
 
     // Encode to IPC
-    let ipc_bytes = rapidbyte_engine::arrow::record_batch_to_ipc(&batch).unwrap();
+    let ipc_bytes = rapidbyte_types::arrow::record_batch_to_ipc(&batch).unwrap();
     assert!(!ipc_bytes.is_empty());
 
     // Decode back
-    let decoded = rapidbyte_engine::arrow::ipc_to_record_batches(&ipc_bytes).unwrap();
+    let decoded = rapidbyte_types::arrow::ipc_to_record_batches(&ipc_bytes).unwrap();
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].num_rows(), 3);
     assert_eq!(decoded[0].num_columns(), 4);

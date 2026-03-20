@@ -4,8 +4,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use rapidbyte_engine::config::types::PipelineConfig;
-use rapidbyte_engine::config::{parser, validator};
+use rapidbyte_pipeline_config::types::PipelineConfig;
+use rapidbyte_pipeline_config::{parser, validator};
 use rapidbyte_secrets::SecretProviders;
 
 pub mod agent;

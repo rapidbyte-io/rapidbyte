@@ -6,8 +6,12 @@ edition.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 regex = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+thiserror = { workspace = true }
 rapidbyte-secrets = { path = "../rapidbyte-secrets" }
+rapidbyte-types = { path = "../rapidbyte-types" }
 
 [dev-dependencies]
 async-trait = { workspace = true }

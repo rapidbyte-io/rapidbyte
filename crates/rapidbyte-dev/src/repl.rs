@@ -22,9 +22,9 @@ use rapidbyte_runtime::{
     create_component_linker, load_plugin_manifest, resolve_plugin_path, source_bindings,
     source_error_to_sdk, ComponentHostState, Frame, LoadedComponent, WasmRuntime,
 };
-use rapidbyte_state::SqliteStateBackend;
 use rapidbyte_types::catalog::{Catalog, SchemaHint};
 use rapidbyte_types::manifest::Permissions;
+use rapidbyte_types::state_backend::{NoopStateBackend, StateBackend};
 use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
 use rapidbyte_types::wire::{PluginKind, SyncMode};
 
@@ -206,10 +206,7 @@ async fn connect_source(
             let runtime = WasmRuntime::new()?;
             let module = runtime.load_module(&wasm_path)?;
 
-            let state_backend = Arc::new(
-                SqliteStateBackend::in_memory()
-                    .context("Failed to create in-memory state backend")?,
-            );
+            let state_backend: Arc<dyn StateBackend> = Arc::new(NoopStateBackend);
 
             // Build host state for discover (no batch frames needed).
             let (dummy_tx, _dummy_rx) = mpsc::sync_channel::<Frame>(1);
@@ -217,7 +214,7 @@ async fn connect_source(
                 .pipeline("dev")
                 .plugin_id(&plugin_ref)
                 .stream("discover")
-                .state_backend(state_backend as Arc<dyn rapidbyte_state::StateBackend>)
+                .state_backend(state_backend)
                 .sender(dummy_tx)
                 .config(&config)
                 .compression(None);
@@ -372,15 +369,13 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
     let stream_result = tokio::task::spawn_blocking(move || -> Result<Vec<RecordBatch>> {
         let (tx, rx) = mpsc::sync_channel::<Frame>(64);
 
-        let state_backend = Arc::new(
-            SqliteStateBackend::in_memory().context("Failed to create in-memory state backend")?,
-        );
+        let state_backend: Arc<dyn StateBackend> = Arc::new(NoopStateBackend);
 
         let mut builder = ComponentHostState::builder()
             .pipeline("dev")
             .plugin_id(&plugin_ref)
             .stream(&stream_ctx.stream_name)
-            .state_backend(state_backend as Arc<dyn rapidbyte_state::StateBackend>)
+            .state_backend(state_backend)
             .sender(tx)
             .config(&config)
             .compression(None);
@@ -434,7 +429,7 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
         while let Ok(frame) = rx.try_recv() {
             match frame {
                 Frame::Data { payload: bytes, .. } => {
-                    let decoded = rapidbyte_engine::arrow::ipc_to_record_batches(&bytes)?;
+                    let decoded = rapidbyte_types::arrow::ipc_to_record_batches(&bytes)?;
                     all_batches.extend(decoded);
                 }
                 Frame::EndStream => break,

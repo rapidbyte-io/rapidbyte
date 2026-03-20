@@ -66,6 +66,16 @@ _build-plugins:
 release:
     cargo build --release
 
+# Build minimal test plugins (used by WASM integration tests)
+build-test-plugins:
+    ./scripts/build-plugin.sh plugins/tests/test-source debug
+    ./scripts/build-plugin.sh plugins/tests/test-destination debug
+    ./scripts/build-plugin.sh plugins/tests/test-transform debug
+
+# Run WASM integration tests (requires test plugins to be built)
+test-wasm: build-test-plugins
+    cargo test -p rapidbyte-engine --features integration --test wasm_runner_integration
+
 # ── Test & lint ──────────────────────────────────────────────────────
 
 test:

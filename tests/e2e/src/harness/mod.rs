@@ -3,33 +3,20 @@ mod container;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
-use rapidbyte_engine::config::parser;
-use rapidbyte_engine::config::validator;
+use rapidbyte_pipeline_config::parser;
+use rapidbyte_pipeline_config::validator;
 use rapidbyte_secrets::SecretProviders;
-use rapidbyte_engine::outcome::{ExecutionOptions, PipelineOutcome};
-use rapidbyte_metrics::snapshot::SnapshotReader;
-use opentelemetry_sdk::metrics::SdkMeterProvider;
+use rapidbyte_engine::PipelineResult;
 use tokio_postgres::NoTls;
 use tokio_util::sync::CancellationToken;
 
+/// Counter used to ensure unique pipeline names across concurrent tests,
+/// avoiding state-table collisions.
+
 static NEXT_SCHEMA_ID: AtomicU64 = AtomicU64::new(1);
 
-/// Shared meter provider and snapshot reader for all E2E tests.
-/// Initialized once so OnceLock-cached instruments stay bound to a single provider.
-fn e2e_metrics() -> &'static (SdkMeterProvider, SnapshotReader) {
-    static INSTANCE: OnceLock<(SdkMeterProvider, SnapshotReader)> = OnceLock::new();
-    INSTANCE.get_or_init(|| {
-        let reader = SnapshotReader::new();
-        let provider = SdkMeterProvider::builder()
-            .with_reader(reader.build_reader())
-            .build();
-        opentelemetry::global::set_meter_provider(provider.clone());
-        (provider, reader)
-    })
-}
 
 #[derive(Debug, Clone)]
 pub struct HarnessContext {
@@ -95,32 +82,50 @@ pub async fn bootstrap() -> Result<HarnessContext> {
 }
 
 impl HarnessContext {
-    pub fn read_dlq_rows(&self, state_db_path: &std::path::Path) -> Result<Vec<DlqRow>> {
-        let conn = rusqlite::Connection::open(state_db_path)
-            .with_context(|| format!("failed to open sqlite state db {}", state_db_path.display()))?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT stream_name, record_json, error_message, error_category \
-                 FROM dlq_records ORDER BY id ASC",
-            )
-            .context("failed to prepare dlq query")?;
+    /// Returns the Postgres connection URL for state storage.
+    pub fn state_connection(&self) -> String {
+        format!(
+            "postgres://{}:{}@{}:{}/{}",
+            self.postgres_user,
+            self.postgres_pass,
+            self.postgres_host,
+            self.postgres_port,
+            self.postgres_db,
+        )
+    }
 
-        let mapped = stmt
-            .query_map([], |row| {
-                Ok(DlqRow {
-                    stream_name: row.get(0)?,
-                    record_json: row.get(1)?,
-                    error_message: row.get(2)?,
-                    error_category: row.get(3)?,
-                })
-            })
+    pub async fn read_dlq_rows(
+        &self,
+        state_connection: &str,
+        pipeline_name: &str,
+    ) -> Result<Vec<DlqRow>> {
+        let (client, connection) = tokio_postgres::connect(state_connection, NoTls)
+            .await
+            .context("failed to connect to postgres for dlq read")?;
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        // Pipeline names are now unique per test (include schema ID suffix),
+        // so filtering by pipeline is sufficient for isolation.
+        let rows = client
+            .query(
+                "SELECT stream_name, record_json, error_message, error_category \
+                 FROM dlq_records WHERE pipeline = $1 ORDER BY id ASC",
+                &[&pipeline_name],
+            )
+            .await
             .context("failed to query dlq rows")?;
 
-        let mut rows = Vec::new();
-        for row in mapped {
-            rows.push(row.context("failed to decode dlq row")?);
-        }
-        Ok(rows)
+        Ok(rows
+            .iter()
+            .map(|row| DlqRow {
+                stream_name: row.get(0),
+                record_json: row.get(1),
+                error_message: row.get(2),
+                error_category: row.get(3),
+            })
+            .collect())
     }
 
     pub async fn allocate_schema_pair(&self, test_name: &str) -> Result<SchemaPair> {
@@ -229,11 +234,10 @@ impl HarnessContext {
     }
 
     pub async fn run_full_refresh_pipeline(&self, schemas: &SchemaPair) -> Result<RunSummary> {
-        let state_file =
-            tempfile::NamedTempFile::new().context("failed to create state db file")?;
+        let state_conn = self.state_connection();
         self.run_pipeline(
             schemas,
-            state_file.path(),
+            &state_conn,
             &PipelinePolicies {
                 sync_mode: "full_refresh",
                 write_mode: "append",
@@ -249,7 +253,7 @@ impl HarnessContext {
     pub async fn run_pipeline(
         &self,
         schemas: &SchemaPair,
-        state_db_path: &std::path::Path,
+        state_connection: &str,
         policies: &PipelinePolicies<'_>,
     ) -> Result<RunSummary> {
         let pipeline_yaml = render_pipeline_yaml(
@@ -257,7 +261,7 @@ impl HarnessContext {
             schemas,
             policies.sync_mode,
             policies.write_mode,
-            state_db_path,
+            state_connection,
             policies.compression,
             policies.on_data_error,
             policies.schema_evolution_block,
@@ -270,23 +274,16 @@ impl HarnessContext {
                 .context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let (provider, reader) = e2e_metrics();
-        let outcome = rapidbyte_engine::orchestrator::run_pipeline(
+        let ctx = rapidbyte_engine::build_run_context(
             &config,
-            &ExecutionOptions::default(),
             None,
-            CancellationToken::new(),
-            reader,
-            provider,
             &rapidbyte_registry::RegistryConfig::default(),
         )
         .await
-        .context("pipeline execution failed")?;
-
-        let run = match outcome {
-            PipelineOutcome::Run(run) => run,
-            PipelineOutcome::DryRun(_) => anyhow::bail!("expected run outcome for e2e test"),
-        };
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let run = rapidbyte_engine::run_pipeline(&ctx, &config, CancellationToken::new())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         Ok(RunSummary {
             records_read: run.counts.records_read,
@@ -356,9 +353,9 @@ impl HarnessContext {
         &self,
         schemas: &SchemaPair,
         query: &str,
-        state_db_path: &std::path::Path,
+        state_connection: &str,
     ) -> Result<RunSummary> {
-        let pipeline_yaml = render_transform_yaml(self, schemas, query, state_db_path);
+        let pipeline_yaml = render_transform_yaml(self, schemas, query, state_connection);
 
         let config =
             parser::parse_pipeline(&pipeline_yaml, &SecretProviders::new())
@@ -366,23 +363,16 @@ impl HarnessContext {
                 .context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let (provider, reader) = e2e_metrics();
-        let outcome = rapidbyte_engine::orchestrator::run_pipeline(
+        let ctx = rapidbyte_engine::build_run_context(
             &config,
-            &ExecutionOptions::default(),
             None,
-            CancellationToken::new(),
-            reader,
-            provider,
             &rapidbyte_registry::RegistryConfig::default(),
         )
         .await
-        .context("pipeline execution failed")?;
-
-        let run = match outcome {
-            PipelineOutcome::Run(run) => run,
-            PipelineOutcome::DryRun(_) => anyhow::bail!("expected run outcome for e2e test"),
-        };
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let run = rapidbyte_engine::run_pipeline(&ctx, &config, CancellationToken::new())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         Ok(RunSummary {
             records_read: run.counts.records_read,
@@ -395,10 +385,10 @@ impl HarnessContext {
         schemas: &SchemaPair,
         rules_yaml: &str,
         on_data_error: &str,
-        state_db_path: &std::path::Path,
+        state_connection: &str,
     ) -> Result<RunSummary> {
         let pipeline_yaml =
-            render_validate_transform_yaml(self, schemas, rules_yaml, on_data_error, state_db_path);
+            render_validate_transform_yaml(self, schemas, rules_yaml, on_data_error, state_connection);
 
         let config =
             parser::parse_pipeline(&pipeline_yaml, &SecretProviders::new())
@@ -406,23 +396,16 @@ impl HarnessContext {
                 .context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let (provider, reader) = e2e_metrics();
-        let outcome = rapidbyte_engine::orchestrator::run_pipeline(
+        let ctx = rapidbyte_engine::build_run_context(
             &config,
-            &ExecutionOptions::default(),
             None,
-            CancellationToken::new(),
-            reader,
-            provider,
             &rapidbyte_registry::RegistryConfig::default(),
         )
         .await
-        .context("pipeline execution failed")?;
-
-        let run = match outcome {
-            PipelineOutcome::Run(run) => run,
-            PipelineOutcome::DryRun(_) => anyhow::bail!("expected run outcome for e2e test"),
-        };
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let run = rapidbyte_engine::run_pipeline(&ctx, &config, CancellationToken::new())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         Ok(RunSummary {
             records_read: run.counts.records_read,
@@ -467,7 +450,7 @@ impl HarnessContext {
     pub async fn run_cdc_pipeline(
         &self,
         schemas: &SchemaPair,
-        state_db_path: &std::path::Path,
+        state_connection: &str,
     ) -> Result<RunSummary> {
         let slot = format!("rapidbyte_{}", schemas.source_users_table);
         let publication = format!("rapidbyte_{}", schemas.source_users_table);
@@ -512,7 +495,7 @@ impl HarnessContext {
             .await
             .context("failed to seed cdc change stream")?;
 
-        let pipeline_yaml = render_cdc_yaml(self, schemas, &slot, &publication, state_db_path);
+        let pipeline_yaml = render_cdc_yaml(self, schemas, &slot, &publication, state_connection);
 
         let config =
             parser::parse_pipeline(&pipeline_yaml, &SecretProviders::new())
@@ -520,23 +503,16 @@ impl HarnessContext {
                 .context("failed to parse pipeline")?;
         validator::validate_pipeline(&config).context("failed to validate pipeline")?;
 
-        let (provider, reader) = e2e_metrics();
-        let outcome = rapidbyte_engine::orchestrator::run_pipeline(
+        let ctx = rapidbyte_engine::build_run_context(
             &config,
-            &ExecutionOptions::default(),
             None,
-            CancellationToken::new(),
-            reader,
-            provider,
             &rapidbyte_registry::RegistryConfig::default(),
         )
         .await
-        .context("pipeline execution failed")?;
-
-        let run = match outcome {
-            PipelineOutcome::Run(run) => run,
-            PipelineOutcome::DryRun(_) => anyhow::bail!("expected run outcome for e2e test"),
-        };
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let run = rapidbyte_engine::run_pipeline(&ctx, &config, CancellationToken::new())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let _ = client
             .query("SELECT pg_drop_replication_slot($1)", &[&slot])
@@ -599,7 +575,7 @@ fn render_pipeline_yaml(
     schemas: &SchemaPair,
     sync_mode: &str,
     write_mode: &str,
-    state_db_path: &std::path::Path,
+    state_connection: &str,
     compression: Option<&str>,
     on_data_error: Option<&str>,
     schema_evolution_block: Option<&str>,
@@ -625,7 +601,7 @@ fn render_pipeline_yaml(
 
     format!(
         r#"version: "1.0"
-pipeline: e2e_full_refresh
+pipeline: e2e_full_refresh_{dest_schema}
 
 source:
   use: postgres
@@ -653,8 +629,7 @@ destination:
   write_mode: {write_mode}{primary_key}{on_data_error}{schema_evolution}
 
 state:
-  backend: sqlite
-  connection: {state_db_path}
+  connection: {state_connection}
 {resources}
 "#,
         users_table = schemas.source_users_table,
@@ -674,7 +649,7 @@ state:
         dest_password = context.postgres_pass,
         dest_database = context.postgres_db,
         dest_schema = schemas.destination_schema,
-        state_db_path = state_db_path.display(),
+        state_connection = state_connection,
         resources = resources,
         on_data_error = on_data_error,
         schema_evolution = schema_evolution,
@@ -720,11 +695,11 @@ fn render_transform_yaml(
     context: &HarnessContext,
     schemas: &SchemaPair,
     query: &str,
-    state_db_path: &std::path::Path,
+    state_connection: &str,
 ) -> String {
     format!(
         r#"version: "1.0"
-pipeline: e2e_transform
+pipeline: e2e_transform_{dest_schema}
 
 source:
   use: postgres
@@ -756,8 +731,7 @@ destination:
   write_mode: append
 
 state:
-  backend: sqlite
-  connection: {state_db_path}
+  connection: {state_connection}
 
 resources:
   parallelism: 1
@@ -770,7 +744,7 @@ resources:
         users_table = schemas.source_users_table,
         dest_schema = schemas.destination_schema,
         query = query,
-        state_db_path = state_db_path.display(),
+        state_connection = state_connection,
     )
 }
 
@@ -779,12 +753,12 @@ fn render_validate_transform_yaml(
     schemas: &SchemaPair,
     rules_yaml: &str,
     on_data_error: &str,
-    state_db_path: &std::path::Path,
+    state_connection: &str,
 ) -> String {
     let rules = indent_block(rules_yaml, 8);
     format!(
         r#"version: "1.0"
-pipeline: e2e_validate_transform
+pipeline: e2e_validate_transform_{dest_schema}
 
 source:
   use: postgres
@@ -817,8 +791,7 @@ destination:
   on_data_error: {on_data_error}
 
 state:
-  backend: sqlite
-  connection: {state_db_path}
+  connection: {state_connection}
 
 resources:
   parallelism: 1
@@ -831,7 +804,7 @@ resources:
         users_table = schemas.source_users_table,
         dest_schema = schemas.destination_schema,
         on_data_error = on_data_error,
-        state_db_path = state_db_path.display(),
+        state_connection = state_connection,
         rules = rules,
     )
 }
@@ -851,11 +824,11 @@ fn render_cdc_yaml(
     schemas: &SchemaPair,
     slot: &str,
     publication: &str,
-    state_db_path: &std::path::Path,
+    state_connection: &str,
 ) -> String {
     format!(
         r#"version: "1.0"
-pipeline: e2e_cdc
+pipeline: e2e_cdc_{dest_schema}
 
 source:
   use: postgres
@@ -883,8 +856,7 @@ destination:
   write_mode: append
 
 state:
-  backend: sqlite
-  connection: {state_db_path}
+  connection: {state_connection}
 "#,
         host = context.postgres_host,
         port = context.postgres_port,
@@ -895,7 +867,7 @@ state:
         publication = publication,
         users_table = schemas.source_users_table,
         dest_schema = schemas.destination_schema,
-        state_db_path = state_db_path.display(),
+        state_connection = state_connection,
     )
 }
 

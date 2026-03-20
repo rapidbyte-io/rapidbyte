@@ -13,10 +13,10 @@ serde_yaml.workspace = true
 postgres.workspace = true
 rapidbyte-types = { path = "../crates/rapidbyte-types" }
 rapidbyte-engine = { path = "../crates/rapidbyte-engine" }
+rapidbyte-pipeline-config = { path = "../crates/rapidbyte-pipeline-config" }
 rapidbyte-secrets = { path = "../crates/rapidbyte-secrets" }
 rapidbyte-metrics = { path = "../crates/rapidbyte-metrics" }
 rapidbyte-runtime = { path = "../crates/rapidbyte-runtime" }
-rapidbyte-state = { path = "../crates/rapidbyte-state" }
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
 tokio.workspace = true

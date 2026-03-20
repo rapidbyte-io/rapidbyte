@@ -27,7 +27,7 @@ use crate::proto::rapidbyte::v1::{
     HeartbeatRequest, PollTaskRequest, RegisterRequest, RunMetrics, TaskCancelled, TaskCompleted,
     TaskFailed, TaskHeartbeat,
 };
-use crate::spool::{PreviewKey, PreviewSpool};
+use crate::spool::PreviewSpool;
 
 /// Configuration for the agent worker.
 #[derive(Clone)]
@@ -112,6 +112,7 @@ struct TaskExecutionContext {
     channel: Channel,
     agent_id: String,
     active_leases: ActiveLeaseMap,
+    #[allow(dead_code)] // retained for future preview features
     spool: Arc<RwLock<PreviewSpool>>,
     otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
     config: AgentConfig,
@@ -430,9 +431,6 @@ async fn process_task(
         },
     );
 
-    let dry_run = false;
-    let limit = None;
-
     let (progress_tx, progress_rx) = mpsc::unbounded_channel();
     let progress_handle = tokio::spawn(crate::progress::collect_progress(
         progress_rx,
@@ -464,41 +462,23 @@ async fn process_task(
     let result = executor::execute_task(
         executor::TaskConfig {
             pipeline_yaml: task.pipeline_yaml.as_bytes(),
-            dry_run,
-            limit,
             progress_tx: Some(progress_tx),
             cancel_token,
             snapshot_reader: ctx.otel_guard.snapshot_reader(),
             meter_provider: ctx.otel_guard.meter_provider(),
             registry_config: &registry_config,
         },
-        |config, options, progress_tx, cancel_token, metrics_runtime, registry_config| {
-            Box::pin(rapidbyte_engine::orchestrator::run_pipeline(
-                config,
-                options,
-                progress_tx,
-                cancel_token,
-                metrics_runtime.snapshot_reader,
-                metrics_runtime.meter_provider,
-                registry_config,
-            ))
+        |config, progress_tx, cancel_token, _metrics_runtime, registry_config| {
+            Box::pin(async move {
+                let ctx = rapidbyte_engine::build_run_context(config, progress_tx, registry_config)
+                    .await?;
+                rapidbyte_engine::run_pipeline(&ctx, config, cancel_token).await
+            })
         },
     )
     .await;
 
     let _ = progress_handle.await;
-
-    // Store preview data in spool if dry-run produced results
-    if let Some(dr) = result.dry_run_result {
-        ctx.spool.write().await.store(
-            PreviewKey {
-                run_id: task.run_id.clone(),
-                task_id: task.task_id.clone(),
-                lease_epoch: task.lease_epoch,
-            },
-            dr,
-        );
-    }
 
     let proto_outcome = match &result.outcome {
         TaskOutcomeKind::Completed => complete_task_request::Outcome::Completed(TaskCompleted {

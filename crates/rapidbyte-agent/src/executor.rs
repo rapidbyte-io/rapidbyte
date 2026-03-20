@@ -3,17 +3,16 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use rapidbyte_engine::config::parser;
-use rapidbyte_engine::config::validator;
-use rapidbyte_engine::outcome::{ExecutionOptions, PipelineOutcome};
-use rapidbyte_engine::progress::ProgressEvent;
-use rapidbyte_engine::PipelineError;
+use rapidbyte_engine::domain::error::PipelineError;
+use rapidbyte_engine::{PipelineResult, ProgressEvent};
+use rapidbyte_pipeline_config::parser;
+use rapidbyte_pipeline_config::validator;
 use rapidbyte_types::prelude::CommitState;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 type PipelineRunFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<PipelineOutcome, PipelineError>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<PipelineResult, PipelineError>> + Send + 'a>>;
 
 #[derive(Clone, Copy)]
 pub struct MetricsRuntime<'a> {
@@ -24,8 +23,6 @@ pub struct MetricsRuntime<'a> {
 /// Consolidated parameters for [`execute_task`].
 pub struct TaskConfig<'a> {
     pub pipeline_yaml: &'a [u8],
-    pub dry_run: bool,
-    pub limit: Option<u64>,
     pub progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
     pub cancel_token: CancellationToken,
     pub snapshot_reader: &'a rapidbyte_metrics::snapshot::SnapshotReader,
@@ -37,7 +34,6 @@ pub struct TaskConfig<'a> {
 pub struct TaskExecutionResult {
     pub outcome: TaskOutcomeKind,
     pub metrics: TaskMetrics,
-    pub dry_run_result: Option<rapidbyte_engine::DryRunResult>,
 }
 
 pub enum TaskOutcomeKind {
@@ -83,6 +79,7 @@ fn is_pre_commit_cancellation(error: &PipelineError) -> bool {
                 && matches!(plugin_error.commit_state, Some(CommitState::BeforeCommit))
         }
         PipelineError::Infrastructure(_) => false,
+        PipelineError::Cancelled => true,
     }
 }
 
@@ -90,8 +87,7 @@ fn is_pre_commit_cancellation(error: &PipelineError) -> bool {
 pub async fn execute_task<R>(task: TaskConfig<'_>, run_pipeline: R) -> TaskExecutionResult
 where
     R: for<'a> FnOnce(
-        &'a rapidbyte_engine::config::types::PipelineConfig,
-        &'a ExecutionOptions,
+        &'a rapidbyte_pipeline_config::PipelineConfig,
         Option<mpsc::UnboundedSender<ProgressEvent>>,
         CancellationToken,
         MetricsRuntime<'a>,
@@ -99,8 +95,6 @@ where
     ) -> PipelineRunFuture<'a>,
 {
     let pipeline_yaml = task.pipeline_yaml;
-    let dry_run = task.dry_run;
-    let limit = task.limit;
     let progress_tx = task.progress_tx;
     let cancel_token = task.cancel_token;
     let metrics_runtime = MetricsRuntime {
@@ -113,7 +107,6 @@ where
         return TaskExecutionResult {
             outcome: TaskOutcomeKind::Cancelled,
             metrics: TaskMetrics::zero(),
-            dry_run_result: None,
         };
     }
 
@@ -129,7 +122,6 @@ where
                     commit_state: CommitState::BeforeCommit,
                 }),
                 metrics: TaskMetrics::zero(),
-                dry_run_result: None,
             };
         }
     };
@@ -151,7 +143,6 @@ where
                         commit_state: CommitState::BeforeCommit,
                     }),
                     metrics: TaskMetrics::zero(),
-                    dry_run_result: None,
                 };
             }
         };
@@ -166,11 +157,9 @@ where
                 commit_state: CommitState::BeforeCommit,
             }),
             metrics: TaskMetrics::zero(),
-            dry_run_result: None,
         };
     }
 
-    let options = ExecutionOptions { dry_run, limit };
     let start = std::time::Instant::now();
 
     // Cancellation is only honored before execution begins. Once the engine
@@ -188,13 +177,11 @@ where
                 elapsed_seconds: elapsed,
                 cursors_advanced: 0,
             },
-            dry_run_result: None,
         };
     }
 
     let pipeline_result = run_pipeline(
         &config,
-        &options,
         progress_tx,
         cancel_token.clone(),
         metrics_runtime,
@@ -203,32 +190,17 @@ where
     .await;
 
     match pipeline_result {
-        Ok(outcome) => {
+        Ok(result) => {
             let elapsed = start.elapsed().as_secs_f64();
-            match outcome {
-                PipelineOutcome::Run(result) => TaskExecutionResult {
-                    outcome: TaskOutcomeKind::Completed,
-                    metrics: TaskMetrics {
-                        records_read: result.counts.records_read,
-                        records_written: result.counts.records_written,
-                        bytes_read: result.counts.bytes_read,
-                        bytes_written: result.counts.bytes_written,
-                        elapsed_seconds: elapsed,
-                        cursors_advanced: 0,
-                    },
-                    dry_run_result: None,
-                },
-                PipelineOutcome::DryRun(dr) => TaskExecutionResult {
-                    outcome: TaskOutcomeKind::Completed,
-                    metrics: TaskMetrics {
-                        records_read: dr.streams.iter().map(|s| s.total_rows).sum(),
-                        records_written: 0,
-                        bytes_read: dr.streams.iter().map(|s| s.total_bytes).sum(),
-                        bytes_written: 0,
-                        elapsed_seconds: elapsed,
-                        cursors_advanced: 0,
-                    },
-                    dry_run_result: Some(dr),
+            TaskExecutionResult {
+                outcome: TaskOutcomeKind::Completed,
+                metrics: TaskMetrics {
+                    records_read: result.counts.records_read,
+                    records_written: result.counts.records_written,
+                    bytes_read: result.counts.bytes_read,
+                    bytes_written: result.counts.bytes_written,
+                    elapsed_seconds: elapsed,
+                    cursors_advanced: 0,
                 },
             }
         }
@@ -245,7 +217,6 @@ where
                         elapsed_seconds: elapsed,
                         cursors_advanced: 0,
                     },
-                    dry_run_result: None,
                 };
             }
             let error_info = match &e {
@@ -263,6 +234,13 @@ where
                     safe_to_retry: false,
                     commit_state: CommitState::BeforeCommit,
                 },
+                PipelineError::Cancelled => TaskErrorInfo {
+                    code: "CANCELLED".into(),
+                    message: "pipeline cancelled".into(),
+                    retryable: true,
+                    safe_to_retry: true,
+                    commit_state: CommitState::BeforeCommit,
+                },
             };
             TaskExecutionResult {
                 outcome: TaskOutcomeKind::Failed(error_info),
@@ -274,7 +252,6 @@ where
                     elapsed_seconds: elapsed,
                     cursors_advanced: 0,
                 },
-                dry_run_result: None,
             }
         }
     }
@@ -283,9 +260,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapidbyte_engine::outcome::PipelineOutcome;
-    use rapidbyte_engine::outcome::{DestTiming, PipelineCounts, PipelineResult, SourceTiming};
-    use rapidbyte_engine::PipelineError;
+    use rapidbyte_engine::domain::error::PipelineError;
+    use rapidbyte_engine::{DestTiming, PipelineCounts, PipelineResult, SourceTiming};
     use rapidbyte_metrics::snapshot::SnapshotReader;
     use rapidbyte_types::error::{CommitState, PluginError};
     use std::sync::Arc;
@@ -318,8 +294,8 @@ destination:
 "#
     }
 
-    fn completed_outcome() -> PipelineOutcome {
-        PipelineOutcome::Run(PipelineResult {
+    fn completed_outcome() -> PipelineResult {
+        PipelineResult {
             counts: PipelineCounts {
                 records_written: 7,
                 bytes_written: 128,
@@ -335,18 +311,17 @@ destination:
             retry_count: 0,
             parallelism: 1,
             stream_metrics: Vec::new(),
-        })
+        }
     }
 
     fn noop_runner() -> impl for<'a> FnOnce(
-        &'a rapidbyte_engine::config::types::PipelineConfig,
-        &'a ExecutionOptions,
+        &'a rapidbyte_pipeline_config::PipelineConfig,
         Option<mpsc::UnboundedSender<ProgressEvent>>,
         CancellationToken,
         MetricsRuntime<'a>,
         &'a rapidbyte_registry::RegistryConfig,
     ) -> PipelineRunFuture<'a> {
-        |_, _, _, _, _, _| Box::pin(async { Ok(completed_outcome()) })
+        |_, _, _, _, _| Box::pin(async { Ok(completed_outcome()) })
     }
 
     #[tokio::test]
@@ -355,8 +330,6 @@ destination:
         let result = execute_task(
             TaskConfig {
                 pipeline_yaml: &[0xFF, 0xFE],
-                dry_run: false,
-                limit: None,
                 progress_tx: None,
                 cancel_token: CancellationToken::new(),
                 snapshot_reader: &reader,
@@ -379,8 +352,6 @@ destination:
         let result = execute_task(
             TaskConfig {
                 pipeline_yaml: b"not: [valid: yaml",
-                dry_run: false,
-                limit: None,
                 progress_tx: None,
                 cancel_token: CancellationToken::new(),
                 snapshot_reader: &reader,
@@ -402,8 +373,6 @@ destination:
         let result = execute_task(
             TaskConfig {
                 pipeline_yaml: &[0xFF],
-                dry_run: false,
-                limit: None,
                 progress_tx: None,
                 cancel_token: CancellationToken::new(),
                 snapshot_reader: &reader,
@@ -428,8 +397,6 @@ destination:
         let result = execute_task(
             TaskConfig {
                 pipeline_yaml: b"pipeline: test\n",
-                dry_run: false,
-                limit: None,
                 progress_tx: None,
                 cancel_token: token,
                 snapshot_reader: &reader,
@@ -457,15 +424,13 @@ destination:
                 execute_task(
                     TaskConfig {
                         pipeline_yaml: valid_yaml(),
-                        dry_run: false,
-                        limit: None,
                         progress_tx: None,
                         cancel_token: token,
                         snapshot_reader: &reader,
                         meter_provider: &provider,
                         registry_config: &rapidbyte_registry::RegistryConfig::default(),
                     },
-                    move |_, _, _, _cancel_token, _metrics_runtime, _registry_config| {
+                    move |_, _, _cancel_token, _metrics_runtime, _registry_config| {
                         let started = started.clone();
                         let release = release.clone();
                         Box::pin(async move {
@@ -502,15 +467,13 @@ destination:
                 execute_task(
                     TaskConfig {
                         pipeline_yaml: valid_yaml(),
-                        dry_run: false,
-                        limit: None,
                         progress_tx: None,
                         cancel_token: token,
                         snapshot_reader: &reader,
                         meter_provider: &provider,
                         registry_config: &rapidbyte_registry::RegistryConfig::default(),
                     },
-                    move |_, _, _, cancel_token, _metrics_runtime, _registry_config| {
+                    move |_, _, cancel_token, _metrics_runtime, _registry_config| {
                         let started = started.clone();
                         Box::pin(async move {
                             let mut cancelled = PluginError::internal(
@@ -555,15 +518,13 @@ destination:
                 execute_task(
                     TaskConfig {
                         pipeline_yaml: valid_yaml(),
-                        dry_run: false,
-                        limit: None,
                         progress_tx: None,
                         cancel_token: token,
                         snapshot_reader: &reader,
                         meter_provider: &provider,
                         registry_config: &rapidbyte_registry::RegistryConfig::default(),
                     },
-                    move |_, _, _, _cancel_token, _metrics_runtime, _registry_config| {
+                    move |_, _, _cancel_token, _metrics_runtime, _registry_config| {
                         let started_destination = started_destination.clone();
                         let release = release.clone();
                         Box::pin(async move {
@@ -604,8 +565,6 @@ destination:
         let result = execute_task(
             TaskConfig {
                 pipeline_yaml: valid_yaml(),
-                dry_run: false,
-                limit: None,
                 progress_tx: None,
                 cancel_token: CancellationToken::new(),
                 snapshot_reader: &reader,

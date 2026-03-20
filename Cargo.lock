@@ -2453,12 +2453,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
 
 [[package]]
-name = "fallible-streaming-iterator"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
-
-[[package]]
 name = "fancy-regex"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4929,10 +4923,10 @@ dependencies = [
  "protoc-bin-vendored",
  "rapidbyte-engine",
  "rapidbyte-metrics",
+ "rapidbyte-pipeline-config",
  "rapidbyte-registry",
  "rapidbyte-runtime",
  "rapidbyte-secrets",
- "rapidbyte-state",
  "rapidbyte-types",
  "sha2",
  "thiserror 2.0.18",
@@ -4958,9 +4952,9 @@ dependencies = [
  "postgres",
  "rapidbyte-engine",
  "rapidbyte-metrics",
+ "rapidbyte-pipeline-config",
  "rapidbyte-runtime",
  "rapidbyte-secrets",
- "rapidbyte-state",
  "rapidbyte-types",
  "serde",
  "serde_json",
@@ -4987,6 +4981,7 @@ dependencies = [
  "rapidbyte-dev",
  "rapidbyte-engine",
  "rapidbyte-metrics",
+ "rapidbyte-pipeline-config",
  "rapidbyte-registry",
  "rapidbyte-runtime",
  "rapidbyte-secrets",
@@ -5051,7 +5046,6 @@ dependencies = [
  "nu-ansi-term",
  "rapidbyte-engine",
  "rapidbyte-runtime",
- "rapidbyte-state",
  "rapidbyte-types",
  "reedline",
  "serde_json",
@@ -5078,13 +5072,15 @@ dependencies = [
  "rapidbyte-registry",
  "rapidbyte-runtime",
  "rapidbyte-secrets",
- "rapidbyte-state",
  "rapidbyte-types",
  "regex",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sqlx",
  "tempfile",
+ "testcontainers",
+ "testcontainers-modules",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
@@ -5118,8 +5114,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "rapidbyte-secrets",
+ "rapidbyte-types",
  "regex",
+ "serde",
+ "serde_json",
  "serde_yaml",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
@@ -5158,7 +5158,6 @@ dependencies = [
  "opentelemetry_sdk",
  "rapidbyte-metrics",
  "rapidbyte-registry",
- "rapidbyte-state",
  "rapidbyte-types",
  "serde",
  "serde_json",
@@ -5214,25 +5213,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "rapidbyte-state"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "criterion",
- "postgres",
- "rapidbyte-types",
- "rusqlite",
- "serde",
- "tempfile",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
 name = "rapidbyte-types"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "arrow",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -5516,20 +5501,6 @@ dependencies = [
  "spki",
  "subtle",
  "zeroize",
-]
-
-[[package]]
-name = "rusqlite"
-version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b838eba278d213a8beaf485bd313fd580ca4505a00d5871caeb1457c55322cae"
-dependencies = [
- "bitflags 2.11.0",
- "fallible-iterator 0.3.0",
- "fallible-streaming-iterator",
- "hashlink",
- "libsqlite3-sys",
- "smallvec",
 ]
 
 [[package]]

@@ -15,10 +15,9 @@ testcontainers = "0.15"
 once_cell = "1"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
-tempfile = "3"
-rusqlite = { version = "0.31", features = ["bundled"] }
 
 rapidbyte-engine = { path = "../../crates/rapidbyte-engine" }
+rapidbyte-pipeline-config = { path = "../../crates/rapidbyte-pipeline-config" }
 rapidbyte-secrets = { path = "../../crates/rapidbyte-secrets" }
 rapidbyte-metrics = { path = "../../crates/rapidbyte-metrics" }
 rapidbyte-registry = { path = "../../crates/rapidbyte-registry" }

@@ -1,7 +1,7 @@
 //! Rapidbyte agent — stateless pipeline worker.
 //!
 //! Pulls tasks from the controller, executes pipelines via the engine,
-//! reports progress, and serves dry-run previews via Arrow Flight.
+//! reports progress, and serves previews via Arrow Flight.
 //!
 //! # Crate structure
 //!

@@ -1,6 +1,6 @@
 //! Pipeline execution subcommand (run).
 
-// u64/i64/usize → f64 casts are intentional lossy conversions for display and
+// u64/i64/usize -> f64 casts are intentional lossy conversions for display and
 // timing computations where sub-millisecond precision loss is acceptable.
 #![allow(clippy::cast_precision_loss)]
 
@@ -9,14 +9,8 @@ use std::path::Path;
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use rapidbyte_engine::orchestrator;
-use rapidbyte_engine::outcome::{ExecutionOptions, PipelineOutcome};
-
 use crate::commands::transport::TlsClientConfig;
-use crate::output::{
-    format::{format_bytes, format_count, format_duration},
-    progress, summary,
-};
+use crate::output::{progress, summary};
 use crate::Verbosity;
 
 #[derive(Debug, Clone)]
@@ -35,35 +29,21 @@ struct ProcessCpuMetrics {
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn execute(
     pipeline_path: &Path,
-    dry_run: bool,
-    limit: Option<u64>,
     verbosity: Verbosity,
     controller: Option<&str>,
     auth_token: Option<&str>,
     tls: Option<&TlsClientConfig>,
-    otel_guard: &rapidbyte_metrics::OtelGuard,
+    _otel_guard: &rapidbyte_metrics::OtelGuard,
     registry_config: &rapidbyte_registry::RegistryConfig,
     secrets: &rapidbyte_secrets::SecretProviders,
 ) -> Result<()> {
     // If controller is set, route to distributed mode
     if let Some(url) = controller {
-        return super::distributed_run::execute(
-            url,
-            pipeline_path,
-            dry_run,
-            limit,
-            verbosity,
-            auth_token,
-            tls,
-        )
-        .await;
+        return super::distributed_run::execute(url, pipeline_path, verbosity, auth_token, tls)
+            .await;
     }
 
     let config = super::load_pipeline(pipeline_path, secrets).await?;
-
-    // Build execution options (--limit implies --dry-run)
-    let dry_run = dry_run || limit.is_some();
-    let options = ExecutionOptions { dry_run, limit };
 
     tracing::info!(
         pipeline = config.pipeline,
@@ -73,10 +53,10 @@ pub async fn execute(
         "Pipeline validated"
     );
 
-    // Spawn progress spinner (unless quiet or dry-run)
+    // Spawn progress spinner (unless quiet)
     let is_tty = console::Term::stderr().is_term();
     let stream_count = config.source.streams.len() as u64;
-    let show_progress = !matches!(verbosity, Verbosity::Quiet) && !dry_run;
+    let show_progress = !matches!(verbosity, Verbosity::Quiet);
     let (progress_tx, spinner_handle) = if show_progress {
         let (tx, handle) = progress::spawn_progress_spinner(stream_count, is_tty);
         (Some(tx), Some(handle))
@@ -111,123 +91,56 @@ pub async fn execute(
             }
         });
     }
-    let outcome = orchestrator::run_pipeline(
-        &config,
-        &options,
-        progress_tx,
-        cancel_token,
-        otel_guard.snapshot_reader(),
-        otel_guard.meter_provider(),
-        registry_config,
-    )
-    .await;
+
+    let ctx = rapidbyte_engine::build_run_context(&config, progress_tx, registry_config).await?;
+    let outcome = rapidbyte_engine::run_pipeline(&ctx, &config, cancel_token).await;
     let (cpu_end, peak_rss_mb) = post_pipeline_metrics();
+
+    // Drop context to release the progress sender, allowing the spinner
+    // loop to exit when rx.recv() returns None.
+    drop(ctx);
 
     // Wait for spinner to finish before printing results
     if let Some(handle) = spinner_handle {
         let _ = handle.await;
     }
 
-    let outcome = match outcome {
-        Ok(o) => o,
+    let result = match outcome {
+        Ok(r) => r,
         Err(e) => return Err(e.into()),
     };
 
-    match outcome {
-        PipelineOutcome::Run(result) => {
-            let cpu_metrics = process_cpu_metrics(cpu_start, cpu_end, result.duration_secs);
+    let cpu_metrics = process_cpu_metrics(cpu_start, cpu_end, result.duration_secs);
 
-            if let Some(cpu) = &cpu_metrics {
-                rapidbyte_metrics::instruments::process::cpu_seconds().record(cpu.cpu_secs, &[]);
-            }
-            if let Some(rss) = peak_rss_mb {
-                rapidbyte_metrics::instruments::process::peak_rss_bytes()
-                    .record(rss * 1024.0 * 1024.0, &[]);
-            }
+    if let Some(cpu) = &cpu_metrics {
+        rapidbyte_metrics::instruments::process::cpu_seconds().record(cpu.cpu_secs, &[]);
+    }
+    if let Some(rss) = peak_rss_mb {
+        rapidbyte_metrics::instruments::process::peak_rss_bytes()
+            .record(rss * 1024.0 * 1024.0, &[]);
+    }
 
-            // Human-readable summary to stderr
-            summary::print_success(&result, &config.pipeline, verbosity);
+    // Human-readable summary to stderr
+    summary::print_success(&result, &config.pipeline, verbosity);
 
-            // Process-level diagnostics for -vv
-            if verbosity == Verbosity::Diagnostic {
-                if let Some(cpu) = &cpu_metrics {
-                    eprintln!(
-                        "    {:<20}CPU {:.0}% ({:.0}% of {} cores) | RSS {:.0} MB",
-                        "Process",
-                        cpu.cpu_pct_one_core,
-                        cpu.cpu_pct_of_available_cores,
-                        cpu.available_cores,
-                        peak_rss_mb.unwrap_or(0.0),
-                    );
-                }
-            }
-
-            // Machine-readable JSON for benchmarking tools (stdout, opt-in)
-            if std::env::var_os("RAPIDBYTE_BENCH").is_some() {
-                let json = bench_json_from_result(&result, cpu_metrics.as_ref(), peak_rss_mb);
-                println!("@@BENCH_JSON@@{json}");
-            }
-        }
-        PipelineOutcome::DryRun(result) => {
-            use arrow::util::pretty::pretty_format_batches;
-
+    // Process-level diagnostics for -vv
+    if verbosity == Verbosity::Diagnostic {
+        if let Some(cpu) = &cpu_metrics {
             eprintln!(
-                "Dry run: '{}' ({} stream{})",
-                config.pipeline,
-                result.streams.len(),
-                if result.streams.len() == 1 { "" } else { "s" },
+                "    {:<20}CPU {:.0}% ({:.0}% of {} cores) | RSS {:.0} MB",
+                "Process",
+                cpu.cpu_pct_one_core,
+                cpu.cpu_pct_of_available_cores,
+                cpu.available_cores,
+                peak_rss_mb.unwrap_or(0.0),
             );
-            eprintln!();
-
-            for stream in &result.streams {
-                eprintln!("Stream: {}", stream.stream_name);
-
-                if stream.batches.is_empty() {
-                    eprintln!("  (no data)");
-                } else {
-                    // Print schema
-                    let schema = stream.batches[0].schema();
-                    eprintln!("  Columns:");
-                    for field in schema.fields() {
-                        eprintln!(
-                            "    {}: {:?}{}",
-                            field.name(),
-                            field.data_type(),
-                            if field.is_nullable() {
-                                " (nullable)"
-                            } else {
-                                ""
-                            }
-                        );
-                    }
-                    eprintln!();
-
-                    // Print table (pretty_format_batches returns a Display impl)
-                    match pretty_format_batches(&stream.batches) {
-                        Ok(table) => eprintln!("{table}"),
-                        Err(e) => eprintln!("  (display error: {e})"),
-                    }
-                }
-
-                eprintln!(
-                    "{} rows ({}, {} batch{})",
-                    format_count(stream.total_rows),
-                    format_bytes(stream.total_bytes),
-                    stream.batches.len(),
-                    if stream.batches.len() == 1 { "" } else { "es" },
-                );
-                eprintln!();
-            }
-
-            eprintln!("Duration: {}", format_duration(result.duration_secs));
-            if result.num_transforms > 0 {
-                eprintln!(
-                    "Transforms: {} applied ({})",
-                    result.num_transforms,
-                    format_duration(result.total_transform_secs),
-                );
-            }
         }
+    }
+
+    // Machine-readable JSON for benchmarking tools (stdout, opt-in)
+    if std::env::var_os("RAPIDBYTE_BENCH").is_some() {
+        let json = bench_json_from_result(&result, cpu_metrics.as_ref(), peak_rss_mb);
+        println!("@@BENCH_JSON@@{json}");
     }
 
     Ok(())
@@ -317,7 +230,7 @@ fn post_pipeline_metrics() -> (Option<f64>, Option<f64>) {
 }
 
 fn bench_json_from_result(
-    result: &rapidbyte_engine::outcome::PipelineResult,
+    result: &rapidbyte_engine::PipelineResult,
     cpu_metrics: Option<&ProcessCpuMetrics>,
     peak_rss_mb: Option<f64>,
 ) -> serde_json::Value {
@@ -417,7 +330,7 @@ fn bench_json_from_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapidbyte_engine::outcome::{
+    use rapidbyte_engine::{
         DestTiming, PipelineCounts, PipelineResult, SourceTiming, StreamShardMetric,
     };
 

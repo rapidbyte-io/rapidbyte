@@ -15,8 +15,6 @@ use rapidbyte_controller::proto::rapidbyte::v1::{
 pub async fn execute(
     controller_url: &str,
     pipeline_path: &Path,
-    _dry_run: bool,
-    _limit: Option<u64>,
     verbosity: Verbosity,
     auth_token: Option<&str>,
     tls: Option<&TlsClientConfig>,

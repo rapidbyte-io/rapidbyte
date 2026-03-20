@@ -27,4 +27,4 @@ destination:
   write_mode: append
 
 state:
-  backend: sqlite
+  connection: "postgres://postgres:postgres@${TEST_SOURCE_PG_HOST}:${TEST_SOURCE_PG_PORT}/source_test"

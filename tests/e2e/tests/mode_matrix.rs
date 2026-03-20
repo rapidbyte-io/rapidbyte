@@ -14,8 +14,7 @@ async fn full_refresh_write_mode_matrix(#[case] write_mode: &str) {
         .allocate_schema_pair("mode_matrix")
         .await
         .expect("schema allocation must succeed");
-    let temp = tempfile::tempdir().expect("must create tempdir for sqlite state");
-    let state_path = temp.path().join("mode_matrix_state.db");
+    let state_conn = context.state_connection();
 
     let result = async {
         context
@@ -26,7 +25,7 @@ async fn full_refresh_write_mode_matrix(#[case] write_mode: &str) {
         context
             .run_pipeline(
                 &schemas,
-                &state_path,
+                &state_conn,
                 &PipelinePolicies {
                     sync_mode: "full_refresh",
                     write_mode,
@@ -41,7 +40,7 @@ async fn full_refresh_write_mode_matrix(#[case] write_mode: &str) {
         context
             .run_pipeline(
                 &schemas,
-                &state_path,
+                &state_conn,
                 &PipelinePolicies {
                     sync_mode: "full_refresh",
                     write_mode,
@@ -82,8 +81,7 @@ async fn incremental_sync_only_appends_new_rows_on_second_run() {
         .allocate_schema_pair("incremental")
         .await
         .expect("schema allocation must succeed");
-    let temp = tempfile::tempdir().expect("must create tempdir for sqlite state");
-    let state_path = temp.path().join("incremental_state.db");
+    let state_conn = context.state_connection();
 
     let result = async {
         context
@@ -94,7 +92,7 @@ async fn incremental_sync_only_appends_new_rows_on_second_run() {
         let first = context
             .run_pipeline(
                 &schemas,
-                &state_path,
+                &state_conn,
                 &PipelinePolicies {
                     sync_mode: "incremental",
                     write_mode: "append",
@@ -116,7 +114,7 @@ async fn incremental_sync_only_appends_new_rows_on_second_run() {
         let second = context
             .run_pipeline(
                 &schemas,
-                &state_path,
+                &state_conn,
                 &PipelinePolicies {
                     sync_mode: "incremental",
                     write_mode: "append",
@@ -158,8 +156,7 @@ async fn full_refresh_compression_matrix(#[case] compression: Option<&str>) {
         .allocate_schema_pair("compression")
         .await
         .expect("schema allocation must succeed");
-    let temp = tempfile::tempdir().expect("must create tempdir for sqlite state");
-    let state_path = temp.path().join("compression_state.db");
+    let state_conn = context.state_connection();
 
     let result = async {
         context
@@ -170,7 +167,7 @@ async fn full_refresh_compression_matrix(#[case] compression: Option<&str>) {
         context
             .run_pipeline(
                 &schemas,
-                &state_path,
+                &state_conn,
                 &PipelinePolicies {
                     sync_mode: "full_refresh",
                     write_mode: "replace",

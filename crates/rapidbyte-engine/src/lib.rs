@@ -7,38 +7,50 @@
 //!
 //! | Module             | Responsibility |
 //! |--------------------|----------------|
-//! | `arrow`            | Arrow IPC encode/decode utilities |
-//! | `config`           | Pipeline YAML config types, parsing, validation |
-//! | `error`            | Pipeline error types, retry policy, convenience constructors |
-//! | `finalizers`       | Post-execution: checkpoint correlation, DLQ, run finalization |
-//! | `orchestrator`     | Top-level pipeline coordination (run, check, discover) |
-//! | `outcome`          | Pipeline operation types: results, timings, options, check statuses |
-//! | `pipeline`         | Pipeline execution: planning, scheduling, stream execution |
-//! | `plugin`           | Plugin resolution, manifest validation, module loading |
-//! | `progress`         | Progress event types and ProgressSender for live CLI updates |
-//! | `runner`           | Per-kind plugin runners (source, dest, transform, validate) |
+//! | `adapter`          | Concrete adapter implementations for port traits |
+//! | `application`      | DI context, use-case orchestration, testing fakes |
+//! | `domain`           | Port traits, domain errors, outcomes, progress, retry |
 
 #![warn(clippy::pedantic)]
 
-pub mod arrow;
-pub mod config;
-pub mod error;
-pub(crate) mod finalizers;
-pub mod orchestrator;
-pub mod outcome;
-pub(crate) mod pipeline;
-pub mod plugin;
-pub mod progress;
-pub mod runner;
+pub mod adapter;
+pub mod application;
+pub mod domain;
 
-// Top-level re-exports for convenience.
-pub use config::parser::parse_pipeline;
-pub use config::types::PipelineConfig;
-pub use config::validator::validate_pipeline;
-pub use error::PipelineError;
-pub use orchestrator::{check_pipeline, discover_plugin, run_pipeline};
-pub use outcome::{
-    CheckResult, CheckStatus, DryRunResult, DryRunStreamResult, ExecutionOptions, PipelineOutcome,
-    PipelineResult,
+// ---------------------------------------------------------------------------
+// Public re-exports — canonical API surface
+// ---------------------------------------------------------------------------
+
+// Application layer
+pub use application::check::check_pipeline;
+pub use application::context::{EngineConfig, EngineContext};
+pub use application::discover::discover_plugin;
+pub use application::run::run_pipeline;
+
+// Domain errors
+pub use domain::error::PipelineError;
+
+// Domain outcomes
+pub use domain::outcome::{
+    CheckResult, CheckStatus, DestTiming, PipelineCounts, PipelineResult, SourceTiming,
+    StreamShardMetric,
 };
-pub use progress::{Phase, ProgressEvent, ProgressSender};
+
+// Domain progress
+pub use domain::progress::{Phase, ProgressEvent, ProgressReporter};
+
+// Domain port traits
+pub use domain::ports::{
+    CursorRepository, DlqRepository, MetricsSnapshot, PluginResolver, PluginRunner,
+    RepositoryError, RunRecordRepository,
+};
+
+// Adapter implementations
+pub use adapter::engine_factory::{
+    build_discover_context, build_lightweight_context, build_run_context,
+};
+pub use adapter::metrics::OtelMetricsSnapshot;
+pub use adapter::postgres::PgBackend;
+pub use adapter::progress::ChannelProgressReporter;
+pub use adapter::registry_resolver::RegistryPluginResolver;
+pub use adapter::wasm_runner::WasmPluginRunner;

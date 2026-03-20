@@ -12,7 +12,6 @@ members = [
     "crates/rapidbyte-runtime",
     "crates/rapidbyte-sdk",
     "crates/rapidbyte-sdk/macros",
-    "crates/rapidbyte-state",
     "crates/rapidbyte-types",
     "crates/rapidbyte-secrets",
     "crates/rapidbyte-pipeline-config",

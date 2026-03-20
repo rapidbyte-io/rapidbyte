@@ -81,7 +81,10 @@ pub async fn run(
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid database URL: {e}"))?;
     let pool = PgPool::connect_with(connect_options).await?;
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    sqlx::migrate!("./migrations")
+        .set_ignore_missing(true)
+        .run(&pool)
+        .await?;
 
     // 2. Build adapters
     let runs = Arc::new(PgRunRepository::new(pool.clone()));

@@ -147,7 +147,6 @@ pub struct StreamLimits {
     #[serde(default)]
     pub checkpoint_interval_seconds: u64,
     /// Maximum number of records to read (None = unlimited).
-    /// Used by dry-run mode to cap source reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_records: Option<u64>,
 }

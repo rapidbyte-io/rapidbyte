@@ -14,8 +14,7 @@ async fn on_data_error_policy_matrix_accepts_all_enums(#[case] on_data_error: &s
         .allocate_schema_pair("policy_on_data_error")
         .await
         .expect("schema allocation must succeed");
-    let temp = tempfile::tempdir().expect("must create tempdir for sqlite state");
-    let state_path = temp.path().join("policy_on_data_error_state.db");
+    let state_conn = context.state_connection();
 
     let result = async {
         context
@@ -26,7 +25,7 @@ async fn on_data_error_policy_matrix_accepts_all_enums(#[case] on_data_error: &s
         context
             .run_pipeline(
                 &schemas,
-                &state_path,
+                &state_conn,
                 &PipelinePolicies {
                     sync_mode: "full_refresh",
                     write_mode: "append",
@@ -63,8 +62,7 @@ async fn schema_evolution_new_column_fail_rejects_source_drift() {
         .allocate_schema_pair("policy_schema_evo_fail")
         .await
         .expect("schema allocation must succeed");
-    let temp = tempfile::tempdir().expect("must create tempdir for sqlite state");
-    let state_path = temp.path().join("policy_schema_evo_fail_state.db");
+    let state_conn = context.state_connection();
 
     let result = async {
         context
@@ -75,7 +73,7 @@ async fn schema_evolution_new_column_fail_rejects_source_drift() {
         context
             .run_pipeline(
                 &schemas,
-                &state_path,
+                &state_conn,
                 &PipelinePolicies {
                     sync_mode: "full_refresh",
                     write_mode: "append",
@@ -96,7 +94,7 @@ async fn schema_evolution_new_column_fail_rejects_source_drift() {
         let err = context
             .run_pipeline(
                 &schemas,
-                &state_path,
+                &state_conn,
                 &PipelinePolicies {
                     sync_mode: "full_refresh",
                     write_mode: "append",

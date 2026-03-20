@@ -7,7 +7,7 @@
 //! This module collects the latest progress event from the engine and exposes
 //! it for the heartbeat loop to include in the next heartbeat.
 
-use rapidbyte_engine::progress::ProgressEvent;
+use rapidbyte_engine::ProgressEvent;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 
@@ -27,7 +27,7 @@ pub async fn collect_progress(
 ) {
     while let Some(event) = rx.recv().await {
         let update = match &event {
-            ProgressEvent::BatchEmitted { bytes } => ProgressSnapshot {
+            ProgressEvent::BatchEmitted { bytes, .. } => ProgressSnapshot {
                 message: Some(format!("processing ({bytes} bytes)")),
                 progress_pct: None,
             },
@@ -35,11 +35,15 @@ pub async fn collect_progress(
                 message: Some(format!("stream {stream} completed")),
                 progress_pct: None,
             },
-            ProgressEvent::PhaseChange { phase } => ProgressSnapshot {
+            ProgressEvent::PhaseChanged { phase } => ProgressSnapshot {
                 message: Some(format!("{phase:?}").to_lowercase()),
                 progress_pct: None,
             },
-            ProgressEvent::Retry { .. } => continue,
+            ProgressEvent::StreamStarted { stream } => ProgressSnapshot {
+                message: Some(format!("stream {stream} starting")),
+                progress_pct: None,
+            },
+            ProgressEvent::RetryScheduled { .. } => continue,
         };
         *snapshot.write().await = update;
     }
