@@ -549,7 +549,7 @@ fn start_distributed_runtime(
             "controller",
             "--listen",
             &controller_addr,
-            "--allow-insecure-default-signing-key",
+            "--allow-insecure-signing-key",
             "--metadata-database-url",
             &metadata_url,
         ])
