@@ -23,7 +23,6 @@ pub struct SummaryGroup {
     pub parallelism: Option<u64>,
     pub distributed_agent_count: Option<u64>,
     pub distributed_controller_url: Option<String>,
-    pub distributed_flight_endpoint: Option<String>,
     pub records_written: Option<u64>,
     pub bytes_written: Option<u64>,
     pub bytes_per_row: Option<f64>,
@@ -152,7 +151,6 @@ fn summarize_group(group: &[&BenchmarkArtifact]) -> Result<SummaryGroup> {
                 .collect(),
         ),
         distributed_controller_url: first_distributed_string(group, "controller_url"),
-        distributed_flight_endpoint: first_distributed_string(group, "flight_endpoint"),
         records_written: median_u64(
             group
                 .iter()
@@ -347,9 +345,6 @@ pub fn render_summary_report(report: &SummaryReport) -> String {
         }
         if let Some(controller_url) = &group.distributed_controller_url {
             lines.push(format!("  controller url: {}", controller_url));
-        }
-        if let Some(flight_endpoint) = &group.distributed_flight_endpoint {
-            lines.push(format!("  flight endpoint: {}", flight_endpoint));
         }
         if let Some(records_written) = group.records_written {
             lines.push(format!("  records written: {}", records_written));
@@ -552,8 +547,7 @@ mod tests {
                 "stream_metrics": [],
                 "distributed": {
                     "controller_url": "http://127.0.0.1:56090",
-                    "agent_count": 1,
-                    "flight_endpoint": "http://127.0.0.1:56091"
+                    "agent_count": 1
                 }
             }),
             correctness: ArtifactCorrectness {
@@ -670,7 +664,6 @@ mod tests {
         assert!(rendered.contains("distributed"));
         assert!(rendered.contains("agent count"));
         assert!(rendered.contains("controller url"));
-        assert!(rendered.contains("flight endpoint"));
         assert!(rendered.contains("records written"));
         assert!(rendered.contains("1000000"));
         assert!(rendered.contains("bytes written"));

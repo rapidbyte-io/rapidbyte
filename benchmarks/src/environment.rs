@@ -22,8 +22,6 @@ pub struct EnvironmentProfile {
 pub struct DistributedRuntimeProfile {
     pub controller_url: String,
     pub controller_auth_token: String,
-    pub signing_key: String,
-    pub agent_flight_url: String,
     #[serde(default = "default_agent_count")]
     pub agent_count: u16,
 }
@@ -226,12 +224,6 @@ fn validate_environment_profile(profile: &EnvironmentProfile) -> Result<()> {
     }
     if distributed.controller_auth_token.trim().is_empty() {
         anyhow::bail!("distributed.controller_auth_token must not be empty");
-    }
-    if distributed.signing_key.trim().is_empty() {
-        anyhow::bail!("distributed.signing_key must not be empty");
-    }
-    if distributed.agent_flight_url.trim().is_empty() {
-        anyhow::bail!("distributed.agent_flight_url must not be empty");
     }
     if distributed.agent_count == 0 {
         anyhow::bail!("distributed.agent_count must be at least 1");
@@ -558,8 +550,6 @@ services:
 distributed:
   controller_url: http://127.0.0.1:56090
   controller_auth_token: bench-token
-  signing_key: bench-signing-key
-  agent_flight_url: http://127.0.0.1:56091
   agent_count: 1
 bindings:
   source:
@@ -577,8 +567,6 @@ bindings:
         let distributed = profile.distributed.expect("distributed profile metadata");
         assert_eq!(distributed.controller_url, "http://127.0.0.1:56090");
         assert_eq!(distributed.controller_auth_token, "bench-token");
-        assert_eq!(distributed.signing_key, "bench-signing-key");
-        assert_eq!(distributed.agent_flight_url, "http://127.0.0.1:56091");
         assert_eq!(distributed.agent_count, 1);
     }
 
@@ -600,12 +588,11 @@ bindings:
         assert_eq!(profile.bindings.destination.schema, "raw");
         let distributed = profile.distributed.expect("distributed profile metadata");
         assert_eq!(distributed.controller_url, "http://127.0.0.1:56090");
-        assert_eq!(distributed.agent_flight_url, "http://127.0.0.1:56091");
         assert_eq!(distributed.agent_count, 1);
     }
 
     #[test]
-    fn distributed_profile_requires_signing_key_when_runtime_is_declared() {
+    fn distributed_profile_requires_auth_token() {
         let root = temp_dir("distributed-profile-invalid");
         let profile_path = root.join("invalid.yaml");
         fs::write(
@@ -624,7 +611,6 @@ services:
     database: rapidbyte_test
 distributed:
   controller_url: http://127.0.0.1:56090
-  agent_flight_url: http://127.0.0.1:56091
 bindings:
   source:
     service: postgres

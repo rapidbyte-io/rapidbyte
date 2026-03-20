@@ -16,6 +16,7 @@ use rapidbyte_controller::proto::rapidbyte::v1::{
 };
 use rapidbyte_controller::ControllerConfig;
 use tokio_postgres::NoTls;
+use tokio_util::sync::CancellationToken;
 
 /// A minimal pipeline YAML with a deliberately unreachable Postgres state backend.
 /// The agent will pick it up, fail fast during task execution, and report
@@ -179,10 +180,8 @@ async fn distributed_submit_and_complete() {
     let metadata = TestMetadataSchema::create().await;
 
     let ctrl_port = free_port();
-    let flight_port = free_port();
     let ctrl_addr = format!("127.0.0.1:{ctrl_port}");
     let ctrl_url = format!("http://{ctrl_addr}");
-    let flight_addr = format!("127.0.0.1:{flight_port}");
     let signing_key = b"distributed-test-signing-key".to_vec();
 
     // Start controller
@@ -199,23 +198,13 @@ async fn distributed_submit_and_complete() {
 
     // Start agent
     let agent_ctrl_url = ctrl_url.clone();
-    let agent_flight_addr = flight_addr.clone();
-    let agent_flight_advertise = flight_addr.clone();
-    let agent_signing_key = signing_key.clone();
     let agent_task = tokio::spawn(async move {
         let config = AgentConfig {
             controller_url: agent_ctrl_url,
-            flight_listen: agent_flight_addr,
-            flight_advertise: agent_flight_advertise,
             max_tasks: 1,
             heartbeat_interval: Duration::from_secs(5),
-            poll_wait_seconds: 5,
-            signing_key: agent_signing_key,
-            preview_ttl: Duration::from_secs(60),
             auth_token: None,
-            allow_insecure_default_signing_key: false,
             controller_tls: None,
-            flight_tls: None,
             metrics_listen: None,
             registry_url: None,
             registry_insecure: false,
@@ -224,7 +213,11 @@ async fn distributed_submit_and_complete() {
         };
         let guard =
             Arc::new(rapidbyte_metrics::init("test-agent").expect("otel init should succeed"));
-        rapidbyte_agent::run(config, guard)
+        let (ctx, registration, adapters) = rapidbyte_agent::build_agent_context(&config, guard)
+            .await
+            .expect("agent context should build");
+        let shutdown = CancellationToken::new();
+        rapidbyte_agent::run_agent(&ctx, registration, &adapters, shutdown)
             .await
             .expect("agent should stay running");
     });

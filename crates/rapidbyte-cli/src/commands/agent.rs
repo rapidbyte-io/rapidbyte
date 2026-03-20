@@ -4,94 +4,121 @@ use anyhow::Result;
 use std::path::Path;
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
+use tracing::info;
+
 #[allow(clippy::too_many_arguments)]
 pub async fn execute(
     controller: &str,
-    flight_listen: &str,
-    flight_advertise: &str,
     max_tasks: u32,
-    signing_key: Option<&str>,
-    allow_insecure_signing_key: bool,
     auth_token: Option<&str>,
     controller_ca_cert: Option<&Path>,
     controller_tls_domain: Option<&str>,
-    flight_tls_cert: Option<&Path>,
-    flight_tls_key: Option<&Path>,
     metrics_listen: Option<&str>,
+    registry_url: Option<&str>,
+    registry_insecure: bool,
+    trust_policy: &str,
+    trusted_key_pems: Vec<String>,
     otel_guard: rapidbyte_metrics::OtelGuard,
 ) -> Result<()> {
     let config = build_config(
         controller,
-        flight_listen,
-        flight_advertise,
         max_tasks,
-        signing_key,
-        allow_insecure_signing_key,
         auth_token,
         controller_ca_cert,
         controller_tls_domain,
-        flight_tls_cert,
-        flight_tls_key,
         metrics_listen,
+        registry_url,
+        registry_insecure,
+        trust_policy,
+        trusted_key_pems,
     )?;
-    rapidbyte_agent::run(config, Arc::new(otel_guard)).await
+
+    let otel_guard = Arc::new(otel_guard);
+    let (ctx, registration, adapters) =
+        rapidbyte_agent::build_agent_context(&config, otel_guard).await?;
+
+    // Set up graceful shutdown on SIGINT / SIGTERM
+    let shutdown = CancellationToken::new();
+    let shutdown_signal = shutdown.clone();
+
+    tokio::spawn(async move {
+        shutdown_signal_wait().await;
+        info!("Shutdown signal received, stopping agent ...");
+        shutdown_signal.cancel();
+    });
+
+    rapidbyte_agent::run_agent(&ctx, registration, &adapters, shutdown).await?;
+    Ok(())
+}
+
+async fn shutdown_signal_wait() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match (
+            signal(SignalKind::interrupt()),
+            signal(SignalKind::terminate()),
+        ) {
+            (Ok(mut sigint), Ok(mut sigterm)) => {
+                tokio::select! {
+                    _ = sigint.recv() => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            (Ok(mut sigint), Err(e)) => {
+                tracing::warn!("failed to install SIGTERM handler: {e}; using SIGINT only");
+                let _ = sigint.recv().await;
+            }
+            _ => {
+                // Fallback to ctrl_c if signal handlers can't be installed.
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn build_config(
     controller: &str,
-    flight_listen: &str,
-    flight_advertise: &str,
     max_tasks: u32,
-    signing_key: Option<&str>,
-    allow_insecure_signing_key: bool,
     auth_token: Option<&str>,
     controller_ca_cert: Option<&Path>,
     controller_tls_domain: Option<&str>,
-    flight_tls_cert: Option<&Path>,
-    flight_tls_key: Option<&Path>,
     metrics_listen: Option<&str>,
+    registry_url: Option<&str>,
+    registry_insecure: bool,
+    trust_policy: &str,
+    trusted_key_pems: Vec<String>,
 ) -> Result<rapidbyte_agent::AgentConfig> {
-    let mut config = rapidbyte_agent::AgentConfig {
-        controller_url: controller.into(),
-        flight_listen: flight_listen.into(),
-        flight_advertise: flight_advertise.into(),
-        max_tasks,
-        ..Default::default()
-    };
-    if let Some(key) = signing_key {
-        config.signing_key = key.as_bytes().to_vec();
-    }
-    config.allow_insecure_default_signing_key = allow_insecure_signing_key;
-    if config.signing_key == rapidbyte_agent::AgentConfig::default().signing_key
-        && !config.allow_insecure_default_signing_key
-    {
-        anyhow::bail!(
-            "agent requires --signing-key / RAPIDBYTE_SIGNING_KEY or --allow-insecure-signing-key"
-        );
-    }
-    config.auth_token = auth_token.map(str::to_owned);
-    if controller_ca_cert.is_some() || controller_tls_domain.is_some() {
-        config.controller_tls = Some(rapidbyte_agent::ClientTlsConfig {
+    let controller_tls = if controller_ca_cert.is_some() || controller_tls_domain.is_some() {
+        Some(rapidbyte_agent::ClientTlsConfig {
             ca_cert_pem: match controller_ca_cert {
                 Some(ca_cert) => std::fs::read(ca_cert)?,
                 None => Vec::new(),
             },
             domain_name: controller_tls_domain.map(str::to_owned),
-        });
-    }
-    match (flight_tls_cert, flight_tls_key) {
-        (Some(cert), Some(key)) => {
-            config.flight_tls = Some(rapidbyte_agent::ServerTlsConfig {
-                cert_pem: std::fs::read(cert)?,
-                key_pem: std::fs::read(key)?,
-            });
-        }
-        (None, None) => {}
-        _ => anyhow::bail!("agent TLS requires both --flight-tls-cert and --flight-tls-key"),
-    }
-    config.metrics_listen = metrics_listen.map(str::to_owned);
-    Ok(config)
+        })
+    } else {
+        None
+    };
+
+    Ok(rapidbyte_agent::AgentConfig {
+        controller_url: controller.into(),
+        max_tasks,
+        auth_token: auth_token.map(str::to_owned),
+        controller_tls,
+        metrics_listen: metrics_listen.map(str::to_owned),
+        registry_url: registry_url.map(str::to_owned),
+        registry_insecure,
+        trust_policy: trust_policy.to_owned(),
+        trusted_key_pems,
+        ..Default::default()
+    })
 }
 
 #[cfg(test)]
@@ -103,25 +130,19 @@ mod tests {
     fn agent_execute_wires_tls() {
         let dir = tempdir().unwrap();
         let ca_path = dir.path().join("ca.pem");
-        let cert_path = dir.path().join("flight.crt");
-        let key_path = dir.path().join("flight.key");
         std::fs::write(&ca_path, b"ca-pem").unwrap();
-        std::fs::write(&cert_path, b"cert-pem").unwrap();
-        std::fs::write(&key_path, b"key-pem").unwrap();
 
         let config = build_config(
             "https://controller.example:9090",
-            "[::]:9091",
-            "agent.example:9091",
             4,
-            Some("signing"),
-            false,
             Some("secret"),
             Some(ca_path.as_path()),
             Some("controller.example"),
-            Some(cert_path.as_path()),
-            Some(key_path.as_path()),
             None,
+            None,
+            false,
+            "skip",
+            vec![],
         )
         .unwrap();
 
@@ -138,52 +159,26 @@ mod tests {
                 .as_deref(),
             Some("controller.example")
         );
-        assert_eq!(config.flight_tls.as_ref().unwrap().cert_pem, b"cert-pem");
-        assert_eq!(config.flight_tls.as_ref().unwrap().key_pem, b"key-pem");
         assert_eq!(config.auth_token.as_deref(), Some("secret"));
-        assert_eq!(config.signing_key, b"signing".to_vec());
     }
 
     #[test]
-    fn agent_execute_rejects_default_signing_key() {
-        let err = build_config(
-            "http://controller.example:9090",
-            "[::]:9091",
-            "agent.example:9091",
-            1,
-            None,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
-        .err()
-        .unwrap();
-
-        assert!(err.to_string().contains("agent requires --signing-key"));
-    }
-
-    #[test]
-    fn agent_execute_allows_insecure_signing_key() {
+    fn agent_execute_no_tls() {
         let config = build_config(
             "http://controller.example:9090",
-            "[::]:9091",
-            "agent.example:9091",
             1,
             None,
-            true,
             None,
             None,
             None,
             None,
-            None,
-            None,
+            false,
+            "skip",
+            vec![],
         )
         .unwrap();
 
-        assert!(config.allow_insecure_default_signing_key);
+        assert!(config.controller_tls.is_none());
+        assert!(config.auth_token.is_none());
     }
 }
