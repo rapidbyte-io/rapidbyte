@@ -13,6 +13,7 @@
 //! | `discovery`    | Discovered streams and plugin spec types (v7) |
 //! | `envelope`     | DLQ record and payload envelope types |
 //! | `error`        | `PluginError`, `ValidationResult`, error categories |
+//! | `lifecycle`    | Apply and teardown lifecycle types (v7) |
 //! | `manifest`     | Plugin manifest and permission types |
 //! | `metric`       | Metric, summary types (read/write/transform) |
 //! | `schema`       | Schema negotiation types (v7 protocol) |
@@ -34,6 +35,7 @@ pub mod discovery;
 pub mod envelope;
 pub mod error;
 pub mod format;
+pub mod lifecycle;
 pub mod manifest;
 pub mod metric;
 pub mod schema;
@@ -60,6 +62,9 @@ pub mod prelude {
     pub use crate::error::{
         BackoffClass, CommitState, ErrorCategory, ErrorScope, PluginError, ValidationResult,
         ValidationStatus,
+    };
+    pub use crate::lifecycle::{
+        ApplyAction, ApplyReport, ApplyRequest, TeardownReport, TeardownRequest,
     };
     pub use crate::manifest::PluginManifest;
     pub use crate::metric::{ReadSummary, TransformSummary, WriteSummary};
