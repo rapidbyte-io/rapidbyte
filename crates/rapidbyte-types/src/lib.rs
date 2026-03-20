@@ -14,6 +14,7 @@
 //! | `error`        | `PluginError`, `ValidationResult`, error categories |
 //! | `manifest`     | Plugin manifest and permission types |
 //! | `metric`       | Metric, summary types (read/write/transform) |
+//! | `schema`       | Schema negotiation types (v7 protocol) |
 //! | `state`        | Run state, pipeline ID, cursor state types |
 //! | `state_backend`| `StateBackend` trait (storage contract) |
 //! | `state_error`  | `StateError` type for backend operations |
@@ -32,6 +33,7 @@ pub mod error;
 pub mod format;
 pub mod manifest;
 pub mod metric;
+pub mod schema;
 pub mod state;
 pub mod state_backend;
 pub mod state_error;
@@ -56,6 +58,7 @@ pub mod prelude {
     };
     pub use crate::manifest::PluginManifest;
     pub use crate::metric::{ReadSummary, TransformSummary, WriteSummary};
+    pub use crate::schema::{FieldConstraint, FieldRequirement, SchemaField, StreamSchema};
     pub use crate::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
     pub use crate::state_backend::{noop_state_backend, NoopStateBackend, StateBackend};
     pub use crate::state_error::StateError;
