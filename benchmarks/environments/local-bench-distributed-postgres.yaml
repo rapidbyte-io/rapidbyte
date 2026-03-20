@@ -14,8 +14,6 @@ services:
 distributed:
   controller_url: http://127.0.0.1:56090
   controller_auth_token: rapidbyte-bench-token
-  signing_key: rapidbyte-bench-signing-key
-  agent_flight_url: http://127.0.0.1:56091
   agent_count: 1
 bindings:
   source:

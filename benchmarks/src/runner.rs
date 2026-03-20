@@ -528,8 +528,6 @@ fn start_distributed_runtime(
         .context("failed to create agent benchmark log")?;
     let controller_addr = socket_addr_from_url(&runtime.controller_url)
         .with_context(|| format!("invalid controller_url {}", runtime.controller_url))?;
-    let agent_flight_addr = socket_addr_from_url(&runtime.agent_flight_url)
-        .with_context(|| format!("invalid agent_flight_url {}", runtime.agent_flight_url))?;
 
     let metadata_url = format!(
         "postgresql://{}:{}@{}:{}/{}",
@@ -551,8 +549,7 @@ fn start_distributed_runtime(
             "controller",
             "--listen",
             &controller_addr,
-            "--signing-key",
-            runtime.signing_key.as_str(),
+            "--allow-insecure-default-signing-key",
             "--metadata-database-url",
             &metadata_url,
         ])
@@ -579,25 +576,16 @@ fn start_distributed_runtime(
             "agent",
             "--controller",
             runtime.controller_url.as_str(),
-            "--flight-listen",
-            &agent_flight_addr,
-            "--flight-advertise",
-            &agent_flight_addr,
             "--max-tasks",
             "1",
-            "--signing-key",
-            runtime.signing_key.as_str(),
         ])
         .stdout(Stdio::from(agent_log.try_clone()?))
         .stderr(Stdio::from(agent_log))
         .spawn()
         .context("failed to start benchmark agent process")?;
 
-    // The agent has no explicit readiness endpoint today; waiting for the Flight bind
-    // plus a short registration grace period keeps startup outside measured timing.
-    wait_for_tcp_ready(&agent_flight_addr, Duration::from_secs(10))
-        .context("agent Flight endpoint did not become ready in time")?;
-    thread::sleep(Duration::from_millis(500));
+    // Give the agent time to register with the controller before starting the benchmark.
+    thread::sleep(Duration::from_secs(2));
 
     if let Some(status) = controller
         .try_wait()
@@ -731,7 +719,6 @@ fn run_result_from_bench_json(
         connector_metrics["distributed"] = json!({
             "controller_url": runtime.controller_url,
             "agent_count": runtime.agent_count,
-            "flight_endpoint": runtime.agent_flight_url,
         });
     }
 
@@ -1878,8 +1865,6 @@ mod tests {
         DistributedRuntimeProfile {
             controller_url: "http://127.0.0.1:56090".to_string(),
             controller_auth_token: "bench-token".to_string(),
-            signing_key: "bench-signing-key".to_string(),
-            agent_flight_url: "http://127.0.0.1:56091".to_string(),
             agent_count: 1,
         }
     }
