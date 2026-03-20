@@ -104,28 +104,14 @@ async fn run_worker_pool(
     let mut workers = JoinSet::new();
 
     for _ in 0..ctx.config.max_tasks.max(1) {
-        let gateway = ctx.gateway.clone();
-        let executor = ctx.executor.clone();
-        let progress = ctx.progress.clone();
-        let metrics = ctx.metrics.clone();
-        let clock = ctx.clock.clone();
-        let config = ctx.config.clone();
+        let worker_ctx = ctx.clone();
         let agent_id = agent_id.to_owned();
         let leases = active_leases.clone();
         let shutdown = shutdown.clone();
         let pc = progress_collector.clone();
 
-        workers.spawn(async move {
-            let worker_ctx = AgentContext {
-                gateway,
-                executor,
-                progress,
-                metrics,
-                clock,
-                config,
-            };
-            worker_loop(&worker_ctx, &agent_id, &pc, leases, shutdown).await
-        });
+        workers
+            .spawn(async move { worker_loop(&worker_ctx, &agent_id, &pc, leases, shutdown).await });
     }
 
     while let Some(result) = workers.join_next().await {
@@ -176,7 +162,6 @@ async fn worker_loop(
         active_leases.write().await.insert(
             assignment.task_id.clone(),
             LeaseEntry {
-                run_id: assignment.run_id.clone(),
                 lease_epoch: assignment.lease_epoch,
                 cancel: cancel.clone(),
                 progress: ctx.progress.clone(),

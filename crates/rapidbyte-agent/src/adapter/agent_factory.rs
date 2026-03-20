@@ -86,7 +86,7 @@ pub async fn build_agent_context(
         GrpcControllerGateway::connect(
             &config.controller_url,
             config.controller_tls.as_ref(),
-            config.auth_token.clone(),
+            config.auth_token.as_deref(),
         )
         .await?,
     );

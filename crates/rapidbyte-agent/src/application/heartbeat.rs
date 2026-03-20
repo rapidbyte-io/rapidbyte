@@ -14,7 +14,6 @@ use super::context::AgentAppConfig;
 
 /// Active lease entry tracked by the worker.
 pub struct LeaseEntry {
-    pub run_id: String,
     pub lease_epoch: u64,
     pub cancel: CancellationToken,
     pub progress: Arc<dyn ProgressCollector>,
@@ -39,6 +38,9 @@ pub async fn heartbeat_loop(
         }
 
         let tasks = build_heartbeats(&active_leases).await;
+        if tasks.is_empty() {
+            continue;
+        }
 
         let payload = HeartbeatPayload {
             agent_id: agent_id.to_owned(),
@@ -65,13 +67,28 @@ pub async fn heartbeat_loop(
 }
 
 async fn build_heartbeats(active_leases: &ActiveLeaseMap) -> Vec<TaskHeartbeat> {
-    let leases = active_leases.read().await;
-    leases
-        .iter()
-        .map(|(task_id, entry)| TaskHeartbeat {
-            task_id: task_id.clone(),
-            lease_epoch: entry.lease_epoch,
-            progress: entry.progress.latest(),
+    // Collect refs under the outer lock, then release before calling .latest()
+    // to avoid holding the lease RwLock while acquiring the progress RwLock.
+    let snapshot: Vec<_> = {
+        let leases = active_leases.read().await;
+        leases
+            .iter()
+            .map(|(task_id, entry)| {
+                (
+                    task_id.clone(),
+                    entry.lease_epoch,
+                    Arc::clone(&entry.progress),
+                )
+            })
+            .collect()
+    };
+
+    snapshot
+        .into_iter()
+        .map(|(task_id, lease_epoch, progress)| TaskHeartbeat {
+            task_id,
+            lease_epoch,
+            progress: progress.latest(),
         })
         .collect()
 }

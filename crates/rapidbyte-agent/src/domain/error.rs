@@ -11,9 +11,13 @@ pub enum AgentError {
     #[error("execution failed: {0}")]
     ExecutionFailed(#[from] anyhow::Error),
 
-    /// Controller communication failed.
+    /// Controller communication failed (transient — may be retried).
     #[error("controller error: {0}")]
     Controller(String),
+
+    /// Controller rejected the request (non-retryable — auth, validation, state conflict).
+    #[error("controller rejected: {0}")]
+    ControllerNonRetryable(String),
 
     /// Task was cancelled before or during execution.
     #[error("cancelled")]

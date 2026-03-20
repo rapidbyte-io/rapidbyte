@@ -1,5 +1,7 @@
 //! Engine executor adapter — bridges `PipelineExecutor` port to rapidbyte-engine.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use rapidbyte_engine::domain::error::PipelineError;
 use rapidbyte_engine::ProgressEvent;
@@ -15,20 +17,20 @@ use crate::domain::task::{
 
 /// Implements [`PipelineExecutor`] by calling `rapidbyte_engine::run_pipeline`.
 pub struct EngineExecutor {
-    registry_config: RwLock<rapidbyte_registry::RegistryConfig>,
+    registry_config: RwLock<Arc<rapidbyte_registry::RegistryConfig>>,
 }
 
 impl EngineExecutor {
     #[must_use]
     pub fn new(registry_config: rapidbyte_registry::RegistryConfig) -> Self {
         Self {
-            registry_config: RwLock::new(registry_config),
+            registry_config: RwLock::new(Arc::new(registry_config)),
         }
     }
 
     /// Update registry config after receiving it from the controller.
     pub async fn update_registry_config(&self, config: rapidbyte_registry::RegistryConfig) {
-        *self.registry_config.write().await = config;
+        *self.registry_config.write().await = Arc::new(config);
     }
 }
 
@@ -40,7 +42,10 @@ impl PipelineExecutor for EngineExecutor {
         cancel: CancellationToken,
         progress_tx: mpsc::UnboundedSender<ProgressEvent>,
     ) -> Result<TaskExecutionResult, AgentError> {
-        let registry_config = self.registry_config.read().await.clone();
+        let registry_config = {
+            let guard = self.registry_config.read().await;
+            Arc::clone(&guard)
+        };
 
         let engine_ctx =
             rapidbyte_engine::build_run_context(config, Some(progress_tx), &registry_config)

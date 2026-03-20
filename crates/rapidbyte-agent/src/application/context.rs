@@ -52,3 +52,16 @@ pub struct AgentContext {
     /// Application configuration.
     pub config: AgentAppConfig,
 }
+
+impl Clone for AgentContext {
+    fn clone(&self) -> Self {
+        Self {
+            gateway: Arc::clone(&self.gateway),
+            executor: Arc::clone(&self.executor),
+            progress: Arc::clone(&self.progress),
+            metrics: Arc::clone(&self.metrics),
+            clock: Arc::clone(&self.clock),
+            config: self.config.clone(),
+        }
+    }
+}

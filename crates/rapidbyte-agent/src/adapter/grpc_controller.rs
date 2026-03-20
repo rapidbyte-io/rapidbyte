@@ -1,6 +1,7 @@
 //! gRPC adapter for the `ControllerGateway` port.
 
 use async_trait::async_trait;
+use tonic::metadata::MetadataValue;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig as TonicClientTlsConfig, Endpoint};
 
 use crate::domain::error::AgentError;
@@ -26,8 +27,8 @@ pub struct ClientTlsConfig {
 
 /// gRPC implementation of [`ControllerGateway`].
 pub struct GrpcControllerGateway {
-    channel: Channel,
-    auth_token: Option<String>,
+    client: AgentServiceClient<Channel>,
+    bearer: Option<MetadataValue<tonic::metadata::Ascii>>,
 }
 
 impl GrpcControllerGateway {
@@ -35,17 +36,28 @@ impl GrpcControllerGateway {
     ///
     /// # Errors
     ///
-    /// Returns an error if the gRPC channel cannot be established.
+    /// Returns an error if the gRPC channel cannot be established or the
+    /// bearer token is not valid ASCII.
     pub async fn connect(
         url: &str,
         tls: Option<&ClientTlsConfig>,
-        auth_token: Option<String>,
+        auth_token: Option<&str>,
     ) -> Result<Self, anyhow::Error> {
         let channel = connect_channel(url, tls).await?;
-        Ok(Self {
-            channel,
-            auth_token,
-        })
+        let client = AgentServiceClient::new(channel);
+        let bearer = auth_token
+            .map(|token| format!("Bearer {token}").parse())
+            .transpose()
+            .map_err(|_| anyhow::anyhow!("invalid bearer token"))?;
+        Ok(Self { client, bearer })
+    }
+
+    fn authed_request<T>(&self, body: T) -> tonic::Request<T> {
+        let mut req = tonic::Request::new(body);
+        if let Some(bearer) = &self.bearer {
+            req.metadata_mut().insert("authorization", bearer.clone());
+        }
+        req
     }
 }
 
@@ -56,7 +68,7 @@ impl ControllerGateway for GrpcControllerGateway {
         config: &RegistrationConfig,
     ) -> Result<RegistrationResponse, AgentError> {
         let agent_id = uuid::Uuid::new_v4().to_string();
-        let mut client = AgentServiceClient::new(self.channel.clone());
+        let mut client = self.client.clone();
         let request = RegisterRequest {
             agent_id: agent_id.clone(),
             capabilities: Some(AgentCapabilities {
@@ -65,9 +77,9 @@ impl ControllerGateway for GrpcControllerGateway {
             }),
         };
         let response = client
-            .register(apply_auth(request, self.auth_token.as_ref())?)
+            .register(self.authed_request(request))
             .await
-            .map_err(|s| AgentError::Controller(format_status(&s)))?
+            .map_err(|s| map_status(&s))?
             .into_inner();
 
         let registry = response.registry.map(|r| ControllerRegistryInfo {
@@ -79,14 +91,14 @@ impl ControllerGateway for GrpcControllerGateway {
     }
 
     async fn poll(&self, agent_id: &str) -> Result<Option<TaskAssignment>, AgentError> {
-        let mut client = AgentServiceClient::new(self.channel.clone());
+        let mut client = self.client.clone();
         let request = PollTaskRequest {
             agent_id: agent_id.to_owned(),
         };
         let response = client
-            .poll_task(apply_auth(request, self.auth_token.as_ref())?)
+            .poll_task(self.authed_request(request))
             .await
-            .map_err(|s| AgentError::Controller(format_status(&s)))?
+            .map_err(|s| map_status(&s))?
             .into_inner();
 
         Ok(match response.result {
@@ -102,7 +114,7 @@ impl ControllerGateway for GrpcControllerGateway {
     }
 
     async fn heartbeat(&self, request: HeartbeatPayload) -> Result<HeartbeatResponse, AgentError> {
-        let mut client = AgentServiceClient::new(self.channel.clone());
+        let mut client = self.client.clone();
         let proto_tasks: Vec<pb::TaskHeartbeat> = request
             .tasks
             .into_iter()
@@ -120,9 +132,9 @@ impl ControllerGateway for GrpcControllerGateway {
         };
 
         let response = client
-            .heartbeat(apply_auth(proto_request, self.auth_token.as_ref())?)
+            .heartbeat(self.authed_request(proto_request))
             .await
-            .map_err(|s| AgentError::Controller(format_status(&s)))?
+            .map_err(|s| map_status(&s))?
             .into_inner();
 
         Ok(HeartbeatResponse {
@@ -141,7 +153,7 @@ impl ControllerGateway for GrpcControllerGateway {
     }
 
     async fn complete(&self, request: CompletionPayload) -> Result<(), AgentError> {
-        let mut client = AgentServiceClient::new(self.channel.clone());
+        let mut client = self.client.clone();
 
         let outcome = match &request.result.outcome {
             TaskOutcomeKind::Completed => {
@@ -185,9 +197,9 @@ impl ControllerGateway for GrpcControllerGateway {
         };
 
         client
-            .complete_task(apply_auth(proto_request, self.auth_token.as_ref())?)
+            .complete_task(self.authed_request(proto_request))
             .await
-            .map_err(|s| AgentError::Controller(format_status(&s)))?;
+            .map_err(|s| map_status(&s))?;
 
         Ok(())
     }
@@ -218,27 +230,16 @@ async fn connect_channel(
     Ok(endpoint.connect().await?)
 }
 
-fn apply_auth<T>(request: T, auth_token: Option<&String>) -> Result<tonic::Request<T>, AgentError> {
-    let mut req = tonic::Request::new(request);
-    if let Some(token) = auth_token {
-        let value = format!("Bearer {token}")
-            .parse()
-            .map_err(|_| AgentError::Controller("invalid bearer token".into()))?;
-        req.metadata_mut().insert("authorization", value);
+/// Map a tonic `Status` to typed `AgentError` — non-retryable codes get their own variant.
+fn map_status(status: &tonic::Status) -> AgentError {
+    let msg = status.message().to_string();
+    match status.code() {
+        tonic::Code::Unauthenticated
+        | tonic::Code::PermissionDenied
+        | tonic::Code::NotFound
+        | tonic::Code::InvalidArgument
+        | tonic::Code::Aborted
+        | tonic::Code::FailedPrecondition => AgentError::ControllerNonRetryable(msg),
+        _ => AgentError::Controller(msg),
     }
-    Ok(req)
-}
-
-/// Format a tonic Status with code prefix for retryability classification.
-fn format_status(status: &tonic::Status) -> String {
-    let code = match status.code() {
-        tonic::Code::Unauthenticated => "unauthenticated",
-        tonic::Code::PermissionDenied => "permission_denied",
-        tonic::Code::NotFound => "not_found",
-        tonic::Code::InvalidArgument => "invalid_argument",
-        tonic::Code::Aborted => "aborted",
-        tonic::Code::FailedPrecondition => "failed_precondition",
-        _ => return status.message().to_string(),
-    };
-    format!("{code}: {}", status.message())
 }

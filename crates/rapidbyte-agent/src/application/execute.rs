@@ -188,18 +188,7 @@ pub(crate) async fn report_completion(
 }
 
 fn is_retryable_controller_error(e: &AgentError) -> bool {
-    match e {
-        AgentError::Controller(msg) => {
-            // Non-retryable gRPC codes mapped to message prefixes by the adapter
-            !msg.starts_with("unauthenticated:")
-                && !msg.starts_with("permission_denied:")
-                && !msg.starts_with("not_found:")
-                && !msg.starts_with("invalid_argument:")
-                && !msg.starts_with("aborted:")
-                && !msg.starts_with("failed_precondition:")
-        }
-        _ => false,
-    }
+    matches!(e, AgentError::Controller(_))
 }
 
 #[cfg(test)]
@@ -342,9 +331,8 @@ mod tests {
             outcome: TaskOutcomeKind::Completed,
             metrics: TaskMetrics::default(),
         }));
-        ctx.gateway.enqueue_complete(Err(AgentError::Controller(
-            "unauthenticated: bad token".into(),
-        )));
+        ctx.gateway
+            .enqueue_complete(Err(AgentError::ControllerNonRetryable("bad token".into())));
 
         let mut assignment = test_assignment();
         assignment.pipeline_yaml = VALID_YAML.into();
