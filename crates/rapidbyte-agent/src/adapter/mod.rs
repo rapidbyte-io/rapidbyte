@@ -1,8 +1,12 @@
 //! Adapter layer: concrete implementations of domain ports.
 
 pub mod channel_progress;
+pub mod clock;
+pub mod metrics;
 
 pub use channel_progress::AtomicProgressCollector;
+pub use clock::SystemClock;
+pub use metrics::OtelMetricsProvider;
 
 // Forward declaration — full implementation in Task 11.
 use std::sync::Arc;
