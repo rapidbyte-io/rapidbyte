@@ -1,29 +1,15 @@
-//! Rapidbyte agent — stateless pipeline worker.
-//!
-//! Pulls tasks from the controller, executes pipelines via the engine,
-//! reports progress, and serves previews via Arrow Flight.
+//! Agent worker for Rapidbyte — polls the controller, executes pipelines, reports results.
 //!
 //! # Crate structure
 //!
-//! | Module     | Responsibility |
-//! |------------|----------------|
-//! | `proto`    | Generated protobuf types |
-//! | `worker`   | Main agent loop (register, poll, heartbeat, execute) |
-//! | `executor` | Task execution wrapper around `engine::run_pipeline` |
-//! | `progress` | `ProgressEvent` to `ReportProgress` forwarding |
-//! | `flight`   | Arrow Flight server for preview replay |
-//! | `spool`    | Preview spool (memory + spill-to-disk) |
-//! | `ticket`   | Ticket validation |
+//! | Module        | Responsibility                              |
+//! |---------------|---------------------------------------------|
+//! | `domain`      | Port traits, domain types, errors            |
+//! | `application` | DI context, use-case orchestration, fakes    |
+//! | `adapter`     | gRPC client, engine executor, metrics, clock |
 
 #![warn(clippy::pedantic)]
 
-mod auth;
-pub mod executor;
-pub mod flight;
-pub mod progress;
-pub mod proto;
-pub mod spool;
-pub mod ticket;
-pub mod worker;
-
-pub use worker::{run, AgentConfig, ClientTlsConfig, ServerTlsConfig};
+pub mod adapter;
+pub mod application;
+pub mod domain;
