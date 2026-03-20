@@ -88,7 +88,7 @@ pub async fn build_agent_context(
     );
 
     let trust_policy = rapidbyte_registry::TrustPolicy::from_str_name(&config.trust_policy)
-        .unwrap_or(rapidbyte_registry::TrustPolicy::Skip);
+        .map_err(|e| anyhow::anyhow!("invalid trust_policy '{}': {e}", config.trust_policy))?;
 
     let registry_config = rapidbyte_registry::RegistryConfig {
         insecure: config.registry_insecure,

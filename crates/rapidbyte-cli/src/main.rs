@@ -561,11 +561,20 @@ async fn main() -> ExitCode {
             max_tasks,
             metrics_listen,
         } => {
-            let trusted_key_pems: Vec<String> = cli
-                .trust_key
-                .iter()
-                .filter_map(|p| std::fs::read_to_string(p).ok())
-                .collect();
+            let mut trusted_key_pems = Vec::with_capacity(cli.trust_key.len());
+            for path in &cli.trust_key {
+                match std::fs::read_to_string(path) {
+                    Ok(pem) => trusted_key_pems.push(pem),
+                    Err(e) => {
+                        eprintln!(
+                            "{} failed to read trust key file {}: {e}",
+                            console::style("\u{2718}").red().bold(),
+                            path.display()
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
             commands::agent::execute(
                 &controller,
                 max_tasks,

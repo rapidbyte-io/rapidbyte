@@ -13,14 +13,14 @@ use crate::domain::ports::progress::ProgressCollector;
 use super::context::AgentAppConfig;
 
 /// Active lease entry tracked by the worker.
-pub struct LeaseEntry {
-    pub lease_epoch: u64,
-    pub cancel: CancellationToken,
-    pub progress: Arc<dyn ProgressCollector>,
+pub(crate) struct LeaseEntry {
+    pub(crate) lease_epoch: u64,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) progress: Arc<dyn ProgressCollector>,
 }
 
 /// Shared map of active task leases.
-pub type ActiveLeaseMap = Arc<RwLock<HashMap<String, LeaseEntry>>>;
+pub(crate) type ActiveLeaseMap = Arc<RwLock<HashMap<String, LeaseEntry>>>;
 
 /// Run the periodic heartbeat loop until shutdown is signalled.
 pub async fn heartbeat_loop(
