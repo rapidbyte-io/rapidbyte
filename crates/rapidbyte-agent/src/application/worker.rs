@@ -183,12 +183,18 @@ async fn worker_loop(
         )
         .await;
 
-        // Always remove the lease after execution completes. If completion
-        // reporting failed (retries exhausted), the agent stops heartbeating
-        // this task, so the controller's lease timeout will fire and
-        // reassign/fail the task. Keeping it would prevent timeout recovery
-        // since heartbeats would keep extending the lease indefinitely.
-        active_leases.write().await.remove(&assignment.task_id);
+        // Remove the lease only if the epoch still matches. If the task was
+        // re-assigned with a newer epoch (e.g., after lease expiry race),
+        // the newer entry must not be removed by this older attempt.
+        {
+            let mut leases = active_leases.write().await;
+            if leases
+                .get(&assignment.task_id)
+                .is_some_and(|e| e.lease_epoch == assignment.lease_epoch)
+            {
+                leases.remove(&assignment.task_id);
+            }
+        }
     }
 }
 
