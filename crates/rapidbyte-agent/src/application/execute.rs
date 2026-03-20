@@ -15,16 +15,13 @@ use crate::domain::task::{
 use super::context::AgentContext;
 
 /// Execute a single task: parse YAML, run via executor port, report to controller.
-///
-/// Returns `true` if completion was acknowledged by the controller,
-/// `false` if completion reporting failed (retries exhausted or non-retryable).
 pub async fn execute_task(
     ctx: &AgentContext,
     agent_id: &str,
     assignment: &TaskAssignment,
     progress_collector: &Arc<crate::adapter::AtomicProgressCollector>,
     cancel: CancellationToken,
-) -> bool {
+) {
     info!(
         task_id = assignment.task_id,
         run_id = assignment.run_id,
@@ -46,7 +43,8 @@ pub async fn execute_task(
                 }),
                 metrics: TaskMetrics::default(),
             };
-            return report_completion(ctx, agent_id, assignment, result).await;
+            report_completion(ctx, agent_id, assignment, result).await;
+            return;
         }
     };
 
@@ -56,7 +54,8 @@ pub async fn execute_task(
             outcome: TaskOutcomeKind::Cancelled,
             metrics: TaskMetrics::default(),
         };
-        return report_completion(ctx, agent_id, assignment, result).await;
+        report_completion(ctx, agent_id, assignment, result).await;
+        return;
     }
 
     // 3. Set up progress channel and execute
@@ -100,7 +99,7 @@ pub async fn execute_task(
     };
 
     // 5. Report to controller
-    report_completion(ctx, agent_id, assignment, result).await
+    report_completion(ctx, agent_id, assignment, result).await;
 }
 
 async fn parse_pipeline(yaml: &str) -> Result<rapidbyte_pipeline_config::PipelineConfig, String> {

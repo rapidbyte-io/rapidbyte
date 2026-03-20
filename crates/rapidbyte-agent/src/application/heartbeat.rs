@@ -37,10 +37,10 @@ pub async fn heartbeat_loop(
             _tick = ticker.tick() => {}
         }
 
+        // Always send heartbeats, even with no active tasks — the controller
+        // uses heartbeats to track agent liveness (last_seen_at) and will
+        // reap idle agents that stop heartbeating.
         let tasks = build_heartbeats(&active_leases).await;
-        if tasks.is_empty() {
-            continue;
-        }
 
         let payload = HeartbeatPayload {
             agent_id: agent_id.to_owned(),
@@ -240,12 +240,13 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn heartbeat_skips_rpc_when_no_leases() {
+    async fn heartbeat_sends_empty_payload_when_idle() {
         let gateway = Arc::new(FakeControllerGateway::new());
+        // Enqueue a response for the idle heartbeat.
+        gateway.enqueue_heartbeat(Ok(HeartbeatResponse { directives: vec![] }));
         let config = test_config();
         let shutdown = CancellationToken::new();
         let active_leases: ActiveLeaseMap = Arc::new(RwLock::new(HashMap::new()));
-        // No leases, no heartbeat results enqueued — the loop should skip the RPC.
 
         let gw = gateway.clone();
         let leases = active_leases.clone();
@@ -261,7 +262,9 @@ mod tests {
         shutdown.cancel();
         handle.await.unwrap();
 
-        // No heartbeat calls — RPC was skipped because there are no active leases.
-        assert!(gateway.heartbeat_payloads().is_empty());
+        // Heartbeat was sent even with no active tasks — keeps agent alive.
+        let payloads = gateway.heartbeat_payloads();
+        assert_eq!(payloads.len(), 1);
+        assert!(payloads[0].tasks.is_empty());
     }
 }

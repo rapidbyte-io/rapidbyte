@@ -160,19 +160,14 @@ async fn worker_loop(
             },
         );
 
-        let acknowledged = execute_task(ctx, agent_id, &assignment, &task_progress, cancel).await;
+        execute_task(ctx, agent_id, &assignment, &task_progress, cancel).await;
 
-        // Only remove lease if controller acknowledged completion.
-        // On failure, keep the lease active so the controller detects it
-        // via heartbeat timeout rather than silently losing the task.
-        if acknowledged {
-            active_leases.write().await.remove(&assignment.task_id);
-        } else {
-            warn!(
-                task_id = assignment.task_id,
-                "Completion not acknowledged — keeping lease active for controller timeout"
-            );
-        }
+        // Always remove the lease after execution completes. If completion
+        // reporting failed (retries exhausted), the agent stops heartbeating
+        // this task, so the controller's lease timeout will fire and
+        // reassign/fail the task. Keeping it would prevent timeout recovery
+        // since heartbeats would keep extending the lease indefinitely.
+        active_leases.write().await.remove(&assignment.task_id);
     }
 }
 
