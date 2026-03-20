@@ -4,8 +4,8 @@
 //! stream operation. It bundles schema, sync configuration, resource
 //! limits, and error handling policies.
 
-use crate::catalog::SchemaHint;
 use crate::cursor::{CursorInfo, CursorType, CursorValue};
+use crate::schema::StreamSchema;
 use crate::wire::{SyncMode, WriteMode};
 use serde::{Deserialize, Serialize};
 
@@ -65,7 +65,8 @@ pub enum NullabilityPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PartitionStrategy {
-    Mod,
+    #[serde(alias = "mod")]
+    ModHash,
     Range,
 }
 
@@ -192,8 +193,11 @@ pub struct StreamContext {
     /// Physical source table/view name when execution stream naming differs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_stream_name: Option<String>,
+    /// Zero-based index of this stream within the pipeline run.
+    #[serde(default)]
+    pub stream_index: u32,
     /// Schema of the stream.
-    pub schema: SchemaHint,
+    pub schema: StreamSchema,
     /// How data is read from the source.
     pub sync_mode: SyncMode,
     /// Cursor tracking state for incremental sync.
@@ -249,7 +253,14 @@ impl StreamContext {
         Self {
             stream_name: stream_name.into(),
             source_stream_name: None,
-            schema: SchemaHint::Columns(Vec::new()),
+            stream_index: 0,
+            schema: StreamSchema {
+                fields: vec![],
+                primary_key: vec![],
+                partition_keys: vec![],
+                source_defined_cursor: None,
+                schema_id: None,
+            },
             sync_mode: SyncMode::FullRefresh,
             cursor_info: None,
             limits: StreamLimits::default(),
@@ -289,7 +300,9 @@ impl StreamContext {
         Some(PartitionCoordinates {
             count,
             index,
-            strategy: self.partition_strategy.unwrap_or(PartitionStrategy::Mod),
+            strategy: self
+                .partition_strategy
+                .unwrap_or(PartitionStrategy::ModHash),
         })
     }
 
@@ -320,8 +333,7 @@ impl StreamContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arrow::ArrowDataType;
-    use crate::catalog::ColumnSchema;
+    use crate::schema::SchemaField;
 
     #[test]
     fn stream_limits_defaults() {
@@ -345,11 +357,13 @@ mod tests {
     #[test]
     fn stream_context_roundtrip() {
         let ctx = StreamContext {
-            schema: SchemaHint::Columns(vec![ColumnSchema {
-                name: "id".into(),
-                data_type: ArrowDataType::Int64,
-                nullable: false,
-            }]),
+            schema: StreamSchema {
+                fields: vec![SchemaField::new("id", "int64", false).with_primary_key(true)],
+                primary_key: vec!["id".into()],
+                partition_keys: vec![],
+                source_defined_cursor: None,
+                schema_id: None,
+            },
             sync_mode: SyncMode::Incremental,
             write_mode: Some(WriteMode::Append),
             partition_key: Some("tenant_id".into()),
@@ -451,7 +465,7 @@ mod tests {
             ..StreamContext::test_default("users")
         };
         let coords = ctx.partition_coordinates_typed().unwrap();
-        assert_eq!(coords.strategy, PartitionStrategy::Mod);
+        assert_eq!(coords.strategy, PartitionStrategy::ModHash);
     }
 
     #[test]

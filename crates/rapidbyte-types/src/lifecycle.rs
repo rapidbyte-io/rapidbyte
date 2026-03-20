@@ -85,14 +85,21 @@ impl TeardownReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::SchemaHint;
+    use crate::schema::StreamSchema;
     use crate::wire::SyncMode;
 
     fn test_stream_context(name: &str) -> StreamContext {
         StreamContext {
             stream_name: name.into(),
             source_stream_name: None,
-            schema: SchemaHint::Columns(Vec::new()),
+            stream_index: 0,
+            schema: StreamSchema {
+                fields: vec![],
+                primary_key: vec![],
+                partition_keys: vec![],
+                source_defined_cursor: None,
+                schema_id: None,
+            },
             sync_mode: SyncMode::FullRefresh,
             cursor_info: None,
             limits: Default::default(),

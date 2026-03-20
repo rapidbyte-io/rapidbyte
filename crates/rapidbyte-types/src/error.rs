@@ -167,24 +167,6 @@ impl CommitState {
     }
 }
 
-/// Validation check outcome.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ValidationStatus {
-    Success,
-    Failed,
-    Warning,
-}
-
-/// Result of a plugin validation check.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ValidationResult {
-    pub status: ValidationStatus,
-    pub message: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
-}
-
 /// Structured error from a plugin operation.
 ///
 /// Carries classification, retry metadata, and optional diagnostic details.

@@ -13,7 +13,7 @@
 //! | `cursor`       | Cursor info and value types for incremental sync |
 //! | `discovery`    | Discovered streams and plugin spec types (v7) |
 //! | `envelope`     | DLQ record and payload envelope types |
-//! | `error`        | `PluginError`, `ValidationResult`, error categories |
+//! | `error`        | `PluginError`, error categories |
 //! | `lifecycle`    | Apply and teardown lifecycle types (v7) |
 //! | `manifest`     | Plugin manifest and permission types |
 //! | `metric`       | Metric, summary types (read/write/transform) |
@@ -64,10 +64,7 @@ pub mod prelude {
     pub use crate::cursor::{CursorInfo, CursorType, CursorValue};
     pub use crate::discovery::{DiscoveredStream, PluginSpec};
     pub use crate::envelope::{DlqRecord, PayloadEnvelope, Timestamp};
-    pub use crate::error::{
-        BackoffClass, CommitState, ErrorCategory, ErrorScope, PluginError, ValidationResult,
-        ValidationStatus,
-    };
+    pub use crate::error::{BackoffClass, CommitState, ErrorCategory, ErrorScope, PluginError};
     pub use crate::lifecycle::{
         ApplyAction, ApplyReport, ApplyRequest, TeardownReport, TeardownRequest,
     };
@@ -79,10 +76,9 @@ pub mod prelude {
     pub use crate::state_backend::{noop_state_backend, NoopStateBackend, StateBackend};
     pub use crate::state_error::StateError;
     pub use crate::stream::{StreamContext, StreamLimits, StreamPolicies};
-    // NOTE: `validation::ValidationStatus` is intentionally excluded to avoid
-    // collision with `error::ValidationStatus`. Resolved in Task 7.
     pub use crate::validation::{
         PrerequisiteCheck, PrerequisiteSeverity, PrerequisitesReport, ValidationReport,
+        ValidationStatus,
     };
     pub use crate::wire::{Feature, PluginInfo, PluginKind, ProtocolVersion, SyncMode, WriteMode};
 }
