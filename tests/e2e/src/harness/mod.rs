@@ -106,15 +106,12 @@ impl HarnessContext {
             let _ = connection.await;
         });
 
-        // Only read DLQ records from the most recent run to avoid leaking
-        // stale rows from prior runs sharing the same pipeline name.
+        // Pipeline names are now unique per test (include schema ID suffix),
+        // so filtering by pipeline is sufficient for isolation.
         let rows = client
             .query(
-                "SELECT d.stream_name, d.record_json, d.error_message, d.error_category \
-                 FROM dlq_records d \
-                 WHERE d.pipeline = $1 \
-                   AND d.run_id = (SELECT MAX(id) FROM sync_runs WHERE pipeline = $1) \
-                 ORDER BY d.id ASC",
+                "SELECT stream_name, record_json, error_message, error_category \
+                 FROM dlq_records WHERE pipeline = $1 ORDER BY id ASC",
                 &[&pipeline_name],
             )
             .await
@@ -604,7 +601,7 @@ fn render_pipeline_yaml(
 
     format!(
         r#"version: "1.0"
-pipeline: e2e_full_refresh
+pipeline: e2e_full_refresh_{dest_schema}
 
 source:
   use: postgres
@@ -702,7 +699,7 @@ fn render_transform_yaml(
 ) -> String {
     format!(
         r#"version: "1.0"
-pipeline: e2e_transform
+pipeline: e2e_transform_{dest_schema}
 
 source:
   use: postgres
@@ -761,7 +758,7 @@ fn render_validate_transform_yaml(
     let rules = indent_block(rules_yaml, 8);
     format!(
         r#"version: "1.0"
-pipeline: e2e_validate_transform
+pipeline: e2e_validate_transform_{dest_schema}
 
 source:
   use: postgres
@@ -831,7 +828,7 @@ fn render_cdc_yaml(
 ) -> String {
     format!(
         r#"version: "1.0"
-pipeline: e2e_cdc
+pipeline: e2e_cdc_{dest_schema}
 
 source:
   use: postgres

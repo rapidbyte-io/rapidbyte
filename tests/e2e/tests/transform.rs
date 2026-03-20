@@ -213,8 +213,9 @@ async fn validate_transform_dlq_continues_and_writes_valid_rows() {
         assert_eq!(run.records_read, 3);
         assert_eq!(run.records_written, 2);
 
+        let pipeline_name = format!("e2e_validate_transform_{}", schemas.destination_schema);
         let dlq_rows = context
-            .read_dlq_rows(&state_conn, "e2e_validate_transform")
+            .read_dlq_rows(&state_conn, &pipeline_name)
             .await
             .expect("should read persisted dlq rows");
         assert_eq!(dlq_rows.len(), 1);
