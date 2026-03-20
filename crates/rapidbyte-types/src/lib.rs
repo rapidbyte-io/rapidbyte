@@ -20,6 +20,7 @@
 //! | `state_backend`| `StateBackend` trait (storage contract) |
 //! | `state_error`  | `StateError` type for backend operations |
 //! | `stream`       | Stream context, limits, policies |
+//! | `validation`   | Validation report and prerequisites types (v7) |
 //! | `wire`         | Wire protocol enums (sync mode, write mode, role) |
 
 #![warn(clippy::pedantic)]
@@ -40,6 +41,7 @@ pub mod state;
 pub mod state_backend;
 pub mod state_error;
 pub mod stream;
+pub mod validation;
 pub mod wire;
 
 /// Common imports for typical usage.
@@ -66,5 +68,10 @@ pub mod prelude {
     pub use crate::state_backend::{noop_state_backend, NoopStateBackend, StateBackend};
     pub use crate::state_error::StateError;
     pub use crate::stream::{StreamContext, StreamLimits, StreamPolicies};
+    // NOTE: `validation::ValidationStatus` is intentionally excluded to avoid
+    // collision with `error::ValidationStatus`. Resolved in Task 7.
+    pub use crate::validation::{
+        PrerequisiteCheck, PrerequisiteSeverity, PrerequisitesReport, ValidationReport,
+    };
     pub use crate::wire::{Feature, PluginInfo, PluginKind, ProtocolVersion, SyncMode, WriteMode};
 }
