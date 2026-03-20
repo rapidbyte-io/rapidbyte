@@ -10,6 +10,12 @@ pub trait ProgressCollector: Send + Sync {
     /// Get the latest progress snapshot for heartbeating.
     fn latest(&self) -> ProgressSnapshot;
 
+    /// Take the latest progress snapshot, replacing it with an empty one.
+    ///
+    /// Used by the heartbeat loop to consume progress so unchanged
+    /// snapshots are not re-sent on subsequent ticks.
+    fn take(&self) -> ProgressSnapshot;
+
     /// Reset progress (when starting a new task).
     fn reset(&self);
 }

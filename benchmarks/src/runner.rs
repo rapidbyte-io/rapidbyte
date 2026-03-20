@@ -584,9 +584,30 @@ fn start_distributed_runtime(
         .spawn()
         .context("failed to start benchmark agent process")?;
 
-    // Give the agent time to register with the controller before starting the benchmark.
-    thread::sleep(Duration::from_secs(2));
+    // Wait for the agent to register with the controller. The agent has no
+    // dedicated readiness endpoint, so we poll both processes to ensure they
+    // haven't crashed and give a grace period for registration to complete.
+    let registration_deadline = Duration::from_secs(10);
+    let poll_interval = Duration::from_millis(250);
+    let start = std::time::Instant::now();
+    while start.elapsed() < registration_deadline {
+        if let Some(status) = controller
+            .try_wait()
+            .context("failed to poll benchmark controller process")?
+        {
+            bail!("benchmark controller exited early with status {status}");
+        }
+        if let Some(status) = agent
+            .try_wait()
+            .context("failed to poll benchmark agent process")?
+        {
+            bail!("benchmark agent exited early with status {status}");
+        }
+        // Both alive — wait a bit before checking again.
+        thread::sleep(poll_interval);
+    }
 
+    // Final liveness check after grace period.
     if let Some(status) = controller
         .try_wait()
         .context("failed to poll benchmark controller process")?

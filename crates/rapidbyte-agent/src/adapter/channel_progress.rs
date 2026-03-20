@@ -42,6 +42,10 @@ impl ProgressCollector for AtomicProgressCollector {
         self.snapshot.read().unwrap().clone()
     }
 
+    fn take(&self) -> ProgressSnapshot {
+        std::mem::take(&mut *self.snapshot.write().unwrap())
+    }
+
     fn reset(&self) {
         *self.snapshot.write().unwrap() = ProgressSnapshot::default();
     }

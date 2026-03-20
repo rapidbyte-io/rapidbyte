@@ -94,7 +94,8 @@ async fn build_heartbeats(active_leases: &ActiveLeaseMap) -> Vec<TaskHeartbeat> 
         .map(|(task_id, lease_epoch, progress)| TaskHeartbeat {
             task_id,
             lease_epoch,
-            progress: progress.latest(),
+            // take() consumes the snapshot so unchanged progress is not re-sent.
+            progress: progress.take(),
         })
         .collect()
 }
