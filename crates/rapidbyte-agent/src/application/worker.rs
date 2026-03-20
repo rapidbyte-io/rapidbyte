@@ -224,7 +224,6 @@ mod tests {
             max_tasks: 1,
             heartbeat_interval: Duration::from_secs(3600), // long interval, won't fire
             completion_retry_delay: Duration::from_millis(1),
-            ..AgentAppConfig::default()
         };
 
         // Enqueue registration success.
@@ -265,7 +264,6 @@ mod tests {
             max_tasks: 1,
             heartbeat_interval: Duration::from_secs(3600),
             completion_retry_delay: Duration::from_millis(1),
-            ..AgentAppConfig::default()
         };
 
         // Registration.
@@ -338,7 +336,6 @@ mod tests {
             max_tasks: 1,
             heartbeat_interval: Duration::from_secs(3600),
             completion_retry_delay: Duration::from_millis(1),
-            ..AgentAppConfig::default()
         };
 
         // Registration.
@@ -398,7 +395,7 @@ mod tests {
         t.ctx.config = AgentAppConfig {
             max_tasks: 1,
             heartbeat_interval: Duration::from_secs(3600),
-            ..AgentAppConfig::default()
+            completion_retry_delay: Duration::from_millis(1),
         };
 
         t.gateway.enqueue_register(Ok(RegistrationResponse {

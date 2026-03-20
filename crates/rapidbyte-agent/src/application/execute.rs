@@ -146,8 +146,14 @@ pub(crate) async fn bridge_progress(
 
 /// Report task completion to the controller with retry logic.
 ///
-/// The retry loop is shutdown-aware: if the shutdown token is cancelled,
-/// retries stop immediately so the agent can exit promptly.
+/// Retries indefinitely on transient errors until either:
+/// - The controller acknowledges completion, or
+/// - A non-retryable error occurs (auth, validation), or
+/// - The shutdown token is cancelled (agent stopping).
+///
+/// This ensures committed work is always reported to the controller
+/// as long as the agent is running, preventing duplicate execution
+/// from lease timeout reassignment.
 pub(crate) async fn report_completion(
     ctx: &AgentContext,
     agent_id: &str,
@@ -162,7 +168,8 @@ pub(crate) async fn report_completion(
         result,
     };
 
-    for attempt in 0..ctx.config.max_completion_retries {
+    let mut attempt: u32 = 0;
+    loop {
         match ctx.gateway.complete(payload.clone()).await {
             Ok(()) => {
                 info!(task_id = assignment.task_id, "Task completion reported");
@@ -175,6 +182,7 @@ pub(crate) async fn report_completion(
                     error = %e,
                     "Completion failed, retrying"
                 );
+                attempt = attempt.saturating_add(1);
                 // Sleep is shutdown-aware so SIGINT/SIGTERM stops retries promptly.
                 tokio::select! {
                     () = tokio::time::sleep(ctx.config.completion_retry_delay) => {}
@@ -197,8 +205,6 @@ pub(crate) async fn report_completion(
             }
         }
     }
-
-    warn!(task_id = assignment.task_id, "Completion retries exhausted");
 }
 
 fn is_retryable_controller_error(e: &AgentError) -> bool {
@@ -437,5 +443,40 @@ mod tests {
             payloads[0].result.outcome,
             TaskOutcomeKind::Cancelled
         ));
+    }
+
+    #[tokio::test]
+    async fn completion_retries_indefinitely_until_shutdown() {
+        let mut ctx = fake_context();
+        ctx.ctx.config.completion_retry_delay = std::time::Duration::from_millis(1);
+        ctx.executor.enqueue(Ok(TaskExecutionResult {
+            outcome: TaskOutcomeKind::Completed,
+            metrics: TaskMetrics::default(),
+        }));
+        // Enqueue many transient failures — more than old max_completion_retries (60)
+        for _ in 0..100 {
+            ctx.gateway
+                .enqueue_complete(Err(AgentError::Controller("unavailable".into())));
+        }
+        // Then a success once retries get through
+        ctx.gateway.enqueue_complete(Ok(()));
+
+        let mut assignment = test_assignment();
+        assignment.pipeline_yaml = VALID_YAML.into();
+
+        let pc = Arc::new(crate::adapter::AtomicProgressCollector::new());
+        execute_task(
+            &ctx.ctx,
+            "agent-1",
+            &assignment,
+            &pc,
+            CancellationToken::new(),
+            &CancellationToken::new(),
+        )
+        .await;
+
+        // All 100 transient failures were retried, then succeeded on attempt 101
+        let payloads = ctx.gateway.completed_payloads();
+        assert_eq!(payloads.len(), 101);
     }
 }

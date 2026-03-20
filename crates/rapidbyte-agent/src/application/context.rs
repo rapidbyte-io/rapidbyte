@@ -12,10 +12,8 @@ pub struct AgentAppConfig {
     pub max_tasks: u32,
     /// Interval between heartbeat RPCs.
     pub heartbeat_interval: Duration,
-    /// Delay between completion retry attempts.
+    /// Delay between completion retry attempts on transient errors.
     pub completion_retry_delay: Duration,
-    /// Maximum number of completion retry attempts before giving up.
-    pub max_completion_retries: u32,
 }
 
 impl Default for AgentAppConfig {
@@ -24,7 +22,6 @@ impl Default for AgentAppConfig {
             max_tasks: 1,
             heartbeat_interval: Duration::from_secs(10),
             completion_retry_delay: Duration::from_secs(1),
-            max_completion_retries: 60,
         }
     }
 }
