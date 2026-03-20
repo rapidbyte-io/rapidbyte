@@ -28,9 +28,20 @@ impl EngineExecutor {
         }
     }
 
-    /// Update registry config after receiving it from the controller.
-    pub async fn update_registry_config(&self, config: rapidbyte_registry::RegistryConfig) {
-        *self.registry_config.write().await = Arc::new(config);
+    /// Return a snapshot of the current registry config.
+    pub async fn registry_config_snapshot(&self) -> rapidbyte_registry::RegistryConfig {
+        let guard = self.registry_config.read().await;
+        (**guard).clone()
+    }
+
+    /// Merge controller-provided registry URL into the existing config,
+    /// preserving `trust_policy` and `trusted_key_pems` set at startup.
+    pub async fn merge_registry_url(&self, url: Option<&str>, insecure: bool) {
+        let mut guard = self.registry_config.write().await;
+        let mut config = (**guard).clone();
+        config.default_registry = rapidbyte_registry::normalize_registry_url_option(url);
+        config.insecure = insecure;
+        *guard = Arc::new(config);
     }
 }
 

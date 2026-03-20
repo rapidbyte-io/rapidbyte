@@ -36,20 +36,14 @@ pub async fn run_agent(
     let agent_id = response.agent_id;
     info!(agent_id, "Registered with controller");
 
-    // 2. Update registry config from controller response
+    // 2. Merge controller-provided registry URL into the existing config,
+    //    preserving trust_policy and trusted_key_pems set at startup.
     if let Some(registry_info) = response.registry {
-        let new_config = rapidbyte_registry::RegistryConfig {
-            insecure: registry_info.insecure,
-            default_registry: rapidbyte_registry::normalize_registry_url_option(
-                registry_info.url.as_deref(),
-            ),
-            ..Default::default()
-        };
         adapters
             .engine_executor
-            .update_registry_config(new_config)
+            .merge_registry_url(registry_info.url.as_deref(), registry_info.insecure)
             .await;
-        info!(agent_id, "Updated registry config from controller");
+        info!(agent_id, "Updated registry URL from controller");
     }
 
     // 3. Shared active lease tracking
@@ -73,14 +67,8 @@ pub async fn run_agent(
     });
 
     // 5. Run worker pool: max_tasks concurrent poll-execute loops
-    let pool_result = run_worker_pool(
-        ctx,
-        &agent_id,
-        &adapters.progress_collector,
-        active_leases.clone(),
-        shutdown.clone(),
-    )
-    .await;
+    let pool_result =
+        run_worker_pool(ctx, &agent_id, active_leases.clone(), shutdown.clone()).await;
 
     // 6. Graceful shutdown: cancel heartbeat, wait for it
     shutdown.cancel();
@@ -97,7 +85,6 @@ pub async fn run_agent(
 async fn run_worker_pool(
     ctx: &AgentContext,
     agent_id: &str,
-    progress_collector: &Arc<AtomicProgressCollector>,
     active_leases: ActiveLeaseMap,
     shutdown: CancellationToken,
 ) -> Result<(), AgentError> {
@@ -108,10 +95,8 @@ async fn run_worker_pool(
         let agent_id = agent_id.to_owned();
         let leases = active_leases.clone();
         let shutdown = shutdown.clone();
-        let pc = progress_collector.clone();
 
-        workers
-            .spawn(async move { worker_loop(&worker_ctx, &agent_id, &pc, leases, shutdown).await });
+        workers.spawn(async move { worker_loop(&worker_ctx, &agent_id, leases, shutdown).await });
     }
 
     while let Some(result) = workers.join_next().await {
@@ -128,7 +113,6 @@ async fn run_worker_pool(
 async fn worker_loop(
     ctx: &AgentContext,
     agent_id: &str,
-    progress_collector: &Arc<AtomicProgressCollector>,
     active_leases: ActiveLeaseMap,
     shutdown: CancellationToken,
 ) -> Result<(), AgentError> {
@@ -146,8 +130,12 @@ async fn worker_loop(
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 continue;
             }
+            Err(e @ AgentError::ControllerNonRetryable(_)) => {
+                error!(error = %e, "Poll rejected by controller (non-retryable)");
+                return Err(e);
+            }
             Err(e) => {
-                warn!(error = %e, "Poll failed");
+                warn!(error = %e, "Poll failed (transient), retrying");
                 if shutdown.is_cancelled() {
                     return Ok(());
                 }
@@ -158,17 +146,21 @@ async fn worker_loop(
 
         let cancel = shutdown.child_token();
 
-        // Register lease
+        // Each task gets its own progress collector so concurrent tasks
+        // don't overwrite each other's heartbeat progress.
+        let task_progress = Arc::new(AtomicProgressCollector::new());
+
+        // Register lease with per-task progress
         active_leases.write().await.insert(
             assignment.task_id.clone(),
             LeaseEntry {
                 lease_epoch: assignment.lease_epoch,
                 cancel: cancel.clone(),
-                progress: ctx.progress.clone(),
+                progress: task_progress.clone(),
             },
         );
 
-        execute_task(ctx, agent_id, &assignment, progress_collector, cancel).await;
+        execute_task(ctx, agent_id, &assignment, &task_progress, cancel).await;
 
         // Remove lease after execution
         active_leases.write().await.remove(&assignment.task_id);
@@ -343,5 +335,67 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn registry_update_preserves_trust_policy() {
+        let initial_config = rapidbyte_registry::RegistryConfig {
+            trust_policy: rapidbyte_registry::TrustPolicy::Verify,
+            trusted_key_pems: vec!["PEM-KEY-1".into()],
+            ..Default::default()
+        };
+
+        let executor = Arc::new(EngineExecutor::new(initial_config));
+
+        // Simulate controller providing a registry URL
+        executor
+            .merge_registry_url(Some("https://registry.example.com"), false)
+            .await;
+
+        // Read back the config and verify trust settings are preserved
+        let config = executor.registry_config_snapshot().await;
+        // normalize_registry_url_option strips the scheme
+        assert!(config.default_registry.is_some());
+        assert!(!config.insecure);
+        assert_eq!(config.trust_policy, rapidbyte_registry::TrustPolicy::Verify);
+        assert_eq!(config.trusted_key_pems, vec!["PEM-KEY-1".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn non_retryable_poll_error_terminates_agent() {
+        let mut t = fake_context();
+        t.ctx.config = AgentAppConfig {
+            max_tasks: 1,
+            heartbeat_interval: Duration::from_secs(3600),
+            ..AgentAppConfig::default()
+        };
+
+        t.gateway.enqueue_register(Ok(RegistrationResponse {
+            agent_id: "agent-1".into(),
+            registry: None,
+        }));
+
+        // Poll returns a non-retryable error (e.g., auth failure)
+        t.gateway
+            .enqueue_poll(Err(AgentError::ControllerNonRetryable(
+                "unauthenticated".into(),
+            )));
+
+        let shutdown = CancellationToken::new();
+        let adapters = test_adapters();
+        let result = run_agent(
+            &t.ctx,
+            RegistrationConfig { max_tasks: 1 },
+            &adapters,
+            shutdown,
+        )
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, AgentError::ControllerNonRetryable(_)),
+            "expected ControllerNonRetryable, got {err:?}"
+        );
     }
 }
