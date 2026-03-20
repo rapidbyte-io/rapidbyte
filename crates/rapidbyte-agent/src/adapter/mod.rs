@@ -2,10 +2,13 @@
 
 pub mod channel_progress;
 pub mod clock;
+pub mod grpc_controller;
 pub mod metrics;
+mod proto;
 
 pub use channel_progress::AtomicProgressCollector;
 pub use clock::SystemClock;
+pub use grpc_controller::{ClientTlsConfig, GrpcControllerGateway};
 pub use metrics::OtelMetricsProvider;
 
 // Forward declaration — full implementation in Task 11.
