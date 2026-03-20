@@ -1,7 +1,5 @@
 //! Engine executor adapter — bridges `PipelineExecutor` port to rapidbyte-engine.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use rapidbyte_engine::domain::error::PipelineError;
 use rapidbyte_engine::ProgressEvent;
@@ -11,7 +9,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::domain::error::AgentError;
 use crate::domain::ports::executor::PipelineExecutor;
-use crate::domain::ports::metrics::MetricsProvider;
 use crate::domain::task::{
     CommitState, TaskErrorInfo, TaskExecutionResult, TaskMetrics, TaskOutcomeKind,
 };
@@ -19,19 +16,13 @@ use crate::domain::task::{
 /// Implements [`PipelineExecutor`] by calling `rapidbyte_engine::run_pipeline`.
 pub struct EngineExecutor {
     registry_config: RwLock<rapidbyte_registry::RegistryConfig>,
-    #[allow(dead_code)]
-    metrics: Arc<dyn MetricsProvider>,
 }
 
 impl EngineExecutor {
     #[must_use]
-    pub fn new(
-        registry_config: rapidbyte_registry::RegistryConfig,
-        metrics: Arc<dyn MetricsProvider>,
-    ) -> Self {
+    pub fn new(registry_config: rapidbyte_registry::RegistryConfig) -> Self {
         Self {
             registry_config: RwLock::new(registry_config),
-            metrics,
         }
     }
 

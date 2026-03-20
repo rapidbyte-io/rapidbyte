@@ -107,7 +107,7 @@ pub async fn build_agent_context(
         ..Default::default()
     };
 
-    let executor = Arc::new(EngineExecutor::new(registry_config, metrics.clone()));
+    let executor = Arc::new(EngineExecutor::new(registry_config));
     let progress = Arc::new(AtomicProgressCollector::new());
     let clock = Arc::new(SystemClock);
 
