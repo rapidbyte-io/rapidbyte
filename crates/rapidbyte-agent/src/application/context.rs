@@ -45,7 +45,7 @@ pub struct AgentContext {
     pub executor: Arc<dyn PipelineExecutor>,
     /// Progress snapshot for heartbeating.
     pub progress: Arc<dyn ProgressCollector>,
-    /// OTel metrics handles.
+    /// `OTel` metrics handles.
     pub metrics: Arc<dyn MetricsProvider>,
     /// Monotonic clock for timing.
     pub clock: Arc<dyn Clock>,

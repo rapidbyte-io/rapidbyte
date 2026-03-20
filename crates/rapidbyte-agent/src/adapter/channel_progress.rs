@@ -13,6 +13,12 @@ pub struct AtomicProgressCollector {
     snapshot: RwLock<ProgressSnapshot>,
 }
 
+impl Default for AtomicProgressCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AtomicProgressCollector {
     #[must_use]
     pub fn new() -> Self {
@@ -22,6 +28,10 @@ impl AtomicProgressCollector {
     }
 
     /// Write a new progress snapshot (called by the bridge task).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned.
     pub fn update(&self, snapshot: ProgressSnapshot) {
         *self.snapshot.write().unwrap() = snapshot;
     }
