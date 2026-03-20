@@ -173,7 +173,7 @@ async fn worker_loop(
             },
         );
 
-        let acknowledged = execute_task(
+        let _acknowledged = execute_task(
             ctx,
             agent_id,
             &assignment,
@@ -183,11 +183,18 @@ async fn worker_loop(
         )
         .await;
 
-        // Only remove the lease if completion was acknowledged AND the
-        // epoch still matches. If not acknowledged (non-retryable error
-        // or shutdown), the lease stays active so heartbeats continue and
-        // the controller retains visibility of the task.
-        if acknowledged {
+        // Always remove the lease (epoch-guarded) after execution.
+        //
+        // The report_completion loop retries indefinitely on transient errors
+        // (the only way committed work goes unreported is agent shutdown).
+        // When report_completion returns false it's because:
+        // - Non-retryable error (FailedPrecondition/NotFound) → controller
+        //   already considers the task terminal, keeping the lease is pointless.
+        // - Shutdown → agent is stopping, leases are moot.
+        //
+        // Retaining stale leases would cause unbounded heartbeat payload growth
+        // since the agent has no mechanism to prune them.
+        {
             let mut leases = active_leases.write().await;
             if leases
                 .get(&assignment.task_id)
@@ -195,11 +202,6 @@ async fn worker_loop(
             {
                 leases.remove(&assignment.task_id);
             }
-        } else {
-            warn!(
-                task_id = assignment.task_id,
-                "Completion not acknowledged — keeping lease active"
-            );
         }
     }
 }
