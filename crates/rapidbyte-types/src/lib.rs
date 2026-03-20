@@ -10,6 +10,7 @@
 //! | `checkpoint`   | Checkpoint and state scope types |
 //! | `compression`  | Compression codec enum |
 //! | `cursor`       | Cursor info and value types for incremental sync |
+//! | `discovery`    | Discovered streams and plugin spec types (v7) |
 //! | `envelope`     | DLQ record and payload envelope types |
 //! | `error`        | `PluginError`, `ValidationResult`, error categories |
 //! | `manifest`     | Plugin manifest and permission types |
@@ -28,6 +29,7 @@ pub mod catalog;
 pub mod checkpoint;
 pub mod compression;
 pub mod cursor;
+pub mod discovery;
 pub mod envelope;
 pub mod error;
 pub mod format;
@@ -51,6 +53,7 @@ pub mod prelude {
     pub use crate::checkpoint::{Checkpoint, CheckpointKind, StateScope};
     pub use crate::compression::CompressionCodec;
     pub use crate::cursor::{CursorInfo, CursorType, CursorValue};
+    pub use crate::discovery::{DiscoveredStream, PluginSpec};
     pub use crate::envelope::{DlqRecord, PayloadEnvelope, Timestamp};
     pub use crate::error::{
         BackoffClass, CommitState, ErrorCategory, ErrorScope, PluginError, ValidationResult,
