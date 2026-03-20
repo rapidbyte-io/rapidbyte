@@ -6,6 +6,7 @@
 //! | Module         | Responsibility |
 //! |----------------|----------------|
 //! | `arrow`        | Arrow data type mappings |
+//! | `batch`        | Batch metadata for Arrow IPC frame transport (v7) |
 //! | `catalog`      | Catalog, stream, and column schema definitions |
 //! | `checkpoint`   | Checkpoint and state scope types |
 //! | `compression`  | Compression codec enum |
@@ -16,6 +17,7 @@
 //! | `lifecycle`    | Apply and teardown lifecycle types (v7) |
 //! | `manifest`     | Plugin manifest and permission types |
 //! | `metric`       | Metric, summary types (read/write/transform) |
+//! | `run`          | Run request and result types (v7) |
 //! | `schema`       | Schema negotiation types (v7 protocol) |
 //! | `state`        | Run state, pipeline ID, cursor state types |
 //! | `state_backend`| `StateBackend` trait (storage contract) |
@@ -27,6 +29,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod arrow;
+pub mod batch;
 pub mod catalog;
 pub mod checkpoint;
 pub mod compression;
@@ -38,6 +41,7 @@ pub mod format;
 pub mod lifecycle;
 pub mod manifest;
 pub mod metric;
+pub mod run;
 pub mod schema;
 pub mod state;
 pub mod state_backend;
@@ -53,6 +57,7 @@ pub mod wire;
 /// ```
 pub mod prelude {
     pub use crate::arrow::ArrowDataType;
+    pub use crate::batch::BatchMetadata;
     pub use crate::catalog::{Catalog, ColumnSchema, SchemaHint, Stream};
     pub use crate::checkpoint::{Checkpoint, CheckpointKind, StateScope};
     pub use crate::compression::CompressionCodec;
@@ -68,6 +73,7 @@ pub mod prelude {
     };
     pub use crate::manifest::PluginManifest;
     pub use crate::metric::{ReadSummary, TransformSummary, WriteSummary};
+    pub use crate::run::{RunRequest, RunSummary, StreamResult};
     pub use crate::schema::{FieldConstraint, FieldRequirement, SchemaField, StreamSchema};
     pub use crate::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
     pub use crate::state_backend::{noop_state_backend, NoopStateBackend, StateBackend};
