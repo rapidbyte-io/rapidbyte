@@ -47,6 +47,22 @@ pub enum StateScope {
     PluginInstance,
 }
 
+/// Cursor position update within a transactional checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CursorUpdate {
+    pub stream_name: String,
+    pub cursor_field: String,
+    pub cursor_value_json: String,
+}
+
+/// State mutation within a transactional checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateMutation {
+    pub scope: StateScope,
+    pub key: String,
+    pub value: String,
+}
+
 /// Progress marker emitted during pipeline execution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Checkpoint {
@@ -102,6 +118,30 @@ mod tests {
         let json = serde_json::to_value(&cp).unwrap();
         assert!(json.get("cursor_field").is_none());
         assert!(json.get("cursor_value").is_none());
+    }
+
+    #[test]
+    fn cursor_update_roundtrip() {
+        let cu = CursorUpdate {
+            stream_name: "public.users".into(),
+            cursor_field: "updated_at".into(),
+            cursor_value_json: r#""2026-01-15T00:00:00Z""#.into(),
+        };
+        let json = serde_json::to_string(&cu).unwrap();
+        let back: CursorUpdate = serde_json::from_str(&json).unwrap();
+        assert_eq!(cu, back);
+    }
+
+    #[test]
+    fn state_mutation_roundtrip() {
+        let sm = StateMutation {
+            scope: StateScope::Stream,
+            key: "last_page".into(),
+            value: "42".into(),
+        };
+        let json = serde_json::to_string(&sm).unwrap();
+        let back: StateMutation = serde_json::from_str(&json).unwrap();
+        assert_eq!(sm, back);
     }
 
     #[test]

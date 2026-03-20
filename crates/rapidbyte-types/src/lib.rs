@@ -59,7 +59,9 @@ pub mod prelude {
     pub use crate::arrow::ArrowDataType;
     pub use crate::batch::BatchMetadata;
     pub use crate::catalog::{Catalog, ColumnSchema, SchemaHint, Stream};
-    pub use crate::checkpoint::{Checkpoint, CheckpointKind, StateScope};
+    pub use crate::checkpoint::{
+        Checkpoint, CheckpointKind, CursorUpdate, StateMutation, StateScope,
+    };
     pub use crate::compression::CompressionCodec;
     pub use crate::cursor::{CursorInfo, CursorType, CursorValue};
     pub use crate::discovery::{DiscoveredStream, PluginSpec};
