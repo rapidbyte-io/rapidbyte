@@ -31,6 +31,13 @@ pub struct FakeControllerGateway {
     heartbeat_results: Mutex<VecDeque<Result<HeartbeatResponse, AgentError>>>,
     complete_results: Mutex<VecDeque<Result<(), AgentError>>>,
     completed_payloads: Mutex<Vec<CompletionPayload>>,
+    heartbeat_payloads: Mutex<Vec<HeartbeatPayload>>,
+}
+
+impl Default for FakeControllerGateway {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FakeControllerGateway {
@@ -42,16 +49,62 @@ impl FakeControllerGateway {
             heartbeat_results: Mutex::new(VecDeque::new()),
             complete_results: Mutex::new(VecDeque::new()),
             completed_payloads: Mutex::new(Vec::new()),
+            heartbeat_payloads: Mutex::new(Vec::new()),
         }
     }
 
+    /// Enqueue a registration result.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
+    pub fn enqueue_register(&self, result: Result<RegistrationResponse, AgentError>) {
+        self.register_results.lock().unwrap().push_back(result);
+    }
+
+    /// Enqueue a poll result.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
+    pub fn enqueue_poll(&self, result: Result<Option<TaskAssignment>, AgentError>) {
+        self.poll_results.lock().unwrap().push_back(result);
+    }
+
+    /// Enqueue a heartbeat result.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
+    pub fn enqueue_heartbeat(&self, result: Result<HeartbeatResponse, AgentError>) {
+        self.heartbeat_results.lock().unwrap().push_back(result);
+    }
+
+    /// Enqueue a completion result.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     pub fn enqueue_complete(&self, result: Result<(), AgentError>) {
         self.complete_results.lock().unwrap().push_back(result);
     }
 
     /// Returns all completion payloads that were reported.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     pub fn completed_payloads(&self) -> Vec<CompletionPayload> {
         self.completed_payloads.lock().unwrap().clone()
+    }
+
+    /// Returns all heartbeat payloads that were sent.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
+    pub fn heartbeat_payloads(&self) -> Vec<HeartbeatPayload> {
+        self.heartbeat_payloads.lock().unwrap().clone()
     }
 }
 
@@ -76,7 +129,8 @@ impl ControllerGateway for FakeControllerGateway {
             .expect("FakeControllerGateway: no poll result enqueued")
     }
 
-    async fn heartbeat(&self, _request: HeartbeatPayload) -> Result<HeartbeatResponse, AgentError> {
+    async fn heartbeat(&self, request: HeartbeatPayload) -> Result<HeartbeatResponse, AgentError> {
+        self.heartbeat_payloads.lock().unwrap().push(request);
         self.heartbeat_results
             .lock()
             .unwrap()
@@ -102,6 +156,12 @@ pub struct FakePipelineExecutor {
     results: Mutex<VecDeque<Result<TaskExecutionResult, AgentError>>>,
 }
 
+impl Default for FakePipelineExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FakePipelineExecutor {
     #[must_use]
     pub fn new() -> Self {
@@ -110,6 +170,11 @@ impl FakePipelineExecutor {
         }
     }
 
+    /// Enqueue an execution result.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     pub fn enqueue(&self, result: Result<TaskExecutionResult, AgentError>) {
         self.results.lock().unwrap().push_back(result);
     }
@@ -139,12 +204,27 @@ pub struct FakeProgressCollector {
     snapshot: RwLock<ProgressSnapshot>,
 }
 
+impl Default for FakeProgressCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FakeProgressCollector {
     #[must_use]
     pub fn new() -> Self {
         Self {
             snapshot: RwLock::new(ProgressSnapshot::default()),
         }
+    }
+
+    /// Set a progress message for testing.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal `RwLock` is poisoned.
+    pub fn set_message(&self, message: &str) {
+        self.snapshot.write().unwrap().message = Some(message.to_owned());
     }
 }
 

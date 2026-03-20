@@ -143,6 +143,8 @@ async fn worker_loop(
                 if shutdown.is_cancelled() {
                     return Ok(());
                 }
+                // Yield to avoid busy-spinning in tests and tight loops.
+                tokio::task::yield_now().await;
                 continue;
             }
             Err(e) => {
@@ -178,5 +180,178 @@ async fn worker_loop(
 
         // Remove lease after execution
         active_leases.write().await.remove(&assignment.task_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapter::{AgentAdapters, AtomicProgressCollector, EngineExecutor};
+    use crate::application::context::AgentAppConfig;
+    use crate::application::testing::fake_context;
+    use crate::domain::ports::controller::{RegistrationResponse, TaskAssignment};
+    use crate::domain::task::{TaskExecutionResult, TaskMetrics, TaskOutcomeKind};
+    use std::time::Duration;
+
+    const VALID_YAML: &str = "version: '1.0'\npipeline: test\nsource:\n  use: postgres\n  config:\n    host: localhost\n  streams:\n    - name: users\n      sync_mode: full_refresh\ndestination:\n  use: postgres\n  config:\n    host: localhost\n  write_mode: append\n";
+
+    fn test_adapters() -> AgentAdapters {
+        AgentAdapters {
+            engine_executor: Arc::new(EngineExecutor::new(
+                rapidbyte_registry::RegistryConfig::default(),
+            )),
+            progress_collector: Arc::new(AtomicProgressCollector::new()),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_agent_registers_with_controller() {
+        let mut t = fake_context();
+        t.ctx.config = AgentAppConfig {
+            max_tasks: 1,
+            heartbeat_interval: Duration::from_secs(3600), // long interval, won't fire
+            completion_retry_delay: Duration::from_millis(1),
+            ..AgentAppConfig::default()
+        };
+
+        // Enqueue registration success.
+        t.gateway.enqueue_register(Ok(RegistrationResponse {
+            agent_id: "agent-1".into(),
+            registry: None,
+        }));
+
+        // Enqueue enough poll-None results so the worker doesn't panic before
+        // the shutdown token is cancelled.
+        for _ in 0..50 {
+            t.gateway.enqueue_poll(Ok(None));
+        }
+
+        let shutdown = CancellationToken::new();
+        let sd = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            sd.cancel();
+        });
+
+        let adapters = test_adapters();
+        let result = run_agent(
+            &t.ctx,
+            RegistrationConfig { max_tasks: 1 },
+            &adapters,
+            shutdown,
+        )
+        .await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_agent_executes_polled_task() {
+        let mut t = fake_context();
+        t.ctx.config = AgentAppConfig {
+            max_tasks: 1,
+            heartbeat_interval: Duration::from_secs(3600),
+            completion_retry_delay: Duration::from_millis(1),
+            ..AgentAppConfig::default()
+        };
+
+        // Registration.
+        t.gateway.enqueue_register(Ok(RegistrationResponse {
+            agent_id: "agent-1".into(),
+            registry: None,
+        }));
+
+        // First poll: task assignment with valid YAML.
+        t.gateway.enqueue_poll(Ok(Some(TaskAssignment {
+            task_id: "task-1".into(),
+            run_id: "run-1".into(),
+            pipeline_yaml: VALID_YAML.into(),
+            lease_epoch: 1,
+            attempt: 1,
+        })));
+
+        // Enqueue executor result.
+        t.executor.enqueue(Ok(TaskExecutionResult {
+            outcome: TaskOutcomeKind::Completed,
+            metrics: TaskMetrics {
+                records_written: 100,
+                ..TaskMetrics::default()
+            },
+        }));
+
+        // Enqueue completion result.
+        t.gateway.enqueue_complete(Ok(()));
+
+        // After task completes, subsequent polls return None, then shutdown.
+        for _ in 0..50 {
+            t.gateway.enqueue_poll(Ok(None));
+        }
+
+        let shutdown = CancellationToken::new();
+        let sd = shutdown.clone();
+        // Allow the task execution to complete before cancelling.
+        tokio::spawn(async move {
+            // Yield multiple times to let the worker execute the task and poll again.
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            sd.cancel();
+        });
+
+        let adapters = test_adapters();
+        let result = run_agent(
+            &t.ctx,
+            RegistrationConfig { max_tasks: 1 },
+            &adapters,
+            shutdown,
+        )
+        .await;
+
+        assert!(result.is_ok());
+
+        let payloads = t.gateway.completed_payloads();
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].task_id, "task-1");
+        assert!(matches!(
+            payloads[0].result.outcome,
+            TaskOutcomeKind::Completed
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_agent_stops_on_shutdown() {
+        let mut t = fake_context();
+        t.ctx.config = AgentAppConfig {
+            max_tasks: 1,
+            heartbeat_interval: Duration::from_secs(3600),
+            completion_retry_delay: Duration::from_millis(1),
+            ..AgentAppConfig::default()
+        };
+
+        // Registration.
+        t.gateway.enqueue_register(Ok(RegistrationResponse {
+            agent_id: "agent-1".into(),
+            registry: None,
+        }));
+
+        // A few polls in case the worker gets one iteration in.
+        for _ in 0..10 {
+            t.gateway.enqueue_poll(Ok(None));
+        }
+
+        // Cancel immediately after registration by using an already-cancelled token.
+        let shutdown = CancellationToken::new();
+        shutdown.cancel();
+
+        let adapters = test_adapters();
+        let result = run_agent(
+            &t.ctx,
+            RegistrationConfig { max_tasks: 1 },
+            &adapters,
+            shutdown,
+        )
+        .await;
+
+        assert!(result.is_ok());
     }
 }
