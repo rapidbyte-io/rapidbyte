@@ -1,37 +1,16 @@
-//! Adapter layer: concrete implementations of domain ports.
+//! Concrete adapter implementations for agent port traits.
 
+pub mod agent_factory;
 pub mod channel_progress;
 pub mod clock;
+pub mod engine_executor;
 pub mod grpc_controller;
 pub mod metrics;
 mod proto;
 
+pub use agent_factory::{build_agent_context, AgentAdapters, AgentConfig};
 pub use channel_progress::AtomicProgressCollector;
 pub use clock::SystemClock;
+pub use engine_executor::EngineExecutor;
 pub use grpc_controller::{ClientTlsConfig, GrpcControllerGateway};
 pub use metrics::OtelMetricsProvider;
-
-// Forward declaration — full implementation in Task 11.
-use std::sync::Arc;
-
-/// Concrete adapter handles returned alongside the context.
-///
-/// Provides access to concrete adapter types that have methods beyond their
-/// port trait interfaces (e.g., `EngineExecutorStub::update_registry_config`).
-pub struct AgentAdapters {
-    /// Engine executor adapter (concrete type for registry config updates).
-    pub engine_executor: Arc<EngineExecutorStub>,
-    /// Progress collector adapter (concrete type for write-side updates).
-    pub progress_collector: Arc<AtomicProgressCollector>,
-}
-
-/// Stub for `EngineExecutor` — replaced with full implementation in Task 11.
-pub struct EngineExecutorStub;
-
-impl EngineExecutorStub {
-    /// Update the registry configuration received from the controller.
-    #[allow(clippy::unused_async)] // Stub — real implementation will be async.
-    pub async fn update_registry_config(&self, _config: rapidbyte_registry::RegistryConfig) {
-        // Stub — real implementation stores config in RwLock<RegistryConfig>.
-    }
-}
