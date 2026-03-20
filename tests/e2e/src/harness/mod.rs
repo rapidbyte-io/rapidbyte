@@ -106,10 +106,15 @@ impl HarnessContext {
             let _ = connection.await;
         });
 
+        // Only read DLQ records from the most recent run to avoid leaking
+        // stale rows from prior runs sharing the same pipeline name.
         let rows = client
             .query(
-                "SELECT stream_name, record_json, error_message, error_category \
-                 FROM dlq_records WHERE pipeline = $1 ORDER BY id ASC",
+                "SELECT d.stream_name, d.record_json, d.error_message, d.error_category \
+                 FROM dlq_records d \
+                 WHERE d.pipeline = $1 \
+                   AND d.run_id = (SELECT MAX(id) FROM sync_runs WHERE pipeline = $1) \
+                 ORDER BY d.id ASC",
                 &[&pipeline_name],
             )
             .await
