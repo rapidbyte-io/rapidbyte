@@ -24,7 +24,7 @@ Rewrite `rapidbyte-agent` from scratch using hexagonal architecture, matching th
 
 Total removed: ~1,490 lines of dead/legacy code.
 
-Dependencies removed: `arrow-flight`, `hmac`, `sha2`.
+Dependencies removed: `arrow-flight`, `arrow`, `hmac`, `sha2`, `bytes`, `tokio-stream`.
 
 Config fields removed: `flight_listen`, `flight_advertise`, `signing_key`, `preview_ttl`, `flight_tls`, `allow_insecure_default_signing_key`.
 
@@ -59,8 +59,8 @@ crates/rapidbyte-agent/src/
 │   ├── engine_executor.rs          # PipelineExecutor → rapidbyte-engine
 │   ├── channel_progress.rs         # ProgressCollector → AtomicProgressCollector
 │   ├── metrics.rs                  # MetricsProvider → OTel
-│   └── clock.rs                    # Clock → SystemClock
-├── proto.rs                        # Generated protobuf types (adapter-internal)
+│   ├── clock.rs                    # Clock → SystemClock
+│   └── proto.rs                    # Generated protobuf types (adapter-only)
 └── build.rs                        # Protobuf code generation
 ```
 
@@ -98,15 +98,13 @@ pub struct TaskErrorInfo {
     pub code: String,
     pub message: String,
     pub retryable: bool,
+    /// Domain-internal only — used for commit-state decisions, not sent over the wire.
     pub safe_to_retry: bool,
     pub commit_state: CommitState,
 }
 
-pub enum CommitState {
-    BeforeCommit,
-    AfterCommitUnknown,
-    AfterCommitConfirmed,
-}
+// Re-exported from rapidbyte_types — not redefined here.
+pub use rapidbyte_types::CommitState;
 
 pub struct TaskMetrics {
     pub records_read: u64,
@@ -143,7 +141,7 @@ Single outbound port for all controller communication. Four methods covering the
 #[async_trait]
 pub trait ControllerGateway: Send + Sync {
     async fn register(&self, config: &RegistrationConfig) -> Result<String, AgentError>;
-    async fn poll(&self, agent_id: &str, wait_seconds: u32) -> Result<Option<TaskAssignment>, AgentError>;
+    async fn poll(&self, agent_id: &str) -> Result<Option<TaskAssignment>, AgentError>;
     async fn heartbeat(&self, request: HeartbeatPayload) -> Result<HeartbeatResponse, AgentError>;
     async fn complete(&self, request: CompletionPayload) -> Result<(), AgentError>;
 }
@@ -159,8 +157,9 @@ pub struct RegistrationConfig {
 pub struct TaskAssignment {
     pub task_id: String,
     pub run_id: String,
-    pub pipeline_yaml: Vec<u8>,
+    pub pipeline_yaml: String,
     pub lease_epoch: u64,
+    pub attempt: u32,
 }
 
 pub struct HeartbeatPayload {
@@ -175,13 +174,19 @@ pub struct TaskHeartbeat {
 }
 
 pub struct HeartbeatResponse {
-    pub cancel_task_ids: Vec<String>,
+    pub directives: Vec<TaskDirective>,
+}
+
+pub struct TaskDirective {
+    pub task_id: String,
+    pub acknowledged: bool,
+    pub cancel_requested: bool,
+    pub lease_expires_at: Option<u64>,
 }
 
 pub struct CompletionPayload {
     pub agent_id: String,
     pub task_id: String,
-    pub run_id: String,
     pub lease_epoch: u64,
     pub result: TaskExecutionResult,
 }
@@ -264,9 +269,9 @@ Three use-cases matching the three concurrent activities:
 
 **`run_agent` (`application/worker.rs`)** — Top-level entry point. Registers with controller, spawns heartbeat loop, runs poll loop, handles graceful shutdown.
 
-**`execute_task` (`application/execute.rs`)** — Single task lifecycle: parse YAML into `PipelineConfig`, execute via `PipelineExecutor` port, handle cancellation semantics (pre/post-commit), report completion to controller with retry logic.
+**`execute_task` (`application/execute.rs`)** — Single task lifecycle: parse YAML string into `PipelineConfig`, execute via `PipelineExecutor` port, handle cancellation semantics (pre/post-commit), report completion to controller with retry logic.
 
-**`heartbeat_loop` (`application/heartbeat.rs`)** — Periodic heartbeat: reads latest progress from `ProgressCollector`, sends to controller, processes cancel directives.
+**`heartbeat_loop` (`application/heartbeat.rs`)** — Periodic heartbeat: reads latest progress from `ProgressCollector`, sends to controller, processes `TaskDirective` responses (cancel requests, lease extensions).
 
 ### Shared State
 
@@ -280,6 +285,18 @@ pub struct LeaseEntry {
     pub progress: Arc<dyn ProgressCollector>,
 }
 ```
+
+### Registry Config Flow
+
+The controller's `RegisterResponse` may include registry info (URL, insecure flag). After registration, `run_agent` updates the `EngineExecutor`'s registry config via a concrete method on the adapter (not through the port trait). The `EngineExecutor` stores `RwLock<RegistryConfig>` internally, and `run_agent` calls `executor.update_registry_config()` after a successful registration that returns registry info.
+
+### Signal Handling
+
+Signal handling (SIGINT/SIGTERM) is the caller's (CLI's) responsibility. The `run_agent` use-case accepts a `CancellationToken` parameter and responds to its cancellation. The CLI creates the token and wires signal handlers to cancel it.
+
+### Metrics Endpoint
+
+The Prometheus metrics endpoint is set up by `build_agent_context` when `AgentConfig::metrics_listen` is provided. The factory spawns the metrics HTTP server before returning, similar to how the current worker starts it. This is infrastructure setup, not application logic.
 
 ### Completion Retry Logic
 
@@ -332,8 +349,11 @@ Composition root. Constructs all adapters and wires `AgentContext`:
 3. Build `EngineExecutor` with registry config + metrics
 4. Create `AtomicProgressCollector`
 5. Create `SystemClock`
-6. Assemble `AgentContext`
-7. Return `(AgentContext, RegistrationConfig)`
+6. Start Prometheus metrics endpoint (if `metrics_listen` configured)
+7. Assemble `AgentContext`
+8. Return `(AgentContext, RegistrationConfig)`
+
+`AgentConfig` (adapter-level, full infrastructure config) includes `metrics_listen: Option<String>` for the Prometheus endpoint.
 
 ## Testing
 
@@ -388,8 +408,10 @@ rapidbyte_agent::run_agent(&ctx, registration, shutdown_token).await?;
 ### Removed
 
 - `arrow-flight` — preview Flight server removed
-- `hmac`, `sha2` — ticket signing removed
 - `arrow` — no longer needed (was only for preview batches)
+- `hmac`, `sha2` — ticket signing removed
+- `bytes` — only used by preview/flight code
+- `tokio-stream` — only used by Flight `TcpListenerStream`
 
 ### Retained
 
@@ -401,11 +423,10 @@ rapidbyte_agent::run_agent(&ctx, registration, shutdown_token).await?;
 - `tracing` — logging
 - `opentelemetry`, `opentelemetry_sdk` — metrics
 - `uuid` — agent ID generation
-- `async-trait` — async port traits
 
 ### Added
 
-None.
+- `async-trait` — required for async port trait definitions (not in current Cargo.toml)
 
 ## Conventions
 
