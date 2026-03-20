@@ -47,21 +47,27 @@ pub async fn heartbeat_loop(
             tasks,
         };
 
-        match gateway.heartbeat(payload).await {
-            Ok(response) => {
-                for directive in response.directives {
-                    if directive.cancel_requested {
-                        warn!(task_id = directive.task_id, "Received cancel directive");
-                        let leases = active_leases.read().await;
-                        if let Some(entry) = leases.get(&directive.task_id) {
-                            entry.cancel.cancel();
+        // Use select so a slow/hung heartbeat RPC doesn't block shutdown.
+        tokio::select! {
+            result = gateway.heartbeat(payload) => {
+                match result {
+                    Ok(response) => {
+                        for directive in response.directives {
+                            if directive.cancel_requested {
+                                warn!(task_id = directive.task_id, "Received cancel directive");
+                                let leases = active_leases.read().await;
+                                if let Some(entry) = leases.get(&directive.task_id) {
+                                    entry.cancel.cancel();
+                                }
+                            }
                         }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Heartbeat failed");
                     }
                 }
             }
-            Err(e) => {
-                warn!(error = %e, "Heartbeat failed");
-            }
+            () = shutdown.cancelled() => break,
         }
     }
 }

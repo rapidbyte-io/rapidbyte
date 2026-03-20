@@ -15,13 +15,16 @@ use crate::domain::task::{
 use super::context::AgentContext;
 
 /// Execute a single task: parse YAML, run via executor port, report to controller.
+///
+/// Returns `true` if completion was acknowledged by the controller,
+/// `false` if completion reporting failed (retries exhausted or non-retryable).
 pub async fn execute_task(
     ctx: &AgentContext,
     agent_id: &str,
     assignment: &TaskAssignment,
     progress_collector: &Arc<crate::adapter::AtomicProgressCollector>,
     cancel: CancellationToken,
-) {
+) -> bool {
     info!(
         task_id = assignment.task_id,
         run_id = assignment.run_id,
@@ -43,8 +46,7 @@ pub async fn execute_task(
                 }),
                 metrics: TaskMetrics::default(),
             };
-            report_completion(ctx, agent_id, assignment, result).await;
-            return;
+            return report_completion(ctx, agent_id, assignment, result).await;
         }
     };
 
@@ -54,8 +56,7 @@ pub async fn execute_task(
             outcome: TaskOutcomeKind::Cancelled,
             metrics: TaskMetrics::default(),
         };
-        report_completion(ctx, agent_id, assignment, result).await;
-        return;
+        return report_completion(ctx, agent_id, assignment, result).await;
     }
 
     // 3. Set up progress channel and execute
@@ -74,19 +75,32 @@ pub async fn execute_task(
             outcome: TaskOutcomeKind::Cancelled,
             metrics: TaskMetrics::default(),
         },
+        Err(AgentError::ExecutionFailed(ref inner)) => {
+            // ExecutionFailed comes from build_run_context (setup/infra),
+            // not from the pipeline itself — no writes have occurred.
+            TaskExecutionResult {
+                outcome: TaskOutcomeKind::Failed(TaskErrorInfo {
+                    code: "INFRASTRUCTURE".into(),
+                    message: inner.to_string(),
+                    retryable: false,
+                    commit_state: CommitState::BeforeCommit,
+                }),
+                metrics: TaskMetrics::default(),
+            }
+        }
         Err(e) => TaskExecutionResult {
             outcome: TaskOutcomeKind::Failed(TaskErrorInfo {
                 code: "EXECUTION_ERROR".into(),
                 message: e.to_string(),
-                retryable: true,
-                commit_state: CommitState::AfterCommitUnknown,
+                retryable: false,
+                commit_state: CommitState::BeforeCommit,
             }),
             metrics: TaskMetrics::default(),
         },
     };
 
     // 5. Report to controller
-    report_completion(ctx, agent_id, assignment, result).await;
+    report_completion(ctx, agent_id, assignment, result).await
 }
 
 async fn parse_pipeline(yaml: &str) -> Result<rapidbyte_pipeline_config::PipelineConfig, String> {
@@ -130,12 +144,17 @@ pub(crate) async fn bridge_progress(
 }
 
 /// Report task completion to the controller with retry logic.
+///
+/// Returns `true` if completion was acknowledged, `false` if retries were
+/// exhausted or a non-retryable error occurred. The caller should keep the
+/// lease active on `false` so the controller can detect the abandoned task
+/// via heartbeat timeout rather than silently losing it.
 pub(crate) async fn report_completion(
     ctx: &AgentContext,
     agent_id: &str,
     assignment: &TaskAssignment,
     result: TaskExecutionResult,
-) {
+) -> bool {
     let payload = CompletionPayload {
         agent_id: agent_id.to_owned(),
         task_id: assignment.task_id.clone(),
@@ -147,7 +166,7 @@ pub(crate) async fn report_completion(
         match ctx.gateway.complete(payload.clone()).await {
             Ok(()) => {
                 info!(task_id = assignment.task_id, "Task completion reported");
-                return;
+                return true;
             }
             Err(ref e) if is_retryable_controller_error(e) => {
                 warn!(
@@ -164,12 +183,16 @@ pub(crate) async fn report_completion(
                     error = %e,
                     "Completion failed with non-retryable error, giving up"
                 );
-                return;
+                return false;
             }
         }
     }
 
-    warn!(task_id = assignment.task_id, "Completion retries exhausted");
+    warn!(
+        task_id = assignment.task_id,
+        "Completion retries exhausted — lease kept active for controller timeout"
+    );
+    false
 }
 
 fn is_retryable_controller_error(e: &AgentError) -> bool {
@@ -361,8 +384,9 @@ mod tests {
         assert_eq!(payloads.len(), 1);
         match &payloads[0].result.outcome {
             TaskOutcomeKind::Failed(info) => {
-                assert_eq!(info.code, "EXECUTION_ERROR");
-                assert!(info.retryable);
+                assert_eq!(info.code, "INFRASTRUCTURE");
+                assert!(!info.retryable);
+                assert_eq!(info.commit_state, CommitState::BeforeCommit);
             }
             other => panic!("expected Failed, got {other:?}"),
         }
