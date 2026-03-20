@@ -1,4 +1,4 @@
-//! Composition root: wires all adapters into an AgentContext.
+//! Composition root: wires all adapters into an `AgentContext`.
 
 use std::sync::Arc;
 use std::time::Duration;

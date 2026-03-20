@@ -1,4 +1,4 @@
-//! gRPC adapter for the ControllerGateway port.
+//! gRPC adapter for the `ControllerGateway` port.
 
 use async_trait::async_trait;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig as TonicClientTlsConfig, Endpoint};
@@ -32,6 +32,10 @@ pub struct GrpcControllerGateway {
 
 impl GrpcControllerGateway {
     /// Connect to the controller at the given URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the gRPC channel cannot be established.
     pub async fn connect(
         url: &str,
         tls: Option<&ClientTlsConfig>,
@@ -61,7 +65,7 @@ impl ControllerGateway for GrpcControllerGateway {
             }),
         };
         let response = client
-            .register(apply_auth(request, &self.auth_token)?)
+            .register(apply_auth(request, self.auth_token.as_ref())?)
             .await
             .map_err(|s| AgentError::Controller(format_status(&s)))?
             .into_inner();
@@ -80,7 +84,7 @@ impl ControllerGateway for GrpcControllerGateway {
             agent_id: agent_id.to_owned(),
         };
         let response = client
-            .poll_task(apply_auth(request, &self.auth_token)?)
+            .poll_task(apply_auth(request, self.auth_token.as_ref())?)
             .await
             .map_err(|s| AgentError::Controller(format_status(&s)))?
             .into_inner();
@@ -116,7 +120,7 @@ impl ControllerGateway for GrpcControllerGateway {
         };
 
         let response = client
-            .heartbeat(apply_auth(proto_request, &self.auth_token)?)
+            .heartbeat(apply_auth(proto_request, self.auth_token.as_ref())?)
             .await
             .map_err(|s| AgentError::Controller(format_status(&s)))?
             .into_inner();
@@ -129,6 +133,7 @@ impl ControllerGateway for GrpcControllerGateway {
                     task_id: d.task_id,
                     acknowledged: d.acknowledged,
                     cancel_requested: d.cancel_requested,
+                    #[allow(clippy::cast_sign_loss)]
                     lease_expires_at: d.lease_expires_at.map(|ts| ts.seconds.max(0) as u64),
                 })
                 .collect(),
@@ -180,7 +185,7 @@ impl ControllerGateway for GrpcControllerGateway {
         };
 
         client
-            .complete_task(apply_auth(proto_request, &self.auth_token)?)
+            .complete_task(apply_auth(proto_request, self.auth_token.as_ref())?)
             .await
             .map_err(|s| AgentError::Controller(format_status(&s)))?;
 
@@ -213,7 +218,7 @@ async fn connect_channel(
     Ok(endpoint.connect().await?)
 }
 
-fn apply_auth<T>(request: T, auth_token: &Option<String>) -> Result<tonic::Request<T>, AgentError> {
+fn apply_auth<T>(request: T, auth_token: Option<&String>) -> Result<tonic::Request<T>, AgentError> {
     let mut req = tonic::Request::new(request);
     if let Some(token) = auth_token {
         let value = format!("Bearer {token}")

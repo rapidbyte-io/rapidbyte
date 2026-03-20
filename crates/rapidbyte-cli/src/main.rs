@@ -202,27 +202,9 @@ enum Commands {
         /// Controller endpoint to connect to
         #[arg(long)]
         controller: String,
-        /// Flight server bind address (data plane)
-        #[arg(long, default_value = "[::]:9091")]
-        flight_listen: String,
-        /// Flight endpoint advertised to clients (must be reachable)
-        #[arg(long)]
-        flight_advertise: String,
         /// Maximum concurrent tasks
         #[arg(long, default_value = "1")]
         max_tasks: u32,
-        /// Shared signing key for preview tickets (must match controller)
-        #[arg(long, env = "RAPIDBYTE_SIGNING_KEY")]
-        signing_key: Option<String>,
-        /// Explicitly allow the built-in insecure development signing key
-        #[arg(long)]
-        allow_insecure_signing_key: bool,
-        /// PEM certificate for the agent Flight server
-        #[arg(long)]
-        flight_tls_cert: Option<PathBuf>,
-        /// PEM private key for the agent Flight server
-        #[arg(long)]
-        flight_tls_key: Option<PathBuf>,
         /// Prometheus metrics listen address (e.g. 127.0.0.1:9191)
         #[arg(long, env = "RAPIDBYTE_METRICS_LISTEN")]
         metrics_listen: Option<String>,
@@ -576,28 +558,25 @@ async fn main() -> ExitCode {
         }
         Commands::Agent {
             controller,
-            flight_listen,
-            flight_advertise,
             max_tasks,
-            signing_key,
-            allow_insecure_signing_key,
-            flight_tls_cert,
-            flight_tls_key,
             metrics_listen,
         } => {
+            let trusted_key_pems: Vec<String> = cli
+                .trust_key
+                .iter()
+                .filter_map(|p| std::fs::read_to_string(p).ok())
+                .collect();
             commands::agent::execute(
                 &controller,
-                &flight_listen,
-                &flight_advertise,
                 max_tasks,
-                signing_key.as_deref(),
-                allow_insecure_signing_key,
                 cli.auth_token.as_deref(),
                 cli.tls_ca_cert.as_deref(),
                 cli.tls_domain.as_deref(),
-                flight_tls_cert.as_deref(),
-                flight_tls_key.as_deref(),
                 metrics_listen.as_deref(),
+                cli.registry_url.as_deref(),
+                cli.registry_insecure,
+                &cli.trust_policy,
+                trusted_key_pems,
                 otel_guard,
             )
             .await

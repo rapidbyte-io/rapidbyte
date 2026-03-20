@@ -13,3 +13,17 @@
 pub mod adapter;
 pub mod application;
 pub mod domain;
+
+// ---------------------------------------------------------------------------
+// Public re-exports — canonical API surface
+// ---------------------------------------------------------------------------
+
+// Application layer
+pub use application::{run_agent, AgentAppConfig, AgentContext};
+
+// Adapter layer
+pub use adapter::{build_agent_context, AgentAdapters, AgentConfig, ClientTlsConfig};
+
+// Domain types
+pub use domain::error::AgentError;
+pub use domain::task::{TaskExecutionResult, TaskOutcomeKind};

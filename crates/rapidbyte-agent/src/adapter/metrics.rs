@@ -1,10 +1,10 @@
-//! OTel metrics adapter.
+//! `OTel` metrics adapter.
 
 use std::sync::Arc;
 
 use crate::domain::ports::metrics::MetricsProvider;
 
-/// Wraps the OTel guard's metric handles.
+/// Wraps the `OTel` guard's metric handles.
 ///
 /// Holds an `Arc<OtelGuard>` so that the `SnapshotReader` (not `Clone`) and the
 /// `SdkMeterProvider` can be accessed by reference through the port trait.

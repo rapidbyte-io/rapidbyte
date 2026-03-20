@@ -1,4 +1,4 @@
-//! Engine executor adapter — bridges PipelineExecutor port to rapidbyte-engine.
+//! Engine executor adapter — bridges `PipelineExecutor` port to rapidbyte-engine.
 
 use std::sync::Arc;
 
