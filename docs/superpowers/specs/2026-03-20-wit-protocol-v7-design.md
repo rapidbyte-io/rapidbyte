@@ -879,6 +879,12 @@ Destination processes B1, commits checkpoint:
 Host correlates S1 + D1:
   Sequence numbers match → data landed
   Atomically persist cursor(users) = id=5000 to state backend
+
+Note: the checkpoint WIT API does not carry sequence numbers directly.
+The host tracks the mapping internally: when checkpoint-commit is called,
+the host records the highest sequence number emitted by that plugin at
+that point. This implicit coupling is host-managed — plugins do not
+need to pass sequence numbers through the checkpoint API.
 ```
 
 #### Multi-Stream CDC (shared cursor / checkpoint barrier)
@@ -955,7 +961,7 @@ Invocations 2 and 3 can run in parallel (separate single-stream tasks).
 Invocation 1 runs as a single multi-stream CDC task.
 ```
 
-The host is responsible for splitting — the plugin never receives mixed sync modes in a single multi-stream `RunRequest`.
+The host is responsible for splitting — the plugin never receives mixed sync modes in a single multi-stream `RunRequest`. Note: if the source also has the `multi-stream` feature (without CDC), multiple non-CDC streams of the same sync mode may be bundled into a single `read_streams()` call rather than dispatched individually.
 
 ### Schema Evolution Mid-Stream
 
