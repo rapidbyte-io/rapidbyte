@@ -67,7 +67,7 @@ pub async fn execute_task(
     let result = ctx.executor.execute(&config, cancel, progress_tx).await;
 
     bridge.abort();
-    ctx.progress.reset();
+    progress_collector.reset();
 
     // 4. Convert to TaskExecutionResult
     let result = match result {

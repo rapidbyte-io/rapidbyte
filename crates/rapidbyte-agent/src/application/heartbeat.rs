@@ -113,6 +113,10 @@ async fn restore_progress(active_leases: &ActiveLeaseMap, tasks: Vec<TaskHeartbe
     let leases = active_leases.read().await;
     for task in tasks {
         if let Some(entry) = leases.get(&task.task_id) {
+            // Skip if lease epoch changed (task was re-assigned).
+            if entry.lease_epoch != task.lease_epoch {
+                continue;
+            }
             if task.progress.message.is_none() && task.progress.progress_pct.is_none() {
                 continue; // nothing to restore
             }
