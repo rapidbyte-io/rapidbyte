@@ -33,6 +33,8 @@ pub enum ErrorCategory {
     Internal,
     /// Frame lifecycle error (alloc/write/seal/read).
     Frame,
+    /// Cooperative cancellation (not retryable).
+    Cancelled,
 }
 
 impl ErrorCategory {
@@ -78,6 +80,7 @@ impl ErrorCategory {
             Self::Schema => "schema",
             Self::Internal => "internal",
             Self::Frame => "frame",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -103,6 +106,7 @@ impl std::str::FromStr for ErrorCategory {
             "schema" => Ok(Self::Schema),
             "internal" => Ok(Self::Internal),
             "frame" => Ok(Self::Frame),
+            "cancelled" => Ok(Self::Cancelled),
             _ => Err(()),
         }
     }
@@ -277,6 +281,23 @@ impl PluginError {
         Self::from_category(ErrorCategory::Frame, code, message)
     }
 
+    /// Create a cancellation error.
+    #[must_use]
+    pub fn cancelled(code: &str, message: impl Into<String>) -> Self {
+        Self {
+            category: ErrorCategory::Cancelled,
+            scope: ErrorScope::Stream,
+            code: code.to_string(),
+            message: message.into(),
+            retryable: false,
+            retry_after_ms: None,
+            backoff_class: BackoffClass::Normal,
+            safe_to_retry: false,
+            commit_state: None,
+            details: None,
+        }
+    }
+
     /// Attach structured diagnostic details.
     #[must_use]
     pub fn with_details(mut self, details: serde_json::Value) -> Self {
@@ -376,6 +397,7 @@ mod tests {
             ErrorCategory::Schema,
             ErrorCategory::Internal,
             ErrorCategory::Frame,
+            ErrorCategory::Cancelled,
         ];
         for cat in categories {
             assert_eq!(cat.as_str().parse::<ErrorCategory>(), Ok(cat));
@@ -385,5 +407,14 @@ mod tests {
     #[test]
     fn error_category_from_str_unknown_returns_err() {
         assert!("unknown_variant".parse::<ErrorCategory>().is_err());
+    }
+
+    #[test]
+    fn cancelled_error_category() {
+        let err = PluginError::cancelled("USER_ABORT", "pipeline cancelled by user");
+        assert_eq!(err.category, ErrorCategory::Cancelled);
+        assert!(!err.retryable);
+        assert!(!err.safe_to_retry);
+        assert_eq!(err.scope, ErrorScope::Stream);
     }
 }
