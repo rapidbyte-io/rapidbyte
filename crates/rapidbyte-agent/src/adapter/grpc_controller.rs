@@ -95,9 +95,15 @@ impl ControllerGateway for GrpcControllerGateway {
             .map_err(|s| map_status(&s))?
             .into_inner();
 
-        let registry = response.registry.map(|r| ControllerRegistryInfo {
-            url: if r.url.is_empty() { None } else { Some(r.url) },
-            insecure: r.insecure,
+        let registry = response.registry.map(|r| {
+            let has_url = !r.url.is_empty();
+            ControllerRegistryInfo {
+                url: if has_url { Some(r.url) } else { None },
+                // insecure only meaningful when a URL is present;
+                // clear it when controller sends empty URL to avoid
+                // leaving the executor in an unexpected insecure mode.
+                insecure: has_url && r.insecure,
+            }
         });
 
         Ok(RegistrationResponse { agent_id, registry })

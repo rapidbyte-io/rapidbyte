@@ -105,12 +105,20 @@ async fn build_heartbeats(active_leases: &ActiveLeaseMap) -> Vec<TaskHeartbeat> 
 }
 
 /// Restore consumed progress snapshots back into their collectors after a
-/// heartbeat RPC failure, so the progress will be retried on the next tick.
+/// heartbeat RPC failure — but only if no newer progress has arrived since.
+///
+/// If the bridge task wrote new progress between `take()` and this restore,
+/// the newer data wins (we skip the restore to avoid regressing progress).
 async fn restore_progress(active_leases: &ActiveLeaseMap, tasks: Vec<TaskHeartbeat>) {
     let leases = active_leases.read().await;
     for task in tasks {
         if let Some(entry) = leases.get(&task.task_id) {
-            if task.progress.message.is_some() || task.progress.progress_pct.is_some() {
+            if task.progress.message.is_none() && task.progress.progress_pct.is_none() {
+                continue; // nothing to restore
+            }
+            // Only restore if the collector is still empty (no newer progress).
+            let current = entry.progress.latest();
+            if current.message.is_none() && current.progress_pct.is_none() {
                 entry.progress.update(task.progress);
             }
         }
