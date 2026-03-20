@@ -21,6 +21,7 @@ pub async fn execute_task(
     assignment: &TaskAssignment,
     progress_collector: &Arc<crate::adapter::AtomicProgressCollector>,
     cancel: CancellationToken,
+    shutdown: &CancellationToken,
 ) {
     info!(
         task_id = assignment.task_id,
@@ -43,7 +44,7 @@ pub async fn execute_task(
                 }),
                 metrics: TaskMetrics::default(),
             };
-            report_completion(ctx, agent_id, assignment, result).await;
+            report_completion(ctx, agent_id, assignment, result, shutdown).await;
             return;
         }
     };
@@ -54,7 +55,7 @@ pub async fn execute_task(
             outcome: TaskOutcomeKind::Cancelled,
             metrics: TaskMetrics::default(),
         };
-        report_completion(ctx, agent_id, assignment, result).await;
+        report_completion(ctx, agent_id, assignment, result, shutdown).await;
         return;
     }
 
@@ -99,7 +100,7 @@ pub async fn execute_task(
     };
 
     // 5. Report to controller
-    report_completion(ctx, agent_id, assignment, result).await;
+    report_completion(ctx, agent_id, assignment, result, shutdown).await;
 }
 
 async fn parse_pipeline(yaml: &str) -> Result<rapidbyte_pipeline_config::PipelineConfig, String> {
@@ -144,16 +145,15 @@ pub(crate) async fn bridge_progress(
 
 /// Report task completion to the controller with retry logic.
 ///
-/// Returns `true` if completion was acknowledged, `false` if retries were
-/// exhausted or a non-retryable error occurred. The caller should keep the
-/// lease active on `false` so the controller can detect the abandoned task
-/// via heartbeat timeout rather than silently losing it.
+/// The retry loop is shutdown-aware: if the shutdown token is cancelled,
+/// retries stop immediately so the agent can exit promptly.
 pub(crate) async fn report_completion(
     ctx: &AgentContext,
     agent_id: &str,
     assignment: &TaskAssignment,
     result: TaskExecutionResult,
-) -> bool {
+    shutdown: &CancellationToken,
+) {
     let payload = CompletionPayload {
         agent_id: agent_id.to_owned(),
         task_id: assignment.task_id.clone(),
@@ -165,7 +165,7 @@ pub(crate) async fn report_completion(
         match ctx.gateway.complete(payload.clone()).await {
             Ok(()) => {
                 info!(task_id = assignment.task_id, "Task completion reported");
-                return true;
+                return;
             }
             Err(ref e) if is_retryable_controller_error(e) => {
                 warn!(
@@ -174,7 +174,17 @@ pub(crate) async fn report_completion(
                     error = %e,
                     "Completion failed, retrying"
                 );
-                tokio::time::sleep(ctx.config.completion_retry_delay).await;
+                // Sleep is shutdown-aware so SIGINT/SIGTERM stops retries promptly.
+                tokio::select! {
+                    () = tokio::time::sleep(ctx.config.completion_retry_delay) => {}
+                    () = shutdown.cancelled() => {
+                        warn!(
+                            task_id = assignment.task_id,
+                            "Stopping completion retries — agent shutting down"
+                        );
+                        return;
+                    }
+                }
             }
             Err(e) => {
                 warn!(
@@ -182,16 +192,12 @@ pub(crate) async fn report_completion(
                     error = %e,
                     "Completion failed with non-retryable error, giving up"
                 );
-                return false;
+                return;
             }
         }
     }
 
-    warn!(
-        task_id = assignment.task_id,
-        "Completion retries exhausted — lease kept active for controller timeout"
-    );
-    false
+    warn!(task_id = assignment.task_id, "Completion retries exhausted");
 }
 
 fn is_retryable_controller_error(e: &AgentError) -> bool {
@@ -227,6 +233,7 @@ mod tests {
             &assignment,
             &pc,
             CancellationToken::new(),
+            &CancellationToken::new(),
         )
         .await;
 
@@ -254,7 +261,15 @@ mod tests {
         assignment.pipeline_yaml = VALID_YAML.into();
 
         let pc = Arc::new(crate::adapter::AtomicProgressCollector::new());
-        execute_task(&t.ctx, "agent-1", &assignment, &pc, token).await;
+        execute_task(
+            &t.ctx,
+            "agent-1",
+            &assignment,
+            &pc,
+            token,
+            &CancellationToken::new(),
+        )
+        .await;
 
         let payloads = t.gateway.completed_payloads();
         assert_eq!(payloads.len(), 1);
@@ -286,6 +301,7 @@ mod tests {
             &assignment,
             &pc,
             CancellationToken::new(),
+            &CancellationToken::new(),
         )
         .await;
 
@@ -321,6 +337,7 @@ mod tests {
             &assignment,
             &pc,
             CancellationToken::new(),
+            &CancellationToken::new(),
         )
         .await;
 
@@ -349,6 +366,7 @@ mod tests {
             &assignment,
             &pc,
             CancellationToken::new(),
+            &CancellationToken::new(),
         )
         .await;
 
@@ -376,6 +394,7 @@ mod tests {
             &assignment,
             &pc,
             CancellationToken::new(),
+            &CancellationToken::new(),
         )
         .await;
 
@@ -407,6 +426,7 @@ mod tests {
             &assignment,
             &pc,
             CancellationToken::new(),
+            &CancellationToken::new(),
         )
         .await;
 

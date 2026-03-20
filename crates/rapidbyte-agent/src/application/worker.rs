@@ -121,13 +121,19 @@ async fn worker_loop(
             return Ok(());
         }
 
-        let assignment = match ctx.gateway.poll(agent_id).await {
+        // Poll is shutdown-aware so the agent can exit promptly.
+        let poll_result = tokio::select! {
+            result = ctx.gateway.poll(agent_id) => result,
+            () = shutdown.cancelled() => return Ok(()),
+        };
+
+        let assignment = match poll_result {
             Ok(Some(task)) => task,
             Ok(None) => {
-                if shutdown.is_cancelled() {
-                    return Ok(());
+                tokio::select! {
+                    () = tokio::time::sleep(std::time::Duration::from_millis(100)) => {}
+                    () = shutdown.cancelled() => return Ok(()),
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 continue;
             }
             Err(e @ AgentError::ControllerNonRetryable(_)) => {
@@ -136,10 +142,10 @@ async fn worker_loop(
             }
             Err(e) => {
                 warn!(error = %e, "Poll failed (transient), retrying");
-                if shutdown.is_cancelled() {
-                    return Ok(());
+                tokio::select! {
+                    () = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                    () = shutdown.cancelled() => return Ok(()),
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 continue;
             }
         };
@@ -160,7 +166,15 @@ async fn worker_loop(
             },
         );
 
-        execute_task(ctx, agent_id, &assignment, &task_progress, cancel).await;
+        execute_task(
+            ctx,
+            agent_id,
+            &assignment,
+            &task_progress,
+            cancel,
+            &shutdown,
+        )
+        .await;
 
         // Always remove the lease after execution completes. If completion
         // reporting failed (retries exhausted), the agent stops heartbeating

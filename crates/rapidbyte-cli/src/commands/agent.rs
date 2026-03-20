@@ -56,19 +56,29 @@ async fn shutdown_signal_wait() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
-        tokio::select! {
-            _ = sigint.recv() => {}
-            _ = sigterm.recv() => {}
+        match (
+            signal(SignalKind::interrupt()),
+            signal(SignalKind::terminate()),
+        ) {
+            (Ok(mut sigint), Ok(mut sigterm)) => {
+                tokio::select! {
+                    _ = sigint.recv() => {}
+                    _ = sigterm.recv() => {}
+                }
+            }
+            (Ok(mut sigint), Err(e)) => {
+                tracing::warn!("failed to install SIGTERM handler: {e}; using SIGINT only");
+                let _ = sigint.recv().await;
+            }
+            _ => {
+                // Fallback to ctrl_c if signal handlers can't be installed.
+                let _ = tokio::signal::ctrl_c().await;
+            }
         }
     }
     #[cfg(not(unix))]
     {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to listen for ctrl-c");
+        let _ = tokio::signal::ctrl_c().await;
     }
 }
 
