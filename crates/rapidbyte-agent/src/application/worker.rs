@@ -173,7 +173,7 @@ async fn worker_loop(
             },
         );
 
-        execute_task(
+        let acknowledged = execute_task(
             ctx,
             agent_id,
             &assignment,
@@ -183,10 +183,11 @@ async fn worker_loop(
         )
         .await;
 
-        // Remove the lease only if the epoch still matches. If the task was
-        // re-assigned with a newer epoch (e.g., after lease expiry race),
-        // the newer entry must not be removed by this older attempt.
-        {
+        // Only remove the lease if completion was acknowledged AND the
+        // epoch still matches. If not acknowledged (non-retryable error
+        // or shutdown), the lease stays active so heartbeats continue and
+        // the controller retains visibility of the task.
+        if acknowledged {
             let mut leases = active_leases.write().await;
             if leases
                 .get(&assignment.task_id)
@@ -194,6 +195,11 @@ async fn worker_loop(
             {
                 leases.remove(&assignment.task_id);
             }
+        } else {
+            warn!(
+                task_id = assignment.task_id,
+                "Completion not acknowledged — keeping lease active"
+            );
         }
     }
 }

@@ -16,6 +16,10 @@ use crate::domain::task::{
 use super::context::AgentContext;
 
 /// Execute a single task: parse YAML, run via executor port, report to controller.
+///
+/// Returns `true` if the controller acknowledged completion.
+/// Returns `false` if completion was rejected (non-retryable error) or
+/// abandoned (shutdown). The caller should keep the lease active on `false`.
 pub async fn execute_task(
     ctx: &AgentContext,
     agent_id: &str,
@@ -23,7 +27,7 @@ pub async fn execute_task(
     progress_collector: &Arc<crate::adapter::AtomicProgressCollector>,
     cancel: CancellationToken,
     shutdown: &CancellationToken,
-) {
+) -> bool {
     info!(
         task_id = assignment.task_id,
         run_id = assignment.run_id,
@@ -45,8 +49,7 @@ pub async fn execute_task(
                 }),
                 metrics: TaskMetrics::default(),
             };
-            report_completion(ctx, agent_id, assignment, result, shutdown).await;
-            return;
+            return report_completion(ctx, agent_id, assignment, result, shutdown).await;
         }
     };
 
@@ -56,8 +59,7 @@ pub async fn execute_task(
             outcome: TaskOutcomeKind::Cancelled,
             metrics: TaskMetrics::default(),
         };
-        report_completion(ctx, agent_id, assignment, result, shutdown).await;
-        return;
+        return report_completion(ctx, agent_id, assignment, result, shutdown).await;
     }
 
     // 3. Set up progress channel and execute
@@ -101,7 +103,7 @@ pub async fn execute_task(
     };
 
     // 5. Report to controller
-    report_completion(ctx, agent_id, assignment, result, shutdown).await;
+    report_completion(ctx, agent_id, assignment, result, shutdown).await
 }
 
 async fn parse_pipeline(yaml: &str) -> Result<rapidbyte_pipeline_config::PipelineConfig, String> {
@@ -154,13 +156,14 @@ pub(crate) async fn bridge_progress(
 /// This ensures committed work is always reported to the controller
 /// as long as the agent is running, preventing duplicate execution
 /// from lease timeout reassignment.
+/// Returns `true` if the controller acknowledged, `false` otherwise.
 pub(crate) async fn report_completion(
     ctx: &AgentContext,
     agent_id: &str,
     assignment: &TaskAssignment,
     result: TaskExecutionResult,
     shutdown: &CancellationToken,
-) {
+) -> bool {
     let payload = CompletionPayload {
         agent_id: agent_id.to_owned(),
         task_id: assignment.task_id.clone(),
@@ -173,7 +176,7 @@ pub(crate) async fn report_completion(
         match ctx.gateway.complete(payload.clone()).await {
             Ok(()) => {
                 info!(task_id = assignment.task_id, "Task completion reported");
-                return;
+                return true;
             }
             Err(ref e) if is_retryable_controller_error(e) => {
                 warn!(
@@ -191,7 +194,7 @@ pub(crate) async fn report_completion(
                             task_id = assignment.task_id,
                             "Stopping completion retries — agent shutting down"
                         );
-                        return;
+                        return false;
                     }
                 }
             }
@@ -201,7 +204,7 @@ pub(crate) async fn report_completion(
                     error = %e,
                     "Completion failed with non-retryable error, giving up"
                 );
-                return;
+                return false;
             }
         }
     }
