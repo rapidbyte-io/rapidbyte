@@ -338,4 +338,64 @@ mod tests {
         let payloads = ctx.gateway.completed_payloads();
         assert_eq!(payloads.len(), 1);
     }
+
+    #[tokio::test]
+    async fn executor_error_produces_failed_outcome() {
+        let t = fake_context();
+        t.executor
+            .enqueue(Err(AgentError::ExecutionFailed(anyhow::anyhow!(
+                "engine blew up"
+            ))));
+        t.gateway.enqueue_complete(Ok(()));
+
+        let mut assignment = test_assignment();
+        assignment.pipeline_yaml = VALID_YAML.into();
+
+        let pc = Arc::new(crate::adapter::AtomicProgressCollector::new());
+        execute_task(
+            &t.ctx,
+            "agent-1",
+            &assignment,
+            &pc,
+            CancellationToken::new(),
+        )
+        .await;
+
+        let payloads = t.gateway.completed_payloads();
+        assert_eq!(payloads.len(), 1);
+        match &payloads[0].result.outcome {
+            TaskOutcomeKind::Failed(info) => {
+                assert_eq!(info.code, "EXECUTION_ERROR");
+                assert!(info.retryable);
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_during_execution_reports_cancelled() {
+        let t = fake_context();
+        t.executor.enqueue(Err(AgentError::Cancelled));
+        t.gateway.enqueue_complete(Ok(()));
+
+        let mut assignment = test_assignment();
+        assignment.pipeline_yaml = VALID_YAML.into();
+
+        let pc = Arc::new(crate::adapter::AtomicProgressCollector::new());
+        execute_task(
+            &t.ctx,
+            "agent-1",
+            &assignment,
+            &pc,
+            CancellationToken::new(),
+        )
+        .await;
+
+        let payloads = t.gateway.completed_payloads();
+        assert_eq!(payloads.len(), 1);
+        assert!(matches!(
+            payloads[0].result.outcome,
+            TaskOutcomeKind::Cancelled
+        ));
+    }
 }
