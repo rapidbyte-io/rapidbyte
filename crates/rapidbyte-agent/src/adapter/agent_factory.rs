@@ -9,10 +9,8 @@ use crate::application::context::{AgentAppConfig, AgentContext};
 use crate::domain::ports::controller::RegistrationConfig;
 
 use super::channel_progress::AtomicProgressCollector;
-use super::clock::SystemClock;
 use super::engine_executor::EngineExecutor;
 use super::grpc_controller::{ClientTlsConfig, GrpcControllerGateway};
-use super::metrics::OtelMetricsProvider;
 
 /// Full infrastructure configuration for agent startup.
 #[derive(Clone)]
@@ -20,7 +18,6 @@ pub struct AgentConfig {
     pub controller_url: String,
     pub max_tasks: u32,
     pub heartbeat_interval: Duration,
-    pub poll_wait_seconds: u32,
     pub auth_token: Option<String>,
     pub controller_tls: Option<ClientTlsConfig>,
     pub metrics_listen: Option<String>,
@@ -36,7 +33,6 @@ impl Default for AgentConfig {
             controller_url: "http://[::]:9090".into(),
             max_tasks: 1,
             heartbeat_interval: Duration::from_secs(10),
-            poll_wait_seconds: 30,
             auth_token: None,
             controller_tls: None,
             metrics_listen: None,
@@ -91,9 +87,6 @@ pub async fn build_agent_context(
         .await?,
     );
 
-    let metrics: Arc<dyn crate::domain::ports::metrics::MetricsProvider> =
-        Arc::new(OtelMetricsProvider::new(otel_guard));
-
     let trust_policy = rapidbyte_registry::TrustPolicy::from_str_name(&config.trust_policy)
         .unwrap_or(rapidbyte_registry::TrustPolicy::Skip);
 
@@ -109,18 +102,14 @@ pub async fn build_agent_context(
 
     let executor = Arc::new(EngineExecutor::new(registry_config));
     let progress = Arc::new(AtomicProgressCollector::new());
-    let clock = Arc::new(SystemClock);
 
     let ctx = AgentContext {
         gateway,
         executor: executor.clone(),
         progress: progress.clone(),
-        metrics,
-        clock,
         config: AgentAppConfig {
             max_tasks: config.max_tasks,
             heartbeat_interval: config.heartbeat_interval,
-            poll_wait_seconds: config.poll_wait_seconds,
             ..AgentAppConfig::default()
         },
     };

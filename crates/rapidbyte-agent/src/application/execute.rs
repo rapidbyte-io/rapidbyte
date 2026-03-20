@@ -117,30 +117,17 @@ pub(crate) async fn bridge_progress(
     use rapidbyte_engine::ProgressEvent;
 
     while let Some(event) = rx.recv().await {
-        let snapshot = match &event {
-            ProgressEvent::BatchEmitted { bytes, .. } => {
-                crate::domain::progress::ProgressSnapshot {
-                    message: Some(format!("processing ({bytes} bytes)")),
-                    progress_pct: None,
-                }
-            }
-            ProgressEvent::StreamCompleted { stream } => {
-                crate::domain::progress::ProgressSnapshot {
-                    message: Some(format!("stream {stream} completed")),
-                    progress_pct: None,
-                }
-            }
-            ProgressEvent::PhaseChanged { phase } => crate::domain::progress::ProgressSnapshot {
-                message: Some(format!("{phase:?}").to_lowercase()),
-                progress_pct: None,
-            },
-            ProgressEvent::StreamStarted { stream } => crate::domain::progress::ProgressSnapshot {
-                message: Some(format!("stream {stream} starting")),
-                progress_pct: None,
-            },
+        let msg = match &event {
+            ProgressEvent::BatchEmitted { bytes, .. } => format!("processing ({bytes} bytes)"),
+            ProgressEvent::StreamCompleted { stream } => format!("stream {stream} completed"),
+            ProgressEvent::PhaseChanged { phase } => format!("{phase:?}").to_lowercase(),
+            ProgressEvent::StreamStarted { stream } => format!("stream {stream} starting"),
             ProgressEvent::RetryScheduled { .. } => continue,
         };
-        collector.update(snapshot);
+        collector.update(crate::domain::progress::ProgressSnapshot {
+            message: Some(msg),
+            progress_pct: None,
+        });
     }
 }
 

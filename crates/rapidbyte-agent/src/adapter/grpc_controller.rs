@@ -11,8 +11,21 @@ use crate::domain::ports::controller::{
 };
 use crate::domain::task::{CommitState, TaskOutcomeKind};
 
-use super::proto::rapidbyte::v1::agent_service_client::AgentServiceClient;
-use super::proto::rapidbyte::v1::{
+mod proto {
+    pub mod rapidbyte {
+        pub mod v1 {
+            #![allow(
+                clippy::doc_markdown,
+                clippy::trivially_copy_pass_by_ref,
+                clippy::default_trait_access
+            )]
+            tonic::include_proto!("rapidbyte.v1");
+        }
+    }
+}
+
+use proto::rapidbyte::v1::agent_service_client::AgentServiceClient;
+use proto::rapidbyte::v1::{
     self as pb, complete_task_request, poll_task_response, AgentCapabilities, CompleteTaskRequest,
     HeartbeatRequest, PollTaskRequest, RegisterRequest, RunMetrics, TaskCancelled, TaskCompleted,
     TaskFailed,
@@ -143,10 +156,7 @@ impl ControllerGateway for GrpcControllerGateway {
                 .into_iter()
                 .map(|d| TaskDirective {
                     task_id: d.task_id,
-                    acknowledged: d.acknowledged,
                     cancel_requested: d.cancel_requested,
-                    #[allow(clippy::cast_sign_loss)]
-                    lease_expires_at: d.lease_expires_at.map(|ts| ts.seconds.max(0) as u64),
                 })
                 .collect(),
         })

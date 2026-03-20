@@ -67,7 +67,6 @@ impl PipelineExecutor for EngineExecutor {
                     bytes_read: pipeline_result.counts.bytes_read,
                     bytes_written: pipeline_result.counts.bytes_written,
                     elapsed_seconds: elapsed,
-                    cursors_advanced: 0,
                 },
             }),
             Err(PipelineError::Cancelled) => Err(AgentError::Cancelled),

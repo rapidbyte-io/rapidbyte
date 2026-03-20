@@ -47,9 +47,7 @@ pub struct HeartbeatResponse {
 #[derive(Debug, Clone)]
 pub struct TaskDirective {
     pub task_id: String,
-    pub acknowledged: bool,
     pub cancel_requested: bool,
-    pub lease_expires_at: Option<u64>,
 }
 
 /// Task completion report.

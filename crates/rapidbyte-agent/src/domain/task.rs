@@ -29,7 +29,6 @@ pub struct TaskMetrics {
     pub bytes_read: u64,
     pub bytes_written: u64,
     pub elapsed_seconds: f64,
-    pub cursors_advanced: u64,
 }
 
 /// Combined result of executing a single task.

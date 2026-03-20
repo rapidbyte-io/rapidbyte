@@ -2,7 +2,6 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
 
 use async_trait::async_trait;
 use rapidbyte_engine::ProgressEvent;
@@ -11,13 +10,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::error::AgentError;
-use crate::domain::ports::clock::Clock;
 use crate::domain::ports::controller::{
     CompletionPayload, ControllerGateway, HeartbeatPayload, HeartbeatResponse, RegistrationConfig,
     RegistrationResponse, TaskAssignment,
 };
 use crate::domain::ports::executor::PipelineExecutor;
-use crate::domain::ports::metrics::MetricsProvider;
 use crate::domain::ports::progress::ProgressCollector;
 use crate::domain::progress::ProgressSnapshot;
 use crate::domain::task::TaskExecutionResult;
@@ -46,18 +43,6 @@ impl FakeControllerGateway {
             complete_results: Mutex::new(VecDeque::new()),
             completed_payloads: Mutex::new(Vec::new()),
         }
-    }
-
-    pub fn enqueue_register(&self, result: Result<RegistrationResponse, AgentError>) {
-        self.register_results.lock().unwrap().push_back(result);
-    }
-
-    pub fn enqueue_poll(&self, result: Result<Option<TaskAssignment>, AgentError>) {
-        self.poll_results.lock().unwrap().push_back(result);
-    }
-
-    pub fn enqueue_heartbeat(&self, result: Result<HeartbeatResponse, AgentError>) {
-        self.heartbeat_results.lock().unwrap().push_back(result);
     }
 
     pub fn enqueue_complete(&self, result: Result<(), AgentError>) {
@@ -161,10 +146,6 @@ impl FakeProgressCollector {
             snapshot: RwLock::new(ProgressSnapshot::default()),
         }
     }
-
-    pub fn set(&self, snapshot: ProgressSnapshot) {
-        *self.snapshot.write().unwrap() = snapshot;
-    }
 }
 
 impl ProgressCollector for FakeProgressCollector {
@@ -178,64 +159,6 @@ impl ProgressCollector for FakeProgressCollector {
 }
 
 // ---------------------------------------------------------------------------
-// FakeMetricsProvider
-// ---------------------------------------------------------------------------
-
-pub struct FakeMetricsProvider {
-    reader: rapidbyte_metrics::snapshot::SnapshotReader,
-    provider: opentelemetry_sdk::metrics::SdkMeterProvider,
-}
-
-impl FakeMetricsProvider {
-    #[must_use]
-    pub fn new() -> Self {
-        let reader = rapidbyte_metrics::snapshot::SnapshotReader::new();
-        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
-            .with_reader(reader.build_reader())
-            .build();
-        Self { reader, provider }
-    }
-}
-
-impl MetricsProvider for FakeMetricsProvider {
-    fn snapshot_reader(&self) -> &rapidbyte_metrics::snapshot::SnapshotReader {
-        &self.reader
-    }
-
-    fn meter_provider(&self) -> &opentelemetry_sdk::metrics::SdkMeterProvider {
-        &self.provider
-    }
-}
-
-// ---------------------------------------------------------------------------
-// FakeClock
-// ---------------------------------------------------------------------------
-
-pub struct FakeClock {
-    now: Mutex<Instant>,
-}
-
-impl FakeClock {
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            now: Mutex::new(Instant::now()),
-        }
-    }
-
-    pub fn advance(&self, duration: std::time::Duration) {
-        let mut now = self.now.lock().unwrap();
-        *now += duration;
-    }
-}
-
-impl Clock for FakeClock {
-    fn now(&self) -> Instant {
-        *self.now.lock().unwrap()
-    }
-}
-
-// ---------------------------------------------------------------------------
 // TestContext
 // ---------------------------------------------------------------------------
 
@@ -244,8 +167,6 @@ pub struct TestContext {
     pub ctx: AgentContext,
     pub gateway: Arc<FakeControllerGateway>,
     pub executor: Arc<FakePipelineExecutor>,
-    pub progress: Arc<FakeProgressCollector>,
-    pub clock: Arc<FakeClock>,
 }
 
 /// Create a fully-wired test context with in-memory fakes.
@@ -254,14 +175,11 @@ pub fn fake_context() -> TestContext {
     let gateway = Arc::new(FakeControllerGateway::new());
     let executor = Arc::new(FakePipelineExecutor::new());
     let progress = Arc::new(FakeProgressCollector::new());
-    let clock = Arc::new(FakeClock::new());
 
     let ctx = AgentContext {
         gateway: Arc::clone(&gateway) as Arc<dyn ControllerGateway>,
         executor: Arc::clone(&executor) as Arc<dyn PipelineExecutor>,
         progress: Arc::clone(&progress) as Arc<dyn ProgressCollector>,
-        metrics: Arc::new(FakeMetricsProvider::new()),
-        clock: Arc::clone(&clock) as Arc<dyn Clock>,
         config: AgentAppConfig::default(),
     };
 
@@ -269,7 +187,5 @@ pub fn fake_context() -> TestContext {
         ctx,
         gateway,
         executor,
-        progress,
-        clock,
     }
 }

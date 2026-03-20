@@ -155,8 +155,7 @@ async fn worker_loop(
             }
         };
 
-        let cancel = CancellationToken::new();
-        let child_cancel = cancel.clone();
+        let cancel = shutdown.child_token();
 
         // Register lease
         active_leases.write().await.insert(
@@ -168,15 +167,14 @@ async fn worker_loop(
             },
         );
 
-        // Link task cancellation to shutdown
-        let shutdown_for_cancel = shutdown.clone();
-        let cancel_for_shutdown = cancel.clone();
-        tokio::spawn(async move {
-            shutdown_for_cancel.cancelled().await;
-            cancel_for_shutdown.cancel();
-        });
-
-        execute_task(ctx, agent_id, &assignment, progress_collector, child_cancel).await;
+        execute_task(
+            ctx,
+            agent_id,
+            &assignment,
+            progress_collector,
+            cancel.clone(),
+        )
+        .await;
 
         // Remove lease after execution
         active_leases.write().await.remove(&assignment.task_id);

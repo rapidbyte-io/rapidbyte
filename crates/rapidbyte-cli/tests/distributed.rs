@@ -203,7 +203,6 @@ async fn distributed_submit_and_complete() {
             controller_url: agent_ctrl_url,
             max_tasks: 1,
             heartbeat_interval: Duration::from_secs(5),
-            poll_wait_seconds: 5,
             auth_token: None,
             controller_tls: None,
             metrics_listen: None,

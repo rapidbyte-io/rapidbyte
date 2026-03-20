@@ -6,7 +6,7 @@
 //! |---------------|---------------------------------------------|
 //! | `domain`      | Port traits, domain types, errors            |
 //! | `application` | DI context, use-case orchestration, fakes    |
-//! | `adapter`     | gRPC client, engine executor, metrics, clock |
+//! | `adapter`     | gRPC client, engine executor                 |
 
 #![warn(clippy::pedantic)]
 
@@ -26,4 +26,3 @@ pub use adapter::{build_agent_context, AgentAdapters, AgentConfig, ClientTlsConf
 
 // Domain types
 pub use domain::error::AgentError;
-pub use domain::task::{TaskExecutionResult, TaskOutcomeKind};
