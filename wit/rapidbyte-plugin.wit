@@ -1,67 +1,77 @@
-package rapidbyte:plugin@6.0.0;
+package rapidbyte:plugin@7.0.0;
 
 interface types {
+    // ── Handles ──
     type session = u64;
+    type frame-handle = u64;
+    type socket-handle = u64;
+    type checkpoint-txn = u64;
 
-    enum plugin-kind {
-        source,
-        destination,
-        transform,
+    // ── Plugin identity ──
+    enum plugin-kind { source, destination, transform }
+
+    // ── Lifecycle phases ──
+    enum run-phase { read, write, transform }
+
+    // ── Sync modes ──
+    enum sync-mode { full-refresh, incremental, cdc }
+
+    // ── Write modes ──
+    enum write-mode { append, replace, upsert }
+
+    // ── Validation ──
+    enum validation-status { success, failed, warning }
+
+    // ── Schema negotiation ──
+    enum field-constraint {
+        field-required,
+        field-optional,
+        field-forbidden,
+        field-recommended,
+        type-incompatible,
     }
 
-    enum run-phase {
-        read,
-        write,
-        transform,
+    record field-requirement {
+        field-name: string,
+        constraint: field-constraint,
+        reason: string,
+        accepted-types: option<list<string>>,
     }
 
-    enum validation-status {
-        success,
-        failed,
-        warning,
+    record schema-field {
+        name: string,
+        arrow-type: string,
+        nullable: bool,
+        is-primary-key: bool,
+        is-generated: bool,
+        is-partition-key: bool,
+        default-value: option<string>,
     }
 
+    record stream-schema {
+        fields: list<schema-field>,
+        primary-key: list<string>,
+        partition-keys: list<string>,
+        source-defined-cursor: option<string>,
+        schema-id: option<string>,
+    }
+
+    // ── Error model ──
     enum error-category {
-        config,
-        auth,
-        permission,
-        rate-limit,
-        transient-network,
-        transient-db,
-        data,
-        schema,
-        internal,
-        frame,
+        config, auth, permission, rate-limit,
+        transient-network, transient-db,
+        data, schema, internal, frame,
+        cancelled,
     }
 
-    enum error-scope {
-        per-stream,
-        per-batch,
-        per-record,
-    }
+    enum error-scope { per-stream, per-batch, per-record }
 
-    enum backoff-class {
-        fast,
-        normal,
-        slow,
-    }
+    enum backoff-class { fast, normal, slow }
 
     enum commit-state {
         before-commit,
         after-commit-unknown,
         after-commit-confirmed,
-    }
-
-    enum state-scope {
-        pipeline,
-        per-stream,
-        plugin-instance,
-    }
-
-    enum checkpoint-kind {
-        source,
-        destination,
-        transform,
     }
 
     record plugin-error {
@@ -77,6 +87,9 @@ interface types {
         details-json: option<string>,
     }
 
+    // ── Stream configuration ──
+    enum partition-strategy { mod-hash, range }
+
     record stream-limits {
         max-batch-bytes: u64,
         max-record-bytes: u64,
@@ -85,52 +98,168 @@ interface types {
         checkpoint-interval-bytes: u64,
         checkpoint-interval-rows: u64,
         checkpoint-interval-seconds: u64,
+        max-records: option<u64>,
     }
 
-    record read-summary {
-        records-read: u64,
-        bytes-read: u64,
-        batches-emitted: u64,
-        checkpoint-count: u64,
-        records-skipped: u64,
+    enum data-error-policy { fail, skip, dlq }
+
+    enum column-policy { add, ignore, fail }
+    enum type-change-policy { coerce, fail, null-out }
+    enum nullability-policy { allow, fail }
+
+    record schema-evolution-policy {
+        new-column: column-policy,
+        removed-column: column-policy,
+        type-change: type-change-policy,
+        nullability-change: nullability-policy,
     }
 
-    record write-summary {
-        records-written: u64,
-        bytes-written: u64,
-        batches-written: u64,
-        checkpoint-count: u64,
-        records-failed: u64,
+    record stream-policies {
+        on-data-error: data-error-policy,
+        schema-evolution: schema-evolution-policy,
     }
 
-    record transform-summary {
-        records-in: u64,
-        records-out: u64,
-        bytes-in: u64,
-        bytes-out: u64,
-        batches-processed: u64,
+    record cursor-info {
+        cursor-field: string,
+        tie-breaker-field: option<string>,
+        cursor-type: string,
+        last-value-json: option<string>,
     }
 
+    record stream-context {
+        stream-index: u32,
+        stream-name: string,
+        source-stream-name: option<string>,
+        schema: stream-schema,
+        sync-mode: sync-mode,
+        cursor-info: option<cursor-info>,
+        limits: stream-limits,
+        policies: stream-policies,
+        write-mode: option<write-mode>,
+        selected-columns: option<list<string>>,
+        partition-key: option<string>,
+        partition-count: option<u32>,
+        partition-index: option<u32>,
+        partition-strategy: option<partition-strategy>,
+    }
+
+    // ── Batch metadata ──
+    record batch-metadata {
+        stream-index: u32,
+        schema-fingerprint: option<string>,
+        sequence-number: u64,
+        compression: option<string>,
+        record-count: u32,
+        byte-count: u64,
+    }
+
+    // ── Checkpoint (transactional) ──
+    enum checkpoint-kind { source, destination, transform }
+
+    record cursor-update {
+        stream-name: string,
+        cursor-field: string,
+        cursor-value-json: string,
+    }
+
+    record state-mutation {
+        scope: state-scope,
+        key: string,
+        value: string,
+    }
+
+    enum state-scope { pipeline, per-stream, plugin-instance }
+
+    // ── Run request / results ──
+    record run-request {
+        streams: list<stream-context>,
+        dry-run: bool,
+    }
+
+    record stream-result {
+        stream-index: u32,
+        stream-name: string,
+        outcome-json: string,
+        succeeded: bool,
+    }
+
+    record run-summary {
+        results: list<stream-result>,
+    }
+
+    // ── Discovery ──
+    record discovered-stream {
+        name: string,
+        schema: stream-schema,
+        supported-sync-modes: list<sync-mode>,
+        default-cursor-field: option<string>,
+        estimated-row-count: option<u64>,
+        metadata-json: option<string>,
+    }
+
+    // ── Validation ──
     record validation-report {
         status: validation-status,
         message: string,
         warnings: list<string>,
+        output-schema: option<stream-schema>,
+        field-requirements: option<list<field-requirement>>,
     }
 
-    record run-request {
-        phase: run-phase,
-        stream-context-json: string,
+    // ── Prerequisites ──
+    enum prerequisite-severity { error, warning, info }
+
+    record prerequisite-check {
+        name: string,
+        passed: bool,
+        severity: prerequisite-severity,
+        message: string,
+        fix-hint: option<string>,
+    }
+
+    record prerequisites-report {
+        passed: bool,
+        checks: list<prerequisite-check>,
+    }
+
+    // ── Spec ──
+    record plugin-spec {
+        protocol-version: u32,
+        config-schema-json: string,
+        resource-schema-json: option<string>,
+        documentation-url: option<string>,
+        features: list<string>,
+        supported-sync-modes: list<sync-mode>,
+        supported-write-modes: option<list<write-mode>>,
+    }
+
+    // ── Apply ──
+    record apply-request {
+        streams: list<stream-context>,
         dry-run: bool,
-        max-records: option<u64>,
     }
 
-    record run-summary {
-        kind: plugin-kind,
-        read: option<read-summary>,
-        write: option<write-summary>,
-        transform: option<transform-summary>,
+    record apply-action {
+        stream-name: string,
+        description: string,
+        ddl-executed: option<string>,
     }
 
+    record apply-report {
+        actions: list<apply-action>,
+    }
+
+    // ── Teardown ──
+    record teardown-request {
+        streams: list<string>,
+        reason: string,
+    }
+
+    record teardown-report {
+        actions: list<string>,
+    }
+
+    // ── Socket I/O ──
     variant socket-read-result {
         data(list<u8>),
         eof,
@@ -146,77 +275,132 @@ interface types {
 interface host {
     use types.{
         plugin-error,
+        batch-metadata,
+        frame-handle,
+        socket-handle,
         socket-read-result,
         socket-write-result,
+        checkpoint-txn,
+        checkpoint-kind,
+        cursor-update,
+        state-mutation,
+        state-scope,
     };
 
-    emit-batch: func(handle: u64) -> result<_, plugin-error>;
-    next-batch: func() -> result<option<u64>, plugin-error>;
+    // ── Batch transport (V4 — metadata-enriched) ──
+
+    frame-new: func(capacity: u64) -> result<frame-handle, plugin-error>;
+    frame-write: func(handle: frame-handle, chunk: list<u8>) -> result<u64, plugin-error>;
+    frame-seal: func(handle: frame-handle) -> result<_, plugin-error>;
+    frame-len: func(handle: frame-handle) -> result<u64, plugin-error>;
+    frame-read: func(handle: frame-handle, offset: u64, len: u64) -> result<list<u8>, plugin-error>;
+    frame-drop: func(handle: frame-handle);
+
+    emit-batch: func(handle: frame-handle, metadata: batch-metadata) -> result<_, plugin-error>;
+    next-batch: func() -> result<option<frame-handle>, plugin-error>;
+    next-batch-metadata: func(handle: frame-handle) -> result<batch-metadata, plugin-error>;
+
+    // ── Transactional checkpoints ──
+
+    checkpoint-begin: func(kind: checkpoint-kind) -> result<checkpoint-txn, plugin-error>;
+    checkpoint-set-cursor: func(txn: checkpoint-txn, cursor: cursor-update) -> result<_, plugin-error>;
+    checkpoint-set-state: func(txn: checkpoint-txn, mutation: state-mutation) -> result<_, plugin-error>;
+    checkpoint-commit: func(
+        txn: checkpoint-txn,
+        records-processed: u64,
+        bytes-processed: u64,
+    ) -> result<_, plugin-error>;
+    checkpoint-abort: func(txn: checkpoint-txn);
+
+    // ── Non-transactional state ──
+
+    state-get: func(scope: state-scope, key: string) -> result<option<string>, plugin-error>;
+    state-put: func(scope: state-scope, key: string, val: string) -> result<_, plugin-error>;
+
+    // ── Cancellation ──
+
+    is-cancelled: func() -> bool;
+
+    // ── Per-stream error reporting ──
+
+    stream-error: func(stream-index: u32, error: plugin-error) -> result<_, plugin-error>;
+
+    // ── Logging ──
+
     log: func(level: u32, msg: string);
-    checkpoint: func(kind: u32, payload-json: string) -> result<_, plugin-error>;
+
+    // ── Metrics ──
+
     counter-add: func(name: string, value: u64, labels-json: string) -> result<_, plugin-error>;
     gauge-set: func(name: string, value: f64, labels-json: string) -> result<_, plugin-error>;
     histogram-record: func(name: string, value: f64, labels-json: string) -> result<_, plugin-error>;
-    emit-dlq-record: func(stream-name: string, record-json: string, error-message: string, error-category: string) -> result<_, plugin-error>;
-    state-get: func(scope: u32, key: string) -> result<option<string>, plugin-error>;
-    state-put: func(scope: u32, key: string, val: string) -> result<_, plugin-error>;
-    state-cas: func(scope: u32, key: string, expected: option<string>, new-val: string) -> result<bool, plugin-error>;
 
-    frame-new: func(capacity: u64) -> result<u64, plugin-error>;
-    frame-write: func(handle: u64, chunk: list<u8>) -> result<u64, plugin-error>;
-    frame-seal: func(handle: u64) -> result<_, plugin-error>;
-    frame-len: func(handle: u64) -> result<u64, plugin-error>;
-    frame-read: func(handle: u64, offset: u64, len: u64) -> result<list<u8>, plugin-error>;
-    frame-drop: func(handle: u64);
+    // ── Dead-letter queue ──
 
-    connect-tcp: func(host: string, port: u16) -> result<u64, plugin-error>;
-    socket-read: func(handle: u64, len: u64) -> result<socket-read-result, plugin-error>;
-    socket-write: func(handle: u64, data: list<u8>) -> result<socket-write-result, plugin-error>;
-    socket-close: func(handle: u64);
+    emit-dlq-record: func(
+        stream-name: string,
+        record-json: string,
+        error-message: string,
+        error-category: string,
+    ) -> result<_, plugin-error>;
+
+    // ── Network (ACL-gated) ──
+
+    connect-tcp: func(host: string, port: u16) -> result<socket-handle, plugin-error>;
+    socket-read: func(handle: socket-handle, len: u64) -> result<socket-read-result, plugin-error>;
+    socket-write: func(handle: socket-handle, data: list<u8>) -> result<socket-write-result, plugin-error>;
+    socket-close: func(handle: socket-handle);
 }
 
 interface source {
     use types.{
-        plugin-error,
-        run-request,
-        run-summary,
-        session,
-        validation-report,
+        plugin-error, plugin-spec, session,
+        run-request, run-summary, discovered-stream,
+        validation-report, prerequisites-report,
+        apply-report, apply-request,
+        teardown-request, teardown-report, stream-schema,
     };
 
+    spec: func() -> result<plugin-spec, plugin-error>;
     open: func(config-json: string) -> result<session, plugin-error>;
-    discover: func(session: session) -> result<string, plugin-error>;
-    validate: func(session: session) -> result<validation-report, plugin-error>;
+    prerequisites: func(session: session) -> result<prerequisites-report, plugin-error>;
+    discover: func(session: session) -> result<list<discovered-stream>, plugin-error>;
+    validate: func(session: session, stream-schema: option<stream-schema>) -> result<validation-report, plugin-error>;
+    apply: func(session: session, request: apply-request) -> result<apply-report, plugin-error>;
     run: func(session: session, request: run-request) -> result<run-summary, plugin-error>;
     close: func(session: session) -> result<_, plugin-error>;
+    teardown: func(session: session, request: teardown-request) -> result<teardown-report, plugin-error>;
 }
 
 interface destination {
     use types.{
-        plugin-error,
-        run-request,
-        run-summary,
-        session,
-        validation-report,
+        plugin-error, plugin-spec, session,
+        run-request, run-summary,
+        validation-report, prerequisites-report,
+        apply-report, apply-request,
+        teardown-request, teardown-report, stream-schema,
     };
 
+    spec: func() -> result<plugin-spec, plugin-error>;
     open: func(config-json: string) -> result<session, plugin-error>;
-    validate: func(session: session) -> result<validation-report, plugin-error>;
+    prerequisites: func(session: session) -> result<prerequisites-report, plugin-error>;
+    validate: func(session: session, stream-schema: option<stream-schema>) -> result<validation-report, plugin-error>;
+    apply: func(session: session, request: apply-request) -> result<apply-report, plugin-error>;
     run: func(session: session, request: run-request) -> result<run-summary, plugin-error>;
     close: func(session: session) -> result<_, plugin-error>;
+    teardown: func(session: session, request: teardown-request) -> result<teardown-report, plugin-error>;
 }
 
 interface transform {
     use types.{
-        plugin-error,
-        run-request,
-        run-summary,
-        session,
-        validation-report,
+        plugin-error, plugin-spec, session,
+        run-request, run-summary,
+        validation-report, stream-schema,
     };
 
+    spec: func() -> result<plugin-spec, plugin-error>;
     open: func(config-json: string) -> result<session, plugin-error>;
-    validate: func(session: session) -> result<validation-report, plugin-error>;
+    validate: func(session: session, stream-schema: option<stream-schema>) -> result<validation-report, plugin-error>;
     run: func(session: session, request: run-request) -> result<run-summary, plugin-error>;
     close: func(session: session) -> result<_, plugin-error>;
 }
