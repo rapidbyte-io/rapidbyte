@@ -88,7 +88,7 @@ fn is_pre_commit_cancellation(error: &PipelineError) -> bool {
             pe.code == "CANCELLED" && matches!(pe.commit_state, Some(CommitState::BeforeCommit))
         }
         PipelineError::Infrastructure(_) => false,
-        PipelineError::Cancelled => true,
+        PipelineError::Cancelled => unreachable!("matched before calling this helper"),
     }
 }
 
@@ -108,12 +108,6 @@ fn convert_pipeline_error(error: &PipelineError) -> TaskErrorInfo {
 
             commit_state: CommitState::BeforeCommit,
         },
-        PipelineError::Cancelled => TaskErrorInfo {
-            code: "CANCELLED".into(),
-            message: "pipeline cancelled".into(),
-            retryable: true,
-
-            commit_state: CommitState::BeforeCommit,
-        },
+        PipelineError::Cancelled => unreachable!("matched before calling this helper"),
     }
 }

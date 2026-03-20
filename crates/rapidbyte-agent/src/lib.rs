@@ -19,7 +19,7 @@ pub mod domain;
 // ---------------------------------------------------------------------------
 
 // Application layer
-pub use application::{run_agent, AgentAppConfig, AgentContext};
+pub use application::{run_agent, AgentContext};
 
 // Adapter layer
 pub use adapter::{build_agent_context, AgentAdapters, AgentConfig, ClientTlsConfig};
