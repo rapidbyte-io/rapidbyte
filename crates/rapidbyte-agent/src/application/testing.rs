@@ -1,6 +1,9 @@
 //! In-memory fakes for all agent port traits and a [`TestContext`] factory.
 
 use std::collections::VecDeque;
+
+/// Minimal valid pipeline YAML for tests that need to reach the executor.
+pub const VALID_YAML: &str = "version: '1.0'\npipeline: test\nsource:\n  use: postgres\n  config:\n    host: localhost\n  streams:\n    - name: users\n      sync_mode: full_refresh\ndestination:\n  use: postgres\n  config:\n    host: localhost\n  write_mode: append\n";
 use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;

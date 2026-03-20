@@ -143,8 +143,7 @@ async fn worker_loop(
                 if shutdown.is_cancelled() {
                     return Ok(());
                 }
-                // Yield to avoid busy-spinning in tests and tight loops.
-                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 continue;
             }
             Err(e) => {
@@ -169,14 +168,7 @@ async fn worker_loop(
             },
         );
 
-        execute_task(
-            ctx,
-            agent_id,
-            &assignment,
-            progress_collector,
-            cancel.clone(),
-        )
-        .await;
+        execute_task(ctx, agent_id, &assignment, progress_collector, cancel).await;
 
         // Remove lease after execution
         active_leases.write().await.remove(&assignment.task_id);
@@ -188,12 +180,10 @@ mod tests {
     use super::*;
     use crate::adapter::{AgentAdapters, AtomicProgressCollector, EngineExecutor};
     use crate::application::context::AgentAppConfig;
-    use crate::application::testing::fake_context;
+    use crate::application::testing::{fake_context, VALID_YAML};
     use crate::domain::ports::controller::{RegistrationResponse, TaskAssignment};
     use crate::domain::task::{TaskExecutionResult, TaskMetrics, TaskOutcomeKind};
     use std::time::Duration;
-
-    const VALID_YAML: &str = "version: '1.0'\npipeline: test\nsource:\n  use: postgres\n  config:\n    host: localhost\n  streams:\n    - name: users\n      sync_mode: full_refresh\ndestination:\n  use: postgres\n  config:\n    host: localhost\n  write_mode: append\n";
 
     fn test_adapters() -> AgentAdapters {
         AgentAdapters {

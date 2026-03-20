@@ -98,21 +98,21 @@ fn convert_pipeline_error(error: &PipelineError) -> TaskErrorInfo {
             code: pe.code.clone(),
             message: pe.message.clone(),
             retryable: pe.retryable,
-            safe_to_retry: pe.safe_to_retry,
+
             commit_state: pe.commit_state.unwrap_or(CommitState::BeforeCommit),
         },
         PipelineError::Infrastructure(e) => TaskErrorInfo {
             code: "INFRASTRUCTURE".into(),
             message: format!("{e:#}"),
             retryable: false,
-            safe_to_retry: false,
+
             commit_state: CommitState::BeforeCommit,
         },
         PipelineError::Cancelled => TaskErrorInfo {
             code: "CANCELLED".into(),
             message: "pipeline cancelled".into(),
             retryable: true,
-            safe_to_retry: true,
+
             commit_state: CommitState::BeforeCommit,
         },
     }

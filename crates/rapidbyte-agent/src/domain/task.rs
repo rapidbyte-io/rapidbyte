@@ -16,8 +16,6 @@ pub struct TaskErrorInfo {
     pub code: String,
     pub message: String,
     pub retryable: bool,
-    /// Domain-internal only — used for commit-state decisions, not sent over the wire.
-    pub safe_to_retry: bool,
     pub commit_state: CommitState,
 }
 

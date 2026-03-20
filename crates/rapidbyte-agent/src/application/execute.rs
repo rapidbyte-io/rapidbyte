@@ -39,7 +39,6 @@ pub async fn execute_task(
                     code: "INVALID_PIPELINE".into(),
                     message: e,
                     retryable: false,
-                    safe_to_retry: true,
                     commit_state: CommitState::BeforeCommit,
                 }),
                 metrics: TaskMetrics::default(),
@@ -80,7 +79,6 @@ pub async fn execute_task(
                 code: "EXECUTION_ERROR".into(),
                 message: e.to_string(),
                 retryable: true,
-                safe_to_retry: false,
                 commit_state: CommitState::AfterCommitUnknown,
             }),
             metrics: TaskMetrics::default(),
@@ -181,10 +179,8 @@ fn is_retryable_controller_error(e: &AgentError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::testing::fake_context;
+    use crate::application::testing::{fake_context, VALID_YAML};
     use crate::domain::task::{TaskExecutionResult, TaskMetrics, TaskOutcomeKind};
-
-    const VALID_YAML: &str = "version: '1.0'\npipeline: test\nsource:\n  use: postgres\n  config:\n    host: localhost\n  streams:\n    - name: users\n      sync_mode: full_refresh\ndestination:\n  use: postgres\n  config:\n    host: localhost\n  write_mode: append\n";
 
     fn test_assignment() -> TaskAssignment {
         TaskAssignment {
