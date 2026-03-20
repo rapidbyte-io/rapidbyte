@@ -33,6 +33,46 @@ v7 is a clean break. All plugins must be rebuilt against the new SDK. No v6 comp
 | Cancellation | Cooperative polling | `is-cancelled()` host import. SDK also checks automatically in `emit_batch`. |
 | Protocol architecture | Evolved WIT (synchronous function calls) | Host drives lifecycle. Type safety from component model. SDK hides WIT complexity behind Rust traits. |
 
+## Implementation Notes
+
+### WIT-to-SDK Type Mapping
+
+The WIT `run` export returns `run-summary` (containing `list<stream-result>`), but the SDK traits return ergonomic per-kind types (`ReadSummary`, `WriteSummary`, `TransformSummary`). The proc macro bridges this:
+
+- **Single-stream path:** `Source::read()` returns `ReadSummary`. The macro wraps it into a `RunSummary` with one `StreamResult` whose `outcome-json` contains the serialized `ReadSummary`. Same for `Destination::write()` → `WriteSummary` and `Transform::transform()` → `TransformSummary`.
+- **Multi-stream path:** `MultiStreamSource::read_streams()` returns `RunSummary` directly, with per-stream results already populated.
+
+### SDK Checkpoint Simple Path
+
+The SDK `Context::checkpoint()` one-liner is sugar over the transactional WIT imports. Internally it calls `checkpoint-begin → checkpoint-set-cursor → checkpoint-commit` in sequence. It provides the same atomicity guarantees as the explicit transactional path. Plugin authors who need to bundle multiple cursor updates or state mutations in one transaction should use `ctx.begin_checkpoint()` instead.
+
+### SDK Batch Consumption
+
+The SDK `Context::next_batch()` returns `Option<IncomingBatch>` which bundles the frame data and metadata. Internally, the SDK calls two host imports per batch: `next-batch` (to get the frame handle) and `next-batch-metadata` (to get the metadata). This is an SDK implementation detail — plugin authors see a single call.
+
+### Async Traits and WIT Synchronous Boundary
+
+All SDK traits use `async fn` (via `#[async_trait]`) for plugin-author ergonomics — plugins can `.await` on internal I/O operations (database queries, HTTP calls via `HostTcpStream`). However, the WIT component boundary remains synchronous. The proc macro generates synchronous WIT exports that create a single-threaded tokio runtime (stored in `OnceLock`) and block on the async SDK methods. This is the same pattern as v6. Wasmtime `async_support` is not required.
+
+### Arrow Type String Encoding
+
+The `arrow-type` field in `schema-field` uses Arrow canonical type names as defined by the Arrow IPC specification. Examples: `"int8"`, `"int16"`, `"int32"`, `"int64"`, `"uint8"`, `"uint16"`, `"uint32"`, `"uint64"`, `"float16"`, `"float32"`, `"float64"`, `"bool"`, `"utf8"`, `"binary"`, `"date32"`, `"timestamp_micros"`, `"timestamp_millis"`. The SDK provides `ArrowDataType::canonical_name()` and `ArrowDataType::from_canonical_name()` for bidirectional conversion.
+
+### Validation Report Semantics by Plugin Kind
+
+The `validation-report` has two optional fields with different meanings depending on plugin kind:
+
+- **`output-schema`**: Meaningful for **sources** (declares what the source produces — though typically derived from `discover`) and **transforms** (declares what the transform outputs given the input schema). Ignored for destinations.
+- **`field-requirements`**: Meaningful for **destinations** (declares per-field constraints on incoming data). Ignored for sources and transforms.
+
+### Empty RunRequest
+
+A `run-request` with an empty `streams` list is invalid. The host validates this before calling the WIT export and never sends an empty request.
+
+### CheckpointTxn Drop Behavior
+
+The `Drop` impl on `CheckpointTxn` calls `checkpoint-abort` as a safety net. Since `Drop::drop` cannot propagate errors in Rust, abort failures during drop are logged as warnings but silently ignored. Plugin authors should always explicitly call `commit()` or `abort()` rather than relying on drop. The SDK logs a warning at `LogLevel::Warn` if drop-triggered abort executes.
+
 ## WIT Protocol Definition
 
 ### Package Declaration
@@ -789,29 +829,37 @@ The `#[plugin(source, features = [...])]` macro generates WIT glue that routes `
 
 ```
 1. spec() + open() + prerequisites()
-2. Load cursors from state backend → inject into stream_context.cursor_info
-3. Build stream contexts with limits, policies, schema, cursor
-4. Determine dispatch strategy:
+2. discover(session) → get fresh schemas for stream context building
+3. Load cursors from state backend → inject into stream_context.cursor_info
+4. Build stream contexts with limits, policies, schema, cursor
+5. Determine dispatch strategy:
    │  if source has "multi-stream" + "cdc" AND multiple CDC streams:
-   │    → bundle all CDC streams into one run_request
+   │    → bundle CDC streams into one run_request (split non-CDC streams separately)
    │  else:
    │    → one run_request per stream, parallel tasks bounded by max_concurrent
-5. Set up channel topology:
+6. Set up channel topology:
    │  Source → mpsc channel → Transform chain → mpsc channel → Destination
    │  (one channel per stream, batches routed by stream_index)
-6. Monitor execution:
+7. Monitor execution:
    │  - Correlate source + destination checkpoint transactions
    │  - On matched pair: persist cursor atomically to state backend
    │  - Propagate cancel_requested to is_cancelled()
    │  - Collect stream_error() calls → mark streams as failed
-7. Collect per-stream results from run_summary
-8. Per-stream retry:
+   │  - For multi-stream CDC: use barrier model (wait for ALL destinations before persisting)
+   │  - For single-stream: use per-stream correlation (standard model)
+8. Collect per-stream results from run_summary
+9. Per-stream retry:
    │  - Failed + retryable: decrement retry budget, apply backoff, re-run stream only
    │  - Failed + not retryable: mark failed, continue others
-9. close(session) for all plugins
+   │  - For multi-stream CDC retries: failed stream runs as single-stream in a separate invocation
+10. close(session) for all plugins
 ```
 
 ### Checkpoint Correlation
+
+#### Single-Stream (independent cursors)
+
+Each stream has an independent cursor. Source and destination checkpoint correlation happens per-stream via sequence numbers.
 
 ```
 Source emits batch B1 for stream "users":
@@ -833,6 +881,39 @@ Host correlates S1 + D1:
   Atomically persist cursor(users) = id=5000 to state backend
 ```
 
+#### Multi-Stream CDC (shared cursor / checkpoint barrier)
+
+In multi-stream CDC, all streams share a single WAL cursor (LSN). The source cannot advance the LSN until ALL streams' data at that LSN has been processed by their respective destinations. The host uses a **checkpoint barrier** model:
+
+```
+Source emits batches for users (seq=1), orders (seq=1), payments (seq=1)
+  All batches come from WAL up to LSN 0/5678
+
+Source commits barrier checkpoint:
+  txn = checkpoint-begin(Source)
+  checkpoint-set-cursor(txn, {stream: "users", field: "lsn", value: "0/5678"})
+  checkpoint-set-cursor(txn, {stream: "orders", field: "lsn", value: "0/5678"})
+  checkpoint-set-cursor(txn, {stream: "payments", field: "lsn", value: "0/5678"})
+  checkpoint-commit(txn, records: 15000, bytes: 6MB)
+  → Host records: barrier B1 = {all streams at LSN 0/5678, max_seq=1}
+
+Host waits for ALL destination streams to acknowledge up to seq=1:
+  dest "users" commits D1 (seq=1)    ✓
+  dest "orders" commits D1 (seq=1)   ✓
+  dest "payments" commits D1 (seq=1) ✓
+
+All destinations acknowledged → barrier B1 satisfied
+  Atomically persist: cursor(users)=0/5678, cursor(orders)=0/5678, cursor(payments)=0/5678
+
+If dest "payments" fails before acknowledging:
+  Barrier B1 is NOT satisfied
+  Host does NOT advance any cursors
+  On retry: source re-reads from previous LSN for ALL streams
+  This prevents partial cursor advancement that could lose data
+```
+
+The barrier model ensures that a shared-cursor source (single replication slot) never advances past what ALL downstream consumers have confirmed. This is the multi-stream generalization of the single-stream correlation model.
+
 ### Multi-Stream CDC Dispatch
 
 ```
@@ -842,7 +923,7 @@ Source manifest: features = ["multi-stream", "cdc"]
 Host builds one RunRequest with all 5 streams.
 Plugin opens ONE replication slot, ONE publication covering all tables.
 Plugin decodes pgoutput, emits batches tagged by stream_index.
-Plugin checkpoints with cursors for ALL streams atomically.
+Plugin checkpoints with cursors for ALL streams atomically (barrier).
 
 Host creates 5 destination channels, routes batches by stream_index.
 
@@ -850,8 +931,60 @@ If "payments" fails:
   Plugin calls stream_error(2, PluginError::schema(...))
   Plugin continues processing streams 0, 1, 3, 4
   RunSummary: 4 succeeded, 1 failed
-  Host retries "payments" separately if retryable
+  Barrier checkpoint includes all 5 streams at same LSN
+  Host holds barrier until remaining 4 destinations acknowledge
+  "payments" is marked failed — host retries it separately if retryable
+  IMPORTANT: if the error is not isolatable (e.g., connection lost to PG),
+  the plugin should return Err(PluginError) from run() instead of using
+  stream_error(), which signals the entire multi-stream run has failed
 ```
+
+### Mixed Sync Modes in Multi-Stream
+
+When a multi-stream capable source receives streams with mixed sync modes (e.g., 3 CDC + 2 incremental), the host splits the request:
+
+```
+Pipeline streams: [users(cdc), orders(cdc), events(cdc), products(incremental), categories(full)]
+
+Host splits into two run invocations:
+  1. RunRequest{streams: [users, orders, events]} → routes to read_all_changes()
+  2. RunRequest{streams: [products]}              → routes to read() (single-stream)
+  3. RunRequest{streams: [categories]}            → routes to read() (single-stream)
+
+Invocations 2 and 3 can run in parallel (separate single-stream tasks).
+Invocation 1 runs as a single multi-stream CDC task.
+```
+
+The host is responsible for splitting — the plugin never receives mixed sync modes in a single multi-stream `RunRequest`.
+
+### Schema Evolution Mid-Stream
+
+If a source detects a schema change during a run (e.g., new column appears in CDC WAL):
+
+1. Source emits the next batch with a new `schema-fingerprint` in `batch-metadata`.
+2. The SDK's `IncomingBatch::schema_changed()` returns `true` when the fingerprint differs from the previous batch (the SDK tracks the last-seen fingerprint internally).
+3. The destination applies its `schema-evolution-policy`:
+   - `new-column: add` → destination auto-adds the column (if it supports `SchemaAutoMigrate` feature).
+   - `new-column: fail` → destination returns an error for that stream.
+   - `new-column: ignore` → destination silently drops the new column's data.
+4. The host does NOT call `destination.apply()` mid-run. Schema evolution during a run is handled by the destination's data path, governed by its policies. `apply()` is only called as an explicit pre-run phase.
+
+If the schema change is too complex for the destination to handle inline (e.g., type change on an existing column with `type-change: fail`), the destination calls `stream_error()` for that stream. The host marks the stream as failed and retries it after the run, at which point a fresh `check → apply → run` cycle picks up the new schema.
+
+### Teardown Semantics
+
+Teardown requires a valid session (must call `open` first). The lifecycle for resource cleanup is:
+
+```
+open(config_json) → teardown(session, request) → close(session)
+```
+
+Teardown cannot be called while `run()` is in progress on the same session. For cleaning up leaked resources from a crashed prior run, the host opens a new session specifically for teardown.
+
+The `reason` field guides cleanup aggressiveness:
+- `"pipeline_deleted"` — full cleanup: drop replication slots, staging tables, publications
+- `"reconfigure"` — selective cleanup: drop slots that don't match new config, keep compatible ones
+- `"stream_removed"` — per-stream cleanup: only clean up resources for the named streams
 
 ### Protocol Version Enforcement
 
