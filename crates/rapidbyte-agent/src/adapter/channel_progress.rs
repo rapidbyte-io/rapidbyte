@@ -26,15 +26,6 @@ impl AtomicProgressCollector {
             snapshot: RwLock::new(ProgressSnapshot::default()),
         }
     }
-
-    /// Write a new progress snapshot (called by the bridge task).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal `RwLock` is poisoned.
-    pub fn update(&self, snapshot: ProgressSnapshot) {
-        *self.snapshot.write().unwrap() = snapshot;
-    }
 }
 
 impl ProgressCollector for AtomicProgressCollector {
@@ -44,6 +35,10 @@ impl ProgressCollector for AtomicProgressCollector {
 
     fn take(&self) -> ProgressSnapshot {
         std::mem::take(&mut *self.snapshot.write().unwrap())
+    }
+
+    fn update(&self, snapshot: ProgressSnapshot) {
+        *self.snapshot.write().unwrap() = snapshot;
     }
 
     fn reset(&self) {

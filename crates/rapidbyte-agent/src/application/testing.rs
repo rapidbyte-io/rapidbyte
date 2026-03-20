@@ -240,6 +240,10 @@ impl ProgressCollector for FakeProgressCollector {
         std::mem::take(&mut *self.snapshot.write().unwrap())
     }
 
+    fn update(&self, snapshot: ProgressSnapshot) {
+        *self.snapshot.write().unwrap() = snapshot;
+    }
+
     fn reset(&self) {
         *self.snapshot.write().unwrap() = ProgressSnapshot::default();
     }

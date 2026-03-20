@@ -41,6 +41,8 @@ pub async fn heartbeat_loop(
         // uses heartbeats to track agent liveness (last_seen_at) and will
         // reap idle agents that stop heartbeating.
         let tasks = build_heartbeats(&active_leases).await;
+        // Keep a copy so we can restore progress on RPC failure.
+        let tasks_backup = tasks.clone();
 
         let payload = HeartbeatPayload {
             agent_id: agent_id.to_owned(),
@@ -63,7 +65,9 @@ pub async fn heartbeat_loop(
                         }
                     }
                     Err(e) => {
-                        warn!(error = %e, "Heartbeat failed");
+                        warn!(error = %e, "Heartbeat failed — restoring progress for retry");
+                        // Restore consumed progress so it's retried on the next tick.
+                        restore_progress(&active_leases, tasks_backup).await;
                     }
                 }
             }
@@ -98,6 +102,19 @@ async fn build_heartbeats(active_leases: &ActiveLeaseMap) -> Vec<TaskHeartbeat> 
             progress: progress.take(),
         })
         .collect()
+}
+
+/// Restore consumed progress snapshots back into their collectors after a
+/// heartbeat RPC failure, so the progress will be retried on the next tick.
+async fn restore_progress(active_leases: &ActiveLeaseMap, tasks: Vec<TaskHeartbeat>) {
+    let leases = active_leases.read().await;
+    for task in tasks {
+        if let Some(entry) = leases.get(&task.task_id) {
+            if task.progress.message.is_some() || task.progress.progress_pct.is_some() {
+                entry.progress.update(task.progress);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

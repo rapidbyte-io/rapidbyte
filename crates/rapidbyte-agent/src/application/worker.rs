@@ -36,14 +36,21 @@ pub async fn run_agent(
     let agent_id = response.agent_id;
     info!(agent_id, "Registered with controller");
 
-    // 2. Merge controller-provided registry URL into the existing config,
-    //    preserving trust_policy and trusted_key_pems set at startup.
+    // 2. Controller response is authoritative for registry URL.
+    //    Merge the registry info (preserving trust_policy/trusted_key_pems),
+    //    or clear it if controller returned None (no registry configured).
     if let Some(registry_info) = response.registry {
         adapters
             .engine_executor
             .merge_registry_url(registry_info.url.as_deref(), registry_info.insecure)
             .await;
         info!(agent_id, "Updated registry URL from controller");
+    } else {
+        adapters
+            .engine_executor
+            .merge_registry_url(None, false)
+            .await;
+        info!(agent_id, "Controller returned no registry — cleared");
     }
 
     // 3. Shared active lease tracking
@@ -415,5 +422,27 @@ mod tests {
             matches!(err, AgentError::ControllerNonRetryable(_)),
             "expected ControllerNonRetryable, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn registry_none_clears_executor_url() {
+        let initial_config = rapidbyte_registry::RegistryConfig {
+            default_registry: Some("https://initial.example.com".into()),
+            insecure: true,
+            ..Default::default()
+        };
+
+        let executor = Arc::new(EngineExecutor::new(initial_config));
+
+        // Simulate controller returning registry: None
+        executor.merge_registry_url(None, false).await;
+
+        let config = executor.registry_config_snapshot().await;
+        assert!(
+            config.default_registry.is_none(),
+            "expected registry cleared, got {:?}",
+            config.default_registry
+        );
+        assert!(!config.insecure);
     }
 }

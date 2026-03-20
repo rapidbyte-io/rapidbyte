@@ -8,6 +8,7 @@ use tracing::{info, warn};
 
 use crate::domain::error::AgentError;
 use crate::domain::ports::controller::{CompletionPayload, TaskAssignment};
+use crate::domain::ports::progress::ProgressCollector;
 use crate::domain::task::{
     CommitState, TaskErrorInfo, TaskExecutionResult, TaskMetrics, TaskOutcomeKind,
 };

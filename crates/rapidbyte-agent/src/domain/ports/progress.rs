@@ -16,6 +16,9 @@ pub trait ProgressCollector: Send + Sync {
     /// snapshots are not re-sent on subsequent ticks.
     fn take(&self) -> ProgressSnapshot;
 
+    /// Write a progress snapshot (used by the bridge task and heartbeat restore).
+    fn update(&self, snapshot: ProgressSnapshot);
+
     /// Reset progress (when starting a new task).
     fn reset(&self);
 }
