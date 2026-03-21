@@ -62,6 +62,40 @@ fn validate_replication_slot_name(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn cdc_stream_token(stream_name: &str) -> String {
+    let mut parts = stream_name.splitn(2, '.');
+    let first = parts.next().unwrap_or(stream_name);
+    let second = parts.next();
+
+    let token = match second {
+        Some(table_name) if first == "public" => table_name,
+        Some(table_name) => {
+            return format!(
+                "{}_{}",
+                sanitize_identifier_fragment(first),
+                sanitize_identifier_fragment(table_name)
+            );
+        }
+        None => first,
+    };
+
+    sanitize_identifier_fragment(token)
+}
+
+fn sanitize_identifier_fragment(value: &str) -> String {
+    value
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 fn resolve_cdc_name(
     prefix: &str,
     configured: Option<&str>,
@@ -70,7 +104,7 @@ fn resolve_cdc_name(
 ) -> Result<String, String> {
     let name = configured
         .map(std::borrow::ToOwned::to_owned)
-        .unwrap_or_else(|| format!("{prefix}{stream_name}"));
+        .unwrap_or_else(|| format!("{prefix}{}", cdc_stream_token(stream_name)));
     if field == "replication slot" {
         validate_replication_slot_name(&name)?;
     } else {
@@ -498,6 +532,25 @@ mod tests {
     }
 
     #[test]
+    fn resolve_cdc_names_uses_sanitized_schema_qualified_default() {
+        let config = crate::config::Config {
+            host: "localhost".to_string(),
+            port: 5432,
+            user: "postgres".to_string(),
+            password: String::new(),
+            database: "test_db".to_string(),
+            schema: Some("analytics".to_string()),
+            replication_slot: None,
+            publication: None,
+        };
+
+        let (slot_name, publication_name) = super::resolve_cdc_names(&config, "analytics.users")
+            .expect("schema-qualified names should derive valid defaults");
+        assert_eq!(slot_name, "rapidbyte_analytics_users");
+        assert_eq!(publication_name, "rapidbyte_analytics_users");
+    }
+
+    #[test]
     fn resolve_cdc_names_rejects_overlong_derived_defaults() {
         let config = crate::config::Config {
             host: "localhost".to_string(),
@@ -536,7 +589,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_cdc_names_rejects_invalid_derived_slot_characters() {
+    fn resolve_cdc_names_sanitizes_invalid_derived_slot_characters() {
         let config = crate::config::Config {
             host: "localhost".to_string(),
             port: 5432,
@@ -549,8 +602,9 @@ mod tests {
         };
         let stream_name = "stream-name";
 
-        let err = super::resolve_cdc_names(&config, stream_name).unwrap_err();
-        assert!(err.contains("replication slot"));
-        assert!(err.contains("lowercase letters, digits, and underscores"));
+        let (slot_name, publication_name) =
+            super::resolve_cdc_names(&config, stream_name).unwrap();
+        assert_eq!(slot_name, "rapidbyte_stream_name");
+        assert_eq!(publication_name, "pub_a");
     }
 }
