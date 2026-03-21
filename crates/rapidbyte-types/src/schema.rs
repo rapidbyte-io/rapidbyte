@@ -111,7 +111,7 @@ impl SchemaField {
 ///
 /// Used during v7 schema negotiation to exchange rich schema information
 /// between source, transform, and destination plugins.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct StreamSchema {
     /// Ordered list of fields in this stream.
     pub fields: Vec<SchemaField>,

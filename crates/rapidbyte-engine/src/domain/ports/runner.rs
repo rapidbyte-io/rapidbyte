@@ -284,6 +284,8 @@ pub struct DiscoveredStream {
     pub name: String,
     /// JSON-serialized catalog returned by the plugin.
     pub catalog_json: String,
+    /// Typed schema for schema negotiation, if the plugin provided one.
+    pub schema: Option<StreamSchema>,
 }
 
 // ---------------------------------------------------------------------------

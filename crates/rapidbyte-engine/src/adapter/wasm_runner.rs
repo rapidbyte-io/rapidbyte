@@ -1283,6 +1283,7 @@ fn run_discover_impl(
             DiscoveredStream {
                 name: s.name,
                 catalog_json,
+                schema: None,
             }
         })
         .collect();

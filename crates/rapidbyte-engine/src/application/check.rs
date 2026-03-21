@@ -5,14 +5,17 @@
 //! every component.
 
 use rapidbyte_pipeline_config::PipelineConfig;
+use rapidbyte_types::schema::{FieldConstraint, FieldRequirement, StreamSchema};
 use rapidbyte_types::validation::{ValidationReport, ValidationStatus};
 use rapidbyte_types::wire::PluginKind;
 
 use crate::application::context::EngineContext;
 use crate::application::{build_sandbox_overrides, extract_permissions, parse_plugin_id};
 use crate::domain::error::PipelineError;
-use crate::domain::outcome::{CheckResult, CheckStatus};
-use crate::domain::ports::runner::{CheckComponentStatus, ValidateParams};
+use crate::domain::outcome::{CheckResult, CheckStatus, StreamNegotiationResult};
+use crate::domain::ports::runner::{
+    CheckComponentStatus, DiscoverParams, PrerequisitesParams, ValidateParams,
+};
 
 /// Resolve and validate all plugins in a pipeline configuration.
 ///
@@ -244,6 +247,134 @@ pub async fn check_pipeline(
         transform_validations.push(worst_validation.expect("at least one stream name"));
     }
 
+    // -- Prerequisites --
+    let source_prereqs = ctx
+        .runner
+        .prerequisites(&PrerequisitesParams {
+            wasm_path: source_resolved.wasm_path.clone(),
+            kind: PluginKind::Source,
+            plugin_id: src_id.clone(),
+            plugin_version: src_ver.clone(),
+            config: pipeline.source.config.clone(),
+            permissions: source_permissions.clone(),
+            sandbox_overrides: source_overrides.clone(),
+        })
+        .await?;
+
+    let dest_prereqs = ctx
+        .runner
+        .prerequisites(&PrerequisitesParams {
+            wasm_path: dest_resolved.wasm_path.clone(),
+            kind: PluginKind::Destination,
+            plugin_id: dst_id.clone(),
+            plugin_version: dst_ver.clone(),
+            config: pipeline.destination.config.clone(),
+            permissions: dest_permissions.clone(),
+            sandbox_overrides: dest_overrides.clone(),
+        })
+        .await?;
+
+    // -- Schema Negotiation --
+    // Discover source schemas, then thread each stream's schema through
+    // transforms and into the destination for field-level reconciliation.
+    // Discovery failure is non-fatal: we skip negotiation but still report
+    // the other check results.
+    let mut schema_negotiation = Vec::new();
+
+    let discovered = ctx
+        .runner
+        .discover(&DiscoverParams {
+            wasm_path: source_resolved.wasm_path.clone(),
+            plugin_id: src_id.clone(),
+            plugin_version: src_ver.clone(),
+            config: pipeline.source.config.clone(),
+            permissions: source_permissions.clone(),
+            sandbox_overrides: source_overrides.clone(),
+        })
+        .await;
+
+    if let Ok(discovered_streams) = discovered {
+        for stream_name in &source_stream_names {
+            let source_schema = discovered_streams
+                .iter()
+                .find(|d| d.name == *stream_name)
+                .and_then(|d| d.schema.clone());
+
+            let mut current_schema = source_schema;
+
+            // Thread through transforms
+            for transform in &pipeline.transforms {
+                if current_schema.is_none() {
+                    break;
+                }
+                let transform_resolved = ctx
+                    .resolver
+                    .resolve(
+                        &transform.use_ref,
+                        PluginKind::Transform,
+                        Some(&transform.config),
+                    )
+                    .await?;
+
+                let (t_id, t_ver) = parse_plugin_id(&transform.use_ref);
+                let transform_permissions = extract_permissions(&transform_resolved);
+                let transform_overrides = build_sandbox_overrides(
+                    transform.permissions.as_ref(),
+                    transform.limits.as_ref(),
+                    transform_resolved.manifest.as_ref(),
+                )?;
+
+                let report = ctx
+                    .runner
+                    .validate_plugin(&ValidateParams {
+                        wasm_path: transform_resolved.wasm_path.clone(),
+                        kind: PluginKind::Transform,
+                        plugin_id: t_id,
+                        plugin_version: t_ver,
+                        config: transform.config.clone(),
+                        stream_name: stream_name.clone(),
+                        permissions: transform_permissions,
+                        sandbox_overrides: transform_overrides,
+                        upstream_schema: current_schema.clone(),
+                    })
+                    .await?;
+
+                if let Some(output) = report.validation.output_schema {
+                    current_schema = Some(output);
+                }
+            }
+
+            // Validate destination with final schema
+            let dest_report = ctx
+                .runner
+                .validate_plugin(&ValidateParams {
+                    wasm_path: dest_resolved.wasm_path.clone(),
+                    kind: PluginKind::Destination,
+                    plugin_id: dst_id.clone(),
+                    plugin_version: dst_ver.clone(),
+                    config: pipeline.destination.config.clone(),
+                    stream_name: stream_name.clone(),
+                    permissions: dest_permissions.clone(),
+                    sandbox_overrides: dest_overrides.clone(),
+                    upstream_schema: current_schema.clone(),
+                })
+                .await?;
+
+            // Reconcile field requirements against the final schema
+            if let (Some(schema), Some(reqs)) =
+                (&current_schema, &dest_report.validation.field_requirements)
+            {
+                let result = reconcile_schema(schema, reqs);
+                schema_negotiation.push(StreamNegotiationResult {
+                    stream_name: stream_name.clone(),
+                    passed: result.passed,
+                    errors: result.errors,
+                    warnings: result.warnings,
+                });
+            }
+        }
+    }
+
     // -- State --
     // State connectivity is intentionally not validated during `check`.
     // The check use case validates plugin WASM modules and configuration
@@ -266,7 +397,78 @@ pub async fn check_pipeline(
         destination_validation: destination_validation.validation,
         transform_validations,
         state,
+        source_prerequisites: Some(source_prereqs),
+        destination_prerequisites: Some(dest_prereqs),
+        schema_negotiation,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Schema reconciliation
+// ---------------------------------------------------------------------------
+
+/// Result of reconciling a schema against a set of field requirements.
+struct ReconciliationResult {
+    passed: bool,
+    errors: Vec<String>,
+    warnings: Vec<String>,
+}
+
+/// Check whether a [`StreamSchema`] satisfies all [`FieldRequirement`]s.
+///
+/// - `FieldRequired` + missing field => error
+/// - `FieldForbidden` + present field => error
+/// - `TypeIncompatible` => always error (with accepted types)
+/// - `FieldRecommended` + missing field => warning (non-fatal)
+/// - `FieldOptional` or satisfied constraints => ok
+fn reconcile_schema(
+    schema: &StreamSchema,
+    requirements: &[FieldRequirement],
+) -> ReconciliationResult {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    for req in requirements {
+        let field = schema.fields.iter().find(|f| f.name == req.field_name);
+        match (&req.constraint, field) {
+            (FieldConstraint::FieldRequired, None) => {
+                errors.push(format!(
+                    "Required field '{}' missing: {}",
+                    req.field_name, req.reason
+                ));
+            }
+            (FieldConstraint::FieldForbidden, Some(_)) => {
+                errors.push(format!(
+                    "Forbidden field '{}' present: {}",
+                    req.field_name, req.reason
+                ));
+            }
+            (FieldConstraint::TypeIncompatible, _) => {
+                let accepted = req
+                    .accepted_types
+                    .as_ref()
+                    .map(|t| t.join(", "))
+                    .unwrap_or_default();
+                errors.push(format!(
+                    "Type incompatible for '{}': {} (accepted: {})",
+                    req.field_name, req.reason, accepted
+                ));
+            }
+            (FieldConstraint::FieldRecommended, None) => {
+                warnings.push(format!(
+                    "Recommended field '{}' missing: {}",
+                    req.field_name, req.reason
+                ));
+            }
+            _ => {} // FieldOptional, or constraint satisfied
+        }
+    }
+
+    ReconciliationResult {
+        passed: errors.is_empty(),
+        errors,
+        warnings,
+    }
 }
 
 /// Return a numeric severity for a validation status so we can keep the
@@ -308,6 +510,7 @@ mod tests {
     use super::*;
     use crate::application::testing::{fake_context, test_resolved_plugin};
     use crate::domain::ports::runner::CheckComponentStatus;
+    use rapidbyte_types::schema::SchemaField;
     use rapidbyte_types::validation::{ValidationReport, ValidationStatus};
 
     fn ok_validation() -> CheckComponentStatus {
@@ -749,5 +952,317 @@ destination:
             result.destination_validation.message,
             "cannot connect to destination"
         );
+    }
+
+    // ===================================================================
+    // Schema reconciliation unit tests
+    // ===================================================================
+
+    #[test]
+    fn reconcile_all_satisfied() {
+        let schema = StreamSchema {
+            fields: vec![
+                SchemaField::new("id", "int64", false),
+                SchemaField::new("name", "utf8", true),
+            ],
+            primary_key: vec!["id".into()],
+            ..Default::default()
+        };
+        let reqs = vec![FieldRequirement {
+            field_name: "id".into(),
+            constraint: FieldConstraint::FieldRequired,
+            reason: "primary key".into(),
+            accepted_types: None,
+        }];
+        let result = reconcile_schema(&schema, &reqs);
+        assert!(result.passed);
+        assert!(result.errors.is_empty());
+    }
+
+    #[test]
+    fn reconcile_required_field_missing() {
+        let schema = StreamSchema {
+            fields: vec![SchemaField::new("name", "utf8", true)],
+            ..Default::default()
+        };
+        let reqs = vec![FieldRequirement {
+            field_name: "id".into(),
+            constraint: FieldConstraint::FieldRequired,
+            reason: "primary key".into(),
+            accepted_types: None,
+        }];
+        let result = reconcile_schema(&schema, &reqs);
+        assert!(!result.passed);
+        assert!(result.errors[0].contains("Required field 'id' missing"));
+    }
+
+    #[test]
+    fn reconcile_forbidden_field_present() {
+        let schema = StreamSchema {
+            fields: vec![
+                SchemaField::new("id", "int64", false),
+                SchemaField::new("_internal", "utf8", true),
+            ],
+            ..Default::default()
+        };
+        let reqs = vec![FieldRequirement {
+            field_name: "_internal".into(),
+            constraint: FieldConstraint::FieldForbidden,
+            reason: "reserved".into(),
+            accepted_types: None,
+        }];
+        let result = reconcile_schema(&schema, &reqs);
+        assert!(!result.passed);
+    }
+
+    #[test]
+    fn reconcile_recommended_missing_is_warning() {
+        let schema = StreamSchema {
+            fields: vec![SchemaField::new("id", "int64", false)],
+            ..Default::default()
+        };
+        let reqs = vec![FieldRequirement {
+            field_name: "sort_key".into(),
+            constraint: FieldConstraint::FieldRecommended,
+            reason: "improves query perf".into(),
+            accepted_types: None,
+        }];
+        let result = reconcile_schema(&schema, &reqs);
+        assert!(result.passed); // Warnings don't fail
+        assert_eq!(result.warnings.len(), 1);
+    }
+
+    #[test]
+    fn reconcile_type_incompatible() {
+        let schema = StreamSchema {
+            fields: vec![SchemaField::new("age", "float64", true)],
+            ..Default::default()
+        };
+        let reqs = vec![FieldRequirement {
+            field_name: "age".into(),
+            constraint: FieldConstraint::TypeIncompatible,
+            reason: "float not supported".into(),
+            accepted_types: Some(vec!["int32".into(), "int64".into()]),
+        }];
+        let result = reconcile_schema(&schema, &reqs);
+        assert!(!result.passed);
+        assert!(result.errors[0].contains("Type incompatible"));
+        assert!(result.errors[0].contains("int32, int64"));
+    }
+
+    #[test]
+    fn reconcile_optional_missing_is_ok() {
+        let schema = StreamSchema {
+            fields: vec![SchemaField::new("id", "int64", false)],
+            ..Default::default()
+        };
+        let reqs = vec![FieldRequirement {
+            field_name: "optional_field".into(),
+            constraint: FieldConstraint::FieldOptional,
+            reason: "not needed".into(),
+            accepted_types: None,
+        }];
+        let result = reconcile_schema(&schema, &reqs);
+        assert!(result.passed);
+        assert!(result.errors.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn reconcile_mixed_constraints() {
+        let schema = StreamSchema {
+            fields: vec![
+                SchemaField::new("id", "int64", false),
+                SchemaField::new("_secret", "utf8", true),
+            ],
+            ..Default::default()
+        };
+        let reqs = vec![
+            FieldRequirement {
+                field_name: "id".into(),
+                constraint: FieldConstraint::FieldRequired,
+                reason: "pk".into(),
+                accepted_types: None,
+            },
+            FieldRequirement {
+                field_name: "email".into(),
+                constraint: FieldConstraint::FieldRequired,
+                reason: "needed for dedup".into(),
+                accepted_types: None,
+            },
+            FieldRequirement {
+                field_name: "_secret".into(),
+                constraint: FieldConstraint::FieldForbidden,
+                reason: "internal only".into(),
+                accepted_types: None,
+            },
+            FieldRequirement {
+                field_name: "sort_key".into(),
+                constraint: FieldConstraint::FieldRecommended,
+                reason: "perf".into(),
+                accepted_types: None,
+            },
+        ];
+        let result = reconcile_schema(&schema, &reqs);
+        assert!(!result.passed);
+        // 2 errors: email missing + _secret forbidden
+        assert_eq!(result.errors.len(), 2);
+        // 1 warning: sort_key recommended
+        assert_eq!(result.warnings.len(), 1);
+    }
+
+    #[test]
+    fn reconcile_empty_requirements() {
+        let schema = StreamSchema {
+            fields: vec![SchemaField::new("id", "int64", false)],
+            ..Default::default()
+        };
+        let result = reconcile_schema(&schema, &[]);
+        assert!(result.passed);
+        assert!(result.errors.is_empty());
+        assert!(result.warnings.is_empty());
+    }
+
+    // ===================================================================
+    // Schema negotiation integration tests
+    // ===================================================================
+
+    #[tokio::test]
+    async fn check_includes_prerequisites() {
+        use rapidbyte_types::validation::PrerequisitesReport;
+
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner
+            .enqueue_prerequisites(Ok(PrerequisitesReport::passed()));
+        tc.runner
+            .enqueue_prerequisites(Ok(PrerequisitesReport::passed()));
+
+        let pipeline = test_pipeline_config();
+        let result = check_pipeline(&tc.ctx, &pipeline).await.unwrap();
+
+        assert!(result.source_prerequisites.is_some());
+        assert!(result.source_prerequisites.unwrap().passed);
+        assert!(result.destination_prerequisites.is_some());
+        assert!(result.destination_prerequisites.unwrap().passed);
+    }
+
+    #[tokio::test]
+    async fn check_schema_negotiation_with_discover() {
+        use crate::domain::ports::runner::DiscoveredStream;
+        use rapidbyte_types::schema::SchemaField;
+
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        // Source and destination validation (initial per-component pass)
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+
+        // Discover returns stream with schema
+        let users_schema = StreamSchema {
+            fields: vec![
+                SchemaField::new("id", "int64", false),
+                SchemaField::new("name", "utf8", true),
+            ],
+            primary_key: vec!["id".into()],
+            ..Default::default()
+        };
+        tc.runner.enqueue_discover(Ok(vec![DiscoveredStream {
+            name: "users".into(),
+            catalog_json: "{}".into(),
+            schema: Some(users_schema),
+        }]));
+
+        // Destination validate with upstream_schema returns field requirements
+        let dest_report = CheckComponentStatus {
+            validation: ValidationReport::success("ok").with_field_requirements(vec![
+                FieldRequirement {
+                    field_name: "id".into(),
+                    constraint: FieldConstraint::FieldRequired,
+                    reason: "primary key".into(),
+                    accepted_types: None,
+                },
+            ]),
+        };
+        tc.runner.enqueue_validate(Ok(dest_report));
+
+        let pipeline = test_pipeline_config();
+        let result = check_pipeline(&tc.ctx, &pipeline).await.unwrap();
+
+        assert_eq!(result.schema_negotiation.len(), 1);
+        assert!(result.schema_negotiation[0].passed);
+        assert_eq!(result.schema_negotiation[0].stream_name, "users");
+        assert!(result.schema_negotiation[0].errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn check_schema_negotiation_detects_missing_required_field() {
+        use crate::domain::ports::runner::DiscoveredStream;
+        use rapidbyte_types::schema::SchemaField;
+
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        // Source and destination validation (initial per-component pass)
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+
+        // Discover returns stream with schema missing "email"
+        let users_schema = StreamSchema {
+            fields: vec![SchemaField::new("id", "int64", false)],
+            primary_key: vec!["id".into()],
+            ..Default::default()
+        };
+        tc.runner.enqueue_discover(Ok(vec![DiscoveredStream {
+            name: "users".into(),
+            catalog_json: "{}".into(),
+            schema: Some(users_schema),
+        }]));
+
+        // Destination requires "email" field
+        let dest_report = CheckComponentStatus {
+            validation: ValidationReport::success("ok").with_field_requirements(vec![
+                FieldRequirement {
+                    field_name: "email".into(),
+                    constraint: FieldConstraint::FieldRequired,
+                    reason: "dedup key".into(),
+                    accepted_types: None,
+                },
+            ]),
+        };
+        tc.runner.enqueue_validate(Ok(dest_report));
+
+        let pipeline = test_pipeline_config();
+        let result = check_pipeline(&tc.ctx, &pipeline).await.unwrap();
+
+        assert_eq!(result.schema_negotiation.len(), 1);
+        assert!(!result.schema_negotiation[0].passed);
+        assert!(result.schema_negotiation[0].errors[0].contains("Required field 'email' missing"));
+    }
+
+    #[tokio::test]
+    async fn check_schema_negotiation_skipped_when_discover_fails() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        // Source and destination validation
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+
+        // Discover fails (no result enqueued; FakePluginRunner returns error)
+        // The default prerequisites call returns passed, discover fails gracefully.
+
+        let pipeline = test_pipeline_config();
+        let result = check_pipeline(&tc.ctx, &pipeline).await.unwrap();
+
+        // Schema negotiation should be empty when discover fails
+        assert!(result.schema_negotiation.is_empty());
     }
 }

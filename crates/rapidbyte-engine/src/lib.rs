@@ -33,7 +33,7 @@ pub use domain::error::PipelineError;
 // Domain outcomes
 pub use domain::outcome::{
     CheckResult, CheckStatus, DestTiming, PipelineCounts, PipelineResult, SourceTiming,
-    StreamShardMetric,
+    StreamNegotiationResult, StreamShardMetric,
 };
 
 // Domain progress

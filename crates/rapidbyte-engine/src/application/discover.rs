@@ -57,6 +57,7 @@ mod tests {
         tc.runner.enqueue_discover(Ok(vec![DiscoveredStream {
             name: "users".into(),
             catalog_json: "{}".into(),
+            schema: None,
         }]));
 
         let streams = discover_plugin(&tc.ctx, "source-pg", None).await.unwrap();
@@ -92,10 +93,12 @@ mod tests {
             DiscoveredStream {
                 name: "orders".into(),
                 catalog_json: r#"{"schema":"public"}"#.into(),
+                schema: None,
             },
             DiscoveredStream {
                 name: "products".into(),
                 catalog_json: "{}".into(),
+                schema: None,
             },
         ]));
 
@@ -134,22 +137,27 @@ mod tests {
             DiscoveredStream {
                 name: "users".into(),
                 catalog_json: "{}".into(),
+                schema: None,
             },
             DiscoveredStream {
                 name: "orders".into(),
                 catalog_json: "{}".into(),
+                schema: None,
             },
             DiscoveredStream {
                 name: "products".into(),
                 catalog_json: "{}".into(),
+                schema: None,
             },
             DiscoveredStream {
                 name: "invoices".into(),
                 catalog_json: "{}".into(),
+                schema: None,
             },
             DiscoveredStream {
                 name: "payments".into(),
                 catalog_json: "{}".into(),
+                schema: None,
             },
         ]));
 
@@ -170,6 +178,7 @@ mod tests {
         tc.runner.enqueue_discover(Ok(vec![DiscoveredStream {
             name: "public.events".into(),
             catalog_json: "{}".into(),
+            schema: None,
         }]));
 
         // Pass None for config

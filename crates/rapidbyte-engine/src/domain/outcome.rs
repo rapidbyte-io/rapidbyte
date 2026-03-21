@@ -3,7 +3,7 @@
 //! These are pure data containers ported from the legacy `outcome` module to
 //! live alongside the domain model.
 
-use rapidbyte_types::validation::ValidationReport;
+use rapidbyte_types::validation::{PrerequisitesReport, ValidationReport};
 
 // ---------------------------------------------------------------------------
 // Pipeline run output
@@ -105,4 +105,23 @@ pub struct CheckResult {
     pub destination_validation: ValidationReport,
     pub transform_validations: Vec<ValidationReport>,
     pub state: CheckStatus,
+    /// Prerequisites check results for the source plugin.
+    pub source_prerequisites: Option<PrerequisitesReport>,
+    /// Prerequisites check results for the destination plugin.
+    pub destination_prerequisites: Option<PrerequisitesReport>,
+    /// Per-stream schema negotiation results.
+    pub schema_negotiation: Vec<StreamNegotiationResult>,
+}
+
+/// Result of schema negotiation for a single stream.
+#[derive(Debug, Clone)]
+pub struct StreamNegotiationResult {
+    /// Stream name this negotiation applies to.
+    pub stream_name: String,
+    /// Whether all field constraints were satisfied.
+    pub passed: bool,
+    /// Errors from field constraint reconciliation.
+    pub errors: Vec<String>,
+    /// Warnings from field constraint reconciliation.
+    pub warnings: Vec<String>,
 }

@@ -19,10 +19,12 @@ use crate::domain::ports::dlq::DlqRepository;
 use crate::domain::ports::metrics::MetricsSnapshot;
 use crate::domain::ports::resolver::{PluginResolver, ResolvedPlugin};
 use crate::domain::ports::run_record::RunRecordRepository;
+use rapidbyte_types::validation::PrerequisitesReport;
+
 use crate::domain::ports::runner::{
     CheckComponentStatus, DestinationOutcome, DestinationRunParams, DiscoverParams,
-    DiscoveredStream, PluginRunner, SourceOutcome, SourceRunParams, TransformOutcome,
-    TransformRunParams, ValidateParams,
+    DiscoveredStream, PluginRunner, PrerequisitesParams, SourceOutcome, SourceRunParams,
+    TransformOutcome, TransformRunParams, ValidateParams,
 };
 use crate::domain::ports::RepositoryError;
 use crate::domain::progress::{ProgressEvent, ProgressReporter};
@@ -57,6 +59,7 @@ pub struct FakePluginRunner {
     dest_results: Mutex<VecDeque<Result<DestinationOutcome, PipelineError>>>,
     validate_results: Mutex<VecDeque<Result<CheckComponentStatus, PipelineError>>>,
     discover_results: Mutex<VecDeque<Result<Vec<DiscoveredStream>, PipelineError>>>,
+    prerequisites_results: Mutex<VecDeque<Result<PrerequisitesReport, PipelineError>>>,
 }
 
 impl FakePluginRunner {
@@ -68,6 +71,7 @@ impl FakePluginRunner {
             dest_results: Mutex::new(VecDeque::new()),
             validate_results: Mutex::new(VecDeque::new()),
             discover_results: Mutex::new(VecDeque::new()),
+            prerequisites_results: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -109,6 +113,14 @@ impl FakePluginRunner {
     /// Panics if the internal mutex is poisoned.
     pub fn enqueue_discover(&self, result: Result<Vec<DiscoveredStream>, PipelineError>) {
         self.discover_results.lock().unwrap().push_back(result);
+    }
+
+    /// Enqueue a prerequisites result to be returned by the next `prerequisites` call.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
+    pub fn enqueue_prerequisites(&self, result: Result<PrerequisitesReport, PipelineError>) {
+        self.prerequisites_results.lock().unwrap().push_back(result);
     }
 }
 
@@ -190,6 +202,17 @@ impl PluginRunner for FakePluginRunner {
                     "FakePluginRunner: no discover result enqueued",
                 ))
             })
+    }
+
+    async fn prerequisites(
+        &self,
+        _params: &PrerequisitesParams,
+    ) -> Result<PrerequisitesReport, PipelineError> {
+        self.prerequisites_results
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Ok(PrerequisitesReport::passed()))
     }
 }
 
