@@ -15,7 +15,8 @@ pub use crate::stream::{CdcResumeToken, PartitionCoordinates};
 pub use crate::context::{Context, LogLevel};
 
 // Errors
-pub use crate::error::{CommitState, PluginError, ValidationResult, ValidationStatus};
+pub use crate::error::{CommitState, PluginError};
+pub use crate::validation::{ValidationReport, ValidationStatus};
 
 // Protocol types — lifecycle
 pub use crate::wire::{Feature, PluginInfo, ProtocolVersion};

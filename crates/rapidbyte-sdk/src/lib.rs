@@ -34,6 +34,7 @@ pub use rapidbyte_types::error;
 pub use rapidbyte_types::manifest;
 pub use rapidbyte_types::metric;
 pub use rapidbyte_types::stream;
+pub use rapidbyte_types::validation;
 pub use rapidbyte_types::wire;
 
 #[cfg(feature = "runtime")]

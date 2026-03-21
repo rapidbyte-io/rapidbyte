@@ -4,17 +4,20 @@ use serde::de::DeserializeOwned;
 
 use crate::catalog::Catalog;
 use crate::context::Context;
-use crate::error::{PluginError, ValidationResult, ValidationStatus};
+use crate::error::PluginError;
 use crate::metric::{ReadSummary, TransformSummary, WriteSummary};
 use crate::stream::StreamContext;
+use crate::validation::{ValidationReport, ValidationStatus};
 use crate::wire::PluginInfo;
 
 /// Default validation response for plugins that do not implement validation.
-pub fn default_validation<C>(_config: &C, _ctx: &Context) -> Result<ValidationResult, PluginError> {
-    Ok(ValidationResult {
+pub fn default_validation<C>(_config: &C, _ctx: &Context) -> Result<ValidationReport, PluginError> {
+    Ok(ValidationReport {
         status: ValidationStatus::Warning,
         message: "Validation not implemented".to_string(),
         warnings: Vec::new(),
+        output_schema: None,
+        field_requirements: None,
     })
 }
 
@@ -33,7 +36,7 @@ pub trait Source: Sized {
     async fn validate(
         config: &Self::Config,
         ctx: &Context,
-    ) -> Result<ValidationResult, PluginError> {
+    ) -> Result<ValidationReport, PluginError> {
         default_validation(config, ctx)
     }
 
@@ -60,7 +63,7 @@ pub trait Destination: Sized {
     async fn validate(
         config: &Self::Config,
         ctx: &Context,
-    ) -> Result<ValidationResult, PluginError> {
+    ) -> Result<ValidationReport, PluginError> {
         default_validation(config, ctx)
     }
 
@@ -93,7 +96,7 @@ pub trait Transform: Sized {
     async fn validate(
         config: &Self::Config,
         ctx: &Context,
-    ) -> Result<ValidationResult, PluginError> {
+    ) -> Result<ValidationReport, PluginError> {
         default_validation(config, ctx)
     }
 
@@ -114,11 +117,12 @@ mod tests {
     use super::*;
     use crate::catalog::Catalog;
     use crate::context::Context;
-    use crate::error::{PluginError, ValidationResult, ValidationStatus};
+    use crate::error::PluginError;
     use crate::metric::{ReadSummary, TransformSummary, WriteSummary};
     use crate::stream::{StreamContext, StreamLimits, StreamPolicies};
+    use crate::validation::{ValidationReport, ValidationStatus};
     use crate::wire::{PluginInfo, ProtocolVersion};
-    use rapidbyte_types::catalog::SchemaHint;
+    use rapidbyte_types::schema::StreamSchema;
     use rapidbyte_types::wire::SyncMode;
     use serde::Deserialize;
 
@@ -267,7 +271,14 @@ mod tests {
         let stream = StreamContext {
             stream_name: "users".to_string(),
             source_stream_name: None,
-            schema: SchemaHint::Columns(Vec::new()),
+            stream_index: 0,
+            schema: StreamSchema {
+                fields: Vec::new(),
+                primary_key: Vec::new(),
+                partition_keys: Vec::new(),
+                source_defined_cursor: None,
+                schema_id: None,
+            },
             sync_mode: SyncMode::FullRefresh,
             cursor_info: None,
             limits: StreamLimits::default(),
