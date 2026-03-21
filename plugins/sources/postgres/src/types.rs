@@ -46,14 +46,44 @@ impl Column {
         self.pg_type == "json" || self.pg_type == "jsonb"
     }
 
-    /// Convert to SDK `ColumnSchema` for catalog discovery.
+    /// Convert to SDK `SchemaField` for catalog discovery.
     #[must_use]
-    pub fn to_schema(&self) -> ColumnSchema {
-        ColumnSchema {
-            name: self.name.clone(),
-            data_type: self.arrow_type,
-            nullable: self.nullable,
-        }
+    pub fn to_schema_field(&self) -> rapidbyte_sdk::schema::SchemaField {
+        rapidbyte_sdk::schema::SchemaField::new(
+            self.name.clone(),
+            arrow_type_canonical_name(self.arrow_type),
+            self.nullable,
+        )
+    }
+}
+
+/// Map an [`ArrowDataType`] to the canonical lowercase name used in [`SchemaField`].
+#[must_use]
+fn arrow_type_canonical_name(dt: ArrowDataType) -> &'static str {
+    match dt {
+        ArrowDataType::Boolean => "boolean",
+        ArrowDataType::Int8 => "int8",
+        ArrowDataType::Int16 => "int16",
+        ArrowDataType::Int32 => "int32",
+        ArrowDataType::Int64 => "int64",
+        ArrowDataType::UInt8 => "uint8",
+        ArrowDataType::UInt16 => "uint16",
+        ArrowDataType::UInt32 => "uint32",
+        ArrowDataType::UInt64 => "uint64",
+        ArrowDataType::Float16 => "float16",
+        ArrowDataType::Float32 => "float32",
+        ArrowDataType::Float64 => "float64",
+        ArrowDataType::Utf8 => "utf8",
+        ArrowDataType::LargeUtf8 => "large_utf8",
+        ArrowDataType::Binary => "binary",
+        ArrowDataType::LargeBinary => "large_binary",
+        ArrowDataType::Date32 => "date32",
+        ArrowDataType::Date64 => "date64",
+        ArrowDataType::TimestampMillis => "timestamp_millis",
+        ArrowDataType::TimestampMicros => "timestamp_micros",
+        ArrowDataType::TimestampNanos => "timestamp_nanos",
+        ArrowDataType::Decimal128 => "decimal128",
+        ArrowDataType::Json => "json",
     }
 }
 
@@ -380,12 +410,12 @@ mod tests {
     }
 
     #[test]
-    fn column_to_schema_conversion() {
+    fn column_to_schema_field_conversion() {
         let col = Column::new("id", "bigint", false);
-        let schema = col.to_schema();
-        assert_eq!(schema.name, "id");
-        assert_eq!(schema.data_type, ArrowDataType::Int64);
-        assert!(!schema.nullable);
+        let field = col.to_schema_field();
+        assert_eq!(field.name, "id");
+        assert_eq!(field.arrow_type, "int64");
+        assert!(!field.nullable);
     }
 
     #[test]

@@ -18,6 +18,7 @@ mod types;
 use std::time::Instant;
 
 use rapidbyte_sdk::prelude::*;
+use rapidbyte_sdk::schema::StreamSchema;
 
 #[rapidbyte_sdk::plugin(source)]
 pub struct SourcePostgres {
@@ -27,39 +28,32 @@ pub struct SourcePostgres {
 impl Source for SourcePostgres {
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
+    async fn init(config: Self::Config) -> Result<Self, PluginError> {
         config.validate()?;
-        Ok((
-            Self { config },
-            PluginInfo {
-                protocol_version: ProtocolVersion::V6,
-                features: vec![Feature::Cdc, Feature::PartitionedRead],
-                default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
-            },
-        ))
+        Ok(Self { config })
     }
 
-    async fn discover(&mut self, ctx: &Context) -> Result<Catalog, PluginError> {
+    async fn discover(&self, ctx: &Context) -> Result<Vec<DiscoveredStream>, PluginError> {
         let _ = ctx;
         let client = client::connect(&self.config)
             .await
             .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
         discovery::discover_catalog(&client)
             .await
-            .map(|streams| Catalog { streams })
             .map_err(|e| PluginError::transient_db("DISCOVERY_FAILED", e))
     }
 
     async fn validate(
-        config: &Self::Config,
+        &self,
         ctx: &Context,
-    ) -> Result<ValidationResult, PluginError> {
+        _upstream: Option<&StreamSchema>,
+    ) -> Result<ValidationReport, PluginError> {
         let _ = ctx;
-        client::validate(config).await
+        client::validate(&self.config).await
     }
 
     async fn read(
-        &mut self,
+        &self,
         ctx: &Context,
         stream: StreamContext,
     ) -> Result<ReadSummary, PluginError> {
@@ -74,7 +68,7 @@ impl Source for SourcePostgres {
             .map_err(|e| PluginError::internal("READ_FAILED", e))
     }
 
-    async fn close(&mut self, ctx: &Context) -> Result<(), PluginError> {
+    async fn close(&self, ctx: &Context) -> Result<(), PluginError> {
         ctx.log(LogLevel::Info, "source-postgres: close (no-op)");
         Ok(())
     }
@@ -82,7 +76,7 @@ impl Source for SourcePostgres {
 
 impl PartitionedSource for SourcePostgres {
     async fn read_partition(
-        &mut self,
+        &self,
         ctx: &Context,
         stream: StreamContext,
         _partition: PartitionCoordinates,
@@ -95,7 +89,7 @@ impl PartitionedSource for SourcePostgres {
 
 impl CdcSource for SourcePostgres {
     async fn read_changes(
-        &mut self,
+        &self,
         ctx: &Context,
         stream: StreamContext,
         _resume: CdcResumeToken,

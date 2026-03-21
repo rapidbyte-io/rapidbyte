@@ -18,7 +18,7 @@ use crate::stream::{CdcResumeToken, PartitionCoordinates, StreamContext};
 #[allow(async_fn_in_trait)]
 pub trait PartitionedSource {
     async fn read_partition(
-        &mut self,
+        &self,
         ctx: &Context,
         stream: StreamContext,
         partition: PartitionCoordinates,
@@ -32,7 +32,7 @@ pub trait PartitionedSource {
 #[allow(async_fn_in_trait)]
 pub trait CdcSource {
     async fn read_changes(
-        &mut self,
+        &self,
         ctx: &Context,
         stream: StreamContext,
         resume: CdcResumeToken,

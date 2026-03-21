@@ -1,9 +1,10 @@
 //! Schema introspection for `PostgreSQL`.
 //!
 //! Queries `information_schema` to discover available tables and columns,
-//! returning `Stream` definitions for the catalog.
+//! returning `DiscoveredStream` definitions for the catalog.
 
 use rapidbyte_sdk::prelude::*;
+use rapidbyte_sdk::schema::StreamSchema;
 use tokio_postgres::Client;
 
 use crate::types::Column;
@@ -14,7 +15,7 @@ use crate::types::Column;
 ///
 /// Returns `Err` if the `information_schema` query fails or result parsing
 /// encounters an unexpected column type.
-pub async fn discover_catalog(client: &Client) -> Result<Vec<Stream>, String> {
+pub async fn discover_catalog(client: &Client) -> Result<Vec<DiscoveredStream>, String> {
     let query = r"
         SELECT
             t.table_name,
@@ -34,7 +35,7 @@ pub async fn discover_catalog(client: &Client) -> Result<Vec<Stream>, String> {
         .await
         .map_err(|e| format!("discovery query failed: {e}"))?;
 
-    let mut streams: Vec<Stream> = Vec::new();
+    let mut streams: Vec<DiscoveredStream> = Vec::new();
     let mut current_table: Option<String> = None;
     let mut current_columns: Vec<Column> = Vec::new();
 
@@ -96,12 +97,19 @@ pub(crate) async fn query_table_columns(
     Ok(columns)
 }
 
-fn build_stream(table: &str, columns: &[Column]) -> Stream {
-    Stream {
+fn build_stream(table: &str, columns: &[Column]) -> DiscoveredStream {
+    DiscoveredStream {
         name: table.to_string(),
-        schema: columns.iter().map(Column::to_schema).collect(),
+        schema: StreamSchema {
+            fields: columns.iter().map(Column::to_schema_field).collect(),
+            primary_key: vec![],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        },
         supported_sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental, SyncMode::Cdc],
-        source_defined_cursor: None,
-        source_defined_primary_key: None,
+        default_cursor_field: None,
+        estimated_row_count: None,
+        metadata_json: None,
     }
 }
