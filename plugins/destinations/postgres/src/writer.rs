@@ -4,9 +4,8 @@ use std::time::Instant;
 
 use rapidbyte_sdk::prelude::*;
 
-use crate::contract::{
-    async_prepare_stream_once, prepare_stream_once, schema_hint_has_shape, CheckpointConfig,
-};
+use crate::apply::prepare_stream_contract;
+use crate::contract::{prepare_stream_once, schema_hint_has_shape, CheckpointConfig, WriteContract};
 use crate::metrics::emit_dest_timings;
 use crate::session::{clamp_copy_flush_bytes, WriteSession};
 
@@ -28,6 +27,7 @@ fn resolve_copy_flush_bytes(
 /// Entry point for writing a single stream.
 pub async fn write_stream(
     config: &crate::config::Config,
+    prepared: Option<WriteContract>,
     ctx: &Context,
     stream: &StreamContext,
 ) -> Result<WriteSummary, PluginError> {
@@ -37,31 +37,35 @@ pub async fn write_stream(
         .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
     let connect_secs = connect_start.elapsed().as_secs_f64();
 
-    let setup = prepare_stream_once(
-        &config.schema,
-        &stream.stream_name,
-        stream.write_mode.clone(),
-        &stream.schema,
-        stream.partition_count.unwrap_or(1) <= 1,
-        stream.policies.schema_evolution,
-        CheckpointConfig {
-            bytes: stream.limits.checkpoint_interval_bytes,
-            rows: stream.limits.checkpoint_interval_rows,
-            seconds: stream.limits.checkpoint_interval_seconds,
-        },
-        resolve_copy_flush_bytes(stream.copy_flush_bytes_override, config.copy_flush_bytes),
-        config.load_method,
-    )
-    .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
-    let skip_mutable_setup = stream.partition_count.unwrap_or(1) > 1
-        && !setup.is_replace
-        && schema_hint_has_shape(&stream.schema);
-    let setup = if skip_mutable_setup {
-        setup
+    let setup = if let Some(prepared) = prepared {
+        prepared
     } else {
-        async_prepare_stream_once(ctx, &client, &stream.schema, setup)
-            .await
-            .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
+        let setup = prepare_stream_once(
+            &config.schema,
+            &stream.stream_name,
+            stream.write_mode.clone(),
+            &stream.schema,
+            stream.partition_count.unwrap_or(1) <= 1,
+            stream.policies.schema_evolution,
+            CheckpointConfig {
+                bytes: stream.limits.checkpoint_interval_bytes,
+                rows: stream.limits.checkpoint_interval_rows,
+                seconds: stream.limits.checkpoint_interval_seconds,
+            },
+            resolve_copy_flush_bytes(stream.copy_flush_bytes_override, config.copy_flush_bytes),
+            config.load_method,
+        )
+        .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
+        let skip_mutable_setup = stream.partition_count.unwrap_or(1) > 1
+            && !setup.is_replace
+            && schema_hint_has_shape(&stream.schema);
+        if skip_mutable_setup {
+            setup
+        } else {
+            prepare_stream_contract(ctx, &client, stream, setup)
+                .await
+                .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
+        }
     };
 
     let mut session = WriteSession::begin(ctx, &client, &config.schema, setup)

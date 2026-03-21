@@ -12,31 +12,53 @@ mod decode;
 mod insert;
 mod metrics;
 mod pg_error;
+mod prerequisites;
 mod session;
 mod types;
+mod validate;
+mod apply;
 mod watermark;
 mod writer;
+
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use rapidbyte_sdk::prelude::*;
 
 #[rapidbyte_sdk::plugin(destination)]
 pub struct DestPostgres {
     config: config::Config,
+    prepared_contracts: Mutex<HashMap<String, contract::WriteContract>>,
 }
 
 impl Destination for DestPostgres {
     type Config = config::Config;
 
     async fn init(config: Self::Config) -> Result<Self, PluginError> {
-        Ok(Self { config })
+        Ok(Self {
+            config,
+            prepared_contracts: Mutex::new(HashMap::new()),
+        })
+    }
+
+    async fn prerequisites(&self, ctx: &Context) -> Result<PrerequisitesReport, PluginError> {
+        prerequisites::prerequisites(&self.config, ctx).await
     }
 
     async fn validate(
         &self,
         _ctx: &Context,
-        _upstream: Option<&rapidbyte_sdk::schema::StreamSchema>,
+        upstream: Option<&rapidbyte_sdk::schema::StreamSchema>,
     ) -> Result<ValidationReport, PluginError> {
-        client::validate(&self.config).await
+        validate::validate(&self.config, upstream)
+    }
+
+    async fn apply(
+        &self,
+        ctx: &Context,
+        request: ApplyRequest,
+    ) -> Result<ApplyReport, PluginError> {
+        apply::apply(&self.config, ctx, request, &self.prepared_contracts).await
     }
 
     async fn write(
@@ -44,7 +66,13 @@ impl Destination for DestPostgres {
         ctx: &Context,
         stream: StreamContext,
     ) -> Result<WriteSummary, PluginError> {
-        writer::write_stream(&self.config, ctx, &stream).await
+        let prepared = self
+            .prepared_contracts
+            .lock()
+            .expect("prepared contract cache poisoned")
+            .get(&stream.stream_name)
+            .cloned();
+        writer::write_stream(&self.config, prepared, ctx, &stream).await
     }
 
     async fn close(&self, ctx: &Context) -> Result<(), PluginError> {
@@ -59,7 +87,13 @@ impl BulkDestination for DestPostgres {
         ctx: &Context,
         stream: StreamContext,
     ) -> Result<WriteSummary, PluginError> {
-        writer::write_stream(&self.config, ctx, &stream).await
+        let prepared = self
+            .prepared_contracts
+            .lock()
+            .expect("prepared contract cache poisoned")
+            .get(&stream.stream_name)
+            .cloned();
+        writer::write_stream(&self.config, prepared, ctx, &stream).await
     }
 }
 
@@ -73,5 +107,28 @@ mod tests {
     #[test]
     fn dest_postgres_implements_bulk_destination() {
         assert_bulk_destination_impl::<DestPostgres>();
+    }
+
+    #[test]
+    fn dest_postgres_starts_without_prepared_contracts() {
+        let plugin = DestPostgres {
+            config: config::Config {
+                host: "localhost".to_string(),
+                port: 5432,
+                user: "postgres".to_string(),
+                password: String::new(),
+                database: "postgres".to_string(),
+                schema: "public".to_string(),
+                load_method: config::LoadMethod::Copy,
+                copy_flush_bytes: None,
+            },
+            prepared_contracts: Mutex::new(HashMap::new()),
+        };
+
+        assert!(plugin
+            .prepared_contracts
+            .lock()
+            .expect("prepared contract cache")
+            .is_empty());
     }
 }
