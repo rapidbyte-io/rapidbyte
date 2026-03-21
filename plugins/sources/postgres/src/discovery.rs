@@ -1,65 +1,93 @@
 //! Schema introspection for `PostgreSQL`.
 //!
-//! Queries `information_schema` to discover available tables and columns,
-//! returning typed `DiscoveredStream` definitions.
+//! Queries `information_schema` and publication metadata to discover available
+//! tables and columns, returning typed `DiscoveredStream` definitions.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::schema::StreamSchema;
 use tokio_postgres::Client;
 
+use crate::config::current_discovery_settings;
 use crate::types::Column;
 
-/// Discover all base tables and columns in the `public` schema.
+/// Discovery metadata for a single column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DiscoveryColumn {
+    pub name: String,
+    pub pg_type: String,
+    pub nullable: bool,
+    pub is_primary_key: bool,
+    pub is_generated: bool,
+}
+
+impl DiscoveryColumn {
+    #[must_use]
+    fn to_schema_field(&self) -> rapidbyte_sdk::schema::SchemaField {
+        Column::new(&self.name, &self.pg_type, self.nullable)
+            .to_schema_field_with_flags(self.is_primary_key, self.is_generated)
+    }
+
+    #[must_use]
+    fn as_column(&self) -> Column {
+        Column::new(&self.name, &self.pg_type, self.nullable)
+    }
+}
+
+/// Discover tables and columns using the current cached discovery settings.
 ///
 /// # Errors
 ///
-/// Returns `Err` if the `information_schema` query fails or result parsing
-/// encounters an unexpected column type.
+/// Returns `Err` if any catalog query fails or result parsing encounters an
+/// unexpected column type.
 pub async fn discover_catalog(client: &Client) -> Result<Vec<DiscoveredStream>, String> {
-    let query = r"
-        SELECT
-            t.table_name,
-            c.column_name,
-            c.data_type,
-            CASE WHEN c.is_nullable = 'YES' THEN true ELSE false END as nullable
-        FROM information_schema.tables t
-        JOIN information_schema.columns c
-            ON t.table_schema = c.table_schema AND t.table_name = c.table_name
-        WHERE t.table_schema = 'public'
-            AND t.table_type = 'BASE TABLE'
-        ORDER BY t.table_name, c.ordinal_position
-    ";
+    let settings = current_discovery_settings();
+    let schema_name = settings.schema.as_deref().unwrap_or("public");
 
-    let rows = client
-        .query(query, &[])
-        .await
-        .map_err(|e| format!("discovery query failed: {e}"))?;
+    let mut table_rows = query_catalog_rows(client, schema_name).await?;
+    let primary_keys = query_primary_keys(client, schema_name).await?;
 
-    let mut streams: Vec<DiscoveredStream> = Vec::new();
-    let mut current_table: Option<String> = None;
-    let mut current_columns: Vec<Column> = Vec::new();
+    let published_tables = match settings.publication.as_deref() {
+        Some(publication_name) => Some(
+            query_publication_tables(client, schema_name, publication_name).await?,
+        ),
+        None => None,
+    };
 
-    for row in &rows {
-        let table: String = row.get(0);
-        let col_name: String = row.get(1);
-        let data_type: String = row.get(2);
-        let nullable: bool = row.get(3);
+    table_rows.sort_by(|left, right| {
+        (left.schema.as_str(), left.table.as_str(), left.ordinal_position)
+            .cmp(&(right.schema.as_str(), right.table.as_str(), right.ordinal_position))
+    });
 
-        // Flush previous table when table name changes
-        if current_table.as_ref() != Some(&table) {
-            if let Some(prev_table) = current_table.take() {
-                streams.push(build_stream(&prev_table, &current_columns));
-                current_columns.clear();
-            }
-            current_table = Some(table);
-        }
-
-        current_columns.push(Column::new(&col_name, &data_type, nullable));
+    let mut grouped: BTreeMap<(String, String), Vec<DiscoveryColumn>> = BTreeMap::new();
+    for row in table_rows {
+        grouped
+            .entry((row.schema, row.table))
+            .or_default()
+            .push(DiscoveryColumn {
+                name: row.column,
+                pg_type: row.data_type,
+                nullable: row.nullable,
+                is_primary_key: false,
+                is_generated: row.is_generated,
+            });
     }
 
-    // Flush final table
-    if let Some(table) = current_table {
-        streams.push(build_stream(&table, &current_columns));
+    let mut streams = Vec::with_capacity(grouped.len());
+    for ((schema, table), mut columns) in grouped {
+        if let Some(primary_key_columns) = primary_keys.get(&(schema.clone(), table.clone())) {
+            for column in &mut columns {
+                column.is_primary_key = primary_key_columns.contains(&column.name);
+            }
+        }
+
+        let stream = build_discovered_stream(&schema, &table, &columns, settings.publication.as_deref());
+        streams.push(stream);
+    }
+
+    if let Some(published_tables) = published_tables {
+        streams = filter_published_streams(streams, &published_tables);
     }
 
     Ok(streams)
@@ -70,15 +98,211 @@ pub(crate) async fn query_table_columns(
     client: &Client,
     table_name: &str,
 ) -> Result<Vec<Column>, String> {
-    let query = "SELECT column_name, data_type, is_nullable \
-        FROM information_schema.columns \
-        WHERE table_schema = 'public' AND table_name = $1 \
-        ORDER BY ordinal_position";
+    let settings = current_discovery_settings();
+    let schema_name = settings.schema.as_deref().unwrap_or("public");
+    query_table_columns_in_schema(client, schema_name, table_name).await
+}
+
+fn build_discovered_stream(
+    schema_name: &str,
+    table_name: &str,
+    columns: &[DiscoveryColumn],
+    publication: Option<&str>,
+) -> DiscoveredStream {
+    let fields = columns
+        .iter()
+        .map(DiscoveryColumn::to_schema_field)
+        .collect::<Vec<_>>();
+    let primary_key = columns
+        .iter()
+        .filter(|column| column.is_primary_key)
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    let default_cursor_field = suggest_cursor_field(columns);
+
+    DiscoveredStream {
+        name: table_name.to_string(),
+        schema: StreamSchema {
+            fields,
+            primary_key: primary_key.clone(),
+            partition_keys: vec![],
+            source_defined_cursor: default_cursor_field.clone(),
+            schema_id: None,
+        },
+        supported_sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental, SyncMode::Cdc],
+        default_cursor_field,
+        estimated_row_count: None,
+        metadata_json: build_metadata_json(schema_name, publication),
+    }
+}
+
+fn build_metadata_json(schema_name: &str, publication: Option<&str>) -> Option<String> {
+    let include_schema = schema_name != "public" || publication.is_some();
+    if !include_schema {
+        return None;
+    }
+
+    let mut metadata = serde_json::Map::new();
+    metadata.insert(
+        "schema".to_string(),
+        serde_json::Value::String(schema_name.to_string()),
+    );
+    if let Some(publication) = publication {
+        metadata.insert(
+            "publication".to_string(),
+            serde_json::Value::String(publication.to_string()),
+        );
+    }
+
+    Some(serde_json::Value::Object(metadata).to_string())
+}
+
+fn filter_published_streams(
+    streams: Vec<DiscoveredStream>,
+    published_tables: &HashSet<String>,
+) -> Vec<DiscoveredStream> {
+    streams
+        .into_iter()
+        .filter(|stream| published_tables.contains(&stream.name))
+        .collect()
+}
+
+fn suggest_cursor_field(columns: &[DiscoveryColumn]) -> Option<String> {
+    let mut candidates = columns
+        .iter()
+        .filter(|column| !column.is_primary_key && !column.is_generated)
+        .filter(|column| {
+            let info = column.as_column();
+            info.is_cursor_candidate()
+        })
+        .collect::<Vec<_>>();
+
+    candidates.sort_by_key(|column| {
+        let info = column.as_column();
+        (info.cursor_suggestion_rank(), info.name.clone())
+    });
+
+    candidates.first().map(|column| column.name.clone())
+}
+
+async fn query_catalog_rows(
+    client: &Client,
+    schema_name: &str,
+) -> Result<Vec<CatalogRow>, String> {
+    let query = r"
+        SELECT
+            t.table_schema,
+            t.table_name,
+            c.column_name,
+            c.data_type,
+            CASE WHEN c.is_nullable = 'YES' THEN true ELSE false END AS nullable,
+            CASE WHEN c.is_generated = 'ALWAYS' THEN true ELSE false END AS is_generated,
+            c.ordinal_position
+        FROM information_schema.tables t
+        JOIN information_schema.columns c
+          ON t.table_schema = c.table_schema
+         AND t.table_name = c.table_name
+        WHERE t.table_schema = $1
+          AND t.table_type = 'BASE TABLE'
+        ORDER BY t.table_schema, t.table_name, c.ordinal_position
+    ";
 
     let rows = client
-        .query(query, &[&table_name])
+        .query(query, &[&schema_name])
         .await
-        .map_err(|e| format!("Schema query failed for {table_name}: {e}"))?;
+        .map_err(|e| format!("discovery query failed for schema '{schema_name}': {e}"))?;
+
+    let mut catalog_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        catalog_rows.push(CatalogRow {
+            schema: row.get(0),
+            table: row.get(1),
+            column: row.get(2),
+            data_type: row.get(3),
+            nullable: row.get(4),
+            is_generated: row.get(5),
+            ordinal_position: row.get(6),
+        });
+    }
+
+    Ok(catalog_rows)
+}
+
+async fn query_primary_keys(
+    client: &Client,
+    schema_name: &str,
+) -> Result<HashMap<(String, String), Vec<String>>, String> {
+    let query = r"
+        SELECT
+            kcu.table_schema,
+            kcu.table_name,
+            kcu.column_name
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema = kcu.table_schema
+         AND tc.table_name = kcu.table_name
+        WHERE tc.constraint_type = 'PRIMARY KEY'
+          AND tc.table_schema = $1
+        ORDER BY kcu.ordinal_position
+    ";
+
+    let rows = client
+        .query(query, &[&schema_name])
+        .await
+        .map_err(|e| format!("primary key discovery failed for schema '{schema_name}': {e}"))?;
+
+    let mut primary_keys: HashMap<(String, String), Vec<String>> = HashMap::new();
+    for row in rows {
+        let key = (row.get::<_, String>(0), row.get::<_, String>(1));
+        let column: String = row.get(2);
+        primary_keys.entry(key).or_default().push(column);
+    }
+
+    Ok(primary_keys)
+}
+
+async fn query_publication_tables(
+    client: &Client,
+    schema_name: &str,
+    publication_name: &str,
+) -> Result<HashSet<String>, String> {
+    let query = r"
+        SELECT schemaname, tablename
+        FROM pg_catalog.pg_publication_tables
+        WHERE pubname = $1 AND schemaname = $2
+    ";
+
+    let rows = client
+        .query(query, &[&publication_name, &schema_name])
+        .await
+        .map_err(|e| format!("publication discovery failed for '{publication_name}': {e}"))?;
+
+    let mut tables = HashSet::with_capacity(rows.len());
+    for row in rows {
+        let table: String = row.get(1);
+        tables.insert(table);
+    }
+
+    Ok(tables)
+}
+
+async fn query_table_columns_in_schema(
+    client: &Client,
+    schema_name: &str,
+    table_name: &str,
+) -> Result<Vec<Column>, String> {
+    let query = r"
+        SELECT column_name, data_type, is_nullable
+        FROM information_schema.columns
+        WHERE table_schema = $1 AND table_name = $2
+        ORDER BY ordinal_position
+    ";
+
+    let rows = client
+        .query(query, &[&schema_name, &table_name])
+        .await
+        .map_err(|e| format!("Schema query failed for {schema_name}.{table_name}: {e}"))?;
 
     let columns: Vec<Column> = rows
         .iter()
@@ -91,25 +315,121 @@ pub(crate) async fn query_table_columns(
         .collect();
 
     if columns.is_empty() {
-        return Err(format!("Table '{table_name}' not found or has no columns"));
+        return Err(format!(
+            "Table '{schema_name}.{table_name}' not found or has no columns"
+        ));
     }
 
     Ok(columns)
 }
 
-fn build_stream(table: &str, columns: &[Column]) -> DiscoveredStream {
-    DiscoveredStream {
-        name: table.to_string(),
-        schema: StreamSchema {
-            fields: columns.iter().map(Column::to_schema_field).collect(),
-            primary_key: vec![],
-            partition_keys: vec![],
-            source_defined_cursor: None,
-            schema_id: None,
-        },
-        supported_sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental, SyncMode::Cdc],
-        default_cursor_field: None,
-        estimated_row_count: None,
-        metadata_json: None,
+#[derive(Debug)]
+struct CatalogRow {
+    schema: String,
+    table: String,
+    column: String,
+    data_type: String,
+    nullable: bool,
+    is_generated: bool,
+    ordinal_position: i32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn column(
+        name: &str,
+        pg_type: &str,
+        nullable: bool,
+        is_primary_key: bool,
+        is_generated: bool,
+    ) -> DiscoveryColumn {
+        DiscoveryColumn {
+            name: name.to_string(),
+            pg_type: pg_type.to_string(),
+            nullable,
+            is_primary_key,
+            is_generated,
+        }
+    }
+
+    #[test]
+    fn build_discovered_stream_marks_primary_key_columns() {
+        let columns = vec![
+            column("id", "int4", false, true, false),
+            column("name", "text", false, false, false),
+        ];
+
+        let stream = build_discovered_stream("analytics", "users", &columns, None);
+
+        assert_eq!(stream.name, "users");
+        assert_eq!(stream.schema.primary_key, vec!["id"]);
+        assert!(stream.schema.fields[0].is_primary_key);
+        assert!(!stream.schema.fields[1].is_primary_key);
+    }
+
+    #[test]
+    fn build_discovered_stream_marks_generated_columns() {
+        let columns = vec![
+            column("id", "int4", false, true, false),
+            column("row_hash", "text", false, false, true),
+        ];
+
+        let stream = build_discovered_stream("analytics", "events", &columns, None);
+
+        assert!(stream.schema.fields[1].is_generated);
+    }
+
+    #[test]
+    fn build_discovered_stream_records_non_public_schema_metadata() {
+        let columns = vec![column("id", "int4", false, true, false)];
+
+        let stream = build_discovered_stream("reporting", "invoices", &columns, None);
+
+        assert_eq!(stream.name, "invoices");
+        assert_eq!(
+            stream.metadata_json.as_deref(),
+            Some(r#"{"schema":"reporting"}"#)
+        );
+    }
+
+    #[test]
+    fn publication_filtering_discards_unpublished_tables() {
+        let streams = vec![
+            build_discovered_stream(
+                "public",
+                "users",
+                &[column("id", "int4", false, true, false)],
+                None,
+            ),
+            build_discovered_stream(
+                "analytics",
+                "events",
+                &[column("id", "int4", false, true, false)],
+                None,
+            ),
+        ];
+        let published = HashSet::from(["events".to_string()]);
+
+        let filtered = filter_published_streams(streams, &published);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "events");
+    }
+
+    #[test]
+    fn cursor_field_suggestion_prefers_updated_at() {
+        let columns = vec![
+            column("id", "int4", false, true, false),
+            column("created_at", "timestamp", false, false, false),
+            column("updated_at", "timestamp", false, false, false),
+            column("generated_at", "timestamp", false, false, true),
+        ];
+
+        assert_eq!(
+            suggest_cursor_field(&columns),
+            Some("updated_at".to_string())
+        );
     }
 }

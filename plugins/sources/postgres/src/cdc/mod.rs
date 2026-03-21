@@ -505,6 +505,7 @@ mod tests {
             user: "postgres".to_string(),
             password: String::new(),
             database: "test_db".to_string(),
+            schema: None,
             replication_slot: None,
             publication: None,
         };
@@ -523,6 +524,7 @@ mod tests {
             user: "postgres".to_string(),
             password: String::new(),
             database: "test_db".to_string(),
+            schema: None,
             replication_slot: Some("slot_a".to_string()),
             publication: None,
         };
@@ -541,6 +543,7 @@ mod tests {
             user: "postgres".to_string(),
             password: String::new(),
             database: "test_db".to_string(),
+            schema: None,
             replication_slot: None,
             publication: Some("pub_a".to_string()),
         };

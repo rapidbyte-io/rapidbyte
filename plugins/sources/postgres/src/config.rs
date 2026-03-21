@@ -1,8 +1,18 @@
 //! Source `PostgreSQL` plugin configuration.
 
+use std::sync::{Mutex, OnceLock};
+
 use rapidbyte_sdk::error::PluginError;
 use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DiscoverySettings {
+    pub schema: Option<String>,
+    pub publication: Option<String>,
+}
+
+static DISCOVERY_SETTINGS: OnceLock<Mutex<DiscoverySettings>> = OnceLock::new();
 
 /// `PostgreSQL` connection config from pipeline YAML.
 #[derive(Debug, Clone, Deserialize, ConfigSchema)]
@@ -21,6 +31,9 @@ pub struct Config {
     pub password: String,
     /// Database name
     pub database: String,
+    /// Schema to discover. Defaults to `public`.
+    #[serde(default)]
+    pub schema: Option<String>,
     /// Logical replication slot name for CDC mode. Defaults to rapidbyte_{`stream_name`}.
     #[serde(default)]
     pub replication_slot: Option<String>,
@@ -38,14 +51,38 @@ impl Config {
     /// Returns `Err` if `replication_slot` or `publication` is empty or exceeds the
     /// 63-byte `PostgreSQL` identifier limit.
     pub fn validate(&self) -> Result<(), PluginError> {
+        if let Some(schema) = self.schema.as_ref() {
+            validate_identifier("schema", schema)?;
+        }
         if let Some(slot) = self.replication_slot.as_ref() {
             validate_replication_slot_name(slot)?;
         }
         if let Some(pub_name) = self.publication.as_ref() {
             validate_identifier("publication", pub_name)?;
         }
+        cache_discovery_settings(self);
         Ok(())
     }
+}
+
+pub(crate) fn current_discovery_settings() -> DiscoverySettings {
+    discovery_settings_lock()
+        .lock()
+        .expect("discovery settings lock poisoned")
+        .clone()
+}
+
+fn cache_discovery_settings(config: &Config) {
+    *discovery_settings_lock()
+        .lock()
+        .expect("discovery settings lock poisoned") = DiscoverySettings {
+        schema: config.schema.clone(),
+        publication: config.publication.clone(),
+    };
+}
+
+fn discovery_settings_lock() -> &'static Mutex<DiscoverySettings> {
+    DISCOVERY_SETTINGS.get_or_init(|| Mutex::new(DiscoverySettings::default()))
 }
 
 fn validate_identifier(field: &str, value: &str) -> Result<(), PluginError> {
@@ -103,6 +140,7 @@ mod tests {
             user: "postgres".to_string(),
             password: String::new(),
             database: "test".to_string(),
+            schema: None,
             replication_slot: None,
             publication: None,
         }
@@ -112,6 +150,15 @@ mod tests {
     fn validate_accepts_publication_name() {
         let cfg = Config {
             publication: Some("my_pub".to_string()),
+            ..base_config()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_schema_selection() {
+        let cfg = Config {
+            schema: Some("analytics".to_string()),
             ..base_config()
         };
         assert!(cfg.validate().is_ok());
