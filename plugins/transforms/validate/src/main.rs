@@ -17,40 +17,24 @@ pub struct TransformValidate {
 impl Transform for TransformValidate {
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
+    async fn init(config: Self::Config) -> Result<Self, PluginError> {
         let compiled = config.compile().map_err(|message| {
             PluginError::config("VALIDATE_CONFIG", format!("Invalid validation config: {message}"))
         })?;
-        Ok((
-            Self { config: compiled },
-            PluginInfo {
-                protocol_version: ProtocolVersion::V6,
-                features: vec![],
-                default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
-            },
-        ))
+        Ok(Self { config: compiled })
     }
 
     async fn validate(
-        config: &Self::Config,
+        &self,
         _ctx: &Context,
-    ) -> Result<ValidationResult, PluginError> {
-        match config.compile() {
-            Ok(_) => Ok(ValidationResult {
-                status: ValidationStatus::Success,
-                message: "Validation transform config is valid".to_string(),
-                warnings: Vec::new(),
-            }),
-            Err(message) => Ok(ValidationResult {
-                status: ValidationStatus::Failed,
-                message,
-                warnings: Vec::new(),
-            }),
-        }
+        _upstream: Option<&StreamSchema>,
+    ) -> Result<ValidationReport, PluginError> {
+        // Config was already validated in init() — if we got here, it's valid
+        Ok(ValidationReport::success("Validation transform config is valid"))
     }
 
     async fn transform(
-        &mut self,
+        &self,
         ctx: &Context,
         stream: StreamContext,
     ) -> Result<TransformSummary, PluginError> {

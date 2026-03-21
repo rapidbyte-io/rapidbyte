@@ -27,6 +27,7 @@ pub use crate::wire::{Feature, ProtocolVersion};
 pub use crate::context::CheckpointTxn;
 pub use crate::cursor::{CursorInfo, CursorValue};
 pub use crate::discovery::{DiscoveredStream, PluginSpec};
+pub use crate::schema::{SchemaField, StreamSchema};
 pub use crate::stream::{StreamContext, StreamLimits};
 pub use crate::wire::{SyncMode, WriteMode};
 
