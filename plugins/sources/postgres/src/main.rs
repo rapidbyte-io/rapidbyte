@@ -106,9 +106,39 @@ impl CdcSource for SourcePostgres {
             .await
             .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
         let connect_secs = connect_start.elapsed().as_secs_f64();
+        let resume = normalize_cdc_resume_token(&_resume);
 
-        cdc::read_cdc_changes(&client, ctx, &stream, &_resume, &self.config, connect_secs)
+        cdc::read_cdc_changes(&client, ctx, &stream, &resume, &self.config, connect_secs)
             .await
             .map_err(|e| PluginError::internal("CDC_READ_FAILED", e))
+    }
+}
+
+fn normalize_cdc_resume_token(resume: &CdcResumeToken) -> CdcResumeToken {
+    if resume.value.is_none() {
+        CdcResumeToken {
+            value: None,
+            cursor_type: rapidbyte_sdk::cursor::CursorType::Lsn,
+        }
+    } else {
+        resume.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_cdc_resume_token;
+    use rapidbyte_sdk::cursor::CursorType;
+    use rapidbyte_sdk::stream::CdcResumeToken;
+
+    #[test]
+    fn normalize_cdc_resume_token_promotes_missing_resume_to_lsn() {
+        let normalized = normalize_cdc_resume_token(&CdcResumeToken {
+            value: None,
+            cursor_type: CursorType::Utf8,
+        });
+
+        assert_eq!(normalized.value, None);
+        assert_eq!(normalized.cursor_type, CursorType::Lsn);
     }
 }
