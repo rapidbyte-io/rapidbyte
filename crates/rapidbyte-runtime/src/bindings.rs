@@ -200,6 +200,10 @@ macro_rules! impl_host_trait_for_world {
                 self.next_batch_impl().map_err($to_world_error)
             }
 
+            fn current_stream_name(&mut self) -> String {
+                self.current_stream().to_string()
+            }
+
             fn next_batch_metadata(
                 &mut self,
                 handle: u64,

@@ -830,6 +830,8 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
             stream: &::rapidbyte_sdk::stream::StreamContext,
             summary: ::rapidbyte_sdk::metric::ReadSummary,
         ) -> ::rapidbyte_sdk::run::RunSummary {
+            let stream_failed =
+                ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
             let outcome = serde_json::json!({
                 "records_read": summary.records_read,
                 "bytes_read": summary.bytes_read,
@@ -842,7 +844,7 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
                     stream_index: stream.stream_index,
                     stream_name: stream.stream_name.clone(),
                     outcome_json: outcome.to_string(),
-                    succeeded: true,
+                    succeeded: !stream_failed,
                 }],
             }
         }
@@ -852,6 +854,8 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
             stream: &::rapidbyte_sdk::stream::StreamContext,
             summary: ::rapidbyte_sdk::metric::WriteSummary,
         ) -> ::rapidbyte_sdk::run::RunSummary {
+            let stream_failed =
+                ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
             let outcome = serde_json::json!({
                 "records_written": summary.records_written,
                 "bytes_written": summary.bytes_written,
@@ -864,7 +868,7 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
                     stream_index: stream.stream_index,
                     stream_name: stream.stream_name.clone(),
                     outcome_json: outcome.to_string(),
-                    succeeded: true,
+                    succeeded: !stream_failed,
                 }],
             }
         }
@@ -874,6 +878,8 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
             stream: &::rapidbyte_sdk::stream::StreamContext,
             summary: ::rapidbyte_sdk::metric::TransformSummary,
         ) -> ::rapidbyte_sdk::run::RunSummary {
+            let stream_failed =
+                ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
             let outcome = serde_json::json!({
                 "records_in": summary.records_in,
                 "records_out": summary.records_out,
@@ -886,7 +892,7 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
                     stream_index: stream.stream_index,
                     stream_name: stream.stream_name.clone(),
                     outcome_json: outcome.to_string(),
-                    succeeded: true,
+                    succeeded: !stream_failed,
                 }],
             }
         }
@@ -953,7 +959,7 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
 
             let _ = CONTEXT.set(::rapidbyte_sdk::context::Context::new(
                 env!("CARGO_PKG_NAME"),
-                "",
+                ::rapidbyte_sdk::host_ffi::current_stream_name(),
             ));
             *get_state().borrow_mut() = Some(instance);
             Ok(1)
@@ -966,7 +972,10 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
             __rb_bindings::rapidbyte::plugin::types::ValidationReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let ctx = CONTEXT.get().expect("open must be called before validate");
+            let ctx = CONTEXT
+                .get()
+                .expect("open must be called before validate")
+                .with_stream(::rapidbyte_sdk::host_ffi::current_stream_name());
             let upstream = stream_schema.map(from_component_stream_schema);
 
             let rt = get_runtime();
@@ -974,7 +983,7 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
             let state_ref = state_cell.borrow();
             let conn = state_ref.as_ref().expect("Plugin not opened");
 
-            rt.block_on(<#struct_name as #trait_path>::validate(conn, ctx, upstream.as_ref()))
+            rt.block_on(<#struct_name as #trait_path>::validate(conn, &ctx, upstream.as_ref()))
                 .map(to_component_validation)
                 .map_err(to_component_error)
         }
@@ -1131,7 +1140,10 @@ fn gen_source_methods(
                 let ctx = base_ctx.with_stream(&stream.stream_name);
                 let stream_idx = stream.stream_index;
                 let stream_nm = stream.stream_name.clone();
+                let _ = ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream_idx);
                 let summary = #read_dispatch;
+                let stream_failed =
+                    ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream_idx);
                 let outcome = serde_json::json!({
                     "records_read": summary.records_read,
                     "bytes_read": summary.bytes_read,
@@ -1143,7 +1155,7 @@ fn gen_source_methods(
                     stream_index: stream_idx,
                     stream_name: stream_nm,
                     outcome_json: outcome.to_string(),
-                    succeeded: true,
+                    succeeded: !stream_failed,
                 });
             }
 
@@ -1232,6 +1244,7 @@ fn gen_dest_methods(
             let mut results = Vec::new();
             for stream in sdk_request.streams {
                 let ctx = base_ctx.with_stream(&stream.stream_name);
+                let _ = ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
 
                 let summary = rt
                     .block_on(<#struct_name as #trait_path>::write(conn, &ctx, stream.clone()))
@@ -1286,6 +1299,7 @@ fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
             let mut results = Vec::new();
             for stream in sdk_request.streams {
                 let ctx = base_ctx.with_stream(&stream.stream_name);
+                let _ = ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
 
                 let summary = rt
                     .block_on(<#struct_name as #trait_path>::transform(conn, &ctx, stream.clone()))
@@ -1334,6 +1348,27 @@ mod tests {
     use super::*;
     use quote::quote;
     use syn::parse_quote;
+
+    #[test]
+    fn lifecycle_validate_uses_current_stream_name() {
+        let struct_name: Ident = parse_quote!(TestTransform);
+        let trait_path = quote!(::rapidbyte_sdk::plugin::Transform);
+
+        let generated = gen_lifecycle_methods(&struct_name, &trait_path).to_string();
+
+        assert!(generated.contains("current_stream_name"));
+        assert!(generated.contains("with_stream"));
+    }
+
+    #[test]
+    fn common_run_summary_helpers_consult_reported_stream_errors() {
+        let struct_name: Ident = parse_quote!(TestSource);
+
+        let generated = gen_common(&struct_name).to_string();
+
+        assert!(generated.contains("take_reported_stream_error"));
+        assert!(generated.contains("succeeded : ! stream_failed"));
+    }
 
     #[test]
     fn destination_run_dispatches_through_write() {

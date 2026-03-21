@@ -302,6 +302,19 @@ pub async fn check_pipeline(
                 .find(|d| d.name == *stream_name)
                 .map(|d| d.schema.clone());
 
+            if source_schema.is_none() {
+                schema_negotiation.push(StreamNegotiationResult {
+                    stream_name: stream_name.clone(),
+                    passed: false,
+                    errors: vec![format!(
+                        "Configured source stream '{}' was not returned by source discovery",
+                        stream_name
+                    )],
+                    warnings: Vec::new(),
+                });
+                continue;
+            }
+
             let mut current_schema = source_schema;
 
             // Thread through transforms
@@ -1422,5 +1435,43 @@ destination:
 
         // Schema negotiation should be empty when discover fails
         assert!(result.schema_negotiation.is_empty());
+    }
+
+    #[tokio::test]
+    async fn check_schema_negotiation_fails_when_discovery_omits_configured_stream() {
+        use crate::domain::ports::runner::DiscoveredStream;
+        use rapidbyte_types::schema::SchemaField;
+
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+
+        tc.runner.enqueue_discover(Ok(vec![DiscoveredStream {
+            name: "orders".into(),
+            schema: StreamSchema {
+                fields: vec![SchemaField::new("id", "int64", false)],
+                primary_key: vec!["id".into()],
+                ..Default::default()
+            },
+            supported_sync_modes: vec![rapidbyte_types::wire::SyncMode::FullRefresh],
+            default_cursor_field: None,
+            estimated_row_count: None,
+            metadata_json: None,
+        }]));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+
+        let pipeline = test_pipeline_config();
+        let result = check_pipeline(&tc.ctx, &pipeline).await.unwrap();
+
+        assert_eq!(result.schema_negotiation.len(), 1);
+        assert_eq!(result.schema_negotiation[0].stream_name, "users");
+        assert!(!result.schema_negotiation[0].passed);
+        assert!(result.schema_negotiation[0]
+            .errors
+            .iter()
+            .any(|msg| msg.contains("not returned by source discovery")));
     }
 }

@@ -1,5 +1,6 @@
 //! Guest-side host import wrappers for the component model.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -81,6 +82,7 @@ pub trait HostImports: Send + Sync {
 
     // Cancellation
     fn is_cancelled(&self) -> bool;
+    fn current_stream_name(&self) -> String;
 
     // Stream errors
     fn stream_error(&self, stream_index: u32, error: &PluginError) -> Result<(), PluginError>;
@@ -186,6 +188,11 @@ fn to_component_error(err: &PluginError) -> bindings::rapidbyte::plugin::types::
 }
 
 static HOST_IMPORTS: OnceLock<Box<dyn HostImports>> = OnceLock::new();
+static REPORTED_STREAM_ERRORS: OnceLock<std::sync::Mutex<BTreeSet<u32>>> = OnceLock::new();
+
+fn reported_stream_errors() -> &'static std::sync::Mutex<BTreeSet<u32>> {
+    REPORTED_STREAM_ERRORS.get_or_init(|| std::sync::Mutex::new(BTreeSet::new()))
+}
 
 #[cfg(any(all(test, not(target_arch = "wasm32")), feature = "test-support"))]
 pub mod test_support {
@@ -228,6 +235,10 @@ pub mod test_support {
             .expect("metric calls lock poisoned")
             .clear();
         *metric_error().lock().expect("metric error lock poisoned") = None;
+        reported_stream_errors()
+            .lock()
+            .expect("reported stream errors lock poisoned")
+            .clear();
     }
 
     pub fn set_metric_error(error: PluginError) {
@@ -346,6 +357,10 @@ pub mod test_support {
 
         fn is_cancelled(&self) -> bool {
             false
+        }
+
+        fn current_stream_name(&self) -> String {
+            "test-stream".to_string()
         }
 
         fn stream_error(
@@ -730,6 +745,10 @@ impl HostImports for WasmHostImports {
         bindings::rapidbyte::plugin::host::is_cancelled()
     }
 
+    fn current_stream_name(&self) -> String {
+        bindings::rapidbyte::plugin::host::current_stream_name()
+    }
+
     fn stream_error(&self, stream_index: u32, error: &PluginError) -> Result<(), PluginError> {
         let wit_error = to_component_error(error);
         bindings::rapidbyte::plugin::host::stream_error(stream_index, &wit_error)
@@ -888,6 +907,10 @@ impl HostImports for StubHostImports {
 
     fn is_cancelled(&self) -> bool {
         false
+    }
+
+    fn current_stream_name(&self) -> String {
+        String::new()
     }
 
     fn stream_error(&self, _stream_index: u32, _error: &PluginError) -> Result<(), PluginError> {
@@ -1142,13 +1165,32 @@ pub fn is_cancelled() -> bool {
     host_imports().is_cancelled()
 }
 
+/// Return the current stream name known to the host runtime.
+pub fn current_stream_name() -> String {
+    host_imports().current_stream_name()
+}
+
 /// Report an error for a specific stream.
 ///
 /// # Errors
 ///
 /// Returns `Err` if the host rejects the stream error report.
 pub fn stream_error(stream_index: u32, error: &PluginError) -> Result<(), PluginError> {
-    host_imports().stream_error(stream_index, error)
+    host_imports().stream_error(stream_index, error)?;
+    reported_stream_errors()
+        .lock()
+        .expect("reported stream errors lock poisoned")
+        .insert(stream_index);
+    Ok(())
+}
+
+/// Return whether this stream reported an error since the last query.
+#[doc(hidden)]
+pub fn take_reported_stream_error(stream_index: u32) -> bool {
+    reported_stream_errors()
+        .lock()
+        .expect("reported stream errors lock poisoned")
+        .remove(&stream_index)
 }
 
 /// Emit a batch with metadata for a specific stream.
@@ -1275,6 +1317,17 @@ mod tests {
         let err = decode_next_batch_frame(&[1, 2, 3], 3).expect_err("invalid ipc should fail");
         assert_eq!(err.code, "NEXT_BATCH_DECODE");
         assert!(err.message.contains("frame_len=3"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn stream_error_tracks_reported_stream_once() {
+        test_support::reset();
+
+        stream_error(7, &PluginError::internal("TEST", "boom")).expect("stream error should work");
+
+        assert!(take_reported_stream_error(7));
+        assert!(!take_reported_stream_error(7));
     }
 
     #[test]

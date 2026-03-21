@@ -456,7 +456,7 @@ impl ComponentHostState {
     /// Max frame capacity: 512 MB. Prevents guest-induced OOM.
     const MAX_FRAME_CAPACITY: u64 = 512 * 1024 * 1024;
 
-    fn current_stream(&self) -> &str {
+    pub(crate) fn current_stream(&self) -> &str {
         self.identity.stream.as_str()
     }
 
@@ -813,48 +813,48 @@ impl ComponentHostState {
         })?;
 
         let checkpoint_id = self.checkpoint_frontier_for(txn.kind);
-
-        // Build a Checkpoint from the first cursor update (if any).
-        let (cursor_field, cursor_value) = txn.cursors.first().map_or_else(
-            || (None, None),
-            |cu| {
-                let cv = serde_json::from_str::<rapidbyte_types::cursor::CursorValue>(
-                    &cu.cursor_value_json,
-                )
-                .ok();
-                (Some(cu.cursor_field.clone()), cv)
-            },
-        );
-
-        let stream_name = txn.cursors.first().map_or_else(
-            || self.current_stream().to_string(),
-            |cu| cu.stream_name.clone(),
-        );
-
-        let cp = Checkpoint {
-            id: checkpoint_id,
-            kind: txn.kind,
-            stream: stream_name,
-            cursor_field,
-            cursor_value,
-            records_processed,
-            bytes_processed,
+        let checkpoints: Vec<Checkpoint> = if txn.cursors.is_empty() {
+            vec![Checkpoint {
+                id: checkpoint_id,
+                kind: txn.kind,
+                stream: self.current_stream().to_string(),
+                cursor_field: None,
+                cursor_value: None,
+                records_processed,
+                bytes_processed,
+            }]
+        } else {
+            txn.cursors
+                .iter()
+                .map(|cu| Checkpoint {
+                    id: checkpoint_id,
+                    kind: txn.kind,
+                    stream: cu.stream_name.clone(),
+                    cursor_field: Some(cu.cursor_field.clone()),
+                    cursor_value: serde_json::from_str::<rapidbyte_types::cursor::CursorValue>(
+                        &cu.cursor_value_json,
+                    )
+                    .ok(),
+                    records_processed,
+                    bytes_processed,
+                })
+                .collect()
         };
 
         tracing::debug!(
             pipeline = self.identity.pipeline.as_str(),
             stream = %self.current_stream(),
             txn_id,
-            ?cp.kind,
+            ?txn.kind,
             "checkpoint-commit"
         );
 
         match txn.kind {
             CheckpointKind::Source => {
-                lock_mutex(&self.checkpoints.source, "source_checkpoints")?.push(cp);
+                lock_mutex(&self.checkpoints.source, "source_checkpoints")?.extend(checkpoints);
             }
             CheckpointKind::Dest => {
-                lock_mutex(&self.checkpoints.dest, "dest_checkpoints")?.push(cp);
+                lock_mutex(&self.checkpoints.dest, "dest_checkpoints")?.extend(checkpoints);
             }
             CheckpointKind::Transform => {
                 tracing::debug!(
@@ -1596,6 +1596,41 @@ mod tests {
         assert_eq!(checkpoints.len(), 1);
         assert_eq!(checkpoints[0].id, 42);
         assert_eq!(checkpoints[0].cursor_field.as_deref(), Some("id"));
+    }
+
+    #[test]
+    fn checkpoint_commit_stores_all_cursor_updates() {
+        let mut host = test_host_state();
+        host.batch.last_emitted_checkpoint_id = Some(42);
+
+        let txn_id = host.checkpoint_begin_impl(CheckpointKind::Source).unwrap();
+
+        host.checkpoint_set_cursor_impl(
+            txn_id,
+            CursorUpdate {
+                stream_name: "users".to_string(),
+                cursor_field: "id".to_string(),
+                cursor_value_json: r#"{"Utf8":{"value":"42"}}"#.to_string(),
+            },
+        )
+        .unwrap();
+        host.checkpoint_set_cursor_impl(
+            txn_id,
+            CursorUpdate {
+                stream_name: "orders".to_string(),
+                cursor_field: "updated_at".to_string(),
+                cursor_value_json: r#"{"Utf8":{"value":"2026-03-21T00:00:00Z"}}"#.to_string(),
+            },
+        )
+        .unwrap();
+
+        host.checkpoint_commit_impl(txn_id, 10, 100).unwrap();
+
+        let checkpoints = host.checkpoints.source.lock().unwrap();
+        assert_eq!(checkpoints.len(), 2);
+        assert_eq!(checkpoints[0].stream, "users");
+        assert_eq!(checkpoints[1].stream, "orders");
+        assert_eq!(checkpoints[1].cursor_field.as_deref(), Some("updated_at"));
     }
 
     #[test]

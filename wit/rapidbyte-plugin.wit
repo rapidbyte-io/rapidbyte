@@ -320,6 +320,7 @@ interface host {
     // ── Cancellation ──
 
     is-cancelled: func() -> bool;
+    current-stream-name: func() -> string;
 
     // ── Per-stream error reporting ──
 
