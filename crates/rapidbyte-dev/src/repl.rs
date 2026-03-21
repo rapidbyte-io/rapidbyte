@@ -22,8 +22,9 @@ use rapidbyte_runtime::{
     create_component_linker, load_plugin_manifest, resolve_plugin_path, source_bindings,
     source_error_to_sdk, ComponentHostState, Frame, LoadedComponent, WasmRuntime,
 };
-use rapidbyte_types::catalog::{Catalog, SchemaHint};
+use rapidbyte_types::catalog::Catalog;
 use rapidbyte_types::manifest::Permissions;
+use rapidbyte_types::schema::StreamSchema;
 use rapidbyte_types::state_backend::{NoopStateBackend, StateBackend};
 use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
 use rapidbyte_types::wire::{PluginKind, SyncMode};
@@ -241,13 +242,55 @@ async fn connect_source(
                 .map_err(source_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
 
-            let discover_json = iface
+            let wit_streams = iface
                 .call_discover(&mut store, session)?
                 .map_err(source_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!("Discover failed: {e}"))?;
 
-            let catalog = serde_json::from_str::<Catalog>(&discover_json)
-                .context("Failed to parse discover catalog JSON")?;
+            // Convert WIT discovered streams to the catalog types used by the dev shell.
+            let catalog_streams = wit_streams
+                .into_iter()
+                .map(|s| rapidbyte_types::catalog::Stream {
+                    name: s.name,
+                    schema: s
+                        .schema
+                        .fields
+                        .into_iter()
+                        .map(|f| {
+                            let data_type =
+                                serde_json::from_value::<rapidbyte_types::arrow::ArrowDataType>(
+                                    serde_json::Value::String(f.arrow_type),
+                                )
+                                .unwrap_or(rapidbyte_types::arrow::ArrowDataType::Utf8);
+                            rapidbyte_types::catalog::ColumnSchema {
+                                name: f.name,
+                                data_type,
+                                nullable: f.nullable,
+                            }
+                        })
+                        .collect(),
+                    supported_sync_modes: s
+                        .supported_sync_modes
+                        .into_iter()
+                        .map(|sm| match sm {
+                            source_bindings::rapidbyte::plugin::types::SyncMode::FullRefresh => {
+                                SyncMode::FullRefresh
+                            }
+                            source_bindings::rapidbyte::plugin::types::SyncMode::Incremental => {
+                                SyncMode::Incremental
+                            }
+                            source_bindings::rapidbyte::plugin::types::SyncMode::Cdc => {
+                                SyncMode::Cdc
+                            }
+                        })
+                        .collect(),
+                    source_defined_cursor: s.default_cursor_field,
+                    source_defined_primary_key: None,
+                })
+                .collect();
+            let catalog = Catalog {
+                streams: catalog_streams,
+            };
 
             if let Err(err) = iface.call_close(&mut store, session)? {
                 tracing::warn!(
@@ -346,7 +389,26 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
     let stream_ctx = StreamContext {
         stream_name: stream.name.clone(),
         source_stream_name: None,
-        schema: SchemaHint::Columns(stream.schema.clone()),
+        stream_index: 0,
+        schema: StreamSchema {
+            fields: stream
+                .schema
+                .iter()
+                .map(|c| rapidbyte_types::schema::SchemaField {
+                    name: c.name.clone(),
+                    arrow_type: c.data_type.to_string(),
+                    nullable: c.nullable,
+                    is_primary_key: false,
+                    is_generated: false,
+                    is_partition_key: false,
+                    default_value: None,
+                })
+                .collect(),
+            primary_key: vec![],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        },
         sync_mode,
         cursor_info: None,
         limits: StreamLimits {
@@ -402,12 +464,10 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
             .map_err(source_error_to_sdk)
             .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
 
-        let ctx_json = serde_json::to_string(&stream_ctx)?;
+        let wit_stream_ctx = dev_stream_context_to_wit(&stream_ctx);
         let run_request = source_bindings::rapidbyte::plugin::types::RunRequest {
-            phase: source_bindings::rapidbyte::plugin::types::RunPhase::Read,
-            stream_context_json: ctx_json,
+            streams: vec![wit_stream_ctx],
             dry_run: false,
-            max_records: limit,
         };
 
         let run_result = iface.call_run(&mut store, session, &run_request)?;
@@ -581,6 +641,75 @@ fn print_banner() {
         style("Type .help for commands, or enter SQL to query.").dim()
     );
     eprintln!();
+}
+
+// ── StreamContext → WIT converter for dev shell ────────────────────
+
+fn dev_stream_context_to_wit(
+    ctx: &StreamContext,
+) -> source_bindings::rapidbyte::plugin::types::StreamContext {
+    use source_bindings::rapidbyte::plugin::types as wit;
+
+    let sync_mode = match ctx.sync_mode {
+        SyncMode::FullRefresh => wit::SyncMode::FullRefresh,
+        SyncMode::Incremental => wit::SyncMode::Incremental,
+        SyncMode::Cdc => wit::SyncMode::Cdc,
+    };
+
+    let schema = wit::StreamSchema {
+        fields: ctx
+            .schema
+            .fields
+            .iter()
+            .map(|f| wit::SchemaField {
+                name: f.name.clone(),
+                arrow_type: f.arrow_type.clone(),
+                nullable: f.nullable,
+                is_primary_key: f.is_primary_key,
+                is_generated: f.is_generated,
+                is_partition_key: f.is_partition_key,
+                default_value: f.default_value.clone(),
+            })
+            .collect(),
+        primary_key: ctx.schema.primary_key.clone(),
+        partition_keys: ctx.schema.partition_keys.clone(),
+        source_defined_cursor: ctx.schema.source_defined_cursor.clone(),
+        schema_id: ctx.schema.schema_id.clone(),
+    };
+
+    wit::StreamContext {
+        stream_index: ctx.stream_index,
+        stream_name: ctx.stream_name.clone(),
+        source_stream_name: ctx.source_stream_name.clone(),
+        schema,
+        sync_mode,
+        cursor_info: None,
+        limits: wit::StreamLimits {
+            max_batch_bytes: ctx.limits.max_batch_bytes,
+            max_record_bytes: ctx.limits.max_record_bytes,
+            max_inflight_batches: ctx.limits.max_inflight_batches,
+            max_parallel_requests: ctx.limits.max_parallel_requests,
+            checkpoint_interval_bytes: ctx.limits.checkpoint_interval_bytes,
+            checkpoint_interval_rows: ctx.limits.checkpoint_interval_rows,
+            checkpoint_interval_seconds: ctx.limits.checkpoint_interval_seconds,
+            max_records: ctx.limits.max_records,
+        },
+        policies: wit::StreamPolicies {
+            on_data_error: wit::DataErrorPolicy::Fail,
+            schema_evolution: wit::SchemaEvolutionPolicy {
+                new_column: wit::ColumnPolicy::Ignore,
+                removed_column: wit::ColumnPolicy::Ignore,
+                type_change: wit::TypeChangePolicy::Coerce,
+                nullability_change: wit::NullabilityPolicy::Allow,
+            },
+        },
+        write_mode: None,
+        selected_columns: ctx.selected_columns.clone(),
+        partition_key: ctx.partition_key.clone(),
+        partition_count: ctx.partition_count,
+        partition_index: ctx.partition_index,
+        partition_strategy: None,
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────

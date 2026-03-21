@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::Result;
 use console::style;
 use rapidbyte_engine::CheckStatus;
-use rapidbyte_types::error::{ValidationResult, ValidationStatus};
+use rapidbyte_types::validation::{ValidationReport, ValidationStatus};
 
 use crate::Verbosity;
 
@@ -87,7 +87,7 @@ fn print_check_item(label: &str, result: &CheckStatus) {
     }
 }
 
-fn print_validation(label: &str, result: &ValidationResult) {
+fn print_validation(label: &str, result: &ValidationReport) {
     match result.status {
         ValidationStatus::Success => {
             eprintln!("{} {:<20} valid", style("\u{2713}").green().bold(), label);
@@ -103,7 +103,7 @@ fn print_validation(label: &str, result: &ValidationResult) {
     }
 }
 
-fn validation_passes(result: &ValidationResult) -> bool {
+fn validation_passes(result: &ValidationReport) -> bool {
     matches!(
         result.status,
         ValidationStatus::Success | ValidationStatus::Warning
@@ -114,7 +114,7 @@ fn check_item_passes(result: Option<&CheckStatus>) -> bool {
     result.is_none_or(|item| item.ok)
 }
 
-fn print_validation_details(result: &ValidationResult) {
+fn print_validation_details(result: &ValidationReport) {
     if !result.message.is_empty() {
         eprintln!("  {}", result.message);
     }
@@ -129,22 +129,17 @@ mod tests {
 
     #[test]
     fn warnings_count_as_non_fatal_validation() {
-        let result = ValidationResult {
-            status: ValidationStatus::Warning,
-            message: "Validation not implemented".to_string(),
-            warnings: vec!["live connectivity check missing".to_string()],
-        };
+        let mut result = ValidationReport::success("Validation not implemented");
+        result.status = ValidationStatus::Warning;
+        result.warnings = vec!["live connectivity check missing".to_string()];
 
         assert!(validation_passes(&result));
     }
 
     #[test]
     fn failures_remain_fatal_validation() {
-        let result = ValidationResult {
-            status: ValidationStatus::Failed,
-            message: "connection refused".to_string(),
-            warnings: vec!["retry disabled".to_string()],
-        };
+        let mut result = ValidationReport::failed("connection refused");
+        result.warnings = vec!["retry disabled".to_string()];
 
         assert!(!validation_passes(&result));
     }
