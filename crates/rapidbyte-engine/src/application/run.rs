@@ -369,6 +369,7 @@ pub async fn run_pipeline(
             let stream_ctx = rapidbyte_types::stream::StreamContext {
                 stream_name: stream_name.clone(),
                 source_stream_name: None,
+                #[allow(clippy::cast_possible_truncation)]
                 stream_index: stream_idx as u32,
                 schema: rapidbyte_types::schema::StreamSchema {
                     fields: vec![],

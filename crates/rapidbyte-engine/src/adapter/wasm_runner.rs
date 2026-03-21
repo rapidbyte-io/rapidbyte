@@ -441,6 +441,7 @@ fn serialize_plugin_config(
 
 macro_rules! stream_context_to_wit {
     ($fn_name:ident, $mod:ident) => {
+        #[allow(clippy::too_many_lines)]
         fn $fn_name(
             ctx: &StreamContext,
         ) -> Result<$mod::rapidbyte::plugin::types::StreamContext, PipelineError> {

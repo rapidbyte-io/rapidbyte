@@ -23,6 +23,7 @@ pub mod testing;
 ///
 /// Only treats `:` as a version separator after the last `/`, so OCI
 /// references like `registry:5000/org/plugin:1.0` are handled correctly.
+#[must_use]
 pub fn parse_plugin_id(plugin_ref: &str) -> (String, String) {
     // Only consider ':' as version separator after the last '/'
     let after_slash = plugin_ref.rfind('/').map_or(0, |i| i + 1);
@@ -42,6 +43,7 @@ pub fn parse_plugin_id(plugin_ref: &str) -> (String, String) {
 ///
 /// Returns `None` when the plugin has no embedded manifest, or `Some(permissions)`
 /// when one is present.
+#[must_use]
 pub fn extract_permissions(
     resolved: &crate::domain::ports::resolver::ResolvedPlugin,
 ) -> Option<rapidbyte_types::manifest::Permissions> {
@@ -59,8 +61,11 @@ pub fn extract_permissions(
 /// can only narrow plugin-declared limits, never widen them (per PROTOCOL.md).
 /// If only one side specifies a limit, that value is used directly.
 ///
+/// # Errors
+///
 /// Returns an error if a memory limit string is present but malformed, to
 /// prevent silently degrading into no memory cap.
+#[allow(clippy::too_many_lines)]
 pub fn build_sandbox_overrides(
     yaml_permissions: Option<&rapidbyte_pipeline_config::PipelinePermissions>,
     yaml_limits: Option<&rapidbyte_pipeline_config::PipelineLimits>,
