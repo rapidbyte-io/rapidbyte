@@ -21,7 +21,7 @@ pub mod testing;
 ///
 /// Only treats `:` as a version separator after the last `/`, so OCI
 /// references like `registry:5000/org/plugin:1.0` are handled correctly.
-pub(crate) fn parse_plugin_id(plugin_ref: &str) -> (String, String) {
+pub fn parse_plugin_id(plugin_ref: &str) -> (String, String) {
     // Only consider ':' as version separator after the last '/'
     let after_slash = plugin_ref.rfind('/').map_or(0, |i| i + 1);
     let suffix = &plugin_ref[after_slash..];
@@ -40,7 +40,7 @@ pub(crate) fn parse_plugin_id(plugin_ref: &str) -> (String, String) {
 ///
 /// Returns `None` when the plugin has no embedded manifest, or `Some(permissions)`
 /// when one is present.
-pub(crate) fn extract_permissions(
+pub fn extract_permissions(
     resolved: &crate::domain::ports::resolver::ResolvedPlugin,
 ) -> Option<rapidbyte_types::manifest::Permissions> {
     resolved.manifest.as_ref().map(|m| m.permissions.clone())
@@ -59,7 +59,7 @@ pub(crate) fn extract_permissions(
 ///
 /// Returns an error if a memory limit string is present but malformed, to
 /// prevent silently degrading into no memory cap.
-pub(crate) fn build_sandbox_overrides(
+pub fn build_sandbox_overrides(
     yaml_permissions: Option<&rapidbyte_pipeline_config::PipelinePermissions>,
     yaml_limits: Option<&rapidbyte_pipeline_config::PipelineLimits>,
     manifest: Option<&rapidbyte_types::manifest::PluginManifest>,

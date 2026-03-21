@@ -20,6 +20,8 @@ pub async fn execute(
     verbosity: Verbosity,
     registry_config: &rapidbyte_registry::RegistryConfig,
     secrets: &rapidbyte_secrets::SecretProviders,
+    apply: bool,
+    dry_run: bool,
 ) -> Result<()> {
     let config = super::load_pipeline(pipeline_path, secrets).await?;
 
@@ -119,17 +121,149 @@ pub async fn execute(
             .is_none_or(|p| p.passed);
     let schema_ok = result.schema_negotiation.iter().all(|n| n.passed);
 
-    if source_ok
+    let all_ok = source_ok
         && dest_ok
         && transform_configs_ok
         && transforms_ok
         && result.state.ok
         && prereqs_ok
-        && schema_ok
-    {
-        Ok(())
+        && schema_ok;
+
+    if !all_ok {
+        return Err(anyhow::anyhow!("pipeline validation failed"));
+    }
+
+    // --- Apply phase (optional) ---
+    if apply {
+        run_apply_phase(&ctx, &config, verbosity, dry_run).await?;
+    }
+
+    Ok(())
+}
+
+/// Run the apply phase for source and destination plugins.
+///
+/// Called when `--apply` is passed to `check` and all validations pass.
+async fn run_apply_phase(
+    ctx: &rapidbyte_engine::EngineContext,
+    config: &rapidbyte_pipeline_config::PipelineConfig,
+    verbosity: Verbosity,
+    dry_run: bool,
+) -> Result<()> {
+    use rapidbyte_engine::domain::ports::runner::ApplyParams;
+    use rapidbyte_types::wire::PluginKind;
+
+    let mode = if dry_run { " (dry-run)" } else { "" };
+    if verbosity != Verbosity::Quiet {
+        eprintln!("\n{} apply phase{}", style("=>").cyan().bold(), mode);
+    }
+
+    let source_resolved = ctx
+        .resolver
+        .resolve(
+            &config.source.use_ref,
+            PluginKind::Source,
+            Some(&config.source.config),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("source resolution failed: {e}"))?;
+
+    let dest_resolved = ctx
+        .resolver
+        .resolve(
+            &config.destination.use_ref,
+            PluginKind::Destination,
+            Some(&config.destination.config),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("destination resolution failed: {e}"))?;
+
+    let (src_id, src_ver) = rapidbyte_engine::application::parse_plugin_id(&config.source.use_ref);
+    let (dst_id, dst_ver) =
+        rapidbyte_engine::application::parse_plugin_id(&config.destination.use_ref);
+
+    let src_permissions = rapidbyte_engine::application::extract_permissions(&source_resolved);
+    let dst_permissions = rapidbyte_engine::application::extract_permissions(&dest_resolved);
+
+    let src_overrides = rapidbyte_engine::application::build_sandbox_overrides(
+        config.source.permissions.as_ref(),
+        config.source.limits.as_ref(),
+        source_resolved.manifest.as_ref(),
+    )
+    .map_err(|e| anyhow::anyhow!("source sandbox overrides: {e}"))?;
+    let dst_overrides = rapidbyte_engine::application::build_sandbox_overrides(
+        config.destination.permissions.as_ref(),
+        config.destination.limits.as_ref(),
+        dest_resolved.manifest.as_ref(),
+    )
+    .map_err(|e| anyhow::anyhow!("destination sandbox overrides: {e}"))?;
+
+    // Source apply
+    let src_report = ctx
+        .runner
+        .apply(&ApplyParams {
+            wasm_path: source_resolved.wasm_path.clone(),
+            kind: PluginKind::Source,
+            plugin_id: src_id,
+            plugin_version: src_ver,
+            config: config.source.config.clone(),
+            streams: Vec::new(),
+            dry_run,
+            permissions: src_permissions,
+            sandbox_overrides: src_overrides,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("source apply failed: {e}"))?;
+
+    if verbosity != Verbosity::Quiet {
+        print_apply_report("source", &src_report);
+    }
+
+    // Destination apply
+    let dst_report = ctx
+        .runner
+        .apply(&ApplyParams {
+            wasm_path: dest_resolved.wasm_path.clone(),
+            kind: PluginKind::Destination,
+            plugin_id: dst_id,
+            plugin_version: dst_ver,
+            config: config.destination.config.clone(),
+            streams: Vec::new(),
+            dry_run,
+            permissions: dst_permissions,
+            sandbox_overrides: dst_overrides,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("destination apply failed: {e}"))?;
+
+    if verbosity != Verbosity::Quiet {
+        print_apply_report("destination", &dst_report);
+    }
+
+    Ok(())
+}
+
+/// Print the actions from an apply report.
+fn print_apply_report(role: &str, report: &rapidbyte_types::lifecycle::ApplyReport) {
+    if report.actions.is_empty() {
+        eprintln!(
+            "  {} {:<20} no actions",
+            style("\u{2713}").green().bold(),
+            role
+        );
     } else {
-        Err(anyhow::anyhow!("pipeline validation failed"))
+        for action in &report.actions {
+            eprintln!(
+                "  {} {} [{}]: {}",
+                style("\u{2713}").green().bold(),
+                role,
+                action.stream_name,
+                action.description
+            );
+            if let Some(ref ddl) = action.ddl_executed {
+                eprintln!("    DDL: {ddl}");
+            }
+        }
     }
 }
 
