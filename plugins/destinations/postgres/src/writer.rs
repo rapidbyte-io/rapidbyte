@@ -29,6 +29,10 @@ fn staging_table_name(stream_name: &str) -> String {
     format!("{stream_name}__rb_staging")
 }
 
+fn replace_staging_qualified_table(target_schema: &str, stream_name: &str) -> String {
+    crate::decode::qualified_name(target_schema, &staging_table_name(stream_name))
+}
+
 fn existing_replace_contract(mut setup: crate::contract::WriteContract) -> crate::contract::WriteContract {
     setup.effective_stream = staging_table_name(&setup.stream_name);
     setup.qualified_table =
@@ -78,7 +82,7 @@ pub async fn write_stream(
         .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
 
     let setup = if setup.is_replace {
-        let staging_table = staging_table_name(&setup.stream_name);
+        let staging_table = replace_staging_qualified_table(&setup.target_schema, &setup.stream_name);
         let handoff = read_contract_handoff(&client, &staging_table)
             .await
             .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
@@ -172,8 +176,8 @@ pub async fn write_stream(
 #[cfg(test)]
 mod tests {
     use super::{
-        contract_from_handoff, existing_replace_contract, resolve_copy_flush_bytes,
-        staging_table_name,
+        contract_from_handoff, existing_replace_contract, replace_staging_qualified_table,
+        resolve_copy_flush_bytes, staging_table_name,
     };
     use crate::session::COPY_FLUSH_MAX;
     use crate::WriteMode;
@@ -209,6 +213,14 @@ mod tests {
     #[test]
     fn staging_table_names_are_deterministic() {
         assert_eq!(staging_table_name("users"), "users__rb_staging");
+    }
+
+    #[test]
+    fn replace_staging_table_identity_is_schema_qualified() {
+        assert_eq!(
+            replace_staging_qualified_table("my schema", "users"),
+            r#""my schema".users__rb_staging"#
+        );
     }
 
     #[test]
