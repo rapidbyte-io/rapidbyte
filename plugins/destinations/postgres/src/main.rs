@@ -27,33 +27,27 @@ pub struct DestPostgres {
 impl Destination for DestPostgres {
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
-        Ok((
-            Self { config },
-            PluginInfo {
-                protocol_version: ProtocolVersion::V6,
-                features: vec![Feature::ExactlyOnce, Feature::BulkLoad],
-                default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
-            },
-        ))
+    async fn init(config: Self::Config) -> Result<Self, PluginError> {
+        Ok(Self { config })
     }
 
     async fn validate(
-        config: &Self::Config,
+        &self,
         _ctx: &Context,
-    ) -> Result<ValidationResult, PluginError> {
-        client::validate(config).await
+        _upstream: Option<&rapidbyte_sdk::schema::StreamSchema>,
+    ) -> Result<ValidationReport, PluginError> {
+        client::validate(&self.config).await
     }
 
     async fn write(
-        &mut self,
+        &self,
         ctx: &Context,
         stream: StreamContext,
     ) -> Result<WriteSummary, PluginError> {
         writer::write_stream(&self.config, ctx, &stream).await
     }
 
-    async fn close(&mut self, ctx: &Context) -> Result<(), PluginError> {
+    async fn close(&self, ctx: &Context) -> Result<(), PluginError> {
         ctx.log(LogLevel::Info, "dest-postgres: close (no-op)");
         Ok(())
     }

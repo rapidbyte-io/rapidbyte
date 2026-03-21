@@ -47,7 +47,7 @@ pub(crate) async fn connect(config: &crate::config::Config) -> Result<Client, St
 /// Returns `Err` if the connection fails or the `SELECT 1` health check fails.
 pub(crate) async fn validate(
     config: &crate::config::Config,
-) -> Result<ValidationResult, PluginError> {
+) -> Result<ValidationReport, PluginError> {
     let client = connect(config)
         .await
         .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
@@ -77,9 +77,5 @@ pub(crate) async fn validate(
         ),
     };
 
-    Ok(ValidationResult {
-        status: ValidationStatus::Success,
-        message,
-        warnings: Vec::new(),
-    })
+    Ok(ValidationReport::success(&message))
 }
