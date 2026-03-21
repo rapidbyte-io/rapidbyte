@@ -4,6 +4,7 @@ use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::validation::ValidationReport;
 
 use crate::config::Config;
+use crate::contract::preflight_schema_from_stream_schema;
 
 pub(crate) fn validate(
     config: &Config,
@@ -15,7 +16,19 @@ pub(crate) fn validate(
     ));
 
     if let Some(schema) = upstream {
-        report = report.with_output_schema(schema.clone());
+        match preflight_schema_from_stream_schema(schema) {
+            Ok(Some(_)) => {
+                report = report.with_output_schema(schema.clone());
+            }
+            Ok(None) => {
+                report = report.with_output_schema(schema.clone());
+            }
+            Err(message) => {
+                return Ok(ValidationReport::failed(&format!(
+                    "destination schema is incompatible with upstream schema: {message}"
+                )));
+            }
+        }
     }
 
     Ok(report)
@@ -70,5 +83,22 @@ mod tests {
 
         assert_eq!(report.status, ValidationStatus::Success);
         assert!(report.output_schema.is_none());
+    }
+
+    #[test]
+    fn validate_rejects_unsupported_arrow_types() {
+        let schema = StreamSchema {
+            fields: vec![SchemaField::new("bad", "made_up_type", true)],
+            primary_key: vec![],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        };
+
+        let report = validate(&base_config(), Some(&schema)).expect("validation");
+
+        assert_eq!(report.status, ValidationStatus::Failed);
+        assert!(report.message.contains("made_up_type"));
+        assert!(report.message.contains("bad"));
     }
 }

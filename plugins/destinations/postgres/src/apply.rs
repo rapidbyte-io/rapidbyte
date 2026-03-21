@@ -1,7 +1,6 @@
 //! Destination `PostgreSQL` apply lifecycle.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 use tokio_postgres::Client;
 
@@ -173,7 +172,6 @@ pub(crate) async fn apply(
     config: &Config,
     ctx: &Context,
     request: ApplyRequest,
-    prepared_contracts: &Mutex<HashMap<String, crate::contract::WriteContract>>,
 ) -> Result<ApplyReport, PluginError> {
     if request.dry_run {
         return plan_apply_request(config, &request).map_err(|e| PluginError::config("INVALID_APPLY_REQUEST", e));
@@ -214,10 +212,6 @@ pub(crate) async fn apply(
             "prepared {}",
             prepared.qualified_table
         ));
-        prepared_contracts
-            .lock()
-            .expect("prepared contract cache poisoned")
-            .insert(action.stream_name.clone(), prepared);
     }
 
     Ok(report)

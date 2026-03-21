@@ -20,25 +20,18 @@ mod apply;
 mod watermark;
 mod writer;
 
-use std::collections::HashMap;
-use std::sync::Mutex;
-
 use rapidbyte_sdk::prelude::*;
 
 #[rapidbyte_sdk::plugin(destination)]
 pub struct DestPostgres {
     config: config::Config,
-    prepared_contracts: Mutex<HashMap<String, contract::WriteContract>>,
 }
 
 impl Destination for DestPostgres {
     type Config = config::Config;
 
     async fn init(config: Self::Config) -> Result<Self, PluginError> {
-        Ok(Self {
-            config,
-            prepared_contracts: Mutex::new(HashMap::new()),
-        })
+        Ok(Self { config })
     }
 
     async fn prerequisites(&self, ctx: &Context) -> Result<PrerequisitesReport, PluginError> {
@@ -58,7 +51,7 @@ impl Destination for DestPostgres {
         ctx: &Context,
         request: ApplyRequest,
     ) -> Result<ApplyReport, PluginError> {
-        apply::apply(&self.config, ctx, request, &self.prepared_contracts).await
+        apply::apply(&self.config, ctx, request).await
     }
 
     async fn write(
@@ -66,13 +59,7 @@ impl Destination for DestPostgres {
         ctx: &Context,
         stream: StreamContext,
     ) -> Result<WriteSummary, PluginError> {
-        let prepared = self
-            .prepared_contracts
-            .lock()
-            .expect("prepared contract cache poisoned")
-            .get(&stream.stream_name)
-            .cloned();
-        writer::write_stream(&self.config, prepared, ctx, &stream).await
+        writer::write_stream(&self.config, ctx, &stream).await
     }
 
     async fn close(&self, ctx: &Context) -> Result<(), PluginError> {
@@ -87,13 +74,7 @@ impl BulkDestination for DestPostgres {
         ctx: &Context,
         stream: StreamContext,
     ) -> Result<WriteSummary, PluginError> {
-        let prepared = self
-            .prepared_contracts
-            .lock()
-            .expect("prepared contract cache poisoned")
-            .get(&stream.stream_name)
-            .cloned();
-        writer::write_stream(&self.config, prepared, ctx, &stream).await
+        writer::write_stream(&self.config, ctx, &stream).await
     }
 }
 
@@ -122,13 +103,7 @@ mod tests {
                 load_method: config::LoadMethod::Copy,
                 copy_flush_bytes: None,
             },
-            prepared_contracts: Mutex::new(HashMap::new()),
         };
-
-        assert!(plugin
-            .prepared_contracts
-            .lock()
-            .expect("prepared contract cache")
-            .is_empty());
+        assert_eq!(plugin.config.schema, "public");
     }
 }

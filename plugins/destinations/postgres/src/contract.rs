@@ -99,10 +99,6 @@ fn parse_arrow_type(s: &str) -> Option<rapidbyte_sdk::arrow::datatypes::DataType
     })
 }
 
-pub(crate) fn schema_hint_has_shape(schema: &StreamSchema) -> bool {
-    !schema.fields.is_empty()
-}
-
 /// Build a destination write contract for a stream.
 pub(crate) fn prepare_stream_once(
     target_schema: &str,
