@@ -34,6 +34,10 @@ impl Source for SourcePostgres {
         Ok(Self { config })
     }
 
+    async fn prerequisites(&self, ctx: &Context) -> Result<PrerequisitesReport, PluginError> {
+        prerequisites::prerequisites(&self.config, ctx).await
+    }
+
     async fn discover(&self, ctx: &Context) -> Result<Vec<DiscoveredStream>, PluginError> {
         let _ = ctx;
         let client = client::connect(&self.config)
@@ -53,16 +57,7 @@ impl Source for SourcePostgres {
         client::validate(&self.config).await
     }
 
-    async fn prerequisites(&self, ctx: &Context) -> Result<PrerequisitesReport, PluginError> {
-        let _ = ctx;
-        prerequisites::prerequisites(&self.config).await
-    }
-
-    async fn read(
-        &self,
-        ctx: &Context,
-        stream: StreamContext,
-    ) -> Result<ReadSummary, PluginError> {
+    async fn read(&self, ctx: &Context, stream: StreamContext) -> Result<ReadSummary, PluginError> {
         let connect_start = Instant::now();
         let client = client::connect(&self.config)
             .await

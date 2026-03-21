@@ -13,10 +13,9 @@ use std::time::Instant;
 
 use tokio_postgres::Client;
 
-use rapidbyte_sdk::prelude::*;
-
 use crate::config::Config;
 use crate::metrics::{emit_batch_counters, emit_source_timings, EmitState, BATCH_SIZE};
+use rapidbyte_sdk::prelude::*;
 
 use encode::{encode_cdc_batch, CdcRow, RelationInfo};
 use pgoutput::{CdcOp, PgOutputMessage, TupleData};
@@ -30,6 +29,71 @@ const SLOT_PREFIX: &str = "rapidbyte_";
 
 /// Default publication prefix. Full publication names are `rapidbyte_{stream_name}`.
 const PUB_PREFIX: &str = "rapidbyte_";
+
+fn validate_pg_identifier(value: &str, field: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{field} must not be empty"));
+    }
+    if value.len() > 63 {
+        return Err(format!(
+            "{field} '{value}' exceeds PostgreSQL 63-byte limit"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_replication_slot_name(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("replication slot must not be empty".to_string());
+    }
+    if value.len() > 63 {
+        return Err(format!(
+            "replication slot '{value}' exceeds PostgreSQL 63-byte limit"
+        ));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Err(format!(
+            "replication slot '{value}' may only contain lowercase letters, digits, and underscores"
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_cdc_name(
+    prefix: &str,
+    configured: Option<&str>,
+    stream_name: &str,
+    field: &str,
+) -> Result<String, String> {
+    let name = configured
+        .map(std::borrow::ToOwned::to_owned)
+        .unwrap_or_else(|| format!("{prefix}{stream_name}"));
+    if field == "replication slot" {
+        validate_replication_slot_name(&name)?;
+    } else {
+        validate_pg_identifier(&name, field)?;
+    }
+    Ok(name)
+}
+
+fn resolve_cdc_names(config: &Config, stream_name: &str) -> Result<(String, String), String> {
+    let slot_name = resolve_cdc_name(
+        SLOT_PREFIX,
+        config.replication_slot.as_deref(),
+        stream_name,
+        "replication slot",
+    )?;
+    let publication_name = resolve_cdc_name(
+        PUB_PREFIX,
+        config.publication.as_deref(),
+        stream_name,
+        "publication",
+    )?;
+    Ok((slot_name, publication_name))
+}
 
 /// Read max changes per CDC query from env, with sane defaults and validation.
 fn cdc_max_changes() -> i32 {
@@ -85,22 +149,13 @@ pub async fn read_cdc_changes(
 
     let query_start = Instant::now();
 
-    // 1. Derive slot name
-    let slot_name = config
-        .replication_slot
-        .clone()
-        .unwrap_or_else(|| format!("{SLOT_PREFIX}{}", stream.stream_name));
+    // 1. Derive and validate CDC identifiers.
+    let (slot_name, publication_name) = resolve_cdc_names(config, &stream.stream_name)?;
 
-    // 2. Derive publication name
-    let publication_name = config
-        .publication
-        .clone()
-        .unwrap_or_else(|| format!("{PUB_PREFIX}{}", stream.stream_name));
-
-    // 3. Ensure replication slot exists (idempotent)
+    // 2. Ensure replication slot exists (idempotent)
     ensure_replication_slot(client, ctx, &slot_name).await?;
 
-    // 4. Read binary changes from the slot (this CONSUMES them)
+    // 3. Read binary changes from the slot (this CONSUMES them)
     // Uses pgoutput plugin with proto_version 1 and the configured publication.
     let changes_query = "SELECT lsn::text, data \
                          FROM pg_logical_slot_get_binary_changes(\
@@ -110,7 +165,10 @@ pub async fn read_cdc_changes(
                          )";
     let max_changes = cdc_max_changes();
     let change_rows = client
-        .query(changes_query, &[&slot_name, &max_changes, &publication_name])
+        .query(
+            changes_query,
+            &[&slot_name, &max_changes, &publication_name],
+        )
         .await
         .map_err(|e| {
             format!(
@@ -133,7 +191,7 @@ pub async fn read_cdc_changes(
     };
     let mut max_lsn: Option<u64> = None;
 
-    // 5. Decode messages, filter to our table, accumulate into batches
+    // 4. Decode messages, filter to our table, accumulate into batches
     let mut relations: HashMap<u32, RelationInfo> = HashMap::new();
     let mut target_oid: Option<u32> = None;
     let mut accumulated_rows: Vec<CdcRow> = Vec::new();
@@ -239,7 +297,7 @@ pub async fn read_cdc_changes(
 
     let fetch_secs = fetch_start.elapsed().as_secs_f64();
 
-    // 6. Emit checkpoint with max LSN
+    // 5. Emit checkpoint with max LSN
     let checkpoint_count = if let Some(lsn) = max_lsn {
         let lsn_string = pgoutput::lsn_to_string(lsn);
         let cp = Checkpoint {
@@ -437,5 +495,59 @@ mod tests {
         let prefix = super::SLOT_PREFIX;
         let slot_name = format!("{prefix}{}", "orders");
         assert_eq!(slot_name, "rapidbyte_orders");
+    }
+
+    #[test]
+    fn resolve_cdc_names_rejects_overlong_derived_defaults() {
+        let config = crate::config::Config {
+            host: "localhost".to_string(),
+            port: 5432,
+            user: "postgres".to_string(),
+            password: String::new(),
+            database: "test_db".to_string(),
+            replication_slot: None,
+            publication: None,
+        };
+        let stream_name = "a".repeat(64);
+
+        let err = super::resolve_cdc_names(&config, &stream_name).unwrap_err();
+        assert!(err.contains("replication slot"));
+        assert!(err.contains("63-byte limit"));
+    }
+
+    #[test]
+    fn resolve_cdc_names_rejects_overlong_derived_publication_name() {
+        let config = crate::config::Config {
+            host: "localhost".to_string(),
+            port: 5432,
+            user: "postgres".to_string(),
+            password: String::new(),
+            database: "test_db".to_string(),
+            replication_slot: Some("slot_a".to_string()),
+            publication: None,
+        };
+        let stream_name = "b".repeat(64);
+
+        let err = super::resolve_cdc_names(&config, &stream_name).unwrap_err();
+        assert!(err.contains("publication"));
+        assert!(err.contains("63-byte limit"));
+    }
+
+    #[test]
+    fn resolve_cdc_names_rejects_invalid_derived_slot_characters() {
+        let config = crate::config::Config {
+            host: "localhost".to_string(),
+            port: 5432,
+            user: "postgres".to_string(),
+            password: String::new(),
+            database: "test_db".to_string(),
+            replication_slot: None,
+            publication: Some("pub_a".to_string()),
+        };
+        let stream_name = "stream-name";
+
+        let err = super::resolve_cdc_names(&config, stream_name).unwrap_err();
+        assert!(err.contains("replication slot"));
+        assert!(err.contains("lowercase letters, digits, and underscores"));
     }
 }

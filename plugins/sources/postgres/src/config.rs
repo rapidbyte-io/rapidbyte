@@ -34,52 +34,61 @@ fn default_port() -> u16 {
 }
 
 impl Config {
-    /// Returns the configured replication slot name, if any.
-    #[must_use]
-    pub(crate) fn configured_replication_slot(&self) -> Option<&str> {
-        self.replication_slot.as_deref()
-    }
-
-    /// Returns the configured publication name, if any.
-    #[must_use]
-    pub(crate) fn configured_publication(&self) -> Option<&str> {
-        self.publication.as_deref()
-    }
-
     /// # Errors
     /// Returns `Err` if `replication_slot` or `publication` is empty or exceeds the
     /// 63-byte `PostgreSQL` identifier limit.
     pub fn validate(&self) -> Result<(), PluginError> {
         if let Some(slot) = self.replication_slot.as_ref() {
-            if slot.is_empty() {
-                return Err(PluginError::config(
-                    "INVALID_CONFIG",
-                    "replication_slot must not be empty".to_string(),
-                ));
-            }
-            if slot.len() > 63 {
-                return Err(PluginError::config(
-                    "INVALID_CONFIG",
-                    format!("replication_slot '{slot}' exceeds PostgreSQL 63-byte limit"),
-                ));
-            }
+            validate_replication_slot_name(slot)?;
         }
         if let Some(pub_name) = self.publication.as_ref() {
-            if pub_name.is_empty() {
-                return Err(PluginError::config(
-                    "INVALID_CONFIG",
-                    "publication must not be empty".to_string(),
-                ));
-            }
-            if pub_name.len() > 63 {
-                return Err(PluginError::config(
-                    "INVALID_CONFIG",
-                    format!("publication '{pub_name}' exceeds PostgreSQL 63-byte limit"),
-                ));
-            }
+            validate_identifier("publication", pub_name)?;
         }
         Ok(())
     }
+}
+
+fn validate_identifier(field: &str, value: &str) -> Result<(), PluginError> {
+    if value.is_empty() {
+        return Err(PluginError::config(
+            "INVALID_CONFIG",
+            format!("{field} must not be empty"),
+        ));
+    }
+    if value.len() > 63 {
+        return Err(PluginError::config(
+            "INVALID_CONFIG",
+            format!("{field} '{value}' exceeds PostgreSQL 63-byte limit"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_replication_slot_name(value: &str) -> Result<(), PluginError> {
+    if value.is_empty() {
+        return Err(PluginError::config(
+            "INVALID_CONFIG",
+            "replication_slot must not be empty",
+        ));
+    }
+    if value.len() > 63 {
+        return Err(PluginError::config(
+            "INVALID_CONFIG",
+            format!("replication_slot '{value}' exceeds PostgreSQL 63-byte limit"),
+        ));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Err(PluginError::config(
+            "INVALID_CONFIG",
+            format!(
+                "replication_slot '{value}' may only contain lowercase letters, digits, and underscores"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -126,5 +135,29 @@ mod tests {
         };
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("exceeds PostgreSQL 63-byte limit"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_slot() {
+        let cfg = Config {
+            replication_slot: Some(String::new()),
+            ..base_config()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("replication_slot must not be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_slot_characters() {
+        let cfg = Config {
+            replication_slot: Some("slot-name".to_string()),
+            ..base_config()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("may only contain lowercase letters, digits, and underscores"));
     }
 }
