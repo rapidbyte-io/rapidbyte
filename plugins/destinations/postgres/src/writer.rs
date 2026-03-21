@@ -5,8 +5,8 @@ use std::time::Instant;
 use rapidbyte_sdk::prelude::*;
 
 use crate::apply::prepare_stream_contract;
-use crate::contract::{mark_contract_prepared, prepare_stream_once, CheckpointConfig};
-use crate::ddl::SchemaState;
+use crate::contract::{mark_contract_prepared, prepare_stream_once, stream_schema_signature, CheckpointConfig};
+use crate::ddl::{read_contract_handoff, ContractHandoff};
 use crate::metrics::emit_dest_timings;
 use crate::session::{clamp_copy_flush_bytes, WriteSession};
 
@@ -29,10 +29,6 @@ fn staging_table_name(stream_name: &str) -> String {
     format!("{stream_name}__rb_staging")
 }
 
-fn should_prepare_fallback(table_exists: bool) -> bool {
-    !table_exists
-}
-
 fn existing_replace_contract(mut setup: crate::contract::WriteContract) -> crate::contract::WriteContract {
     setup.effective_stream = staging_table_name(&setup.stream_name);
     setup.qualified_table =
@@ -40,49 +36,13 @@ fn existing_replace_contract(mut setup: crate::contract::WriteContract) -> crate
     mark_contract_prepared(setup)
 }
 
-async fn existing_table_runtime_contract(
-    client: &tokio_postgres::Client,
-    setup: crate::contract::WriteContract,
-    stream_schema: &StreamSchema,
-) -> Result<crate::contract::WriteContract, String> {
-    let mut schema_state = SchemaState::new();
-    schema_state
-        .load_existing_table_state(
-            client,
-            &setup.target_schema,
-            &setup.effective_stream,
-            &setup.schema_policy,
-            stream_schema,
-        )
-        .await?;
-
-    let mut setup = setup;
-    setup.ignored_columns = schema_state.ignored_columns;
-    setup.type_null_columns = schema_state.type_null_columns;
-    Ok(mark_contract_prepared(setup))
-}
-
-fn replace_staging_signature_matches(
-    marker_signature: Option<&str>,
-    stream_schema: &StreamSchema,
-) -> Result<bool, String> {
-    Ok(marker_signature == crate::contract::stream_schema_signature(stream_schema)?.as_deref())
-}
-
-async fn target_table_exists(
-    client: &tokio_postgres::Client,
-    target_schema: &str,
-    table_name: &str,
-) -> Result<bool, String> {
-    let exists: bool = client
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2 AND table_type = 'BASE TABLE')",
-            &[&target_schema, &table_name],
-        )
-        .await
-        .map_err(|e| format!("failed to query target table existence: {e}"))?
-        .get(0);
-    Ok(exists)
+fn contract_from_handoff(
+    mut setup: crate::contract::WriteContract,
+    handoff: &ContractHandoff,
+) -> crate::contract::WriteContract {
+    setup.ignored_columns = handoff.ignored_columns.iter().cloned().collect();
+    setup.type_null_columns = handoff.type_null_columns.iter().cloned().collect();
+    mark_contract_prepared(setup)
 }
 
 /// Entry point for writing a single stream.
@@ -114,44 +74,41 @@ pub async fn write_stream(
     )
     .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
 
+    let current_signature = stream_schema_signature(&stream.schema)
+        .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
+
     let setup = if setup.is_replace {
-        let staging_name = staging_table_name(&setup.stream_name);
-        let staging_exists = target_table_exists(&client, &setup.target_schema, &staging_name)
+        let staging_table = staging_table_name(&setup.stream_name);
+        let handoff = read_contract_handoff(&client, &staging_table)
             .await
             .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
-        let staging_signature = crate::ddl::staging_prepared_signature(
-            &client,
-            &setup.target_schema,
-            &setup.stream_name,
-        )
-            .await
-            .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
-        if staging_exists
-            && replace_staging_signature_matches(staging_signature.as_deref(), &stream.schema)
-            .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
-        {
-            existing_table_runtime_contract(
-                &client,
-                existing_replace_contract(setup),
-                &stream.schema,
-            )
-                .await
-                .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
+        if let Some(handoff) = handoff {
+            if current_signature.as_deref() == Some(handoff.schema_signature.as_str()) {
+                contract_from_handoff(existing_replace_contract(setup), &handoff)
+            } else {
+                prepare_stream_contract(ctx, &client, stream, setup)
+                    .await
+                    .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
+            }
         } else {
             prepare_stream_contract(ctx, &client, stream, setup)
                 .await
                 .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
         }
     } else {
-        let table_exists = target_table_exists(&client, &setup.target_schema, &setup.effective_stream)
+        let handoff = read_contract_handoff(&client, &setup.qualified_table)
             .await
             .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
-        if should_prepare_fallback(table_exists) {
-            prepare_stream_contract(ctx, &client, stream, setup)
-                .await
-                .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
+        if let Some(handoff) = handoff {
+            if current_signature.as_deref() == Some(handoff.schema_signature.as_str()) {
+                contract_from_handoff(setup, &handoff)
+            } else {
+                prepare_stream_contract(ctx, &client, stream, setup)
+                    .await
+                    .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
+            }
         } else {
-            existing_table_runtime_contract(&client, setup, &stream.schema)
+            prepare_stream_contract(ctx, &client, stream, setup)
                 .await
                 .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
         }
@@ -215,12 +172,12 @@ pub async fn write_stream(
 #[cfg(test)]
 mod tests {
     use super::{
-        existing_replace_contract, replace_staging_signature_matches, resolve_copy_flush_bytes,
-        should_prepare_fallback, staging_table_name,
+        contract_from_handoff, existing_replace_contract, resolve_copy_flush_bytes,
+        staging_table_name,
     };
     use crate::session::COPY_FLUSH_MAX;
     use crate::WriteMode;
-    use rapidbyte_sdk::schema::{SchemaField, StreamSchema};
+    use rapidbyte_sdk::schema::StreamSchema;
 
     #[test]
     fn runtime_override_takes_precedence_over_configured_flush_bytes() {
@@ -247,16 +204,6 @@ mod tests {
 
         let clamped_config = resolve_copy_flush_bytes(None, Some(256 * 1024));
         assert_eq!(clamped_config, Some(1024 * 1024));
-    }
-
-    #[test]
-    fn existing_tables_skip_fallback_setup_for_standard_writes() {
-        assert!(!should_prepare_fallback(true));
-    }
-
-    #[test]
-    fn missing_tables_trigger_fallback_setup() {
-        assert!(should_prepare_fallback(false));
     }
 
     #[test]
@@ -290,37 +237,32 @@ mod tests {
     }
 
     #[test]
-    fn replace_staging_exists_skips_fallback() {
-        assert!(!should_prepare_fallback(true));
-    }
-
-    #[test]
-    fn replace_staging_missing_triggers_fallback() {
-        assert!(should_prepare_fallback(false));
-    }
-
-    #[test]
-    fn replace_staging_signature_must_match_current_schema() {
-        let schema = StreamSchema {
-            fields: vec![SchemaField::new("id", "int64", false)],
-            primary_key: vec!["id".to_string()],
-            partition_keys: vec![],
-            source_defined_cursor: None,
-            schema_id: None,
+    fn contract_from_handoff_applies_state_without_structural_work() {
+        let contract = crate::contract::prepare_stream_once(
+            "public",
+            "users",
+            None,
+            &StreamSchema::default(),
+            true,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy::default(),
+            crate::contract::CheckpointConfig {
+                bytes: 0,
+                rows: 0,
+                seconds: 0,
+            },
+            None,
+            crate::config::LoadMethod::Copy,
+        )
+        .expect("contract");
+        let handoff = crate::ddl::ContractHandoff {
+            schema_signature: "sig".to_string(),
+            ignored_columns: vec!["legacy".to_string()],
+            type_null_columns: vec!["coerce_me".to_string()],
         };
-        let marker = crate::contract::stream_schema_signature(&schema)
-            .expect("signature")
-            .expect("non-empty schema");
-        assert!(replace_staging_signature_matches(Some(&marker), &schema).expect("match"));
 
-        let changed = StreamSchema {
-            fields: vec![SchemaField::new("id", "utf8", false)],
-            primary_key: vec!["id".to_string()],
-            partition_keys: vec![],
-            source_defined_cursor: None,
-            schema_id: None,
-        };
-        assert!(!replace_staging_signature_matches(Some(&marker), &changed).expect("mismatch"));
-        assert!(!replace_staging_signature_matches(None, &schema).expect("missing marker"));
+        let prepared = contract_from_handoff(contract, &handoff);
+        assert!(prepared.ignored_columns.contains("legacy"));
+        assert!(prepared.type_null_columns.contains("coerce_me"));
+        assert!(!prepared.needs_schema_ensure);
     }
 }

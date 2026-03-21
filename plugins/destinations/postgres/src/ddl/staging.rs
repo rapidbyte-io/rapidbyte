@@ -4,9 +4,30 @@ use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::prelude::*;
+use serde::{Deserialize, Serialize};
 
-pub(crate) const REPLACE_PREPARED_MARKER_PREFIX: &str =
-    "rapidbyte:dest-postgres:replace-prepared:";
+pub(crate) const CONTRACT_HANDOFF_PREFIX: &str = "rapidbyte:dest-postgres:handoff:";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ContractHandoff {
+    pub schema_signature: String,
+    pub ignored_columns: Vec<String>,
+    pub type_null_columns: Vec<String>,
+}
+
+impl ContractHandoff {
+    pub(crate) fn from_contract(
+        contract: &crate::contract::WriteContract,
+        schema_signature: Option<String>,
+    ) -> Option<Self> {
+        let schema_signature = schema_signature?;
+        Some(Self {
+            schema_signature,
+            ignored_columns: contract.ignored_columns.iter().cloned().collect(),
+            type_null_columns: contract.type_null_columns.iter().cloned().collect(),
+        })
+    }
+}
 
 /// Build the unqualified staging table name for a stream.
 fn staging_name(stream_name: &str) -> String {
@@ -85,45 +106,46 @@ pub(crate) async fn prepare_staging(
 }
 
 /// Mark a staging table as prepared by the current apply/write lifecycle.
-pub(crate) async fn mark_staging_prepared(
+pub(crate) async fn write_contract_handoff(
     client: &Client,
-    target_schema: &str,
-    stream_name: &str,
-    schema_signature: Option<&str>,
+    qualified_table: &str,
+    handoff: &ContractHandoff,
 ) -> Result<(), String> {
-    let Some(schema_signature) = schema_signature else {
-        return Ok(());
-    };
-    let staging_table = crate::decode::qualified_name(target_schema, &staging_name(stream_name));
+    let payload = serde_json::to_string(handoff)
+        .map_err(|e| format!("serializing contract handoff failed: {e}"))?;
     let sql = format!(
-        "COMMENT ON TABLE {staging_table} IS '{}'",
-        format!("{REPLACE_PREPARED_MARKER_PREFIX}{schema_signature}").replace('\'', "''")
+        "COMMENT ON TABLE {qualified_table} IS '{}'",
+        format!("{CONTRACT_HANDOFF_PREFIX}{payload}").replace('\'', "''")
     );
     client
         .execute(&sql, &[])
         .await
-        .map_err(|e| format!("COMMENT ON staging table failed for {staging_table}: {e}"))?;
+        .map_err(|e| format!("COMMENT ON table failed for {qualified_table}: {e}"))?;
     Ok(())
 }
 
-/// Check whether a staging table has been marked as prepared.
-pub(crate) async fn staging_prepared_signature(
+/// Read the persisted contract handoff for a table or staging table.
+pub(crate) async fn read_contract_handoff(
     client: &Client,
-    target_schema: &str,
-    stream_name: &str,
-) -> Result<Option<String>, String> {
-    let staging_table = crate::decode::qualified_name(target_schema, &staging_name(stream_name));
+    qualified_table: &str,
+) -> Result<Option<ContractHandoff>, String> {
     let row = client
         .query_one(
             "SELECT obj_description(to_regclass($1), 'pg_class')",
-            &[&staging_table],
+            &[&qualified_table],
         )
         .await
-        .map_err(|e| format!("querying staging marker failed for {staging_table}: {e}"))?;
+        .map_err(|e| format!("querying contract handoff failed for {qualified_table}: {e}"))?;
     let comment: Option<String> = row.get(0);
-    Ok(comment.and_then(|comment| {
-        comment
-            .strip_prefix(REPLACE_PREPARED_MARKER_PREFIX)
-            .map(str::to_owned)
-    }))
+    let Some(comment) = comment else {
+        return Ok(None);
+    };
+
+    let Some(payload) = comment.strip_prefix(CONTRACT_HANDOFF_PREFIX) else {
+        return Ok(None);
+    };
+
+    let handoff = serde_json::from_str(payload)
+        .map_err(|e| format!("parsing contract handoff failed for {qualified_table}: {e}"))?;
+    Ok(Some(handoff))
 }

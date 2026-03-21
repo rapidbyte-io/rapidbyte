@@ -8,8 +8,11 @@ use rapidbyte_sdk::lifecycle::{ApplyAction, ApplyReport, ApplyRequest};
 use rapidbyte_sdk::prelude::*;
 
 use crate::config::Config;
-use crate::contract::{mark_contract_prepared, preflight_schema_from_stream_schema, CheckpointConfig};
-use crate::ddl::{prepare_staging, SchemaState};
+use crate::contract::{
+    mark_contract_prepared, preflight_schema_from_stream_schema, stream_schema_signature,
+    CheckpointConfig,
+};
+use crate::ddl::{prepare_staging, write_contract_handoff, ContractHandoff, SchemaState};
 use crate::decode;
 
 fn apply_action_description(config: &Config, stream_name: &str, dry_run: bool) -> String {
@@ -133,16 +136,10 @@ pub(crate) async fn prepare_stream_contract(
     contract.ignored_columns = schema_state.ignored_columns;
     contract.type_null_columns = schema_state.type_null_columns;
 
-    if contract.is_replace {
-        let schema_signature = crate::contract::stream_schema_signature(&stream.schema)?;
-        crate::ddl::mark_staging_prepared(
-            client,
-            &contract.target_schema,
-            &contract.stream_name,
-            schema_signature.as_deref(),
-        )
-        .await
-        .map_err(|e| format!("dest-postgres: staging marker write failed: {e}"))?;
+    if let Some(handoff) = ContractHandoff::from_contract(&contract, stream_schema_signature(&stream.schema)?) {
+        write_contract_handoff(client, &contract.qualified_table, &handoff)
+            .await
+            .map_err(|e| format!("dest-postgres: contract handoff write failed: {e}"))?;
     }
 
     contract.watermark_records = if contract.is_replace || !contract.use_watermarks {
