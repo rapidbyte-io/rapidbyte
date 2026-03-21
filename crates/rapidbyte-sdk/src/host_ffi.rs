@@ -8,12 +8,8 @@ use std::time::Instant;
 use crate::checkpoint::CheckpointKind;
 use crate::checkpoint::{Checkpoint, StateScope};
 #[cfg(target_arch = "wasm32")]
-use crate::envelope::PayloadEnvelope;
-#[cfg(target_arch = "wasm32")]
 use crate::error::{BackoffClass, CommitState, ErrorScope};
 use crate::error::{ErrorCategory, PluginError};
-#[cfg(target_arch = "wasm32")]
-use crate::wire::ProtocolVersion;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use rapidbyte_types::batch::BatchMetadata;
@@ -119,15 +115,73 @@ pub trait HostImports: Send + Sync {
     fn socket_close(&self, handle: u64);
 }
 
-/// FFI helper: convert `StateScope` to its integer representation for
-/// host import calls. The types crate no longer carries this method
-/// because FFI encoding belongs at the boundary.
+/// FFI helper: convert `StateScope` to the WIT-generated `StateScope` enum.
 #[cfg(target_arch = "wasm32")]
-const fn state_scope_to_i32(scope: StateScope) -> i32 {
+fn to_wit_state_scope(scope: StateScope) -> bindings::rapidbyte::plugin::types::StateScope {
+    use bindings::rapidbyte::plugin::types::StateScope as WitStateScope;
     match scope {
-        StateScope::Pipeline => 0,
-        StateScope::Stream => 1,
-        StateScope::PluginInstance => 2,
+        StateScope::Pipeline => WitStateScope::Pipeline,
+        StateScope::Stream => WitStateScope::PerStream,
+        StateScope::PluginInstance => WitStateScope::PluginInstance,
+    }
+}
+
+/// FFI helper: convert `u32` kind to the WIT-generated `CheckpointKind` enum.
+#[cfg(target_arch = "wasm32")]
+fn to_wit_checkpoint_kind(kind: u32) -> bindings::rapidbyte::plugin::types::CheckpointKind {
+    use bindings::rapidbyte::plugin::types::CheckpointKind as WitCK;
+    match kind {
+        0 => WitCK::Source,
+        1 => WitCK::Destination,
+        2 => WitCK::Transform,
+        _ => WitCK::Source, // fallback
+    }
+}
+
+/// FFI helper: convert SDK `PluginError` to WIT-generated `PluginError`.
+#[cfg(target_arch = "wasm32")]
+fn to_component_error(err: &PluginError) -> bindings::rapidbyte::plugin::types::PluginError {
+    use bindings::rapidbyte::plugin::types as ct;
+
+    ct::PluginError {
+        category: match err.category {
+            ErrorCategory::Config => ct::ErrorCategory::Config,
+            ErrorCategory::Auth => ct::ErrorCategory::Auth,
+            ErrorCategory::Permission => ct::ErrorCategory::Permission,
+            ErrorCategory::RateLimit => ct::ErrorCategory::RateLimit,
+            ErrorCategory::TransientNetwork => ct::ErrorCategory::TransientNetwork,
+            ErrorCategory::TransientDb => ct::ErrorCategory::TransientDb,
+            ErrorCategory::Data => ct::ErrorCategory::Data,
+            ErrorCategory::Schema => ct::ErrorCategory::Schema,
+            ErrorCategory::Internal => ct::ErrorCategory::Internal,
+            ErrorCategory::Frame => ct::ErrorCategory::Frame,
+            ErrorCategory::Cancelled => ct::ErrorCategory::Cancelled,
+            _ => ct::ErrorCategory::Internal,
+        },
+        scope: match err.scope {
+            ErrorScope::Stream => ct::ErrorScope::PerStream,
+            ErrorScope::Batch => ct::ErrorScope::PerBatch,
+            ErrorScope::Record => ct::ErrorScope::PerRecord,
+        },
+        code: err.code.clone(),
+        message: err.message.clone(),
+        retryable: err.retryable,
+        retry_after_ms: err.retry_after_ms,
+        backoff_class: match err.backoff_class {
+            BackoffClass::Fast => ct::BackoffClass::Fast,
+            BackoffClass::Normal => ct::BackoffClass::Normal,
+            BackoffClass::Slow => ct::BackoffClass::Slow,
+        },
+        safe_to_retry: err.safe_to_retry,
+        commit_state: err.commit_state.map(|s| match s {
+            CommitState::BeforeCommit => ct::CommitState::BeforeCommit,
+            CommitState::AfterCommitUnknown => ct::CommitState::AfterCommitUnknown,
+            CommitState::AfterCommitConfirmed => ct::CommitState::AfterCommitConfirmed,
+        }),
+        details_json: err
+            .details
+            .as_ref()
+            .and_then(|v| serde_json::to_string(v).ok()),
     }
 }
 
@@ -458,6 +512,7 @@ fn from_component_error(err: bindings::rapidbyte::plugin::types::PluginError) ->
             ct::ErrorCategory::Schema => ErrorCategory::Schema,
             ct::ErrorCategory::Internal => ErrorCategory::Internal,
             ct::ErrorCategory::Frame => ErrorCategory::Frame,
+            ct::ErrorCategory::Cancelled => ErrorCategory::Cancelled,
         },
         scope: match err.scope {
             ct::ErrorScope::PerStream => ErrorScope::Stream,
@@ -520,7 +575,16 @@ impl HostImports for WasmHostImports {
     }
 
     fn emit_batch(&self, handle: u64) -> Result<(), PluginError> {
-        bindings::rapidbyte::plugin::host::emit_batch(handle).map_err(from_component_error)
+        let metadata = bindings::rapidbyte::plugin::types::BatchMetadata {
+            stream_index: 0,
+            schema_fingerprint: None,
+            sequence_number: 0,
+            compression: None,
+            record_count: 0,
+            byte_count: 0,
+        };
+        bindings::rapidbyte::plugin::host::emit_batch(handle, &metadata)
+            .map_err(from_component_error)
     }
 
     fn next_batch(&self) -> Result<Option<u64>, PluginError> {
@@ -528,38 +592,51 @@ impl HostImports for WasmHostImports {
     }
 
     fn state_get(&self, scope: StateScope, key: &str) -> Result<Option<String>, PluginError> {
-        bindings::rapidbyte::plugin::host::state_get(state_scope_to_i32(scope) as u32, key)
+        bindings::rapidbyte::plugin::host::state_get(to_wit_state_scope(scope), key)
             .map_err(from_component_error)
     }
 
     fn state_put(&self, scope: StateScope, key: &str, value: &str) -> Result<(), PluginError> {
-        bindings::rapidbyte::plugin::host::state_put(state_scope_to_i32(scope) as u32, key, value)
+        bindings::rapidbyte::plugin::host::state_put(to_wit_state_scope(scope), key, value)
             .map_err(from_component_error)
     }
 
     fn checkpoint(
         &self,
-        plugin_id: &str,
+        _plugin_id: &str,
         stream_name: &str,
         cp: &Checkpoint,
     ) -> Result<(), PluginError> {
-        let kind = match cp.kind {
-            CheckpointKind::Source => 0,
-            CheckpointKind::Dest => 1,
-            CheckpointKind::Transform => 2,
+        // v7: `checkpoint` removed from WIT; use transactional checkpoint API.
+        let wit_kind = match cp.kind {
+            CheckpointKind::Source => bindings::rapidbyte::plugin::types::CheckpointKind::Source,
+            CheckpointKind::Dest => bindings::rapidbyte::plugin::types::CheckpointKind::Destination,
+            CheckpointKind::Transform => {
+                bindings::rapidbyte::plugin::types::CheckpointKind::Transform
+            }
         };
 
-        let envelope = PayloadEnvelope {
-            protocol_version: ProtocolVersion::current(),
-            plugin_id: plugin_id.to_string(),
-            stream_name: stream_name.to_string(),
-            payload: cp,
-        };
-        let payload_json = serde_json::to_string(&envelope)
-            .map_err(|e| PluginError::internal("SERIALIZE_CHECKPOINT", e.to_string()))?;
+        let txn = bindings::rapidbyte::plugin::host::checkpoint_begin(wit_kind)
+            .map_err(from_component_error)?;
 
-        bindings::rapidbyte::plugin::host::checkpoint(kind, &payload_json)
-            .map_err(from_component_error)
+        if let (Some(field), Some(value)) = (&cp.cursor_field, &cp.cursor_value) {
+            let value_json = serde_json::to_string(value)
+                .map_err(|e| PluginError::internal("SERIALIZE_CURSOR", e.to_string()))?;
+            let cursor = bindings::rapidbyte::plugin::types::CursorUpdate {
+                stream_name: stream_name.to_string(),
+                cursor_field: field.clone(),
+                cursor_value_json: value_json,
+            };
+            bindings::rapidbyte::plugin::host::checkpoint_set_cursor(txn, &cursor)
+                .map_err(from_component_error)?;
+        }
+
+        bindings::rapidbyte::plugin::host::checkpoint_commit(
+            txn,
+            cp.records_processed,
+            cp.bytes_processed,
+        )
+        .map_err(from_component_error)
     }
 
     fn counter_add(&self, name: &str, value: u64, labels_json: &str) -> Result<(), PluginError> {
@@ -599,7 +676,8 @@ impl HostImports for WasmHostImports {
     }
 
     fn checkpoint_begin(&self, kind: u32) -> Result<u64, PluginError> {
-        bindings::rapidbyte::plugin::host::checkpoint_begin(kind).map_err(from_component_error)
+        bindings::rapidbyte::plugin::host::checkpoint_begin(to_wit_checkpoint_kind(kind))
+            .map_err(from_component_error)
     }
 
     fn checkpoint_set_cursor(
@@ -609,13 +687,13 @@ impl HostImports for WasmHostImports {
         cursor_field: &str,
         cursor_value_json: &str,
     ) -> Result<(), PluginError> {
-        bindings::rapidbyte::plugin::host::checkpoint_set_cursor(
-            txn,
-            stream_name,
-            cursor_field,
-            cursor_value_json,
-        )
-        .map_err(from_component_error)
+        let cursor = bindings::rapidbyte::plugin::types::CursorUpdate {
+            stream_name: stream_name.to_string(),
+            cursor_field: cursor_field.to_string(),
+            cursor_value_json: cursor_value_json.to_string(),
+        };
+        bindings::rapidbyte::plugin::host::checkpoint_set_cursor(txn, &cursor)
+            .map_err(from_component_error)
     }
 
     fn checkpoint_set_state(
@@ -625,7 +703,17 @@ impl HostImports for WasmHostImports {
         key: &str,
         value: &str,
     ) -> Result<(), PluginError> {
-        bindings::rapidbyte::plugin::host::checkpoint_set_state(txn, scope, key, value)
+        let wit_scope = match scope {
+            0 => bindings::rapidbyte::plugin::types::StateScope::Pipeline,
+            1 => bindings::rapidbyte::plugin::types::StateScope::PerStream,
+            _ => bindings::rapidbyte::plugin::types::StateScope::PluginInstance,
+        };
+        let mutation = bindings::rapidbyte::plugin::types::StateMutation {
+            scope: wit_scope,
+            key: key.to_string(),
+            value: value.to_string(),
+        };
+        bindings::rapidbyte::plugin::host::checkpoint_set_state(txn, &mutation)
             .map_err(from_component_error)
     }
 
@@ -643,9 +731,8 @@ impl HostImports for WasmHostImports {
     }
 
     fn stream_error(&self, stream_index: u32, error: &PluginError) -> Result<(), PluginError> {
-        let error_json = serde_json::to_string(error)
-            .map_err(|e| PluginError::internal("SERIALIZE_ERROR", e.to_string()))?;
-        bindings::rapidbyte::plugin::host::stream_error(stream_index, &error_json)
+        let wit_error = to_component_error(error);
+        bindings::rapidbyte::plugin::host::stream_error(stream_index, &wit_error)
             .map_err(from_component_error)
     }
 
@@ -654,16 +741,16 @@ impl HostImports for WasmHostImports {
         handle: u64,
         metadata: &BatchMetadata,
     ) -> Result<(), PluginError> {
-        bindings::rapidbyte::plugin::host::emit_batch_with_metadata(
-            handle,
-            metadata.stream_index,
-            metadata.schema_fingerprint.as_deref(),
-            metadata.sequence_number,
-            metadata.compression.as_deref(),
-            metadata.record_count,
-            metadata.byte_count,
-        )
-        .map_err(from_component_error)
+        let wit_metadata = bindings::rapidbyte::plugin::types::BatchMetadata {
+            stream_index: metadata.stream_index,
+            schema_fingerprint: metadata.schema_fingerprint.clone(),
+            sequence_number: metadata.sequence_number,
+            compression: metadata.compression.clone(),
+            record_count: metadata.record_count,
+            byte_count: metadata.byte_count,
+        };
+        bindings::rapidbyte::plugin::host::emit_batch(handle, &wit_metadata)
+            .map_err(from_component_error)
     }
 
     fn next_batch_metadata(&self, handle: u64) -> Result<BatchMetadata, PluginError> {

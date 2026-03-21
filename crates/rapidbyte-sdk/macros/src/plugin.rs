@@ -1125,9 +1125,22 @@ fn gen_source_methods(
             let mut results = Vec::new();
             for stream in sdk_request.streams {
                 let ctx = base_ctx.with_stream(&stream.stream_name);
+                let stream_idx = stream.stream_index;
+                let stream_nm = stream.stream_name.clone();
                 let summary = #read_dispatch;
-                let run_sum = read_summary_to_run_summary(&stream, summary);
-                results.extend(run_sum.results);
+                let outcome = serde_json::json!({
+                    "records_read": summary.records_read,
+                    "bytes_read": summary.bytes_read,
+                    "batches_emitted": summary.batches_emitted,
+                    "checkpoint_count": summary.checkpoint_count,
+                    "records_skipped": summary.records_skipped,
+                });
+                results.push(::rapidbyte_sdk::run::StreamResult {
+                    stream_index: stream_idx,
+                    stream_name: stream_nm,
+                    outcome_json: outcome.to_string(),
+                    succeeded: true,
+                });
             }
 
             Ok(to_component_run_summary(::rapidbyte_sdk::run::RunSummary { results }))

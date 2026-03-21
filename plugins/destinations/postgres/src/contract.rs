@@ -4,8 +4,8 @@ use std::sync::Arc;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::arrow::datatypes::Schema;
-use rapidbyte_sdk::catalog::SchemaHint;
 use rapidbyte_sdk::prelude::*;
+use rapidbyte_sdk::schema::StreamSchema;
 use rapidbyte_sdk::stream::SchemaEvolutionPolicy;
 
 use crate::config::LoadMethod;
@@ -40,26 +40,56 @@ pub struct CheckpointConfig {
     pub seconds: u64,
 }
 
-fn preflight_schema_from_hint(schema_hint: &SchemaHint) -> Option<Arc<Schema>> {
-    match schema_hint {
-        SchemaHint::Columns(columns) => {
-            if columns.is_empty() {
-                None
-            } else {
-                Some(build_arrow_schema(columns))
-            }
-        }
-        SchemaHint::ArrowIpc(ipc_bytes) => decode_ipc(ipc_bytes).ok().map(|(schema, _)| schema),
-        _ => None,
+fn preflight_schema_from_stream_schema(schema: &StreamSchema) -> Option<Arc<Schema>> {
+    use rapidbyte_sdk::arrow::datatypes::Field;
+
+    if schema.fields.is_empty() {
+        return None;
+    }
+    let fields: Vec<Field> = schema
+        .fields
+        .iter()
+        .map(|f| {
+            let dt = parse_arrow_type(&f.arrow_type);
+            Field::new(&f.name, dt, f.nullable)
+        })
+        .collect();
+    Some(Arc::new(Schema::new(fields)))
+}
+
+/// Best-effort parse of canonical arrow type names to Arrow DataType.
+fn parse_arrow_type(s: &str) -> rapidbyte_sdk::arrow::datatypes::DataType {
+    use rapidbyte_sdk::arrow::datatypes::{DataType, TimeUnit};
+    match s {
+        "boolean" => DataType::Boolean,
+        "int8" => DataType::Int8,
+        "int16" => DataType::Int16,
+        "int32" => DataType::Int32,
+        "int64" => DataType::Int64,
+        "uint8" => DataType::UInt8,
+        "uint16" => DataType::UInt16,
+        "uint32" => DataType::UInt32,
+        "uint64" => DataType::UInt64,
+        "float16" => DataType::Float16,
+        "float32" => DataType::Float32,
+        "float64" => DataType::Float64,
+        "utf8" => DataType::Utf8,
+        "large_utf8" => DataType::LargeUtf8,
+        "binary" => DataType::Binary,
+        "large_binary" => DataType::LargeBinary,
+        "date32" => DataType::Date32,
+        "date64" => DataType::Date64,
+        "timestamp_millis" => DataType::Timestamp(TimeUnit::Millisecond, None),
+        "timestamp_micros" => DataType::Timestamp(TimeUnit::Microsecond, None),
+        "timestamp_nanos" => DataType::Timestamp(TimeUnit::Nanosecond, None),
+        "decimal128" => DataType::Decimal128(38, 9),
+        "json" | "jsonb" => DataType::Utf8,
+        _ => DataType::Utf8, // fallback
     }
 }
 
-pub(crate) fn schema_hint_has_shape(schema_hint: &SchemaHint) -> bool {
-    match schema_hint {
-        SchemaHint::Columns(columns) => !columns.is_empty(),
-        SchemaHint::ArrowIpc(ipc_bytes) => !ipc_bytes.is_empty(),
-        _ => false,
-    }
+pub(crate) fn schema_hint_has_shape(schema: &StreamSchema) -> bool {
+    !schema.fields.is_empty()
 }
 
 /// Build a destination write contract for a stream.
@@ -67,7 +97,7 @@ pub(crate) fn prepare_stream_once(
     target_schema: &str,
     stream_name: &str,
     write_mode: Option<WriteMode>,
-    _schema_hint: &SchemaHint,
+    _schema: &StreamSchema,
     use_watermarks: bool,
     schema_policy: SchemaEvolutionPolicy,
     checkpoint: CheckpointConfig,
@@ -107,7 +137,7 @@ pub(crate) fn prepare_stream_once(
 pub(crate) async fn async_prepare_stream_once(
     ctx: &Context,
     client: &Client,
-    schema_hint: &SchemaHint,
+    schema: &StreamSchema,
     mut contract: WriteContract,
 ) -> Result<WriteContract, String> {
     if contract.use_watermarks {
@@ -130,7 +160,7 @@ pub(crate) async fn async_prepare_stream_once(
     }
 
     let mut schema_state = crate::ddl::SchemaState::new();
-    if let Some(schema) = preflight_schema_from_hint(schema_hint) {
+    if let Some(schema) = preflight_schema_from_stream_schema(schema) {
         schema_state
             .ensure_table(
                 ctx,
