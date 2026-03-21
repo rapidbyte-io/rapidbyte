@@ -701,6 +701,7 @@ fn dev_stream_context_to_wit(
         partition_key: ctx.partition_key.clone(),
         partition_count: ctx.partition_count,
         partition_index: ctx.partition_index,
+        effective_parallelism: ctx.effective_parallelism,
         partition_strategy: None,
     }
 }

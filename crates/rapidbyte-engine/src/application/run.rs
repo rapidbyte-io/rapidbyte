@@ -196,8 +196,9 @@ pub async fn run_pipeline(
             transform_resolved.push(resolved);
         }
 
-        // 2b. Apply phase — provision resources (best-effort, non-fatal)
-        {
+        // 2b. Apply phase — provision resources once so retries do not
+        // repeat side effects.
+        if attempt == 1 {
             let (src_apply_id, src_apply_ver) = parse_plugin_id(&pipeline.source.use_ref);
             let (dst_apply_id, dst_apply_ver) = parse_plugin_id(&pipeline.destination.use_ref);
             let src_apply_permissions = extract_permissions(&source_resolved);
@@ -1204,6 +1205,11 @@ destination:
 
         assert_eq!(result.retry_count, 1, "expected 1 retry");
         assert_eq!(result.counts.records_read, 100);
+        assert_eq!(
+            tc.runner.apply_calls().len(),
+            2,
+            "apply should run once for source and destination"
+        );
 
         // Verify RetryScheduled event was emitted
         let events = tc.progress.events();

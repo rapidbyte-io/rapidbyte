@@ -140,6 +140,7 @@ interface types {
         partition-key: option<string>,
         partition-count: option<u32>,
         partition-index: option<u32>,
+        effective-parallelism: option<u32>,
         partition-strategy: option<partition-strategy>,
     }
 

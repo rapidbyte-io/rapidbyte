@@ -574,7 +574,7 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
                 partition_key: ctx.partition_key,
                 partition_count: ctx.partition_count,
                 partition_index: ctx.partition_index,
-                effective_parallelism: None,
+                effective_parallelism: ctx.effective_parallelism,
                 partition_strategy: ctx.partition_strategy.map(from_component_partition_strategy),
                 copy_flush_bytes_override: None,
             }
@@ -687,6 +687,7 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
                 partition_key: ctx.partition_key,
                 partition_count: ctx.partition_count,
                 partition_index: ctx.partition_index,
+                effective_parallelism: ctx.effective_parallelism,
                 partition_strategy: ctx.partition_strategy.map(to_component_partition_strategy),
             }
         }
@@ -1443,5 +1444,13 @@ mod tests {
         assert!(common_generated.contains("fn write_summary_to_run_summary"));
         assert!(common_generated
             .contains("summary : :: rapidbyte_sdk :: metric :: WriteSummary , succeeded : bool"));
+    }
+
+    #[test]
+    fn stream_context_converters_preserve_effective_parallelism() {
+        let struct_name: Ident = parse_quote!(TestTransform);
+        let generated = gen_common(&struct_name).to_string();
+
+        assert!(generated.contains("effective_parallelism : ctx . effective_parallelism"));
     }
 }
