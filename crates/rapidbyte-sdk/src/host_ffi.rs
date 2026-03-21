@@ -56,20 +56,54 @@ pub trait HostImports: Send + Sync {
 
     fn state_get(&self, scope: StateScope, key: &str) -> Result<Option<String>, PluginError>;
     fn state_put(&self, scope: StateScope, key: &str, value: &str) -> Result<(), PluginError>;
-    fn state_compare_and_set(
-        &self,
-        scope: StateScope,
-        key: &str,
-        expected: Option<&str>,
-        new_value: &str,
-    ) -> Result<bool, PluginError>;
-
     fn checkpoint(
         &self,
         plugin_id: &str,
         stream_name: &str,
         cp: &Checkpoint,
     ) -> Result<(), PluginError>;
+
+    // Transactional checkpoints
+    fn checkpoint_begin(&self, kind: u32) -> Result<u64, PluginError>;
+    fn checkpoint_set_cursor(
+        &self,
+        txn: u64,
+        stream_name: &str,
+        cursor_field: &str,
+        cursor_value_json: &str,
+    ) -> Result<(), PluginError>;
+    fn checkpoint_set_state(
+        &self,
+        txn: u64,
+        scope: u32,
+        key: &str,
+        value: &str,
+    ) -> Result<(), PluginError>;
+    fn checkpoint_commit(&self, txn: u64, records: u64, bytes: u64) -> Result<(), PluginError>;
+    fn checkpoint_abort(&self, txn: u64);
+
+    // Cancellation
+    fn is_cancelled(&self) -> bool;
+
+    // Stream errors
+    fn stream_error(&self, stream_index: u32, error: &PluginError) -> Result<(), PluginError>;
+
+    // Batch with metadata
+    fn emit_batch_with_metadata(
+        &self,
+        handle: u64,
+        stream_index: u32,
+        schema_fingerprint: Option<&str>,
+        sequence_number: u64,
+        compression: Option<&str>,
+        record_count: u32,
+        byte_count: u64,
+    ) -> Result<(), PluginError>;
+    fn next_batch_metadata(
+        &self,
+        handle: u64,
+    ) -> Result<(u32, Option<String>, u64, Option<String>, u32, u64), PluginError>;
+
     fn counter_add(&self, name: &str, value: u64, labels_json: &str) -> Result<(), PluginError>;
     fn gauge_set(&self, name: &str, value: f64, labels_json: &str) -> Result<(), PluginError>;
     fn histogram_record(
@@ -219,16 +253,6 @@ pub mod test_support {
             Ok(())
         }
 
-        fn state_compare_and_set(
-            &self,
-            _scope: StateScope,
-            _key: &str,
-            _expected: Option<&str>,
-            _new_value: &str,
-        ) -> Result<bool, PluginError> {
-            Ok(false)
-        }
-
         fn checkpoint(
             &self,
             _plugin_id: &str,
@@ -236,6 +260,73 @@ pub mod test_support {
             _cp: &Checkpoint,
         ) -> Result<(), PluginError> {
             Ok(())
+        }
+
+        fn checkpoint_begin(&self, _kind: u32) -> Result<u64, PluginError> {
+            Ok(1)
+        }
+
+        fn checkpoint_set_cursor(
+            &self,
+            _txn: u64,
+            _stream_name: &str,
+            _cursor_field: &str,
+            _cursor_value_json: &str,
+        ) -> Result<(), PluginError> {
+            Ok(())
+        }
+
+        fn checkpoint_set_state(
+            &self,
+            _txn: u64,
+            _scope: u32,
+            _key: &str,
+            _value: &str,
+        ) -> Result<(), PluginError> {
+            Ok(())
+        }
+
+        fn checkpoint_commit(
+            &self,
+            _txn: u64,
+            _records: u64,
+            _bytes: u64,
+        ) -> Result<(), PluginError> {
+            Ok(())
+        }
+
+        fn checkpoint_abort(&self, _txn: u64) {}
+
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+
+        fn stream_error(
+            &self,
+            _stream_index: u32,
+            _error: &PluginError,
+        ) -> Result<(), PluginError> {
+            Ok(())
+        }
+
+        fn emit_batch_with_metadata(
+            &self,
+            _handle: u64,
+            _stream_index: u32,
+            _schema_fingerprint: Option<&str>,
+            _sequence_number: u64,
+            _compression: Option<&str>,
+            _record_count: u32,
+            _byte_count: u64,
+        ) -> Result<(), PluginError> {
+            Ok(())
+        }
+
+        fn next_batch_metadata(
+            &self,
+            _handle: u64,
+        ) -> Result<(u32, Option<String>, u64, Option<String>, u32, u64), PluginError> {
+            Ok((0, None, 0, None, 0, 0))
         }
 
         fn counter_add(
@@ -340,7 +431,11 @@ fn default_host_imports() -> Box<dyn HostImports> {
     }
 }
 
-fn host_imports() -> &'static dyn HostImports {
+/// Returns the active host imports implementation.
+///
+/// This is exposed as `pub` so that `Context` can call host imports
+/// directly for stream-indexed operations.
+pub fn host_imports() -> &'static dyn HostImports {
     HOST_IMPORTS.get_or_init(default_host_imports).as_ref()
 }
 
@@ -450,22 +545,6 @@ impl HostImports for WasmHostImports {
             .map_err(from_component_error)
     }
 
-    fn state_compare_and_set(
-        &self,
-        scope: StateScope,
-        key: &str,
-        expected: Option<&str>,
-        new_value: &str,
-    ) -> Result<bool, PluginError> {
-        bindings::rapidbyte::plugin::host::state_cas(
-            state_scope_to_i32(scope) as u32,
-            key,
-            expected,
-            new_value,
-        )
-        .map_err(from_component_error)
-    }
-
     fn checkpoint(
         &self,
         plugin_id: &str,
@@ -525,6 +604,86 @@ impl HostImports for WasmHostImports {
             error_category.as_str(),
         )
         .map_err(from_component_error)
+    }
+
+    fn checkpoint_begin(&self, kind: u32) -> Result<u64, PluginError> {
+        bindings::rapidbyte::plugin::host::checkpoint_begin(kind).map_err(from_component_error)
+    }
+
+    fn checkpoint_set_cursor(
+        &self,
+        txn: u64,
+        stream_name: &str,
+        cursor_field: &str,
+        cursor_value_json: &str,
+    ) -> Result<(), PluginError> {
+        bindings::rapidbyte::plugin::host::checkpoint_set_cursor(
+            txn,
+            stream_name,
+            cursor_field,
+            cursor_value_json,
+        )
+        .map_err(from_component_error)
+    }
+
+    fn checkpoint_set_state(
+        &self,
+        txn: u64,
+        scope: u32,
+        key: &str,
+        value: &str,
+    ) -> Result<(), PluginError> {
+        bindings::rapidbyte::plugin::host::checkpoint_set_state(txn, scope, key, value)
+            .map_err(from_component_error)
+    }
+
+    fn checkpoint_commit(&self, txn: u64, records: u64, bytes: u64) -> Result<(), PluginError> {
+        bindings::rapidbyte::plugin::host::checkpoint_commit(txn, records, bytes)
+            .map_err(from_component_error)
+    }
+
+    fn checkpoint_abort(&self, txn: u64) {
+        bindings::rapidbyte::plugin::host::checkpoint_abort(txn);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        bindings::rapidbyte::plugin::host::is_cancelled()
+    }
+
+    fn stream_error(&self, stream_index: u32, error: &PluginError) -> Result<(), PluginError> {
+        let error_json = serde_json::to_string(error)
+            .map_err(|e| PluginError::internal("SERIALIZE_ERROR", e.to_string()))?;
+        bindings::rapidbyte::plugin::host::stream_error(stream_index, &error_json)
+            .map_err(from_component_error)
+    }
+
+    fn emit_batch_with_metadata(
+        &self,
+        handle: u64,
+        stream_index: u32,
+        schema_fingerprint: Option<&str>,
+        sequence_number: u64,
+        compression: Option<&str>,
+        record_count: u32,
+        byte_count: u64,
+    ) -> Result<(), PluginError> {
+        bindings::rapidbyte::plugin::host::emit_batch_with_metadata(
+            handle,
+            stream_index,
+            schema_fingerprint,
+            sequence_number,
+            compression,
+            record_count,
+            byte_count,
+        )
+        .map_err(from_component_error)
+    }
+
+    fn next_batch_metadata(
+        &self,
+        handle: u64,
+    ) -> Result<(u32, Option<String>, u64, Option<String>, u32, u64), PluginError> {
+        bindings::rapidbyte::plugin::host::next_batch_metadata(handle).map_err(from_component_error)
     }
 
     fn connect_tcp(&self, host: &str, port: u16) -> Result<u64, PluginError> {
@@ -608,16 +767,6 @@ impl HostImports for StubHostImports {
         Ok(())
     }
 
-    fn state_compare_and_set(
-        &self,
-        _scope: StateScope,
-        _key: &str,
-        _expected: Option<&str>,
-        _new_value: &str,
-    ) -> Result<bool, PluginError> {
-        Ok(false)
-    }
-
     fn checkpoint(
         &self,
         _plugin_id: &str,
@@ -625,6 +774,64 @@ impl HostImports for StubHostImports {
         _cp: &Checkpoint,
     ) -> Result<(), PluginError> {
         Ok(())
+    }
+
+    fn checkpoint_begin(&self, _kind: u32) -> Result<u64, PluginError> {
+        Ok(1)
+    }
+
+    fn checkpoint_set_cursor(
+        &self,
+        _txn: u64,
+        _stream_name: &str,
+        _cursor_field: &str,
+        _cursor_value_json: &str,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    fn checkpoint_set_state(
+        &self,
+        _txn: u64,
+        _scope: u32,
+        _key: &str,
+        _value: &str,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    fn checkpoint_commit(&self, _txn: u64, _records: u64, _bytes: u64) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    fn checkpoint_abort(&self, _txn: u64) {}
+
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+
+    fn stream_error(&self, _stream_index: u32, _error: &PluginError) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    fn emit_batch_with_metadata(
+        &self,
+        _handle: u64,
+        _stream_index: u32,
+        _schema_fingerprint: Option<&str>,
+        _sequence_number: u64,
+        _compression: Option<&str>,
+        _record_count: u32,
+        _byte_count: u64,
+    ) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    fn next_batch_metadata(
+        &self,
+        _handle: u64,
+    ) -> Result<(u32, Option<String>, u64, Option<String>, u32, u64), PluginError> {
+        Ok((0, None, 0, None, 0, 0))
     }
 
     fn counter_add(&self, _name: &str, _value: u64, _labels_json: &str) -> Result<(), PluginError> {
@@ -791,20 +998,6 @@ pub fn state_put(scope: StateScope, key: &str, value: &str) -> Result<(), Plugin
     host_imports().state_put(scope, key, value)
 }
 
-/// Atomically compare-and-set a value in the host state backend.
-///
-/// # Errors
-///
-/// Returns `Err` if the host state backend rejects the CAS operation.
-pub fn state_compare_and_set(
-    scope: StateScope,
-    key: &str,
-    expected: Option<&str>,
-    new_value: &str,
-) -> Result<bool, PluginError> {
-    host_imports().state_compare_and_set(scope, key, expected, new_value)
-}
-
 /// Submit a checkpoint to the host runtime.
 ///
 /// # Errors
@@ -812,6 +1005,101 @@ pub fn state_compare_and_set(
 /// Returns `Err` if the host rejects the checkpoint.
 pub fn checkpoint(plugin_id: &str, stream_name: &str, cp: &Checkpoint) -> Result<(), PluginError> {
     host_imports().checkpoint(plugin_id, stream_name, cp)
+}
+
+/// Begin a transactional checkpoint.
+///
+/// # Errors
+///
+/// Returns `Err` if the host rejects the checkpoint begin.
+pub fn checkpoint_begin(kind: u32) -> Result<u64, PluginError> {
+    host_imports().checkpoint_begin(kind)
+}
+
+/// Set cursor position within a transactional checkpoint.
+///
+/// # Errors
+///
+/// Returns `Err` if the host rejects the cursor update.
+pub fn checkpoint_set_cursor(
+    txn: u64,
+    stream_name: &str,
+    cursor_field: &str,
+    cursor_value_json: &str,
+) -> Result<(), PluginError> {
+    host_imports().checkpoint_set_cursor(txn, stream_name, cursor_field, cursor_value_json)
+}
+
+/// Set state within a transactional checkpoint.
+///
+/// # Errors
+///
+/// Returns `Err` if the host rejects the state mutation.
+pub fn checkpoint_set_state(
+    txn: u64,
+    scope: u32,
+    key: &str,
+    value: &str,
+) -> Result<(), PluginError> {
+    host_imports().checkpoint_set_state(txn, scope, key, value)
+}
+
+/// Commit a transactional checkpoint.
+///
+/// # Errors
+///
+/// Returns `Err` if the host rejects the commit.
+pub fn checkpoint_commit(txn: u64, records: u64, bytes: u64) -> Result<(), PluginError> {
+    host_imports().checkpoint_commit(txn, records, bytes)
+}
+
+/// Abort a transactional checkpoint.
+pub fn checkpoint_abort(txn: u64) {
+    host_imports().checkpoint_abort(txn);
+}
+
+/// Check if the pipeline has been cancelled.
+pub fn is_cancelled() -> bool {
+    host_imports().is_cancelled()
+}
+
+/// Report an error for a specific stream.
+///
+/// # Errors
+///
+/// Returns `Err` if the host rejects the stream error report.
+pub fn stream_error(stream_index: u32, error: &PluginError) -> Result<(), PluginError> {
+    host_imports().stream_error(stream_index, error)
+}
+
+/// Emit a batch with metadata for a specific stream.
+///
+/// # Errors
+///
+/// Returns `Err` if the host rejects the batch emission.
+pub fn emit_batch_with_metadata(
+    handle: u64,
+    stream_index: u32,
+    schema_fingerprint: Option<&str>,
+    sequence_number: u64,
+    compression: Option<&str>,
+    record_count: u32,
+    byte_count: u64,
+) -> Result<(), PluginError> {
+    host_imports().emit_batch_with_metadata(
+        handle,
+        stream_index,
+        schema_fingerprint,
+        sequence_number,
+        compression,
+        record_count,
+        byte_count,
+    )
+}
+
+/// Log a warning message through the host runtime.
+pub fn log_warn(message: &str) {
+    log(1, message);
 }
 
 /// Add to a counter in the host runtime.
