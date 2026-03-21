@@ -28,6 +28,9 @@ impl Transform for TransformValidate {
     type Config = config::Config;
 
     async fn init(config: Self::Config) -> Result<Self, PluginError> {
+        config.compile().map_err(|message| {
+            PluginError::config("VALIDATE_CONFIG", format!("Invalid validation config: {message}"))
+        })?;
         Ok(Self {
             config,
             compiled: std::sync::OnceLock::new(),
@@ -73,23 +76,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn init_accepts_config_that_requires_validation() {
+    async fn init_rejects_config_that_requires_validation() {
         let result = TransformValidate::init(invalid_regex_config()).await;
-        assert!(result.is_ok(), "init should not reject invalid config");
+        assert!(result.is_err(), "init should reject invalid config");
     }
 
     #[tokio::test]
     async fn invalid_config_reports_validation_failure() {
-        let plugin = TransformValidate::init(invalid_regex_config())
-            .await
-            .expect("init should not reject invalid config");
-        let ctx = Context::new("transform-validate", "users");
-        let validation = plugin
-            .validate(&ctx, None)
-            .await
-            .expect("validate should not return plugin error");
-
-        assert_eq!(validation.status, ValidationStatus::Failed);
-        assert!(validation.message.contains("Invalid validation config"));
+        let result = TransformValidate::init(invalid_regex_config()).await;
+        match result {
+            Ok(_) => panic!("invalid config should fail init"),
+            Err(err) => {
+                assert_eq!(err.code, "VALIDATE_CONFIG");
+                assert!(err.message.contains("Invalid validation config"));
+            }
+        }
     }
 }

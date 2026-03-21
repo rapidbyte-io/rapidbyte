@@ -1154,10 +1154,13 @@ fn validate_plugin_impl(
             )?;
             let iface = bindings.rapidbyte_plugin_source();
 
-            let session = iface
+            let session = match iface
                 .call_open(&mut store, &config_json)?
                 .map_err(source_error_to_sdk)
-                .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
+            {
+                Ok(session) => session,
+                Err(err) => return config_error_as_validation_failure("Source", err),
+            };
 
             let wit_schema = upstream_schema.map(schema_to_wit_source);
             let result = iface
@@ -1183,10 +1186,13 @@ fn validate_plugin_impl(
             )?;
             let iface = bindings.rapidbyte_plugin_destination();
 
-            let session = iface
+            let session = match iface
                 .call_open(&mut store, &config_json)?
                 .map_err(dest_error_to_sdk)
-                .map_err(|e| anyhow::anyhow!("Destination open failed: {e}"))?;
+            {
+                Ok(session) => session,
+                Err(err) => return config_error_as_validation_failure("Destination", err),
+            };
 
             let wit_schema = upstream_schema.map(schema_to_wit_dest);
             let result = iface
@@ -1212,10 +1218,13 @@ fn validate_plugin_impl(
             )?;
             let iface = bindings.rapidbyte_plugin_transform();
 
-            let session = iface
+            let session = match iface
                 .call_open(&mut store, &config_json)?
                 .map_err(transform_error_to_sdk)
-                .map_err(|e| anyhow::anyhow!("Transform open failed: {e}"))?;
+            {
+                Ok(session) => session,
+                Err(err) => return config_error_as_validation_failure("Transform", err),
+            };
 
             let wit_schema = upstream_schema.map(schema_to_wit_transform);
             let result = iface
@@ -1229,6 +1238,17 @@ fn validate_plugin_impl(
         PluginKind::Unknown => {
             anyhow::bail!("cannot validate plugin with unknown kind")
         }
+    }
+}
+
+fn config_error_as_validation_failure(
+    role: &str,
+    err: rapidbyte_types::error::PluginError,
+) -> anyhow::Result<ValidationReport> {
+    if err.category == rapidbyte_types::error::ErrorCategory::Config {
+        Ok(ValidationReport::failed(&err.message))
+    } else {
+        Err(anyhow::anyhow!("{role} open failed: {err}"))
     }
 }
 
@@ -2107,9 +2127,14 @@ pub fn run_transform_stream_bench(
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_close_result, parse_compression, plugin_instance_key};
+    use super::{
+        config_error_as_validation_failure, handle_close_result, parse_compression,
+        plugin_instance_key,
+    };
     use rapidbyte_runtime::CompressionCodec;
+    use rapidbyte_types::error::ErrorCategory;
     use rapidbyte_types::stream::StreamContext;
+    use rapidbyte_types::validation::ValidationStatus;
 
     #[test]
     fn test_handle_close_result_ok() {
@@ -2144,6 +2169,16 @@ mod tests {
     fn parse_compression_invalid_returns_error() {
         let result = parse_compression(Some("brotli"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_error_as_validation_failure_maps_config_category() {
+        let err = rapidbyte_types::error::PluginError::config("BAD_CONFIG", "invalid config");
+
+        let report = config_error_as_validation_failure("Transform", err)
+            .expect("config errors should map to failed validation");
+        assert_eq!(report.status, ValidationStatus::Failed);
+        assert!(report.message.contains("invalid config"));
     }
 
     fn test_stream_ctx(stream_name: &str, partition_index: Option<u32>) -> StreamContext {
