@@ -24,6 +24,7 @@ use rapidbyte_sdk::schema::StreamSchema;
 #[rapidbyte_sdk::plugin(source)]
 pub struct SourcePostgres {
     config: config::Config,
+    discovery_settings: config::DiscoverySettings,
 }
 
 impl Source for SourcePostgres {
@@ -31,7 +32,11 @@ impl Source for SourcePostgres {
 
     async fn init(config: Self::Config) -> Result<Self, PluginError> {
         config.validate()?;
-        Ok(Self { config })
+        let discovery_settings = config.discovery_settings();
+        Ok(Self {
+            config,
+            discovery_settings,
+        })
     }
 
     async fn prerequisites(&self, ctx: &Context) -> Result<PrerequisitesReport, PluginError> {
@@ -43,7 +48,7 @@ impl Source for SourcePostgres {
         let client = client::connect(&self.config)
             .await
             .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
-        discovery::discover_catalog(&client)
+        discovery::discover_catalog_with_settings(&client, &self.discovery_settings)
             .await
             .map_err(|e| PluginError::transient_db("DISCOVERY_FAILED", e))
     }

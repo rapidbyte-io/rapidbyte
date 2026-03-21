@@ -9,7 +9,7 @@ use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::schema::StreamSchema;
 use tokio_postgres::Client;
 
-use crate::config::current_discovery_settings;
+use crate::config::DiscoverySettings;
 use crate::types::Column;
 
 /// Discovery metadata for a single column.
@@ -35,14 +35,21 @@ impl DiscoveryColumn {
     }
 }
 
-/// Discover tables and columns using the current cached discovery settings.
+/// Discover tables and columns using default discovery settings.
 ///
 /// # Errors
 ///
 /// Returns `Err` if any catalog query fails or result parsing encounters an
 /// unexpected column type.
+#[allow(dead_code)]
 pub async fn discover_catalog(client: &Client) -> Result<Vec<DiscoveredStream>, String> {
-    let settings = current_discovery_settings();
+    discover_catalog_with_settings(client, &DiscoverySettings::default()).await
+}
+
+pub(crate) async fn discover_catalog_with_settings(
+    client: &Client,
+    settings: &DiscoverySettings,
+) -> Result<Vec<DiscoveredStream>, String> {
     let schema_name = settings.schema.as_deref().unwrap_or("public");
 
     let mut table_rows = query_catalog_rows(client, schema_name).await?;
@@ -82,7 +89,17 @@ pub async fn discover_catalog(client: &Client) -> Result<Vec<DiscoveredStream>, 
             }
         }
 
-        let stream = build_discovered_stream(&schema, &table, &columns, settings.publication.as_deref());
+        let primary_key = primary_keys
+            .get(&(schema.clone(), table.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let stream = build_discovered_stream(
+            &schema,
+            &table,
+            &columns,
+            &primary_key,
+            settings.publication.as_deref(),
+        );
         streams.push(stream);
     }
 
@@ -98,25 +115,19 @@ pub(crate) async fn query_table_columns(
     client: &Client,
     table_name: &str,
 ) -> Result<Vec<Column>, String> {
-    let settings = current_discovery_settings();
-    let schema_name = settings.schema.as_deref().unwrap_or("public");
-    query_table_columns_in_schema(client, schema_name, table_name).await
+    query_table_columns_in_schema(client, "public", table_name).await
 }
 
 fn build_discovered_stream(
     schema_name: &str,
     table_name: &str,
     columns: &[DiscoveryColumn],
+    primary_key: &[String],
     publication: Option<&str>,
 ) -> DiscoveredStream {
     let fields = columns
         .iter()
         .map(DiscoveryColumn::to_schema_field)
-        .collect::<Vec<_>>();
-    let primary_key = columns
-        .iter()
-        .filter(|column| column.is_primary_key)
-        .map(|column| column.name.clone())
         .collect::<Vec<_>>();
     let default_cursor_field = suggest_cursor_field(columns);
 
@@ -124,7 +135,7 @@ fn build_discovered_stream(
         name: table_name.to_string(),
         schema: StreamSchema {
             fields,
-            primary_key: primary_key.clone(),
+            primary_key: primary_key.to_vec(),
             partition_keys: vec![],
             source_defined_cursor: default_cursor_field.clone(),
             schema_id: None,
@@ -170,7 +181,7 @@ fn filter_published_streams(
 fn suggest_cursor_field(columns: &[DiscoveryColumn]) -> Option<String> {
     let mut candidates = columns
         .iter()
-        .filter(|column| !column.is_primary_key && !column.is_generated)
+        .filter(|column| !column.is_generated)
         .filter(|column| {
             let info = column.as_column();
             info.is_cursor_candidate()
@@ -361,7 +372,13 @@ mod tests {
             column("name", "text", false, false, false),
         ];
 
-        let stream = build_discovered_stream("analytics", "users", &columns, None);
+        let stream = build_discovered_stream(
+            "analytics",
+            "users",
+            &columns,
+            &["id".to_string()],
+            None,
+        );
 
         assert_eq!(stream.name, "users");
         assert_eq!(stream.schema.primary_key, vec!["id"]);
@@ -376,7 +393,13 @@ mod tests {
             column("row_hash", "text", false, false, true),
         ];
 
-        let stream = build_discovered_stream("analytics", "events", &columns, None);
+        let stream = build_discovered_stream(
+            "analytics",
+            "events",
+            &columns,
+            &["id".to_string()],
+            None,
+        );
 
         assert!(stream.schema.fields[1].is_generated);
     }
@@ -385,7 +408,13 @@ mod tests {
     fn build_discovered_stream_records_non_public_schema_metadata() {
         let columns = vec![column("id", "int4", false, true, false)];
 
-        let stream = build_discovered_stream("reporting", "invoices", &columns, None);
+        let stream = build_discovered_stream(
+            "reporting",
+            "invoices",
+            &columns,
+            &["id".to_string()],
+            None,
+        );
 
         assert_eq!(stream.name, "invoices");
         assert_eq!(
@@ -401,12 +430,14 @@ mod tests {
                 "public",
                 "users",
                 &[column("id", "int4", false, true, false)],
+                &["id".to_string()],
                 None,
             ),
             build_discovered_stream(
                 "analytics",
                 "events",
                 &[column("id", "int4", false, true, false)],
+                &["id".to_string()],
                 None,
             ),
         ];
@@ -427,9 +458,26 @@ mod tests {
             column("generated_at", "timestamp", false, false, true),
         ];
 
-        assert_eq!(
-            suggest_cursor_field(&columns),
-            Some("updated_at".to_string())
+        assert_eq!(suggest_cursor_field(&columns), Some("updated_at".to_string()));
+    }
+
+    #[test]
+    fn build_discovered_stream_preserves_primary_key_order() {
+        let columns = vec![
+            column("tenant_id", "int4", false, true, false),
+            column("id", "int4", false, true, false),
+            column("created_at", "timestamp", false, false, false),
+        ];
+        let stream = build_discovered_stream(
+            "analytics",
+            "orders",
+            &columns,
+            &["tenant_id".to_string(), "id".to_string()],
+            None,
         );
+
+        assert_eq!(stream.schema.primary_key, vec!["tenant_id", "id"]);
+        assert!(stream.schema.fields[0].is_primary_key);
+        assert!(stream.schema.fields[1].is_primary_key);
     }
 }

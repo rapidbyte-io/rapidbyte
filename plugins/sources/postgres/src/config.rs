@@ -1,7 +1,5 @@
 //! Source `PostgreSQL` plugin configuration.
 
-use std::sync::{Mutex, OnceLock};
-
 use rapidbyte_sdk::error::PluginError;
 use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;
@@ -11,8 +9,6 @@ pub(crate) struct DiscoverySettings {
     pub schema: Option<String>,
     pub publication: Option<String>,
 }
-
-static DISCOVERY_SETTINGS: OnceLock<Mutex<DiscoverySettings>> = OnceLock::new();
 
 /// `PostgreSQL` connection config from pipeline YAML.
 #[derive(Debug, Clone, Deserialize, ConfigSchema)]
@@ -60,29 +56,16 @@ impl Config {
         if let Some(pub_name) = self.publication.as_ref() {
             validate_identifier("publication", pub_name)?;
         }
-        cache_discovery_settings(self);
         Ok(())
     }
-}
-
-pub(crate) fn current_discovery_settings() -> DiscoverySettings {
-    discovery_settings_lock()
-        .lock()
-        .expect("discovery settings lock poisoned")
-        .clone()
-}
-
-fn cache_discovery_settings(config: &Config) {
-    *discovery_settings_lock()
-        .lock()
-        .expect("discovery settings lock poisoned") = DiscoverySettings {
-        schema: config.schema.clone(),
-        publication: config.publication.clone(),
-    };
-}
-
-fn discovery_settings_lock() -> &'static Mutex<DiscoverySettings> {
-    DISCOVERY_SETTINGS.get_or_init(|| Mutex::new(DiscoverySettings::default()))
+    
+    #[must_use]
+    pub(crate) fn discovery_settings(&self) -> DiscoverySettings {
+        DiscoverySettings {
+            schema: self.schema.clone(),
+            publication: self.publication.clone(),
+        }
+    }
 }
 
 fn validate_identifier(field: &str, value: &str) -> Result<(), PluginError> {
