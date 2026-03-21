@@ -18,20 +18,25 @@ use rapidbyte_runtime::{
     WasmRuntime,
 };
 use rapidbyte_types::checkpoint::Checkpoint;
+use rapidbyte_types::discovery::PluginSpec;
+use rapidbyte_types::lifecycle::{ApplyAction, ApplyReport, TeardownReport};
 use rapidbyte_types::manifest::Permissions;
 use rapidbyte_types::metric::{ReadSummary, TransformSummary, WriteSummary};
+use rapidbyte_types::schema::StreamSchema;
 use rapidbyte_types::state::RunStats;
 use rapidbyte_types::state_backend::StateBackend;
 use rapidbyte_types::stream::StreamContext;
-use rapidbyte_types::validation::ValidationReport;
-use rapidbyte_types::wire::PluginKind;
+use rapidbyte_types::validation::{
+    PrerequisiteCheck, PrerequisiteSeverity, PrerequisitesReport, ValidationReport,
+};
+use rapidbyte_types::wire::{PluginKind, SyncMode, WriteMode};
 
 use crate::adapter::engine_factory::noop_state_backend;
 use crate::domain::error::PipelineError;
 use crate::domain::ports::runner::{
-    CheckComponentStatus, DestinationOutcome, DestinationRunParams, DiscoverParams,
-    DiscoveredStream, PluginRunner, SourceOutcome, SourceRunParams, TransformOutcome,
-    TransformRunParams, ValidateParams,
+    ApplyParams, CheckComponentStatus, DestinationOutcome, DestinationRunParams, DiscoverParams,
+    DiscoveredStream, PluginRunner, PrerequisitesParams, SourceOutcome, SourceRunParams,
+    SpecParams, TeardownParams, TransformOutcome, TransformRunParams, ValidateParams,
 };
 
 // ── Public adapter ──────────────────────────────────────────────────
@@ -169,6 +174,7 @@ impl PluginRunner for WasmPluginRunner {
         let stream_name = params.stream_name.clone();
         let permissions = params.permissions.clone();
         let sandbox_overrides = params.sandbox_overrides.clone();
+        let upstream_schema = params.upstream_schema.clone();
 
         let validation = tokio::task::spawn_blocking(move || {
             validate_plugin_impl(
@@ -180,6 +186,7 @@ impl PluginRunner for WasmPluginRunner {
                 &stream_name,
                 permissions.as_ref(),
                 sandbox_overrides.as_ref(),
+                upstream_schema.as_ref(),
             )
         })
         .await
@@ -218,6 +225,118 @@ impl PluginRunner for WasmPluginRunner {
         .map_err(PipelineError::Infrastructure)?;
 
         Ok(streams)
+    }
+
+    async fn spec(&self, params: &SpecParams) -> Result<PluginSpec, PipelineError> {
+        let component = self
+            .runtime
+            .load_module(&params.wasm_path)
+            .map_err(PipelineError::Infrastructure)?;
+        let kind = params.kind;
+        let plugin_id = params.plugin_id.clone();
+        let plugin_version = params.plugin_version.clone();
+
+        tokio::task::spawn_blocking(move || {
+            run_spec_impl(&component, kind, &plugin_id, &plugin_version)
+        })
+        .await
+        .map_err(|e| PipelineError::infra(format!("spec task panicked: {e}")))?
+        .map_err(PipelineError::Infrastructure)
+    }
+
+    async fn prerequisites(
+        &self,
+        params: &PrerequisitesParams,
+    ) -> Result<PrerequisitesReport, PipelineError> {
+        let component = self
+            .runtime
+            .load_module(&params.wasm_path)
+            .map_err(PipelineError::Infrastructure)?;
+        let kind = params.kind;
+        let plugin_id = params.plugin_id.clone();
+        let plugin_version = params.plugin_version.clone();
+        let config = params.config.clone();
+        let permissions = params.permissions.clone();
+        let sandbox_overrides = params.sandbox_overrides.clone();
+
+        tokio::task::spawn_blocking(move || {
+            run_prerequisites_impl(
+                &component,
+                kind,
+                &plugin_id,
+                &plugin_version,
+                &config,
+                permissions.as_ref(),
+                sandbox_overrides.as_ref(),
+            )
+        })
+        .await
+        .map_err(|e| PipelineError::infra(format!("prerequisites task panicked: {e}")))?
+        .map_err(PipelineError::Infrastructure)
+    }
+
+    async fn apply(&self, params: &ApplyParams) -> Result<ApplyReport, PipelineError> {
+        let component = self
+            .runtime
+            .load_module(&params.wasm_path)
+            .map_err(PipelineError::Infrastructure)?;
+        let kind = params.kind;
+        let plugin_id = params.plugin_id.clone();
+        let plugin_version = params.plugin_version.clone();
+        let config = params.config.clone();
+        let streams = params.streams.clone();
+        let dry_run = params.dry_run;
+        let permissions = params.permissions.clone();
+        let sandbox_overrides = params.sandbox_overrides.clone();
+
+        tokio::task::spawn_blocking(move || {
+            run_apply_impl(
+                &component,
+                kind,
+                &plugin_id,
+                &plugin_version,
+                &config,
+                &streams,
+                dry_run,
+                permissions.as_ref(),
+                sandbox_overrides.as_ref(),
+            )
+        })
+        .await
+        .map_err(|e| PipelineError::infra(format!("apply task panicked: {e}")))?
+        .map_err(PipelineError::Infrastructure)
+    }
+
+    async fn teardown(&self, params: &TeardownParams) -> Result<TeardownReport, PipelineError> {
+        let component = self
+            .runtime
+            .load_module(&params.wasm_path)
+            .map_err(PipelineError::Infrastructure)?;
+        let kind = params.kind;
+        let plugin_id = params.plugin_id.clone();
+        let plugin_version = params.plugin_version.clone();
+        let config = params.config.clone();
+        let streams = params.streams.clone();
+        let reason = params.reason.clone();
+        let permissions = params.permissions.clone();
+        let sandbox_overrides = params.sandbox_overrides.clone();
+
+        tokio::task::spawn_blocking(move || {
+            run_teardown_impl(
+                &component,
+                kind,
+                &plugin_id,
+                &plugin_version,
+                &config,
+                &streams,
+                &reason,
+                permissions.as_ref(),
+                sandbox_overrides.as_ref(),
+            )
+        })
+        .await
+        .map_err(|e| PipelineError::infra(format!("teardown task panicked: {e}")))?
+        .map_err(PipelineError::Infrastructure)
     }
 }
 
@@ -980,6 +1099,7 @@ fn validate_plugin_impl(
     stream_name: &str,
     permissions: Option<&Permissions>,
     sandbox_overrides: Option<&SandboxOverrides>,
+    upstream_schema: Option<&StreamSchema>,
 ) -> anyhow::Result<ValidationReport> {
     use rapidbyte_runtime::{dest_validation_to_sdk, transform_validation_to_sdk};
 
@@ -1028,8 +1148,9 @@ fn validate_plugin_impl(
                 .map_err(source_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
 
+            let wit_schema = upstream_schema.map(schema_to_wit_source);
             let result = iface
-                .call_validate(&mut store, session, None)?
+                .call_validate(&mut store, session, wit_schema.as_ref())?
                 .map(source_validation_to_sdk)
                 .map_err(source_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!(e.to_string()));
@@ -1056,8 +1177,9 @@ fn validate_plugin_impl(
                 .map_err(dest_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!("Destination open failed: {e}"))?;
 
+            let wit_schema = upstream_schema.map(schema_to_wit_dest);
             let result = iface
-                .call_validate(&mut store, session, None)?
+                .call_validate(&mut store, session, wit_schema.as_ref())?
                 .map(dest_validation_to_sdk)
                 .map_err(dest_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!(e.to_string()));
@@ -1084,8 +1206,9 @@ fn validate_plugin_impl(
                 .map_err(transform_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!("Transform open failed: {e}"))?;
 
+            let wit_schema = upstream_schema.map(schema_to_wit_transform);
             let result = iface
-                .call_validate(&mut store, session, None)?
+                .call_validate(&mut store, session, wit_schema.as_ref())?
                 .map(transform_validation_to_sdk)
                 .map_err(transform_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!(e.to_string()));
@@ -1177,6 +1300,589 @@ fn run_discover_impl(
     }
 
     Ok(streams)
+}
+
+// ── Schema → WIT converters ─────────────────────────────────────────
+
+macro_rules! schema_to_wit {
+    ($fn_name:ident, $mod:ident) => {
+        fn $fn_name(schema: &StreamSchema) -> $mod::rapidbyte::plugin::types::StreamSchema {
+            $mod::rapidbyte::plugin::types::StreamSchema {
+                fields: schema
+                    .fields
+                    .iter()
+                    .map(|f| $mod::rapidbyte::plugin::types::SchemaField {
+                        name: f.name.clone(),
+                        arrow_type: f.arrow_type.clone(),
+                        nullable: f.nullable,
+                        is_primary_key: f.is_primary_key,
+                        is_generated: f.is_generated,
+                        is_partition_key: f.is_partition_key,
+                        default_value: f.default_value.clone(),
+                    })
+                    .collect(),
+                primary_key: schema.primary_key.clone(),
+                partition_keys: schema.partition_keys.clone(),
+                source_defined_cursor: schema.source_defined_cursor.clone(),
+                schema_id: schema.schema_id.clone(),
+            }
+        }
+    };
+}
+
+schema_to_wit!(schema_to_wit_source, source_bindings);
+schema_to_wit!(schema_to_wit_dest, dest_bindings);
+schema_to_wit!(schema_to_wit_transform, transform_bindings);
+
+// ── WIT → SDK converters for lifecycle types ────────────────────────
+
+macro_rules! wit_spec_to_sdk {
+    ($fn_name:ident, $mod:ident) => {
+        fn $fn_name(spec: $mod::rapidbyte::plugin::types::PluginSpec) -> PluginSpec {
+            PluginSpec {
+                protocol_version: spec.protocol_version,
+                config_schema_json: spec.config_schema_json,
+                resource_schema_json: spec.resource_schema_json,
+                documentation_url: spec.documentation_url,
+                features: spec.features,
+                supported_sync_modes: spec
+                    .supported_sync_modes
+                    .into_iter()
+                    .map(|m| match m {
+                        $mod::rapidbyte::plugin::types::SyncMode::FullRefresh => {
+                            SyncMode::FullRefresh
+                        }
+                        $mod::rapidbyte::plugin::types::SyncMode::Incremental => {
+                            SyncMode::Incremental
+                        }
+                        $mod::rapidbyte::plugin::types::SyncMode::Cdc => SyncMode::Cdc,
+                    })
+                    .collect(),
+                supported_write_modes: spec.supported_write_modes.map(|modes| {
+                    modes
+                        .into_iter()
+                        .map(|m| match m {
+                            $mod::rapidbyte::plugin::types::WriteMode::Append => WriteMode::Append,
+                            $mod::rapidbyte::plugin::types::WriteMode::Replace => {
+                                WriteMode::Replace
+                            }
+                            $mod::rapidbyte::plugin::types::WriteMode::Upsert => {
+                                WriteMode::Upsert {
+                                    primary_key: vec![],
+                                }
+                            }
+                        })
+                        .collect()
+                }),
+            }
+        }
+    };
+}
+
+wit_spec_to_sdk!(source_spec_to_sdk, source_bindings);
+wit_spec_to_sdk!(dest_spec_to_sdk, dest_bindings);
+wit_spec_to_sdk!(transform_spec_to_sdk, transform_bindings);
+
+macro_rules! wit_prerequisites_to_sdk {
+    ($fn_name:ident, $mod:ident) => {
+        fn $fn_name(
+            report: $mod::rapidbyte::plugin::types::PrerequisitesReport,
+        ) -> PrerequisitesReport {
+            PrerequisitesReport {
+                passed: report.passed,
+                checks: report
+                    .checks
+                    .into_iter()
+                    .map(|c| PrerequisiteCheck {
+                        name: c.name,
+                        passed: c.passed,
+                        severity: match c.severity {
+                            $mod::rapidbyte::plugin::types::PrerequisiteSeverity::Error => {
+                                PrerequisiteSeverity::Error
+                            }
+                            $mod::rapidbyte::plugin::types::PrerequisiteSeverity::Warning => {
+                                PrerequisiteSeverity::Warning
+                            }
+                            $mod::rapidbyte::plugin::types::PrerequisiteSeverity::Info => {
+                                PrerequisiteSeverity::Info
+                            }
+                        },
+                        message: c.message,
+                        fix_hint: c.fix_hint,
+                    })
+                    .collect(),
+            }
+        }
+    };
+}
+
+wit_prerequisites_to_sdk!(source_prerequisites_to_sdk, source_bindings);
+wit_prerequisites_to_sdk!(dest_prerequisites_to_sdk, dest_bindings);
+
+macro_rules! wit_apply_report_to_sdk {
+    ($fn_name:ident, $mod:ident) => {
+        fn $fn_name(report: $mod::rapidbyte::plugin::types::ApplyReport) -> ApplyReport {
+            ApplyReport {
+                actions: report
+                    .actions
+                    .into_iter()
+                    .map(|a| ApplyAction {
+                        stream_name: a.stream_name,
+                        description: a.description,
+                        ddl_executed: a.ddl_executed,
+                    })
+                    .collect(),
+            }
+        }
+    };
+}
+
+wit_apply_report_to_sdk!(source_apply_report_to_sdk, source_bindings);
+wit_apply_report_to_sdk!(dest_apply_report_to_sdk, dest_bindings);
+
+macro_rules! wit_teardown_report_to_sdk {
+    ($fn_name:ident, $mod:ident) => {
+        fn $fn_name(report: $mod::rapidbyte::plugin::types::TeardownReport) -> TeardownReport {
+            TeardownReport {
+                actions: report.actions,
+            }
+        }
+    };
+}
+
+wit_teardown_report_to_sdk!(source_teardown_report_to_sdk, source_bindings);
+wit_teardown_report_to_sdk!(dest_teardown_report_to_sdk, dest_bindings);
+
+// ── Spec runner ─────────────────────────────────────────────────────
+
+/// Retrieve the plugin spec by calling the sessionless `spec()` export.
+fn run_spec_impl(
+    module: &LoadedComponent,
+    kind: PluginKind,
+    plugin_id: &str,
+    plugin_version: &str,
+) -> anyhow::Result<PluginSpec> {
+    tracing::info!(plugin = plugin_id, version = plugin_version, kind = ?kind, "Retrieving plugin spec");
+
+    let state = noop_state_backend();
+    let host_state = ComponentHostState::builder()
+        .pipeline("spec")
+        .plugin_id(plugin_id)
+        .plugin_instance_key(format!("spec:{kind:?}:{plugin_id}"))
+        .stream("spec")
+        .state_backend(state)
+        .config(&serde_json::Value::Null)
+        .compression(None)
+        .build()?;
+
+    let mut store = module.new_store(host_state, None);
+
+    match kind {
+        PluginKind::Source => {
+            let linker = create_component_linker(&module.engine, "source", |linker| {
+                source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = source_bindings::RapidbyteSource::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_source();
+            let wit_spec = iface
+                .call_spec(&mut store)?
+                .map_err(source_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Source spec failed: {e}"))?;
+            Ok(source_spec_to_sdk(wit_spec))
+        }
+        PluginKind::Destination => {
+            let linker = create_component_linker(&module.engine, "destination", |linker| {
+                dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = dest_bindings::RapidbyteDestination::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_destination();
+            let wit_spec = iface
+                .call_spec(&mut store)?
+                .map_err(dest_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Destination spec failed: {e}"))?;
+            Ok(dest_spec_to_sdk(wit_spec))
+        }
+        PluginKind::Transform => {
+            let linker = create_component_linker(&module.engine, "transform", |linker| {
+                transform_bindings::RapidbyteTransform::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = transform_bindings::RapidbyteTransform::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_transform();
+            let wit_spec = iface
+                .call_spec(&mut store)?
+                .map_err(transform_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Transform spec failed: {e}"))?;
+            Ok(transform_spec_to_sdk(wit_spec))
+        }
+        PluginKind::Unknown => {
+            anyhow::bail!("cannot retrieve spec for plugin with unknown kind")
+        }
+    }
+}
+
+// ── Prerequisites runner ────────────────────────────────────────────
+
+/// Run prerequisite checks against the plugin.
+#[allow(clippy::too_many_arguments)]
+fn run_prerequisites_impl(
+    module: &LoadedComponent,
+    kind: PluginKind,
+    plugin_id: &str,
+    plugin_version: &str,
+    config: &serde_json::Value,
+    permissions: Option<&Permissions>,
+    sandbox_overrides: Option<&SandboxOverrides>,
+) -> anyhow::Result<PrerequisitesReport> {
+    tracing::info!(plugin = plugin_id, version = plugin_version, kind = ?kind, "Running prerequisites check");
+
+    let state = noop_state_backend();
+    let mut builder = ComponentHostState::builder()
+        .pipeline("prerequisites")
+        .plugin_id(plugin_id)
+        .plugin_instance_key(format!("prerequisites:{kind:?}:{plugin_id}"))
+        .stream("prerequisites")
+        .state_backend(state)
+        .config(config)
+        .compression(None);
+    if let Some(p) = permissions {
+        builder = builder.permissions(p);
+    }
+    if let Some(ovr) = sandbox_overrides {
+        builder = builder.overrides(ovr);
+    }
+    let host_state = builder.build()?;
+
+    let timeout = sandbox_overrides.and_then(|o| o.timeout_seconds);
+    let mut store = module.new_store(host_state, timeout);
+    let config_json = serde_json::to_string(config)?;
+
+    match kind {
+        PluginKind::Source => {
+            let linker = create_component_linker(&module.engine, "source", |linker| {
+                source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = source_bindings::RapidbyteSource::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_source();
+
+            let session = iface
+                .call_open(&mut store, &config_json)?
+                .map_err(source_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
+
+            let result = iface
+                .call_prerequisites(&mut store, session)?
+                .map(source_prerequisites_to_sdk)
+                .map_err(source_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let _ = iface.call_close(&mut store, session);
+            result
+        }
+        PluginKind::Destination => {
+            let linker = create_component_linker(&module.engine, "destination", |linker| {
+                dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = dest_bindings::RapidbyteDestination::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_destination();
+
+            let session = iface
+                .call_open(&mut store, &config_json)?
+                .map_err(dest_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Destination open failed: {e}"))?;
+
+            let result = iface
+                .call_prerequisites(&mut store, session)?
+                .map(dest_prerequisites_to_sdk)
+                .map_err(dest_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let _ = iface.call_close(&mut store, session);
+            result
+        }
+        PluginKind::Transform => {
+            // Transform interface does not have prerequisites — return passed.
+            Ok(PrerequisitesReport::passed())
+        }
+        PluginKind::Unknown => {
+            anyhow::bail!("cannot run prerequisites for plugin with unknown kind")
+        }
+    }
+}
+
+// ── Apply runner ────────────────────────────────────────────────────
+
+/// Apply schema changes for streams.
+#[allow(clippy::too_many_arguments)]
+fn run_apply_impl(
+    module: &LoadedComponent,
+    kind: PluginKind,
+    plugin_id: &str,
+    plugin_version: &str,
+    config: &serde_json::Value,
+    streams: &[StreamContext],
+    dry_run: bool,
+    permissions: Option<&Permissions>,
+    sandbox_overrides: Option<&SandboxOverrides>,
+) -> anyhow::Result<ApplyReport> {
+    tracing::info!(plugin = plugin_id, version = plugin_version, kind = ?kind, dry_run, "Running apply");
+
+    let state = noop_state_backend();
+    let mut builder = ComponentHostState::builder()
+        .pipeline("apply")
+        .plugin_id(plugin_id)
+        .plugin_instance_key(format!("apply:{kind:?}:{plugin_id}"))
+        .stream("apply")
+        .state_backend(state)
+        .config(config)
+        .compression(None);
+    if let Some(p) = permissions {
+        builder = builder.permissions(p);
+    }
+    if let Some(ovr) = sandbox_overrides {
+        builder = builder.overrides(ovr);
+    }
+    let host_state = builder.build()?;
+
+    let timeout = sandbox_overrides.and_then(|o| o.timeout_seconds);
+    let mut store = module.new_store(host_state, timeout);
+    let config_json = serde_json::to_string(config)?;
+
+    match kind {
+        PluginKind::Source => {
+            let linker = create_component_linker(&module.engine, "source", |linker| {
+                source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = source_bindings::RapidbyteSource::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_source();
+
+            let session = iface
+                .call_open(&mut store, &config_json)?
+                .map_err(source_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
+
+            let wit_streams: Vec<_> = streams
+                .iter()
+                .map(stream_context_to_wit_source)
+                .collect::<Result<_, _>>()?;
+            let request = source_bindings::rapidbyte::plugin::types::ApplyRequest {
+                streams: wit_streams,
+                dry_run,
+            };
+
+            let result = iface
+                .call_apply(&mut store, session, &request)?
+                .map(source_apply_report_to_sdk)
+                .map_err(source_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let _ = iface.call_close(&mut store, session);
+            result
+        }
+        PluginKind::Destination => {
+            let linker = create_component_linker(&module.engine, "destination", |linker| {
+                dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = dest_bindings::RapidbyteDestination::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_destination();
+
+            let session = iface
+                .call_open(&mut store, &config_json)?
+                .map_err(dest_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Destination open failed: {e}"))?;
+
+            let wit_streams: Vec<_> = streams
+                .iter()
+                .map(stream_context_to_wit_dest)
+                .collect::<Result<_, _>>()?;
+            let request = dest_bindings::rapidbyte::plugin::types::ApplyRequest {
+                streams: wit_streams,
+                dry_run,
+            };
+
+            let result = iface
+                .call_apply(&mut store, session, &request)?
+                .map(dest_apply_report_to_sdk)
+                .map_err(dest_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let _ = iface.call_close(&mut store, session);
+            result
+        }
+        PluginKind::Transform => {
+            // Transform interface does not have apply — return noop.
+            Ok(ApplyReport::noop())
+        }
+        PluginKind::Unknown => {
+            anyhow::bail!("cannot run apply for plugin with unknown kind")
+        }
+    }
+}
+
+// ── Teardown runner ─────────────────────────────────────────────────
+
+/// Tear down resources for streams.
+#[allow(clippy::too_many_arguments)]
+fn run_teardown_impl(
+    module: &LoadedComponent,
+    kind: PluginKind,
+    plugin_id: &str,
+    plugin_version: &str,
+    config: &serde_json::Value,
+    streams: &[String],
+    reason: &str,
+    permissions: Option<&Permissions>,
+    sandbox_overrides: Option<&SandboxOverrides>,
+) -> anyhow::Result<TeardownReport> {
+    tracing::info!(plugin = plugin_id, version = plugin_version, kind = ?kind, reason, "Running teardown");
+
+    let state = noop_state_backend();
+    let mut builder = ComponentHostState::builder()
+        .pipeline("teardown")
+        .plugin_id(plugin_id)
+        .plugin_instance_key(format!("teardown:{kind:?}:{plugin_id}"))
+        .stream("teardown")
+        .state_backend(state)
+        .config(config)
+        .compression(None);
+    if let Some(p) = permissions {
+        builder = builder.permissions(p);
+    }
+    if let Some(ovr) = sandbox_overrides {
+        builder = builder.overrides(ovr);
+    }
+    let host_state = builder.build()?;
+
+    let timeout = sandbox_overrides.and_then(|o| o.timeout_seconds);
+    let mut store = module.new_store(host_state, timeout);
+    let config_json = serde_json::to_string(config)?;
+
+    match kind {
+        PluginKind::Source => {
+            let linker = create_component_linker(&module.engine, "source", |linker| {
+                source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = source_bindings::RapidbyteSource::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_source();
+
+            let session = iface
+                .call_open(&mut store, &config_json)?
+                .map_err(source_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
+
+            let request = source_bindings::rapidbyte::plugin::types::TeardownRequest {
+                streams: streams.to_vec(),
+                reason: reason.to_string(),
+            };
+
+            let result = iface
+                .call_teardown(&mut store, session, &request)?
+                .map(source_teardown_report_to_sdk)
+                .map_err(source_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let _ = iface.call_close(&mut store, session);
+            result
+        }
+        PluginKind::Destination => {
+            let linker = create_component_linker(&module.engine, "destination", |linker| {
+                dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = dest_bindings::RapidbyteDestination::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_destination();
+
+            let session = iface
+                .call_open(&mut store, &config_json)?
+                .map_err(dest_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Destination open failed: {e}"))?;
+
+            let request = dest_bindings::rapidbyte::plugin::types::TeardownRequest {
+                streams: streams.to_vec(),
+                reason: reason.to_string(),
+            };
+
+            let result = iface
+                .call_teardown(&mut store, session, &request)?
+                .map(dest_teardown_report_to_sdk)
+                .map_err(dest_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let _ = iface.call_close(&mut store, session);
+            result
+        }
+        PluginKind::Transform => {
+            // Transform interface does not have teardown — return noop.
+            Ok(TeardownReport::noop())
+        }
+        PluginKind::Unknown => {
+            anyhow::bail!("cannot run teardown for plugin with unknown kind")
+        }
+    }
 }
 
 // ── Public API for benchmarks crate ──────────────────────────────────
