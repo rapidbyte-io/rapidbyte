@@ -611,7 +611,7 @@ fn first_batch_schema(batches: &[RecordBatch]) -> Result<StreamSchema> {
         .iter()
         .map(|f| rapidbyte_types::schema::SchemaField {
             name: f.name().clone(),
-            arrow_type: format!("{}", f.data_type()),
+            arrow_type: canonical_arrow_type_name(f.data_type()),
             nullable: f.is_nullable(),
             is_primary_key: false,
             is_generated: false,
@@ -626,6 +626,35 @@ fn first_batch_schema(batches: &[RecordBatch]) -> Result<StreamSchema> {
         source_defined_cursor: None,
         schema_id: None,
     })
+}
+
+fn canonical_arrow_type_name(data_type: &arrow::datatypes::DataType) -> String {
+    use arrow::datatypes::{DataType, TimeUnit};
+
+    match data_type {
+        DataType::Boolean => "boolean".into(),
+        DataType::Int8 => "int8".into(),
+        DataType::Int16 => "int16".into(),
+        DataType::Int32 => "int32".into(),
+        DataType::Int64 => "int64".into(),
+        DataType::UInt8 => "uint8".into(),
+        DataType::UInt16 => "uint16".into(),
+        DataType::UInt32 => "uint32".into(),
+        DataType::UInt64 => "uint64".into(),
+        DataType::Float16 => "float16".into(),
+        DataType::Float32 => "float32".into(),
+        DataType::Float64 => "float64".into(),
+        DataType::Utf8 => "utf8".into(),
+        DataType::LargeUtf8 => "large_utf8".into(),
+        DataType::Binary => "binary".into(),
+        DataType::LargeBinary => "large_binary".into(),
+        DataType::Date32 => "date32".into(),
+        DataType::Date64 => "date64".into(),
+        DataType::Timestamp(TimeUnit::Millisecond, None) => "timestamp_millis".into(),
+        DataType::Timestamp(TimeUnit::Microsecond, None) => "timestamp_micros".into(),
+        DataType::Timestamp(TimeUnit::Nanosecond, None) => "timestamp_nanos".into(),
+        _ => data_type.to_string(),
+    }
 }
 
 fn row_count_correctness(validator: &str, expected: u64, actual: u64) -> ArtifactCorrectness {
@@ -671,7 +700,10 @@ impl Drop for AotEnvGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::{destination_input_channel_capacity, generate_input_batches};
+    use super::{
+        canonical_arrow_type_name, destination_input_channel_capacity, generate_input_batches,
+    };
+    use arrow::datatypes::{DataType, TimeUnit};
 
     #[test]
     fn destination_input_channel_capacity_scales_with_batch_count() {
@@ -684,6 +716,15 @@ mod tests {
         assert!(
             destination_input_channel_capacity(batches.len()) > batches.len(),
             "capacity must hold all batches plus end-of-stream"
+        );
+    }
+
+    #[test]
+    fn canonical_arrow_type_name_uses_protocol_names() {
+        assert_eq!(canonical_arrow_type_name(&DataType::Int64), "int64");
+        assert_eq!(
+            canonical_arrow_type_name(&DataType::Timestamp(TimeUnit::Microsecond, None)),
+            "timestamp_micros"
         );
     }
 }

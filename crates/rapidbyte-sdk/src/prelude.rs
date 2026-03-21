@@ -18,7 +18,10 @@ pub use crate::context::{Context, LogLevel};
 
 // Errors
 pub use crate::error::{CommitState, PluginError};
-pub use crate::validation::{ValidationReport, ValidationStatus};
+pub use crate::lifecycle::{
+    ApplyAction, ApplyReport, ApplyRequest, TeardownReport, TeardownRequest,
+};
+pub use crate::validation::{PrerequisitesReport, ValidationReport, ValidationStatus};
 
 // Protocol types — lifecycle
 pub use crate::wire::{Feature, ProtocolVersion};

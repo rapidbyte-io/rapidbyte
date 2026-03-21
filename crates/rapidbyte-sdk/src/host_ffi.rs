@@ -711,24 +711,32 @@ impl HostImports for WasmHostImports {
         let txn = bindings::rapidbyte::plugin::host::checkpoint_begin(wit_kind)
             .map_err(from_component_error)?;
 
-        if let (Some(field), Some(value)) = (&cp.cursor_field, &cp.cursor_value) {
-            let value_json = serde_json::to_string(value)
-                .map_err(|e| PluginError::internal("SERIALIZE_CURSOR", e.to_string()))?;
-            let cursor = bindings::rapidbyte::plugin::types::CursorUpdate {
-                stream_name: stream_name.to_string(),
-                cursor_field: field.clone(),
-                cursor_value_json: value_json,
-            };
-            bindings::rapidbyte::plugin::host::checkpoint_set_cursor(txn, &cursor)
-                .map_err(from_component_error)?;
+        let result = (|| {
+            if let (Some(field), Some(value)) = (&cp.cursor_field, &cp.cursor_value) {
+                let value_json = serde_json::to_string(value)
+                    .map_err(|e| PluginError::internal("SERIALIZE_CURSOR", e.to_string()))?;
+                let cursor = bindings::rapidbyte::plugin::types::CursorUpdate {
+                    stream_name: stream_name.to_string(),
+                    cursor_field: field.clone(),
+                    cursor_value_json: value_json,
+                };
+                bindings::rapidbyte::plugin::host::checkpoint_set_cursor(txn, &cursor)
+                    .map_err(from_component_error)?;
+            }
+
+            bindings::rapidbyte::plugin::host::checkpoint_commit(
+                txn,
+                cp.records_processed,
+                cp.bytes_processed,
+            )
+            .map_err(from_component_error)
+        })();
+
+        if result.is_err() {
+            bindings::rapidbyte::plugin::host::checkpoint_abort(txn);
         }
 
-        bindings::rapidbyte::plugin::host::checkpoint_commit(
-            txn,
-            cp.records_processed,
-            cp.bytes_processed,
-        )
-        .map_err(from_component_error)
+        result
     }
 
     fn counter_add(&self, name: &str, value: u64, labels_json: &str) -> Result<(), PluginError> {

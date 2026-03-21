@@ -1272,7 +1272,6 @@ fn gen_dest_methods(
             let mut results = Vec::new();
             for stream in sdk_request.streams {
                 let ctx = base_ctx.with_stream(&stream.stream_name);
-                let _ = ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
 
                 let summary = #write_dispatch;
 
@@ -1325,7 +1324,6 @@ fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
             let mut results = Vec::new();
             for stream in sdk_request.streams {
                 let ctx = base_ctx.with_stream(&stream.stream_name);
-                let _ = ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
 
                 let summary = rt
                     .block_on(<#struct_name as #trait_path>::transform(conn, &ctx, stream.clone()))
@@ -1421,5 +1419,21 @@ mod tests {
 
         assert!(generated.contains("BulkDestination"));
         assert!(generated.contains("write_bulk"));
+    }
+
+    #[test]
+    fn destination_and_transform_runs_do_not_preclear_stream_errors() {
+        let struct_name: Ident = parse_quote!(TestTransform);
+        let destination_trait = quote!(::rapidbyte_sdk::plugin::Destination);
+        let transform_trait = quote!(::rapidbyte_sdk::plugin::Transform);
+
+        let destination_generated =
+            gen_dest_methods(&struct_name, &destination_trait, None).to_string();
+        let transform_generated = gen_transform_methods(&struct_name, &transform_trait).to_string();
+
+        assert!(!destination_generated
+            .contains("let _ = :: rapidbyte_sdk :: host_ffi :: take_reported_stream_error"));
+        assert!(!transform_generated
+            .contains("let _ = :: rapidbyte_sdk :: host_ffi :: take_reported_stream_error"));
     }
 }
