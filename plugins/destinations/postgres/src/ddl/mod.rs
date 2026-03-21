@@ -15,8 +15,8 @@ use self::drift::detect_schema_drift;
 use crate::pg_error::format_pg_error;
 use crate::types::arrow_to_pg_type;
 
-pub(crate) use self::staging::{prepare_staging, swap_staging_table};
-pub(crate) use self::staging::{mark_staging_prepared, staging_is_prepared};
+pub(crate) use self::staging::{mark_staging_prepared, prepare_staging, staging_prepared_signature};
+pub(crate) use self::staging::swap_staging_table;
 
 fn is_pg_type_typname_race(code: &str, message: &str, detail: &str) -> bool {
     code == "23505"

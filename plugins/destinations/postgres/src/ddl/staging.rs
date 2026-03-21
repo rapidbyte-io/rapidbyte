@@ -5,7 +5,8 @@ use tokio_postgres::Client;
 
 use rapidbyte_sdk::prelude::*;
 
-pub(crate) const REPLACE_PREPARED_MARKER: &str = "rapidbyte:dest-postgres:replace-prepared";
+pub(crate) const REPLACE_PREPARED_MARKER_PREFIX: &str =
+    "rapidbyte:dest-postgres:replace-prepared:";
 
 /// Build the unqualified staging table name for a stream.
 fn staging_name(stream_name: &str) -> String {
@@ -88,11 +89,15 @@ pub(crate) async fn mark_staging_prepared(
     client: &Client,
     target_schema: &str,
     stream_name: &str,
+    schema_signature: Option<&str>,
 ) -> Result<(), String> {
+    let Some(schema_signature) = schema_signature else {
+        return Ok(());
+    };
     let staging_table = crate::decode::qualified_name(target_schema, &staging_name(stream_name));
     let sql = format!(
         "COMMENT ON TABLE {staging_table} IS '{}'",
-        REPLACE_PREPARED_MARKER.replace('\'', "''")
+        format!("{REPLACE_PREPARED_MARKER_PREFIX}{schema_signature}").replace('\'', "''")
     );
     client
         .execute(&sql, &[])
@@ -102,11 +107,11 @@ pub(crate) async fn mark_staging_prepared(
 }
 
 /// Check whether a staging table has been marked as prepared.
-pub(crate) async fn staging_is_prepared(
+pub(crate) async fn staging_prepared_signature(
     client: &Client,
     target_schema: &str,
     stream_name: &str,
-) -> Result<bool, String> {
+) -> Result<Option<String>, String> {
     let staging_table = crate::decode::qualified_name(target_schema, &staging_name(stream_name));
     let row = client
         .query_one(
@@ -116,5 +121,9 @@ pub(crate) async fn staging_is_prepared(
         .await
         .map_err(|e| format!("querying staging marker failed for {staging_table}: {e}"))?;
     let comment: Option<String> = row.get(0);
-    Ok(comment.as_deref() == Some(REPLACE_PREPARED_MARKER))
+    Ok(comment.and_then(|comment| {
+        comment
+            .strip_prefix(REPLACE_PREPARED_MARKER_PREFIX)
+            .map(str::to_owned)
+    }))
 }

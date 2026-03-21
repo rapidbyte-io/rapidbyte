@@ -99,6 +99,15 @@ fn parse_arrow_type(s: &str) -> Option<rapidbyte_sdk::arrow::datatypes::DataType
     })
 }
 
+pub(crate) fn stream_schema_signature(schema: &StreamSchema) -> Result<Option<String>, String> {
+    if schema.fields.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(schema)
+        .map(Some)
+        .map_err(|e| format!("failed to encode stream schema signature: {e}"))
+}
+
 /// Build a destination write contract for a stream.
 pub(crate) fn prepare_stream_once(
     target_schema: &str,

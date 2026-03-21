@@ -62,6 +62,13 @@ async fn existing_table_runtime_contract(
     Ok(mark_contract_prepared(setup))
 }
 
+fn replace_staging_signature_matches(
+    marker_signature: Option<&str>,
+    stream_schema: &StreamSchema,
+) -> Result<bool, String> {
+    Ok(marker_signature == crate::contract::stream_schema_signature(stream_schema)?.as_deref())
+}
+
 async fn target_table_exists(
     client: &tokio_postgres::Client,
     target_schema: &str,
@@ -112,8 +119,15 @@ pub async fn write_stream(
         let staging_exists = target_table_exists(&client, &setup.target_schema, &staging_name)
             .await
             .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
-        if crate::ddl::staging_is_prepared(&client, &setup.target_schema, &setup.stream_name)
+        let staging_signature = crate::ddl::staging_prepared_signature(
+            &client,
+            &setup.target_schema,
+            &setup.stream_name,
+        )
             .await
+            .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
+        if staging_exists
+            && replace_staging_signature_matches(staging_signature.as_deref(), &stream.schema)
             .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
         {
             existing_table_runtime_contract(
@@ -121,10 +135,6 @@ pub async fn write_stream(
                 existing_replace_contract(setup),
                 &stream.schema,
             )
-                .await
-                .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
-        } else if should_prepare_fallback(staging_exists) {
-            prepare_stream_contract(ctx, &client, stream, setup)
                 .await
                 .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
         } else {
@@ -205,11 +215,12 @@ pub async fn write_stream(
 #[cfg(test)]
 mod tests {
     use super::{
-        existing_replace_contract, resolve_copy_flush_bytes, should_prepare_fallback,
-        staging_table_name,
+        existing_replace_contract, replace_staging_signature_matches, resolve_copy_flush_bytes,
+        should_prepare_fallback, staging_table_name,
     };
     use crate::session::COPY_FLUSH_MAX;
     use crate::WriteMode;
+    use rapidbyte_sdk::schema::{SchemaField, StreamSchema};
 
     #[test]
     fn runtime_override_takes_precedence_over_configured_flush_bytes() {
@@ -286,5 +297,30 @@ mod tests {
     #[test]
     fn replace_staging_missing_triggers_fallback() {
         assert!(should_prepare_fallback(false));
+    }
+
+    #[test]
+    fn replace_staging_signature_must_match_current_schema() {
+        let schema = StreamSchema {
+            fields: vec![SchemaField::new("id", "int64", false)],
+            primary_key: vec!["id".to_string()],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        };
+        let marker = crate::contract::stream_schema_signature(&schema)
+            .expect("signature")
+            .expect("non-empty schema");
+        assert!(replace_staging_signature_matches(Some(&marker), &schema).expect("match"));
+
+        let changed = StreamSchema {
+            fields: vec![SchemaField::new("id", "utf8", false)],
+            primary_key: vec!["id".to_string()],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        };
+        assert!(!replace_staging_signature_matches(Some(&marker), &changed).expect("mismatch"));
+        assert!(!replace_staging_signature_matches(None, &schema).expect("missing marker"));
     }
 }
