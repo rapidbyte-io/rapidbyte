@@ -4,7 +4,6 @@ use std::path::Path;
 
 use anyhow::Result;
 use console::style;
-use rapidbyte_types::arrow::ArrowDataType;
 use rapidbyte_types::discovery::DiscoveredStream;
 use rapidbyte_types::wire::SyncMode;
 
@@ -157,7 +156,7 @@ struct CatalogStreamOutput {
 
 struct CatalogColumnOutput {
     name: String,
-    data_type: ArrowDataType,
+    data_type: serde_json::Value,
     nullable: bool,
 }
 
@@ -173,7 +172,7 @@ fn machine_readable_catalog_json(streams: &[DiscoveredStream]) -> Result<String>
                     .iter()
                     .map(|field| CatalogColumnOutput {
                         name: field.name.clone(),
-                        data_type: arrow_type_from_name(&field.arrow_type),
+                        data_type: catalog_data_type_value(&field.arrow_type),
                         nullable: field.nullable,
                     })
                     .collect(),
@@ -210,33 +209,35 @@ fn machine_readable_catalog_json(streams: &[DiscoveredStream]) -> Result<String>
     Ok(serde_json::to_string(&json)?)
 }
 
-fn arrow_type_from_name(name: &str) -> ArrowDataType {
-    match name {
-        "boolean" => ArrowDataType::Boolean,
-        "int8" => ArrowDataType::Int8,
-        "int16" => ArrowDataType::Int16,
-        "int32" => ArrowDataType::Int32,
-        "int64" => ArrowDataType::Int64,
-        "uint8" => ArrowDataType::UInt8,
-        "uint16" => ArrowDataType::UInt16,
-        "uint32" => ArrowDataType::UInt32,
-        "uint64" => ArrowDataType::UInt64,
-        "float16" => ArrowDataType::Float16,
-        "float32" => ArrowDataType::Float32,
-        "float64" => ArrowDataType::Float64,
-        "utf8" => ArrowDataType::Utf8,
-        "large_utf8" => ArrowDataType::LargeUtf8,
-        "binary" => ArrowDataType::Binary,
-        "large_binary" => ArrowDataType::LargeBinary,
-        "date32" => ArrowDataType::Date32,
-        "date64" => ArrowDataType::Date64,
-        "timestamp_millis" => ArrowDataType::TimestampMillis,
-        "timestamp_micros" => ArrowDataType::TimestampMicros,
-        "timestamp_nanos" => ArrowDataType::TimestampNanos,
-        "decimal128" => ArrowDataType::Decimal128,
-        "json" => ArrowDataType::Json,
-        _ => ArrowDataType::Utf8,
-    }
+fn catalog_data_type_value(name: &str) -> serde_json::Value {
+    let canonical = match name {
+        "boolean" => Some("Boolean"),
+        "int8" => Some("Int8"),
+        "int16" => Some("Int16"),
+        "int32" => Some("Int32"),
+        "int64" => Some("Int64"),
+        "uint8" => Some("UInt8"),
+        "uint16" => Some("UInt16"),
+        "uint32" => Some("UInt32"),
+        "uint64" => Some("UInt64"),
+        "float16" => Some("Float16"),
+        "float32" => Some("Float32"),
+        "float64" => Some("Float64"),
+        "utf8" => Some("Utf8"),
+        "large_utf8" => Some("LargeUtf8"),
+        "binary" => Some("Binary"),
+        "large_binary" => Some("LargeBinary"),
+        "date32" => Some("Date32"),
+        "date64" => Some("Date64"),
+        "timestamp_millis" => Some("TimestampMillis"),
+        "timestamp_micros" => Some("TimestampMicros"),
+        "timestamp_nanos" => Some("TimestampNanos"),
+        "decimal128" => Some("Decimal128"),
+        "json" => Some("Json"),
+        _ => None,
+    };
+
+    serde_json::Value::String(canonical.unwrap_or(name).to_string())
 }
 
 #[cfg(test)]
@@ -270,5 +271,32 @@ mod tests {
         assert_eq!(value["streams"][0]["schema"][0]["name"], "id");
         assert_eq!(value["streams"][0]["schema"][0]["data_type"], "Int64");
         assert_eq!(value["streams"][0]["source_defined_cursor"], "updated_at");
+    }
+
+    #[test]
+    fn machine_readable_output_preserves_unknown_schema_type_strings() {
+        let streams = vec![DiscoveredStream {
+            name: "events".into(),
+            schema: StreamSchema {
+                fields: vec![SchemaField::new("occurred_at", "timestamp_tz", false)],
+                primary_key: vec![],
+                partition_keys: vec![],
+                source_defined_cursor: None,
+                schema_id: None,
+            },
+            supported_sync_modes: vec![SyncMode::FullRefresh],
+            default_cursor_field: None,
+            estimated_row_count: None,
+            metadata_json: None,
+        }];
+
+        let json = machine_readable_catalog_json(&streams).expect("catalog json should serialize");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("catalog json should parse");
+
+        assert_eq!(
+            value["streams"][0]["schema"][0]["data_type"],
+            "timestamp_tz"
+        );
     }
 }

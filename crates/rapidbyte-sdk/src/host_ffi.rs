@@ -220,6 +220,10 @@ pub mod test_support {
 
     static METRIC_CALLS: OnceLock<Mutex<Vec<MetricCall>>> = OnceLock::new();
     static METRIC_ERROR: OnceLock<Mutex<Option<PluginError>>> = OnceLock::new();
+    static NEXT_BATCH_FRAME: OnceLock<Mutex<Option<(u64, Vec<u8>, BatchMetadata)>>> =
+        OnceLock::new();
+    static DROPPED_HANDLES: OnceLock<Mutex<Vec<u64>>> = OnceLock::new();
+    static NEXT_BATCH_METADATA_CALLS: OnceLock<Mutex<Vec<u64>>> = OnceLock::new();
 
     fn metric_calls() -> &'static Mutex<Vec<MetricCall>> {
         METRIC_CALLS.get_or_init(|| Mutex::new(Vec::new()))
@@ -229,12 +233,35 @@ pub mod test_support {
         METRIC_ERROR.get_or_init(|| Mutex::new(None))
     }
 
+    fn next_batch_frame() -> &'static Mutex<Option<(u64, Vec<u8>, BatchMetadata)>> {
+        NEXT_BATCH_FRAME.get_or_init(|| Mutex::new(None))
+    }
+
+    fn dropped_handles() -> &'static Mutex<Vec<u64>> {
+        DROPPED_HANDLES.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    fn next_batch_metadata_calls() -> &'static Mutex<Vec<u64>> {
+        NEXT_BATCH_METADATA_CALLS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
     pub fn reset() {
         metric_calls()
             .lock()
             .expect("metric calls lock poisoned")
             .clear();
         *metric_error().lock().expect("metric error lock poisoned") = None;
+        *next_batch_frame()
+            .lock()
+            .expect("next batch frame lock poisoned") = None;
+        dropped_handles()
+            .lock()
+            .expect("dropped handles lock poisoned")
+            .clear();
+        next_batch_metadata_calls()
+            .lock()
+            .expect("metadata calls lock poisoned")
+            .clear();
         reported_stream_errors()
             .lock()
             .expect("reported stream errors lock poisoned")
@@ -257,6 +284,26 @@ pub mod test_support {
         std::mem::take(&mut *calls)
     }
 
+    pub fn set_next_batch_frame(handle: u64, bytes: Vec<u8>, metadata: BatchMetadata) {
+        *next_batch_frame()
+            .lock()
+            .expect("next batch frame lock poisoned") = Some((handle, bytes, metadata));
+    }
+
+    pub fn take_dropped_handles() -> Vec<u64> {
+        let mut handles = dropped_handles()
+            .lock()
+            .expect("dropped handles lock poisoned");
+        std::mem::take(&mut *handles)
+    }
+
+    pub fn take_next_batch_metadata_calls() -> Vec<u64> {
+        let mut calls = next_batch_metadata_calls()
+            .lock()
+            .expect("metadata calls lock poisoned");
+        std::mem::take(&mut *calls)
+    }
+
     #[derive(Default)]
     pub struct RecordingHostImports;
 
@@ -276,26 +323,51 @@ pub mod test_support {
         }
 
         fn frame_len(&self, _handle: u64) -> Result<u64, PluginError> {
-            Ok(0)
+            Ok(next_batch_frame()
+                .lock()
+                .expect("next batch frame lock poisoned")
+                .as_ref()
+                .map_or(0, |(_, bytes, _)| bytes.len() as u64))
         }
 
-        fn frame_read(
-            &self,
-            _handle: u64,
-            _offset: u64,
-            _len: u64,
-        ) -> Result<Vec<u8>, PluginError> {
-            Ok(vec![])
+        fn frame_read(&self, handle: u64, _offset: u64, _len: u64) -> Result<Vec<u8>, PluginError> {
+            let guard = next_batch_frame()
+                .lock()
+                .expect("next batch frame lock poisoned");
+            let bytes = guard
+                .as_ref()
+                .filter(|(configured_handle, _, _)| *configured_handle == handle)
+                .map(|(_, bytes, _)| bytes.clone())
+                .unwrap_or_default();
+            Ok(bytes)
         }
 
-        fn frame_drop(&self, _handle: u64) {}
+        fn frame_drop(&self, handle: u64) {
+            dropped_handles()
+                .lock()
+                .expect("dropped handles lock poisoned")
+                .push(handle);
+            let mut frame = next_batch_frame()
+                .lock()
+                .expect("next batch frame lock poisoned");
+            if frame
+                .as_ref()
+                .is_some_and(|(configured_handle, _, _)| *configured_handle == handle)
+            {
+                *frame = None;
+            }
+        }
 
         fn emit_batch(&self, _handle: u64) -> Result<(), PluginError> {
             Ok(())
         }
 
         fn next_batch(&self) -> Result<Option<u64>, PluginError> {
-            Ok(None)
+            Ok(next_batch_frame()
+                .lock()
+                .expect("next batch frame lock poisoned")
+                .as_ref()
+                .map(|(handle, _, _)| *handle))
         }
 
         fn state_get(&self, _scope: StateScope, _key: &str) -> Result<Option<String>, PluginError> {
@@ -379,15 +451,19 @@ pub mod test_support {
             Ok(())
         }
 
-        fn next_batch_metadata(&self, _handle: u64) -> Result<BatchMetadata, PluginError> {
-            Ok(BatchMetadata {
-                stream_index: 0,
-                schema_fingerprint: None,
-                sequence_number: 0,
-                compression: None,
-                record_count: 0,
-                byte_count: 0,
-            })
+        fn next_batch_metadata(&self, handle: u64) -> Result<BatchMetadata, PluginError> {
+            next_batch_metadata_calls()
+                .lock()
+                .expect("metadata calls lock poisoned")
+                .push(handle);
+            let frame = next_batch_frame()
+                .lock()
+                .expect("next batch frame lock poisoned");
+            frame
+                .as_ref()
+                .filter(|(configured_handle, _, _)| *configured_handle == handle)
+                .map(|(_, _, metadata)| metadata.clone())
+                .ok_or_else(|| PluginError::internal("TEST_METADATA", "missing batch metadata"))
         }
 
         fn counter_add(
@@ -1027,6 +1103,7 @@ fn decode_next_batch_frame(
 /// Decoded result of a single `next_batch` host frame.
 #[derive(Debug)]
 pub struct DecodedBatch {
+    pub metadata: BatchMetadata,
     pub schema: Arc<Schema>,
     pub batches: Vec<RecordBatch>,
     pub decode_secs: f64,
@@ -1060,6 +1137,7 @@ pub fn next_batch_with_decode_timing(max_bytes: u64) -> Result<Option<DecodedBat
         return Ok(None);
     };
 
+    let metadata = imports.next_batch_metadata(handle)?;
     let frame_len = imports.frame_len(handle)?;
     if frame_len > max_bytes {
         imports.frame_drop(handle);
@@ -1076,6 +1154,7 @@ pub fn next_batch_with_decode_timing(max_bytes: u64) -> Result<Option<DecodedBat
     let decode_start = Instant::now();
     let (schema, batches) = decode_next_batch_frame(&ipc_bytes, frame_len)?;
     Ok(Some(DecodedBatch {
+        metadata,
         schema,
         batches,
         decode_secs: decode_start.elapsed().as_secs_f64(),
@@ -1328,6 +1407,38 @@ mod tests {
 
         assert!(take_reported_stream_error(7));
         assert!(!take_reported_stream_error(7));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn next_batch_with_decode_timing_returns_metadata_and_drains_it() {
+        use arrow::array::Int32Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        test_support::reset();
+
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1, 2]))]).unwrap();
+        let ipc = crate::arrow::ipc::encode_ipc(&batch).expect("ipc should encode");
+        let metadata = BatchMetadata {
+            stream_index: 3,
+            schema_fingerprint: Some("abc".into()),
+            sequence_number: 9,
+            compression: None,
+            record_count: 2,
+            byte_count: ipc.len() as u64,
+        };
+        test_support::set_next_batch_frame(41, ipc, metadata.clone());
+
+        let decoded = next_batch_with_decode_timing(u64::MAX)
+            .expect("next batch should succeed")
+            .expect("batch should exist");
+
+        assert_eq!(decoded.metadata, metadata);
+        assert_eq!(test_support::take_next_batch_metadata_calls(), vec![41]);
+        assert_eq!(test_support::take_dropped_handles(), vec![41]);
     }
 
     #[test]

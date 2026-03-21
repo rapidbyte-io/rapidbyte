@@ -1549,6 +1549,48 @@ destination:
         assert_eq!(result.retry_count, 0);
     }
 
+    #[tokio::test]
+    async fn run_pipeline_apply_receives_configured_streams() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+        tc.runner.enqueue_source(Ok(make_source_outcome(10, 100)));
+        tc.runner
+            .enqueue_destination(Ok(make_dest_outcome(10, 100)));
+
+        let pipeline: PipelineConfig = serde_yaml::from_str(
+            r#"
+version: "1.0"
+pipeline: test-pipeline
+source:
+  use: src
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+      columns: ["id", "email"]
+destination:
+  use: dst
+  config: {}
+  write_mode: append
+"#,
+        )
+        .unwrap();
+
+        let cancel = CancellationToken::new();
+        let _ = run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
+
+        let apply_calls = tc.runner.apply_calls();
+        assert_eq!(apply_calls.len(), 2);
+        assert_eq!(apply_calls[0].streams.len(), 1);
+        assert_eq!(apply_calls[1].streams.len(), 1);
+        assert_eq!(apply_calls[0].streams[0].stream_name, "users");
+        assert_eq!(
+            apply_calls[0].streams[0].selected_columns.as_deref(),
+            Some(&["id".to_string(), "email".to_string()][..])
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Test 20: Cancellation between streams
     // -----------------------------------------------------------------------
