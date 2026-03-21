@@ -4,6 +4,7 @@
 //! Supports `should_fail` to simulate write failures.
 
 use rapidbyte_sdk::prelude::*;
+use rapidbyte_sdk::schema::StreamSchema;
 use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;
 
@@ -22,30 +23,22 @@ pub struct TestDestination {
 impl Destination for TestDestination {
     type Config = Config;
 
-    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
-        Ok((
-            Self { config },
-            PluginInfo {
-                protocol_version: ProtocolVersion::V6,
-                features: vec![],
-                default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
-            },
-        ))
+    async fn init(config: Self::Config) -> Result<Self, PluginError> {
+        Ok(Self { config })
     }
 
     async fn validate(
-        _config: &Self::Config,
+        &self,
         _ctx: &Context,
-    ) -> Result<ValidationResult, PluginError> {
-        Ok(ValidationResult {
-            status: ValidationStatus::Success,
-            message: "Test destination config is valid".to_string(),
-            warnings: Vec::new(),
-        })
+        _upstream: Option<&StreamSchema>,
+    ) -> Result<ValidationReport, PluginError> {
+        Ok(ValidationReport::success(
+            "Test destination config is valid",
+        ))
     }
 
     async fn write(
-        &mut self,
+        &self,
         ctx: &Context,
         stream: StreamContext,
     ) -> Result<WriteSummary, PluginError> {
