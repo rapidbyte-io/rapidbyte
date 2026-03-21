@@ -8,6 +8,8 @@ use std::sync::Arc;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 
+use rapidbyte_types::batch::BatchMetadata;
+
 use crate::checkpoint::{Checkpoint, CheckpointKind, StateScope};
 use crate::cursor::CursorValue;
 use crate::error::{ErrorCategory, PluginError};
@@ -144,15 +146,15 @@ impl Context {
         }
 
         imports.frame_seal(handle)?;
-        imports.emit_batch_with_metadata(
-            handle,
+        let metadata = BatchMetadata {
             stream_index,
-            None,
-            0,
-            None,
-            batch.num_rows() as u32,
-            batch.get_array_memory_size() as u64,
-        )?;
+            schema_fingerprint: None,
+            sequence_number: 0,
+            compression: None,
+            record_count: batch.num_rows() as u32,
+            byte_count: batch.get_array_memory_size() as u64,
+        };
+        imports.emit_batch_with_metadata(handle, &metadata)?;
         Ok(())
     }
 

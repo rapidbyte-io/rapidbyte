@@ -16,6 +16,7 @@ use crate::error::{ErrorCategory, PluginError};
 use crate::wire::ProtocolVersion;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
+use rapidbyte_types::batch::BatchMetadata;
 
 #[cfg(target_arch = "wasm32")]
 mod bindings {
@@ -92,17 +93,9 @@ pub trait HostImports: Send + Sync {
     fn emit_batch_with_metadata(
         &self,
         handle: u64,
-        stream_index: u32,
-        schema_fingerprint: Option<&str>,
-        sequence_number: u64,
-        compression: Option<&str>,
-        record_count: u32,
-        byte_count: u64,
+        metadata: &BatchMetadata,
     ) -> Result<(), PluginError>;
-    fn next_batch_metadata(
-        &self,
-        handle: u64,
-    ) -> Result<(u32, Option<String>, u64, Option<String>, u32, u64), PluginError>;
+    fn next_batch_metadata(&self, handle: u64) -> Result<BatchMetadata, PluginError>;
 
     fn counter_add(&self, name: &str, value: u64, labels_json: &str) -> Result<(), PluginError>;
     fn gauge_set(&self, name: &str, value: f64, labels_json: &str) -> Result<(), PluginError>;
@@ -312,21 +305,20 @@ pub mod test_support {
         fn emit_batch_with_metadata(
             &self,
             _handle: u64,
-            _stream_index: u32,
-            _schema_fingerprint: Option<&str>,
-            _sequence_number: u64,
-            _compression: Option<&str>,
-            _record_count: u32,
-            _byte_count: u64,
+            _metadata: &BatchMetadata,
         ) -> Result<(), PluginError> {
             Ok(())
         }
 
-        fn next_batch_metadata(
-            &self,
-            _handle: u64,
-        ) -> Result<(u32, Option<String>, u64, Option<String>, u32, u64), PluginError> {
-            Ok((0, None, 0, None, 0, 0))
+        fn next_batch_metadata(&self, _handle: u64) -> Result<BatchMetadata, PluginError> {
+            Ok(BatchMetadata {
+                stream_index: 0,
+                schema_fingerprint: None,
+                sequence_number: 0,
+                compression: None,
+                record_count: 0,
+                byte_count: 0,
+            })
         }
 
         fn counter_add(
@@ -660,30 +652,31 @@ impl HostImports for WasmHostImports {
     fn emit_batch_with_metadata(
         &self,
         handle: u64,
-        stream_index: u32,
-        schema_fingerprint: Option<&str>,
-        sequence_number: u64,
-        compression: Option<&str>,
-        record_count: u32,
-        byte_count: u64,
+        metadata: &BatchMetadata,
     ) -> Result<(), PluginError> {
         bindings::rapidbyte::plugin::host::emit_batch_with_metadata(
             handle,
-            stream_index,
-            schema_fingerprint,
-            sequence_number,
-            compression,
-            record_count,
-            byte_count,
+            metadata.stream_index,
+            metadata.schema_fingerprint.as_deref(),
+            metadata.sequence_number,
+            metadata.compression.as_deref(),
+            metadata.record_count,
+            metadata.byte_count,
         )
         .map_err(from_component_error)
     }
 
-    fn next_batch_metadata(
-        &self,
-        handle: u64,
-    ) -> Result<(u32, Option<String>, u64, Option<String>, u32, u64), PluginError> {
-        bindings::rapidbyte::plugin::host::next_batch_metadata(handle).map_err(from_component_error)
+    fn next_batch_metadata(&self, handle: u64) -> Result<BatchMetadata, PluginError> {
+        let result = bindings::rapidbyte::plugin::host::next_batch_metadata(handle)
+            .map_err(from_component_error)?;
+        Ok(BatchMetadata {
+            stream_index: result.stream_index,
+            schema_fingerprint: result.schema_fingerprint,
+            sequence_number: result.sequence_number,
+            compression: result.compression,
+            record_count: result.record_count,
+            byte_count: result.byte_count,
+        })
     }
 
     fn connect_tcp(&self, host: &str, port: u16) -> Result<u64, PluginError> {
@@ -817,21 +810,20 @@ impl HostImports for StubHostImports {
     fn emit_batch_with_metadata(
         &self,
         _handle: u64,
-        _stream_index: u32,
-        _schema_fingerprint: Option<&str>,
-        _sequence_number: u64,
-        _compression: Option<&str>,
-        _record_count: u32,
-        _byte_count: u64,
+        _metadata: &BatchMetadata,
     ) -> Result<(), PluginError> {
         Ok(())
     }
 
-    fn next_batch_metadata(
-        &self,
-        _handle: u64,
-    ) -> Result<(u32, Option<String>, u64, Option<String>, u32, u64), PluginError> {
-        Ok((0, None, 0, None, 0, 0))
+    fn next_batch_metadata(&self, _handle: u64) -> Result<BatchMetadata, PluginError> {
+        Ok(BatchMetadata {
+            stream_index: 0,
+            schema_fingerprint: None,
+            sequence_number: 0,
+            compression: None,
+            record_count: 0,
+            byte_count: 0,
+        })
     }
 
     fn counter_add(&self, _name: &str, _value: u64, _labels_json: &str) -> Result<(), PluginError> {
@@ -1077,24 +1069,8 @@ pub fn stream_error(stream_index: u32, error: &PluginError) -> Result<(), Plugin
 /// # Errors
 ///
 /// Returns `Err` if the host rejects the batch emission.
-pub fn emit_batch_with_metadata(
-    handle: u64,
-    stream_index: u32,
-    schema_fingerprint: Option<&str>,
-    sequence_number: u64,
-    compression: Option<&str>,
-    record_count: u32,
-    byte_count: u64,
-) -> Result<(), PluginError> {
-    host_imports().emit_batch_with_metadata(
-        handle,
-        stream_index,
-        schema_fingerprint,
-        sequence_number,
-        compression,
-        record_count,
-        byte_count,
-    )
+pub fn emit_batch_with_metadata(handle: u64, metadata: &BatchMetadata) -> Result<(), PluginError> {
+    host_imports().emit_batch_with_metadata(handle, metadata)
 }
 
 /// Log a warning message through the host runtime.
