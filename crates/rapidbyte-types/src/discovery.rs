@@ -65,6 +65,25 @@ pub struct PluginSpec {
     pub supported_write_modes: Option<Vec<WriteMode>>,
 }
 
+impl PluginSpec {
+    /// Create a default spec from manifest defaults.
+    ///
+    /// Returns a minimal v7 spec with empty schemas and no features.
+    /// Plugin authors should override fields as needed.
+    #[must_use]
+    pub fn from_manifest() -> Self {
+        Self {
+            protocol_version: 7,
+            config_schema_json: "{}".into(),
+            resource_schema_json: None,
+            documentation_url: None,
+            features: vec![],
+            supported_sync_modes: vec![],
+            supported_write_modes: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
