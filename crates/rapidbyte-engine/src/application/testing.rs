@@ -61,6 +61,7 @@ pub struct FakePluginRunner {
     validate_results: Mutex<VecDeque<Result<CheckComponentStatus, PipelineError>>>,
     discover_results: Mutex<VecDeque<Result<Vec<DiscoveredStream>, PipelineError>>>,
     prerequisites_results: Mutex<VecDeque<Result<PrerequisitesReport, PipelineError>>>,
+    apply_results: Mutex<VecDeque<Result<ApplyReport, PipelineError>>>,
     apply_calls: Mutex<Vec<ApplyParams>>,
 }
 
@@ -74,6 +75,7 @@ impl FakePluginRunner {
             validate_results: Mutex::new(VecDeque::new()),
             discover_results: Mutex::new(VecDeque::new()),
             prerequisites_results: Mutex::new(VecDeque::new()),
+            apply_results: Mutex::new(VecDeque::new()),
             apply_calls: Mutex::new(Vec::new()),
         }
     }
@@ -124,6 +126,14 @@ impl FakePluginRunner {
     /// Panics if the internal mutex is poisoned.
     pub fn enqueue_prerequisites(&self, result: Result<PrerequisitesReport, PipelineError>) {
         self.prerequisites_results.lock().unwrap().push_back(result);
+    }
+
+    /// Enqueue an apply result to be returned by the next `apply` call.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
+    pub fn enqueue_apply(&self, result: Result<ApplyReport, PipelineError>) {
+        self.apply_results.lock().unwrap().push_back(result);
     }
 
     /// Return the recorded apply calls.
@@ -229,7 +239,11 @@ impl PluginRunner for FakePluginRunner {
 
     async fn apply(&self, params: &ApplyParams) -> Result<ApplyReport, PipelineError> {
         self.apply_calls.lock().unwrap().push(params.clone());
-        Ok(ApplyReport::noop())
+        self.apply_results
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Ok(ApplyReport::noop()))
     }
 }
 

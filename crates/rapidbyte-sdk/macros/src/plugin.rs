@@ -865,9 +865,8 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
         fn write_summary_to_run_summary(
             stream: &::rapidbyte_sdk::stream::StreamContext,
             summary: ::rapidbyte_sdk::metric::WriteSummary,
+            succeeded: bool,
         ) -> ::rapidbyte_sdk::run::RunSummary {
-            let stream_failed =
-                ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
             let outcome = serde_json::json!({
                 "records_written": summary.records_written,
                 "bytes_written": summary.bytes_written,
@@ -880,7 +879,7 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
                     stream_index: stream.stream_index,
                     stream_name: stream.stream_name.clone(),
                     outcome_json: outcome.to_string(),
-                    succeeded: !stream_failed,
+                    succeeded,
                 }],
             }
         }
@@ -889,9 +888,8 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
         fn transform_summary_to_run_summary(
             stream: &::rapidbyte_sdk::stream::StreamContext,
             summary: ::rapidbyte_sdk::metric::TransformSummary,
+            succeeded: bool,
         ) -> ::rapidbyte_sdk::run::RunSummary {
-            let stream_failed =
-                ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
             let outcome = serde_json::json!({
                 "records_in": summary.records_in,
                 "records_out": summary.records_out,
@@ -904,7 +902,7 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
                     stream_index: stream.stream_index,
                     stream_name: stream.stream_name.clone(),
                     outcome_json: outcome.to_string(),
-                    succeeded: !stream_failed,
+                    succeeded,
                 }],
             }
         }
@@ -1272,10 +1270,13 @@ fn gen_dest_methods(
             let mut results = Vec::new();
             for stream in sdk_request.streams {
                 let ctx = base_ctx.with_stream(&stream.stream_name);
+                let _ = ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
 
                 let summary = #write_dispatch;
 
-                let run_sum = write_summary_to_run_summary(&stream, summary);
+                let succeeded =
+                    !::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
+                let run_sum = write_summary_to_run_summary(&stream, summary, succeeded);
                 results.extend(run_sum.results);
             }
 
@@ -1324,12 +1325,15 @@ fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
             let mut results = Vec::new();
             for stream in sdk_request.streams {
                 let ctx = base_ctx.with_stream(&stream.stream_name);
+                let _ = ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
 
                 let summary = rt
                     .block_on(<#struct_name as #trait_path>::transform(conn, &ctx, stream.clone()))
                     .map_err(to_component_error)?;
 
-                let run_sum = transform_summary_to_run_summary(&stream, summary);
+                let succeeded =
+                    !::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
+                let run_sum = transform_summary_to_run_summary(&stream, summary, succeeded);
                 results.extend(run_sum.results);
             }
 
@@ -1422,7 +1426,7 @@ mod tests {
     }
 
     #[test]
-    fn destination_and_transform_runs_do_not_preclear_stream_errors() {
+    fn destination_and_transform_runs_preclear_and_helpers_are_pure() {
         let struct_name: Ident = parse_quote!(TestTransform);
         let destination_trait = quote!(::rapidbyte_sdk::plugin::Destination);
         let transform_trait = quote!(::rapidbyte_sdk::plugin::Transform);
@@ -1430,10 +1434,14 @@ mod tests {
         let destination_generated =
             gen_dest_methods(&struct_name, &destination_trait, None).to_string();
         let transform_generated = gen_transform_methods(&struct_name, &transform_trait).to_string();
+        let common_generated = gen_common(&struct_name).to_string();
 
-        assert!(!destination_generated
+        assert!(destination_generated
             .contains("let _ = :: rapidbyte_sdk :: host_ffi :: take_reported_stream_error"));
-        assert!(!transform_generated
+        assert!(transform_generated
             .contains("let _ = :: rapidbyte_sdk :: host_ffi :: take_reported_stream_error"));
+        assert!(common_generated.contains("fn write_summary_to_run_summary"));
+        assert!(common_generated
+            .contains("summary : :: rapidbyte_sdk :: metric :: WriteSummary , succeeded : bool"));
     }
 }

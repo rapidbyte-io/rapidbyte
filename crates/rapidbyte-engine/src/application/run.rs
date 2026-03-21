@@ -228,8 +228,7 @@ pub async fn run_pipeline(
                     permissions: src_apply_permissions,
                     sandbox_overrides: src_apply_overrides,
                 })
-                .await
-                .ok(); // Non-fatal — apply is best-effort
+                .await?;
 
             let _dst_apply = ctx
                 .runner
@@ -244,8 +243,7 @@ pub async fn run_pipeline(
                     permissions: dst_apply_permissions,
                     sandbox_overrides: dst_apply_overrides,
                 })
-                .await
-                .ok(); // Non-fatal — apply is best-effort
+                .await?;
         }
 
         // 3. Report Running phase
@@ -1557,6 +1555,26 @@ destination:
         assert_eq!(result.counts.records_read, 0);
         assert_eq!(result.counts.records_written, 0);
         assert_eq!(result.retry_count, 0);
+    }
+
+    #[tokio::test]
+    async fn run_pipeline_apply_failure_returns_error() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+        tc.runner
+            .enqueue_apply(Err(PipelineError::infra("source apply failed")));
+
+        let pipeline = test_pipeline_config("src", "dst", &["users"]);
+        let cancel = CancellationToken::new();
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await;
+
+        match result {
+            Err(PipelineError::Infrastructure(err)) => {
+                assert!(err.to_string().contains("source apply failed"));
+            }
+            other => panic!("expected source apply failure, got {other:?}"),
+        }
     }
 
     #[tokio::test]
