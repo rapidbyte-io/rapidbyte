@@ -24,8 +24,19 @@ fn resolve_copy_flush_bytes(
     configured.map(clamp_copy_flush_bytes)
 }
 
-fn should_run_full_setup(is_replace: bool, table_exists: bool) -> bool {
-    is_replace || !table_exists
+fn staging_table_name(stream_name: &str) -> String {
+    format!("{stream_name}__rb_staging")
+}
+
+fn should_prepare_fallback(table_exists: bool) -> bool {
+    !table_exists
+}
+
+fn existing_replace_contract(mut setup: crate::contract::WriteContract) -> crate::contract::WriteContract {
+    setup.effective_stream = staging_table_name(&setup.stream_name);
+    setup.qualified_table =
+        crate::decode::qualified_name(&setup.target_schema, &setup.effective_stream);
+    mark_contract_prepared(setup)
 }
 
 async fn target_table_exists(
@@ -73,15 +84,29 @@ pub async fn write_stream(
     )
     .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
 
-    let table_exists = target_table_exists(&client, &setup.target_schema, &setup.effective_stream)
-        .await
-        .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
-    let setup = if should_run_full_setup(setup.is_replace, table_exists) {
-        prepare_stream_contract(ctx, &client, stream, setup)
+    let setup = if setup.is_replace {
+        let staging_name = staging_table_name(&setup.stream_name);
+        let staging_exists = target_table_exists(&client, &setup.target_schema, &staging_name)
             .await
-            .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
+            .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
+        if should_prepare_fallback(!staging_exists) {
+            prepare_stream_contract(ctx, &client, stream, setup)
+                .await
+                .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
+        } else {
+            existing_replace_contract(setup)
+        }
     } else {
-        mark_contract_prepared(setup)
+        let table_exists = target_table_exists(&client, &setup.target_schema, &setup.effective_stream)
+            .await
+            .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
+        if should_prepare_fallback(table_exists) {
+            prepare_stream_contract(ctx, &client, stream, setup)
+                .await
+                .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
+        } else {
+            mark_contract_prepared(setup)
+        }
     };
 
     let mut session = WriteSession::begin(ctx, &client, &config.schema, setup)
@@ -141,8 +166,9 @@ pub async fn write_stream(
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_copy_flush_bytes, should_run_full_setup};
+    use super::{existing_replace_contract, resolve_copy_flush_bytes, should_prepare_fallback, staging_table_name};
     use crate::session::COPY_FLUSH_MAX;
+    use crate::WriteMode;
 
     #[test]
     fn runtime_override_takes_precedence_over_configured_flush_bytes() {
@@ -172,17 +198,42 @@ mod tests {
     }
 
     #[test]
-    fn existing_tables_skip_full_setup_for_standard_writes() {
-        assert!(!should_run_full_setup(false, true));
+    fn existing_tables_skip_fallback_setup_for_standard_writes() {
+        assert!(!should_prepare_fallback(true));
     }
 
     #[test]
-    fn missing_tables_trigger_full_setup() {
-        assert!(should_run_full_setup(false, false));
+    fn missing_tables_trigger_fallback_setup() {
+        assert!(should_prepare_fallback(false));
     }
 
     #[test]
-    fn replace_writes_still_use_full_setup() {
-        assert!(should_run_full_setup(true, true));
+    fn staging_table_names_are_deterministic() {
+        assert_eq!(staging_table_name("users"), "users__rb_staging");
+    }
+
+    #[test]
+    fn existing_replace_contract_targets_staging_table() {
+        let contract = crate::contract::prepare_stream_once(
+            "public",
+            "users",
+            Some(WriteMode::Replace),
+            &rapidbyte_sdk::schema::StreamSchema::default(),
+            true,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy::default(),
+            crate::contract::CheckpointConfig {
+                bytes: 0,
+                rows: 0,
+                seconds: 0,
+            },
+            None,
+            crate::config::LoadMethod::Copy,
+        )
+        .expect("contract");
+
+        let resolved = existing_replace_contract(contract);
+        assert_eq!(resolved.effective_stream, "users__rb_staging");
+        assert_eq!(resolved.qualified_table, "public.users__rb_staging");
+        assert!(!resolved.needs_schema_ensure);
     }
 }
