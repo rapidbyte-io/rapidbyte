@@ -133,6 +133,12 @@ pub(crate) async fn prepare_stream_contract(
     contract.ignored_columns = schema_state.ignored_columns;
     contract.type_null_columns = schema_state.type_null_columns;
 
+    if contract.is_replace {
+        crate::ddl::mark_staging_prepared(client, &contract.target_schema, &contract.stream_name)
+            .await
+            .map_err(|e| format!("dest-postgres: staging marker write failed: {e}"))?;
+    }
+
     contract.watermark_records = if contract.is_replace || !contract.use_watermarks {
         0
     } else {

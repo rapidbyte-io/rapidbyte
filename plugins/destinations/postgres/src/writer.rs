@@ -6,6 +6,7 @@ use rapidbyte_sdk::prelude::*;
 
 use crate::apply::prepare_stream_contract;
 use crate::contract::{mark_contract_prepared, prepare_stream_once, CheckpointConfig};
+use crate::ddl::SchemaState;
 use crate::metrics::emit_dest_timings;
 use crate::session::{clamp_copy_flush_bytes, WriteSession};
 
@@ -37,6 +38,28 @@ fn existing_replace_contract(mut setup: crate::contract::WriteContract) -> crate
     setup.qualified_table =
         crate::decode::qualified_name(&setup.target_schema, &setup.effective_stream);
     mark_contract_prepared(setup)
+}
+
+async fn existing_table_runtime_contract(
+    client: &tokio_postgres::Client,
+    setup: crate::contract::WriteContract,
+    stream_schema: &StreamSchema,
+) -> Result<crate::contract::WriteContract, String> {
+    let mut schema_state = SchemaState::new();
+    schema_state
+        .load_existing_table_state(
+            client,
+            &setup.target_schema,
+            &setup.effective_stream,
+            &setup.schema_policy,
+            stream_schema,
+        )
+        .await?;
+
+    let mut setup = setup;
+    setup.ignored_columns = schema_state.ignored_columns;
+    setup.type_null_columns = schema_state.type_null_columns;
+    Ok(mark_contract_prepared(setup))
 }
 
 async fn target_table_exists(
@@ -89,12 +112,25 @@ pub async fn write_stream(
         let staging_exists = target_table_exists(&client, &setup.target_schema, &staging_name)
             .await
             .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
-        if should_prepare_fallback(staging_exists) {
+        if crate::ddl::staging_is_prepared(&client, &setup.target_schema, &setup.stream_name)
+            .await
+            .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
+        {
+            existing_table_runtime_contract(
+                &client,
+                existing_replace_contract(setup),
+                &stream.schema,
+            )
+                .await
+                .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
+        } else if should_prepare_fallback(staging_exists) {
             prepare_stream_contract(ctx, &client, stream, setup)
                 .await
                 .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
         } else {
-            existing_replace_contract(setup)
+            prepare_stream_contract(ctx, &client, stream, setup)
+                .await
+                .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
         }
     } else {
         let table_exists = target_table_exists(&client, &setup.target_schema, &setup.effective_stream)
@@ -105,7 +141,9 @@ pub async fn write_stream(
                 .await
                 .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
         } else {
-            mark_contract_prepared(setup)
+            existing_table_runtime_contract(&client, setup, &stream.schema)
+                .await
+                .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
         }
     };
 
@@ -166,7 +204,10 @@ pub async fn write_stream(
 
 #[cfg(test)]
 mod tests {
-    use super::{existing_replace_contract, resolve_copy_flush_bytes, should_prepare_fallback, staging_table_name};
+    use super::{
+        existing_replace_contract, resolve_copy_flush_bytes, should_prepare_fallback,
+        staging_table_name,
+    };
     use crate::session::COPY_FLUSH_MAX;
     use crate::WriteMode;
 

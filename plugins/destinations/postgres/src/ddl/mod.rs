@@ -16,6 +16,7 @@ use crate::pg_error::format_pg_error;
 use crate::types::arrow_to_pg_type;
 
 pub(crate) use self::staging::{prepare_staging, swap_staging_table};
+pub(crate) use self::staging::{mark_staging_prepared, staging_is_prepared};
 
 fn is_pg_type_typname_race(code: &str, message: &str, detail: &str) -> bool {
     code == "23505"
@@ -50,6 +51,45 @@ impl SchemaState {
             ignored_columns: HashSet::new(),
             type_null_columns: HashSet::new(),
         }
+    }
+
+    pub(crate) fn observe_schema_drift(
+        &mut self,
+        drift: &drift::SchemaDrift,
+        policy: &SchemaEvolutionPolicy,
+    ) {
+        if matches!(policy.new_column, rapidbyte_sdk::stream::ColumnPolicy::Ignore) {
+            for (col_name, _) in &drift.new_columns {
+                self.ignored_columns.insert(col_name.clone());
+            }
+        }
+
+        if matches!(policy.type_change, rapidbyte_sdk::stream::TypeChangePolicy::Null) {
+            for (col_name, _, _) in &drift.type_changes {
+                self.type_null_columns.insert(col_name.clone());
+            }
+        }
+    }
+
+    pub(crate) async fn load_existing_table_state(
+        &mut self,
+        client: &Client,
+        target_schema: &str,
+        stream_name: &str,
+        schema_policy: &SchemaEvolutionPolicy,
+        stream_schema: &StreamSchema,
+    ) -> Result<(), String> {
+        let Some(arrow_schema) = crate::contract::preflight_schema_from_stream_schema(stream_schema)?
+        else {
+            return Ok(());
+        };
+
+        if let Some(drift) = detect_schema_drift(client, target_schema, stream_name, &arrow_schema)
+            .await?
+        {
+            self.observe_schema_drift(&drift, schema_policy);
+        }
+        Ok(())
     }
 }
 
