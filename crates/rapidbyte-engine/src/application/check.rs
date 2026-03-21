@@ -89,6 +89,7 @@ pub async fn check_pipeline(
                 stream_name: stream_name.clone(),
                 permissions: source_permissions.clone(),
                 sandbox_overrides: source_overrides.clone(),
+                upstream_schema: None,
             })
             .await?;
 
@@ -149,6 +150,7 @@ pub async fn check_pipeline(
                 stream_name: stream_name.clone(),
                 permissions: dest_permissions.clone(),
                 sandbox_overrides: dest_overrides.clone(),
+                upstream_schema: None,
             })
             .await?;
 
@@ -223,6 +225,7 @@ pub async fn check_pipeline(
                     stream_name: stream_name.clone(),
                     permissions: transform_permissions.clone(),
                     sandbox_overrides: transform_overrides.clone(),
+                    upstream_schema: None,
                 })
                 .await?;
 

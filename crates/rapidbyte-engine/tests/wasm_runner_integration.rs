@@ -474,6 +474,7 @@ async fn test_validate_source_plugin() {
             stream_name: "test-stream".into(),
             permissions: None,
             sandbox_overrides: None,
+            upstream_schema: None,
         })
         .await
         .expect("validation should succeed");
@@ -502,6 +503,7 @@ async fn test_validate_destination_plugin() {
             stream_name: "test-stream".into(),
             permissions: None,
             sandbox_overrides: None,
+            upstream_schema: None,
         })
         .await
         .expect("validation should succeed");
