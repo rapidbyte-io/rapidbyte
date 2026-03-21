@@ -24,10 +24,11 @@ use rapidbyte_engine::domain::ports::runner::{
 };
 use rapidbyte_engine::PipelineError;
 use rapidbyte_runtime::{Frame, WasmRuntime};
-use rapidbyte_types::catalog::SchemaHint;
 use rapidbyte_types::envelope::DlqRecord;
+use rapidbyte_types::schema::StreamSchema;
 use rapidbyte_types::state::RunStats;
 use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
+use rapidbyte_types::validation::ValidationStatus;
 use rapidbyte_types::wire::{PluginKind, SyncMode};
 
 // ---------------------------------------------------------------------------
@@ -65,7 +66,8 @@ fn make_stream_ctx(stream_name: &str) -> StreamContext {
     StreamContext {
         stream_name: stream_name.to_string(),
         source_stream_name: None,
-        schema: SchemaHint::Columns(vec![]),
+        stream_index: 0,
+        schema: StreamSchema::default(),
         sync_mode: SyncMode::FullRefresh,
         cursor_info: None,
         limits: StreamLimits::default(),
@@ -490,10 +492,7 @@ async fn test_validate_source_plugin() {
         .await
         .expect("validation should succeed");
 
-    assert_eq!(
-        result.validation.status,
-        rapidbyte_types::error::ValidationStatus::Success
-    );
+    assert_eq!(result.validation.status, ValidationStatus::Success);
 }
 
 // ---------------------------------------------------------------------------
@@ -519,10 +518,7 @@ async fn test_validate_destination_plugin() {
         .await
         .expect("validation should succeed");
 
-    assert_eq!(
-        result.validation.status,
-        rapidbyte_types::error::ValidationStatus::Success
-    );
+    assert_eq!(result.validation.status, ValidationStatus::Success);
 }
 
 // ---------------------------------------------------------------------------
@@ -547,15 +543,14 @@ async fn test_discover_source_streams() {
 
     assert_eq!(streams.len(), 1);
     assert_eq!(streams[0].name, "test-stream");
-
-    // Verify the catalog JSON contains expected schema
-    let catalog: serde_json::Value =
-        serde_json::from_str(&streams[0].catalog_json).expect("catalog should parse");
-    assert_eq!(catalog["name"], "test-stream");
-    let schema = catalog["schema"]
-        .as_array()
-        .expect("schema should be array");
-    assert_eq!(schema.len(), 2);
-    assert_eq!(schema[0]["name"], "id");
-    assert_eq!(schema[1]["name"], "value");
+    assert_eq!(streams[0].schema.fields.len(), 2);
+    assert_eq!(streams[0].schema.fields[0].name, "id");
+    assert_eq!(streams[0].schema.fields[0].arrow_type, "int32");
+    assert!(!streams[0].schema.fields[0].nullable);
+    assert!(streams[0].schema.fields[0].is_primary_key);
+    assert_eq!(streams[0].schema.fields[1].name, "value");
+    assert_eq!(streams[0].supported_sync_modes, vec![SyncMode::FullRefresh]);
+    assert_eq!(streams[0].default_cursor_field, None);
+    assert_eq!(streams[0].estimated_row_count, None);
+    assert_eq!(streams[0].metadata_json, None);
 }

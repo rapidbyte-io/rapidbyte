@@ -1,8 +1,8 @@
 //! Arrow data type identifiers and IPC codec utilities.
 //!
 //! Maps database column types to a portable subset of Apache Arrow
-//! logical types. Used in [`crate::catalog::ColumnSchema`] to describe
-//! stream schemas without depending on the Arrow crate itself.
+//! logical types. Used in v7 `SchemaField` records to describe stream
+//! schemas without depending on the Arrow crate itself.
 //!
 //! The [`ipc`] submodule provides Arrow IPC serialization/deserialization
 //! helpers for `RecordBatch` transport between pipeline stages.

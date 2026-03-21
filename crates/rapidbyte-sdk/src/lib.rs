@@ -26,7 +26,6 @@ pub mod prelude;
 
 // Type re-exports — always available (no feature gate)
 pub use rapidbyte_types::arrow as arrow_types;
-pub use rapidbyte_types::catalog;
 pub use rapidbyte_types::checkpoint;
 pub use rapidbyte_types::cursor;
 pub use rapidbyte_types::discovery;

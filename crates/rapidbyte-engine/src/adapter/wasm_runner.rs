@@ -19,11 +19,11 @@ use rapidbyte_runtime::{
     WasmRuntime,
 };
 use rapidbyte_types::checkpoint::Checkpoint;
-use rapidbyte_types::discovery::PluginSpec;
+use rapidbyte_types::discovery::{DiscoveredStream, PluginSpec};
 use rapidbyte_types::lifecycle::{ApplyAction, ApplyReport, TeardownReport};
 use rapidbyte_types::manifest::Permissions;
 use rapidbyte_types::metric::{ReadSummary, TransformSummary, WriteSummary};
-use rapidbyte_types::schema::StreamSchema;
+use rapidbyte_types::schema::{SchemaField, StreamSchema};
 use rapidbyte_types::state::RunStats;
 use rapidbyte_types::state_backend::StateBackend;
 use rapidbyte_types::stream::StreamContext;
@@ -36,8 +36,8 @@ use crate::adapter::engine_factory::noop_state_backend;
 use crate::domain::error::PipelineError;
 use crate::domain::ports::runner::{
     ApplyParams, CheckComponentStatus, DestinationOutcome, DestinationRunParams, DiscoverParams,
-    DiscoveredStream, PluginRunner, PrerequisitesParams, SourceOutcome, SourceRunParams,
-    SpecParams, TeardownParams, TransformOutcome, TransformRunParams, ValidateParams,
+    PluginRunner, PrerequisitesParams, SourceOutcome, SourceRunParams, SpecParams, TeardownParams,
+    TransformOutcome, TransformRunParams, ValidateParams,
 };
 
 // ── Public adapter ──────────────────────────────────────────────────
@@ -1288,15 +1288,7 @@ fn run_discover_impl(
 
     let streams = wit_streams
         .into_iter()
-        .map(|s| {
-            let catalog_json =
-                serde_json::to_string(&s.name).unwrap_or_else(|_| String::from("{}"));
-            DiscoveredStream {
-                name: s.name,
-                catalog_json,
-                schema: None,
-            }
-        })
+        .map(source_discovered_stream_to_sdk)
         .collect();
 
     tracing::info!(
@@ -1345,6 +1337,63 @@ macro_rules! schema_to_wit {
 schema_to_wit!(schema_to_wit_source, source_bindings);
 schema_to_wit!(schema_to_wit_dest, dest_bindings);
 schema_to_wit!(schema_to_wit_transform, transform_bindings);
+
+fn source_discovered_stream_to_sdk(
+    stream: source_bindings::rapidbyte::plugin::types::DiscoveredStream,
+) -> DiscoveredStream {
+    let source_bindings::rapidbyte::plugin::types::DiscoveredStream {
+        name,
+        schema,
+        supported_sync_modes,
+        default_cursor_field,
+        estimated_row_count,
+        metadata_json,
+    } = stream;
+    let source_bindings::rapidbyte::plugin::types::StreamSchema {
+        fields,
+        primary_key,
+        partition_keys,
+        source_defined_cursor,
+        schema_id,
+    } = schema;
+
+    DiscoveredStream {
+        name,
+        schema: StreamSchema {
+            fields: fields
+                .into_iter()
+                .map(|field| SchemaField {
+                    name: field.name,
+                    arrow_type: field.arrow_type,
+                    nullable: field.nullable,
+                    is_primary_key: field.is_primary_key,
+                    is_generated: field.is_generated,
+                    is_partition_key: field.is_partition_key,
+                    default_value: field.default_value,
+                })
+                .collect(),
+            primary_key,
+            partition_keys,
+            source_defined_cursor,
+            schema_id,
+        },
+        supported_sync_modes: supported_sync_modes
+            .into_iter()
+            .map(|mode| match mode {
+                source_bindings::rapidbyte::plugin::types::SyncMode::FullRefresh => {
+                    SyncMode::FullRefresh
+                }
+                source_bindings::rapidbyte::plugin::types::SyncMode::Incremental => {
+                    SyncMode::Incremental
+                }
+                source_bindings::rapidbyte::plugin::types::SyncMode::Cdc => SyncMode::Cdc,
+            })
+            .collect(),
+        default_cursor_field,
+        estimated_row_count,
+        metadata_json,
+    }
+}
 
 // ── WIT → SDK converters for lifecycle types ────────────────────────
 

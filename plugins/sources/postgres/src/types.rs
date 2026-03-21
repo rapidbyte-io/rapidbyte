@@ -46,17 +46,7 @@ impl Column {
         self.pg_type == "json" || self.pg_type == "jsonb"
     }
 
-    /// Convert to legacy `ColumnSchema` for `build_arrow_schema`.
-    #[must_use]
-    pub fn to_schema(&self) -> rapidbyte_sdk::catalog::ColumnSchema {
-        rapidbyte_sdk::catalog::ColumnSchema {
-            name: self.name.clone(),
-            data_type: self.arrow_type,
-            nullable: self.nullable,
-        }
-    }
-
-    /// Convert to SDK `SchemaField` for catalog discovery.
+    /// Convert to SDK `SchemaField` for typed discovery and runtime schema flow.
     #[must_use]
     pub fn to_schema_field(&self) -> rapidbyte_sdk::schema::SchemaField {
         rapidbyte_sdk::schema::SchemaField::new(

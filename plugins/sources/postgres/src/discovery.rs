@@ -1,7 +1,7 @@
 //! Schema introspection for `PostgreSQL`.
 //!
 //! Queries `information_schema` to discover available tables and columns,
-//! returning `DiscoveredStream` definitions for the catalog.
+//! returning typed `DiscoveredStream` definitions.
 
 use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::schema::StreamSchema;

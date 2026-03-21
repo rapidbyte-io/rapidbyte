@@ -22,8 +22,9 @@ use rapidbyte_runtime::{
     create_component_linker, load_plugin_manifest, resolve_plugin_path, source_bindings,
     source_error_to_sdk, ComponentHostState, Frame, LoadedComponent, WasmRuntime,
 };
-use rapidbyte_types::catalog::Catalog;
+use rapidbyte_types::discovery::DiscoveredStream;
 use rapidbyte_types::manifest::Permissions;
+use rapidbyte_types::schema::SchemaField;
 use rapidbyte_types::schema::StreamSchema;
 use rapidbyte_types::state_backend::{NoopStateBackend, StateBackend};
 use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
@@ -43,7 +44,7 @@ pub(crate) struct ReplState {
 pub(crate) struct ConnectedSource {
     pub plugin_ref: String,
     pub config: serde_json::Value,
-    pub catalog: Catalog,
+    pub streams: Vec<DiscoveredStream>,
     pub loaded_module: LoadedComponent,
     pub permissions: Option<Permissions>,
 }
@@ -81,7 +82,6 @@ pub(crate) async fn run() -> Result<()> {
                 .as_ref()
                 .map(|source| {
                     source
-                        .catalog
                         .streams
                         .iter()
                         .map(|stream| stream.name.clone())
@@ -170,9 +170,9 @@ async fn handle_source(
 
     let result = connect_source(&plugin_ref, &config).await;
     spinner.finish_and_clear();
-    let (catalog, loaded_module, permissions) = result?;
+    let (streams, loaded_module, permissions) = result?;
 
-    let stream_count = catalog.streams.len();
+    let stream_count = streams.len();
     display::print_success(&format!(
         "Connected -- {stream_count} stream{} discovered",
         if stream_count == 1 { "" } else { "s" }
@@ -181,7 +181,7 @@ async fn handle_source(
     state.source = Some(ConnectedSource {
         plugin_ref,
         config,
-        catalog,
+        streams,
         loaded_module,
         permissions,
     });
@@ -193,7 +193,7 @@ async fn handle_source(
 async fn connect_source(
     plugin_ref: &str,
     config: &serde_json::Value,
-) -> Result<(Catalog, LoadedComponent, Option<Permissions>)> {
+) -> Result<(Vec<DiscoveredStream>, LoadedComponent, Option<Permissions>)> {
     let wasm_path = resolve_plugin_path(plugin_ref, PluginKind::Source)?;
     let manifest = load_plugin_manifest(&wasm_path)?;
     let permissions = manifest.as_ref().map(|m| m.permissions.clone());
@@ -202,8 +202,8 @@ async fn connect_source(
     let config = config.clone();
     let plugin_ref = plugin_ref.to_string();
 
-    let (catalog, module) =
-        tokio::task::spawn_blocking(move || -> Result<(Catalog, LoadedComponent)> {
+    let (streams, module) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<DiscoveredStream>, LoadedComponent)> {
             let runtime = WasmRuntime::new()?;
             let module = runtime.load_module(&wasm_path)?;
 
@@ -247,50 +247,65 @@ async fn connect_source(
                 .map_err(source_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!("Discover failed: {e}"))?;
 
-            // Convert WIT discovered streams to the catalog types used by the dev shell.
-            let catalog_streams = wit_streams
+            let streams = wit_streams
                 .into_iter()
-                .map(|s| rapidbyte_types::catalog::Stream {
-                    name: s.name,
-                    schema: s
-                        .schema
-                        .fields
-                        .into_iter()
-                        .map(|f| {
-                            let data_type =
-                                serde_json::from_value::<rapidbyte_types::arrow::ArrowDataType>(
-                                    serde_json::Value::String(f.arrow_type),
-                                )
-                                .unwrap_or(rapidbyte_types::arrow::ArrowDataType::Utf8);
-                            rapidbyte_types::catalog::ColumnSchema {
-                                name: f.name,
-                                data_type,
-                                nullable: f.nullable,
-                            }
-                        })
-                        .collect(),
-                    supported_sync_modes: s
-                        .supported_sync_modes
-                        .into_iter()
-                        .map(|sm| match sm {
-                            source_bindings::rapidbyte::plugin::types::SyncMode::FullRefresh => {
-                                SyncMode::FullRefresh
-                            }
-                            source_bindings::rapidbyte::plugin::types::SyncMode::Incremental => {
-                                SyncMode::Incremental
-                            }
-                            source_bindings::rapidbyte::plugin::types::SyncMode::Cdc => {
-                                SyncMode::Cdc
-                            }
-                        })
-                        .collect(),
-                    source_defined_cursor: s.default_cursor_field,
-                    source_defined_primary_key: None,
+                .map(|stream| {
+                    let source_bindings::rapidbyte::plugin::types::DiscoveredStream {
+                        name,
+                        schema,
+                        supported_sync_modes,
+                        default_cursor_field,
+                        estimated_row_count,
+                        metadata_json,
+                    } = stream;
+                    let source_bindings::rapidbyte::plugin::types::StreamSchema {
+                        fields,
+                        primary_key,
+                        partition_keys,
+                        source_defined_cursor,
+                        schema_id,
+                    } = schema;
+
+                    DiscoveredStream {
+                        name,
+                        schema: StreamSchema {
+                            fields: fields
+                                .into_iter()
+                                .map(|field| SchemaField {
+                                    name: field.name,
+                                    arrow_type: field.arrow_type,
+                                    nullable: field.nullable,
+                                    is_primary_key: field.is_primary_key,
+                                    is_generated: field.is_generated,
+                                    is_partition_key: field.is_partition_key,
+                                    default_value: field.default_value,
+                                })
+                                .collect(),
+                            primary_key,
+                            partition_keys,
+                            source_defined_cursor,
+                            schema_id,
+                        },
+                        supported_sync_modes: supported_sync_modes
+                            .into_iter()
+                            .map(|sm| match sm {
+                                source_bindings::rapidbyte::plugin::types::SyncMode::FullRefresh => {
+                                    SyncMode::FullRefresh
+                                }
+                                source_bindings::rapidbyte::plugin::types::SyncMode::Incremental => {
+                                    SyncMode::Incremental
+                                }
+                                source_bindings::rapidbyte::plugin::types::SyncMode::Cdc => {
+                                    SyncMode::Cdc
+                                }
+                            })
+                            .collect(),
+                        default_cursor_field,
+                        estimated_row_count,
+                        metadata_json,
+                    }
                 })
                 .collect();
-            let catalog = Catalog {
-                streams: catalog_streams,
-            };
 
             if let Err(err) = iface.call_close(&mut store, session)? {
                 tracing::warn!(
@@ -299,12 +314,12 @@ async fn connect_source(
                 );
             }
 
-            Ok((catalog, module))
+            Ok((streams, module))
         })
         .await
         .context("Plugin task panicked")??;
 
-    Ok((catalog, module, permissions))
+    Ok((streams, module, permissions))
 }
 
 // ── .tables handler ────────────────────────────────────────────────
@@ -312,7 +327,7 @@ async fn connect_source(
 fn handle_tables(state: &ReplState) -> Result<()> {
     let source = require_source(state)?;
 
-    if source.catalog.streams.is_empty() {
+    if source.streams.is_empty() {
         display::print_hint("No streams discovered.");
         return Ok(());
     }
@@ -324,7 +339,7 @@ fn handle_tables(state: &ReplState) -> Result<()> {
         style("Columns").bold().underlined(),
     );
 
-    for stream in &source.catalog.streams {
+    for stream in &source.streams {
         let sync_label = stream
             .supported_sync_modes
             .iter()
@@ -336,7 +351,7 @@ fn handle_tables(state: &ReplState) -> Result<()> {
             "{:<40} {:<15} {}",
             stream.name,
             sync_label,
-            stream.schema.len()
+            stream.schema.fields.len()
         );
     }
 
@@ -347,7 +362,7 @@ fn handle_tables(state: &ReplState) -> Result<()> {
 
 fn handle_schema(state: &ReplState, table: &str) -> Result<()> {
     let source = require_source(state)?;
-    let stream = find_stream(&source.catalog, table)?;
+    let stream = find_stream(&source.streams, table)?;
 
     eprintln!("{}", style(format!("-- {} --", stream.name)).bold());
     eprintln!(
@@ -357,13 +372,9 @@ fn handle_schema(state: &ReplState, table: &str) -> Result<()> {
         style("Nullable").bold().underlined(),
     );
 
-    for col in &stream.schema {
+    for col in &stream.schema.fields {
         let nullable_str = if col.nullable { "YES" } else { "NO" };
-        eprintln!(
-            "{:<30} {:<20} {nullable_str}",
-            col.name,
-            format!("{:?}", col.data_type)
-        );
+        eprintln!("{:<30} {:<20} {nullable_str}", col.name, col.arrow_type);
     }
 
     Ok(())
@@ -373,7 +384,7 @@ fn handle_schema(state: &ReplState, table: &str) -> Result<()> {
 
 async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -> Result<()> {
     let source = require_source(state)?;
-    let stream = find_stream(&source.catalog, table)?.clone();
+    let stream = find_stream(&source.streams, table)?.clone();
 
     let plugin_ref = source.plugin_ref.clone();
     let config = source.config.clone();
@@ -390,25 +401,7 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
         stream_name: stream.name.clone(),
         source_stream_name: None,
         stream_index: 0,
-        schema: StreamSchema {
-            fields: stream
-                .schema
-                .iter()
-                .map(|c| rapidbyte_types::schema::SchemaField {
-                    name: c.name.clone(),
-                    arrow_type: c.data_type.to_string(),
-                    nullable: c.nullable,
-                    is_primary_key: false,
-                    is_generated: false,
-                    is_partition_key: false,
-                    default_value: None,
-                })
-                .collect(),
-            primary_key: vec![],
-            partition_keys: vec![],
-            source_defined_cursor: None,
-            schema_id: None,
-        },
+        schema: stream.schema.clone(),
         sync_mode,
         cursor_info: None,
         limits: StreamLimits {
@@ -721,24 +714,20 @@ fn require_source(state: &ReplState) -> Result<&ConnectedSource> {
         .ok_or_else(|| anyhow::anyhow!("No source connected. Use .source to connect first."))
 }
 
-fn find_stream<'a>(
-    catalog: &'a Catalog,
-    table: &str,
-) -> Result<&'a rapidbyte_types::catalog::Stream> {
+fn find_stream<'a>(streams: &'a [DiscoveredStream], table: &str) -> Result<&'a DiscoveredStream> {
     // Try exact match first.
-    if let Some(stream) = catalog.streams.iter().find(|s| s.name == table) {
+    if let Some(stream) = streams.iter().find(|s| s.name == table) {
         return Ok(stream);
     }
 
     // Try suffix match (e.g., "users" matching "public.users").
-    let matches: Vec<_> = catalog
-        .streams
+    let matches: Vec<_> = streams
         .iter()
         .filter(|s| s.name.rsplit('.').next() == Some(table))
         .collect();
 
     match matches.len() {
-        0 => anyhow::bail!("Stream '{table}' not found in catalog"),
+        0 => anyhow::bail!("Stream '{table}' not found in discovered streams"),
         1 => Ok(matches[0]),
         n => anyhow::bail!(
             "Ambiguous stream name '{table}' matches {n} streams: {}",

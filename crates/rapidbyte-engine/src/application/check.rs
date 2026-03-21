@@ -166,7 +166,7 @@ pub async fn check_pipeline(
             destination_validation = Some(validation);
         }
     }
-    let destination_validation = destination_validation.expect("at least one stream name");
+    let mut destination_validation = destination_validation.expect("at least one stream name");
 
     // -- Transforms --
     let mut transform_configs = Vec::with_capacity(pipeline.transforms.len());
@@ -280,6 +280,8 @@ pub async fn check_pipeline(
     // Discovery failure is non-fatal: we skip negotiation but still report
     // the other check results.
     let mut schema_negotiation = Vec::new();
+    let mut schema_aware_transform_validations = vec![None; pipeline.transforms.len()];
+    let mut schema_aware_destination_validation: Option<ValidationReport> = None;
 
     let discovered = ctx
         .runner
@@ -298,12 +300,13 @@ pub async fn check_pipeline(
             let source_schema = discovered_streams
                 .iter()
                 .find(|d| d.name == *stream_name)
-                .and_then(|d| d.schema.clone());
+                .map(|d| d.schema.clone());
 
             let mut current_schema = source_schema;
 
             // Thread through transforms
-            for transform in &pipeline.transforms {
+            let mut schema_validation_failed = false;
+            for (transform_index, transform) in pipeline.transforms.iter().enumerate() {
                 if current_schema.is_none() {
                     break;
                 }
@@ -339,9 +342,34 @@ pub async fn check_pipeline(
                     })
                     .await?;
 
-                if let Some(output) = report.validation.output_schema {
+                let mut validation = report.validation;
+                if !validation.message.is_empty() {
+                    validation.message =
+                        format!("[stream: {}] {}", stream_name, validation.message);
+                }
+
+                let update_transform_validation = schema_aware_transform_validations
+                    .get(transform_index)
+                    .and_then(Option::as_ref)
+                    .is_none_or(|prev| {
+                        validation_severity(&validation) > validation_severity(prev)
+                    });
+                if update_transform_validation {
+                    schema_aware_transform_validations[transform_index] = Some(validation.clone());
+                }
+
+                if validation.status == ValidationStatus::Failed {
+                    schema_validation_failed = true;
+                    break;
+                }
+
+                if let Some(output) = validation.output_schema {
                     current_schema = Some(output);
                 }
+            }
+
+            if schema_validation_failed {
+                continue;
             }
 
             // Validate destination with final schema
@@ -360,18 +388,52 @@ pub async fn check_pipeline(
                 })
                 .await?;
 
-            // Reconcile field requirements against the final schema
-            if let (Some(schema), Some(reqs)) =
-                (&current_schema, &dest_report.validation.field_requirements)
-            {
-                let result = reconcile_schema(schema, reqs);
-                schema_negotiation.push(StreamNegotiationResult {
-                    stream_name: stream_name.clone(),
-                    passed: result.passed,
-                    errors: result.errors,
-                    warnings: result.warnings,
-                });
+            let mut dest_validation = dest_report.validation;
+            if !dest_validation.message.is_empty() {
+                dest_validation.message =
+                    format!("[stream: {}] {}", stream_name, dest_validation.message);
             }
+            let update_destination_validation = schema_aware_destination_validation
+                .as_ref()
+                .is_none_or(|prev| {
+                    validation_severity(&dest_validation) > validation_severity(prev)
+                });
+            if update_destination_validation {
+                schema_aware_destination_validation = Some(dest_validation.clone());
+            }
+
+            // Reconcile field requirements against the final schema
+            if dest_validation.status != ValidationStatus::Failed {
+                if let (Some(schema), Some(reqs)) =
+                    (&current_schema, &dest_validation.field_requirements)
+                {
+                    let result = reconcile_schema(schema, reqs);
+                    schema_negotiation.push(StreamNegotiationResult {
+                        stream_name: stream_name.clone(),
+                        passed: result.passed,
+                        errors: result.errors,
+                        warnings: result.warnings,
+                    });
+                }
+            }
+        }
+    }
+
+    for (index, schema_aware) in schema_aware_transform_validations.into_iter().enumerate() {
+        if let Some(schema_aware) = schema_aware {
+            let replace = validation_severity(&schema_aware)
+                >= validation_severity(&transform_validations[index]);
+            if replace {
+                transform_validations[index] = schema_aware;
+            }
+        }
+    }
+
+    if let Some(schema_aware) = schema_aware_destination_validation {
+        if validation_severity(&schema_aware)
+            >= validation_severity(&destination_validation.validation)
+        {
+            destination_validation.validation = schema_aware;
         }
     }
 
@@ -1174,8 +1236,11 @@ destination:
         };
         tc.runner.enqueue_discover(Ok(vec![DiscoveredStream {
             name: "users".into(),
-            catalog_json: "{}".into(),
-            schema: Some(users_schema),
+            schema: users_schema,
+            supported_sync_modes: vec![rapidbyte_types::wire::SyncMode::FullRefresh],
+            default_cursor_field: None,
+            estimated_row_count: None,
+            metadata_json: None,
         }]));
 
         // Destination validate with upstream_schema returns field requirements
@@ -1221,8 +1286,11 @@ destination:
         };
         tc.runner.enqueue_discover(Ok(vec![DiscoveredStream {
             name: "users".into(),
-            catalog_json: "{}".into(),
-            schema: Some(users_schema),
+            schema: users_schema,
+            supported_sync_modes: vec![rapidbyte_types::wire::SyncMode::FullRefresh],
+            default_cursor_field: None,
+            estimated_row_count: None,
+            metadata_json: None,
         }]));
 
         // Destination requires "email" field
@@ -1244,6 +1312,96 @@ destination:
         assert_eq!(result.schema_negotiation.len(), 1);
         assert!(!result.schema_negotiation[0].passed);
         assert!(result.schema_negotiation[0].errors[0].contains("Required field 'email' missing"));
+    }
+
+    #[tokio::test]
+    async fn check_schema_negotiation_surfaces_transform_failure() {
+        use crate::domain::ports::runner::DiscoveredStream;
+        use rapidbyte_types::schema::SchemaField;
+
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+        tc.resolver
+            .register("sql-transform", test_resolved_plugin());
+
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+
+        let users_schema = StreamSchema {
+            fields: vec![SchemaField::new("id", "int64", false)],
+            primary_key: vec!["id".into()],
+            ..Default::default()
+        };
+        tc.runner.enqueue_discover(Ok(vec![DiscoveredStream {
+            name: "users".into(),
+            schema: users_schema,
+            supported_sync_modes: vec![rapidbyte_types::wire::SyncMode::FullRefresh],
+            default_cursor_field: None,
+            estimated_row_count: None,
+            metadata_json: None,
+        }]));
+
+        tc.runner.enqueue_validate(Ok(CheckComponentStatus {
+            validation: ValidationReport::failed("missing required field 'email'"),
+        }));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+
+        let pipeline = test_pipeline_config_with_transform();
+        let result = check_pipeline(&tc.ctx, &pipeline).await.unwrap();
+
+        assert_eq!(result.transform_validations.len(), 1);
+        assert_eq!(
+            result.transform_validations[0].status,
+            ValidationStatus::Failed
+        );
+        assert!(result.transform_validations[0]
+            .message
+            .contains("missing required field 'email'"));
+    }
+
+    #[tokio::test]
+    async fn check_schema_negotiation_surfaces_destination_failure() {
+        use crate::domain::ports::runner::DiscoveredStream;
+        use rapidbyte_types::schema::SchemaField;
+
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+        tc.runner.enqueue_validate(Ok(ok_validation()));
+
+        let users_schema = StreamSchema {
+            fields: vec![SchemaField::new("id", "int64", false)],
+            primary_key: vec!["id".into()],
+            ..Default::default()
+        };
+        tc.runner.enqueue_discover(Ok(vec![DiscoveredStream {
+            name: "users".into(),
+            schema: users_schema,
+            supported_sync_modes: vec![rapidbyte_types::wire::SyncMode::FullRefresh],
+            default_cursor_field: None,
+            estimated_row_count: None,
+            metadata_json: None,
+        }]));
+
+        tc.runner.enqueue_validate(Ok(CheckComponentStatus {
+            validation: ValidationReport::failed("destination requires column 'email'"),
+        }));
+
+        let pipeline = test_pipeline_config();
+        let result = check_pipeline(&tc.ctx, &pipeline).await.unwrap();
+
+        assert_eq!(
+            result.destination_validation.status,
+            ValidationStatus::Failed
+        );
+        assert!(result
+            .destination_validation
+            .message
+            .contains("destination requires column 'email'"));
     }
 
     #[tokio::test]

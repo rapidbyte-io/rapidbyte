@@ -7,7 +7,6 @@
 //! |----------------|----------------|
 //! | `arrow`        | Arrow data type mappings |
 //! | `batch`        | Batch metadata for Arrow IPC frame transport (v7) |
-//! | `catalog`      | Catalog, stream, and column schema definitions |
 //! | `checkpoint`   | Checkpoint and state scope types |
 //! | `compression`  | Compression codec enum |
 //! | `cursor`       | Cursor info and value types for incremental sync |
@@ -30,7 +29,6 @@
 
 pub mod arrow;
 pub mod batch;
-pub mod catalog;
 pub mod checkpoint;
 pub mod compression;
 pub mod cursor;
@@ -58,7 +56,6 @@ pub mod wire;
 pub mod prelude {
     pub use crate::arrow::ArrowDataType;
     pub use crate::batch::BatchMetadata;
-    pub use crate::catalog::{Catalog, ColumnSchema, SchemaHint, Stream};
     pub use crate::checkpoint::{
         Checkpoint, CheckpointKind, CursorUpdate, StateMutation, StateScope,
     };

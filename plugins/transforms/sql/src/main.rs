@@ -30,20 +30,34 @@ fn parse_plannable_statement(query: &str) -> Result<DfStatement, String> {
 #[rapidbyte_sdk::plugin(transform)]
 pub struct TransformSql {
     config: config::Config,
+    prepared: std::sync::OnceLock<Result<PreparedQuery, String>>,
+}
+
+struct PreparedQuery {
+    query: String,
     statement: DfStatement,
+}
+
+impl TransformSql {
+    fn prepared_query(&self) -> Result<&PreparedQuery, String> {
+        match self.prepared.get_or_init(|| {
+            let query = normalize_and_parse_query(&self.config)?;
+            let statement = parse_plannable_statement(&query)?;
+            Ok(PreparedQuery { query, statement })
+        }) {
+            Ok(prepared) => Ok(prepared),
+            Err(message) => Err(message.clone()),
+        }
+    }
 }
 
 impl Transform for TransformSql {
     type Config = config::Config;
 
     async fn init(config: Self::Config) -> Result<Self, PluginError> {
-        let query = normalize_and_parse_query(&config)
-            .map_err(|message| PluginError::config("SQL_CONFIG", message))?;
-        let statement = parse_plannable_statement(&query)
-            .map_err(|message| PluginError::config("SQL_CONFIG", message))?;
         Ok(Self {
-            config: config::Config { query },
-            statement,
+            config,
+            prepared: std::sync::OnceLock::new(),
         })
     }
 
@@ -52,8 +66,9 @@ impl Transform for TransformSql {
         ctx: &Context,
         _upstream: Option<&rapidbyte_sdk::schema::StreamSchema>,
     ) -> Result<ValidationReport, PluginError> {
-        match normalize_and_parse_query(&self.config)
-            .and_then(|query| validate_query_for_stream_name(&query, ctx.stream_name()))
+        match self
+            .prepared_query()
+            .and_then(|prepared| validate_query_for_stream_name(&prepared.query, ctx.stream_name()))
         {
             Ok(()) => Ok(ValidationReport::success("SQL query configuration is valid")),
             Err(message) => Ok(ValidationReport::failed(&message)),
@@ -65,9 +80,12 @@ impl Transform for TransformSql {
         ctx: &Context,
         stream: StreamContext,
     ) -> Result<TransformSummary, PluginError> {
-        validate_query_for_stream_name(&self.config.query, ctx.stream_name())
+        let prepared = self
+            .prepared_query()
             .map_err(|message| PluginError::config("SQL_CONFIG", message))?;
-        transform::run(ctx, &stream, &self.config, &self.statement).await
+        validate_query_for_stream_name(&prepared.query, ctx.stream_name())
+            .map_err(|message| PluginError::config("SQL_CONFIG", message))?;
+        transform::run(ctx, &stream, &self.config, &prepared.statement).await
     }
 }
 
@@ -76,23 +94,36 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn init_rejects_empty_query() {
-        let result = TransformSql::init(config::Config {
+    async fn validate_reports_empty_query_failure() {
+        let plugin = TransformSql::init(config::Config {
             query: "   ".to_string(),
         })
-        .await;
-        assert!(result.is_err());
+        .await
+        .expect("init should not reject invalid config");
+        let ctx = Context::new("transform-sql", "users");
+        let validation = plugin
+            .validate(&ctx, None)
+            .await
+            .expect("validate should not return plugin error");
+
+        assert_eq!(validation.status, ValidationStatus::Failed);
+        assert!(validation.message.contains("empty"));
     }
 
     #[tokio::test]
-    async fn init_trims_query_before_storing() {
+    async fn validate_accepts_query_after_normalization() {
         let plugin = TransformSql::init(config::Config {
             query: "  SELECT * FROM users  ".to_string(),
         })
         .await
         .expect("init should succeed");
+        let ctx = Context::new("transform-sql", "users");
+        let validation = plugin
+            .validate(&ctx, None)
+            .await
+            .expect("validate should not return plugin error");
 
-        assert_eq!(plugin.config.query, "SELECT * FROM users");
+        assert_eq!(validation.status, ValidationStatus::Success);
     }
 
     #[tokio::test]
@@ -137,50 +168,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn init_rejects_invalid_sql_with_parse_context() {
-        let result = TransformSql::init(config::Config {
+    async fn validate_reports_parse_error_for_invalid_sql() {
+        let plugin = TransformSql::init(config::Config {
             query: "SELECT FROM users".to_string(),
         })
-        .await;
+        .await
+        .expect("init should not reject invalid config");
+        let ctx = Context::new("transform-sql", "users");
+        let validation = plugin
+            .validate(&ctx, None)
+            .await
+            .expect("validate should not return plugin error");
 
-        match result {
-            Ok(_) => panic!("invalid SQL should fail init"),
-            Err(err) => {
-                assert_eq!(err.code, "SQL_CONFIG");
-                assert!(err.message.contains("failed to parse SQL query"));
-            }
-        }
+        assert_eq!(validation.status, ValidationStatus::Failed);
+        assert!(validation.message.contains("failed to parse SQL query"));
     }
 
     #[tokio::test]
-    async fn init_rejects_multiple_statements() {
-        let result = TransformSql::init(config::Config {
+    async fn validate_reports_multiple_statements_failure() {
+        let plugin = TransformSql::init(config::Config {
             query: "SELECT * FROM users; SELECT * FROM users".to_string(),
         })
-        .await;
+        .await
+        .expect("init should not reject invalid config");
+        let ctx = Context::new("transform-sql", "users");
+        let validation = plugin
+            .validate(&ctx, None)
+            .await
+            .expect("validate should not return plugin error");
 
-        match result {
-            Ok(_) => panic!("multiple statements should fail init"),
-            Err(err) => {
-                assert_eq!(err.code, "SQL_CONFIG");
-                assert!(err.message.contains("exactly one statement"));
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn validate_reports_parse_error_for_invalid_sql() {
-        // validate() is now an instance method, but init() also parses the query.
-        // For invalid SQL, init() fails before we can call validate().
-        // We test that init() correctly rejects invalid SQL instead.
-        let result = TransformSql::init(config::Config {
-            query: "SELECT FROM users".to_string(),
-        })
-        .await;
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert_eq!(err.code, "SQL_CONFIG");
-        assert!(err.message.contains("failed to parse SQL query"));
+        assert_eq!(validation.status, ValidationStatus::Failed);
+        assert!(validation.message.contains("exactly one statement"));
     }
 }

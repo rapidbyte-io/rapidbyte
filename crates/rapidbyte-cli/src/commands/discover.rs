@@ -2,8 +2,9 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use console::style;
+use rapidbyte_types::discovery::DiscoveredStream;
 use rapidbyte_types::wire::SyncMode;
 
 use crate::Verbosity;
@@ -22,7 +23,7 @@ pub async fn execute(
 ) -> Result<()> {
     let config = super::load_pipeline(pipeline_path, secrets).await?;
 
-    // Discover catalog from source plugin
+    // Discover typed streams from the source plugin
     let ctx = rapidbyte_engine::build_discover_context(registry_config).await?;
     let discovered_streams = rapidbyte_engine::discover_plugin(
         &ctx,
@@ -32,22 +33,9 @@ pub async fn execute(
     .await
     .map_err(anyhow::Error::from)?;
 
-    // Convert DiscoveredStream to Catalog
-    let catalog_streams: Vec<rapidbyte_types::catalog::Stream> = discovered_streams
-        .into_iter()
-        .map(|s| {
-            serde_json::from_str(&s.catalog_json)
-                .with_context(|| format!("malformed catalog for stream '{}'", s.name))
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    let catalog = rapidbyte_types::catalog::Catalog {
-        streams: catalog_streams,
-    };
-
     // Human-readable output to stderr (skip in quiet mode)
     if verbosity != Verbosity::Quiet {
-        let count = catalog.streams.len();
+        let count = discovered_streams.len();
         eprintln!(
             "{} Discovered {} stream{}",
             style("\u{2713}").green().bold(),
@@ -57,29 +45,21 @@ pub async fn execute(
         eprintln!();
 
         // Compute column widths for the table
-        let name_width = catalog
-            .streams
+        let name_width = discovered_streams
             .iter()
             .map(|s| s.name.len())
             .max()
             .unwrap_or(6)
             .max(6);
-        let sync_width = catalog
-            .streams
+        let sync_width = discovered_streams
             .iter()
             .map(|s| sync_label(s.supported_sync_modes.as_slice()).len())
             .max()
             .unwrap_or(4)
             .max(4);
-        let cursor_width = catalog
-            .streams
+        let cursor_width = discovered_streams
             .iter()
-            .map(|s| {
-                s.source_defined_cursor
-                    .as_deref()
-                    .unwrap_or("\u{2014}")
-                    .len()
-            })
+            .map(|s| cursor_label(s).len())
             .max()
             .unwrap_or(6)
             .max(6);
@@ -97,13 +77,10 @@ pub async fn execute(
         let rule_len = name_width + sync_width + cursor_width + 18;
         eprintln!("  {}", "\u{2500}".repeat(rule_len));
 
-        for stream in &catalog.streams {
+        for stream in &discovered_streams {
             let sync = sync_label(&stream.supported_sync_modes);
-            let cursor = stream
-                .source_defined_cursor
-                .as_deref()
-                .unwrap_or("\u{2014}");
-            let cols = stream.schema.len();
+            let cursor = cursor_label(stream);
+            let cols = stream.schema.fields.len();
 
             eprintln!(
                 "  {:<name_w$}   {:<sync_w$}   {:<cursor_w$}   {}",
@@ -117,10 +94,8 @@ pub async fn execute(
             );
 
             // Verbose mode: show full schema per stream
-            if (verbosity == Verbosity::Verbose || verbosity == Verbosity::Diagnostic)
-                && !stream.schema.is_empty()
-            {
-                for col in &stream.schema {
+            if verbosity == Verbosity::Verbose || verbosity == Verbosity::Diagnostic {
+                for col in &stream.schema.fields {
                     let nullable = if col.nullable {
                         style("NULL").dim()
                     } else {
@@ -129,7 +104,7 @@ pub async fn execute(
                     eprintln!(
                         "  {pad:>name_w$}     {:<24} {:<12} {}",
                         style(&col.name).cyan(),
-                        format!("{}", col.data_type),
+                        col.arrow_type,
                         nullable,
                         pad = "",
                         name_w = name_width,
@@ -142,8 +117,8 @@ pub async fn execute(
     }
 
     // Machine-readable JSON on stdout (always emitted)
-    let json = serde_json::to_string(&catalog)?;
-    println!("@@CATALOG_JSON@@{json}");
+    let json = serde_json::to_string(&discovered_streams)?;
+    println!("@@DISCOVERY_JSON@@{json}");
 
     Ok(())
 }
@@ -157,4 +132,12 @@ fn sync_label(modes: &[SyncMode]) -> &'static str {
     } else {
         "full"
     }
+}
+
+fn cursor_label(stream: &DiscoveredStream) -> &str {
+    stream
+        .default_cursor_field
+        .as_deref()
+        .or(stream.schema.source_defined_cursor.as_deref())
+        .unwrap_or("\u{2014}")
 }

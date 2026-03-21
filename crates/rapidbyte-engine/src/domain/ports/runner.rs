@@ -10,6 +10,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use async_trait::async_trait;
 use rapidbyte_runtime::{Frame, SandboxOverrides};
 use rapidbyte_types::checkpoint::Checkpoint;
+pub use rapidbyte_types::discovery::DiscoveredStream;
 use rapidbyte_types::discovery::PluginSpec;
 use rapidbyte_types::envelope::DlqRecord;
 use rapidbyte_types::lifecycle::{ApplyReport, TeardownReport};
@@ -282,17 +283,6 @@ pub struct DestinationOutcome {
 pub struct CheckComponentStatus {
     /// Validation result from the plugin.
     pub validation: ValidationReport,
-}
-
-/// A stream discovered by a source plugin.
-#[derive(Debug, Clone)]
-pub struct DiscoveredStream {
-    /// Fully-qualified stream name (e.g. `"public.users"`).
-    pub name: String,
-    /// JSON-serialized catalog returned by the plugin.
-    pub catalog_json: String,
-    /// Typed schema for schema negotiation, if the plugin provided one.
-    pub schema: Option<StreamSchema>,
 }
 
 // ---------------------------------------------------------------------------

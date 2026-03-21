@@ -29,7 +29,7 @@ static UNIX_EPOCH_DATE: LazyLock<NaiveDate> =
 /// Delegates to the SDK's `build_arrow_schema` so the type conversion stays
 /// in one place.
 pub fn arrow_schema(columns: &[Column]) -> Arc<Schema> {
-    let col_schemas: Vec<_> = columns.iter().map(Column::to_schema).collect();
+    let col_schemas: Vec<_> = columns.iter().map(Column::to_schema_field).collect();
     build_arrow_schema(&col_schemas)
 }
 

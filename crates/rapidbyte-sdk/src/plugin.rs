@@ -22,7 +22,7 @@ use crate::validation::{PrerequisitesReport, ValidationReport};
 /// - `init()` returns `Result<Self, PluginError>` (no `PluginInfo`).
 /// - `spec()` is a static method with a default implementation.
 /// - `validate()` takes `&self` and an optional upstream `StreamSchema`.
-/// - `discover()` returns `Vec<DiscoveredStream>` instead of `Catalog`.
+/// - `discover()` returns typed `Vec<DiscoveredStream>`.
 /// - New lifecycle hooks: `prerequisites()`, `apply()`, `teardown()`.
 /// - All instance methods take `&self`, not `&mut self`.
 #[allow(async_fn_in_trait)]
