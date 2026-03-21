@@ -52,7 +52,7 @@ pub(crate) async fn discover_catalog_with_settings(
 ) -> Result<Vec<DiscoveredStream>, String> {
     let schema_name = settings.schema.as_deref().unwrap_or("public");
 
-    let mut table_rows = query_catalog_rows(client, schema_name).await?;
+    let table_rows = query_catalog_rows(client, schema_name).await?;
     let primary_keys = query_primary_keys(client, schema_name).await?;
 
     let published_tables = match settings.publication.as_deref() {
@@ -62,6 +62,36 @@ pub(crate) async fn discover_catalog_with_settings(
         None => None,
     };
 
+    Ok(build_discovered_streams(
+        table_rows,
+        primary_keys,
+        settings.publication.as_deref(),
+        published_tables.as_ref(),
+    ))
+}
+
+/// Query column metadata for a single table in the `public` schema.
+pub(crate) async fn query_table_columns(
+    client: &Client,
+    table_name: &str,
+) -> Result<Vec<Column>, String> {
+    let (schema_name, bare_table_name) = split_schema_and_table_name(table_name);
+    query_table_columns_in_schema(client, schema_name, bare_table_name).await
+}
+
+fn split_schema_and_table_name(source_table_name: &str) -> (&str, &str) {
+    let mut parts = source_table_name.rsplitn(2, '.');
+    let table_name = parts.next().unwrap_or(source_table_name);
+    let schema_name = parts.next().unwrap_or("public");
+    (schema_name, table_name)
+}
+
+fn build_discovered_streams(
+    mut table_rows: Vec<CatalogRow>,
+    primary_keys: HashMap<(String, String), Vec<String>>,
+    publication: Option<&str>,
+    published_tables: Option<&HashSet<String>>,
+) -> Vec<DiscoveredStream> {
     table_rows.sort_by(|left, right| {
         (left.schema.as_str(), left.table.as_str(), left.ordinal_position)
             .cmp(&(right.schema.as_str(), right.table.as_str(), right.ordinal_position))
@@ -83,39 +113,24 @@ pub(crate) async fn discover_catalog_with_settings(
 
     let mut streams = Vec::with_capacity(grouped.len());
     for ((schema, table), mut columns) in grouped {
-        if let Some(primary_key_columns) = primary_keys.get(&(schema.clone(), table.clone())) {
-            for column in &mut columns {
-                column.is_primary_key = primary_key_columns.contains(&column.name);
-            }
-        }
-
         let primary_key = primary_keys
             .get(&(schema.clone(), table.clone()))
             .cloned()
             .unwrap_or_default();
-        let stream = build_discovered_stream(
-            &schema,
-            &table,
-            &columns,
-            &primary_key,
-            settings.publication.as_deref(),
-        );
+        let primary_key_set: HashSet<&str> = primary_key.iter().map(String::as_str).collect();
+        for column in &mut columns {
+            column.is_primary_key = primary_key_set.contains(column.name.as_str());
+        }
+
+        let stream = build_discovered_stream(&schema, &table, &columns, &primary_key, publication);
         streams.push(stream);
     }
 
     if let Some(published_tables) = published_tables {
-        streams = filter_published_streams(streams, &published_tables);
+        streams = filter_published_streams(streams, published_tables);
     }
 
-    Ok(streams)
-}
-
-/// Query column metadata for a single table in the `public` schema.
-pub(crate) async fn query_table_columns(
-    client: &Client,
-    table_name: &str,
-) -> Result<Vec<Column>, String> {
-    query_table_columns_in_schema(client, "public", table_name).await
+    streams
 }
 
 fn build_discovered_stream(
@@ -130,9 +145,14 @@ fn build_discovered_stream(
         .map(DiscoveryColumn::to_schema_field)
         .collect::<Vec<_>>();
     let default_cursor_field = suggest_cursor_field(columns);
+    let stream_name = if schema_name == "public" {
+        table_name.to_string()
+    } else {
+        format!("{schema_name}.{table_name}")
+    };
 
     DiscoveredStream {
-        name: table_name.to_string(),
+        name: stream_name,
         schema: StreamSchema {
             fields,
             primary_key: primary_key.to_vec(),
@@ -291,8 +311,13 @@ async fn query_publication_tables(
 
     let mut tables = HashSet::with_capacity(rows.len());
     for row in rows {
+        let schema: String = row.get(0);
         let table: String = row.get(1);
-        tables.insert(table);
+        if schema == "public" {
+            tables.insert(table);
+        } else {
+            tables.insert(format!("{schema}.{table}"));
+        }
     }
 
     Ok(tables)
@@ -380,7 +405,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(stream.name, "users");
+        assert_eq!(stream.name, "analytics.users");
         assert_eq!(stream.schema.primary_key, vec!["id"]);
         assert!(stream.schema.fields[0].is_primary_key);
         assert!(!stream.schema.fields[1].is_primary_key);
@@ -416,7 +441,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(stream.name, "invoices");
+        assert_eq!(stream.name, "reporting.invoices");
         assert_eq!(
             stream.metadata_json.as_deref(),
             Some(r#"{"schema":"reporting"}"#)
@@ -424,29 +449,107 @@ mod tests {
     }
 
     #[test]
-    fn publication_filtering_discards_unpublished_tables() {
-        let streams = vec![
-            build_discovered_stream(
-                "public",
-                "users",
-                &[column("id", "int4", false, true, false)],
-                &["id".to_string()],
-                None,
-            ),
-            build_discovered_stream(
-                "analytics",
-                "events",
-                &[column("id", "int4", false, true, false)],
-                &["id".to_string()],
-                None,
-            ),
+    fn discover_streams_preserves_primary_key_order() {
+        let rows = vec![
+            CatalogRow {
+                schema: "analytics".to_string(),
+                table: "orders".to_string(),
+                column: "tenant_id".to_string(),
+                data_type: "int4".to_string(),
+                nullable: false,
+                is_generated: false,
+                ordinal_position: 1,
+            },
+            CatalogRow {
+                schema: "analytics".to_string(),
+                table: "orders".to_string(),
+                column: "id".to_string(),
+                data_type: "int4".to_string(),
+                nullable: false,
+                is_generated: false,
+                ordinal_position: 2,
+            },
+            CatalogRow {
+                schema: "analytics".to_string(),
+                table: "orders".to_string(),
+                column: "created_at".to_string(),
+                data_type: "timestamp".to_string(),
+                nullable: false,
+                is_generated: false,
+                ordinal_position: 3,
+            },
         ];
-        let published = HashSet::from(["events".to_string()]);
+        let primary_keys = HashMap::from([(
+            ("analytics".to_string(), "orders".to_string()),
+            vec!["tenant_id".to_string(), "id".to_string()],
+        )]);
 
-        let filtered = filter_published_streams(streams, &published);
+        let streams = build_discovered_streams(rows, primary_keys, None, None);
+        let stream = &streams[0];
 
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].name, "events");
+        assert_eq!(stream.name, "analytics.orders");
+        assert_eq!(stream.schema.primary_key, vec!["tenant_id", "id"]);
+        assert!(stream.schema.fields[0].is_primary_key);
+        assert!(stream.schema.fields[1].is_primary_key);
+    }
+
+    #[test]
+    fn discover_streams_filters_unpublished_tables() {
+        let rows = vec![
+            CatalogRow {
+                schema: "public".to_string(),
+                table: "users".to_string(),
+                column: "id".to_string(),
+                data_type: "int4".to_string(),
+                nullable: false,
+                is_generated: false,
+                ordinal_position: 1,
+            },
+            CatalogRow {
+                schema: "public".to_string(),
+                table: "orders".to_string(),
+                column: "id".to_string(),
+                data_type: "int4".to_string(),
+                nullable: false,
+                is_generated: false,
+                ordinal_position: 1,
+            },
+        ];
+        let primary_keys = HashMap::from([
+            (("public".to_string(), "users".to_string()), vec!["id".to_string()]),
+            (("public".to_string(), "orders".to_string()), vec!["id".to_string()]),
+        ]);
+        let published = HashSet::from(["users".to_string()]);
+
+        let streams = build_discovered_streams(rows, primary_keys, Some("rapidbyte_users"), Some(&published));
+
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].name, "users");
+    }
+
+    #[test]
+    fn discover_streams_uses_non_public_schema_name() {
+        let rows = vec![CatalogRow {
+            schema: "analytics".to_string(),
+            table: "events".to_string(),
+            column: "id".to_string(),
+            data_type: "int4".to_string(),
+            nullable: false,
+            is_generated: false,
+            ordinal_position: 1,
+        }];
+        let primary_keys = HashMap::from([(
+            ("analytics".to_string(), "events".to_string()),
+            vec!["id".to_string()],
+        )]);
+
+        let streams = build_discovered_streams(rows, primary_keys, None, None);
+
+        assert_eq!(streams[0].name, "analytics.events");
+        assert_eq!(
+            streams[0].metadata_json.as_deref(),
+            Some(r#"{"schema":"analytics"}"#)
+        );
     }
 
     #[test]
@@ -476,6 +579,7 @@ mod tests {
             None,
         );
 
+        assert_eq!(stream.name, "analytics.orders");
         assert_eq!(stream.schema.primary_key, vec!["tenant_id", "id"]);
         assert!(stream.schema.fields[0].is_primary_key);
         assert!(stream.schema.fields[1].is_primary_key);
