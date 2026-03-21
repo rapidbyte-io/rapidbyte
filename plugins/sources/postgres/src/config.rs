@@ -34,6 +34,18 @@ fn default_port() -> u16 {
 }
 
 impl Config {
+    /// Returns the configured replication slot name, if any.
+    #[must_use]
+    pub(crate) fn configured_replication_slot(&self) -> Option<&str> {
+        self.replication_slot.as_deref()
+    }
+
+    /// Returns the configured publication name, if any.
+    #[must_use]
+    pub(crate) fn configured_publication(&self) -> Option<&str> {
+        self.publication.as_deref()
+    }
+
     /// # Errors
     /// Returns `Err` if `replication_slot` or `publication` is empty or exceeds the
     /// 63-byte `PostgreSQL` identifier limit.
@@ -68,7 +80,6 @@ impl Config {
         }
         Ok(())
     }
-
 }
 
 #[cfg(test)]

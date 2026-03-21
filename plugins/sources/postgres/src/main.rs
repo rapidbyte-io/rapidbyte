@@ -11,6 +11,7 @@ mod cursor;
 mod discovery;
 mod encode;
 mod metrics;
+mod prerequisites;
 mod query;
 mod reader;
 mod types;
@@ -50,6 +51,11 @@ impl Source for SourcePostgres {
     ) -> Result<ValidationReport, PluginError> {
         let _ = ctx;
         client::validate(&self.config).await
+    }
+
+    async fn prerequisites(&self, ctx: &Context) -> Result<PrerequisitesReport, PluginError> {
+        let _ = ctx;
+        prerequisites::prerequisites(&self.config).await
     }
 
     async fn read(
