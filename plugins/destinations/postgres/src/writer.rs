@@ -89,7 +89,7 @@ pub async fn write_stream(
         let staging_exists = target_table_exists(&client, &setup.target_schema, &staging_name)
             .await
             .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
-        if should_prepare_fallback(!staging_exists) {
+        if should_prepare_fallback(staging_exists) {
             prepare_stream_contract(ctx, &client, stream, setup)
                 .await
                 .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
@@ -235,5 +235,15 @@ mod tests {
         assert_eq!(resolved.effective_stream, "users__rb_staging");
         assert_eq!(resolved.qualified_table, "public.users__rb_staging");
         assert!(!resolved.needs_schema_ensure);
+    }
+
+    #[test]
+    fn replace_staging_exists_skips_fallback() {
+        assert!(!should_prepare_fallback(true));
+    }
+
+    #[test]
+    fn replace_staging_missing_triggers_fallback() {
+        assert!(should_prepare_fallback(false));
     }
 }
