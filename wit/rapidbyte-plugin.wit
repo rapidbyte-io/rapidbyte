@@ -7,12 +7,6 @@ interface types {
     type socket-handle = u64;
     type checkpoint-txn = u64;
 
-    // ── Plugin identity ──
-    enum plugin-kind { source, destination, transform }
-
-    // ── Lifecycle phases ──
-    enum run-phase { read, write, transform }
-
     // ── Sync modes ──
     enum sync-mode { full-refresh, incremental, cdc }
 
