@@ -26,7 +26,7 @@ use crate::application::{extract_permissions, parse_plugin_id};
 use crate::domain::error::PipelineError;
 use crate::domain::outcome::{PipelineCounts, PipelineResult, SourceTiming, StreamShardMetric};
 use crate::domain::ports::runner::{
-    DestinationRunParams, SourceOutcome, SourceRunParams, TransformRunParams,
+    ApplyParams, DestinationRunParams, SourceOutcome, SourceRunParams, TransformRunParams,
 };
 use crate::domain::progress::{Phase, ProgressEvent};
 use crate::domain::retry::{RetryDecision, RetryPolicy};
@@ -184,6 +184,61 @@ pub async fn run_pipeline(
                 )
                 .await?;
             transform_resolved.push(resolved);
+        }
+
+        // 2b. Apply phase — provision resources (best-effort, non-fatal)
+        {
+            let (src_apply_id, src_apply_ver) = parse_plugin_id(&pipeline.source.use_ref);
+            let (dst_apply_id, dst_apply_ver) = parse_plugin_id(&pipeline.destination.use_ref);
+            let src_apply_permissions = extract_permissions(&source_resolved);
+            let dst_apply_permissions = extract_permissions(&dest_resolved);
+            let src_apply_overrides = build_sandbox_overrides(
+                pipeline.source.permissions.as_ref(),
+                pipeline.source.limits.as_ref(),
+                source_resolved.manifest.as_ref(),
+            )?;
+            let dst_apply_overrides = build_sandbox_overrides(
+                pipeline.destination.permissions.as_ref(),
+                pipeline.destination.limits.as_ref(),
+                dest_resolved.manifest.as_ref(),
+            )?;
+
+            // TODO: build full StreamContexts for apply once cursor loading
+            // is moved earlier. For now pass an empty vec — the apply call
+            // itself is the important part for resource provisioning.
+            let apply_streams = Vec::new();
+
+            let _src_apply = ctx
+                .runner
+                .apply(&ApplyParams {
+                    wasm_path: source_resolved.wasm_path.clone(),
+                    kind: rapidbyte_types::wire::PluginKind::Source,
+                    plugin_id: src_apply_id,
+                    plugin_version: src_apply_ver,
+                    config: pipeline.source.config.clone(),
+                    streams: apply_streams.clone(),
+                    dry_run: false,
+                    permissions: src_apply_permissions,
+                    sandbox_overrides: src_apply_overrides,
+                })
+                .await
+                .ok(); // Non-fatal — apply is best-effort
+
+            let _dst_apply = ctx
+                .runner
+                .apply(&ApplyParams {
+                    wasm_path: dest_resolved.wasm_path.clone(),
+                    kind: rapidbyte_types::wire::PluginKind::Destination,
+                    plugin_id: dst_apply_id,
+                    plugin_version: dst_apply_ver,
+                    config: pipeline.destination.config.clone(),
+                    streams: apply_streams,
+                    dry_run: false,
+                    permissions: dst_apply_permissions,
+                    sandbox_overrides: dst_apply_overrides,
+                })
+                .await
+                .ok(); // Non-fatal — apply is best-effort
         }
 
         // 3. Report Running phase
