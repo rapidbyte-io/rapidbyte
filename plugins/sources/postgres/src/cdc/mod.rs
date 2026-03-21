@@ -14,6 +14,7 @@ use std::time::Instant;
 use tokio_postgres::Client;
 
 use crate::config::Config;
+use crate::diagnostics::{cdc_checkpoint_failure_diagnostic, cdc_resume_ambiguity_diagnostic};
 use crate::metrics::{emit_batch_counters, emit_source_timings, EmitState, BATCH_SIZE};
 use rapidbyte_sdk::prelude::*;
 
@@ -173,6 +174,7 @@ pub async fn read_cdc_changes(
     client: &Client,
     ctx: &Context,
     stream: &StreamContext,
+    resume: &CdcResumeToken,
     config: &Config,
     connect_secs: f64,
 ) -> Result<ReadSummary, String> {
@@ -185,6 +187,18 @@ pub async fn read_cdc_changes(
 
     // 1. Derive and validate CDC identifiers.
     let (slot_name, publication_name) = resolve_cdc_names(config, &stream.stream_name)?;
+
+    // 1b. Surface ambiguous resume states before touching the destructive CDC path.
+    if let Some(resume_diagnostic) = cdc_resume_ambiguity_diagnostic(&stream.stream_name, resume) {
+        match resume_diagnostic.level {
+            crate::diagnostics::DiagnosticLevel::Warning => {
+                ctx.log(LogLevel::Warn, &resume_diagnostic.message);
+            }
+            crate::diagnostics::DiagnosticLevel::Error => {
+                return Err(resume_diagnostic.render());
+            }
+        }
+    }
 
     // 2. Ensure replication slot exists (idempotent)
     ensure_replication_slot(client, ctx, &slot_name).await?;
@@ -206,9 +220,8 @@ pub async fn read_cdc_changes(
         .await
         .map_err(|e| {
             format!(
-                "pg_logical_slot_get_binary_changes failed for slot '{slot_name}' \
-                 with publication '{publication_name}'. Ensure the publication exists \
-                 (CREATE PUBLICATION {publication_name} FOR TABLE ...): {e}"
+                "pg_logical_slot_get_binary_changes failed for stream '{}' with slot '{}' and publication '{}'. Ensure the publication exists and includes the target table before retrying: {e}",
+                stream.stream_name, slot_name, publication_name
             )
         })?;
 
@@ -347,10 +360,7 @@ pub async fn read_cdc_changes(
         };
         // CDC uses get_binary_changes (destructive) so checkpoint MUST succeed to avoid data loss.
         ctx.checkpoint(&cp).map_err(|e| {
-            format!(
-                "CDC checkpoint failed (WAL already consumed): {}",
-                e.message
-            )
+            cdc_checkpoint_failure_diagnostic(&stream.stream_name, &lsn_string, &e.message).render()
         })?;
         ctx.log(
             LogLevel::Info,
@@ -455,6 +465,13 @@ mod tests {
     use super::encode::RelationInfo;
     use super::pgoutput::{CdcOp, ColumnDef, ColumnValue, TupleData};
     use rapidbyte_sdk::arrow::datatypes::DataType;
+    use rapidbyte_sdk::cursor::CursorType;
+    use rapidbyte_sdk::stream::CdcResumeToken;
+
+    use crate::diagnostics::{
+        cdc_checkpoint_failure_diagnostic, cdc_publication_mismatch_diagnostic,
+        cdc_resume_ambiguity_diagnostic, cdc_slot_mismatch_diagnostic, DiagnosticLevel,
+    };
 
     #[test]
     fn relation_info_schema_includes_rb_op() {
@@ -606,5 +623,80 @@ mod tests {
             super::resolve_cdc_names(&config, stream_name).unwrap();
         assert_eq!(slot_name, "rapidbyte_stream_name");
         assert_eq!(publication_name, "pub_a");
+    }
+
+    #[test]
+    fn cdc_slot_mismatch_diagnostic_is_operator_facing() {
+        let diagnostic = cdc_slot_mismatch_diagnostic(
+            "public.orders",
+            "rapidbyte_orders_v2",
+            "rapidbyte_orders",
+        );
+
+        assert_eq!(diagnostic.level, DiagnosticLevel::Error);
+        assert!(diagnostic.message.contains("public.orders"));
+        assert!(diagnostic.message.contains("rapidbyte_orders_v2"));
+        assert!(diagnostic.message.contains("rapidbyte_orders"));
+        assert!(diagnostic.fix_hint.as_deref().unwrap_or("").contains("drop"));
+    }
+
+    #[test]
+    fn cdc_publication_mismatch_diagnostic_is_operator_facing() {
+        let diagnostic = cdc_publication_mismatch_diagnostic(
+            "public.orders",
+            "rapidbyte_orders_v2",
+            "rapidbyte_orders",
+        );
+
+        assert_eq!(diagnostic.level, DiagnosticLevel::Error);
+        assert!(diagnostic.message.contains("public.orders"));
+        assert!(diagnostic.message.contains("rapidbyte_orders_v2"));
+        assert!(diagnostic.message.contains("rapidbyte_orders"));
+        assert!(
+            diagnostic
+                .fix_hint
+                .as_deref()
+                .unwrap_or("")
+                .contains("CREATE PUBLICATION")
+        );
+    }
+
+    #[test]
+    fn cdc_checkpoint_failure_diagnostic_mentions_destructive_read() {
+        let diagnostic =
+            cdc_checkpoint_failure_diagnostic("public.orders", "0/16B6C50", "checkpoint lost");
+
+        assert_eq!(diagnostic.level, DiagnosticLevel::Error);
+        assert!(diagnostic.message.contains("WAL already consumed"));
+        assert!(diagnostic.message.contains("0/16B6C50"));
+        assert!(diagnostic.message.contains("checkpoint lost"));
+        assert!(diagnostic.fix_hint.as_deref().unwrap_or("").contains("backfill"));
+    }
+
+    #[test]
+    fn cdc_resume_ambiguity_diagnostic_warns_on_missing_resume_and_errors_on_non_lsn() {
+        let warning = cdc_resume_ambiguity_diagnostic(
+            "public.orders",
+            &CdcResumeToken {
+                value: None,
+                cursor_type: CursorType::Lsn,
+            },
+        )
+        .expect("missing resume value should be ambiguous");
+        assert_eq!(warning.level, DiagnosticLevel::Warning);
+        assert!(warning.message.contains("resume token"));
+        assert!(warning.message.contains("public.orders"));
+
+        let error = cdc_resume_ambiguity_diagnostic(
+            "public.orders",
+            &CdcResumeToken {
+                value: Some("abc".to_string()),
+                cursor_type: CursorType::Utf8,
+            },
+        )
+        .expect("non-LSN resume token should be rejected");
+        assert_eq!(error.level, DiagnosticLevel::Error);
+        assert!(error.message.contains("LSN"));
+        assert!(error.message.contains("Utf8"));
     }
 }

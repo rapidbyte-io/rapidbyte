@@ -10,6 +10,7 @@ mod config;
 mod cursor;
 mod discovery;
 mod encode;
+mod diagnostics;
 mod metrics;
 mod prerequisites;
 mod query;
@@ -106,7 +107,7 @@ impl CdcSource for SourcePostgres {
             .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
         let connect_secs = connect_start.elapsed().as_secs_f64();
 
-        cdc::read_cdc_changes(&client, ctx, &stream, &self.config, connect_secs)
+        cdc::read_cdc_changes(&client, ctx, &stream, &_resume, &self.config, connect_secs)
             .await
             .map_err(|e| PluginError::internal("CDC_READ_FAILED", e))
     }
