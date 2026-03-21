@@ -4,6 +4,7 @@
 //! execution: resolve plugins, load cursors, execute streams, finalize.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
 
@@ -126,6 +127,19 @@ pub async fn run_pipeline(
     let pipeline_id = PipelineId::new(&pipeline.pipeline);
     let mut attempt: u32 = 0;
     let overall_start = Instant::now();
+
+    // Cooperative cancellation flag for WASM plugins. The spawned task
+    // watches the CancellationToken and sets the AtomicBool so plugins
+    // that poll `is_cancelled()` can exit promptly.
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    {
+        let flag = Arc::clone(&cancel_flag);
+        let token = cancel.clone();
+        tokio::spawn(async move {
+            token.cancelled().await;
+            flag.store(true, Ordering::Relaxed);
+        });
+    }
 
     loop {
         attempt += 1;
@@ -383,6 +397,7 @@ pub async fn run_pipeline(
                             });
                         }))
                     },
+                    cancel_flag: Arc::clone(&cancel_flag),
                 };
                 tokio::spawn(async move { runner.run_source(params).await })
             };
@@ -416,6 +431,7 @@ pub async fn run_pipeline(
                     frame_sender: next_tx,
                     dlq_records: Arc::clone(&stream_dlq),
                     transform_index: i,
+                    cancel_flag: Arc::clone(&cancel_flag),
                 };
                 transform_handles.push(tokio::spawn(
                     async move { runner.run_transform(params).await },
@@ -447,6 +463,7 @@ pub async fn run_pipeline(
                     frame_receiver: current_rx,
                     dlq_records: Arc::clone(&stream_dlq),
                     stats: Arc::clone(&stats),
+                    cancel_flag: Arc::clone(&cancel_flag),
                 };
                 tokio::spawn(async move { runner.run_destination(params).await })
             };

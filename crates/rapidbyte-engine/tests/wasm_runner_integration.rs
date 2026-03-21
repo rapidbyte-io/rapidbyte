@@ -14,6 +14,7 @@
 #![cfg(feature = "integration")]
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use rapidbyte_engine::adapter::wasm_runner::WasmPluginRunner;
@@ -118,6 +119,7 @@ async fn test_source_emits_expected_rows() {
             frame_sender: tx,
             stats: stats.clone(),
             on_batch_emitted: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         })
         .await
         .expect("source run should succeed");
@@ -174,6 +176,7 @@ async fn test_source_failure_propagates_error() {
             frame_sender: tx,
             stats,
             on_batch_emitted: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         })
         .await;
 
@@ -219,6 +222,7 @@ async fn test_destination_consumes_frames() {
             frame_sender: source_tx,
             stats: source_stats,
             on_batch_emitted: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         })
         .await
         .expect("source run should succeed");
@@ -244,6 +248,7 @@ async fn test_destination_consumes_frames() {
             frame_receiver: source_rx,
             dlq_records: dlq,
             stats: dest_stats.clone(),
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         })
         .await
         .expect("destination run should succeed");
@@ -289,6 +294,7 @@ async fn test_destination_failure_propagates_error() {
             frame_receiver: rx,
             dlq_records: make_dlq(),
             stats: make_stats(),
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         })
         .await;
 
@@ -328,6 +334,7 @@ async fn test_transform_passthrough() {
             frame_sender: source_tx,
             stats: source_stats,
             on_batch_emitted: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         })
         .await
         .expect("source run should succeed");
@@ -352,6 +359,7 @@ async fn test_transform_passthrough() {
             frame_sender: transform_tx,
             dlq_records: dlq,
             transform_index: 0,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         })
         .await
         .expect("transform run should succeed");
@@ -400,6 +408,7 @@ async fn test_full_pipeline_source_transform_destination() {
             frame_sender: source_tx,
             stats: source_stats,
             on_batch_emitted: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         })
         .await
         .expect("source should succeed");
@@ -423,6 +432,7 @@ async fn test_full_pipeline_source_transform_destination() {
             frame_sender: transform_tx,
             dlq_records: make_dlq(),
             transform_index: 0,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         })
         .await
         .expect("transform should succeed");
@@ -445,6 +455,7 @@ async fn test_full_pipeline_source_transform_destination() {
             frame_receiver: transform_rx,
             dlq_records: make_dlq(),
             stats: dest_stats,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         })
         .await
         .expect("destination should succeed");

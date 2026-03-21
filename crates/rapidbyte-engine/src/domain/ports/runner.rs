@@ -4,6 +4,7 @@
 //! and destination plugins through a trait boundary.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex};
 
 use async_trait::async_trait;
@@ -54,6 +55,8 @@ pub struct SourceRunParams {
     pub stats: Arc<Mutex<RunStats>>,
     /// Optional callback invoked after each batch is emitted.
     pub on_batch_emitted: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+    /// Cooperative cancellation flag shared with the WASM host state.
+    pub cancel_flag: Arc<AtomicBool>,
 }
 
 /// Parameters for running a transform plugin on a single stream.
@@ -86,6 +89,8 @@ pub struct TransformRunParams {
     pub dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     /// Zero-based index of this transform in the pipeline.
     pub transform_index: usize,
+    /// Cooperative cancellation flag shared with the WASM host state.
+    pub cancel_flag: Arc<AtomicBool>,
 }
 
 /// Parameters for running a destination plugin on a single stream.
@@ -116,6 +121,8 @@ pub struct DestinationRunParams {
     pub dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     /// Shared run stats accumulator.
     pub stats: Arc<Mutex<RunStats>>,
+    /// Cooperative cancellation flag shared with the WASM host state.
+    pub cancel_flag: Arc<AtomicBool>,
 }
 
 /// Parameters for validating a plugin configuration.

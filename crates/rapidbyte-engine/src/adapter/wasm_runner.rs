@@ -5,6 +5,7 @@
 //! discover) is implemented directly in this module — no delegation to
 //! legacy runner functions.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
 
@@ -86,6 +87,7 @@ impl PluginRunner for WasmPluginRunner {
                 &params.config,
                 params.stats,
                 params.on_batch_emitted,
+                params.cancel_flag,
             )
         })
         .await
@@ -120,6 +122,7 @@ impl PluginRunner for WasmPluginRunner {
                 params.dlq_records,
                 params.transform_index,
                 &params.config,
+                params.cancel_flag,
             )
         })
         .await
@@ -153,6 +156,7 @@ impl PluginRunner for WasmPluginRunner {
                 params.dlq_records,
                 &params.config,
                 params.stats,
+                params.cancel_flag,
             )
         })
         .await
@@ -656,6 +660,7 @@ fn run_source_stream(
     source_config: &serde_json::Value,
     stats: Arc<Mutex<RunStats>>,
     on_batch_emitted: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+    cancel_flag: Arc<AtomicBool>,
 ) -> Result<SourceOutcome, PipelineError> {
     let phase_start = Instant::now();
 
@@ -679,7 +684,8 @@ fn run_source_stream(
     }
     builder = builder
         .sender(frame_sender.clone())
-        .source_checkpoints(source_checkpoints.clone());
+        .source_checkpoints(source_checkpoints.clone())
+        .cancel_flag(cancel_flag);
     if let Some(cb) = on_batch_emitted {
         builder = builder.on_emit(cb);
     }
@@ -808,6 +814,7 @@ fn run_destination_stream(
     dlq_records: Arc<Mutex<Vec<rapidbyte_types::envelope::DlqRecord>>>,
     dest_config: &serde_json::Value,
     stats: Arc<Mutex<RunStats>>,
+    cancel_flag: Arc<AtomicBool>,
 ) -> Result<DestinationOutcome, PipelineError> {
     let phase_start = Instant::now();
     let vm_setup_start = Instant::now();
@@ -833,7 +840,8 @@ fn run_destination_stream(
     let builder = builder
         .receiver(frame_receiver)
         .dest_checkpoints(dest_checkpoints.clone())
-        .dlq_records(dlq_records.clone());
+        .dlq_records(dlq_records.clone())
+        .cancel_flag(cancel_flag);
     let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
     let timeout = overrides.and_then(|o| o.timeout_seconds);
@@ -969,6 +977,7 @@ fn run_transform_stream(
     dlq_records: Arc<Mutex<Vec<rapidbyte_types::envelope::DlqRecord>>>,
     transform_index: usize,
     transform_config: &serde_json::Value,
+    cancel_flag: Arc<AtomicBool>,
 ) -> Result<TransformOutcome, PipelineError> {
     let phase_start = Instant::now();
 
@@ -996,7 +1005,8 @@ fn run_transform_stream(
         .receiver(frame_receiver)
         .dlq_records(dlq_records)
         .source_checkpoints(source_checkpoints)
-        .dest_checkpoints(dest_checkpoints);
+        .dest_checkpoints(dest_checkpoints)
+        .cancel_flag(cancel_flag);
     let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
     let timeout = overrides.and_then(|o| o.timeout_seconds);
@@ -1957,6 +1967,7 @@ pub fn run_source_stream_bench(
         source_config,
         stats,
         on_batch_emitted,
+        Arc::new(AtomicBool::new(false)),
     )?;
     Ok(SourceStreamOutcome {
         duration_secs: outcome.duration_secs,
@@ -1994,6 +2005,7 @@ pub fn run_destination_stream_bench(
         dlq_records,
         dest_config,
         stats,
+        Arc::new(AtomicBool::new(false)),
     )?;
     Ok(DestinationStreamOutcome {
         duration_secs: outcome.duration_secs,
@@ -2035,6 +2047,7 @@ pub fn run_transform_stream_bench(
         dlq_records,
         transform_index,
         transform_config,
+        Arc::new(AtomicBool::new(false)),
     )?;
     Ok(TransformStreamOutcome {
         duration_secs: outcome.duration_secs,

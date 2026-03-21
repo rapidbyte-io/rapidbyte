@@ -744,6 +744,7 @@ mod tests {
     /// ignores the params, so the values don't matter.
     fn make_source_params() -> SourceRunParams {
         use std::path::PathBuf;
+        use std::sync::atomic::AtomicBool;
         use std::sync::{mpsc, Arc, Mutex};
 
         use rapidbyte_runtime::Frame;
@@ -765,6 +766,7 @@ mod tests {
             frame_sender: tx,
             stats: Arc::new(Mutex::new(RunStats::default())),
             on_batch_emitted: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 }
