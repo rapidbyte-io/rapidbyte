@@ -40,52 +40,64 @@ pub struct CheckpointConfig {
     pub seconds: u64,
 }
 
-fn preflight_schema_from_stream_schema(schema: &StreamSchema) -> Option<Arc<Schema>> {
+fn preflight_schema_from_stream_schema(schema: &StreamSchema) -> Result<Option<Arc<Schema>>, String> {
     use rapidbyte_sdk::arrow::datatypes::Field;
 
     if schema.fields.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let fields: Vec<Field> = schema
+    let fields: Result<Vec<Field>, String> = schema
         .fields
         .iter()
         .map(|f| {
-            let dt = parse_arrow_type(&f.arrow_type);
-            Field::new(&f.name, dt, f.nullable)
+            let dt = parse_arrow_type(&f.arrow_type).ok_or_else(|| {
+                format!(
+                    "unsupported schema type '{}' for field '{}'",
+                    f.arrow_type, f.name
+                )
+            })?;
+            Ok(Field::new(&f.name, dt, f.nullable))
         })
         .collect();
-    Some(Arc::new(Schema::new(fields)))
+    Ok(Some(Arc::new(Schema::new(fields?))))
 }
 
-/// Best-effort parse of canonical arrow type names to Arrow DataType.
-fn parse_arrow_type(s: &str) -> rapidbyte_sdk::arrow::datatypes::DataType {
+fn parse_arrow_type(s: &str) -> Option<rapidbyte_sdk::arrow::datatypes::DataType> {
     use rapidbyte_sdk::arrow::datatypes::{DataType, TimeUnit};
-    match s {
-        "boolean" => DataType::Boolean,
-        "int8" => DataType::Int8,
-        "int16" => DataType::Int16,
-        "int32" => DataType::Int32,
-        "int64" => DataType::Int64,
-        "uint8" => DataType::UInt8,
-        "uint16" => DataType::UInt16,
-        "uint32" => DataType::UInt32,
-        "uint64" => DataType::UInt64,
-        "float16" => DataType::Float16,
-        "float32" => DataType::Float32,
-        "float64" => DataType::Float64,
-        "utf8" => DataType::Utf8,
-        "large_utf8" => DataType::LargeUtf8,
-        "binary" => DataType::Binary,
-        "large_binary" => DataType::LargeBinary,
-        "date32" => DataType::Date32,
-        "date64" => DataType::Date64,
-        "timestamp_millis" => DataType::Timestamp(TimeUnit::Millisecond, None),
-        "timestamp_micros" => DataType::Timestamp(TimeUnit::Microsecond, None),
-        "timestamp_nanos" => DataType::Timestamp(TimeUnit::Nanosecond, None),
-        "decimal128" => DataType::Decimal128(38, 9),
-        "json" | "jsonb" => DataType::Utf8,
-        _ => DataType::Utf8, // fallback
-    }
+    use rapidbyte_sdk::arrow_types::ArrowDataType;
+
+    Some(match ArrowDataType::from_schema_name(s)? {
+        ArrowDataType::Boolean => DataType::Boolean,
+        ArrowDataType::Int8 => DataType::Int8,
+        ArrowDataType::Int16 => DataType::Int16,
+        ArrowDataType::Int32 => DataType::Int32,
+        ArrowDataType::Int64 => DataType::Int64,
+        ArrowDataType::UInt8 => DataType::UInt8,
+        ArrowDataType::UInt16 => DataType::UInt16,
+        ArrowDataType::UInt32 => DataType::UInt32,
+        ArrowDataType::UInt64 => DataType::UInt64,
+        ArrowDataType::Float16 => DataType::Float16,
+        ArrowDataType::Float32 => DataType::Float32,
+        ArrowDataType::Float64 => DataType::Float64,
+        ArrowDataType::Utf8 => DataType::Utf8,
+        ArrowDataType::LargeUtf8 => DataType::LargeUtf8,
+        ArrowDataType::Binary => DataType::Binary,
+        ArrowDataType::LargeBinary => DataType::LargeBinary,
+        ArrowDataType::Date32 => DataType::Date32,
+        ArrowDataType::Date64 => DataType::Date64,
+        ArrowDataType::TimestampMillis => {
+            DataType::Timestamp(TimeUnit::Millisecond, None)
+        }
+        ArrowDataType::TimestampMicros => {
+            DataType::Timestamp(TimeUnit::Microsecond, None)
+        }
+        ArrowDataType::TimestampNanos => {
+            DataType::Timestamp(TimeUnit::Nanosecond, None)
+        }
+        ArrowDataType::Decimal128 => DataType::Decimal128(38, 9),
+        ArrowDataType::Json => DataType::Utf8,
+        _ => return None,
+    })
 }
 
 pub(crate) fn schema_hint_has_shape(schema: &StreamSchema) -> bool {
@@ -160,7 +172,7 @@ pub(crate) async fn async_prepare_stream_once(
     }
 
     let mut schema_state = crate::ddl::SchemaState::new();
-    if let Some(schema) = preflight_schema_from_stream_schema(schema) {
+    if let Some(schema) = preflight_schema_from_stream_schema(schema)? {
         schema_state
             .ensure_table(
                 ctx,
@@ -314,7 +326,9 @@ mod tests {
             schema_id: None,
         };
 
-        let arrow = preflight_schema_from_stream_schema(&schema).expect("schema should be built");
+        let arrow = preflight_schema_from_stream_schema(&schema)
+            .expect("schema parse should succeed")
+            .expect("schema should be built");
         assert_eq!(arrow.fields().len(), 2);
         assert_eq!(arrow.field(0).name(), "id");
         assert_eq!(arrow.field(1).name(), "name");
@@ -323,6 +337,23 @@ mod tests {
     #[test]
     fn preflight_schema_from_empty_stream_schema_returns_none() {
         let schema = empty_stream_schema();
-        assert!(preflight_schema_from_stream_schema(&schema).is_none());
+        assert!(preflight_schema_from_stream_schema(&schema)
+            .expect("empty schema should parse")
+            .is_none());
+    }
+
+    #[test]
+    fn preflight_schema_from_stream_schema_rejects_unknown_type() {
+        let schema = StreamSchema {
+            fields: vec![SchemaField::new("id", "made_up_type", false)],
+            primary_key: vec![],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        };
+
+        let err = preflight_schema_from_stream_schema(&schema)
+            .expect_err("unknown type should fail");
+        assert!(err.contains("made_up_type"));
     }
 }
