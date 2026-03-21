@@ -373,7 +373,7 @@ pub async fn run_pipeline(
                 stream_index: stream_idx as u32,
                 schema: rapidbyte_types::schema::StreamSchema {
                     fields: vec![],
-                    primary_key: vec![],
+                    primary_key: pipeline.destination.primary_key.clone(),
                     partition_keys: vec![],
                     source_defined_cursor: None,
                     schema_id: None,

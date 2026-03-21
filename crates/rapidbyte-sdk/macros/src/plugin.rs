@@ -395,13 +395,14 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
 
         fn from_component_write_mode(
             m: __rb_bindings::rapidbyte::plugin::types::WriteMode,
+            schema_primary_key: &[String],
         ) -> ::rapidbyte_sdk::wire::WriteMode {
             use __rb_bindings::rapidbyte::plugin::types::WriteMode as CWriteMode;
             match m {
                 CWriteMode::Append => ::rapidbyte_sdk::wire::WriteMode::Append,
                 CWriteMode::Replace => ::rapidbyte_sdk::wire::WriteMode::Replace,
                 CWriteMode::Upsert => ::rapidbyte_sdk::wire::WriteMode::Upsert {
-                    primary_key: vec![],
+                    primary_key: schema_primary_key.to_vec(),
                 },
             }
         }
@@ -544,6 +545,9 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
         fn from_component_stream_context(
             ctx: __rb_bindings::rapidbyte::plugin::types::StreamContext,
         ) -> ::rapidbyte_sdk::stream::StreamContext {
+            // Extract primary_key before moving schema so we can populate
+            // WriteMode::Upsert { primary_key } (the WIT enum does not carry it).
+            let schema_pk = ctx.schema.primary_key.clone();
             ::rapidbyte_sdk::stream::StreamContext {
                 stream_index: ctx.stream_index,
                 stream_name: ctx.stream_name,
@@ -553,7 +557,7 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
                 cursor_info: ctx.cursor_info.map(from_component_cursor_info),
                 limits: from_component_stream_limits(ctx.limits),
                 policies: from_component_stream_policies(ctx.policies),
-                write_mode: ctx.write_mode.map(from_component_write_mode),
+                write_mode: ctx.write_mode.map(|m| from_component_write_mode(m, &schema_pk)),
                 selected_columns: ctx.selected_columns,
                 partition_key: ctx.partition_key,
                 partition_count: ctx.partition_count,

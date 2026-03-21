@@ -217,10 +217,13 @@ pub(crate) async fn async_prepare_stream_once(
 
 #[cfg(test)]
 mod tests {
-    use rapidbyte_sdk::catalog::{ColumnSchema, SchemaHint};
-    use rapidbyte_sdk::prelude::ArrowDataType;
+    use rapidbyte_sdk::schema::{SchemaField, StreamSchema};
 
     use super::*;
+
+    fn empty_stream_schema() -> StreamSchema {
+        StreamSchema::default()
+    }
 
     #[test]
     fn write_contract_clone_preserves_fields() {
@@ -258,7 +261,7 @@ mod tests {
             "raw",
             "",
             Some(WriteMode::Append),
-            &SchemaHint::Columns(Vec::new()),
+            &empty_stream_schema(),
             true,
             SchemaEvolutionPolicy::default(),
             CheckpointConfig {
@@ -282,7 +285,7 @@ mod tests {
             "raw",
             "users",
             Some(WriteMode::Append),
-            &SchemaHint::Columns(Vec::new()),
+            &empty_stream_schema(),
             false,
             SchemaEvolutionPolicy::default(),
             CheckpointConfig {
@@ -299,23 +302,27 @@ mod tests {
     }
 
     #[test]
-    fn preflight_schema_from_columns_builds_arrow_schema() {
-        let hint = SchemaHint::Columns(vec![
-            ColumnSchema {
-                name: "id".to_string(),
-                data_type: ArrowDataType::Int64,
-                nullable: false,
-            },
-            ColumnSchema {
-                name: "name".to_string(),
-                data_type: ArrowDataType::Utf8,
-                nullable: true,
-            },
-        ]);
+    fn preflight_schema_from_stream_schema_builds_arrow_schema() {
+        let schema = StreamSchema {
+            fields: vec![
+                SchemaField::new("id", "int64", false),
+                SchemaField::new("name", "utf8", true),
+            ],
+            primary_key: vec![],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        };
 
-        let schema = preflight_schema_from_hint(&hint).expect("schema should be built");
-        assert_eq!(schema.fields().len(), 2);
-        assert_eq!(schema.field(0).name(), "id");
-        assert_eq!(schema.field(1).name(), "name");
+        let arrow = preflight_schema_from_stream_schema(&schema).expect("schema should be built");
+        assert_eq!(arrow.fields().len(), 2);
+        assert_eq!(arrow.field(0).name(), "id");
+        assert_eq!(arrow.field(1).name(), "name");
+    }
+
+    #[test]
+    fn preflight_schema_from_empty_stream_schema_returns_none() {
+        let schema = empty_stream_schema();
+        assert!(preflight_schema_from_stream_schema(&schema).is_none());
     }
 }
