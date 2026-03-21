@@ -10,11 +10,11 @@ use async_trait::async_trait;
 use rapidbyte_runtime::{Frame, SandboxOverrides};
 use rapidbyte_types::checkpoint::Checkpoint;
 use rapidbyte_types::envelope::DlqRecord;
-use rapidbyte_types::error::ValidationResult;
 use rapidbyte_types::manifest::Permissions;
 use rapidbyte_types::metric::{ReadSummary, TransformSummary, WriteSummary};
 use rapidbyte_types::state::RunStats;
 use rapidbyte_types::stream::StreamContext;
+use rapidbyte_types::validation::ValidationReport;
 
 use crate::domain::error::PipelineError;
 
@@ -190,7 +190,7 @@ pub struct DestinationOutcome {
 #[derive(Debug, Clone)]
 pub struct CheckComponentStatus {
     /// Validation result from the plugin.
-    pub validation: ValidationResult,
+    pub validation: ValidationReport,
 }
 
 /// A stream discovered by a source plugin.

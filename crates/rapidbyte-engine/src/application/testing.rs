@@ -724,10 +724,8 @@ mod tests {
         use std::sync::{mpsc, Arc, Mutex};
 
         use rapidbyte_runtime::Frame;
-        use rapidbyte_types::catalog::SchemaHint;
         use rapidbyte_types::state::RunStats;
-        use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
-        use rapidbyte_types::wire::SyncMode;
+        use rapidbyte_types::stream::StreamContext;
 
         let (tx, _rx) = mpsc::sync_channel::<Frame>(1);
         SourceRunParams {
@@ -736,23 +734,7 @@ mod tests {
             metric_run_label: "test-run".to_string(),
             plugin_id: "fake/source".to_string(),
             plugin_version: "0.1.0".to_string(),
-            stream_ctx: StreamContext {
-                stream_name: "test".to_string(),
-                source_stream_name: None,
-                schema: SchemaHint::Columns(vec![]),
-                sync_mode: SyncMode::FullRefresh,
-                cursor_info: None,
-                limits: StreamLimits::default(),
-                policies: StreamPolicies::default(),
-                write_mode: None,
-                selected_columns: None,
-                partition_key: None,
-                partition_count: None,
-                partition_index: None,
-                effective_parallelism: None,
-                partition_strategy: None,
-                copy_flush_bytes_override: None,
-            },
+            stream_ctx: StreamContext::test_default("test"),
             config: serde_json::Value::Null,
             permissions: None,
             sandbox_overrides: None,

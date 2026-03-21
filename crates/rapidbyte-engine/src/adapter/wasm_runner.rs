@@ -17,14 +17,13 @@ use rapidbyte_runtime::{
     ComponentHostState, CompressionCodec, Frame, HostTimings, LoadedComponent, SandboxOverrides,
     WasmRuntime,
 };
-use rapidbyte_types::catalog::Catalog;
 use rapidbyte_types::checkpoint::Checkpoint;
-use rapidbyte_types::error::ValidationResult;
 use rapidbyte_types::manifest::Permissions;
 use rapidbyte_types::metric::{ReadSummary, TransformSummary, WriteSummary};
 use rapidbyte_types::state::RunStats;
 use rapidbyte_types::state_backend::StateBackend;
 use rapidbyte_types::stream::StreamContext;
+use rapidbyte_types::validation::ValidationReport;
 use rapidbyte_types::wire::PluginKind;
 
 use crate::adapter::engine_factory::noop_state_backend;
@@ -204,7 +203,7 @@ impl PluginRunner for WasmPluginRunner {
         let permissions = params.permissions.clone();
         let sandbox_overrides = params.sandbox_overrides.clone();
 
-        let catalog = tokio::task::spawn_blocking(move || {
+        let streams = tokio::task::spawn_blocking(move || {
             run_discover_impl(
                 &component,
                 &plugin_id,
@@ -217,22 +216,6 @@ impl PluginRunner for WasmPluginRunner {
         .await
         .map_err(|e| PipelineError::infra(format!("discover task panicked: {e}")))?
         .map_err(PipelineError::Infrastructure)?;
-
-        let streams = catalog
-            .streams
-            .into_iter()
-            .map(|s| {
-                let catalog_json = serde_json::to_string(&s)
-                    .map_err(|e| PipelineError::infra(format!("failed to serialize catalog: {e}")));
-                match catalog_json {
-                    Ok(json) => Ok(DiscoveredStream {
-                        name: s.name,
-                        catalog_json: json,
-                    }),
-                    Err(e) => Err(e),
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(streams)
     }
@@ -327,12 +310,170 @@ fn serialize_plugin_config(
         .map_err(PipelineError::Infrastructure)
 }
 
-/// Serialize a [`StreamContext`] to JSON for the `RunRequest`.
-fn serialize_stream_context(stream_ctx: &StreamContext) -> Result<String, PipelineError> {
-    serde_json::to_string(stream_ctx)
-        .context("Failed to serialize StreamContext")
-        .map_err(PipelineError::Infrastructure)
+// ── StreamContext → WIT converters ──────────────────────────────────
+//
+// Each WIT world (source, destination, transform) has its own copy of
+// the StreamContext type. These helpers convert from the shared
+// `rapidbyte_types::stream::StreamContext` to the per-world WIT type.
+
+macro_rules! stream_context_to_wit {
+    ($fn_name:ident, $mod:ident) => {
+        fn $fn_name(
+            ctx: &StreamContext,
+        ) -> Result<$mod::rapidbyte::plugin::types::StreamContext, PipelineError> {
+            use rapidbyte_types::stream::PartitionStrategy;
+            use rapidbyte_types::wire::{SyncMode, WriteMode};
+
+            let sync_mode = match ctx.sync_mode {
+                SyncMode::FullRefresh => $mod::rapidbyte::plugin::types::SyncMode::FullRefresh,
+                SyncMode::Incremental => $mod::rapidbyte::plugin::types::SyncMode::Incremental,
+                SyncMode::Cdc => $mod::rapidbyte::plugin::types::SyncMode::Cdc,
+            };
+
+            let write_mode = ctx.write_mode.as_ref().map(|wm| match wm {
+                WriteMode::Append => $mod::rapidbyte::plugin::types::WriteMode::Append,
+                WriteMode::Replace => $mod::rapidbyte::plugin::types::WriteMode::Replace,
+                WriteMode::Upsert { .. } => $mod::rapidbyte::plugin::types::WriteMode::Upsert,
+            });
+
+            let cursor_info = ctx.cursor_info.as_ref().map(|ci| {
+                let last_value_json = ci
+                    .last_value
+                    .as_ref()
+                    .map(|v| serde_json::to_string(v).unwrap_or_default());
+                $mod::rapidbyte::plugin::types::CursorInfo {
+                    cursor_field: ci.cursor_field.clone(),
+                    tie_breaker_field: ci.tie_breaker_field.clone(),
+                    cursor_type: serde_json::to_value(&ci.cursor_type)
+                        .ok()
+                        .and_then(|v| v.as_str().map(String::from))
+                        .unwrap_or_else(|| "utf8".to_string()),
+                    last_value_json,
+                }
+            });
+
+            let schema = $mod::rapidbyte::plugin::types::StreamSchema {
+                fields: ctx
+                    .schema
+                    .fields
+                    .iter()
+                    .map(|f| $mod::rapidbyte::plugin::types::SchemaField {
+                        name: f.name.clone(),
+                        arrow_type: f.arrow_type.clone(),
+                        nullable: f.nullable,
+                        is_primary_key: f.is_primary_key,
+                        is_generated: f.is_generated,
+                        is_partition_key: f.is_partition_key,
+                        default_value: f.default_value.clone(),
+                    })
+                    .collect(),
+                primary_key: ctx.schema.primary_key.clone(),
+                partition_keys: ctx.schema.partition_keys.clone(),
+                source_defined_cursor: ctx.schema.source_defined_cursor.clone(),
+                schema_id: ctx.schema.schema_id.clone(),
+            };
+
+            let on_data_error = match ctx.policies.on_data_error {
+                rapidbyte_types::stream::DataErrorPolicy::Fail => {
+                    $mod::rapidbyte::plugin::types::DataErrorPolicy::Fail
+                }
+                rapidbyte_types::stream::DataErrorPolicy::Skip => {
+                    $mod::rapidbyte::plugin::types::DataErrorPolicy::Skip
+                }
+                rapidbyte_types::stream::DataErrorPolicy::Dlq => {
+                    $mod::rapidbyte::plugin::types::DataErrorPolicy::Dlq
+                }
+            };
+
+            let se = &ctx.policies.schema_evolution;
+            let schema_evolution = $mod::rapidbyte::plugin::types::SchemaEvolutionPolicy {
+                new_column: match se.new_column {
+                    rapidbyte_types::stream::ColumnPolicy::Add => {
+                        $mod::rapidbyte::plugin::types::ColumnPolicy::Add
+                    }
+                    rapidbyte_types::stream::ColumnPolicy::Ignore => {
+                        $mod::rapidbyte::plugin::types::ColumnPolicy::Ignore
+                    }
+                    rapidbyte_types::stream::ColumnPolicy::Fail => {
+                        $mod::rapidbyte::plugin::types::ColumnPolicy::Fail
+                    }
+                },
+                removed_column: match se.removed_column {
+                    rapidbyte_types::stream::ColumnPolicy::Add => {
+                        $mod::rapidbyte::plugin::types::ColumnPolicy::Add
+                    }
+                    rapidbyte_types::stream::ColumnPolicy::Ignore => {
+                        $mod::rapidbyte::plugin::types::ColumnPolicy::Ignore
+                    }
+                    rapidbyte_types::stream::ColumnPolicy::Fail => {
+                        $mod::rapidbyte::plugin::types::ColumnPolicy::Fail
+                    }
+                },
+                type_change: match se.type_change {
+                    rapidbyte_types::stream::TypeChangePolicy::Coerce => {
+                        $mod::rapidbyte::plugin::types::TypeChangePolicy::Coerce
+                    }
+                    rapidbyte_types::stream::TypeChangePolicy::Fail => {
+                        $mod::rapidbyte::plugin::types::TypeChangePolicy::Fail
+                    }
+                    rapidbyte_types::stream::TypeChangePolicy::Null => {
+                        $mod::rapidbyte::plugin::types::TypeChangePolicy::NullOut
+                    }
+                },
+                nullability_change: match se.nullability_change {
+                    rapidbyte_types::stream::NullabilityPolicy::Allow => {
+                        $mod::rapidbyte::plugin::types::NullabilityPolicy::Allow
+                    }
+                    rapidbyte_types::stream::NullabilityPolicy::Fail => {
+                        $mod::rapidbyte::plugin::types::NullabilityPolicy::Fail
+                    }
+                },
+            };
+
+            let partition_strategy = ctx.partition_strategy.as_ref().map(|ps| match ps {
+                PartitionStrategy::ModHash => {
+                    $mod::rapidbyte::plugin::types::PartitionStrategy::ModHash
+                }
+                PartitionStrategy::Range => {
+                    $mod::rapidbyte::plugin::types::PartitionStrategy::Range
+                }
+            });
+
+            Ok($mod::rapidbyte::plugin::types::StreamContext {
+                stream_index: ctx.stream_index,
+                stream_name: ctx.stream_name.clone(),
+                source_stream_name: ctx.source_stream_name.clone(),
+                schema,
+                sync_mode,
+                cursor_info,
+                limits: $mod::rapidbyte::plugin::types::StreamLimits {
+                    max_batch_bytes: ctx.limits.max_batch_bytes,
+                    max_record_bytes: ctx.limits.max_record_bytes,
+                    max_inflight_batches: ctx.limits.max_inflight_batches,
+                    max_parallel_requests: ctx.limits.max_parallel_requests,
+                    checkpoint_interval_bytes: ctx.limits.checkpoint_interval_bytes,
+                    checkpoint_interval_rows: ctx.limits.checkpoint_interval_rows,
+                    checkpoint_interval_seconds: ctx.limits.checkpoint_interval_seconds,
+                    max_records: ctx.limits.max_records,
+                },
+                policies: $mod::rapidbyte::plugin::types::StreamPolicies {
+                    on_data_error,
+                    schema_evolution,
+                },
+                write_mode,
+                selected_columns: ctx.selected_columns.clone(),
+                partition_key: ctx.partition_key.clone(),
+                partition_count: ctx.partition_count,
+                partition_index: ctx.partition_index,
+                partition_strategy,
+            })
+        }
+    };
 }
+
+stream_context_to_wit!(stream_context_to_wit_source, source_bindings);
+stream_context_to_wit!(stream_context_to_wit_dest, dest_bindings);
+stream_context_to_wit!(stream_context_to_wit_transform, transform_bindings);
 
 /// Drain checkpoints from a shared mutex, returning an owned `Vec`.
 fn extract_checkpoints(
@@ -453,34 +594,33 @@ fn run_source_stream(
         .map_err(|e| PipelineError::infra(format!("Failed to call source open: {e}")))?
         .map_err(|err| PipelineError::Plugin(source_error_to_sdk(err)))?;
 
-    let ctx_json = serialize_stream_context(stream_ctx)?;
-
     tracing::info!(stream = stream_ctx.stream_name, "Starting source read");
+    let wit_stream_ctx = stream_context_to_wit_source(stream_ctx)?;
     let run_request = source_bindings::rapidbyte::plugin::types::RunRequest {
-        phase: source_bindings::rapidbyte::plugin::types::RunPhase::Read,
-        stream_context_json: ctx_json,
+        streams: vec![wit_stream_ctx],
         dry_run: false,
-        max_records: None,
     };
     let run_result = iface
         .call_run(&mut store, session, &run_request)
         .map_err(|e| PipelineError::infra(format!("Failed to call source run: {e}")))?;
 
     let summary = match run_result {
-        Ok(summary) => {
-            let Some(summary) = summary.read else {
+        Ok(run_summary) => {
+            let result = run_summary.results.into_iter().next().ok_or_else(|| {
                 let _ = iface.call_close(&mut store, session);
-                return Err(PipelineError::infra(
-                    "source run summary missing read section",
-                ));
-            };
-            ReadSummary {
-                records_read: summary.records_read,
-                bytes_read: summary.bytes_read,
-                batches_emitted: summary.batches_emitted,
-                checkpoint_count: summary.checkpoint_count,
-                records_skipped: summary.records_skipped,
+                PipelineError::infra("source run summary returned no stream results")
+            })?;
+            if !result.succeeded {
+                let _ = iface.call_close(&mut store, session);
+                return Err(PipelineError::infra(format!(
+                    "source stream '{}' failed: {}",
+                    result.stream_name, result.outcome_json
+                )));
             }
+            serde_json::from_str::<ReadSummary>(&result.outcome_json).map_err(|e| {
+                let _ = iface.call_close(&mut store, session);
+                PipelineError::infra(format!("failed to parse source outcome_json: {e}"))
+            })?
         }
         Err(err) => {
             let _ = iface.call_close(&mut store, session);
@@ -608,37 +748,37 @@ fn run_destination_stream(
         .map_err(|err| PipelineError::Plugin(dest_error_to_sdk(err)))?;
 
     let recv_start = Instant::now();
-    let ctx_json = serialize_stream_context(stream_ctx)?;
 
     tracing::info!(
         stream = stream_ctx.stream_name,
         "Starting destination write"
     );
+    let wit_stream_ctx = stream_context_to_wit_dest(stream_ctx)?;
     let run_request = dest_bindings::rapidbyte::plugin::types::RunRequest {
-        phase: dest_bindings::rapidbyte::plugin::types::RunPhase::Write,
-        stream_context_json: ctx_json,
+        streams: vec![wit_stream_ctx],
         dry_run: false,
-        max_records: None,
     };
     let run_result = iface
         .call_run(&mut store, session, &run_request)
         .map_err(|e| PipelineError::infra(format!("Failed to call destination run: {e}")))?;
 
     let summary = match run_result {
-        Ok(summary) => {
-            let Some(summary) = summary.write else {
+        Ok(run_summary) => {
+            let result = run_summary.results.into_iter().next().ok_or_else(|| {
                 let _ = iface.call_close(&mut store, session);
-                return Err(PipelineError::infra(
-                    "destination run summary missing write section",
-                ));
-            };
-            WriteSummary {
-                records_written: summary.records_written,
-                bytes_written: summary.bytes_written,
-                batches_written: summary.batches_written,
-                checkpoint_count: summary.checkpoint_count,
-                records_failed: summary.records_failed,
+                PipelineError::infra("destination run summary returned no stream results")
+            })?;
+            if !result.succeeded {
+                let _ = iface.call_close(&mut store, session);
+                return Err(PipelineError::infra(format!(
+                    "destination stream '{}' failed: {}",
+                    result.stream_name, result.outcome_json
+                )));
             }
+            serde_json::from_str::<WriteSummary>(&result.outcome_json).map_err(|e| {
+                let _ = iface.call_close(&mut store, session);
+                PipelineError::infra(format!("failed to parse destination outcome_json: {e}"))
+            })?
         }
         Err(err) => {
             let _ = iface.call_close(&mut store, session);
@@ -771,34 +911,33 @@ fn run_transform_stream(
         .map_err(|e| PipelineError::infra(format!("Failed to call transform open: {e}")))?
         .map_err(|err| PipelineError::Plugin(transform_error_to_sdk(err)))?;
 
-    let ctx_json = serialize_stream_context(stream_ctx)?;
-
     tracing::info!(stream = stream_ctx.stream_name, "Starting transform");
+    let wit_stream_ctx = stream_context_to_wit_transform(stream_ctx)?;
     let run_request = transform_bindings::rapidbyte::plugin::types::RunRequest {
-        phase: transform_bindings::rapidbyte::plugin::types::RunPhase::Transform,
-        stream_context_json: ctx_json,
+        streams: vec![wit_stream_ctx],
         dry_run: false,
-        max_records: None,
     };
     let run_result = iface
         .call_run(&mut store, session, &run_request)
         .map_err(|e| PipelineError::infra(format!("Failed to call transform run: {e}")))?;
 
     let summary = match run_result {
-        Ok(summary) => {
-            let Some(summary) = summary.transform else {
+        Ok(run_summary) => {
+            let result = run_summary.results.into_iter().next().ok_or_else(|| {
                 let _ = iface.call_close(&mut store, session);
-                return Err(PipelineError::infra(
-                    "transform run summary missing transform section",
-                ));
-            };
-            TransformSummary {
-                records_in: summary.records_in,
-                records_out: summary.records_out,
-                bytes_in: summary.bytes_in,
-                bytes_out: summary.bytes_out,
-                batches_processed: summary.batches_processed,
+                PipelineError::infra("transform run summary returned no stream results")
+            })?;
+            if !result.succeeded {
+                let _ = iface.call_close(&mut store, session);
+                return Err(PipelineError::infra(format!(
+                    "transform stream '{}' failed: {}",
+                    result.stream_name, result.outcome_json
+                )));
             }
+            serde_json::from_str::<TransformSummary>(&result.outcome_json).map_err(|e| {
+                let _ = iface.call_close(&mut store, session);
+                PipelineError::infra(format!("failed to parse transform outcome_json: {e}"))
+            })?
         }
         Err(err) => {
             let _ = iface.call_close(&mut store, session);
@@ -841,7 +980,7 @@ fn validate_plugin_impl(
     stream_name: &str,
     permissions: Option<&Permissions>,
     sandbox_overrides: Option<&SandboxOverrides>,
-) -> anyhow::Result<ValidationResult> {
+) -> anyhow::Result<ValidationReport> {
     use rapidbyte_runtime::{dest_validation_to_sdk, transform_validation_to_sdk};
 
     tracing::info!(plugin = plugin_id, version = plugin_version, kind = ?kind, "Validating plugin");
@@ -890,7 +1029,7 @@ fn validate_plugin_impl(
                 .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
 
             let result = iface
-                .call_validate(&mut store, session)?
+                .call_validate(&mut store, session, None)?
                 .map(source_validation_to_sdk)
                 .map_err(source_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!(e.to_string()));
@@ -918,7 +1057,7 @@ fn validate_plugin_impl(
                 .map_err(|e| anyhow::anyhow!("Destination open failed: {e}"))?;
 
             let result = iface
-                .call_validate(&mut store, session)?
+                .call_validate(&mut store, session, None)?
                 .map(dest_validation_to_sdk)
                 .map_err(dest_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!(e.to_string()));
@@ -946,7 +1085,7 @@ fn validate_plugin_impl(
                 .map_err(|e| anyhow::anyhow!("Transform open failed: {e}"))?;
 
             let result = iface
-                .call_validate(&mut store, session)?
+                .call_validate(&mut store, session, None)?
                 .map(transform_validation_to_sdk)
                 .map_err(transform_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!(e.to_string()));
@@ -969,7 +1108,7 @@ fn run_discover_impl(
     config: &serde_json::Value,
     permissions: Option<&Permissions>,
     sandbox_overrides: Option<&SandboxOverrides>,
-) -> anyhow::Result<Catalog> {
+) -> anyhow::Result<Vec<DiscoveredStream>> {
     let state = noop_state_backend();
     let mut builder = ComponentHostState::builder()
         .pipeline("discover")
@@ -1008,12 +1147,22 @@ fn run_discover_impl(
         .map_err(source_error_to_sdk)
         .map_err(|e| anyhow::anyhow!("Source open failed for discover: {e}"))?;
 
-    let discover_json = iface
+    let wit_streams = iface
         .call_discover(&mut store, session)?
         .map_err(source_error_to_sdk)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    let catalog = serde_json::from_str::<Catalog>(&discover_json)
-        .context("Failed to parse discover catalog JSON")?;
+
+    let streams = wit_streams
+        .into_iter()
+        .map(|s| {
+            let catalog_json =
+                serde_json::to_string(&s.name).unwrap_or_else(|_| String::from("{}"));
+            DiscoveredStream {
+                name: s.name,
+                catalog_json,
+            }
+        })
+        .collect();
 
     tracing::info!(
         plugin = plugin_id,
@@ -1027,7 +1176,7 @@ fn run_discover_impl(
         );
     }
 
-    Ok(catalog)
+    Ok(streams)
 }
 
 // ── Public API for benchmarks crate ──────────────────────────────────
@@ -1190,9 +1339,7 @@ pub fn run_transform_stream_bench(
 mod tests {
     use super::{handle_close_result, parse_compression, plugin_instance_key};
     use rapidbyte_runtime::CompressionCodec;
-    use rapidbyte_types::catalog::SchemaHint;
-    use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
-    use rapidbyte_types::wire::SyncMode;
+    use rapidbyte_types::stream::StreamContext;
 
     #[test]
     fn test_handle_close_result_ok() {
@@ -1230,23 +1377,9 @@ mod tests {
     }
 
     fn test_stream_ctx(stream_name: &str, partition_index: Option<u32>) -> StreamContext {
-        StreamContext {
-            stream_name: stream_name.to_string(),
-            source_stream_name: None,
-            schema: SchemaHint::Columns(vec![]),
-            sync_mode: SyncMode::FullRefresh,
-            cursor_info: None,
-            limits: StreamLimits::default(),
-            policies: StreamPolicies::default(),
-            write_mode: None,
-            selected_columns: None,
-            partition_key: None,
-            partition_count: None,
-            partition_index,
-            effective_parallelism: None,
-            partition_strategy: None,
-            copy_flush_bytes_override: None,
-        }
+        let mut ctx = StreamContext::test_default(stream_name);
+        ctx.partition_index = partition_index;
+        ctx
     }
 
     #[test]

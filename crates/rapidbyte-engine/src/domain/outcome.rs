@@ -3,7 +3,7 @@
 //! These are pure data containers ported from the legacy `outcome` module to
 //! live alongside the domain model.
 
-use rapidbyte_types::error::ValidationResult;
+use rapidbyte_types::validation::ValidationReport;
 
 // ---------------------------------------------------------------------------
 // Pipeline run output
@@ -101,8 +101,8 @@ pub struct CheckResult {
     pub source_config: Option<CheckStatus>,
     pub destination_config: Option<CheckStatus>,
     pub transform_configs: Vec<CheckStatus>,
-    pub source_validation: ValidationResult,
-    pub destination_validation: ValidationResult,
-    pub transform_validations: Vec<ValidationResult>,
+    pub source_validation: ValidationReport,
+    pub destination_validation: ValidationReport,
+    pub transform_validations: Vec<ValidationReport>,
     pub state: CheckStatus,
 }

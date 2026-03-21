@@ -217,7 +217,7 @@ pub async fn run_pipeline(
         // using defaults. Channel capacity also comes from config.
         let stream_limits = build_stream_limits(&pipeline.resources)?;
 
-        for stream_cfg in &pipeline.source.streams {
+        for (stream_idx, stream_cfg) in pipeline.source.streams.iter().enumerate() {
             if cancel.is_cancelled() {
                 return Err(PipelineError::Cancelled);
             }
@@ -300,7 +300,14 @@ pub async fn run_pipeline(
             let stream_ctx = rapidbyte_types::stream::StreamContext {
                 stream_name: stream_name.clone(),
                 source_stream_name: None,
-                schema: rapidbyte_types::catalog::SchemaHint::Columns(vec![]),
+                stream_index: stream_idx as u32,
+                schema: rapidbyte_types::schema::StreamSchema {
+                    fields: vec![],
+                    primary_key: vec![],
+                    partition_keys: vec![],
+                    source_defined_cursor: None,
+                    schema_id: None,
+                },
                 sync_mode: stream_cfg.sync_mode,
                 cursor_info,
                 limits: stream_limits.clone(),

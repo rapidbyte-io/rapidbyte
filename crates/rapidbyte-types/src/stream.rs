@@ -247,7 +247,6 @@ impl StreamContext {
     }
 
     /// Create a minimal context for testing, with only a stream name required.
-    #[cfg(test)]
     #[must_use]
     pub fn test_default(stream_name: impl Into<String>) -> Self {
         Self {

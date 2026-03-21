@@ -5,7 +5,7 @@
 //! every component.
 
 use rapidbyte_pipeline_config::PipelineConfig;
-use rapidbyte_types::error::{ValidationResult, ValidationStatus};
+use rapidbyte_types::validation::{ValidationReport, ValidationStatus};
 use rapidbyte_types::wire::PluginKind;
 
 use crate::application::context::EngineContext;
@@ -210,7 +210,7 @@ pub async fn check_pipeline(
 
         // Validate against all streams, keep the worst result per transform
         // to maintain 1:1 alignment with pipeline.transforms for CLI labeling.
-        let mut worst_validation: Option<ValidationResult> = None;
+        let mut worst_validation: Option<ValidationReport> = None;
         for stream_name in &stream_names {
             let validation = ctx
                 .runner
@@ -272,7 +272,7 @@ fn severity(status: &CheckComponentStatus) -> u8 {
     validation_severity(&status.validation)
 }
 
-fn validation_severity(result: &ValidationResult) -> u8 {
+fn validation_severity(result: &ValidationReport) -> u8 {
     match result.status {
         ValidationStatus::Failed => 2,
         ValidationStatus::Warning => 1,
@@ -305,25 +305,17 @@ mod tests {
     use super::*;
     use crate::application::testing::{fake_context, test_resolved_plugin};
     use crate::domain::ports::runner::CheckComponentStatus;
-    use rapidbyte_types::error::{ValidationResult, ValidationStatus};
+    use rapidbyte_types::validation::{ValidationReport, ValidationStatus};
 
     fn ok_validation() -> CheckComponentStatus {
         CheckComponentStatus {
-            validation: ValidationResult {
-                status: ValidationStatus::Success,
-                message: String::new(),
-                warnings: vec![],
-            },
+            validation: ValidationReport::success(""),
         }
     }
 
     fn failed_validation(msg: &str) -> CheckComponentStatus {
         CheckComponentStatus {
-            validation: ValidationResult {
-                status: ValidationStatus::Failed,
-                message: msg.to_string(),
-                warnings: vec![],
-            },
+            validation: ValidationReport::failed(msg),
         }
     }
 
