@@ -126,6 +126,10 @@ impl FakePluginRunner {
         self.prerequisites_results.lock().unwrap().push_back(result);
     }
 
+    /// Return the recorded apply calls.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
     #[must_use]
     pub fn apply_calls(&self) -> Vec<ApplyParams> {
         self.apply_calls.lock().unwrap().clone()

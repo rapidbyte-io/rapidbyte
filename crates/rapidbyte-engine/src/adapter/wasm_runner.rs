@@ -1159,7 +1159,7 @@ fn validate_plugin_impl(
                 .map_err(source_error_to_sdk)
             {
                 Ok(session) => session,
-                Err(err) => return config_error_as_validation_failure("Source", err),
+                Err(err) => return config_error_as_validation_failure("Source", &err),
             };
 
             let wit_schema = upstream_schema.map(schema_to_wit_source);
@@ -1191,7 +1191,7 @@ fn validate_plugin_impl(
                 .map_err(dest_error_to_sdk)
             {
                 Ok(session) => session,
-                Err(err) => return config_error_as_validation_failure("Destination", err),
+                Err(err) => return config_error_as_validation_failure("Destination", &err),
             };
 
             let wit_schema = upstream_schema.map(schema_to_wit_dest);
@@ -1223,7 +1223,7 @@ fn validate_plugin_impl(
                 .map_err(transform_error_to_sdk)
             {
                 Ok(session) => session,
-                Err(err) => return config_error_as_validation_failure("Transform", err),
+                Err(err) => return config_error_as_validation_failure("Transform", &err),
             };
 
             let wit_schema = upstream_schema.map(schema_to_wit_transform);
@@ -1243,7 +1243,7 @@ fn validate_plugin_impl(
 
 fn config_error_as_validation_failure(
     role: &str,
-    err: rapidbyte_types::error::PluginError,
+    err: &rapidbyte_types::error::PluginError,
 ) -> anyhow::Result<ValidationReport> {
     if err.category == rapidbyte_types::error::ErrorCategory::Config {
         Ok(ValidationReport::failed(&err.message))
@@ -2132,7 +2132,6 @@ mod tests {
         plugin_instance_key,
     };
     use rapidbyte_runtime::CompressionCodec;
-    use rapidbyte_types::error::ErrorCategory;
     use rapidbyte_types::stream::StreamContext;
     use rapidbyte_types::validation::ValidationStatus;
 
@@ -2175,7 +2174,7 @@ mod tests {
     fn config_error_as_validation_failure_maps_config_category() {
         let err = rapidbyte_types::error::PluginError::config("BAD_CONFIG", "invalid config");
 
-        let report = config_error_as_validation_failure("Transform", err)
+        let report = config_error_as_validation_failure("Transform", &err)
             .expect("config errors should map to failed validation");
         assert_eq!(report.status, ValidationStatus::Failed);
         assert!(report.message.contains("invalid config"));

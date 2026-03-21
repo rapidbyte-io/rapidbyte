@@ -86,6 +86,7 @@ impl TeardownReport {
 mod tests {
     use super::*;
     use crate::schema::StreamSchema;
+    use crate::stream::{StreamLimits, StreamPolicies};
     use crate::wire::SyncMode;
 
     fn test_stream_context(name: &str) -> StreamContext {
@@ -102,8 +103,8 @@ mod tests {
             },
             sync_mode: SyncMode::FullRefresh,
             cursor_info: None,
-            limits: Default::default(),
-            policies: Default::default(),
+            limits: StreamLimits::default(),
+            policies: StreamPolicies::default(),
             write_mode: None,
             selected_columns: None,
             partition_key: None,

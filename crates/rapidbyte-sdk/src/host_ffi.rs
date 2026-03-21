@@ -218,10 +218,11 @@ pub mod test_support {
         },
     }
 
+    type NextBatchFrame = (u64, Vec<u8>, BatchMetadata);
+
     static METRIC_CALLS: OnceLock<Mutex<Vec<MetricCall>>> = OnceLock::new();
     static METRIC_ERROR: OnceLock<Mutex<Option<PluginError>>> = OnceLock::new();
-    static NEXT_BATCH_FRAME: OnceLock<Mutex<Option<(u64, Vec<u8>, BatchMetadata)>>> =
-        OnceLock::new();
+    static NEXT_BATCH_FRAME: OnceLock<Mutex<Option<NextBatchFrame>>> = OnceLock::new();
     static DROPPED_HANDLES: OnceLock<Mutex<Vec<u64>>> = OnceLock::new();
     static NEXT_BATCH_METADATA_CALLS: OnceLock<Mutex<Vec<u64>>> = OnceLock::new();
 
@@ -233,7 +234,7 @@ pub mod test_support {
         METRIC_ERROR.get_or_init(|| Mutex::new(None))
     }
 
-    fn next_batch_frame() -> &'static Mutex<Option<(u64, Vec<u8>, BatchMetadata)>> {
+    fn next_batch_frame() -> &'static Mutex<Option<NextBatchFrame>> {
         NEXT_BATCH_FRAME.get_or_init(|| Mutex::new(None))
     }
 
