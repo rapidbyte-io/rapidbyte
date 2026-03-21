@@ -13,6 +13,7 @@ use syn::{Ident, ItemStruct, Result};
 struct ManifestFeatures {
     has_partitioned_read: bool,
     has_cdc: bool,
+    has_bulk_load: bool,
 }
 
 fn read_manifest_features(kind: &PluginKind) -> Option<ManifestFeatures> {
@@ -28,6 +29,7 @@ fn read_manifest_features(kind: &PluginKind) -> Option<ManifestFeatures> {
             return Some(ManifestFeatures {
                 has_partitioned_read: false,
                 has_cdc: false,
+                has_bulk_load: false,
             })
         }
     };
@@ -42,6 +44,7 @@ fn read_manifest_features(kind: &PluginKind) -> Option<ManifestFeatures> {
     Some(ManifestFeatures {
         has_partitioned_read: features.iter().any(|f| f == "partitioned_read"),
         has_cdc: features.iter().any(|f| f == "cdc"),
+        has_bulk_load: features.iter().any(|f| f == "bulk_load"),
     })
 }
 
@@ -71,7 +74,16 @@ fn gen_feature_assertions(
                 });
             }
         }
-        PluginKind::Destination => {}
+        PluginKind::Destination => {
+            if features.has_bulk_load {
+                assertions.push(quote! {
+                    const _: () = {
+                        fn __assert_bulk_destination<T: ::rapidbyte_sdk::features::BulkDestination>() {}
+                        fn __check() { __assert_bulk_destination::<#struct_name>(); }
+                    };
+                });
+            }
+        }
         PluginKind::Transform => {}
     }
 
@@ -1187,8 +1199,24 @@ fn gen_source_methods(
 fn gen_dest_methods(
     struct_name: &Ident,
     trait_path: &TokenStream,
-    _features: Option<&ManifestFeatures>,
+    features: Option<&ManifestFeatures>,
 ) -> TokenStream {
+    let write_dispatch = if features.is_some_and(|f| f.has_bulk_load) {
+        quote! {
+            rt.block_on(<#struct_name as ::rapidbyte_sdk::features::BulkDestination>::write_bulk(
+                conn,
+                &ctx,
+                stream.clone(),
+            ))
+            .map_err(to_component_error)?
+        }
+    } else {
+        quote! {
+            rt.block_on(<#struct_name as #trait_path>::write(conn, &ctx, stream.clone()))
+                .map_err(to_component_error)?
+        }
+    };
+
     quote! {
         fn prerequisites(
             _session: u64,
@@ -1246,9 +1274,7 @@ fn gen_dest_methods(
                 let ctx = base_ctx.with_stream(&stream.stream_name);
                 let _ = ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
 
-                let summary = rt
-                    .block_on(<#struct_name as #trait_path>::write(conn, &ctx, stream.clone()))
-                    .map_err(to_component_error)?;
+                let summary = #write_dispatch;
 
                 let run_sum = write_summary_to_run_summary(&stream, summary);
                 results.extend(run_sum.results);
@@ -1379,5 +1405,21 @@ mod tests {
 
         assert!(generated.contains(":: write"));
         assert!(generated.contains("write_summary_to_run_summary"));
+    }
+
+    #[test]
+    fn destination_run_dispatches_bulk_feature_through_write_bulk() {
+        let struct_name: Ident = parse_quote!(TestDestination);
+        let trait_path = quote!(::rapidbyte_sdk::plugin::Destination);
+        let features = ManifestFeatures {
+            has_partitioned_read: false,
+            has_cdc: false,
+            has_bulk_load: true,
+        };
+
+        let generated = gen_dest_methods(&struct_name, &trait_path, Some(&features)).to_string();
+
+        assert!(generated.contains("BulkDestination"));
+        assert!(generated.contains("write_bulk"));
     }
 }

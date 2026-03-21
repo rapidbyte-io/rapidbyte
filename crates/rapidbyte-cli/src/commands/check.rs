@@ -198,6 +198,8 @@ async fn run_apply_phase(
     )
     .map_err(|e| anyhow::anyhow!("destination sandbox overrides: {e}"))?;
 
+    let apply_streams = rapidbyte_engine::application::build_apply_streams(config);
+
     // Source apply
     let src_report = ctx
         .runner
@@ -207,7 +209,7 @@ async fn run_apply_phase(
             plugin_id: src_id,
             plugin_version: src_ver,
             config: config.source.config.clone(),
-            streams: Vec::new(),
+            streams: apply_streams.clone(),
             dry_run,
             permissions: src_permissions,
             sandbox_overrides: src_overrides,
@@ -228,7 +230,7 @@ async fn run_apply_phase(
             plugin_id: dst_id,
             plugin_version: dst_ver,
             config: config.destination.config.clone(),
-            streams: Vec::new(),
+            streams: apply_streams,
             dry_run,
             permissions: dst_permissions,
             sandbox_overrides: dst_overrides,

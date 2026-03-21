@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use rapidbyte_metrics::snapshot::PipelineMetricsSnapshot;
 use rapidbyte_types::envelope::DlqRecord;
+use rapidbyte_types::lifecycle::ApplyReport;
 use rapidbyte_types::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
 use rapidbyte_types::wire::PluginKind;
 
@@ -22,7 +23,7 @@ use crate::domain::ports::run_record::RunRecordRepository;
 use rapidbyte_types::validation::PrerequisitesReport;
 
 use crate::domain::ports::runner::{
-    CheckComponentStatus, DestinationOutcome, DestinationRunParams, DiscoverParams,
+    ApplyParams, CheckComponentStatus, DestinationOutcome, DestinationRunParams, DiscoverParams,
     DiscoveredStream, PluginRunner, PrerequisitesParams, SourceOutcome, SourceRunParams,
     TransformOutcome, TransformRunParams, ValidateParams,
 };
@@ -60,6 +61,7 @@ pub struct FakePluginRunner {
     validate_results: Mutex<VecDeque<Result<CheckComponentStatus, PipelineError>>>,
     discover_results: Mutex<VecDeque<Result<Vec<DiscoveredStream>, PipelineError>>>,
     prerequisites_results: Mutex<VecDeque<Result<PrerequisitesReport, PipelineError>>>,
+    apply_calls: Mutex<Vec<ApplyParams>>,
 }
 
 impl FakePluginRunner {
@@ -72,6 +74,7 @@ impl FakePluginRunner {
             validate_results: Mutex::new(VecDeque::new()),
             discover_results: Mutex::new(VecDeque::new()),
             prerequisites_results: Mutex::new(VecDeque::new()),
+            apply_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -121,6 +124,11 @@ impl FakePluginRunner {
     /// Panics if the internal mutex is poisoned.
     pub fn enqueue_prerequisites(&self, result: Result<PrerequisitesReport, PipelineError>) {
         self.prerequisites_results.lock().unwrap().push_back(result);
+    }
+
+    #[must_use]
+    pub fn apply_calls(&self) -> Vec<ApplyParams> {
+        self.apply_calls.lock().unwrap().clone()
     }
 }
 
@@ -213,6 +221,11 @@ impl PluginRunner for FakePluginRunner {
             .unwrap()
             .pop_front()
             .unwrap_or_else(|| Ok(PrerequisitesReport::passed()))
+    }
+
+    async fn apply(&self, params: &ApplyParams) -> Result<ApplyReport, PipelineError> {
+        self.apply_calls.lock().unwrap().push(params.clone());
+        Ok(ApplyReport::noop())
     }
 }
 

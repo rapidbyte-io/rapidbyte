@@ -4,6 +4,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use console::style;
+use rapidbyte_types::arrow::ArrowDataType;
 use rapidbyte_types::discovery::DiscoveredStream;
 use rapidbyte_types::wire::SyncMode;
 
@@ -117,8 +118,8 @@ pub async fn execute(
     }
 
     // Machine-readable JSON on stdout (always emitted)
-    let json = serde_json::to_string(&discovered_streams)?;
-    println!("@@DISCOVERY_JSON@@{json}");
+    let json = machine_readable_catalog_json(&discovered_streams)?;
+    println!("@@CATALOG_JSON@@{json}");
 
     Ok(())
 }
@@ -140,4 +141,134 @@ fn cursor_label(stream: &DiscoveredStream) -> &str {
         .as_deref()
         .or(stream.schema.source_defined_cursor.as_deref())
         .unwrap_or("\u{2014}")
+}
+
+struct CatalogOutput {
+    streams: Vec<CatalogStreamOutput>,
+}
+
+struct CatalogStreamOutput {
+    name: String,
+    schema: Vec<CatalogColumnOutput>,
+    supported_sync_modes: Vec<SyncMode>,
+    source_defined_cursor: Option<String>,
+    source_defined_primary_key: Option<Vec<String>>,
+}
+
+struct CatalogColumnOutput {
+    name: String,
+    data_type: ArrowDataType,
+    nullable: bool,
+}
+
+fn machine_readable_catalog_json(streams: &[DiscoveredStream]) -> Result<String> {
+    let output = CatalogOutput {
+        streams: streams
+            .iter()
+            .map(|stream| CatalogStreamOutput {
+                name: stream.name.clone(),
+                schema: stream
+                    .schema
+                    .fields
+                    .iter()
+                    .map(|field| CatalogColumnOutput {
+                        name: field.name.clone(),
+                        data_type: arrow_type_from_name(&field.arrow_type),
+                        nullable: field.nullable,
+                    })
+                    .collect(),
+                supported_sync_modes: stream.supported_sync_modes.clone(),
+                source_defined_cursor: stream
+                    .default_cursor_field
+                    .clone()
+                    .or_else(|| stream.schema.source_defined_cursor.clone()),
+                source_defined_primary_key: (!stream.schema.primary_key.is_empty())
+                    .then(|| stream.schema.primary_key.clone()),
+            })
+            .collect(),
+    };
+    let json = serde_json::json!({
+        "streams": output.streams.into_iter().map(|stream| {
+            let mut value = serde_json::json!({
+                "name": stream.name,
+                "schema": stream.schema.into_iter().map(|field| serde_json::json!({
+                    "name": field.name,
+                    "data_type": field.data_type,
+                    "nullable": field.nullable,
+                })).collect::<Vec<_>>(),
+                "supported_sync_modes": stream.supported_sync_modes,
+            });
+            if let Some(cursor) = stream.source_defined_cursor {
+                value["source_defined_cursor"] = serde_json::Value::String(cursor);
+            }
+            if let Some(pk) = stream.source_defined_primary_key {
+                value["source_defined_primary_key"] = serde_json::to_value(pk)?;
+            }
+            Ok(value)
+        }).collect::<Result<Vec<_>>>()?,
+    });
+    Ok(serde_json::to_string(&json)?)
+}
+
+fn arrow_type_from_name(name: &str) -> ArrowDataType {
+    match name {
+        "boolean" => ArrowDataType::Boolean,
+        "int8" => ArrowDataType::Int8,
+        "int16" => ArrowDataType::Int16,
+        "int32" => ArrowDataType::Int32,
+        "int64" => ArrowDataType::Int64,
+        "uint8" => ArrowDataType::UInt8,
+        "uint16" => ArrowDataType::UInt16,
+        "uint32" => ArrowDataType::UInt32,
+        "uint64" => ArrowDataType::UInt64,
+        "float16" => ArrowDataType::Float16,
+        "float32" => ArrowDataType::Float32,
+        "float64" => ArrowDataType::Float64,
+        "utf8" => ArrowDataType::Utf8,
+        "large_utf8" => ArrowDataType::LargeUtf8,
+        "binary" => ArrowDataType::Binary,
+        "large_binary" => ArrowDataType::LargeBinary,
+        "date32" => ArrowDataType::Date32,
+        "date64" => ArrowDataType::Date64,
+        "timestamp_millis" => ArrowDataType::TimestampMillis,
+        "timestamp_micros" => ArrowDataType::TimestampMicros,
+        "timestamp_nanos" => ArrowDataType::TimestampNanos,
+        "decimal128" => ArrowDataType::Decimal128,
+        "json" => ArrowDataType::Json,
+        _ => ArrowDataType::Utf8,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rapidbyte_types::schema::{SchemaField, StreamSchema};
+
+    #[test]
+    fn machine_readable_output_preserves_catalog_marker_shape() {
+        let streams = vec![DiscoveredStream {
+            name: "users".into(),
+            schema: StreamSchema {
+                fields: vec![SchemaField::new("id", "int64", false)],
+                primary_key: vec!["id".into()],
+                partition_keys: vec![],
+                source_defined_cursor: Some("updated_at".into()),
+                schema_id: None,
+            },
+            supported_sync_modes: vec![SyncMode::FullRefresh, SyncMode::Incremental],
+            default_cursor_field: Some("updated_at".into()),
+            estimated_row_count: Some(10),
+            metadata_json: Some(r#"{"schema":"public"}"#.into()),
+        }];
+
+        let json = machine_readable_catalog_json(&streams).expect("catalog json should serialize");
+        let value: serde_json::Value =
+            serde_json::from_str(&json).expect("catalog json should parse");
+
+        assert!(value["streams"].is_array());
+        assert_eq!(value["streams"][0]["name"], "users");
+        assert_eq!(value["streams"][0]["schema"][0]["name"], "id");
+        assert_eq!(value["streams"][0]["schema"][0]["data_type"], "Int64");
+        assert_eq!(value["streams"][0]["source_defined_cursor"], "updated_at");
+    }
 }

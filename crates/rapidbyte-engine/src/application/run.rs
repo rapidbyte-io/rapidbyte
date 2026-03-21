@@ -203,10 +203,7 @@ pub async fn run_pipeline(
                 dest_resolved.manifest.as_ref(),
             )?;
 
-            // TODO: build full StreamContexts for apply once cursor loading
-            // is moved earlier. For now pass an empty vec — the apply call
-            // itself is the important part for resource provisioning.
-            let apply_streams = Vec::new();
+            let apply_streams = crate::application::build_apply_streams(pipeline);
 
             let _src_apply = ctx
                 .runner

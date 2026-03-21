@@ -124,3 +124,92 @@ pub fn build_sandbox_overrides(
         timeout_seconds,
     }))
 }
+
+/// Build stream contexts for lifecycle phases that need configured streams
+/// before the main run loop starts, such as `apply`.
+#[must_use]
+pub fn build_apply_streams(
+    pipeline: &rapidbyte_pipeline_config::PipelineConfig,
+) -> Vec<rapidbyte_types::stream::StreamContext> {
+    pipeline
+        .source
+        .streams
+        .iter()
+        .enumerate()
+        .map(
+            |(stream_idx, stream_cfg)| rapidbyte_types::stream::StreamContext {
+                stream_name: stream_cfg.name.clone(),
+                source_stream_name: None,
+                #[allow(clippy::cast_possible_truncation)]
+                stream_index: stream_idx as u32,
+                schema: rapidbyte_types::schema::StreamSchema {
+                    fields: vec![],
+                    primary_key: pipeline.destination.primary_key.clone(),
+                    partition_keys: vec![],
+                    source_defined_cursor: None,
+                    schema_id: None,
+                },
+                sync_mode: stream_cfg.sync_mode,
+                cursor_info: None,
+                limits: rapidbyte_types::stream::StreamLimits::default(),
+                policies: rapidbyte_types::stream::StreamPolicies {
+                    on_data_error: pipeline.destination.on_data_error,
+                    schema_evolution: pipeline.destination.schema_evolution.unwrap_or_default(),
+                },
+                write_mode: Some(
+                    pipeline
+                        .destination
+                        .write_mode
+                        .to_protocol(pipeline.destination.primary_key.clone()),
+                ),
+                selected_columns: stream_cfg.columns.clone(),
+                partition_key: stream_cfg.partition_key.clone(),
+                partition_count: None,
+                partition_index: None,
+                effective_parallelism: Some(match pipeline.resources.parallelism {
+                    rapidbyte_pipeline_config::PipelineParallelism::Auto => 1,
+                    rapidbyte_pipeline_config::PipelineParallelism::Manual(n) => n,
+                }),
+                partition_strategy: None,
+                copy_flush_bytes_override: None,
+            },
+        )
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_apply_streams_preserves_configured_source_streams() {
+        let pipeline: rapidbyte_pipeline_config::PipelineConfig = serde_yaml::from_str(
+            r#"
+version: "1.0"
+pipeline: test-pipeline
+source:
+  use: src
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+      columns: ["id", "email"]
+destination:
+  use: dst
+  config: {}
+  write_mode: append
+"#,
+        )
+        .unwrap();
+
+        let streams = build_apply_streams(&pipeline);
+
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].stream_name, "users");
+        assert_eq!(
+            streams[0].selected_columns.as_deref(),
+            Some(&["id".to_string(), "email".to_string()][..])
+        );
+        assert_eq!(streams[0].stream_index, 0);
+    }
+}
