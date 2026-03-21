@@ -13,6 +13,7 @@ use syn::{Ident, ItemStruct, Result};
 struct ManifestFeatures {
     has_partitioned_read: bool,
     has_cdc: bool,
+    has_bulk_load: bool,
 }
 
 fn read_manifest_features(kind: &PluginKind) -> Option<ManifestFeatures> {
@@ -28,6 +29,7 @@ fn read_manifest_features(kind: &PluginKind) -> Option<ManifestFeatures> {
             return Some(ManifestFeatures {
                 has_partitioned_read: false,
                 has_cdc: false,
+                has_bulk_load: false,
             })
         }
     };
@@ -42,6 +44,7 @@ fn read_manifest_features(kind: &PluginKind) -> Option<ManifestFeatures> {
     Some(ManifestFeatures {
         has_partitioned_read: features.iter().any(|f| f == "partitioned_read"),
         has_cdc: features.iter().any(|f| f == "cdc"),
+        has_bulk_load: features.iter().any(|f| f == "bulk_load"),
     })
 }
 
@@ -71,7 +74,16 @@ fn gen_feature_assertions(
                 });
             }
         }
-        PluginKind::Destination => {}
+        PluginKind::Destination => {
+            if features.has_bulk_load {
+                assertions.push(quote! {
+                    const _: () = {
+                        fn __assert_bulk_destination<T: ::rapidbyte_sdk::features::BulkDestination>() {}
+                        fn __check() { __assert_bulk_destination::<#struct_name>(); }
+                    };
+                });
+            }
+        }
         PluginKind::Transform => {}
     }
 
@@ -217,6 +229,7 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
                     ErrorCategory::Data => CErrorCategory::Data,
                     ErrorCategory::Schema => CErrorCategory::Schema,
                     ErrorCategory::Frame => CErrorCategory::Frame,
+                    ErrorCategory::Cancelled => CErrorCategory::Cancelled,
                     ErrorCategory::Internal | _ => CErrorCategory::Internal,
                 },
                 scope: match error.scope {
@@ -243,20 +256,6 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
             }
         }
 
-        fn parse_stream_context(
-            ctx_json: String,
-        ) -> Result<
-            ::rapidbyte_sdk::stream::StreamContext,
-            __rb_bindings::rapidbyte::plugin::types::PluginError,
-        > {
-            serde_json::from_str(&ctx_json).map_err(|e| {
-                to_component_error(::rapidbyte_sdk::error::PluginError::config(
-                    "INVALID_STREAM_CTX",
-                    format!("Invalid StreamContext JSON: {}", e),
-                ))
-            })
-        }
-
         fn parse_config<T: serde::de::DeserializeOwned>(
             config_json: &str,
         ) -> Result<T, __rb_bindings::rapidbyte::plugin::types::PluginError> {
@@ -274,13 +273,96 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
             parse_config(json)
         }
 
+        // ── Schema converters: WIT → SDK ────────────────────────────
+
+        fn from_component_schema_field(
+            f: __rb_bindings::rapidbyte::plugin::types::SchemaField,
+        ) -> ::rapidbyte_sdk::schema::SchemaField {
+            ::rapidbyte_sdk::schema::SchemaField {
+                name: f.name,
+                arrow_type: f.arrow_type,
+                nullable: f.nullable,
+                is_primary_key: f.is_primary_key,
+                is_generated: f.is_generated,
+                is_partition_key: f.is_partition_key,
+                default_value: f.default_value,
+            }
+        }
+
+        fn from_component_stream_schema(
+            s: __rb_bindings::rapidbyte::plugin::types::StreamSchema,
+        ) -> ::rapidbyte_sdk::schema::StreamSchema {
+            ::rapidbyte_sdk::schema::StreamSchema {
+                fields: s.fields.into_iter().map(from_component_schema_field).collect(),
+                primary_key: s.primary_key,
+                partition_keys: s.partition_keys,
+                source_defined_cursor: s.source_defined_cursor,
+                schema_id: s.schema_id,
+            }
+        }
+
+        // ── Schema converters: SDK → WIT ────────────────────────────
+
+        fn to_component_schema_field(
+            f: ::rapidbyte_sdk::schema::SchemaField,
+        ) -> __rb_bindings::rapidbyte::plugin::types::SchemaField {
+            __rb_bindings::rapidbyte::plugin::types::SchemaField {
+                name: f.name,
+                arrow_type: f.arrow_type,
+                nullable: f.nullable,
+                is_primary_key: f.is_primary_key,
+                is_generated: f.is_generated,
+                is_partition_key: f.is_partition_key,
+                default_value: f.default_value,
+            }
+        }
+
+        fn to_component_stream_schema(
+            s: ::rapidbyte_sdk::schema::StreamSchema,
+        ) -> __rb_bindings::rapidbyte::plugin::types::StreamSchema {
+            __rb_bindings::rapidbyte::plugin::types::StreamSchema {
+                fields: s.fields.into_iter().map(to_component_schema_field).collect(),
+                primary_key: s.primary_key,
+                partition_keys: s.partition_keys,
+                source_defined_cursor: s.source_defined_cursor,
+                schema_id: s.schema_id,
+            }
+        }
+
+        // ── Validation converters ───────────────────────────────────
+
+        fn to_component_field_constraint(
+            c: ::rapidbyte_sdk::schema::FieldConstraint,
+        ) -> __rb_bindings::rapidbyte::plugin::types::FieldConstraint {
+            use __rb_bindings::rapidbyte::plugin::types::FieldConstraint as CFieldConstraint;
+            use ::rapidbyte_sdk::schema::FieldConstraint;
+            match c {
+                FieldConstraint::FieldRequired => CFieldConstraint::FieldRequired,
+                FieldConstraint::FieldOptional => CFieldConstraint::FieldOptional,
+                FieldConstraint::FieldForbidden => CFieldConstraint::FieldForbidden,
+                FieldConstraint::FieldRecommended => CFieldConstraint::FieldRecommended,
+                FieldConstraint::TypeIncompatible => CFieldConstraint::TypeIncompatible,
+            }
+        }
+
+        fn to_component_field_requirement(
+            r: ::rapidbyte_sdk::schema::FieldRequirement,
+        ) -> __rb_bindings::rapidbyte::plugin::types::FieldRequirement {
+            __rb_bindings::rapidbyte::plugin::types::FieldRequirement {
+                field_name: r.field_name,
+                constraint: to_component_field_constraint(r.constraint),
+                reason: r.reason,
+                accepted_types: r.accepted_types,
+            }
+        }
+
         fn to_component_validation(
-            result: ::rapidbyte_sdk::error::ValidationResult,
+            result: ::rapidbyte_sdk::validation::ValidationReport,
         ) -> __rb_bindings::rapidbyte::plugin::types::ValidationReport {
             use __rb_bindings::rapidbyte::plugin::types::{
                 ValidationReport as CValidationReport, ValidationStatus as CValidationStatus,
             };
-            use ::rapidbyte_sdk::error::ValidationStatus;
+            use ::rapidbyte_sdk::validation::ValidationStatus;
 
             CValidationReport {
                 status: match result.status {
@@ -290,6 +372,539 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
                 },
                 message: result.message,
                 warnings: result.warnings,
+                output_schema: result.output_schema.map(to_component_stream_schema),
+                field_requirements: result.field_requirements.map(|reqs|
+                    reqs.into_iter().map(to_component_field_requirement).collect()
+                ),
+            }
+        }
+
+        // ── SyncMode converters ─────────────────────────────────────
+
+        fn from_component_sync_mode(
+            m: __rb_bindings::rapidbyte::plugin::types::SyncMode,
+        ) -> ::rapidbyte_sdk::wire::SyncMode {
+            use __rb_bindings::rapidbyte::plugin::types::SyncMode as CSyncMode;
+            match m {
+                CSyncMode::FullRefresh => ::rapidbyte_sdk::wire::SyncMode::FullRefresh,
+                CSyncMode::Incremental => ::rapidbyte_sdk::wire::SyncMode::Incremental,
+                CSyncMode::Cdc => ::rapidbyte_sdk::wire::SyncMode::Cdc,
+            }
+        }
+
+        fn to_component_sync_mode(
+            m: ::rapidbyte_sdk::wire::SyncMode,
+        ) -> __rb_bindings::rapidbyte::plugin::types::SyncMode {
+            use __rb_bindings::rapidbyte::plugin::types::SyncMode as CSyncMode;
+            match m {
+                ::rapidbyte_sdk::wire::SyncMode::FullRefresh => CSyncMode::FullRefresh,
+                ::rapidbyte_sdk::wire::SyncMode::Incremental => CSyncMode::Incremental,
+                ::rapidbyte_sdk::wire::SyncMode::Cdc => CSyncMode::Cdc,
+            }
+        }
+
+        // ── WriteMode converters ────────────────────────────────────
+
+        fn from_component_write_mode(
+            m: __rb_bindings::rapidbyte::plugin::types::WriteMode,
+            schema_primary_key: &[String],
+        ) -> ::rapidbyte_sdk::wire::WriteMode {
+            use __rb_bindings::rapidbyte::plugin::types::WriteMode as CWriteMode;
+            match m {
+                CWriteMode::Append => ::rapidbyte_sdk::wire::WriteMode::Append,
+                CWriteMode::Replace => ::rapidbyte_sdk::wire::WriteMode::Replace,
+                CWriteMode::Upsert => ::rapidbyte_sdk::wire::WriteMode::Upsert {
+                    primary_key: schema_primary_key.to_vec(),
+                },
+            }
+        }
+
+        fn to_component_write_mode(
+            m: ::rapidbyte_sdk::wire::WriteMode,
+        ) -> __rb_bindings::rapidbyte::plugin::types::WriteMode {
+            use __rb_bindings::rapidbyte::plugin::types::WriteMode as CWriteMode;
+            match m {
+                ::rapidbyte_sdk::wire::WriteMode::Append => CWriteMode::Append,
+                ::rapidbyte_sdk::wire::WriteMode::Replace => CWriteMode::Replace,
+                ::rapidbyte_sdk::wire::WriteMode::Upsert { .. } => CWriteMode::Upsert,
+            }
+        }
+
+        // ── PartitionStrategy converters ────────────────────────────
+
+        fn from_component_partition_strategy(
+            s: __rb_bindings::rapidbyte::plugin::types::PartitionStrategy,
+        ) -> ::rapidbyte_sdk::stream::PartitionStrategy {
+            use __rb_bindings::rapidbyte::plugin::types::PartitionStrategy as CPS;
+            match s {
+                CPS::ModHash => ::rapidbyte_sdk::stream::PartitionStrategy::ModHash,
+                CPS::Range => ::rapidbyte_sdk::stream::PartitionStrategy::Range,
+            }
+        }
+
+        fn to_component_partition_strategy(
+            s: ::rapidbyte_sdk::stream::PartitionStrategy,
+        ) -> __rb_bindings::rapidbyte::plugin::types::PartitionStrategy {
+            use __rb_bindings::rapidbyte::plugin::types::PartitionStrategy as CPS;
+            match s {
+                ::rapidbyte_sdk::stream::PartitionStrategy::ModHash => CPS::ModHash,
+                ::rapidbyte_sdk::stream::PartitionStrategy::Range => CPS::Range,
+            }
+        }
+
+        // ── DataErrorPolicy converters ──────────────────────────────
+
+        fn from_component_data_error_policy(
+            p: __rb_bindings::rapidbyte::plugin::types::DataErrorPolicy,
+        ) -> ::rapidbyte_sdk::stream::DataErrorPolicy {
+            use __rb_bindings::rapidbyte::plugin::types::DataErrorPolicy as CDP;
+            match p {
+                CDP::Fail => ::rapidbyte_sdk::stream::DataErrorPolicy::Fail,
+                CDP::Skip => ::rapidbyte_sdk::stream::DataErrorPolicy::Skip,
+                CDP::Dlq => ::rapidbyte_sdk::stream::DataErrorPolicy::Dlq,
+            }
+        }
+
+        // ── ColumnPolicy converters ─────────────────────────────────
+
+        fn from_component_column_policy(
+            p: __rb_bindings::rapidbyte::plugin::types::ColumnPolicy,
+        ) -> ::rapidbyte_sdk::stream::ColumnPolicy {
+            use __rb_bindings::rapidbyte::plugin::types::ColumnPolicy as CCP;
+            match p {
+                CCP::Add => ::rapidbyte_sdk::stream::ColumnPolicy::Add,
+                CCP::Ignore => ::rapidbyte_sdk::stream::ColumnPolicy::Ignore,
+                CCP::Fail => ::rapidbyte_sdk::stream::ColumnPolicy::Fail,
+            }
+        }
+
+        // ── TypeChangePolicy converters ─────────────────────────────
+
+        fn from_component_type_change_policy(
+            p: __rb_bindings::rapidbyte::plugin::types::TypeChangePolicy,
+        ) -> ::rapidbyte_sdk::stream::TypeChangePolicy {
+            use __rb_bindings::rapidbyte::plugin::types::TypeChangePolicy as CTP;
+            match p {
+                CTP::Coerce => ::rapidbyte_sdk::stream::TypeChangePolicy::Coerce,
+                CTP::Fail => ::rapidbyte_sdk::stream::TypeChangePolicy::Fail,
+                CTP::NullOut => ::rapidbyte_sdk::stream::TypeChangePolicy::Null,
+            }
+        }
+
+        // ── NullabilityPolicy converters ────────────────────────────
+
+        fn from_component_nullability_policy(
+            p: __rb_bindings::rapidbyte::plugin::types::NullabilityPolicy,
+        ) -> ::rapidbyte_sdk::stream::NullabilityPolicy {
+            use __rb_bindings::rapidbyte::plugin::types::NullabilityPolicy as CNP;
+            match p {
+                CNP::Allow => ::rapidbyte_sdk::stream::NullabilityPolicy::Allow,
+                CNP::Fail => ::rapidbyte_sdk::stream::NullabilityPolicy::Fail,
+            }
+        }
+
+        // ── StreamContext converter: WIT → SDK ──────────────────────
+
+        fn from_component_cursor_info(
+            c: __rb_bindings::rapidbyte::plugin::types::CursorInfo,
+        ) -> ::rapidbyte_sdk::cursor::CursorInfo {
+            // cursor_type is a snake_case string in the WIT (e.g., "int64", "utf8").
+            // Deserialize it via serde to map to the SDK CursorType enum.
+            let quoted = format!("\"{}\"", c.cursor_type);
+            let cursor_type: ::rapidbyte_sdk::cursor::CursorType =
+                serde_json::from_str(&quoted)
+                    .unwrap_or(::rapidbyte_sdk::cursor::CursorType::Utf8);
+            let last_value = c.last_value_json.map(|json| {
+                serde_json::from_str(&json).unwrap_or(::rapidbyte_sdk::cursor::CursorValue::Null)
+            });
+            ::rapidbyte_sdk::cursor::CursorInfo {
+                cursor_field: c.cursor_field,
+                tie_breaker_field: c.tie_breaker_field,
+                cursor_type,
+                last_value,
+            }
+        }
+
+        fn from_component_stream_limits(
+            l: __rb_bindings::rapidbyte::plugin::types::StreamLimits,
+        ) -> ::rapidbyte_sdk::stream::StreamLimits {
+            ::rapidbyte_sdk::stream::StreamLimits {
+                max_batch_bytes: l.max_batch_bytes,
+                max_record_bytes: l.max_record_bytes,
+                max_inflight_batches: l.max_inflight_batches,
+                max_parallel_requests: l.max_parallel_requests,
+                checkpoint_interval_bytes: l.checkpoint_interval_bytes,
+                checkpoint_interval_rows: l.checkpoint_interval_rows,
+                checkpoint_interval_seconds: l.checkpoint_interval_seconds,
+                max_records: l.max_records,
+            }
+        }
+
+        fn from_component_stream_policies(
+            p: __rb_bindings::rapidbyte::plugin::types::StreamPolicies,
+        ) -> ::rapidbyte_sdk::stream::StreamPolicies {
+            ::rapidbyte_sdk::stream::StreamPolicies {
+                on_data_error: from_component_data_error_policy(p.on_data_error),
+                schema_evolution: ::rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                    new_column: from_component_column_policy(p.schema_evolution.new_column),
+                    removed_column: from_component_column_policy(p.schema_evolution.removed_column),
+                    type_change: from_component_type_change_policy(p.schema_evolution.type_change),
+                    nullability_change: from_component_nullability_policy(p.schema_evolution.nullability_change),
+                },
+            }
+        }
+
+        fn from_component_stream_context(
+            ctx: __rb_bindings::rapidbyte::plugin::types::StreamContext,
+        ) -> ::rapidbyte_sdk::stream::StreamContext {
+            // Extract primary_key before moving schema so we can populate
+            // WriteMode::Upsert { primary_key } (the WIT enum does not carry it).
+            let schema_pk = ctx.schema.primary_key.clone();
+            ::rapidbyte_sdk::stream::StreamContext {
+                stream_index: ctx.stream_index,
+                stream_name: ctx.stream_name,
+                source_stream_name: ctx.source_stream_name,
+                schema: from_component_stream_schema(ctx.schema),
+                sync_mode: from_component_sync_mode(ctx.sync_mode),
+                cursor_info: ctx.cursor_info.map(from_component_cursor_info),
+                limits: from_component_stream_limits(ctx.limits),
+                policies: from_component_stream_policies(ctx.policies),
+                write_mode: ctx.write_mode.map(|m| from_component_write_mode(m, &schema_pk)),
+                selected_columns: ctx.selected_columns,
+                partition_key: ctx.partition_key,
+                partition_count: ctx.partition_count,
+                partition_index: ctx.partition_index,
+                effective_parallelism: ctx.effective_parallelism,
+                partition_strategy: ctx.partition_strategy.map(from_component_partition_strategy),
+                copy_flush_bytes_override: None,
+            }
+        }
+
+        // ── StreamContext converter: SDK → WIT ──────────────────────
+
+        fn to_component_cursor_info(
+            c: ::rapidbyte_sdk::cursor::CursorInfo,
+        ) -> __rb_bindings::rapidbyte::plugin::types::CursorInfo {
+            // Serialize cursor_type via serde to get the snake_case string
+            // (e.g., CursorType::Int64 → "int64").  Strip surrounding quotes.
+            let cursor_type_str = serde_json::to_string(&c.cursor_type)
+                .unwrap_or_else(|_| "\"utf8\"".to_string());
+            let cursor_type = cursor_type_str.trim_matches('"').to_string();
+            __rb_bindings::rapidbyte::plugin::types::CursorInfo {
+                cursor_field: c.cursor_field,
+                tie_breaker_field: c.tie_breaker_field,
+                cursor_type,
+                last_value_json: c.last_value.map(|v| serde_json::to_string(&v).unwrap_or_default()),
+            }
+        }
+
+        fn to_component_stream_limits(
+            l: ::rapidbyte_sdk::stream::StreamLimits,
+        ) -> __rb_bindings::rapidbyte::plugin::types::StreamLimits {
+            __rb_bindings::rapidbyte::plugin::types::StreamLimits {
+                max_batch_bytes: l.max_batch_bytes,
+                max_record_bytes: l.max_record_bytes,
+                max_inflight_batches: l.max_inflight_batches,
+                max_parallel_requests: l.max_parallel_requests,
+                checkpoint_interval_bytes: l.checkpoint_interval_bytes,
+                checkpoint_interval_rows: l.checkpoint_interval_rows,
+                checkpoint_interval_seconds: l.checkpoint_interval_seconds,
+                max_records: l.max_records,
+            }
+        }
+
+        fn to_component_data_error_policy(
+            p: ::rapidbyte_sdk::stream::DataErrorPolicy,
+        ) -> __rb_bindings::rapidbyte::plugin::types::DataErrorPolicy {
+            use __rb_bindings::rapidbyte::plugin::types::DataErrorPolicy as CDP;
+            match p {
+                ::rapidbyte_sdk::stream::DataErrorPolicy::Fail => CDP::Fail,
+                ::rapidbyte_sdk::stream::DataErrorPolicy::Skip => CDP::Skip,
+                ::rapidbyte_sdk::stream::DataErrorPolicy::Dlq => CDP::Dlq,
+            }
+        }
+
+        fn to_component_column_policy(
+            p: ::rapidbyte_sdk::stream::ColumnPolicy,
+        ) -> __rb_bindings::rapidbyte::plugin::types::ColumnPolicy {
+            use __rb_bindings::rapidbyte::plugin::types::ColumnPolicy as CCP;
+            match p {
+                ::rapidbyte_sdk::stream::ColumnPolicy::Add => CCP::Add,
+                ::rapidbyte_sdk::stream::ColumnPolicy::Ignore => CCP::Ignore,
+                ::rapidbyte_sdk::stream::ColumnPolicy::Fail => CCP::Fail,
+            }
+        }
+
+        fn to_component_type_change_policy(
+            p: ::rapidbyte_sdk::stream::TypeChangePolicy,
+        ) -> __rb_bindings::rapidbyte::plugin::types::TypeChangePolicy {
+            use __rb_bindings::rapidbyte::plugin::types::TypeChangePolicy as CTP;
+            match p {
+                ::rapidbyte_sdk::stream::TypeChangePolicy::Coerce => CTP::Coerce,
+                ::rapidbyte_sdk::stream::TypeChangePolicy::Fail => CTP::Fail,
+                ::rapidbyte_sdk::stream::TypeChangePolicy::Null => CTP::NullOut,
+            }
+        }
+
+        fn to_component_nullability_policy(
+            p: ::rapidbyte_sdk::stream::NullabilityPolicy,
+        ) -> __rb_bindings::rapidbyte::plugin::types::NullabilityPolicy {
+            use __rb_bindings::rapidbyte::plugin::types::NullabilityPolicy as CNP;
+            match p {
+                ::rapidbyte_sdk::stream::NullabilityPolicy::Allow => CNP::Allow,
+                ::rapidbyte_sdk::stream::NullabilityPolicy::Fail => CNP::Fail,
+            }
+        }
+
+        fn to_component_stream_policies(
+            p: ::rapidbyte_sdk::stream::StreamPolicies,
+        ) -> __rb_bindings::rapidbyte::plugin::types::StreamPolicies {
+            __rb_bindings::rapidbyte::plugin::types::StreamPolicies {
+                on_data_error: to_component_data_error_policy(p.on_data_error),
+                schema_evolution: __rb_bindings::rapidbyte::plugin::types::SchemaEvolutionPolicy {
+                    new_column: to_component_column_policy(p.schema_evolution.new_column),
+                    removed_column: to_component_column_policy(p.schema_evolution.removed_column),
+                    type_change: to_component_type_change_policy(p.schema_evolution.type_change),
+                    nullability_change: to_component_nullability_policy(p.schema_evolution.nullability_change),
+                },
+            }
+        }
+
+        fn to_component_stream_context(
+            ctx: ::rapidbyte_sdk::stream::StreamContext,
+        ) -> __rb_bindings::rapidbyte::plugin::types::StreamContext {
+            __rb_bindings::rapidbyte::plugin::types::StreamContext {
+                stream_index: ctx.stream_index,
+                stream_name: ctx.stream_name,
+                source_stream_name: ctx.source_stream_name,
+                schema: to_component_stream_schema(ctx.schema),
+                sync_mode: to_component_sync_mode(ctx.sync_mode),
+                cursor_info: ctx.cursor_info.map(to_component_cursor_info),
+                limits: to_component_stream_limits(ctx.limits),
+                policies: to_component_stream_policies(ctx.policies),
+                write_mode: ctx.write_mode.map(to_component_write_mode),
+                selected_columns: ctx.selected_columns,
+                partition_key: ctx.partition_key,
+                partition_count: ctx.partition_count,
+                partition_index: ctx.partition_index,
+                effective_parallelism: ctx.effective_parallelism,
+                partition_strategy: ctx.partition_strategy.map(to_component_partition_strategy),
+            }
+        }
+
+        // ── PluginSpec converter: SDK → WIT ─────────────────────────
+
+        fn to_component_plugin_spec(
+            spec: ::rapidbyte_sdk::discovery::PluginSpec,
+        ) -> __rb_bindings::rapidbyte::plugin::types::PluginSpec {
+            __rb_bindings::rapidbyte::plugin::types::PluginSpec {
+                protocol_version: spec.protocol_version,
+                config_schema_json: spec.config_schema_json,
+                resource_schema_json: spec.resource_schema_json,
+                documentation_url: spec.documentation_url,
+                features: spec.features,
+                supported_sync_modes: spec.supported_sync_modes.into_iter().map(to_component_sync_mode).collect(),
+                supported_write_modes: spec.supported_write_modes.map(|modes|
+                    modes.into_iter().map(to_component_write_mode).collect()
+                ),
+            }
+        }
+
+        // ── DiscoveredStream converter: SDK → WIT ───────────────────
+
+        fn to_component_discovered_stream(
+            s: ::rapidbyte_sdk::discovery::DiscoveredStream,
+        ) -> __rb_bindings::rapidbyte::plugin::types::DiscoveredStream {
+            __rb_bindings::rapidbyte::plugin::types::DiscoveredStream {
+                name: s.name,
+                schema: to_component_stream_schema(s.schema),
+                supported_sync_modes: s.supported_sync_modes.into_iter().map(to_component_sync_mode).collect(),
+                default_cursor_field: s.default_cursor_field,
+                estimated_row_count: s.estimated_row_count,
+                metadata_json: s.metadata_json,
+            }
+        }
+
+        // ── Prerequisites converters ────────────────────────────────
+
+        fn to_component_prerequisite_severity(
+            s: ::rapidbyte_sdk::validation::PrerequisiteSeverity,
+        ) -> __rb_bindings::rapidbyte::plugin::types::PrerequisiteSeverity {
+            use __rb_bindings::rapidbyte::plugin::types::PrerequisiteSeverity as CPS;
+            use ::rapidbyte_sdk::validation::PrerequisiteSeverity;
+            match s {
+                PrerequisiteSeverity::Error => CPS::Error,
+                PrerequisiteSeverity::Warning => CPS::Warning,
+                PrerequisiteSeverity::Info => CPS::Info,
+            }
+        }
+
+        fn to_component_prerequisite_check(
+            c: ::rapidbyte_sdk::validation::PrerequisiteCheck,
+        ) -> __rb_bindings::rapidbyte::plugin::types::PrerequisiteCheck {
+            __rb_bindings::rapidbyte::plugin::types::PrerequisiteCheck {
+                name: c.name,
+                passed: c.passed,
+                severity: to_component_prerequisite_severity(c.severity),
+                message: c.message,
+                fix_hint: c.fix_hint,
+            }
+        }
+
+        fn to_component_prerequisites_report(
+            r: ::rapidbyte_sdk::validation::PrerequisitesReport,
+        ) -> __rb_bindings::rapidbyte::plugin::types::PrerequisitesReport {
+            __rb_bindings::rapidbyte::plugin::types::PrerequisitesReport {
+                passed: r.passed,
+                checks: r.checks.into_iter().map(to_component_prerequisite_check).collect(),
+            }
+        }
+
+        // ── Apply converters ────────────────────────────────────────
+
+        fn from_component_apply_request(
+            r: __rb_bindings::rapidbyte::plugin::types::ApplyRequest,
+        ) -> ::rapidbyte_sdk::lifecycle::ApplyRequest {
+            ::rapidbyte_sdk::lifecycle::ApplyRequest {
+                streams: r.streams.into_iter().map(from_component_stream_context).collect(),
+                dry_run: r.dry_run,
+            }
+        }
+
+        fn to_component_apply_action(
+            a: ::rapidbyte_sdk::lifecycle::ApplyAction,
+        ) -> __rb_bindings::rapidbyte::plugin::types::ApplyAction {
+            __rb_bindings::rapidbyte::plugin::types::ApplyAction {
+                stream_name: a.stream_name,
+                description: a.description,
+                ddl_executed: a.ddl_executed,
+            }
+        }
+
+        fn to_component_apply_report(
+            r: ::rapidbyte_sdk::lifecycle::ApplyReport,
+        ) -> __rb_bindings::rapidbyte::plugin::types::ApplyReport {
+            __rb_bindings::rapidbyte::plugin::types::ApplyReport {
+                actions: r.actions.into_iter().map(to_component_apply_action).collect(),
+            }
+        }
+
+        // ── Teardown converters ─────────────────────────────────────
+
+        fn from_component_teardown_request(
+            r: __rb_bindings::rapidbyte::plugin::types::TeardownRequest,
+        ) -> ::rapidbyte_sdk::lifecycle::TeardownRequest {
+            ::rapidbyte_sdk::lifecycle::TeardownRequest {
+                streams: r.streams,
+                reason: r.reason,
+            }
+        }
+
+        fn to_component_teardown_report(
+            r: ::rapidbyte_sdk::lifecycle::TeardownReport,
+        ) -> __rb_bindings::rapidbyte::plugin::types::TeardownReport {
+            __rb_bindings::rapidbyte::plugin::types::TeardownReport {
+                actions: r.actions,
+            }
+        }
+
+        // ── RunRequest / RunSummary converters ──────────────────────
+
+        fn from_component_run_request(
+            r: __rb_bindings::rapidbyte::plugin::types::RunRequest,
+        ) -> ::rapidbyte_sdk::run::RunRequest {
+            ::rapidbyte_sdk::run::RunRequest {
+                streams: r.streams.into_iter().map(from_component_stream_context).collect(),
+                dry_run: r.dry_run,
+            }
+        }
+
+        fn to_component_stream_result(
+            r: ::rapidbyte_sdk::run::StreamResult,
+        ) -> __rb_bindings::rapidbyte::plugin::types::StreamResult {
+            __rb_bindings::rapidbyte::plugin::types::StreamResult {
+                stream_index: r.stream_index,
+                stream_name: r.stream_name,
+                outcome_json: r.outcome_json,
+                succeeded: r.succeeded,
+            }
+        }
+
+        fn to_component_run_summary(
+            s: ::rapidbyte_sdk::run::RunSummary,
+        ) -> __rb_bindings::rapidbyte::plugin::types::RunSummary {
+            __rb_bindings::rapidbyte::plugin::types::RunSummary {
+                results: s.results.into_iter().map(to_component_stream_result).collect(),
+            }
+        }
+
+        /// Build a single-stream RunSummary from a ReadSummary.
+        fn read_summary_to_run_summary(
+            stream: &::rapidbyte_sdk::stream::StreamContext,
+            summary: ::rapidbyte_sdk::metric::ReadSummary,
+        ) -> ::rapidbyte_sdk::run::RunSummary {
+            let stream_failed =
+                ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
+            let outcome = serde_json::json!({
+                "records_read": summary.records_read,
+                "bytes_read": summary.bytes_read,
+                "batches_emitted": summary.batches_emitted,
+                "checkpoint_count": summary.checkpoint_count,
+                "records_skipped": summary.records_skipped,
+            });
+            ::rapidbyte_sdk::run::RunSummary {
+                results: vec![::rapidbyte_sdk::run::StreamResult {
+                    stream_index: stream.stream_index,
+                    stream_name: stream.stream_name.clone(),
+                    outcome_json: outcome.to_string(),
+                    succeeded: !stream_failed,
+                }],
+            }
+        }
+
+        /// Build a single-stream RunSummary from a WriteSummary.
+        fn write_summary_to_run_summary(
+            stream: &::rapidbyte_sdk::stream::StreamContext,
+            summary: ::rapidbyte_sdk::metric::WriteSummary,
+            succeeded: bool,
+        ) -> ::rapidbyte_sdk::run::RunSummary {
+            let outcome = serde_json::json!({
+                "records_written": summary.records_written,
+                "bytes_written": summary.bytes_written,
+                "batches_written": summary.batches_written,
+                "checkpoint_count": summary.checkpoint_count,
+                "records_failed": summary.records_failed,
+            });
+            ::rapidbyte_sdk::run::RunSummary {
+                results: vec![::rapidbyte_sdk::run::StreamResult {
+                    stream_index: stream.stream_index,
+                    stream_name: stream.stream_name.clone(),
+                    outcome_json: outcome.to_string(),
+                    succeeded,
+                }],
+            }
+        }
+
+        /// Build a single-stream RunSummary from a TransformSummary.
+        fn transform_summary_to_run_summary(
+            stream: &::rapidbyte_sdk::stream::StreamContext,
+            summary: ::rapidbyte_sdk::metric::TransformSummary,
+            succeeded: bool,
+        ) -> ::rapidbyte_sdk::run::RunSummary {
+            let outcome = serde_json::json!({
+                "records_in": summary.records_in,
+                "records_out": summary.records_out,
+                "bytes_in": summary.bytes_in,
+                "bytes_out": summary.bytes_out,
+                "batches_processed": summary.batches_processed,
+            });
+            ::rapidbyte_sdk::run::RunSummary {
+                results: vec![::rapidbyte_sdk::run::StreamResult {
+                    stream_index: stream.stream_index,
+                    stream_name: stream.stream_name.clone(),
+                    outcome_json: outcome.to_string(),
+                    succeeded,
+                }],
             }
         }
     }
@@ -329,9 +944,17 @@ fn gen_guest_impl(
     }
 }
 
-/// Generate open, validate, close methods (shared by all roles).
+/// Generate spec, open, validate, close methods (shared by all roles).
 fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> TokenStream {
     quote! {
+        fn spec() -> Result<
+            __rb_bindings::rapidbyte::plugin::types::PluginSpec,
+            __rb_bindings::rapidbyte::plugin::types::PluginError,
+        > {
+            let sdk_spec = <#struct_name as #trait_path>::spec();
+            Ok(to_component_plugin_spec(sdk_spec))
+        }
+
         fn open(
             config_json: String,
         ) -> Result<u64, __rb_bindings::rapidbyte::plugin::types::PluginError> {
@@ -341,27 +964,37 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
                 parse_config(&config_json)?;
 
             let rt = get_runtime();
-            let (instance, _plugin_info) = rt
+            let instance = rt
                 .block_on(<#struct_name as #trait_path>::init(config))
                 .map_err(to_component_error)?;
 
             let _ = CONTEXT.set(::rapidbyte_sdk::context::Context::new(
                 env!("CARGO_PKG_NAME"),
-                "",
+                ::rapidbyte_sdk::host_ffi::current_stream_name(),
             ));
             *get_state().borrow_mut() = Some(instance);
             Ok(1)
         }
 
-        fn validate(_session: u64) -> Result<
+        fn validate(
+            _session: u64,
+            stream_schema: Option<__rb_bindings::rapidbyte::plugin::types::StreamSchema>,
+        ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::ValidationReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let config: <#struct_name as #trait_path>::Config = parse_saved_config()?;
-            let ctx = CONTEXT.get().expect("open must be called before validate");
+            let ctx = CONTEXT
+                .get()
+                .expect("open must be called before validate")
+                .with_stream(::rapidbyte_sdk::host_ffi::current_stream_name());
+            let upstream = stream_schema.map(from_component_stream_schema);
 
             let rt = get_runtime();
-            rt.block_on(<#struct_name as #trait_path>::validate(&config, ctx))
+            let state_cell = get_state();
+            let state_ref = state_cell.borrow();
+            let conn = state_ref.as_ref().expect("Plugin not opened");
+
+            rt.block_on(<#struct_name as #trait_path>::validate(conn, &ctx, upstream.as_ref()))
                 .map(to_component_validation)
                 .map_err(to_component_error)
         }
@@ -370,27 +1003,15 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
             let rt = get_runtime();
             let ctx = CONTEXT.get().expect("open must be called before close");
             let state_cell = get_state();
-            let mut state_ref = state_cell.borrow_mut();
-            if let Some(conn) = state_ref.as_mut() {
+            let state_ref = state_cell.borrow();
+            if let Some(conn) = state_ref.as_ref() {
                 rt.block_on(<#struct_name as #trait_path>::close(conn, ctx))
                     .map_err(to_component_error)?;
             }
-            *state_ref = None;
+            drop(state_ref);
+            *get_state().borrow_mut() = None;
             Ok(())
         }
-    }
-}
-
-/// Generate the shared `run` method preamble: parse request, acquire state.
-fn gen_run_preamble() -> TokenStream {
-    quote! {
-        let stream = parse_stream_context(request.stream_context_json)?;
-        let base_ctx = CONTEXT.get().expect("Plugin not opened");
-        let ctx = base_ctx.with_stream(&stream.stream_name);
-        let rt = get_runtime();
-        let state_cell = get_state();
-        let mut state_ref = state_cell.borrow_mut();
-        let conn = state_ref.as_mut().expect("Plugin not opened");
     }
 }
 
@@ -408,7 +1029,7 @@ fn gen_read_dispatch(
 
     if !has_partitioned && !has_cdc {
         return quote! {
-            rt.block_on(<#struct_name as #trait_path>::read(conn, &ctx, stream))
+            rt.block_on(<#struct_name as #trait_path>::read(conn, &ctx, stream.clone()))
                 .map_err(to_component_error)?
         };
     }
@@ -441,40 +1062,73 @@ fn gen_read_dispatch(
         rt.block_on(async {
             #partition_branch
             #cdc_branch
-            <#struct_name as #trait_path>::read(conn, &ctx, stream).await
+            <#struct_name as #trait_path>::read(conn, &ctx, stream.clone()).await
         }).map_err(to_component_error)?
     }
 }
 
-/// Generate source-specific methods: discover, run.
+/// Generate source-specific methods: discover, prerequisites, apply, run, teardown.
 fn gen_source_methods(
     struct_name: &Ident,
     trait_path: &TokenStream,
     features: Option<&ManifestFeatures>,
 ) -> TokenStream {
     let read_dispatch = gen_read_dispatch(struct_name, trait_path, features);
-    let run_preamble = gen_run_preamble();
 
     quote! {
-        fn discover(
+        fn prerequisites(
             _session: u64,
-        ) -> Result<String, __rb_bindings::rapidbyte::plugin::types::PluginError> {
+        ) -> Result<
+            __rb_bindings::rapidbyte::plugin::types::PrerequisitesReport,
+            __rb_bindings::rapidbyte::plugin::types::PluginError,
+        > {
             let ctx = CONTEXT.get().expect("Plugin not opened");
             let rt = get_runtime();
             let state_cell = get_state();
-            let mut state_ref = state_cell.borrow_mut();
-            let conn = state_ref.as_mut().expect("Plugin not opened");
+            let state_ref = state_cell.borrow();
+            let conn = state_ref.as_ref().expect("Plugin not opened");
 
-            let catalog = rt
+            rt.block_on(<#struct_name as #trait_path>::prerequisites(conn, ctx))
+                .map(to_component_prerequisites_report)
+                .map_err(to_component_error)
+        }
+
+        fn discover(
+            _session: u64,
+        ) -> Result<
+            Vec<__rb_bindings::rapidbyte::plugin::types::DiscoveredStream>,
+            __rb_bindings::rapidbyte::plugin::types::PluginError,
+        > {
+            let ctx = CONTEXT.get().expect("Plugin not opened");
+            let rt = get_runtime();
+            let state_cell = get_state();
+            let state_ref = state_cell.borrow();
+            let conn = state_ref.as_ref().expect("Plugin not opened");
+
+            let streams = rt
                 .block_on(<#struct_name as #trait_path>::discover(conn, ctx))
                 .map_err(to_component_error)?;
 
-            serde_json::to_string(&catalog).map_err(|e| {
-                to_component_error(::rapidbyte_sdk::error::PluginError::internal(
-                    "SERIALIZE_CATALOG",
-                    e.to_string(),
-                ))
-            })
+            Ok(streams.into_iter().map(to_component_discovered_stream).collect())
+        }
+
+        fn apply(
+            _session: u64,
+            request: __rb_bindings::rapidbyte::plugin::types::ApplyRequest,
+        ) -> Result<
+            __rb_bindings::rapidbyte::plugin::types::ApplyReport,
+            __rb_bindings::rapidbyte::plugin::types::PluginError,
+        > {
+            let ctx = CONTEXT.get().expect("Plugin not opened");
+            let rt = get_runtime();
+            let state_cell = get_state();
+            let state_ref = state_cell.borrow();
+            let conn = state_ref.as_ref().expect("Plugin not opened");
+
+            let sdk_request = from_component_apply_request(request);
+            rt.block_on(<#struct_name as #trait_path>::apply(conn, ctx, sdk_request))
+                .map(to_component_apply_report)
+                .map_err(to_component_error)
         }
 
         fn run(
@@ -484,35 +1138,121 @@ fn gen_source_methods(
             __rb_bindings::rapidbyte::plugin::types::RunSummary,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            #run_preamble
+            let sdk_request = from_component_run_request(request);
+            let base_ctx = CONTEXT.get().expect("Plugin not opened");
+            let rt = get_runtime();
+            let state_cell = get_state();
+            let state_ref = state_cell.borrow();
+            let conn = state_ref.as_ref().expect("Plugin not opened");
 
-            let summary = #read_dispatch;
+            // Process each stream and collect results
+            let mut results = Vec::new();
+            for stream in sdk_request.streams {
+                let ctx = base_ctx.with_stream(&stream.stream_name);
+                let stream_idx = stream.stream_index;
+                let stream_nm = stream.stream_name.clone();
+                let _ = ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream_idx);
+                let summary = #read_dispatch;
+                let stream_failed =
+                    ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream_idx);
+                let outcome = serde_json::json!({
+                    "records_read": summary.records_read,
+                    "bytes_read": summary.bytes_read,
+                    "batches_emitted": summary.batches_emitted,
+                    "checkpoint_count": summary.checkpoint_count,
+                    "records_skipped": summary.records_skipped,
+                });
+                results.push(::rapidbyte_sdk::run::StreamResult {
+                    stream_index: stream_idx,
+                    stream_name: stream_nm,
+                    outcome_json: outcome.to_string(),
+                    succeeded: !stream_failed,
+                });
+            }
 
-            Ok(__rb_bindings::rapidbyte::plugin::types::RunSummary {
-                kind: __rb_bindings::rapidbyte::plugin::types::PluginKind::Source,
-                read: Some(__rb_bindings::rapidbyte::plugin::types::ReadSummary {
-                    records_read: summary.records_read,
-                    bytes_read: summary.bytes_read,
-                    batches_emitted: summary.batches_emitted,
-                    checkpoint_count: summary.checkpoint_count,
-                    records_skipped: summary.records_skipped,
-                }),
-                write: None,
-                transform: None,
-            })
+            Ok(to_component_run_summary(::rapidbyte_sdk::run::RunSummary { results }))
+        }
+
+        fn teardown(
+            _session: u64,
+            request: __rb_bindings::rapidbyte::plugin::types::TeardownRequest,
+        ) -> Result<
+            __rb_bindings::rapidbyte::plugin::types::TeardownReport,
+            __rb_bindings::rapidbyte::plugin::types::PluginError,
+        > {
+            let ctx = CONTEXT.get().expect("Plugin not opened");
+            let rt = get_runtime();
+            let state_cell = get_state();
+            let state_ref = state_cell.borrow();
+            let conn = state_ref.as_ref().expect("Plugin not opened");
+
+            let sdk_request = from_component_teardown_request(request);
+            rt.block_on(<#struct_name as #trait_path>::teardown(conn, ctx, sdk_request))
+                .map(to_component_teardown_report)
+                .map_err(to_component_error)
         }
     }
 }
 
-/// Generate destination-specific methods: run.
+/// Generate destination-specific methods: prerequisites, apply, run, teardown.
 fn gen_dest_methods(
     struct_name: &Ident,
     trait_path: &TokenStream,
-    _features: Option<&ManifestFeatures>,
+    features: Option<&ManifestFeatures>,
 ) -> TokenStream {
-    let run_preamble = gen_run_preamble();
+    let write_dispatch = if features.is_some_and(|f| f.has_bulk_load) {
+        quote! {
+            rt.block_on(<#struct_name as ::rapidbyte_sdk::features::BulkDestination>::write_bulk(
+                conn,
+                &ctx,
+                stream.clone(),
+            ))
+            .map_err(to_component_error)?
+        }
+    } else {
+        quote! {
+            rt.block_on(<#struct_name as #trait_path>::write(conn, &ctx, stream.clone()))
+                .map_err(to_component_error)?
+        }
+    };
 
     quote! {
+        fn prerequisites(
+            _session: u64,
+        ) -> Result<
+            __rb_bindings::rapidbyte::plugin::types::PrerequisitesReport,
+            __rb_bindings::rapidbyte::plugin::types::PluginError,
+        > {
+            let ctx = CONTEXT.get().expect("Plugin not opened");
+            let rt = get_runtime();
+            let state_cell = get_state();
+            let state_ref = state_cell.borrow();
+            let conn = state_ref.as_ref().expect("Plugin not opened");
+
+            rt.block_on(<#struct_name as #trait_path>::prerequisites(conn, ctx))
+                .map(to_component_prerequisites_report)
+                .map_err(to_component_error)
+        }
+
+        fn apply(
+            _session: u64,
+            request: __rb_bindings::rapidbyte::plugin::types::ApplyRequest,
+        ) -> Result<
+            __rb_bindings::rapidbyte::plugin::types::ApplyReport,
+            __rb_bindings::rapidbyte::plugin::types::PluginError,
+        > {
+            let ctx = CONTEXT.get().expect("Plugin not opened");
+            let rt = get_runtime();
+            let state_cell = get_state();
+            let state_ref = state_cell.borrow();
+            let conn = state_ref.as_ref().expect("Plugin not opened");
+
+            let sdk_request = from_component_apply_request(request);
+            rt.block_on(<#struct_name as #trait_path>::apply(conn, ctx, sdk_request))
+                .map(to_component_apply_report)
+                .map_err(to_component_error)
+        }
+
         fn run(
             _session: u64,
             request: __rb_bindings::rapidbyte::plugin::types::RunRequest,
@@ -520,32 +1260,53 @@ fn gen_dest_methods(
             __rb_bindings::rapidbyte::plugin::types::RunSummary,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            #run_preamble
+            let sdk_request = from_component_run_request(request);
+            let base_ctx = CONTEXT.get().expect("Plugin not opened");
+            let rt = get_runtime();
+            let state_cell = get_state();
+            let state_ref = state_cell.borrow();
+            let conn = state_ref.as_ref().expect("Plugin not opened");
 
-            let summary = rt
-                .block_on(<#struct_name as #trait_path>::write_bulk(conn, &ctx, stream))
-                .map_err(to_component_error)?;
+            // Process each stream and collect results
+            let mut results = Vec::new();
+            for stream in sdk_request.streams {
+                let ctx = base_ctx.with_stream(&stream.stream_name);
+                let _ = ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
 
-            Ok(__rb_bindings::rapidbyte::plugin::types::RunSummary {
-                kind: __rb_bindings::rapidbyte::plugin::types::PluginKind::Destination,
-                read: None,
-                write: Some(__rb_bindings::rapidbyte::plugin::types::WriteSummary {
-                    records_written: summary.records_written,
-                    bytes_written: summary.bytes_written,
-                    batches_written: summary.batches_written,
-                    checkpoint_count: summary.checkpoint_count,
-                    records_failed: summary.records_failed,
-                }),
-                transform: None,
-            })
+                let summary = #write_dispatch;
+
+                let succeeded =
+                    !::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
+                let run_sum = write_summary_to_run_summary(&stream, summary, succeeded);
+                results.extend(run_sum.results);
+            }
+
+            Ok(to_component_run_summary(::rapidbyte_sdk::run::RunSummary { results }))
+        }
+
+        fn teardown(
+            _session: u64,
+            request: __rb_bindings::rapidbyte::plugin::types::TeardownRequest,
+        ) -> Result<
+            __rb_bindings::rapidbyte::plugin::types::TeardownReport,
+            __rb_bindings::rapidbyte::plugin::types::PluginError,
+        > {
+            let ctx = CONTEXT.get().expect("Plugin not opened");
+            let rt = get_runtime();
+            let state_cell = get_state();
+            let state_ref = state_cell.borrow();
+            let conn = state_ref.as_ref().expect("Plugin not opened");
+
+            let sdk_request = from_component_teardown_request(request);
+            rt.block_on(<#struct_name as #trait_path>::teardown(conn, ctx, sdk_request))
+                .map(to_component_teardown_report)
+                .map_err(to_component_error)
         }
     }
 }
 
 /// Generate transform-specific methods: run.
 fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> TokenStream {
-    let run_preamble = gen_run_preamble();
-
     quote! {
         fn run(
             _session: u64,
@@ -554,24 +1315,30 @@ fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
             __rb_bindings::rapidbyte::plugin::types::RunSummary,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            #run_preamble
+            let sdk_request = from_component_run_request(request);
+            let base_ctx = CONTEXT.get().expect("Plugin not opened");
+            let rt = get_runtime();
+            let state_cell = get_state();
+            let state_ref = state_cell.borrow();
+            let conn = state_ref.as_ref().expect("Plugin not opened");
 
-            let summary = rt
-                .block_on(<#struct_name as #trait_path>::transform(conn, &ctx, stream))
-                .map_err(to_component_error)?;
+            // Process each stream and collect results
+            let mut results = Vec::new();
+            for stream in sdk_request.streams {
+                let ctx = base_ctx.with_stream(&stream.stream_name);
+                let _ = ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
 
-            Ok(__rb_bindings::rapidbyte::plugin::types::RunSummary {
-                kind: __rb_bindings::rapidbyte::plugin::types::PluginKind::Transform,
-                read: None,
-                write: None,
-                transform: Some(__rb_bindings::rapidbyte::plugin::types::TransformSummary {
-                    records_in: summary.records_in,
-                    records_out: summary.records_out,
-                    bytes_in: summary.bytes_in,
-                    bytes_out: summary.bytes_out,
-                    batches_processed: summary.batches_processed,
-                }),
-            })
+                let summary = rt
+                    .block_on(<#struct_name as #trait_path>::transform(conn, &ctx, stream.clone()))
+                    .map_err(to_component_error)?;
+
+                let succeeded =
+                    !::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
+                let run_sum = transform_summary_to_run_summary(&stream, summary, succeeded);
+                results.extend(run_sum.results);
+            }
+
+            Ok(to_component_run_summary(::rapidbyte_sdk::run::RunSummary { results }))
         }
     }
 }
@@ -612,13 +1379,78 @@ mod tests {
     use syn::parse_quote;
 
     #[test]
-    fn destination_run_dispatches_through_write_bulk() {
+    fn lifecycle_validate_uses_current_stream_name() {
+        let struct_name: Ident = parse_quote!(TestTransform);
+        let trait_path = quote!(::rapidbyte_sdk::plugin::Transform);
+
+        let generated = gen_lifecycle_methods(&struct_name, &trait_path).to_string();
+
+        assert!(generated.contains("current_stream_name"));
+        assert!(generated.contains("with_stream"));
+    }
+
+    #[test]
+    fn common_run_summary_helpers_consult_reported_stream_errors() {
+        let struct_name: Ident = parse_quote!(TestSource);
+
+        let generated = gen_common(&struct_name).to_string();
+
+        assert!(generated.contains("take_reported_stream_error"));
+        assert!(generated.contains("succeeded : ! stream_failed"));
+    }
+
+    #[test]
+    fn destination_run_dispatches_through_write() {
         let struct_name: Ident = parse_quote!(TestDestination);
         let trait_path = quote!(::rapidbyte_sdk::plugin::Destination);
 
         let generated = gen_dest_methods(&struct_name, &trait_path, None).to_string();
 
-        assert!(generated.contains(":: write_bulk"));
-        assert!(!generated.contains(":: write ("));
+        assert!(generated.contains(":: write"));
+        assert!(generated.contains("write_summary_to_run_summary"));
+    }
+
+    #[test]
+    fn destination_run_dispatches_bulk_feature_through_write_bulk() {
+        let struct_name: Ident = parse_quote!(TestDestination);
+        let trait_path = quote!(::rapidbyte_sdk::plugin::Destination);
+        let features = ManifestFeatures {
+            has_partitioned_read: false,
+            has_cdc: false,
+            has_bulk_load: true,
+        };
+
+        let generated = gen_dest_methods(&struct_name, &trait_path, Some(&features)).to_string();
+
+        assert!(generated.contains("BulkDestination"));
+        assert!(generated.contains("write_bulk"));
+    }
+
+    #[test]
+    fn destination_and_transform_runs_preclear_and_helpers_are_pure() {
+        let struct_name: Ident = parse_quote!(TestTransform);
+        let destination_trait = quote!(::rapidbyte_sdk::plugin::Destination);
+        let transform_trait = quote!(::rapidbyte_sdk::plugin::Transform);
+
+        let destination_generated =
+            gen_dest_methods(&struct_name, &destination_trait, None).to_string();
+        let transform_generated = gen_transform_methods(&struct_name, &transform_trait).to_string();
+        let common_generated = gen_common(&struct_name).to_string();
+
+        assert!(destination_generated
+            .contains("let _ = :: rapidbyte_sdk :: host_ffi :: take_reported_stream_error"));
+        assert!(transform_generated
+            .contains("let _ = :: rapidbyte_sdk :: host_ffi :: take_reported_stream_error"));
+        assert!(common_generated.contains("fn write_summary_to_run_summary"));
+        assert!(common_generated
+            .contains("summary : :: rapidbyte_sdk :: metric :: WriteSummary , succeeded : bool"));
+    }
+
+    #[test]
+    fn stream_context_converters_preserve_effective_parallelism() {
+        let struct_name: Ident = parse_quote!(TestTransform);
+        let generated = gen_common(&struct_name).to_string();
+
+        assert!(generated.contains("effective_parallelism : ctx . effective_parallelism"));
     }
 }

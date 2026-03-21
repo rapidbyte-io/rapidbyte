@@ -14,16 +14,19 @@ pub enum ProtocolVersion {
     /// Version 5 — legacy protocol kept for compatibility checks.
     #[serde(rename = "5")]
     V5,
-    /// Version 6 — current stable protocol.
-    #[default]
+    /// Version 6 — previous stable protocol.
     #[serde(rename = "6")]
     V6,
+    /// Version 7 — current stable protocol.
+    #[default]
+    #[serde(rename = "7")]
+    V7,
 }
 
 impl ProtocolVersion {
     #[must_use]
     pub const fn current() -> Self {
-        Self::V6
+        Self::V7
     }
 }
 
@@ -100,6 +103,10 @@ pub enum Feature {
     BulkLoad,
     /// Source supports parallel partitioned reads (mod/range sharding).
     PartitionedRead,
+    /// Source can handle multiple streams in a single run invocation.
+    MultiStream,
+    /// Multi-stream CDC: one replication slot, many tables.
+    MultiStreamCdc,
 }
 
 /// Plugin self-description returned at initialization.
@@ -138,10 +145,37 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_default_is_v6() {
+    fn protocol_version_default_is_v7() {
         let v = ProtocolVersion::default();
         assert_eq!(v, ProtocolVersion::current());
-        assert_eq!(serde_json::to_string(&v).unwrap(), "\"6\"");
+        assert_eq!(v, ProtocolVersion::V7);
+        assert_eq!(serde_json::to_string(&v).unwrap(), "\"7\"");
+    }
+
+    #[test]
+    fn v7_protocol_version_roundtrip() {
+        let v = ProtocolVersion::V7;
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(json, "\"7\"");
+        let back: ProtocolVersion = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ProtocolVersion::V7);
+    }
+
+    #[test]
+    fn feature_multi_stream_serde() {
+        // MultiStream
+        let f = Feature::MultiStream;
+        let json = serde_json::to_string(&f).unwrap();
+        assert_eq!(json, "\"multi_stream\"");
+        let back: Feature = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, Feature::MultiStream);
+
+        // MultiStreamCdc
+        let f = Feature::MultiStreamCdc;
+        let json = serde_json::to_string(&f).unwrap();
+        assert_eq!(json, "\"multi_stream_cdc\"");
+        let back: Feature = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, Feature::MultiStreamCdc);
     }
 
     #[test]

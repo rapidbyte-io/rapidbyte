@@ -9,6 +9,7 @@ use ::arrow::array::{Int32Array, StringArray};
 use ::arrow::datatypes::{DataType, Field, Schema};
 use ::arrow::record_batch::RecordBatch;
 use rapidbyte_sdk::prelude::*;
+use rapidbyte_sdk::schema::{SchemaField, StreamSchema};
 use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;
 
@@ -43,54 +44,41 @@ pub struct TestSource {
 impl Source for TestSource {
     type Config = Config;
 
-    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
-        Ok((
-            Self { config },
-            PluginInfo {
-                protocol_version: ProtocolVersion::V6,
-                features: vec![],
-                default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
-            },
-        ))
+    async fn init(config: Self::Config) -> Result<Self, PluginError> {
+        Ok(Self { config })
     }
 
-    async fn discover(&mut self, ctx: &Context) -> Result<Catalog, PluginError> {
+    async fn discover(&self, ctx: &Context) -> Result<Vec<DiscoveredStream>, PluginError> {
         ctx.log(LogLevel::Info, "test-source: discover");
-        Ok(Catalog {
-            streams: vec![Stream {
-                name: "test-stream".to_string(),
-                schema: vec![
-                    ColumnSchema {
-                        name: "id".to_string(),
-                        data_type: ArrowDataType::Int32,
-                        nullable: false,
-                    },
-                    ColumnSchema {
-                        name: "value".to_string(),
-                        data_type: ArrowDataType::Utf8,
-                        nullable: true,
-                    },
+        Ok(vec![DiscoveredStream {
+            name: "test-stream".to_string(),
+            schema: StreamSchema {
+                fields: vec![
+                    SchemaField::new("id", "int32", false).with_primary_key(true),
+                    SchemaField::new("value", "utf8", true),
                 ],
-                supported_sync_modes: vec![SyncMode::FullRefresh],
+                primary_key: vec!["id".to_string()],
+                partition_keys: vec![],
                 source_defined_cursor: None,
-                source_defined_primary_key: Some(vec!["id".to_string()]),
-            }],
-        })
+                schema_id: None,
+            },
+            supported_sync_modes: vec![SyncMode::FullRefresh],
+            default_cursor_field: None,
+            estimated_row_count: None,
+            metadata_json: None,
+        }])
     }
 
     async fn validate(
-        _config: &Self::Config,
+        &self,
         _ctx: &Context,
-    ) -> Result<ValidationResult, PluginError> {
-        Ok(ValidationResult {
-            status: ValidationStatus::Success,
-            message: "Test source config is valid".to_string(),
-            warnings: Vec::new(),
-        })
+        _upstream: Option<&StreamSchema>,
+    ) -> Result<ValidationReport, PluginError> {
+        Ok(ValidationReport::success("Test source config is valid"))
     }
 
     async fn read(
-        &mut self,
+        &self,
         ctx: &Context,
         _stream: StreamContext,
     ) -> Result<ReadSummary, PluginError> {

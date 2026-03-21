@@ -345,30 +345,27 @@ pub struct {struct_name} {{
 impl Source for {struct_name} {{
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {{
-        Ok((
-            Self {{ config }},
-            PluginInfo {{
-                protocol_version: ProtocolVersion::current(),
-                features: vec![],
-                default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
-            }},
-        ))
+    async fn init(config: Self::Config) -> Result<Self, PluginError> {{
+        Ok(Self {{ config }})
     }}
 
-    async fn discover(&mut self, _ctx: &Context) -> Result<Catalog, PluginError> {{
-        discover::discover_catalog(&self.config)
+    async fn discover(&self, _ctx: &Context) -> Result<Vec<DiscoveredStream>, PluginError> {{
+        discover::discover_streams(&self.config)
     }}
 
-    async fn validate(config: &Self::Config, _ctx: &Context) -> Result<ValidationResult, PluginError> {{
-        client::validate(config).await
+    async fn validate(
+        &self,
+        _ctx: &Context,
+        _upstream: Option<&StreamSchema>,
+    ) -> Result<ValidationReport, PluginError> {{
+        client::validate(&self.config).await
     }}
 
-    async fn read(&mut self, ctx: &Context, stream: StreamContext) -> Result<ReadSummary, PluginError> {{
+    async fn read(&self, ctx: &Context, stream: StreamContext) -> Result<ReadSummary, PluginError> {{
         read::read_stream(&self.config, ctx, &stream).await
     }}
 
-    async fn close(&mut self, ctx: &Context) -> Result<(), PluginError> {{
+    async fn close(&self, ctx: &Context) -> Result<(), PluginError> {{
         ctx.log(LogLevel::Info, &format!("{{}}: close", env!("CARGO_PKG_NAME")));
         Ok(())
     }}
@@ -396,26 +393,23 @@ pub struct {struct_name} {{
 impl Destination for {struct_name} {{
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {{
-        Ok((
-            Self {{ config }},
-            PluginInfo {{
-                protocol_version: ProtocolVersion::current(),
-                features: vec![],
-                default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
-            }},
-        ))
+    async fn init(config: Self::Config) -> Result<Self, PluginError> {{
+        Ok(Self {{ config }})
     }}
 
-    async fn validate(config: &Self::Config, _ctx: &Context) -> Result<ValidationResult, PluginError> {{
-        client::validate(config).await
+    async fn validate(
+        &self,
+        _ctx: &Context,
+        _upstream: Option<&StreamSchema>,
+    ) -> Result<ValidationReport, PluginError> {{
+        client::validate(&self.config).await
     }}
 
-    async fn write(&mut self, ctx: &Context, stream: StreamContext) -> Result<WriteSummary, PluginError> {{
+    async fn write(&self, ctx: &Context, stream: StreamContext) -> Result<WriteSummary, PluginError> {{
         write::write_stream(&self.config, ctx, &stream).await
     }}
 
-    async fn close(&mut self, ctx: &Context) -> Result<(), PluginError> {{
+    async fn close(&self, ctx: &Context) -> Result<(), PluginError> {{
         ctx.log(LogLevel::Info, &format!("{{}}: close", env!("CARGO_PKG_NAME")));
         Ok(())
     }}
@@ -487,26 +481,20 @@ pub struct {struct_name} {{
 impl Transform for {struct_name} {{
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {{
-        Ok((
-            Self {{ config }},
-            PluginInfo {{
-                protocol_version: ProtocolVersion::current(),
-                features: vec![],
-                default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
-            }},
-        ))
+    async fn init(config: Self::Config) -> Result<Self, PluginError> {{
+        Ok(Self {{ config }})
     }}
 
     async fn validate(
-        config: &Self::Config,
+        &self,
         _ctx: &Context,
-    ) -> Result<ValidationResult, PluginError> {{
-        validate::validate_config(config)
+        _upstream: Option<&StreamSchema>,
+    ) -> Result<ValidationReport, PluginError> {{
+        validate::validate_config(&self.config)
     }}
 
     async fn transform(
-        &mut self,
+        &self,
         ctx: &Context,
         stream: StreamContext,
     ) -> Result<TransformSummary, PluginError> {{
@@ -524,11 +512,10 @@ fn gen_client_rs() -> &'static str {
 use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
-pub async fn validate(config: &Config) -> Result<ValidationResult, PluginError> {
+pub async fn validate(config: &Config) -> Result<ValidationReport, PluginError> {
     let _ = config;
-    Err(PluginError::config(
-        "UNIMPLEMENTED",
-        "Connection validation is not implemented yet".to_string(),
+    Ok(ValidationReport::failed(
+        "UNIMPLEMENTED: connection validation is not implemented yet",
     ))
 }
 "#
@@ -558,7 +545,7 @@ fn gen_discover_rs() -> &'static str {
 use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
-pub fn discover_catalog(config: &Config) -> Result<Catalog, PluginError> {
+pub fn discover_streams(config: &Config) -> Result<Vec<DiscoveredStream>, PluginError> {
     let _ = config;
     Err(PluginError::schema(
         "UNIMPLEMENTED",
@@ -616,18 +603,12 @@ fn gen_transform_validate_rs() -> &'static str {
 use crate::config::Config;
 use rapidbyte_sdk::prelude::*;
 
-pub fn validate_config(config: &Config) -> Result<ValidationResult, PluginError> {
+pub fn validate_config(config: &Config) -> Result<ValidationReport, PluginError> {
     match config.validate() {
-        Ok(()) => Ok(ValidationResult {
-            status: ValidationStatus::Success,
-            message: "Transform config is valid".to_string(),
-            warnings: Vec::new(),
-        }),
-        Err(message) => Ok(ValidationResult {
-            status: ValidationStatus::Failed,
-            message,
-            warnings: vec!["Replace the scaffold validation stub before shipping".to_string()],
-        }),
+        Ok(()) => Ok(ValidationReport::success("Transform config is valid")),
+        Err(message) => Ok(ValidationReport::failed(&format!(
+            "{message}. Replace the scaffold validation stub before shipping"
+        ))),
     }
 }
 "#
@@ -709,18 +690,31 @@ mod tests {
         assert!(readme.contains("NOT PRODUCTION-READY"));
         assert!(readme.contains("UNIMPLEMENTED"));
         assert!(main_rs.contains("#[rapidbyte_sdk::plugin(source)]"));
+        assert!(
+            main_rs.contains("async fn init(config: Self::Config) -> Result<Self, PluginError>")
+        );
+        assert!(main_rs.contains("async fn discover(&self, _ctx: &Context) -> Result<Vec<DiscoveredStream>, PluginError>"));
+        assert!(main_rs.contains("ValidationReport"));
+        assert!(!main_rs.contains("PluginInfo"));
+        assert!(!main_rs.contains("ValidationResult"));
+        assert!(!main_rs.contains("Result<Catalog, PluginError>"));
+        assert!(!main_rs.contains("&mut self"));
+        assert!(main_rs.contains("discover::discover_streams(&self.config)"));
         assert!(!config_rs.contains("3306"));
         assert!(config_rs.contains("pub struct Config"));
         assert!(client_rs.contains("NOT PRODUCTION-READY"));
-        assert!(client_rs.contains("PluginError::config("));
-        assert!(client_rs.contains("\"UNIMPLEMENTED\""));
+        assert!(client_rs.contains("ValidationReport::failed"));
+        assert!(!client_rs.contains("PluginError::config("));
         assert!(read_rs.contains("NOT PRODUCTION-READY"));
         assert!(read_rs.contains("PluginError::internal("));
         assert!(read_rs.contains("\"UNIMPLEMENTED\""));
         assert!(discover_rs.contains("NOT PRODUCTION-READY"));
         assert!(discover_rs.contains("PluginError::schema("));
         assert!(discover_rs.contains("\"UNIMPLEMENTED\""));
-        assert!(!client_rs.contains("ValidationStatus::Success"));
+        assert!(discover_rs.contains("Vec<DiscoveredStream>"));
+        assert!(!discover_rs.contains("Catalog"));
+        assert!(client_rs.contains("ValidationReport"));
+        assert!(!client_rs.contains("ValidationResult"));
         assert!(!read_rs.contains("records_read: 0"));
 
         assert_generated_rust_parses("source main.rs", &main_rs);
@@ -756,14 +750,22 @@ mod tests {
         assert!(readme.contains("NOT PRODUCTION-READY"));
         assert!(readme.contains("UNIMPLEMENTED"));
         assert!(main_rs.contains("#[rapidbyte_sdk::plugin(destination)]"));
+        assert!(
+            main_rs.contains("async fn init(config: Self::Config) -> Result<Self, PluginError>")
+        );
+        assert!(main_rs.contains("ValidationReport"));
+        assert!(!main_rs.contains("PluginInfo"));
+        assert!(!main_rs.contains("ValidationResult"));
+        assert!(!main_rs.contains("&mut self"));
         assert!(!config_rs.contains("3306"));
         assert!(client_rs.contains("NOT PRODUCTION-READY"));
-        assert!(client_rs.contains("PluginError::config("));
-        assert!(client_rs.contains("\"UNIMPLEMENTED\""));
+        assert!(client_rs.contains("ValidationReport::failed"));
+        assert!(!client_rs.contains("PluginError::config("));
+        assert!(client_rs.contains("ValidationReport"));
+        assert!(!client_rs.contains("ValidationResult"));
         assert!(write_rs.contains("NOT PRODUCTION-READY"));
         assert!(write_rs.contains("PluginError::internal("));
         assert!(write_rs.contains("\"UNIMPLEMENTED\""));
-        assert!(!client_rs.contains("ValidationStatus::Success"));
         assert!(!write_rs.contains("records_written: 0"));
 
         assert_generated_rust_parses("destination main.rs", &main_rs);
@@ -798,11 +800,19 @@ mod tests {
         assert!(readme.contains("NOT PRODUCTION-READY"));
         assert!(readme.contains("UNIMPLEMENTED"));
         assert!(main_rs.contains("#[rapidbyte_sdk::plugin(transform)]"));
-        assert!(main_rs.contains("validate::validate_config(config)"));
+        assert!(
+            main_rs.contains("async fn init(config: Self::Config) -> Result<Self, PluginError>")
+        );
+        assert!(main_rs.contains("validate::validate_config(&self.config)"));
+        assert!(main_rs.contains("ValidationReport"));
+        assert!(!main_rs.contains("PluginInfo"));
+        assert!(!main_rs.contains("ValidationResult"));
+        assert!(!main_rs.contains("&mut self"));
         assert!(config_rs.contains("NOT PRODUCTION-READY"));
         assert!(config_rs.contains("UNIMPLEMENTED"));
         assert!(config_rs.contains("pub fn validate(&self) -> Result<(), String>"));
-        assert!(validate_rs.contains("ValidationStatus::Failed"));
+        assert!(validate_rs.contains("ValidationReport::failed"));
+        assert!(!validate_rs.contains("ValidationResult"));
         assert!(validate_rs.contains("Replace the scaffold validation stub before shipping"));
         assert!(transform_rs.contains("NOT PRODUCTION-READY"));
         assert!(transform_rs.contains("PluginError::internal("));

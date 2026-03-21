@@ -28,10 +28,11 @@ pub mod transform_bindings {
 
 // --- Error + validation converters + Host trait impls ---
 
-use rapidbyte_types::error::{
-    BackoffClass, CommitState, ErrorCategory, ErrorScope, PluginError, ValidationResult,
-    ValidationStatus,
-};
+use rapidbyte_types::batch::BatchMetadata;
+use rapidbyte_types::checkpoint::{CheckpointKind, CursorUpdate, StateMutation, StateScope};
+use rapidbyte_types::error::{BackoffClass, CommitState, ErrorCategory, ErrorScope, PluginError};
+use rapidbyte_types::schema::{FieldConstraint, FieldRequirement, SchemaField, StreamSchema};
+use rapidbyte_types::validation::{ValidationReport, ValidationStatus};
 
 use crate::host_state::ComponentHostState;
 use crate::socket::{SocketReadResult, SocketWriteResult};
@@ -79,7 +80,8 @@ macro_rules! define_error_converters {
                     ErrorCategory::Data => CErrorCategory::Data,
                     ErrorCategory::Schema => CErrorCategory::Schema,
                     ErrorCategory::Frame => CErrorCategory::Frame,
-                    ErrorCategory::Internal | _ => CErrorCategory::Internal,
+                    ErrorCategory::Cancelled => CErrorCategory::Cancelled,
+                    _ => CErrorCategory::Internal,
                 },
                 scope: match error.scope {
                     ErrorScope::Stream => CErrorScope::PerStream,
@@ -134,6 +136,9 @@ macro_rules! define_error_converters {
                         ErrorCategory::Internal
                     }
                     $module::rapidbyte::plugin::types::ErrorCategory::Frame => ErrorCategory::Frame,
+                    $module::rapidbyte::plugin::types::ErrorCategory::Cancelled => {
+                        ErrorCategory::Cancelled
+                    }
                 },
                 scope: match error.scope {
                     $module::rapidbyte::plugin::types::ErrorScope::PerStream => ErrorScope::Stream,
@@ -170,13 +175,22 @@ macro_rules! define_error_converters {
 }
 
 macro_rules! impl_host_trait_for_world {
-    ($module:ident, $to_world_error:ident) => {
+    ($module:ident, $to_world_error:ident, $from_world_fn:ident) => {
         impl $module::rapidbyte::plugin::host::Host for ComponentHostState {
             fn emit_batch(
                 &mut self,
                 handle: u64,
+                metadata: $module::rapidbyte::plugin::types::BatchMetadata,
             ) -> std::result::Result<(), $module::rapidbyte::plugin::types::PluginError> {
-                self.emit_batch_impl(handle).map_err($to_world_error)
+                let meta = BatchMetadata {
+                    stream_index: metadata.stream_index,
+                    schema_fingerprint: metadata.schema_fingerprint,
+                    sequence_number: metadata.sequence_number,
+                    compression: metadata.compression,
+                    record_count: metadata.record_count,
+                    byte_count: metadata.byte_count,
+                };
+                self.emit_batch_impl(handle, meta).map_err($to_world_error)
             }
 
             fn next_batch(
@@ -186,16 +200,111 @@ macro_rules! impl_host_trait_for_world {
                 self.next_batch_impl().map_err($to_world_error)
             }
 
+            fn current_stream_name(&mut self) -> String {
+                self.current_stream().to_string()
+            }
+
+            fn next_batch_metadata(
+                &mut self,
+                handle: u64,
+            ) -> std::result::Result<
+                $module::rapidbyte::plugin::types::BatchMetadata,
+                $module::rapidbyte::plugin::types::PluginError,
+            > {
+                self.next_batch_metadata_impl(handle)
+                    .map(|bm| $module::rapidbyte::plugin::types::BatchMetadata {
+                        stream_index: bm.stream_index,
+                        schema_fingerprint: bm.schema_fingerprint,
+                        sequence_number: bm.sequence_number,
+                        compression: bm.compression,
+                        record_count: bm.record_count,
+                        byte_count: bm.byte_count,
+                    })
+                    .map_err($to_world_error)
+            }
+
             fn log(&mut self, level: u32, msg: String) {
                 self.log_impl(level, msg);
             }
 
-            fn checkpoint(
+            fn checkpoint_begin(
                 &mut self,
-                kind: u32,
-                payload_json: String,
+                kind: $module::rapidbyte::plugin::types::CheckpointKind,
+            ) -> std::result::Result<u64, $module::rapidbyte::plugin::types::PluginError> {
+                let kind = match kind {
+                    $module::rapidbyte::plugin::types::CheckpointKind::Source => {
+                        CheckpointKind::Source
+                    }
+                    $module::rapidbyte::plugin::types::CheckpointKind::Destination => {
+                        CheckpointKind::Dest
+                    }
+                    $module::rapidbyte::plugin::types::CheckpointKind::Transform => {
+                        CheckpointKind::Transform
+                    }
+                };
+                self.checkpoint_begin_impl(kind).map_err($to_world_error)
+            }
+
+            fn checkpoint_set_cursor(
+                &mut self,
+                txn: u64,
+                cursor: $module::rapidbyte::plugin::types::CursorUpdate,
             ) -> std::result::Result<(), $module::rapidbyte::plugin::types::PluginError> {
-                self.checkpoint_impl(kind, payload_json)
+                let cursor = CursorUpdate {
+                    stream_name: cursor.stream_name,
+                    cursor_field: cursor.cursor_field,
+                    cursor_value_json: cursor.cursor_value_json,
+                };
+                self.checkpoint_set_cursor_impl(txn, cursor)
+                    .map_err($to_world_error)
+            }
+
+            fn checkpoint_set_state(
+                &mut self,
+                txn: u64,
+                mutation: $module::rapidbyte::plugin::types::StateMutation,
+            ) -> std::result::Result<(), $module::rapidbyte::plugin::types::PluginError> {
+                let scope = match mutation.scope {
+                    $module::rapidbyte::plugin::types::StateScope::Pipeline => StateScope::Pipeline,
+                    $module::rapidbyte::plugin::types::StateScope::PerStream => StateScope::Stream,
+                    $module::rapidbyte::plugin::types::StateScope::PluginInstance => {
+                        StateScope::PluginInstance
+                    }
+                };
+                let mutation = StateMutation {
+                    scope,
+                    key: mutation.key,
+                    value: mutation.value,
+                };
+                self.checkpoint_set_state_impl(txn, mutation)
+                    .map_err($to_world_error)
+            }
+
+            fn checkpoint_commit(
+                &mut self,
+                txn: u64,
+                records_processed: u64,
+                bytes_processed: u64,
+            ) -> std::result::Result<(), $module::rapidbyte::plugin::types::PluginError> {
+                self.checkpoint_commit_impl(txn, records_processed, bytes_processed)
+                    .map_err($to_world_error)
+            }
+
+            fn checkpoint_abort(&mut self, txn: u64) {
+                self.checkpoint_abort_impl(txn);
+            }
+
+            fn is_cancelled(&mut self) -> bool {
+                self.is_cancelled_impl()
+            }
+
+            fn stream_error(
+                &mut self,
+                stream_index: u32,
+                error: $module::rapidbyte::plugin::types::PluginError,
+            ) -> std::result::Result<(), $module::rapidbyte::plugin::types::PluginError> {
+                let sdk_error = $from_world_fn(error);
+                self.stream_error_impl(stream_index, sdk_error)
                     .map_err($to_world_error)
             }
 
@@ -242,31 +351,34 @@ macro_rules! impl_host_trait_for_world {
 
             fn state_get(
                 &mut self,
-                scope: u32,
+                scope: $module::rapidbyte::plugin::types::StateScope,
                 key: String,
             ) -> std::result::Result<Option<String>, $module::rapidbyte::plugin::types::PluginError>
             {
+                let scope = match scope {
+                    $module::rapidbyte::plugin::types::StateScope::Pipeline => StateScope::Pipeline,
+                    $module::rapidbyte::plugin::types::StateScope::PerStream => StateScope::Stream,
+                    $module::rapidbyte::plugin::types::StateScope::PluginInstance => {
+                        StateScope::PluginInstance
+                    }
+                };
                 self.state_get_impl(scope, key).map_err($to_world_error)
             }
 
             fn state_put(
                 &mut self,
-                scope: u32,
+                scope: $module::rapidbyte::plugin::types::StateScope,
                 key: String,
                 val: String,
             ) -> std::result::Result<(), $module::rapidbyte::plugin::types::PluginError> {
+                let scope = match scope {
+                    $module::rapidbyte::plugin::types::StateScope::Pipeline => StateScope::Pipeline,
+                    $module::rapidbyte::plugin::types::StateScope::PerStream => StateScope::Stream,
+                    $module::rapidbyte::plugin::types::StateScope::PluginInstance => {
+                        StateScope::PluginInstance
+                    }
+                };
                 self.state_put_impl(scope, key, val)
-                    .map_err($to_world_error)
-            }
-
-            fn state_cas(
-                &mut self,
-                scope: u32,
-                key: String,
-                expected: Option<String>,
-                new_val: String,
-            ) -> std::result::Result<bool, $module::rapidbyte::plugin::types::PluginError> {
-                self.state_cas_impl(scope, key, expected, new_val)
                     .map_err($to_world_error)
             }
 
@@ -376,8 +488,8 @@ macro_rules! define_validation_to_sdk {
     ($fn_name:ident, $module:ident) => {
         pub fn $fn_name(
             value: $module::rapidbyte::plugin::types::ValidationReport,
-        ) -> ValidationResult {
-            ValidationResult {
+        ) -> ValidationReport {
+            ValidationReport {
                 status: match value.status {
                     $module::rapidbyte::plugin::types::ValidationStatus::Success => {
                         ValidationStatus::Success
@@ -391,6 +503,51 @@ macro_rules! define_validation_to_sdk {
                 },
                 message: value.message,
                 warnings: value.warnings,
+                output_schema: value.output_schema.map(|s| StreamSchema {
+                    fields: s
+                        .fields
+                        .into_iter()
+                        .map(|f| SchemaField {
+                            name: f.name,
+                            arrow_type: f.arrow_type,
+                            nullable: f.nullable,
+                            is_primary_key: f.is_primary_key,
+                            is_generated: f.is_generated,
+                            is_partition_key: f.is_partition_key,
+                            default_value: f.default_value,
+                        })
+                        .collect(),
+                    primary_key: s.primary_key,
+                    partition_keys: s.partition_keys,
+                    source_defined_cursor: s.source_defined_cursor,
+                    schema_id: s.schema_id,
+                }),
+                field_requirements: value.field_requirements.map(|reqs| {
+                    reqs.into_iter()
+                        .map(|r| FieldRequirement {
+                            field_name: r.field_name,
+                            constraint: match r.constraint {
+                                $module::rapidbyte::plugin::types::FieldConstraint::FieldRequired => {
+                                    FieldConstraint::FieldRequired
+                                }
+                                $module::rapidbyte::plugin::types::FieldConstraint::FieldOptional => {
+                                    FieldConstraint::FieldOptional
+                                }
+                                $module::rapidbyte::plugin::types::FieldConstraint::FieldForbidden => {
+                                    FieldConstraint::FieldForbidden
+                                }
+                                $module::rapidbyte::plugin::types::FieldConstraint::FieldRecommended => {
+                                    FieldConstraint::FieldRecommended
+                                }
+                                $module::rapidbyte::plugin::types::FieldConstraint::TypeIncompatible => {
+                                    FieldConstraint::TypeIncompatible
+                                }
+                            },
+                            reason: r.reason,
+                            accepted_types: r.accepted_types,
+                        })
+                        .collect()
+                }),
             }
         }
     };
@@ -399,7 +556,7 @@ macro_rules! define_validation_to_sdk {
 macro_rules! define_world_glue {
     ($module:ident, $to_world_error:ident, $from_world_error:ident, $validation_fn:ident) => {
         define_error_converters!($to_world_error, $from_world_error, $module);
-        impl_host_trait_for_world!($module, $to_world_error);
+        impl_host_trait_for_world!($module, $to_world_error, $from_world_error);
         impl $module::rapidbyte::plugin::types::Host for ComponentHostState {}
         define_validation_to_sdk!($validation_fn, $module);
     };
@@ -412,7 +569,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v5_world_bindings_exist() {
+    fn v7_world_bindings_exist() {
         let _ = std::any::TypeId::of::<source_bindings::RapidbyteSource>();
         let _ = std::any::TypeId::of::<dest_bindings::RapidbyteDestination>();
         let _ = std::any::TypeId::of::<transform_bindings::RapidbyteTransform>();
@@ -430,6 +587,8 @@ mod tests {
                 "missing live check".to_string(),
                 "using defaults".to_string(),
             ],
+            output_schema: None,
+            field_requirements: None,
         };
 
         let converted = source_validation_to_sdk(report);
@@ -443,5 +602,74 @@ mod tests {
                 "using defaults".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn source_validation_conversion_maps_output_schema() {
+        let report = source_bindings::rapidbyte::plugin::types::ValidationReport {
+            status: source_bindings::rapidbyte::plugin::types::ValidationStatus::Success,
+            message: "ok".to_string(),
+            warnings: vec![],
+            output_schema: Some(source_bindings::rapidbyte::plugin::types::StreamSchema {
+                fields: vec![source_bindings::rapidbyte::plugin::types::SchemaField {
+                    name: "id".to_string(),
+                    arrow_type: "int64".to_string(),
+                    nullable: false,
+                    is_primary_key: true,
+                    is_generated: false,
+                    is_partition_key: false,
+                    default_value: None,
+                }],
+                primary_key: vec!["id".to_string()],
+                partition_keys: vec![],
+                source_defined_cursor: None,
+                schema_id: None,
+            }),
+            field_requirements: None,
+        };
+
+        let converted = source_validation_to_sdk(report);
+        let schema = converted.output_schema.unwrap();
+        assert_eq!(schema.fields.len(), 1);
+        assert_eq!(schema.fields[0].name, "id");
+        assert!(schema.fields[0].is_primary_key);
+    }
+
+    #[test]
+    fn source_validation_conversion_maps_field_requirements() {
+        let report = source_bindings::rapidbyte::plugin::types::ValidationReport {
+            status: source_bindings::rapidbyte::plugin::types::ValidationStatus::Warning,
+            message: "constraints".to_string(),
+            warnings: vec![],
+            output_schema: None,
+            field_requirements: Some(vec![
+                source_bindings::rapidbyte::plugin::types::FieldRequirement {
+                    field_name: "email".to_string(),
+                    constraint:
+                        source_bindings::rapidbyte::plugin::types::FieldConstraint::FieldRequired,
+                    reason: "destination needs email".to_string(),
+                    accepted_types: Some(vec!["utf8".to_string()]),
+                },
+            ]),
+        };
+
+        let converted = source_validation_to_sdk(report);
+        let reqs = converted.field_requirements.unwrap();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].field_name, "email");
+        assert_eq!(reqs[0].constraint, FieldConstraint::FieldRequired);
+    }
+
+    #[test]
+    fn error_category_cancelled_roundtrips() {
+        let err = PluginError::cancelled("TEST_CANCEL", "test cancellation");
+        let wit_err = to_source_error(err);
+        assert!(matches!(
+            wit_err.category,
+            source_bindings::rapidbyte::plugin::types::ErrorCategory::Cancelled
+        ));
+
+        let back = source_error_to_sdk(wit_err);
+        assert_eq!(back.category, ErrorCategory::Cancelled);
     }
 }

@@ -140,11 +140,25 @@ enum Commands {
     Check {
         /// Path to pipeline YAML file
         pipeline: PathBuf,
+        /// Run apply phase after validation passes (provision resources)
+        #[arg(long)]
+        apply: bool,
+        /// Report planned apply actions without executing them (requires --apply)
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Discover available streams from a source plugin
     Discover {
         /// Path to pipeline YAML file
         pipeline: PathBuf,
+    },
+    /// Tear down resources provisioned by a pipeline
+    Teardown {
+        /// Path to pipeline YAML file
+        pipeline: PathBuf,
+        /// Reason for teardown (forwarded to plugins)
+        #[arg(long, default_value = "pipeline_deleted")]
+        reason: String,
     },
     /// Manage plugins (pull, push, inspect, list, remove)
     Plugin {
@@ -498,13 +512,25 @@ async fn main() -> ExitCode {
             )
             .await
         }
-        Commands::Check { pipeline } => {
+        Commands::Check {
+            pipeline,
+            apply,
+            dry_run,
+        } => {
             let Some(secrets) =
                 try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id)
             else {
                 return ExitCode::FAILURE;
             };
-            commands::check::execute(&pipeline, verbosity, &registry_config, &secrets).await
+            commands::check::execute(
+                &pipeline,
+                verbosity,
+                &registry_config,
+                &secrets,
+                apply,
+                dry_run,
+            )
+            .await
         }
         Commands::Discover { pipeline } => {
             let Some(secrets) =
@@ -513,6 +539,15 @@ async fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             };
             commands::discover::execute(&pipeline, verbosity, &registry_config, &secrets).await
+        }
+        Commands::Teardown { pipeline, reason } => {
+            let Some(secrets) =
+                try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id)
+            else {
+                return ExitCode::FAILURE;
+            };
+            commands::teardown::execute(&pipeline, &reason, verbosity, &registry_config, &secrets)
+                .await
         }
         Commands::Plugin { command } => commands::plugin::execute(command, &registry_config).await,
         Commands::Scaffold { name, output } => commands::scaffold::run(&name, output.as_deref()),

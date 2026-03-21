@@ -19,6 +19,7 @@ pub mod plugin;
 pub mod run;
 pub mod scaffold;
 pub mod status;
+pub mod teardown;
 pub mod transport;
 pub mod watch;
 

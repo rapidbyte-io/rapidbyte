@@ -4,6 +4,7 @@
 //! execution: resolve plugins, load cursors, execute streams, finalize.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
 
@@ -25,10 +26,20 @@ use crate::application::{extract_permissions, parse_plugin_id};
 use crate::domain::error::PipelineError;
 use crate::domain::outcome::{PipelineCounts, PipelineResult, SourceTiming, StreamShardMetric};
 use crate::domain::ports::runner::{
-    DestinationRunParams, SourceOutcome, SourceRunParams, TransformRunParams,
+    ApplyParams, DestinationRunParams, SourceOutcome, SourceRunParams, TransformRunParams,
 };
 use crate::domain::progress::{Phase, ProgressEvent};
 use crate::domain::retry::{RetryDecision, RetryPolicy};
+
+struct AbortTaskOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
 
 /// Convert a `CompressionCodec` enum into its wire-format string name.
 fn compression_name(codec: rapidbyte_types::compression::CompressionCodec) -> &'static str {
@@ -127,6 +138,19 @@ pub async fn run_pipeline(
     let mut attempt: u32 = 0;
     let overall_start = Instant::now();
 
+    // Cooperative cancellation flag for WASM plugins. The spawned task
+    // watches the CancellationToken and sets the AtomicBool so plugins
+    // that poll `is_cancelled()` can exit promptly.
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let _cancel_watcher = {
+        let flag = Arc::clone(&cancel_flag);
+        let token = cancel.clone();
+        AbortTaskOnDrop(Some(tokio::spawn(async move {
+            token.cancelled().await;
+            flag.store(true, Ordering::Relaxed);
+        })))
+    };
+
     loop {
         attempt += 1;
 
@@ -170,6 +194,57 @@ pub async fn run_pipeline(
                 )
                 .await?;
             transform_resolved.push(resolved);
+        }
+
+        // 2b. Apply phase — provision resources once so retries do not
+        // repeat side effects.
+        if attempt == 1 {
+            let (src_apply_id, src_apply_ver) = parse_plugin_id(&pipeline.source.use_ref);
+            let (dst_apply_id, dst_apply_ver) = parse_plugin_id(&pipeline.destination.use_ref);
+            let src_apply_permissions = extract_permissions(&source_resolved);
+            let dst_apply_permissions = extract_permissions(&dest_resolved);
+            let src_apply_overrides = build_sandbox_overrides(
+                pipeline.source.permissions.as_ref(),
+                pipeline.source.limits.as_ref(),
+                source_resolved.manifest.as_ref(),
+            )?;
+            let dst_apply_overrides = build_sandbox_overrides(
+                pipeline.destination.permissions.as_ref(),
+                pipeline.destination.limits.as_ref(),
+                dest_resolved.manifest.as_ref(),
+            )?;
+
+            let apply_streams = crate::application::build_apply_streams(pipeline);
+
+            let _src_apply = ctx
+                .runner
+                .apply(&ApplyParams {
+                    wasm_path: source_resolved.wasm_path.clone(),
+                    kind: rapidbyte_types::wire::PluginKind::Source,
+                    plugin_id: src_apply_id,
+                    plugin_version: src_apply_ver,
+                    config: pipeline.source.config.clone(),
+                    streams: apply_streams.clone(),
+                    dry_run: false,
+                    permissions: src_apply_permissions,
+                    sandbox_overrides: src_apply_overrides,
+                })
+                .await?;
+
+            let _dst_apply = ctx
+                .runner
+                .apply(&ApplyParams {
+                    wasm_path: dest_resolved.wasm_path.clone(),
+                    kind: rapidbyte_types::wire::PluginKind::Destination,
+                    plugin_id: dst_apply_id,
+                    plugin_version: dst_apply_ver,
+                    config: pipeline.destination.config.clone(),
+                    streams: apply_streams,
+                    dry_run: false,
+                    permissions: dst_apply_permissions,
+                    sandbox_overrides: dst_apply_overrides,
+                })
+                .await?;
         }
 
         // 3. Report Running phase
@@ -217,7 +292,7 @@ pub async fn run_pipeline(
         // using defaults. Channel capacity also comes from config.
         let stream_limits = build_stream_limits(&pipeline.resources)?;
 
-        for stream_cfg in &pipeline.source.streams {
+        for (stream_idx, stream_cfg) in pipeline.source.streams.iter().enumerate() {
             if cancel.is_cancelled() {
                 return Err(PipelineError::Cancelled);
             }
@@ -300,7 +375,15 @@ pub async fn run_pipeline(
             let stream_ctx = rapidbyte_types::stream::StreamContext {
                 stream_name: stream_name.clone(),
                 source_stream_name: None,
-                schema: rapidbyte_types::catalog::SchemaHint::Columns(vec![]),
+                #[allow(clippy::cast_possible_truncation)]
+                stream_index: stream_idx as u32,
+                schema: rapidbyte_types::schema::StreamSchema {
+                    fields: vec![],
+                    primary_key: pipeline.destination.primary_key.clone(),
+                    partition_keys: vec![],
+                    source_defined_cursor: None,
+                    schema_id: None,
+                },
                 sync_mode: stream_cfg.sync_mode,
                 cursor_info,
                 limits: stream_limits.clone(),
@@ -376,6 +459,7 @@ pub async fn run_pipeline(
                             });
                         }))
                     },
+                    cancel_flag: Arc::clone(&cancel_flag),
                 };
                 tokio::spawn(async move { runner.run_source(params).await })
             };
@@ -409,6 +493,7 @@ pub async fn run_pipeline(
                     frame_sender: next_tx,
                     dlq_records: Arc::clone(&stream_dlq),
                     transform_index: i,
+                    cancel_flag: Arc::clone(&cancel_flag),
                 };
                 transform_handles.push(tokio::spawn(
                     async move { runner.run_transform(params).await },
@@ -440,6 +525,7 @@ pub async fn run_pipeline(
                     frame_receiver: current_rx,
                     dlq_records: Arc::clone(&stream_dlq),
                     stats: Arc::clone(&stats),
+                    cancel_flag: Arc::clone(&cancel_flag),
                 };
                 tokio::spawn(async move { runner.run_destination(params).await })
             };
@@ -1119,6 +1205,11 @@ destination:
 
         assert_eq!(result.retry_count, 1, "expected 1 retry");
         assert_eq!(result.counts.records_read, 100);
+        assert_eq!(
+            tc.runner.apply_calls().len(),
+            2,
+            "apply should run once for source and destination"
+        );
 
         // Verify RetryScheduled event was emitted
         let events = tc.progress.events();
@@ -1470,6 +1561,68 @@ destination:
         assert_eq!(result.counts.records_read, 0);
         assert_eq!(result.counts.records_written, 0);
         assert_eq!(result.retry_count, 0);
+    }
+
+    #[tokio::test]
+    async fn run_pipeline_apply_failure_returns_error() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+        tc.runner
+            .enqueue_apply(Err(PipelineError::infra("source apply failed")));
+
+        let pipeline = test_pipeline_config("src", "dst", &["users"]);
+        let cancel = CancellationToken::new();
+        let result = run_pipeline(&tc.ctx, &pipeline, cancel).await;
+
+        match result {
+            Err(PipelineError::Infrastructure(err)) => {
+                assert!(err.to_string().contains("source apply failed"));
+            }
+            other => panic!("expected source apply failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_pipeline_apply_receives_configured_streams() {
+        let tc = fake_context();
+        tc.resolver.register("src", test_resolved_plugin());
+        tc.resolver.register("dst", test_resolved_plugin());
+        tc.runner.enqueue_source(Ok(make_source_outcome(10, 100)));
+        tc.runner
+            .enqueue_destination(Ok(make_dest_outcome(10, 100)));
+
+        let pipeline: PipelineConfig = serde_yaml::from_str(
+            r#"
+version: "1.0"
+pipeline: test-pipeline
+source:
+  use: src
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+      columns: ["id", "email"]
+destination:
+  use: dst
+  config: {}
+  write_mode: append
+"#,
+        )
+        .unwrap();
+
+        let cancel = CancellationToken::new();
+        let _ = run_pipeline(&tc.ctx, &pipeline, cancel).await.unwrap();
+
+        let apply_calls = tc.runner.apply_calls();
+        assert_eq!(apply_calls.len(), 2);
+        assert_eq!(apply_calls[0].streams.len(), 1);
+        assert_eq!(apply_calls[1].streams.len(), 1);
+        assert_eq!(apply_calls[0].streams[0].stream_name, "users");
+        assert_eq!(
+            apply_calls[0].streams[0].selected_columns.as_deref(),
+            Some(&["id".to_string(), "email".to_string()][..])
+        );
     }
 
     // -----------------------------------------------------------------------

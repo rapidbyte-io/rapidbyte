@@ -4,17 +4,23 @@
 //! and destination plugins through a trait boundary.
 
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex};
 
 use async_trait::async_trait;
 use rapidbyte_runtime::{Frame, SandboxOverrides};
 use rapidbyte_types::checkpoint::Checkpoint;
+pub use rapidbyte_types::discovery::DiscoveredStream;
+use rapidbyte_types::discovery::PluginSpec;
 use rapidbyte_types::envelope::DlqRecord;
-use rapidbyte_types::error::ValidationResult;
+use rapidbyte_types::lifecycle::{ApplyReport, TeardownReport};
 use rapidbyte_types::manifest::Permissions;
 use rapidbyte_types::metric::{ReadSummary, TransformSummary, WriteSummary};
+use rapidbyte_types::schema::StreamSchema;
 use rapidbyte_types::state::RunStats;
 use rapidbyte_types::stream::StreamContext;
+use rapidbyte_types::validation::{PrerequisitesReport, ValidationReport};
+use rapidbyte_types::wire::PluginKind;
 
 use crate::domain::error::PipelineError;
 
@@ -50,6 +56,8 @@ pub struct SourceRunParams {
     pub stats: Arc<Mutex<RunStats>>,
     /// Optional callback invoked after each batch is emitted.
     pub on_batch_emitted: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+    /// Cooperative cancellation flag shared with the WASM host state.
+    pub cancel_flag: Arc<AtomicBool>,
 }
 
 /// Parameters for running a transform plugin on a single stream.
@@ -82,6 +90,8 @@ pub struct TransformRunParams {
     pub dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     /// Zero-based index of this transform in the pipeline.
     pub transform_index: usize,
+    /// Cooperative cancellation flag shared with the WASM host state.
+    pub cancel_flag: Arc<AtomicBool>,
 }
 
 /// Parameters for running a destination plugin on a single stream.
@@ -112,6 +122,8 @@ pub struct DestinationRunParams {
     pub dlq_records: Arc<Mutex<Vec<DlqRecord>>>,
     /// Shared run stats accumulator.
     pub stats: Arc<Mutex<RunStats>>,
+    /// Cooperative cancellation flag shared with the WASM host state.
+    pub cancel_flag: Arc<AtomicBool>,
 }
 
 /// Parameters for validating a plugin configuration.
@@ -119,7 +131,7 @@ pub struct ValidateParams {
     /// Path to the compiled WASM module.
     pub wasm_path: PathBuf,
     /// Plugin kind (source, destination, transform).
-    pub kind: rapidbyte_types::wire::PluginKind,
+    pub kind: PluginKind,
     /// Plugin identifier.
     pub plugin_id: String,
     /// Plugin version string.
@@ -132,6 +144,8 @@ pub struct ValidateParams {
     pub permissions: Option<Permissions>,
     /// Pipeline-level sandbox overrides (permissions/limits from YAML config).
     pub sandbox_overrides: Option<SandboxOverrides>,
+    /// Upstream schema for schema negotiation (e.g. source schema passed to destination).
+    pub upstream_schema: Option<StreamSchema>,
 }
 
 /// Parameters for discovering available streams from a source plugin.
@@ -144,6 +158,84 @@ pub struct DiscoverParams {
     pub plugin_version: String,
     /// Plugin configuration as JSON.
     pub config: serde_json::Value,
+    /// Manifest-declared permissions.
+    pub permissions: Option<Permissions>,
+    /// Pipeline-level sandbox overrides (permissions/limits from YAML config).
+    pub sandbox_overrides: Option<SandboxOverrides>,
+}
+
+/// Parameters for plugin spec retrieval.
+#[derive(Debug, Clone)]
+pub struct SpecParams {
+    /// Path to the compiled WASM module.
+    pub wasm_path: PathBuf,
+    /// Plugin kind (source, destination, transform).
+    pub kind: PluginKind,
+    /// Plugin identifier.
+    pub plugin_id: String,
+    /// Plugin version string.
+    pub plugin_version: String,
+}
+
+/// Parameters for prerequisites check.
+#[derive(Debug, Clone)]
+pub struct PrerequisitesParams {
+    /// Path to the compiled WASM module.
+    pub wasm_path: PathBuf,
+    /// Plugin kind (source, destination, transform).
+    pub kind: PluginKind,
+    /// Plugin identifier.
+    pub plugin_id: String,
+    /// Plugin version string.
+    pub plugin_version: String,
+    /// Plugin configuration as JSON.
+    pub config: serde_json::Value,
+    /// Manifest-declared permissions.
+    pub permissions: Option<Permissions>,
+    /// Pipeline-level sandbox overrides (permissions/limits from YAML config).
+    pub sandbox_overrides: Option<SandboxOverrides>,
+}
+
+/// Parameters for apply (resource provisioning).
+#[derive(Debug, Clone)]
+pub struct ApplyParams {
+    /// Path to the compiled WASM module.
+    pub wasm_path: PathBuf,
+    /// Plugin kind (source, destination, transform).
+    pub kind: PluginKind,
+    /// Plugin identifier.
+    pub plugin_id: String,
+    /// Plugin version string.
+    pub plugin_version: String,
+    /// Plugin configuration as JSON.
+    pub config: serde_json::Value,
+    /// Stream contexts for schema apply.
+    pub streams: Vec<StreamContext>,
+    /// If `true`, report planned actions without executing them.
+    pub dry_run: bool,
+    /// Manifest-declared permissions.
+    pub permissions: Option<Permissions>,
+    /// Pipeline-level sandbox overrides (permissions/limits from YAML config).
+    pub sandbox_overrides: Option<SandboxOverrides>,
+}
+
+/// Parameters for teardown (resource cleanup).
+#[derive(Debug, Clone)]
+pub struct TeardownParams {
+    /// Path to the compiled WASM module.
+    pub wasm_path: PathBuf,
+    /// Plugin kind (source, destination, transform).
+    pub kind: PluginKind,
+    /// Plugin identifier.
+    pub plugin_id: String,
+    /// Plugin version string.
+    pub plugin_version: String,
+    /// Plugin configuration as JSON.
+    pub config: serde_json::Value,
+    /// Names of streams to tear down.
+    pub streams: Vec<String>,
+    /// Human-readable reason for the teardown.
+    pub reason: String,
     /// Manifest-declared permissions.
     pub permissions: Option<Permissions>,
     /// Pipeline-level sandbox overrides (permissions/limits from YAML config).
@@ -190,16 +282,7 @@ pub struct DestinationOutcome {
 #[derive(Debug, Clone)]
 pub struct CheckComponentStatus {
     /// Validation result from the plugin.
-    pub validation: ValidationResult,
-}
-
-/// A stream discovered by a source plugin.
-#[derive(Debug, Clone)]
-pub struct DiscoveredStream {
-    /// Fully-qualified stream name (e.g. `"public.users"`).
-    pub name: String,
-    /// JSON-serialized catalog returned by the plugin.
-    pub catalog_json: String,
+    pub validation: ValidationReport,
 }
 
 // ---------------------------------------------------------------------------
@@ -241,4 +324,31 @@ pub trait PluginRunner: Send + Sync {
         &self,
         params: &DiscoverParams,
     ) -> Result<Vec<DiscoveredStream>, PipelineError>;
+
+    /// Retrieve the plugin's spec (protocol version, config schema, features).
+    async fn spec(&self, params: &SpecParams) -> Result<PluginSpec, PipelineError> {
+        let _ = params;
+        Ok(PluginSpec::from_manifest())
+    }
+
+    /// Run prerequisite checks against the plugin (connectivity, permissions, etc.).
+    async fn prerequisites(
+        &self,
+        params: &PrerequisitesParams,
+    ) -> Result<PrerequisitesReport, PipelineError> {
+        let _ = params;
+        Ok(PrerequisitesReport::passed())
+    }
+
+    /// Apply schema changes for streams (create/alter tables, etc.).
+    async fn apply(&self, params: &ApplyParams) -> Result<ApplyReport, PipelineError> {
+        let _ = params;
+        Ok(ApplyReport::noop())
+    }
+
+    /// Tear down resources for streams (drop tables, clean up state, etc.).
+    async fn teardown(&self, params: &TeardownParams) -> Result<TeardownReport, PipelineError> {
+        let _ = params;
+        Ok(TeardownReport::noop())
+    }
 }

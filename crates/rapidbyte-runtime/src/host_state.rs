@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -15,7 +16,10 @@ use wasmtime::component::ResourceTable;
 use wasmtime::StoreLimits;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
-use rapidbyte_types::checkpoint::{Checkpoint, CheckpointKind, StateScope};
+use rapidbyte_types::batch::BatchMetadata;
+use rapidbyte_types::checkpoint::{
+    Checkpoint, CheckpointKind, CursorUpdate, StateMutation, StateScope,
+};
 use rapidbyte_types::envelope::{DlqRecord, Timestamp};
 use rapidbyte_types::error::{ErrorCategory, PluginError};
 use rapidbyte_types::manifest::Permissions;
@@ -46,6 +50,7 @@ pub enum Frame {
     Data {
         payload: bytes::Bytes,
         checkpoint_id: u64,
+        metadata: BatchMetadata,
     },
     /// End-of-stream marker.
     EndStream,
@@ -148,6 +153,14 @@ pub(crate) struct SocketManager {
     pub next_handle: u64,
 }
 
+/// Pending checkpoint transaction accumulating cursor and state mutations
+/// before a commit or abort.
+pub(crate) struct PendingCheckpointTxn {
+    pub kind: CheckpointKind,
+    pub cursors: Vec<CursorUpdate>,
+    pub mutations: Vec<StateMutation>,
+}
+
 /// Shared state passed to Wasmtime component host imports.
 pub struct ComponentHostState {
     pub(crate) identity: PluginIdentity,
@@ -157,6 +170,16 @@ pub struct ComponentHostState {
     pub(crate) frames: FrameTable,
     pub(crate) store_limits: StoreLimits,
     pub(crate) scope_labels: rapidbyte_metrics::labels::ScopeLabels,
+    /// Pending transactional checkpoint operations (`txn_id` -> txn).
+    pub(crate) checkpoint_txns: HashMap<u64, PendingCheckpointTxn>,
+    /// Next checkpoint transaction id.
+    pub(crate) next_checkpoint_txn_id: u64,
+    /// Cooperative cancellation flag (set by the orchestrator).
+    pub(crate) cancel_flag: Arc<AtomicBool>,
+    /// Collected per-stream errors reported by the plugin.
+    pub(crate) stream_errors: Vec<(u32, PluginError)>,
+    /// Metadata for frames received via `next_batch` (handle -> metadata).
+    pub(crate) batch_metadata: HashMap<u64, BatchMetadata>,
     ctx: WasiCtx,
     table: ResourceTable,
 }
@@ -183,6 +206,7 @@ pub struct HostStateBuilder {
     overrides: Option<SandboxOverrides>,
     dlq_limit: usize,
     on_emit: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 impl HostStateBuilder {
@@ -206,6 +230,7 @@ impl HostStateBuilder {
             overrides: None,
             dlq_limit: DEFAULT_DLQ_LIMIT,
             on_emit: None,
+            cancel_flag: None,
         }
     }
 
@@ -318,6 +343,13 @@ impl HostStateBuilder {
         self
     }
 
+    /// Set an external cancellation flag for cooperative plugin cancellation.
+    #[must_use]
+    pub fn cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancel_flag = Some(flag);
+        self
+    }
+
     /// Build the host state. Fails if required fields are missing or WASI context fails.
     ///
     /// # Errors
@@ -400,6 +432,11 @@ impl HostStateBuilder {
             frames: FrameTable::new(),
             store_limits: build_store_limits(self.overrides.as_ref()),
             scope_labels,
+            checkpoint_txns: HashMap::new(),
+            next_checkpoint_txn_id: 1,
+            cancel_flag: self.cancel_flag.unwrap_or_default(),
+            stream_errors: Vec::new(),
+            batch_metadata: HashMap::new(),
             ctx: build_wasi_ctx(self.permissions.as_ref(), self.overrides.as_ref())?,
             table: ResourceTable::new(),
         })
@@ -419,7 +456,7 @@ impl ComponentHostState {
     /// Max frame capacity: 512 MB. Prevents guest-induced OOM.
     const MAX_FRAME_CAPACITY: u64 = 512 * 1024 * 1024;
 
-    fn current_stream(&self) -> &str {
+    pub(crate) fn current_stream(&self) -> &str {
         self.identity.stream.as_str()
     }
 
@@ -541,7 +578,11 @@ impl ComponentHostState {
     // ── Host import implementations ─────────────────────────────────
 
     #[allow(clippy::cast_possible_truncation)]
-    pub(crate) fn emit_batch_impl(&mut self, handle: u64) -> Result<(), PluginError> {
+    pub(crate) fn emit_batch_impl(
+        &mut self,
+        handle: u64,
+        metadata: BatchMetadata,
+    ) -> Result<(), PluginError> {
         let fn_start = Instant::now();
 
         // Consume the sealed frame -> Bytes (zero-copy)
@@ -579,6 +620,7 @@ impl ComponentHostState {
             .send(Frame::Data {
                 payload,
                 checkpoint_id,
+                metadata,
             })
             .map_err(|e| PluginError::internal("CHANNEL_SEND", e.to_string()))?;
 
@@ -614,13 +656,14 @@ impl ComponentHostState {
         };
         let wait_elapsed_nanos = wait_start.elapsed().as_nanos() as u64;
 
-        let payload = match frame {
+        let (payload, frame_metadata) = match frame {
             Frame::Data {
                 payload,
                 checkpoint_id,
+                metadata,
             } => {
                 self.batch.current_checkpoint_id = Some(checkpoint_id);
-                payload
+                (payload, metadata)
             }
             Frame::EndStream => return Ok(None),
         };
@@ -638,6 +681,9 @@ impl ComponentHostState {
 
         // Insert as sealed read-only frame
         let handle = self.frames.insert_sealed(payload);
+
+        // Store metadata so the plugin can retrieve it via next-batch-metadata
+        self.batch_metadata.insert(handle, frame_metadata);
 
         let total_elapsed = fn_start.elapsed();
         let wait_elapsed = Duration::from_nanos(wait_elapsed_nanos);
@@ -667,11 +713,10 @@ impl ComponentHostState {
 
     pub(crate) fn state_get_impl(
         &mut self,
-        scope: u32,
+        scope: StateScope,
         key: String,
     ) -> Result<Option<String>, PluginError> {
         validate_state_key(&key)?;
-        let scope = parse_state_scope(scope)?;
         let scoped_key = self.scoped_state_key(scope, &key);
         self.identity
             .state_backend
@@ -682,12 +727,11 @@ impl ComponentHostState {
 
     pub(crate) fn state_put_impl(
         &mut self,
-        scope: u32,
+        scope: StateScope,
         key: String,
         value: String,
     ) -> Result<(), PluginError> {
         validate_state_key(&key)?;
-        let scope = parse_state_scope(scope)?;
         let scoped_key = self.scoped_state_key(scope, &key);
         let cursor = CursorState {
             cursor_field: Some(key),
@@ -705,77 +749,208 @@ impl ComponentHostState {
             .map_err(|e| PluginError::internal("STATE_BACKEND", e.to_string()))
     }
 
-    pub(crate) fn state_cas_impl(
-        &mut self,
-        scope: u32,
-        key: String,
-        expected: Option<String>,
-        new_value: String,
-    ) -> Result<bool, PluginError> {
-        validate_state_key(&key)?;
-        let scope = parse_state_scope(scope)?;
-        let scoped_key = self.scoped_state_key(scope, &key);
-        self.identity
-            .state_backend
-            .compare_and_set(
-                &self.identity.pipeline,
-                &StreamName::new(scoped_key),
-                expected.as_deref(),
-                &new_value,
-            )
-            .map_err(|e| PluginError::internal("STATE_BACKEND", e.to_string()))
-    }
+    // ── Transactional checkpoint host imports ────────────────────────
 
-    pub(crate) fn checkpoint_impl(
+    #[allow(clippy::unnecessary_wraps)]
+    pub(crate) fn checkpoint_begin_impl(
         &mut self,
-        kind: u32,
-        payload_json: String,
-    ) -> Result<(), PluginError> {
-        let envelope: serde_json::Value = serde_json::from_str(&payload_json)
-            .map_err(|e| PluginError::internal("PARSE_CHECKPOINT", e.to_string()))?;
+        kind: CheckpointKind,
+    ) -> Result<u64, PluginError> {
+        let txn_id = self.next_checkpoint_txn_id;
+        self.next_checkpoint_txn_id += 1;
 
         tracing::debug!(
             pipeline = self.identity.pipeline.as_str(),
             stream = %self.current_stream(),
-            "Received checkpoint: {}",
-            payload_json
+            txn_id,
+            ?kind,
+            "checkpoint-begin"
         );
 
-        let checkpoint_kind = CheckpointKind::try_from(kind).map_err(|k| {
-            PluginError::config(
-                "INVALID_CHECKPOINT_KIND",
-                format!("Invalid checkpoint kind: {k}"),
-            )
+        self.checkpoint_txns.insert(
+            txn_id,
+            PendingCheckpointTxn {
+                kind,
+                cursors: Vec::new(),
+                mutations: Vec::new(),
+            },
+        );
+        Ok(txn_id)
+    }
+
+    pub(crate) fn checkpoint_set_cursor_impl(
+        &mut self,
+        txn_id: u64,
+        cursor: CursorUpdate,
+    ) -> Result<(), PluginError> {
+        let txn = self.checkpoint_txns.get_mut(&txn_id).ok_or_else(|| {
+            PluginError::internal("INVALID_TXN", format!("No checkpoint txn {txn_id}"))
+        })?;
+        txn.cursors.push(cursor);
+        Ok(())
+    }
+
+    pub(crate) fn checkpoint_set_state_impl(
+        &mut self,
+        txn_id: u64,
+        mutation: StateMutation,
+    ) -> Result<(), PluginError> {
+        let txn = self.checkpoint_txns.get_mut(&txn_id).ok_or_else(|| {
+            PluginError::internal("INVALID_TXN", format!("No checkpoint txn {txn_id}"))
+        })?;
+        txn.mutations.push(mutation);
+        Ok(())
+    }
+
+    pub(crate) fn checkpoint_commit_impl(
+        &mut self,
+        txn_id: u64,
+        records_processed: u64,
+        bytes_processed: u64,
+    ) -> Result<(), PluginError> {
+        let txn = self.checkpoint_txns.remove(&txn_id).ok_or_else(|| {
+            PluginError::internal("INVALID_TXN", format!("No checkpoint txn {txn_id}"))
         })?;
 
-        let payload = match envelope {
-            serde_json::Value::Object(mut map) => map
-                .remove("payload")
-                .unwrap_or(serde_json::Value::Object(map)),
-            other => other,
+        let checkpoint_id = self.checkpoint_frontier_for(txn.kind);
+        let checkpoints: Vec<Checkpoint> = if txn.cursors.is_empty() {
+            vec![Checkpoint {
+                id: checkpoint_id,
+                kind: txn.kind,
+                stream: self.current_stream().to_string(),
+                cursor_field: None,
+                cursor_value: None,
+                records_processed,
+                bytes_processed,
+            }]
+        } else {
+            txn.cursors
+                .iter()
+                .map(|cu| {
+                    let cursor_value =
+                        serde_json::from_str::<rapidbyte_types::cursor::CursorValue>(
+                            &cu.cursor_value_json,
+                        )
+                        .map_err(|e| {
+                            PluginError::internal(
+                                "INVALID_CURSOR_JSON",
+                                format!(
+                                    "failed to decode checkpoint cursor for stream '{}': {e}",
+                                    cu.stream_name
+                                ),
+                            )
+                        })?;
+                    Ok(Checkpoint {
+                        id: checkpoint_id,
+                        kind: txn.kind,
+                        stream: cu.stream_name.clone(),
+                        cursor_field: Some(cu.cursor_field.clone()),
+                        cursor_value: Some(cursor_value),
+                        records_processed,
+                        bytes_processed,
+                    })
+                })
+                .collect::<Result<Vec<_>, PluginError>>()?
         };
 
-        let mut cp: Checkpoint = serde_json::from_value(payload)
-            .map_err(|e| PluginError::internal("PARSE_CHECKPOINT", e.to_string()))?;
-        cp.id = self.checkpoint_frontier_for(checkpoint_kind);
+        tracing::debug!(
+            pipeline = self.identity.pipeline.as_str(),
+            stream = %self.current_stream(),
+            txn_id,
+            ?txn.kind,
+            "checkpoint-commit"
+        );
 
-        match checkpoint_kind {
+        // Apply state mutations
+        for m in &txn.mutations {
+            let scoped_key = self.scoped_state_key(m.scope, &m.key);
+            let cursor = CursorState {
+                cursor_field: Some(m.key.clone()),
+                cursor_value: Some(m.value.clone()),
+                updated_at: Utc::now().to_rfc3339(),
+            };
+            self.identity
+                .state_backend
+                .set_cursor(
+                    &self.identity.pipeline,
+                    &StreamName::new(scoped_key),
+                    &cursor,
+                )
+                .map_err(|e| {
+                    PluginError::internal(
+                        "CHECKPOINT_STATE_PERSIST",
+                        format!("failed to persist checkpoint state mutation: {e}"),
+                    )
+                })?;
+        }
+
+        match txn.kind {
             CheckpointKind::Source => {
-                lock_mutex(&self.checkpoints.source, "source_checkpoints")?.push(cp);
+                lock_mutex(&self.checkpoints.source, "source_checkpoints")?.extend(checkpoints);
             }
             CheckpointKind::Dest => {
-                lock_mutex(&self.checkpoints.dest, "dest_checkpoints")?.push(cp);
+                lock_mutex(&self.checkpoints.dest, "dest_checkpoints")?.extend(checkpoints);
             }
             CheckpointKind::Transform => {
                 tracing::debug!(
                     pipeline = self.identity.pipeline.as_str(),
                     stream = %self.current_stream(),
-                    "Received transform checkpoint"
+                    "Committed transform checkpoint"
                 );
             }
         }
 
         Ok(())
+    }
+
+    pub(crate) fn checkpoint_abort_impl(&mut self, txn_id: u64) {
+        if self.checkpoint_txns.remove(&txn_id).is_some() {
+            tracing::debug!(
+                pipeline = self.identity.pipeline.as_str(),
+                stream = %self.current_stream(),
+                txn_id,
+                "checkpoint-abort"
+            );
+        }
+    }
+
+    // ── Cancellation ────────────────────────────────────────────────
+
+    pub(crate) fn is_cancelled_impl(&self) -> bool {
+        self.cancel_flag.load(Ordering::Relaxed)
+    }
+
+    // ── Per-stream error reporting ──────────────────────────────────
+
+    #[allow(clippy::unnecessary_wraps)]
+    pub(crate) fn stream_error_impl(
+        &mut self,
+        stream_index: u32,
+        error: PluginError,
+    ) -> Result<(), PluginError> {
+        tracing::warn!(
+            pipeline = self.identity.pipeline.as_str(),
+            stream_index,
+            code = %error.code,
+            "stream-error reported by plugin: {}",
+            error.message
+        );
+        self.stream_errors.push((stream_index, error));
+        Ok(())
+    }
+
+    // ── Batch metadata retrieval ────────────────────────────────────
+
+    pub(crate) fn next_batch_metadata_impl(
+        &mut self,
+        handle: u64,
+    ) -> Result<BatchMetadata, PluginError> {
+        self.batch_metadata.remove(&handle).ok_or_else(|| {
+            PluginError::internal(
+                "NO_BATCH_METADATA",
+                format!("No metadata for frame handle {handle}"),
+            )
+        })
     }
 
     #[allow(clippy::unnecessary_wraps)]
@@ -1154,18 +1329,6 @@ fn validate_state_key(key: &str) -> Result<(), PluginError> {
     Ok(())
 }
 
-fn parse_state_scope(scope: u32) -> Result<StateScope, PluginError> {
-    match scope {
-        0 => Ok(StateScope::Pipeline),
-        1 => Ok(StateScope::Stream),
-        2 => Ok(StateScope::PluginInstance),
-        _ => Err(PluginError::config(
-            "INVALID_SCOPE",
-            format!("Invalid scope: {scope}"),
-        )),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1178,12 +1341,21 @@ mod tests {
     /// Minimal in-memory state backend for tests (replaces `SqliteStateBackend`).
     struct FakeStateBackend {
         cursors: Mutex<HashMap<(String, String), rapidbyte_types::state::CursorState>>,
+        fail_set_cursor: bool,
     }
 
     impl FakeStateBackend {
         fn new() -> Self {
             Self {
                 cursors: Mutex::new(HashMap::new()),
+                fail_set_cursor: false,
+            }
+        }
+
+        fn failing_set_cursor() -> Self {
+            Self {
+                cursors: Mutex::new(HashMap::new()),
+                fail_set_cursor: true,
             }
         }
     }
@@ -1208,6 +1380,12 @@ mod tests {
             stream: &rapidbyte_types::state::StreamName,
             cursor: &rapidbyte_types::state::CursorState,
         ) -> rapidbyte_types::state_error::Result<()> {
+            if self.fail_set_cursor {
+                return Err(rapidbyte_types::state_error::StateError::backend_context(
+                    "set_cursor",
+                    std::io::Error::other("forced set_cursor failure"),
+                ));
+            }
             self.cursors
                 .lock()
                 .unwrap()
@@ -1404,14 +1582,24 @@ mod tests {
     fn frame_data_holds_bytes() {
         use bytes::Bytes;
         let payload = Bytes::from_static(b"test-ipc-payload");
+        let meta = BatchMetadata {
+            stream_index: 0,
+            schema_fingerprint: None,
+            sequence_number: 1,
+            compression: None,
+            record_count: 10,
+            byte_count: 16,
+        };
         let frame = Frame::Data {
             payload: payload.clone(),
             checkpoint_id: 7,
+            metadata: meta,
         };
         match frame {
             Frame::Data {
                 payload: b,
                 checkpoint_id,
+                ..
             } => {
                 assert_eq!(b, payload);
                 assert_eq!(checkpoint_id, 7);
@@ -1421,35 +1609,144 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_impl_rewrites_source_checkpoint_id_from_frontier() {
+    fn checkpoint_begin_commit_stores_source_checkpoint() {
         let mut host = test_host_state();
         host.batch.last_emitted_checkpoint_id = Some(42);
 
-        let cp = Checkpoint {
-            id: 999,
-            kind: CheckpointKind::Source,
-            stream: "users".to_string(),
-            cursor_field: Some("id".to_string()),
-            cursor_value: Some(rapidbyte_types::cursor::CursorValue::Utf8 {
-                value: "42".to_string(),
-            }),
-            records_processed: 10,
-            bytes_processed: 100,
-        };
+        let txn_id = host.checkpoint_begin_impl(CheckpointKind::Source).unwrap();
 
-        host.checkpoint_impl(0, serde_json::to_string(&cp).unwrap())
-            .unwrap();
+        host.checkpoint_set_cursor_impl(
+            txn_id,
+            CursorUpdate {
+                stream_name: "users".to_string(),
+                cursor_field: "id".to_string(),
+                cursor_value_json: r#"{"type":"utf8","value":"42"}"#.to_string(),
+            },
+        )
+        .unwrap();
+
+        host.checkpoint_commit_impl(txn_id, 10, 100).unwrap();
 
         let checkpoints = host.checkpoints.source.lock().unwrap();
         assert_eq!(checkpoints.len(), 1);
         assert_eq!(checkpoints[0].id, 42);
+        assert_eq!(checkpoints[0].cursor_field.as_deref(), Some("id"));
     }
 
     #[test]
-    fn checkpoint_impl_rejects_malformed_payload() {
+    fn checkpoint_commit_stores_all_cursor_updates() {
         let mut host = test_host_state();
-        let result = host.checkpoint_impl(0, r#"{"payload":{"stream":1}}"#.to_string());
+        host.batch.last_emitted_checkpoint_id = Some(42);
+
+        let txn_id = host.checkpoint_begin_impl(CheckpointKind::Source).unwrap();
+
+        host.checkpoint_set_cursor_impl(
+            txn_id,
+            CursorUpdate {
+                stream_name: "users".to_string(),
+                cursor_field: "id".to_string(),
+                cursor_value_json: r#"{"type":"utf8","value":"42"}"#.to_string(),
+            },
+        )
+        .unwrap();
+        host.checkpoint_set_cursor_impl(
+            txn_id,
+            CursorUpdate {
+                stream_name: "orders".to_string(),
+                cursor_field: "updated_at".to_string(),
+                cursor_value_json: r#"{"type":"utf8","value":"2026-03-21T00:00:00Z"}"#.to_string(),
+            },
+        )
+        .unwrap();
+
+        host.checkpoint_commit_impl(txn_id, 10, 100).unwrap();
+
+        let checkpoints = host.checkpoints.source.lock().unwrap();
+        assert_eq!(checkpoints.len(), 2);
+        assert_eq!(checkpoints[0].stream, "users");
+        assert_eq!(checkpoints[1].stream, "orders");
+        assert_eq!(checkpoints[1].cursor_field.as_deref(), Some("updated_at"));
+    }
+
+    #[test]
+    fn checkpoint_commit_rejects_invalid_cursor_json() {
+        let mut host = test_host_state();
+        host.batch.last_emitted_checkpoint_id = Some(42);
+
+        let txn_id = host.checkpoint_begin_impl(CheckpointKind::Source).unwrap();
+        host.checkpoint_set_cursor_impl(
+            txn_id,
+            CursorUpdate {
+                stream_name: "users".to_string(),
+                cursor_field: "id".to_string(),
+                cursor_value_json: "{not-json}".to_string(),
+            },
+        )
+        .unwrap();
+
+        let result = host.checkpoint_commit_impl(txn_id, 10, 100);
         assert!(result.is_err());
+        assert!(result.unwrap_err().code.contains("INVALID_CURSOR_JSON"));
+        let checkpoints = host.checkpoints.source.lock().unwrap();
+        assert!(checkpoints.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_commit_propagates_state_backend_failure() {
+        let state: Arc<dyn StateBackend> = Arc::new(FakeStateBackend::failing_set_cursor());
+        let mut host = ComponentHostState::builder()
+            .pipeline("test-pipeline")
+            .plugin_id("postgres")
+            .stream("users")
+            .state_backend(state)
+            .build()
+            .unwrap();
+
+        let txn_id = host.checkpoint_begin_impl(CheckpointKind::Source).unwrap();
+        host.checkpoint_set_state_impl(
+            txn_id,
+            StateMutation {
+                scope: StateScope::Stream,
+                key: "offset".into(),
+                value: "42".into(),
+            },
+        )
+        .unwrap();
+
+        let result = host.checkpoint_commit_impl(txn_id, 10, 100);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .code
+            .contains("CHECKPOINT_STATE_PERSIST"));
+        let checkpoints = host.checkpoints.source.lock().unwrap();
+        assert!(checkpoints.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_abort_discards_txn() {
+        let mut host = test_host_state();
+        let txn_id = host.checkpoint_begin_impl(CheckpointKind::Source).unwrap();
+        host.checkpoint_abort_impl(txn_id);
+
+        // Committing a non-existent txn should fail
+        let result = host.checkpoint_commit_impl(txn_id, 0, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn is_cancelled_reads_flag() {
+        let host = test_host_state();
+        assert!(!host.is_cancelled_impl());
+    }
+
+    #[test]
+    fn stream_error_collects_errors() {
+        let mut host = test_host_state();
+        let err = PluginError::internal("TEST", "test error");
+        host.stream_error_impl(0, err).unwrap();
+        assert_eq!(host.stream_errors.len(), 1);
+        assert_eq!(host.stream_errors[0].0, 0);
     }
 
     #[test]

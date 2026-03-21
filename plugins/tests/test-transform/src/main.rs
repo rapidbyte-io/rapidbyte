@@ -4,6 +4,7 @@
 //! unchanged to downstream. Supports `should_fail` to simulate errors.
 
 use rapidbyte_sdk::prelude::*;
+use rapidbyte_sdk::schema::StreamSchema;
 use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;
 
@@ -22,30 +23,20 @@ pub struct TestTransform {
 impl Transform for TestTransform {
     type Config = Config;
 
-    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
-        Ok((
-            Self { config },
-            PluginInfo {
-                protocol_version: ProtocolVersion::V6,
-                features: vec![],
-                default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
-            },
-        ))
+    async fn init(config: Self::Config) -> Result<Self, PluginError> {
+        Ok(Self { config })
     }
 
     async fn validate(
-        _config: &Self::Config,
+        &self,
         _ctx: &Context,
-    ) -> Result<ValidationResult, PluginError> {
-        Ok(ValidationResult {
-            status: ValidationStatus::Success,
-            message: "Test transform config is valid".to_string(),
-            warnings: Vec::new(),
-        })
+        _upstream: Option<&StreamSchema>,
+    ) -> Result<ValidationReport, PluginError> {
+        Ok(ValidationReport::success("Test transform config is valid"))
     }
 
     async fn transform(
-        &mut self,
+        &self,
         ctx: &Context,
         stream: StreamContext,
     ) -> Result<TransformSummary, PluginError> {

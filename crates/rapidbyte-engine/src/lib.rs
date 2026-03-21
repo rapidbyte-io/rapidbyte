@@ -26,6 +26,7 @@ pub use application::check::check_pipeline;
 pub use application::context::{EngineConfig, EngineContext};
 pub use application::discover::discover_plugin;
 pub use application::run::run_pipeline;
+pub use application::teardown::teardown_pipeline;
 
 // Domain errors
 pub use domain::error::PipelineError;
@@ -33,7 +34,7 @@ pub use domain::error::PipelineError;
 // Domain outcomes
 pub use domain::outcome::{
     CheckResult, CheckStatus, DestTiming, PipelineCounts, PipelineResult, SourceTiming,
-    StreamShardMetric,
+    StreamNegotiationResult, StreamShardMetric,
 };
 
 // Domain progress

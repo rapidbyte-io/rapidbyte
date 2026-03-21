@@ -6,12 +6,14 @@
 //! | `context`  | [`EngineContext`] DI container and [`EngineConfig`] |
 //! | `discover` | [`discover_plugin`] — resolve a source plugin and discover streams |
 //! | `run`      | [`run_pipeline`] — core pipeline orchestration with retry loop |
+//! | `teardown` | [`teardown_pipeline`] — tear down persistent resources |
 //! | `testing`  | In-memory fakes and [`TestContext`] factory (test / `test-support` only) |
 
 pub mod check;
 pub mod context;
 pub mod discover;
 pub mod run;
+pub mod teardown;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
@@ -21,7 +23,8 @@ pub mod testing;
 ///
 /// Only treats `:` as a version separator after the last `/`, so OCI
 /// references like `registry:5000/org/plugin:1.0` are handled correctly.
-pub(crate) fn parse_plugin_id(plugin_ref: &str) -> (String, String) {
+#[must_use]
+pub fn parse_plugin_id(plugin_ref: &str) -> (String, String) {
     // Only consider ':' as version separator after the last '/'
     let after_slash = plugin_ref.rfind('/').map_or(0, |i| i + 1);
     let suffix = &plugin_ref[after_slash..];
@@ -40,7 +43,8 @@ pub(crate) fn parse_plugin_id(plugin_ref: &str) -> (String, String) {
 ///
 /// Returns `None` when the plugin has no embedded manifest, or `Some(permissions)`
 /// when one is present.
-pub(crate) fn extract_permissions(
+#[must_use]
+pub fn extract_permissions(
     resolved: &crate::domain::ports::resolver::ResolvedPlugin,
 ) -> Option<rapidbyte_types::manifest::Permissions> {
     resolved.manifest.as_ref().map(|m| m.permissions.clone())
@@ -57,9 +61,12 @@ pub(crate) fn extract_permissions(
 /// can only narrow plugin-declared limits, never widen them (per PROTOCOL.md).
 /// If only one side specifies a limit, that value is used directly.
 ///
+/// # Errors
+///
 /// Returns an error if a memory limit string is present but malformed, to
 /// prevent silently degrading into no memory cap.
-pub(crate) fn build_sandbox_overrides(
+#[allow(clippy::too_many_lines)]
+pub fn build_sandbox_overrides(
     yaml_permissions: Option<&rapidbyte_pipeline_config::PipelinePermissions>,
     yaml_limits: Option<&rapidbyte_pipeline_config::PipelineLimits>,
     manifest: Option<&rapidbyte_types::manifest::PluginManifest>,
@@ -116,4 +123,93 @@ pub(crate) fn build_sandbox_overrides(
         max_memory_bytes,
         timeout_seconds,
     }))
+}
+
+/// Build stream contexts for lifecycle phases that need configured streams
+/// before the main run loop starts, such as `apply`.
+#[must_use]
+pub fn build_apply_streams(
+    pipeline: &rapidbyte_pipeline_config::PipelineConfig,
+) -> Vec<rapidbyte_types::stream::StreamContext> {
+    pipeline
+        .source
+        .streams
+        .iter()
+        .enumerate()
+        .map(
+            |(stream_idx, stream_cfg)| rapidbyte_types::stream::StreamContext {
+                stream_name: stream_cfg.name.clone(),
+                source_stream_name: None,
+                #[allow(clippy::cast_possible_truncation)]
+                stream_index: stream_idx as u32,
+                schema: rapidbyte_types::schema::StreamSchema {
+                    fields: vec![],
+                    primary_key: pipeline.destination.primary_key.clone(),
+                    partition_keys: vec![],
+                    source_defined_cursor: None,
+                    schema_id: None,
+                },
+                sync_mode: stream_cfg.sync_mode,
+                cursor_info: None,
+                limits: rapidbyte_types::stream::StreamLimits::default(),
+                policies: rapidbyte_types::stream::StreamPolicies {
+                    on_data_error: pipeline.destination.on_data_error,
+                    schema_evolution: pipeline.destination.schema_evolution.unwrap_or_default(),
+                },
+                write_mode: Some(
+                    pipeline
+                        .destination
+                        .write_mode
+                        .to_protocol(pipeline.destination.primary_key.clone()),
+                ),
+                selected_columns: stream_cfg.columns.clone(),
+                partition_key: stream_cfg.partition_key.clone(),
+                partition_count: None,
+                partition_index: None,
+                effective_parallelism: Some(match pipeline.resources.parallelism {
+                    rapidbyte_pipeline_config::PipelineParallelism::Auto => 1,
+                    rapidbyte_pipeline_config::PipelineParallelism::Manual(n) => n,
+                }),
+                partition_strategy: None,
+                copy_flush_bytes_override: None,
+            },
+        )
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_apply_streams_preserves_configured_source_streams() {
+        let pipeline: rapidbyte_pipeline_config::PipelineConfig = serde_yaml::from_str(
+            r#"
+version: "1.0"
+pipeline: test-pipeline
+source:
+  use: src
+  config: {}
+  streams:
+    - name: users
+      sync_mode: full_refresh
+      columns: ["id", "email"]
+destination:
+  use: dst
+  config: {}
+  write_mode: append
+"#,
+        )
+        .unwrap();
+
+        let streams = build_apply_streams(&pipeline);
+
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].stream_name, "users");
+        assert_eq!(
+            streams[0].selected_columns.as_deref(),
+            Some(&["id".to_string(), "email".to_string()][..])
+        );
+        assert_eq!(streams[0].stream_index, 0);
+    }
 }

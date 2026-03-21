@@ -63,9 +63,9 @@ pub use metrics::MetricsSnapshot;
 pub use resolver::{PluginResolver, ResolvedPlugin};
 pub use run_record::RunRecordRepository;
 pub use runner::{
-    CheckComponentStatus, DestinationOutcome, DestinationRunParams, DiscoverParams,
-    DiscoveredStream, PluginRunner, SourceOutcome, SourceRunParams, TransformOutcome,
-    TransformRunParams, ValidateParams,
+    ApplyParams, CheckComponentStatus, DestinationOutcome, DestinationRunParams, DiscoverParams,
+    DiscoveredStream, PluginRunner, PrerequisitesParams, SourceOutcome, SourceRunParams,
+    SpecParams, TeardownParams, TransformOutcome, TransformRunParams, ValidateParams,
 };
 
 #[cfg(test)]

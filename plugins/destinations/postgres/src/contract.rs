@@ -4,8 +4,8 @@ use std::sync::Arc;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::arrow::datatypes::Schema;
-use rapidbyte_sdk::catalog::SchemaHint;
 use rapidbyte_sdk::prelude::*;
+use rapidbyte_sdk::schema::StreamSchema;
 use rapidbyte_sdk::stream::SchemaEvolutionPolicy;
 
 use crate::config::LoadMethod;
@@ -40,26 +40,68 @@ pub struct CheckpointConfig {
     pub seconds: u64,
 }
 
-fn preflight_schema_from_hint(schema_hint: &SchemaHint) -> Option<Arc<Schema>> {
-    match schema_hint {
-        SchemaHint::Columns(columns) => {
-            if columns.is_empty() {
-                None
-            } else {
-                Some(build_arrow_schema(columns))
-            }
-        }
-        SchemaHint::ArrowIpc(ipc_bytes) => decode_ipc(ipc_bytes).ok().map(|(schema, _)| schema),
-        _ => None,
+fn preflight_schema_from_stream_schema(schema: &StreamSchema) -> Result<Option<Arc<Schema>>, String> {
+    use rapidbyte_sdk::arrow::datatypes::Field;
+
+    if schema.fields.is_empty() {
+        return Ok(None);
     }
+    let fields: Result<Vec<Field>, String> = schema
+        .fields
+        .iter()
+        .map(|f| {
+            let dt = parse_arrow_type(&f.arrow_type).ok_or_else(|| {
+                format!(
+                    "unsupported schema type '{}' for field '{}'",
+                    f.arrow_type, f.name
+                )
+            })?;
+            Ok(Field::new(&f.name, dt, f.nullable))
+        })
+        .collect();
+    Ok(Some(Arc::new(Schema::new(fields?))))
 }
 
-pub(crate) fn schema_hint_has_shape(schema_hint: &SchemaHint) -> bool {
-    match schema_hint {
-        SchemaHint::Columns(columns) => !columns.is_empty(),
-        SchemaHint::ArrowIpc(ipc_bytes) => !ipc_bytes.is_empty(),
-        _ => false,
-    }
+fn parse_arrow_type(s: &str) -> Option<rapidbyte_sdk::arrow::datatypes::DataType> {
+    use rapidbyte_sdk::arrow::datatypes::{DataType, TimeUnit};
+    use rapidbyte_sdk::arrow_types::ArrowDataType;
+
+    Some(match ArrowDataType::from_schema_name(s)? {
+        ArrowDataType::Boolean => DataType::Boolean,
+        ArrowDataType::Int8 => DataType::Int8,
+        ArrowDataType::Int16 => DataType::Int16,
+        ArrowDataType::Int32 => DataType::Int32,
+        ArrowDataType::Int64 => DataType::Int64,
+        ArrowDataType::UInt8 => DataType::UInt8,
+        ArrowDataType::UInt16 => DataType::UInt16,
+        ArrowDataType::UInt32 => DataType::UInt32,
+        ArrowDataType::UInt64 => DataType::UInt64,
+        ArrowDataType::Float16 => DataType::Float16,
+        ArrowDataType::Float32 => DataType::Float32,
+        ArrowDataType::Float64 => DataType::Float64,
+        ArrowDataType::Utf8 => DataType::Utf8,
+        ArrowDataType::LargeUtf8 => DataType::LargeUtf8,
+        ArrowDataType::Binary => DataType::Binary,
+        ArrowDataType::LargeBinary => DataType::LargeBinary,
+        ArrowDataType::Date32 => DataType::Date32,
+        ArrowDataType::Date64 => DataType::Date64,
+        ArrowDataType::TimestampMillis => {
+            DataType::Timestamp(TimeUnit::Millisecond, None)
+        }
+        ArrowDataType::TimestampMicros => {
+            DataType::Timestamp(TimeUnit::Microsecond, None)
+        }
+        ArrowDataType::TimestampNanos => {
+            DataType::Timestamp(TimeUnit::Nanosecond, None)
+        }
+        ArrowDataType::Decimal128 => DataType::Decimal128(38, 9),
+        ArrowDataType::Json => DataType::Utf8,
+        _ => return None,
+    })
+}
+
+pub(crate) fn schema_hint_has_shape(schema: &StreamSchema) -> bool {
+    !schema.fields.is_empty()
 }
 
 /// Build a destination write contract for a stream.
@@ -67,7 +109,7 @@ pub(crate) fn prepare_stream_once(
     target_schema: &str,
     stream_name: &str,
     write_mode: Option<WriteMode>,
-    _schema_hint: &SchemaHint,
+    _schema: &StreamSchema,
     use_watermarks: bool,
     schema_policy: SchemaEvolutionPolicy,
     checkpoint: CheckpointConfig,
@@ -107,7 +149,7 @@ pub(crate) fn prepare_stream_once(
 pub(crate) async fn async_prepare_stream_once(
     ctx: &Context,
     client: &Client,
-    schema_hint: &SchemaHint,
+    schema: &StreamSchema,
     mut contract: WriteContract,
 ) -> Result<WriteContract, String> {
     if contract.use_watermarks {
@@ -130,7 +172,7 @@ pub(crate) async fn async_prepare_stream_once(
     }
 
     let mut schema_state = crate::ddl::SchemaState::new();
-    if let Some(schema) = preflight_schema_from_hint(schema_hint) {
+    if let Some(schema) = preflight_schema_from_stream_schema(schema)? {
         schema_state
             .ensure_table(
                 ctx,
@@ -187,10 +229,13 @@ pub(crate) async fn async_prepare_stream_once(
 
 #[cfg(test)]
 mod tests {
-    use rapidbyte_sdk::catalog::{ColumnSchema, SchemaHint};
-    use rapidbyte_sdk::prelude::ArrowDataType;
+    use rapidbyte_sdk::schema::{SchemaField, StreamSchema};
 
     use super::*;
+
+    fn empty_stream_schema() -> StreamSchema {
+        StreamSchema::default()
+    }
 
     #[test]
     fn write_contract_clone_preserves_fields() {
@@ -228,7 +273,7 @@ mod tests {
             "raw",
             "",
             Some(WriteMode::Append),
-            &SchemaHint::Columns(Vec::new()),
+            &empty_stream_schema(),
             true,
             SchemaEvolutionPolicy::default(),
             CheckpointConfig {
@@ -252,7 +297,7 @@ mod tests {
             "raw",
             "users",
             Some(WriteMode::Append),
-            &SchemaHint::Columns(Vec::new()),
+            &empty_stream_schema(),
             false,
             SchemaEvolutionPolicy::default(),
             CheckpointConfig {
@@ -269,23 +314,46 @@ mod tests {
     }
 
     #[test]
-    fn preflight_schema_from_columns_builds_arrow_schema() {
-        let hint = SchemaHint::Columns(vec![
-            ColumnSchema {
-                name: "id".to_string(),
-                data_type: ArrowDataType::Int64,
-                nullable: false,
-            },
-            ColumnSchema {
-                name: "name".to_string(),
-                data_type: ArrowDataType::Utf8,
-                nullable: true,
-            },
-        ]);
+    fn preflight_schema_from_stream_schema_builds_arrow_schema() {
+        let schema = StreamSchema {
+            fields: vec![
+                SchemaField::new("id", "int64", false),
+                SchemaField::new("name", "utf8", true),
+            ],
+            primary_key: vec![],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        };
 
-        let schema = preflight_schema_from_hint(&hint).expect("schema should be built");
-        assert_eq!(schema.fields().len(), 2);
-        assert_eq!(schema.field(0).name(), "id");
-        assert_eq!(schema.field(1).name(), "name");
+        let arrow = preflight_schema_from_stream_schema(&schema)
+            .expect("schema parse should succeed")
+            .expect("schema should be built");
+        assert_eq!(arrow.fields().len(), 2);
+        assert_eq!(arrow.field(0).name(), "id");
+        assert_eq!(arrow.field(1).name(), "name");
+    }
+
+    #[test]
+    fn preflight_schema_from_empty_stream_schema_returns_none() {
+        let schema = empty_stream_schema();
+        assert!(preflight_schema_from_stream_schema(&schema)
+            .expect("empty schema should parse")
+            .is_none());
+    }
+
+    #[test]
+    fn preflight_schema_from_stream_schema_rejects_unknown_type() {
+        let schema = StreamSchema {
+            fields: vec![SchemaField::new("id", "made_up_type", false)],
+            primary_key: vec![],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        };
+
+        let err = preflight_schema_from_stream_schema(&schema)
+            .expect_err("unknown type should fail");
+        assert!(err.contains("made_up_type"));
     }
 }

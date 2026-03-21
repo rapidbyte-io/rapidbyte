@@ -3,7 +3,7 @@
 //! All data in Rapidbyte flows as Arrow RecordBatches. This module provides
 //! the tools plugin authors need to work with Arrow:
 //!
-//! - [`build_arrow_schema`] — convert protocol `ColumnSchema` to Arrow `Schema`
+//! - [`build_arrow_schema`] — convert v7 `SchemaField` values to Arrow `Schema`
 //! - [`encode_ipc`] / [`decode_ipc`] — IPC serialization (used internally by
 //!   `host_ffi::emit_batch` and `host_ffi::next_batch`)
 //! - [`arrow_data_type`] — convert protocol `ArrowDataType` to Arrow `DataType`

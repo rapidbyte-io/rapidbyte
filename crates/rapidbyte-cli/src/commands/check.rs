@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::Result;
 use console::style;
 use rapidbyte_engine::CheckStatus;
-use rapidbyte_types::error::{ValidationResult, ValidationStatus};
+use rapidbyte_types::validation::{PrerequisitesReport, ValidationReport, ValidationStatus};
 
 use crate::Verbosity;
 
@@ -14,11 +14,14 @@ use crate::Verbosity;
 /// # Errors
 ///
 /// Returns `Err` if pipeline parsing, validation, or connectivity check fails.
+#[allow(clippy::too_many_lines)]
 pub async fn execute(
     pipeline_path: &Path,
     verbosity: Verbosity,
     registry_config: &rapidbyte_registry::RegistryConfig,
     secrets: &rapidbyte_secrets::SecretProviders,
+    apply: bool,
+    dry_run: bool,
 ) -> Result<()> {
     let config = super::load_pipeline(pipeline_path, secrets).await?;
 
@@ -57,6 +60,46 @@ pub async fn execute(
         }
 
         print_check_item("state", &result.state);
+
+        // Prerequisites
+        if let Some(ref prereqs) = result.source_prerequisites {
+            print_prerequisites("source prerequisites", prereqs);
+        }
+        if let Some(ref prereqs) = result.destination_prerequisites {
+            print_prerequisites("dest prerequisites", prereqs);
+        }
+
+        // Schema negotiation
+        for neg in &result.schema_negotiation {
+            if neg.passed && neg.warnings.is_empty() {
+                eprintln!(
+                    "{} schema [{}]     valid",
+                    style("\u{2713}").green().bold(),
+                    neg.stream_name
+                );
+            } else if neg.passed {
+                eprintln!(
+                    "{} schema [{}]     warning",
+                    style("!").yellow().bold(),
+                    neg.stream_name
+                );
+                for w in &neg.warnings {
+                    eprintln!("  warning: {w}");
+                }
+            } else {
+                eprintln!(
+                    "{} schema [{}]     failed",
+                    style("\u{2717}").red().bold(),
+                    neg.stream_name
+                );
+                for e in &neg.errors {
+                    eprintln!("  {e}");
+                }
+                for w in &neg.warnings {
+                    eprintln!("  warning: {w}");
+                }
+            }
+        }
     }
 
     // Return error if anything failed
@@ -68,11 +111,161 @@ pub async fn execute(
         && validation_passes(&result.destination_validation);
     let transform_configs_ok = result.transform_configs.iter().all(|item| item.ok);
     let transforms_ok = result.transform_validations.iter().all(validation_passes);
+    let prereqs_ok = result
+        .source_prerequisites
+        .as_ref()
+        .is_none_or(|p| p.passed)
+        && result
+            .destination_prerequisites
+            .as_ref()
+            .is_none_or(|p| p.passed);
+    let schema_ok = result.schema_negotiation.iter().all(|n| n.passed);
 
-    if source_ok && dest_ok && transform_configs_ok && transforms_ok && result.state.ok {
-        Ok(())
+    let all_ok = source_ok
+        && dest_ok
+        && transform_configs_ok
+        && transforms_ok
+        && result.state.ok
+        && prereqs_ok
+        && schema_ok;
+
+    if !all_ok {
+        return Err(anyhow::anyhow!("pipeline validation failed"));
+    }
+
+    // --- Apply phase (optional) ---
+    if apply {
+        run_apply_phase(&ctx, &config, verbosity, dry_run).await?;
+    }
+
+    Ok(())
+}
+
+/// Run the apply phase for source and destination plugins.
+///
+/// Called when `--apply` is passed to `check` and all validations pass.
+async fn run_apply_phase(
+    ctx: &rapidbyte_engine::EngineContext,
+    config: &rapidbyte_pipeline_config::PipelineConfig,
+    verbosity: Verbosity,
+    dry_run: bool,
+) -> Result<()> {
+    use rapidbyte_engine::domain::ports::runner::ApplyParams;
+    use rapidbyte_types::wire::PluginKind;
+
+    let mode = if dry_run { " (dry-run)" } else { "" };
+    if verbosity != Verbosity::Quiet {
+        eprintln!("\n{} apply phase{}", style("=>").cyan().bold(), mode);
+    }
+
+    let source_resolved = ctx
+        .resolver
+        .resolve(
+            &config.source.use_ref,
+            PluginKind::Source,
+            Some(&config.source.config),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("source resolution failed: {e}"))?;
+
+    let dest_resolved = ctx
+        .resolver
+        .resolve(
+            &config.destination.use_ref,
+            PluginKind::Destination,
+            Some(&config.destination.config),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("destination resolution failed: {e}"))?;
+
+    let (src_id, src_ver) = rapidbyte_engine::application::parse_plugin_id(&config.source.use_ref);
+    let (dst_id, dst_ver) =
+        rapidbyte_engine::application::parse_plugin_id(&config.destination.use_ref);
+
+    let src_permissions = rapidbyte_engine::application::extract_permissions(&source_resolved);
+    let dst_permissions = rapidbyte_engine::application::extract_permissions(&dest_resolved);
+
+    let src_overrides = rapidbyte_engine::application::build_sandbox_overrides(
+        config.source.permissions.as_ref(),
+        config.source.limits.as_ref(),
+        source_resolved.manifest.as_ref(),
+    )
+    .map_err(|e| anyhow::anyhow!("source sandbox overrides: {e}"))?;
+    let dst_overrides = rapidbyte_engine::application::build_sandbox_overrides(
+        config.destination.permissions.as_ref(),
+        config.destination.limits.as_ref(),
+        dest_resolved.manifest.as_ref(),
+    )
+    .map_err(|e| anyhow::anyhow!("destination sandbox overrides: {e}"))?;
+
+    let apply_streams = rapidbyte_engine::application::build_apply_streams(config);
+
+    // Source apply
+    let src_report = ctx
+        .runner
+        .apply(&ApplyParams {
+            wasm_path: source_resolved.wasm_path.clone(),
+            kind: PluginKind::Source,
+            plugin_id: src_id,
+            plugin_version: src_ver,
+            config: config.source.config.clone(),
+            streams: apply_streams.clone(),
+            dry_run,
+            permissions: src_permissions,
+            sandbox_overrides: src_overrides,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("source apply failed: {e}"))?;
+
+    if verbosity != Verbosity::Quiet {
+        print_apply_report("source", &src_report);
+    }
+
+    // Destination apply
+    let dst_report = ctx
+        .runner
+        .apply(&ApplyParams {
+            wasm_path: dest_resolved.wasm_path.clone(),
+            kind: PluginKind::Destination,
+            plugin_id: dst_id,
+            plugin_version: dst_ver,
+            config: config.destination.config.clone(),
+            streams: apply_streams,
+            dry_run,
+            permissions: dst_permissions,
+            sandbox_overrides: dst_overrides,
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("destination apply failed: {e}"))?;
+
+    if verbosity != Verbosity::Quiet {
+        print_apply_report("destination", &dst_report);
+    }
+
+    Ok(())
+}
+
+/// Print the actions from an apply report.
+fn print_apply_report(role: &str, report: &rapidbyte_types::lifecycle::ApplyReport) {
+    if report.actions.is_empty() {
+        eprintln!(
+            "  {} {:<20} no actions",
+            style("\u{2713}").green().bold(),
+            role
+        );
     } else {
-        Err(anyhow::anyhow!("pipeline validation failed"))
+        for action in &report.actions {
+            eprintln!(
+                "  {} {} [{}]: {}",
+                style("\u{2713}").green().bold(),
+                role,
+                action.stream_name,
+                action.description
+            );
+            if let Some(ref ddl) = action.ddl_executed {
+                eprintln!("    DDL: {ddl}");
+            }
+        }
     }
 }
 
@@ -87,7 +280,7 @@ fn print_check_item(label: &str, result: &CheckStatus) {
     }
 }
 
-fn print_validation(label: &str, result: &ValidationResult) {
+fn print_validation(label: &str, result: &ValidationReport) {
     match result.status {
         ValidationStatus::Success => {
             eprintln!("{} {:<20} valid", style("\u{2713}").green().bold(), label);
@@ -103,7 +296,7 @@ fn print_validation(label: &str, result: &ValidationResult) {
     }
 }
 
-fn validation_passes(result: &ValidationResult) -> bool {
+fn validation_passes(result: &ValidationReport) -> bool {
     matches!(
         result.status,
         ValidationStatus::Success | ValidationStatus::Warning
@@ -114,12 +307,30 @@ fn check_item_passes(result: Option<&CheckStatus>) -> bool {
     result.is_none_or(|item| item.ok)
 }
 
-fn print_validation_details(result: &ValidationResult) {
+fn print_validation_details(result: &ValidationReport) {
     if !result.message.is_empty() {
         eprintln!("  {}", result.message);
     }
     for warning in &result.warnings {
         eprintln!("  warning: {warning}");
+    }
+}
+
+fn print_prerequisites(label: &str, report: &PrerequisitesReport) {
+    if report.passed {
+        eprintln!("{} {:<20} passed", style("\u{2713}").green().bold(), label);
+    } else {
+        eprintln!("{} {:<20} failed", style("\u{2717}").red().bold(), label);
+    }
+    for check in &report.checks {
+        if check.passed {
+            eprintln!("  {} {}", style("\u{2713}").green(), check.message);
+        } else {
+            eprintln!("  {} {}", style("\u{2717}").red(), check.message);
+            if let Some(hint) = &check.fix_hint {
+                eprintln!("    fix: {hint}");
+            }
+        }
     }
 }
 
@@ -129,22 +340,17 @@ mod tests {
 
     #[test]
     fn warnings_count_as_non_fatal_validation() {
-        let result = ValidationResult {
-            status: ValidationStatus::Warning,
-            message: "Validation not implemented".to_string(),
-            warnings: vec!["live connectivity check missing".to_string()],
-        };
+        let mut result = ValidationReport::success("Validation not implemented");
+        result.status = ValidationStatus::Warning;
+        result.warnings = vec!["live connectivity check missing".to_string()];
 
         assert!(validation_passes(&result));
     }
 
     #[test]
     fn failures_remain_fatal_validation() {
-        let result = ValidationResult {
-            status: ValidationStatus::Failed,
-            message: "connection refused".to_string(),
-            warnings: vec!["retry disabled".to_string()],
-        };
+        let mut result = ValidationReport::failed("connection refused");
+        result.warnings = vec!["retry disabled".to_string()];
 
         assert!(!validation_passes(&result));
     }

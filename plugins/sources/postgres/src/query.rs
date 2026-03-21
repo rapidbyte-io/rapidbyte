@@ -456,8 +456,8 @@ pub(crate) fn timestamp_micros_to_rfc3339(us: i64) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapidbyte_sdk::catalog::SchemaHint;
     use rapidbyte_sdk::cursor::CursorInfo;
+    use rapidbyte_sdk::schema::StreamSchema;
     use rapidbyte_sdk::stream::{StreamContext, StreamLimits, StreamPolicies};
     use rapidbyte_sdk::wire::SyncMode;
 
@@ -472,7 +472,8 @@ mod tests {
         StreamContext {
             stream_name: "users".to_string(),
             source_stream_name: None,
-            schema: SchemaHint::Columns(vec![]),
+            stream_index: 0,
+            schema: StreamSchema::default(),
             sync_mode: SyncMode::FullRefresh,
             cursor_info: None,
             limits: StreamLimits::default(),

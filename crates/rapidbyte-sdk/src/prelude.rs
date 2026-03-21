@@ -8,21 +8,29 @@
 pub use crate::plugin::{Destination, Source, Transform};
 
 // Feature traits
-pub use crate::features::{CdcSource, PartitionedSource};
+pub use crate::features::{
+    BulkDestination, CdcSource, MultiStreamCdcSource, MultiStreamSource, PartitionedSource,
+};
 pub use crate::stream::{CdcResumeToken, PartitionCoordinates};
 
 // Context and logging
 pub use crate::context::{Context, LogLevel};
 
 // Errors
-pub use crate::error::{CommitState, PluginError, ValidationResult, ValidationStatus};
+pub use crate::error::{CommitState, PluginError};
+pub use crate::lifecycle::{
+    ApplyAction, ApplyReport, ApplyRequest, TeardownReport, TeardownRequest,
+};
+pub use crate::validation::{PrerequisitesReport, ValidationReport, ValidationStatus};
 
 // Protocol types — lifecycle
-pub use crate::wire::{Feature, PluginInfo, ProtocolVersion};
+pub use crate::wire::{Feature, ProtocolVersion};
 
-// Protocol types — streams and catalog
-pub use crate::catalog::{Catalog, ColumnSchema, Stream};
+// Protocol types — streams and discovery
+pub use crate::context::CheckpointTxn;
 pub use crate::cursor::{CursorInfo, CursorValue};
+pub use crate::discovery::{DiscoveredStream, PluginSpec};
+pub use crate::schema::{SchemaField, StreamSchema};
 pub use crate::stream::{StreamContext, StreamLimits};
 pub use crate::wire::{SyncMode, WriteMode};
 

@@ -8,7 +8,10 @@ use std::sync::Arc;
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 
-use crate::checkpoint::{Checkpoint, StateScope};
+use rapidbyte_types::batch::BatchMetadata;
+
+use crate::checkpoint::{Checkpoint, CheckpointKind, StateScope};
+use crate::cursor::CursorValue;
 use crate::error::{ErrorCategory, PluginError};
 use crate::host_ffi;
 
@@ -102,8 +105,68 @@ impl Context {
     }
 
     /// Emit a checkpoint using the context's plugin ID and stream name.
+    ///
+    /// Uses the transactional checkpoint API internally.
     pub fn checkpoint(&self, cp: &Checkpoint) -> Result<(), PluginError> {
-        host_ffi::checkpoint(&self.plugin_id, &self.stream_name, cp)
+        let mut txn = self.begin_checkpoint(cp.kind)?;
+        if let (Some(field), Some(value)) = (&cp.cursor_field, &cp.cursor_value) {
+            txn.set_cursor(&cp.stream, field, value.clone())?;
+        }
+        txn.commit(cp.records_processed, cp.bytes_processed)
+    }
+
+    /// Check if the pipeline has been cancelled.
+    pub fn is_cancelled(&self) -> bool {
+        host_ffi::is_cancelled()
+    }
+
+    /// Check cancellation, returning Err if cancelled. Use with `?` in loops.
+    pub fn check_cancelled(&self) -> Result<(), PluginError> {
+        if self.is_cancelled() {
+            Err(PluginError::cancelled("CANCELLED", "Pipeline cancelled"))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Emit a batch for a specific stream (multi-stream sources).
+    pub fn emit_batch_for_stream(
+        &self,
+        stream_index: u32,
+        batch: &RecordBatch,
+    ) -> Result<(), PluginError> {
+        let imports = host_ffi::host_imports();
+
+        let capacity = batch.get_array_memory_size() as u64 + 1024;
+        let handle = imports.frame_new(capacity)?;
+
+        {
+            let mut writer = crate::frame_writer::FrameWriter::new(handle, imports);
+            crate::arrow::ipc::encode_ipc_into(batch, &mut writer)?;
+        }
+
+        imports.frame_seal(handle)?;
+        let metadata = BatchMetadata {
+            stream_index,
+            schema_fingerprint: None,
+            sequence_number: 0,
+            compression: None,
+            record_count: batch.num_rows() as u32,
+            byte_count: batch.get_array_memory_size() as u64,
+        };
+        imports.emit_batch_with_metadata(handle, &metadata)?;
+        Ok(())
+    }
+
+    /// Report an error for a specific stream (multi-stream sources).
+    pub fn stream_error(&self, stream_index: u32, error: PluginError) -> Result<(), PluginError> {
+        host_ffi::stream_error(stream_index, &error)
+    }
+
+    /// Begin a transactional checkpoint.
+    pub fn begin_checkpoint(&self, kind: CheckpointKind) -> Result<CheckpointTxn, PluginError> {
+        let handle = host_ffi::checkpoint_begin(kind as u32)?;
+        Ok(CheckpointTxn::new(handle))
     }
 
     /// Add to a counter metric.
@@ -186,6 +249,68 @@ impl Context {
             error_message,
             error_category,
         )
+    }
+}
+
+/// A transactional checkpoint handle.
+///
+/// Groups cursor updates and state mutations into an atomic unit.
+/// If dropped without calling [`commit`](Self::commit) or [`abort`](Self::abort),
+/// the checkpoint is automatically aborted.
+pub struct CheckpointTxn {
+    handle: u64,
+    committed: bool,
+}
+
+impl CheckpointTxn {
+    fn new(handle: u64) -> Self {
+        Self {
+            handle,
+            committed: false,
+        }
+    }
+
+    /// Set a cursor position within this checkpoint transaction.
+    pub fn set_cursor(
+        &mut self,
+        stream: &str,
+        field: &str,
+        value: CursorValue,
+    ) -> Result<(), PluginError> {
+        let value_json = serde_json::to_string(&value)
+            .map_err(|e| PluginError::internal("SERIALIZE", e.to_string()))?;
+        host_ffi::checkpoint_set_cursor(self.handle, stream, field, &value_json)
+    }
+
+    /// Set state within this checkpoint transaction.
+    pub fn set_state(
+        &mut self,
+        scope: StateScope,
+        key: &str,
+        value: &str,
+    ) -> Result<(), PluginError> {
+        host_ffi::checkpoint_set_state(self.handle, scope as u32, key, value)
+    }
+
+    /// Commit the checkpoint transaction with record/byte counts.
+    pub fn commit(mut self, records: u64, bytes: u64) -> Result<(), PluginError> {
+        self.committed = true;
+        host_ffi::checkpoint_commit(self.handle, records, bytes)
+    }
+
+    /// Explicitly abort the checkpoint transaction.
+    pub fn abort(mut self) {
+        self.committed = true; // Prevent drop from aborting again
+        host_ffi::checkpoint_abort(self.handle);
+    }
+}
+
+impl Drop for CheckpointTxn {
+    fn drop(&mut self) {
+        if !self.committed {
+            host_ffi::log_warn("CheckpointTxn dropped without commit — aborting");
+            host_ffi::checkpoint_abort(self.handle);
+        }
     }
 }
 

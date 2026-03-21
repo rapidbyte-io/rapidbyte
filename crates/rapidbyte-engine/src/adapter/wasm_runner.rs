@@ -5,6 +5,7 @@
 //! discover) is implemented directly in this module — no delegation to
 //! legacy runner functions.
 
+use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Instant;
 
@@ -17,22 +18,26 @@ use rapidbyte_runtime::{
     ComponentHostState, CompressionCodec, Frame, HostTimings, LoadedComponent, SandboxOverrides,
     WasmRuntime,
 };
-use rapidbyte_types::catalog::Catalog;
 use rapidbyte_types::checkpoint::Checkpoint;
-use rapidbyte_types::error::ValidationResult;
+use rapidbyte_types::discovery::{DiscoveredStream, PluginSpec};
+use rapidbyte_types::lifecycle::{ApplyAction, ApplyReport, TeardownReport};
 use rapidbyte_types::manifest::Permissions;
 use rapidbyte_types::metric::{ReadSummary, TransformSummary, WriteSummary};
+use rapidbyte_types::schema::{SchemaField, StreamSchema};
 use rapidbyte_types::state::RunStats;
 use rapidbyte_types::state_backend::StateBackend;
 use rapidbyte_types::stream::StreamContext;
-use rapidbyte_types::wire::PluginKind;
+use rapidbyte_types::validation::{
+    PrerequisiteCheck, PrerequisiteSeverity, PrerequisitesReport, ValidationReport,
+};
+use rapidbyte_types::wire::{PluginKind, SyncMode, WriteMode};
 
 use crate::adapter::engine_factory::noop_state_backend;
 use crate::domain::error::PipelineError;
 use crate::domain::ports::runner::{
-    CheckComponentStatus, DestinationOutcome, DestinationRunParams, DiscoverParams,
-    DiscoveredStream, PluginRunner, SourceOutcome, SourceRunParams, TransformOutcome,
-    TransformRunParams, ValidateParams,
+    ApplyParams, CheckComponentStatus, DestinationOutcome, DestinationRunParams, DiscoverParams,
+    PluginRunner, PrerequisitesParams, SourceOutcome, SourceRunParams, SpecParams, TeardownParams,
+    TransformOutcome, TransformRunParams, ValidateParams,
 };
 
 // ── Public adapter ──────────────────────────────────────────────────
@@ -82,6 +87,7 @@ impl PluginRunner for WasmPluginRunner {
                 &params.config,
                 params.stats,
                 params.on_batch_emitted,
+                params.cancel_flag,
             )
         })
         .await
@@ -116,6 +122,7 @@ impl PluginRunner for WasmPluginRunner {
                 params.dlq_records,
                 params.transform_index,
                 &params.config,
+                params.cancel_flag,
             )
         })
         .await
@@ -149,6 +156,7 @@ impl PluginRunner for WasmPluginRunner {
                 params.dlq_records,
                 &params.config,
                 params.stats,
+                params.cancel_flag,
             )
         })
         .await
@@ -170,6 +178,7 @@ impl PluginRunner for WasmPluginRunner {
         let stream_name = params.stream_name.clone();
         let permissions = params.permissions.clone();
         let sandbox_overrides = params.sandbox_overrides.clone();
+        let upstream_schema = params.upstream_schema.clone();
 
         let validation = tokio::task::spawn_blocking(move || {
             validate_plugin_impl(
@@ -181,6 +190,7 @@ impl PluginRunner for WasmPluginRunner {
                 &stream_name,
                 permissions.as_ref(),
                 sandbox_overrides.as_ref(),
+                upstream_schema.as_ref(),
             )
         })
         .await
@@ -204,7 +214,7 @@ impl PluginRunner for WasmPluginRunner {
         let permissions = params.permissions.clone();
         let sandbox_overrides = params.sandbox_overrides.clone();
 
-        let catalog = tokio::task::spawn_blocking(move || {
+        let streams = tokio::task::spawn_blocking(move || {
             run_discover_impl(
                 &component,
                 &plugin_id,
@@ -218,23 +228,119 @@ impl PluginRunner for WasmPluginRunner {
         .map_err(|e| PipelineError::infra(format!("discover task panicked: {e}")))?
         .map_err(PipelineError::Infrastructure)?;
 
-        let streams = catalog
-            .streams
-            .into_iter()
-            .map(|s| {
-                let catalog_json = serde_json::to_string(&s)
-                    .map_err(|e| PipelineError::infra(format!("failed to serialize catalog: {e}")));
-                match catalog_json {
-                    Ok(json) => Ok(DiscoveredStream {
-                        name: s.name,
-                        catalog_json: json,
-                    }),
-                    Err(e) => Err(e),
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
         Ok(streams)
+    }
+
+    async fn spec(&self, params: &SpecParams) -> Result<PluginSpec, PipelineError> {
+        let component = self
+            .runtime
+            .load_module(&params.wasm_path)
+            .map_err(PipelineError::Infrastructure)?;
+        let kind = params.kind;
+        let plugin_id = params.plugin_id.clone();
+        let plugin_version = params.plugin_version.clone();
+
+        tokio::task::spawn_blocking(move || {
+            run_spec_impl(&component, kind, &plugin_id, &plugin_version)
+        })
+        .await
+        .map_err(|e| PipelineError::infra(format!("spec task panicked: {e}")))?
+        .map_err(PipelineError::Infrastructure)
+    }
+
+    async fn prerequisites(
+        &self,
+        params: &PrerequisitesParams,
+    ) -> Result<PrerequisitesReport, PipelineError> {
+        let component = self
+            .runtime
+            .load_module(&params.wasm_path)
+            .map_err(PipelineError::Infrastructure)?;
+        let kind = params.kind;
+        let plugin_id = params.plugin_id.clone();
+        let plugin_version = params.plugin_version.clone();
+        let config = params.config.clone();
+        let permissions = params.permissions.clone();
+        let sandbox_overrides = params.sandbox_overrides.clone();
+
+        tokio::task::spawn_blocking(move || {
+            run_prerequisites_impl(
+                &component,
+                kind,
+                &plugin_id,
+                &plugin_version,
+                &config,
+                permissions.as_ref(),
+                sandbox_overrides.as_ref(),
+            )
+        })
+        .await
+        .map_err(|e| PipelineError::infra(format!("prerequisites task panicked: {e}")))?
+        .map_err(PipelineError::Infrastructure)
+    }
+
+    async fn apply(&self, params: &ApplyParams) -> Result<ApplyReport, PipelineError> {
+        let component = self
+            .runtime
+            .load_module(&params.wasm_path)
+            .map_err(PipelineError::Infrastructure)?;
+        let kind = params.kind;
+        let plugin_id = params.plugin_id.clone();
+        let plugin_version = params.plugin_version.clone();
+        let config = params.config.clone();
+        let streams = params.streams.clone();
+        let dry_run = params.dry_run;
+        let permissions = params.permissions.clone();
+        let sandbox_overrides = params.sandbox_overrides.clone();
+
+        tokio::task::spawn_blocking(move || {
+            run_apply_impl(
+                &component,
+                kind,
+                &plugin_id,
+                &plugin_version,
+                &config,
+                &streams,
+                dry_run,
+                permissions.as_ref(),
+                sandbox_overrides.as_ref(),
+            )
+        })
+        .await
+        .map_err(|e| PipelineError::infra(format!("apply task panicked: {e}")))?
+        .map_err(PipelineError::Infrastructure)
+    }
+
+    async fn teardown(&self, params: &TeardownParams) -> Result<TeardownReport, PipelineError> {
+        let component = self
+            .runtime
+            .load_module(&params.wasm_path)
+            .map_err(PipelineError::Infrastructure)?;
+        let kind = params.kind;
+        let plugin_id = params.plugin_id.clone();
+        let plugin_version = params.plugin_version.clone();
+        let config = params.config.clone();
+        let streams = params.streams.clone();
+        let reason = params.reason.clone();
+        let permissions = params.permissions.clone();
+        let sandbox_overrides = params.sandbox_overrides.clone();
+
+        tokio::task::spawn_blocking(move || {
+            run_teardown_impl(
+                &component,
+                kind,
+                &plugin_id,
+                &plugin_version,
+                &config,
+                &streams,
+                &reason,
+                permissions.as_ref(),
+                sandbox_overrides.as_ref(),
+            )
+        })
+        .await
+        .map_err(|e| PipelineError::infra(format!("teardown task panicked: {e}")))?
+        .map_err(PipelineError::Infrastructure)
     }
 }
 
@@ -327,12 +433,172 @@ fn serialize_plugin_config(
         .map_err(PipelineError::Infrastructure)
 }
 
-/// Serialize a [`StreamContext`] to JSON for the `RunRequest`.
-fn serialize_stream_context(stream_ctx: &StreamContext) -> Result<String, PipelineError> {
-    serde_json::to_string(stream_ctx)
-        .context("Failed to serialize StreamContext")
-        .map_err(PipelineError::Infrastructure)
+// ── StreamContext → WIT converters ──────────────────────────────────
+//
+// Each WIT world (source, destination, transform) has its own copy of
+// the StreamContext type. These helpers convert from the shared
+// `rapidbyte_types::stream::StreamContext` to the per-world WIT type.
+
+macro_rules! stream_context_to_wit {
+    ($fn_name:ident, $mod:ident) => {
+        #[allow(clippy::too_many_lines)]
+        fn $fn_name(
+            ctx: &StreamContext,
+        ) -> Result<$mod::rapidbyte::plugin::types::StreamContext, PipelineError> {
+            use rapidbyte_types::stream::PartitionStrategy;
+            use rapidbyte_types::wire::{SyncMode, WriteMode};
+
+            let sync_mode = match ctx.sync_mode {
+                SyncMode::FullRefresh => $mod::rapidbyte::plugin::types::SyncMode::FullRefresh,
+                SyncMode::Incremental => $mod::rapidbyte::plugin::types::SyncMode::Incremental,
+                SyncMode::Cdc => $mod::rapidbyte::plugin::types::SyncMode::Cdc,
+            };
+
+            let write_mode = ctx.write_mode.as_ref().map(|wm| match wm {
+                WriteMode::Append => $mod::rapidbyte::plugin::types::WriteMode::Append,
+                WriteMode::Replace => $mod::rapidbyte::plugin::types::WriteMode::Replace,
+                WriteMode::Upsert { .. } => $mod::rapidbyte::plugin::types::WriteMode::Upsert,
+            });
+
+            let cursor_info = ctx.cursor_info.as_ref().map(|ci| {
+                let last_value_json = ci
+                    .last_value
+                    .as_ref()
+                    .map(|v| serde_json::to_string(v).unwrap_or_default());
+                $mod::rapidbyte::plugin::types::CursorInfo {
+                    cursor_field: ci.cursor_field.clone(),
+                    tie_breaker_field: ci.tie_breaker_field.clone(),
+                    cursor_type: serde_json::to_value(&ci.cursor_type)
+                        .ok()
+                        .and_then(|v| v.as_str().map(String::from))
+                        .unwrap_or_else(|| "utf8".to_string()),
+                    last_value_json,
+                }
+            });
+
+            let schema = $mod::rapidbyte::plugin::types::StreamSchema {
+                fields: ctx
+                    .schema
+                    .fields
+                    .iter()
+                    .map(|f| $mod::rapidbyte::plugin::types::SchemaField {
+                        name: f.name.clone(),
+                        arrow_type: f.arrow_type.clone(),
+                        nullable: f.nullable,
+                        is_primary_key: f.is_primary_key,
+                        is_generated: f.is_generated,
+                        is_partition_key: f.is_partition_key,
+                        default_value: f.default_value.clone(),
+                    })
+                    .collect(),
+                primary_key: ctx.schema.primary_key.clone(),
+                partition_keys: ctx.schema.partition_keys.clone(),
+                source_defined_cursor: ctx.schema.source_defined_cursor.clone(),
+                schema_id: ctx.schema.schema_id.clone(),
+            };
+
+            let on_data_error = match ctx.policies.on_data_error {
+                rapidbyte_types::stream::DataErrorPolicy::Fail => {
+                    $mod::rapidbyte::plugin::types::DataErrorPolicy::Fail
+                }
+                rapidbyte_types::stream::DataErrorPolicy::Skip => {
+                    $mod::rapidbyte::plugin::types::DataErrorPolicy::Skip
+                }
+                rapidbyte_types::stream::DataErrorPolicy::Dlq => {
+                    $mod::rapidbyte::plugin::types::DataErrorPolicy::Dlq
+                }
+            };
+
+            let se = &ctx.policies.schema_evolution;
+            let schema_evolution = $mod::rapidbyte::plugin::types::SchemaEvolutionPolicy {
+                new_column: match se.new_column {
+                    rapidbyte_types::stream::ColumnPolicy::Add => {
+                        $mod::rapidbyte::plugin::types::ColumnPolicy::Add
+                    }
+                    rapidbyte_types::stream::ColumnPolicy::Ignore => {
+                        $mod::rapidbyte::plugin::types::ColumnPolicy::Ignore
+                    }
+                    rapidbyte_types::stream::ColumnPolicy::Fail => {
+                        $mod::rapidbyte::plugin::types::ColumnPolicy::Fail
+                    }
+                },
+                removed_column: match se.removed_column {
+                    rapidbyte_types::stream::ColumnPolicy::Add => {
+                        $mod::rapidbyte::plugin::types::ColumnPolicy::Add
+                    }
+                    rapidbyte_types::stream::ColumnPolicy::Ignore => {
+                        $mod::rapidbyte::plugin::types::ColumnPolicy::Ignore
+                    }
+                    rapidbyte_types::stream::ColumnPolicy::Fail => {
+                        $mod::rapidbyte::plugin::types::ColumnPolicy::Fail
+                    }
+                },
+                type_change: match se.type_change {
+                    rapidbyte_types::stream::TypeChangePolicy::Coerce => {
+                        $mod::rapidbyte::plugin::types::TypeChangePolicy::Coerce
+                    }
+                    rapidbyte_types::stream::TypeChangePolicy::Fail => {
+                        $mod::rapidbyte::plugin::types::TypeChangePolicy::Fail
+                    }
+                    rapidbyte_types::stream::TypeChangePolicy::Null => {
+                        $mod::rapidbyte::plugin::types::TypeChangePolicy::NullOut
+                    }
+                },
+                nullability_change: match se.nullability_change {
+                    rapidbyte_types::stream::NullabilityPolicy::Allow => {
+                        $mod::rapidbyte::plugin::types::NullabilityPolicy::Allow
+                    }
+                    rapidbyte_types::stream::NullabilityPolicy::Fail => {
+                        $mod::rapidbyte::plugin::types::NullabilityPolicy::Fail
+                    }
+                },
+            };
+
+            let partition_strategy = ctx.partition_strategy.as_ref().map(|ps| match ps {
+                PartitionStrategy::ModHash => {
+                    $mod::rapidbyte::plugin::types::PartitionStrategy::ModHash
+                }
+                PartitionStrategy::Range => {
+                    $mod::rapidbyte::plugin::types::PartitionStrategy::Range
+                }
+            });
+
+            Ok($mod::rapidbyte::plugin::types::StreamContext {
+                stream_index: ctx.stream_index,
+                stream_name: ctx.stream_name.clone(),
+                source_stream_name: ctx.source_stream_name.clone(),
+                schema,
+                sync_mode,
+                cursor_info,
+                limits: $mod::rapidbyte::plugin::types::StreamLimits {
+                    max_batch_bytes: ctx.limits.max_batch_bytes,
+                    max_record_bytes: ctx.limits.max_record_bytes,
+                    max_inflight_batches: ctx.limits.max_inflight_batches,
+                    max_parallel_requests: ctx.limits.max_parallel_requests,
+                    checkpoint_interval_bytes: ctx.limits.checkpoint_interval_bytes,
+                    checkpoint_interval_rows: ctx.limits.checkpoint_interval_rows,
+                    checkpoint_interval_seconds: ctx.limits.checkpoint_interval_seconds,
+                    max_records: ctx.limits.max_records,
+                },
+                policies: $mod::rapidbyte::plugin::types::StreamPolicies {
+                    on_data_error,
+                    schema_evolution,
+                },
+                write_mode,
+                selected_columns: ctx.selected_columns.clone(),
+                partition_key: ctx.partition_key.clone(),
+                partition_count: ctx.partition_count,
+                partition_index: ctx.partition_index,
+                effective_parallelism: ctx.effective_parallelism,
+                partition_strategy,
+            })
+        }
+    };
 }
+
+stream_context_to_wit!(stream_context_to_wit_source, source_bindings);
+stream_context_to_wit!(stream_context_to_wit_dest, dest_bindings);
+stream_context_to_wit!(stream_context_to_wit_transform, transform_bindings);
 
 /// Drain checkpoints from a shared mutex, returning an owned `Vec`.
 fn extract_checkpoints(
@@ -396,6 +662,7 @@ fn run_source_stream(
     source_config: &serde_json::Value,
     stats: Arc<Mutex<RunStats>>,
     on_batch_emitted: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+    cancel_flag: Arc<AtomicBool>,
 ) -> Result<SourceOutcome, PipelineError> {
     let phase_start = Instant::now();
 
@@ -419,7 +686,8 @@ fn run_source_stream(
     }
     builder = builder
         .sender(frame_sender.clone())
-        .source_checkpoints(source_checkpoints.clone());
+        .source_checkpoints(source_checkpoints.clone())
+        .cancel_flag(cancel_flag);
     if let Some(cb) = on_batch_emitted {
         builder = builder.on_emit(cb);
     }
@@ -453,34 +721,33 @@ fn run_source_stream(
         .map_err(|e| PipelineError::infra(format!("Failed to call source open: {e}")))?
         .map_err(|err| PipelineError::Plugin(source_error_to_sdk(err)))?;
 
-    let ctx_json = serialize_stream_context(stream_ctx)?;
-
     tracing::info!(stream = stream_ctx.stream_name, "Starting source read");
+    let wit_stream_ctx = stream_context_to_wit_source(stream_ctx)?;
     let run_request = source_bindings::rapidbyte::plugin::types::RunRequest {
-        phase: source_bindings::rapidbyte::plugin::types::RunPhase::Read,
-        stream_context_json: ctx_json,
+        streams: vec![wit_stream_ctx],
         dry_run: false,
-        max_records: None,
     };
     let run_result = iface
         .call_run(&mut store, session, &run_request)
         .map_err(|e| PipelineError::infra(format!("Failed to call source run: {e}")))?;
 
     let summary = match run_result {
-        Ok(summary) => {
-            let Some(summary) = summary.read else {
+        Ok(run_summary) => {
+            let result = run_summary.results.into_iter().next().ok_or_else(|| {
                 let _ = iface.call_close(&mut store, session);
-                return Err(PipelineError::infra(
-                    "source run summary missing read section",
-                ));
-            };
-            ReadSummary {
-                records_read: summary.records_read,
-                bytes_read: summary.bytes_read,
-                batches_emitted: summary.batches_emitted,
-                checkpoint_count: summary.checkpoint_count,
-                records_skipped: summary.records_skipped,
+                PipelineError::infra("source run summary returned no stream results")
+            })?;
+            if !result.succeeded {
+                let _ = iface.call_close(&mut store, session);
+                return Err(PipelineError::infra(format!(
+                    "source stream '{}' failed: {}",
+                    result.stream_name, result.outcome_json
+                )));
             }
+            serde_json::from_str::<ReadSummary>(&result.outcome_json).map_err(|e| {
+                let _ = iface.call_close(&mut store, session);
+                PipelineError::infra(format!("failed to parse source outcome_json: {e}"))
+            })?
         }
         Err(err) => {
             let _ = iface.call_close(&mut store, session);
@@ -549,6 +816,7 @@ fn run_destination_stream(
     dlq_records: Arc<Mutex<Vec<rapidbyte_types::envelope::DlqRecord>>>,
     dest_config: &serde_json::Value,
     stats: Arc<Mutex<RunStats>>,
+    cancel_flag: Arc<AtomicBool>,
 ) -> Result<DestinationOutcome, PipelineError> {
     let phase_start = Instant::now();
     let vm_setup_start = Instant::now();
@@ -574,7 +842,8 @@ fn run_destination_stream(
     let builder = builder
         .receiver(frame_receiver)
         .dest_checkpoints(dest_checkpoints.clone())
-        .dlq_records(dlq_records.clone());
+        .dlq_records(dlq_records.clone())
+        .cancel_flag(cancel_flag);
     let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
     let timeout = overrides.and_then(|o| o.timeout_seconds);
@@ -608,37 +877,37 @@ fn run_destination_stream(
         .map_err(|err| PipelineError::Plugin(dest_error_to_sdk(err)))?;
 
     let recv_start = Instant::now();
-    let ctx_json = serialize_stream_context(stream_ctx)?;
 
     tracing::info!(
         stream = stream_ctx.stream_name,
         "Starting destination write"
     );
+    let wit_stream_ctx = stream_context_to_wit_dest(stream_ctx)?;
     let run_request = dest_bindings::rapidbyte::plugin::types::RunRequest {
-        phase: dest_bindings::rapidbyte::plugin::types::RunPhase::Write,
-        stream_context_json: ctx_json,
+        streams: vec![wit_stream_ctx],
         dry_run: false,
-        max_records: None,
     };
     let run_result = iface
         .call_run(&mut store, session, &run_request)
         .map_err(|e| PipelineError::infra(format!("Failed to call destination run: {e}")))?;
 
     let summary = match run_result {
-        Ok(summary) => {
-            let Some(summary) = summary.write else {
+        Ok(run_summary) => {
+            let result = run_summary.results.into_iter().next().ok_or_else(|| {
                 let _ = iface.call_close(&mut store, session);
-                return Err(PipelineError::infra(
-                    "destination run summary missing write section",
-                ));
-            };
-            WriteSummary {
-                records_written: summary.records_written,
-                bytes_written: summary.bytes_written,
-                batches_written: summary.batches_written,
-                checkpoint_count: summary.checkpoint_count,
-                records_failed: summary.records_failed,
+                PipelineError::infra("destination run summary returned no stream results")
+            })?;
+            if !result.succeeded {
+                let _ = iface.call_close(&mut store, session);
+                return Err(PipelineError::infra(format!(
+                    "destination stream '{}' failed: {}",
+                    result.stream_name, result.outcome_json
+                )));
             }
+            serde_json::from_str::<WriteSummary>(&result.outcome_json).map_err(|e| {
+                let _ = iface.call_close(&mut store, session);
+                PipelineError::infra(format!("failed to parse destination outcome_json: {e}"))
+            })?
         }
         Err(err) => {
             let _ = iface.call_close(&mut store, session);
@@ -710,6 +979,7 @@ fn run_transform_stream(
     dlq_records: Arc<Mutex<Vec<rapidbyte_types::envelope::DlqRecord>>>,
     transform_index: usize,
     transform_config: &serde_json::Value,
+    cancel_flag: Arc<AtomicBool>,
 ) -> Result<TransformOutcome, PipelineError> {
     let phase_start = Instant::now();
 
@@ -737,7 +1007,8 @@ fn run_transform_stream(
         .receiver(frame_receiver)
         .dlq_records(dlq_records)
         .source_checkpoints(source_checkpoints)
-        .dest_checkpoints(dest_checkpoints);
+        .dest_checkpoints(dest_checkpoints)
+        .cancel_flag(cancel_flag);
     let host_state = builder.build().map_err(PipelineError::Infrastructure)?;
 
     let timeout = overrides.and_then(|o| o.timeout_seconds);
@@ -771,34 +1042,33 @@ fn run_transform_stream(
         .map_err(|e| PipelineError::infra(format!("Failed to call transform open: {e}")))?
         .map_err(|err| PipelineError::Plugin(transform_error_to_sdk(err)))?;
 
-    let ctx_json = serialize_stream_context(stream_ctx)?;
-
     tracing::info!(stream = stream_ctx.stream_name, "Starting transform");
+    let wit_stream_ctx = stream_context_to_wit_transform(stream_ctx)?;
     let run_request = transform_bindings::rapidbyte::plugin::types::RunRequest {
-        phase: transform_bindings::rapidbyte::plugin::types::RunPhase::Transform,
-        stream_context_json: ctx_json,
+        streams: vec![wit_stream_ctx],
         dry_run: false,
-        max_records: None,
     };
     let run_result = iface
         .call_run(&mut store, session, &run_request)
         .map_err(|e| PipelineError::infra(format!("Failed to call transform run: {e}")))?;
 
     let summary = match run_result {
-        Ok(summary) => {
-            let Some(summary) = summary.transform else {
+        Ok(run_summary) => {
+            let result = run_summary.results.into_iter().next().ok_or_else(|| {
                 let _ = iface.call_close(&mut store, session);
-                return Err(PipelineError::infra(
-                    "transform run summary missing transform section",
-                ));
-            };
-            TransformSummary {
-                records_in: summary.records_in,
-                records_out: summary.records_out,
-                bytes_in: summary.bytes_in,
-                bytes_out: summary.bytes_out,
-                batches_processed: summary.batches_processed,
+                PipelineError::infra("transform run summary returned no stream results")
+            })?;
+            if !result.succeeded {
+                let _ = iface.call_close(&mut store, session);
+                return Err(PipelineError::infra(format!(
+                    "transform stream '{}' failed: {}",
+                    result.stream_name, result.outcome_json
+                )));
             }
+            serde_json::from_str::<TransformSummary>(&result.outcome_json).map_err(|e| {
+                let _ = iface.call_close(&mut store, session);
+                PipelineError::infra(format!("failed to parse transform outcome_json: {e}"))
+            })?
         }
         Err(err) => {
             let _ = iface.call_close(&mut store, session);
@@ -841,7 +1111,8 @@ fn validate_plugin_impl(
     stream_name: &str,
     permissions: Option<&Permissions>,
     sandbox_overrides: Option<&SandboxOverrides>,
-) -> anyhow::Result<ValidationResult> {
+    upstream_schema: Option<&StreamSchema>,
+) -> anyhow::Result<ValidationReport> {
     use rapidbyte_runtime::{dest_validation_to_sdk, transform_validation_to_sdk};
 
     tracing::info!(plugin = plugin_id, version = plugin_version, kind = ?kind, "Validating plugin");
@@ -884,13 +1155,17 @@ fn validate_plugin_impl(
             )?;
             let iface = bindings.rapidbyte_plugin_source();
 
-            let session = iface
+            let session = match iface
                 .call_open(&mut store, &config_json)?
                 .map_err(source_error_to_sdk)
-                .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
+            {
+                Ok(session) => session,
+                Err(err) => return config_error_as_validation_failure("Source", &err),
+            };
 
+            let wit_schema = upstream_schema.map(schema_to_wit_source);
             let result = iface
-                .call_validate(&mut store, session)?
+                .call_validate(&mut store, session, wit_schema.as_ref())?
                 .map(source_validation_to_sdk)
                 .map_err(source_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!(e.to_string()));
@@ -912,13 +1187,17 @@ fn validate_plugin_impl(
             )?;
             let iface = bindings.rapidbyte_plugin_destination();
 
-            let session = iface
+            let session = match iface
                 .call_open(&mut store, &config_json)?
                 .map_err(dest_error_to_sdk)
-                .map_err(|e| anyhow::anyhow!("Destination open failed: {e}"))?;
+            {
+                Ok(session) => session,
+                Err(err) => return config_error_as_validation_failure("Destination", &err),
+            };
 
+            let wit_schema = upstream_schema.map(schema_to_wit_dest);
             let result = iface
-                .call_validate(&mut store, session)?
+                .call_validate(&mut store, session, wit_schema.as_ref())?
                 .map(dest_validation_to_sdk)
                 .map_err(dest_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!(e.to_string()));
@@ -940,13 +1219,17 @@ fn validate_plugin_impl(
             )?;
             let iface = bindings.rapidbyte_plugin_transform();
 
-            let session = iface
+            let session = match iface
                 .call_open(&mut store, &config_json)?
                 .map_err(transform_error_to_sdk)
-                .map_err(|e| anyhow::anyhow!("Transform open failed: {e}"))?;
+            {
+                Ok(session) => session,
+                Err(err) => return config_error_as_validation_failure("Transform", &err),
+            };
 
+            let wit_schema = upstream_schema.map(schema_to_wit_transform);
             let result = iface
-                .call_validate(&mut store, session)?
+                .call_validate(&mut store, session, wit_schema.as_ref())?
                 .map(transform_validation_to_sdk)
                 .map_err(transform_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!(e.to_string()));
@@ -956,6 +1239,17 @@ fn validate_plugin_impl(
         PluginKind::Unknown => {
             anyhow::bail!("cannot validate plugin with unknown kind")
         }
+    }
+}
+
+fn config_error_as_validation_failure(
+    role: &str,
+    err: &rapidbyte_types::error::PluginError,
+) -> anyhow::Result<ValidationReport> {
+    if err.category == rapidbyte_types::error::ErrorCategory::Config {
+        Ok(ValidationReport::failed(&err.message))
+    } else {
+        Err(anyhow::anyhow!("{role} open failed: {err}"))
     }
 }
 
@@ -969,7 +1263,7 @@ fn run_discover_impl(
     config: &serde_json::Value,
     permissions: Option<&Permissions>,
     sandbox_overrides: Option<&SandboxOverrides>,
-) -> anyhow::Result<Catalog> {
+) -> anyhow::Result<Vec<DiscoveredStream>> {
     let state = noop_state_backend();
     let mut builder = ComponentHostState::builder()
         .pipeline("discover")
@@ -1008,12 +1302,15 @@ fn run_discover_impl(
         .map_err(source_error_to_sdk)
         .map_err(|e| anyhow::anyhow!("Source open failed for discover: {e}"))?;
 
-    let discover_json = iface
+    let wit_streams = iface
         .call_discover(&mut store, session)?
         .map_err(source_error_to_sdk)
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-    let catalog = serde_json::from_str::<Catalog>(&discover_json)
-        .context("Failed to parse discover catalog JSON")?;
+
+    let streams = wit_streams
+        .into_iter()
+        .map(source_discovered_stream_to_sdk)
+        .collect();
 
     tracing::info!(
         plugin = plugin_id,
@@ -1027,7 +1324,647 @@ fn run_discover_impl(
         );
     }
 
-    Ok(catalog)
+    Ok(streams)
+}
+
+// ── Schema → WIT converters ─────────────────────────────────────────
+
+macro_rules! schema_to_wit {
+    ($fn_name:ident, $mod:ident) => {
+        fn $fn_name(schema: &StreamSchema) -> $mod::rapidbyte::plugin::types::StreamSchema {
+            $mod::rapidbyte::plugin::types::StreamSchema {
+                fields: schema
+                    .fields
+                    .iter()
+                    .map(|f| $mod::rapidbyte::plugin::types::SchemaField {
+                        name: f.name.clone(),
+                        arrow_type: f.arrow_type.clone(),
+                        nullable: f.nullable,
+                        is_primary_key: f.is_primary_key,
+                        is_generated: f.is_generated,
+                        is_partition_key: f.is_partition_key,
+                        default_value: f.default_value.clone(),
+                    })
+                    .collect(),
+                primary_key: schema.primary_key.clone(),
+                partition_keys: schema.partition_keys.clone(),
+                source_defined_cursor: schema.source_defined_cursor.clone(),
+                schema_id: schema.schema_id.clone(),
+            }
+        }
+    };
+}
+
+schema_to_wit!(schema_to_wit_source, source_bindings);
+schema_to_wit!(schema_to_wit_dest, dest_bindings);
+schema_to_wit!(schema_to_wit_transform, transform_bindings);
+
+fn source_discovered_stream_to_sdk(
+    stream: source_bindings::rapidbyte::plugin::types::DiscoveredStream,
+) -> DiscoveredStream {
+    let source_bindings::rapidbyte::plugin::types::DiscoveredStream {
+        name,
+        schema,
+        supported_sync_modes,
+        default_cursor_field,
+        estimated_row_count,
+        metadata_json,
+    } = stream;
+    let source_bindings::rapidbyte::plugin::types::StreamSchema {
+        fields,
+        primary_key,
+        partition_keys,
+        source_defined_cursor,
+        schema_id,
+    } = schema;
+
+    DiscoveredStream {
+        name,
+        schema: StreamSchema {
+            fields: fields
+                .into_iter()
+                .map(|field| SchemaField {
+                    name: field.name,
+                    arrow_type: field.arrow_type,
+                    nullable: field.nullable,
+                    is_primary_key: field.is_primary_key,
+                    is_generated: field.is_generated,
+                    is_partition_key: field.is_partition_key,
+                    default_value: field.default_value,
+                })
+                .collect(),
+            primary_key,
+            partition_keys,
+            source_defined_cursor,
+            schema_id,
+        },
+        supported_sync_modes: supported_sync_modes
+            .into_iter()
+            .map(|mode| match mode {
+                source_bindings::rapidbyte::plugin::types::SyncMode::FullRefresh => {
+                    SyncMode::FullRefresh
+                }
+                source_bindings::rapidbyte::plugin::types::SyncMode::Incremental => {
+                    SyncMode::Incremental
+                }
+                source_bindings::rapidbyte::plugin::types::SyncMode::Cdc => SyncMode::Cdc,
+            })
+            .collect(),
+        default_cursor_field,
+        estimated_row_count,
+        metadata_json,
+    }
+}
+
+// ── WIT → SDK converters for lifecycle types ────────────────────────
+
+macro_rules! wit_spec_to_sdk {
+    ($fn_name:ident, $mod:ident) => {
+        fn $fn_name(spec: $mod::rapidbyte::plugin::types::PluginSpec) -> PluginSpec {
+            PluginSpec {
+                protocol_version: spec.protocol_version,
+                config_schema_json: spec.config_schema_json,
+                resource_schema_json: spec.resource_schema_json,
+                documentation_url: spec.documentation_url,
+                features: spec.features,
+                supported_sync_modes: spec
+                    .supported_sync_modes
+                    .into_iter()
+                    .map(|m| match m {
+                        $mod::rapidbyte::plugin::types::SyncMode::FullRefresh => {
+                            SyncMode::FullRefresh
+                        }
+                        $mod::rapidbyte::plugin::types::SyncMode::Incremental => {
+                            SyncMode::Incremental
+                        }
+                        $mod::rapidbyte::plugin::types::SyncMode::Cdc => SyncMode::Cdc,
+                    })
+                    .collect(),
+                supported_write_modes: spec.supported_write_modes.map(|modes| {
+                    modes
+                        .into_iter()
+                        .map(|m| match m {
+                            $mod::rapidbyte::plugin::types::WriteMode::Append => WriteMode::Append,
+                            $mod::rapidbyte::plugin::types::WriteMode::Replace => {
+                                WriteMode::Replace
+                            }
+                            $mod::rapidbyte::plugin::types::WriteMode::Upsert => {
+                                WriteMode::Upsert {
+                                    primary_key: vec![],
+                                }
+                            }
+                        })
+                        .collect()
+                }),
+            }
+        }
+    };
+}
+
+wit_spec_to_sdk!(source_spec_to_sdk, source_bindings);
+wit_spec_to_sdk!(dest_spec_to_sdk, dest_bindings);
+wit_spec_to_sdk!(transform_spec_to_sdk, transform_bindings);
+
+macro_rules! wit_prerequisites_to_sdk {
+    ($fn_name:ident, $mod:ident) => {
+        fn $fn_name(
+            report: $mod::rapidbyte::plugin::types::PrerequisitesReport,
+        ) -> PrerequisitesReport {
+            PrerequisitesReport {
+                passed: report.passed,
+                checks: report
+                    .checks
+                    .into_iter()
+                    .map(|c| PrerequisiteCheck {
+                        name: c.name,
+                        passed: c.passed,
+                        severity: match c.severity {
+                            $mod::rapidbyte::plugin::types::PrerequisiteSeverity::Error => {
+                                PrerequisiteSeverity::Error
+                            }
+                            $mod::rapidbyte::plugin::types::PrerequisiteSeverity::Warning => {
+                                PrerequisiteSeverity::Warning
+                            }
+                            $mod::rapidbyte::plugin::types::PrerequisiteSeverity::Info => {
+                                PrerequisiteSeverity::Info
+                            }
+                        },
+                        message: c.message,
+                        fix_hint: c.fix_hint,
+                    })
+                    .collect(),
+            }
+        }
+    };
+}
+
+wit_prerequisites_to_sdk!(source_prerequisites_to_sdk, source_bindings);
+wit_prerequisites_to_sdk!(dest_prerequisites_to_sdk, dest_bindings);
+
+macro_rules! wit_apply_report_to_sdk {
+    ($fn_name:ident, $mod:ident) => {
+        fn $fn_name(report: $mod::rapidbyte::plugin::types::ApplyReport) -> ApplyReport {
+            ApplyReport {
+                actions: report
+                    .actions
+                    .into_iter()
+                    .map(|a| ApplyAction {
+                        stream_name: a.stream_name,
+                        description: a.description,
+                        ddl_executed: a.ddl_executed,
+                    })
+                    .collect(),
+            }
+        }
+    };
+}
+
+wit_apply_report_to_sdk!(source_apply_report_to_sdk, source_bindings);
+wit_apply_report_to_sdk!(dest_apply_report_to_sdk, dest_bindings);
+
+macro_rules! wit_teardown_report_to_sdk {
+    ($fn_name:ident, $mod:ident) => {
+        fn $fn_name(report: $mod::rapidbyte::plugin::types::TeardownReport) -> TeardownReport {
+            TeardownReport {
+                actions: report.actions,
+            }
+        }
+    };
+}
+
+wit_teardown_report_to_sdk!(source_teardown_report_to_sdk, source_bindings);
+wit_teardown_report_to_sdk!(dest_teardown_report_to_sdk, dest_bindings);
+
+// ── Spec runner ─────────────────────────────────────────────────────
+
+/// Retrieve the plugin spec by calling the sessionless `spec()` export.
+fn run_spec_impl(
+    module: &LoadedComponent,
+    kind: PluginKind,
+    plugin_id: &str,
+    plugin_version: &str,
+) -> anyhow::Result<PluginSpec> {
+    tracing::info!(plugin = plugin_id, version = plugin_version, kind = ?kind, "Retrieving plugin spec");
+
+    let state = noop_state_backend();
+    let host_state = ComponentHostState::builder()
+        .pipeline("spec")
+        .plugin_id(plugin_id)
+        .plugin_instance_key(format!("spec:{kind:?}:{plugin_id}"))
+        .stream("spec")
+        .state_backend(state)
+        .config(&serde_json::Value::Null)
+        .compression(None)
+        .build()?;
+
+    let mut store = module.new_store(host_state, None);
+
+    match kind {
+        PluginKind::Source => {
+            let linker = create_component_linker(&module.engine, "source", |linker| {
+                source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = source_bindings::RapidbyteSource::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_source();
+            let wit_spec = iface
+                .call_spec(&mut store)?
+                .map_err(source_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Source spec failed: {e}"))?;
+            Ok(source_spec_to_sdk(wit_spec))
+        }
+        PluginKind::Destination => {
+            let linker = create_component_linker(&module.engine, "destination", |linker| {
+                dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = dest_bindings::RapidbyteDestination::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_destination();
+            let wit_spec = iface
+                .call_spec(&mut store)?
+                .map_err(dest_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Destination spec failed: {e}"))?;
+            Ok(dest_spec_to_sdk(wit_spec))
+        }
+        PluginKind::Transform => {
+            let linker = create_component_linker(&module.engine, "transform", |linker| {
+                transform_bindings::RapidbyteTransform::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = transform_bindings::RapidbyteTransform::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_transform();
+            let wit_spec = iface
+                .call_spec(&mut store)?
+                .map_err(transform_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Transform spec failed: {e}"))?;
+            Ok(transform_spec_to_sdk(wit_spec))
+        }
+        PluginKind::Unknown => {
+            anyhow::bail!("cannot retrieve spec for plugin with unknown kind")
+        }
+    }
+}
+
+// ── Prerequisites runner ────────────────────────────────────────────
+
+/// Run prerequisite checks against the plugin.
+#[allow(clippy::too_many_arguments)]
+fn run_prerequisites_impl(
+    module: &LoadedComponent,
+    kind: PluginKind,
+    plugin_id: &str,
+    plugin_version: &str,
+    config: &serde_json::Value,
+    permissions: Option<&Permissions>,
+    sandbox_overrides: Option<&SandboxOverrides>,
+) -> anyhow::Result<PrerequisitesReport> {
+    tracing::info!(plugin = plugin_id, version = plugin_version, kind = ?kind, "Running prerequisites check");
+
+    let state = noop_state_backend();
+    let mut builder = ComponentHostState::builder()
+        .pipeline("prerequisites")
+        .plugin_id(plugin_id)
+        .plugin_instance_key(format!("prerequisites:{kind:?}:{plugin_id}"))
+        .stream("prerequisites")
+        .state_backend(state)
+        .config(config)
+        .compression(None);
+    if let Some(p) = permissions {
+        builder = builder.permissions(p);
+    }
+    if let Some(ovr) = sandbox_overrides {
+        builder = builder.overrides(ovr);
+    }
+    let host_state = builder.build()?;
+
+    let timeout = sandbox_overrides.and_then(|o| o.timeout_seconds);
+    let mut store = module.new_store(host_state, timeout);
+    let config_json = serde_json::to_string(config)?;
+
+    match kind {
+        PluginKind::Source => {
+            let linker = create_component_linker(&module.engine, "source", |linker| {
+                source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = source_bindings::RapidbyteSource::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_source();
+
+            let session = iface
+                .call_open(&mut store, &config_json)?
+                .map_err(source_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
+
+            let result = iface
+                .call_prerequisites(&mut store, session)?
+                .map(source_prerequisites_to_sdk)
+                .map_err(source_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let _ = iface.call_close(&mut store, session);
+            result
+        }
+        PluginKind::Destination => {
+            let linker = create_component_linker(&module.engine, "destination", |linker| {
+                dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = dest_bindings::RapidbyteDestination::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_destination();
+
+            let session = iface
+                .call_open(&mut store, &config_json)?
+                .map_err(dest_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Destination open failed: {e}"))?;
+
+            let result = iface
+                .call_prerequisites(&mut store, session)?
+                .map(dest_prerequisites_to_sdk)
+                .map_err(dest_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let _ = iface.call_close(&mut store, session);
+            result
+        }
+        PluginKind::Transform => {
+            // Transform interface does not have prerequisites — return passed.
+            Ok(PrerequisitesReport::passed())
+        }
+        PluginKind::Unknown => {
+            anyhow::bail!("cannot run prerequisites for plugin with unknown kind")
+        }
+    }
+}
+
+// ── Apply runner ────────────────────────────────────────────────────
+
+/// Apply schema changes for streams.
+#[allow(clippy::too_many_arguments)]
+fn run_apply_impl(
+    module: &LoadedComponent,
+    kind: PluginKind,
+    plugin_id: &str,
+    plugin_version: &str,
+    config: &serde_json::Value,
+    streams: &[StreamContext],
+    dry_run: bool,
+    permissions: Option<&Permissions>,
+    sandbox_overrides: Option<&SandboxOverrides>,
+) -> anyhow::Result<ApplyReport> {
+    tracing::info!(plugin = plugin_id, version = plugin_version, kind = ?kind, dry_run, "Running apply");
+
+    let state = noop_state_backend();
+    let mut builder = ComponentHostState::builder()
+        .pipeline("apply")
+        .plugin_id(plugin_id)
+        .plugin_instance_key(format!("apply:{kind:?}:{plugin_id}"))
+        .stream("apply")
+        .state_backend(state)
+        .config(config)
+        .compression(None);
+    if let Some(p) = permissions {
+        builder = builder.permissions(p);
+    }
+    if let Some(ovr) = sandbox_overrides {
+        builder = builder.overrides(ovr);
+    }
+    let host_state = builder.build()?;
+
+    let timeout = sandbox_overrides.and_then(|o| o.timeout_seconds);
+    let mut store = module.new_store(host_state, timeout);
+    let config_json = serde_json::to_string(config)?;
+
+    match kind {
+        PluginKind::Source => {
+            let linker = create_component_linker(&module.engine, "source", |linker| {
+                source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = source_bindings::RapidbyteSource::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_source();
+
+            let session = iface
+                .call_open(&mut store, &config_json)?
+                .map_err(source_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
+
+            let wit_streams: Vec<_> = streams
+                .iter()
+                .map(stream_context_to_wit_source)
+                .collect::<Result<_, _>>()?;
+            let request = source_bindings::rapidbyte::plugin::types::ApplyRequest {
+                streams: wit_streams,
+                dry_run,
+            };
+
+            let result = iface
+                .call_apply(&mut store, session, &request)?
+                .map(source_apply_report_to_sdk)
+                .map_err(source_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let _ = iface.call_close(&mut store, session);
+            result
+        }
+        PluginKind::Destination => {
+            let linker = create_component_linker(&module.engine, "destination", |linker| {
+                dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = dest_bindings::RapidbyteDestination::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_destination();
+
+            let session = iface
+                .call_open(&mut store, &config_json)?
+                .map_err(dest_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Destination open failed: {e}"))?;
+
+            let wit_streams: Vec<_> = streams
+                .iter()
+                .map(stream_context_to_wit_dest)
+                .collect::<Result<_, _>>()?;
+            let request = dest_bindings::rapidbyte::plugin::types::ApplyRequest {
+                streams: wit_streams,
+                dry_run,
+            };
+
+            let result = iface
+                .call_apply(&mut store, session, &request)?
+                .map(dest_apply_report_to_sdk)
+                .map_err(dest_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let _ = iface.call_close(&mut store, session);
+            result
+        }
+        PluginKind::Transform => {
+            // Transform interface does not have apply — return noop.
+            Ok(ApplyReport::noop())
+        }
+        PluginKind::Unknown => {
+            anyhow::bail!("cannot run apply for plugin with unknown kind")
+        }
+    }
+}
+
+// ── Teardown runner ─────────────────────────────────────────────────
+
+/// Tear down resources for streams.
+#[allow(clippy::too_many_arguments)]
+fn run_teardown_impl(
+    module: &LoadedComponent,
+    kind: PluginKind,
+    plugin_id: &str,
+    plugin_version: &str,
+    config: &serde_json::Value,
+    streams: &[String],
+    reason: &str,
+    permissions: Option<&Permissions>,
+    sandbox_overrides: Option<&SandboxOverrides>,
+) -> anyhow::Result<TeardownReport> {
+    tracing::info!(plugin = plugin_id, version = plugin_version, kind = ?kind, reason, "Running teardown");
+
+    let state = noop_state_backend();
+    let mut builder = ComponentHostState::builder()
+        .pipeline("teardown")
+        .plugin_id(plugin_id)
+        .plugin_instance_key(format!("teardown:{kind:?}:{plugin_id}"))
+        .stream("teardown")
+        .state_backend(state)
+        .config(config)
+        .compression(None);
+    if let Some(p) = permissions {
+        builder = builder.permissions(p);
+    }
+    if let Some(ovr) = sandbox_overrides {
+        builder = builder.overrides(ovr);
+    }
+    let host_state = builder.build()?;
+
+    let timeout = sandbox_overrides.and_then(|o| o.timeout_seconds);
+    let mut store = module.new_store(host_state, timeout);
+    let config_json = serde_json::to_string(config)?;
+
+    match kind {
+        PluginKind::Source => {
+            let linker = create_component_linker(&module.engine, "source", |linker| {
+                source_bindings::RapidbyteSource::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = source_bindings::RapidbyteSource::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_source();
+
+            let session = iface
+                .call_open(&mut store, &config_json)?
+                .map_err(source_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
+
+            let request = source_bindings::rapidbyte::plugin::types::TeardownRequest {
+                streams: streams.to_vec(),
+                reason: reason.to_string(),
+            };
+
+            let result = iface
+                .call_teardown(&mut store, session, &request)?
+                .map(source_teardown_report_to_sdk)
+                .map_err(source_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let _ = iface.call_close(&mut store, session);
+            result
+        }
+        PluginKind::Destination => {
+            let linker = create_component_linker(&module.engine, "destination", |linker| {
+                dest_bindings::RapidbyteDestination::add_to_linker::<_, HasSelf<_>>(
+                    linker,
+                    |state| state,
+                )?;
+                Ok(())
+            })?;
+            let bindings = dest_bindings::RapidbyteDestination::instantiate(
+                &mut store,
+                &module.component,
+                &linker,
+            )?;
+            let iface = bindings.rapidbyte_plugin_destination();
+
+            let session = iface
+                .call_open(&mut store, &config_json)?
+                .map_err(dest_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!("Destination open failed: {e}"))?;
+
+            let request = dest_bindings::rapidbyte::plugin::types::TeardownRequest {
+                streams: streams.to_vec(),
+                reason: reason.to_string(),
+            };
+
+            let result = iface
+                .call_teardown(&mut store, session, &request)?
+                .map(dest_teardown_report_to_sdk)
+                .map_err(dest_error_to_sdk)
+                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let _ = iface.call_close(&mut store, session);
+            result
+        }
+        PluginKind::Transform => {
+            // Transform interface does not have teardown — return noop.
+            Ok(TeardownReport::noop())
+        }
+        PluginKind::Unknown => {
+            anyhow::bail!("cannot run teardown for plugin with unknown kind")
+        }
+    }
 }
 
 // ── Public API for benchmarks crate ──────────────────────────────────
@@ -1101,6 +2038,7 @@ pub fn run_source_stream_bench(
         source_config,
         stats,
         on_batch_emitted,
+        Arc::new(AtomicBool::new(false)),
     )?;
     Ok(SourceStreamOutcome {
         duration_secs: outcome.duration_secs,
@@ -1138,6 +2076,7 @@ pub fn run_destination_stream_bench(
         dlq_records,
         dest_config,
         stats,
+        Arc::new(AtomicBool::new(false)),
     )?;
     Ok(DestinationStreamOutcome {
         duration_secs: outcome.duration_secs,
@@ -1179,6 +2118,7 @@ pub fn run_transform_stream_bench(
         dlq_records,
         transform_index,
         transform_config,
+        Arc::new(AtomicBool::new(false)),
     )?;
     Ok(TransformStreamOutcome {
         duration_secs: outcome.duration_secs,
@@ -1188,11 +2128,13 @@ pub fn run_transform_stream_bench(
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_close_result, parse_compression, plugin_instance_key};
+    use super::{
+        config_error_as_validation_failure, handle_close_result, parse_compression,
+        plugin_instance_key,
+    };
     use rapidbyte_runtime::CompressionCodec;
-    use rapidbyte_types::catalog::SchemaHint;
-    use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
-    use rapidbyte_types::wire::SyncMode;
+    use rapidbyte_types::stream::StreamContext;
+    use rapidbyte_types::validation::ValidationStatus;
 
     #[test]
     fn test_handle_close_result_ok() {
@@ -1229,24 +2171,20 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn config_error_as_validation_failure_maps_config_category() {
+        let err = rapidbyte_types::error::PluginError::config("BAD_CONFIG", "invalid config");
+
+        let report = config_error_as_validation_failure("Transform", &err)
+            .expect("config errors should map to failed validation");
+        assert_eq!(report.status, ValidationStatus::Failed);
+        assert!(report.message.contains("invalid config"));
+    }
+
     fn test_stream_ctx(stream_name: &str, partition_index: Option<u32>) -> StreamContext {
-        StreamContext {
-            stream_name: stream_name.to_string(),
-            source_stream_name: None,
-            schema: SchemaHint::Columns(vec![]),
-            sync_mode: SyncMode::FullRefresh,
-            cursor_info: None,
-            limits: StreamLimits::default(),
-            policies: StreamPolicies::default(),
-            write_mode: None,
-            selected_columns: None,
-            partition_key: None,
-            partition_count: None,
-            partition_index,
-            effective_parallelism: None,
-            partition_strategy: None,
-            copy_flush_bytes_override: None,
-        }
+        let mut ctx = StreamContext::test_default(stream_name);
+        ctx.partition_index = partition_index;
+        ctx
     }
 
     #[test]

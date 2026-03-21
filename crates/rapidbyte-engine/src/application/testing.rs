@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use rapidbyte_metrics::snapshot::PipelineMetricsSnapshot;
 use rapidbyte_types::envelope::DlqRecord;
+use rapidbyte_types::lifecycle::ApplyReport;
 use rapidbyte_types::state::{CursorState, PipelineId, RunStats, RunStatus, StreamName};
 use rapidbyte_types::wire::PluginKind;
 
@@ -19,10 +20,12 @@ use crate::domain::ports::dlq::DlqRepository;
 use crate::domain::ports::metrics::MetricsSnapshot;
 use crate::domain::ports::resolver::{PluginResolver, ResolvedPlugin};
 use crate::domain::ports::run_record::RunRecordRepository;
+use rapidbyte_types::validation::PrerequisitesReport;
+
 use crate::domain::ports::runner::{
-    CheckComponentStatus, DestinationOutcome, DestinationRunParams, DiscoverParams,
-    DiscoveredStream, PluginRunner, SourceOutcome, SourceRunParams, TransformOutcome,
-    TransformRunParams, ValidateParams,
+    ApplyParams, CheckComponentStatus, DestinationOutcome, DestinationRunParams, DiscoverParams,
+    DiscoveredStream, PluginRunner, PrerequisitesParams, SourceOutcome, SourceRunParams,
+    TransformOutcome, TransformRunParams, ValidateParams,
 };
 use crate::domain::ports::RepositoryError;
 use crate::domain::progress::{ProgressEvent, ProgressReporter};
@@ -57,6 +60,9 @@ pub struct FakePluginRunner {
     dest_results: Mutex<VecDeque<Result<DestinationOutcome, PipelineError>>>,
     validate_results: Mutex<VecDeque<Result<CheckComponentStatus, PipelineError>>>,
     discover_results: Mutex<VecDeque<Result<Vec<DiscoveredStream>, PipelineError>>>,
+    prerequisites_results: Mutex<VecDeque<Result<PrerequisitesReport, PipelineError>>>,
+    apply_results: Mutex<VecDeque<Result<ApplyReport, PipelineError>>>,
+    apply_calls: Mutex<Vec<ApplyParams>>,
 }
 
 impl FakePluginRunner {
@@ -68,6 +74,9 @@ impl FakePluginRunner {
             dest_results: Mutex::new(VecDeque::new()),
             validate_results: Mutex::new(VecDeque::new()),
             discover_results: Mutex::new(VecDeque::new()),
+            prerequisites_results: Mutex::new(VecDeque::new()),
+            apply_results: Mutex::new(VecDeque::new()),
+            apply_calls: Mutex::new(Vec::new()),
         }
     }
 
@@ -109,6 +118,31 @@ impl FakePluginRunner {
     /// Panics if the internal mutex is poisoned.
     pub fn enqueue_discover(&self, result: Result<Vec<DiscoveredStream>, PipelineError>) {
         self.discover_results.lock().unwrap().push_back(result);
+    }
+
+    /// Enqueue a prerequisites result to be returned by the next `prerequisites` call.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
+    pub fn enqueue_prerequisites(&self, result: Result<PrerequisitesReport, PipelineError>) {
+        self.prerequisites_results.lock().unwrap().push_back(result);
+    }
+
+    /// Enqueue an apply result to be returned by the next `apply` call.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
+    pub fn enqueue_apply(&self, result: Result<ApplyReport, PipelineError>) {
+        self.apply_results.lock().unwrap().push_back(result);
+    }
+
+    /// Return the recorded apply calls.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
+    #[must_use]
+    pub fn apply_calls(&self) -> Vec<ApplyParams> {
+        self.apply_calls.lock().unwrap().clone()
     }
 }
 
@@ -190,6 +224,26 @@ impl PluginRunner for FakePluginRunner {
                     "FakePluginRunner: no discover result enqueued",
                 ))
             })
+    }
+
+    async fn prerequisites(
+        &self,
+        _params: &PrerequisitesParams,
+    ) -> Result<PrerequisitesReport, PipelineError> {
+        self.prerequisites_results
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Ok(PrerequisitesReport::passed()))
+    }
+
+    async fn apply(&self, params: &ApplyParams) -> Result<ApplyReport, PipelineError> {
+        self.apply_calls.lock().unwrap().push(params.clone());
+        self.apply_results
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| Ok(ApplyReport::noop()))
     }
 }
 
@@ -721,13 +775,12 @@ mod tests {
     /// ignores the params, so the values don't matter.
     fn make_source_params() -> SourceRunParams {
         use std::path::PathBuf;
+        use std::sync::atomic::AtomicBool;
         use std::sync::{mpsc, Arc, Mutex};
 
         use rapidbyte_runtime::Frame;
-        use rapidbyte_types::catalog::SchemaHint;
         use rapidbyte_types::state::RunStats;
-        use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
-        use rapidbyte_types::wire::SyncMode;
+        use rapidbyte_types::stream::StreamContext;
 
         let (tx, _rx) = mpsc::sync_channel::<Frame>(1);
         SourceRunParams {
@@ -736,23 +789,7 @@ mod tests {
             metric_run_label: "test-run".to_string(),
             plugin_id: "fake/source".to_string(),
             plugin_version: "0.1.0".to_string(),
-            stream_ctx: StreamContext {
-                stream_name: "test".to_string(),
-                source_stream_name: None,
-                schema: SchemaHint::Columns(vec![]),
-                sync_mode: SyncMode::FullRefresh,
-                cursor_info: None,
-                limits: StreamLimits::default(),
-                policies: StreamPolicies::default(),
-                write_mode: None,
-                selected_columns: None,
-                partition_key: None,
-                partition_count: None,
-                partition_index: None,
-                effective_parallelism: None,
-                partition_strategy: None,
-                copy_flush_bytes_override: None,
-            },
+            stream_ctx: StreamContext::test_default("test"),
             config: serde_json::Value::Null,
             permissions: None,
             sandbox_overrides: None,
@@ -760,6 +797,7 @@ mod tests {
             frame_sender: tx,
             stats: Arc::new(Mutex::new(RunStats::default())),
             on_batch_emitted: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 }

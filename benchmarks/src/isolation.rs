@@ -16,7 +16,7 @@ use rapidbyte_runtime::{
     load_plugin_manifest, parse_plugin_ref, resolve_plugin_path, Frame, WasmRuntime,
 };
 use rapidbyte_types::arrow::record_batch_to_ipc;
-use rapidbyte_types::catalog::SchemaHint;
+use rapidbyte_types::schema::StreamSchema;
 use rapidbyte_types::state::RunStats;
 use rapidbyte_types::state_backend::StateBackend;
 use rapidbyte_types::stream::{DataErrorPolicy, StreamContext, StreamLimits, StreamPolicies};
@@ -220,7 +220,7 @@ pub fn execute_destination_benchmark(
         .map(|connector| connector.plugin.clone())
         .context("missing destination connector")?;
     let batches = generate_input_batches(workload.rows)?;
-    let schema_hint = first_batch_schema_hint(&batches)?;
+    let schema_hint = first_batch_schema(&batches)?;
     let stream_ctx = destination_stream_context(env, scenario, schema_hint);
     let _aot = AotEnvGuard::new(scenario.benchmark.aot);
     let runtime = WasmRuntime::new()?;
@@ -309,7 +309,7 @@ pub fn execute_transform_benchmark(
     }
 
     let batches = generate_input_batches(workload.rows)?;
-    let stream_ctx = transform_stream_context(first_batch_schema_hint(&batches)?);
+    let stream_ctx = transform_stream_context(first_batch_schema(&batches)?);
     let _aot = AotEnvGuard::new(scenario.benchmark.aot);
     // Provider must be installed so OTel instruments record during the transform
     // run, but transforms don't emit per-phase timing histograms so we discard
@@ -450,19 +450,19 @@ fn mapping_config_json(mapping: &Mapping) -> Result<serde_json::Value> {
     serde_json::to_value(config).context("failed to serialize benchmark config as json")
 }
 
-fn source_stream_context(
-    env: &PostgresBenchmarkEnvironment,
-    scenario: &ScenarioManifest,
-) -> StreamContext {
+fn default_stream_context(stream_name: &str) -> StreamContext {
     StreamContext {
-        stream_name: env.stream_name.clone(),
-        source_stream_name: Some(env.stream_name.clone()),
-        schema: SchemaHint::Columns(Vec::new()),
-        sync_mode: scenario
-            .connector_options
-            .source
-            .sync_mode
-            .unwrap_or(SyncMode::FullRefresh),
+        stream_name: stream_name.to_string(),
+        source_stream_name: None,
+        stream_index: 0,
+        schema: StreamSchema {
+            fields: vec![],
+            primary_key: vec![],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        },
+        sync_mode: SyncMode::FullRefresh,
         cursor_info: None,
         limits: StreamLimits::default(),
         policies: StreamPolicies::default(),
@@ -475,60 +475,49 @@ fn source_stream_context(
         partition_strategy: None,
         copy_flush_bytes_override: None,
     }
+}
+
+fn source_stream_context(
+    env: &PostgresBenchmarkEnvironment,
+    scenario: &ScenarioManifest,
+) -> StreamContext {
+    let mut ctx = default_stream_context(&env.stream_name);
+    ctx.source_stream_name = Some(env.stream_name.clone());
+    ctx.sync_mode = scenario
+        .connector_options
+        .source
+        .sync_mode
+        .unwrap_or(SyncMode::FullRefresh);
+    ctx
 }
 
 fn destination_stream_context(
     env: &PostgresBenchmarkEnvironment,
     scenario: &ScenarioManifest,
-    schema: SchemaHint,
+    schema: StreamSchema,
 ) -> StreamContext {
-    StreamContext {
-        stream_name: env.stream_name.clone(),
-        source_stream_name: Some(env.stream_name.clone()),
-        schema,
-        sync_mode: SyncMode::FullRefresh,
-        cursor_info: None,
-        limits: StreamLimits::default(),
-        policies: StreamPolicies {
-            on_data_error: DataErrorPolicy::Fail,
-            ..StreamPolicies::default()
-        },
-        write_mode: Some(parse_write_mode(
-            scenario
-                .connector_options
-                .destination
-                .write_mode
-                .as_deref()
-                .unwrap_or("append"),
-        )),
-        selected_columns: None,
-        partition_key: None,
-        partition_count: None,
-        partition_index: None,
-        effective_parallelism: None,
-        partition_strategy: None,
-        copy_flush_bytes_override: None,
-    }
+    let mut ctx = default_stream_context(&env.stream_name);
+    ctx.source_stream_name = Some(env.stream_name.clone());
+    ctx.schema = schema;
+    ctx.policies = StreamPolicies {
+        on_data_error: DataErrorPolicy::Fail,
+        ..StreamPolicies::default()
+    };
+    ctx.write_mode = Some(parse_write_mode(
+        scenario
+            .connector_options
+            .destination
+            .write_mode
+            .as_deref()
+            .unwrap_or("append"),
+    ));
+    ctx
 }
 
-fn transform_stream_context(schema: SchemaHint) -> StreamContext {
-    StreamContext {
-        stream_name: "bench_transform".to_string(),
-        source_stream_name: None,
-        schema,
-        sync_mode: SyncMode::FullRefresh,
-        cursor_info: None,
-        limits: StreamLimits::default(),
-        policies: StreamPolicies::default(),
-        write_mode: None,
-        selected_columns: None,
-        partition_key: None,
-        partition_count: None,
-        partition_index: None,
-        effective_parallelism: None,
-        partition_strategy: None,
-        copy_flush_bytes_override: None,
-    }
+fn transform_stream_context(schema: StreamSchema) -> StreamContext {
+    let mut ctx = default_stream_context("bench_transform");
+    ctx.schema = schema;
+    ctx
 }
 
 fn parse_write_mode(value: &str) -> WriteMode {
@@ -583,11 +572,22 @@ fn generate_input_batches(rows: u64) -> Result<Vec<RecordBatch>> {
 }
 
 fn send_input_batches(sender: mpsc::SyncSender<Frame>, batches: &[RecordBatch]) -> Result<()> {
-    for batch in batches {
+    for (seq, batch) in batches.iter().enumerate() {
+        let ipc_bytes = record_batch_to_ipc(batch)?;
+        let byte_count = ipc_bytes.len() as u64;
+        let record_count = batch.num_rows() as u32;
         sender
             .send(Frame::Data {
-                payload: Bytes::from(record_batch_to_ipc(batch)?),
+                payload: Bytes::from(ipc_bytes),
                 checkpoint_id: 0,
+                metadata: rapidbyte_types::batch::BatchMetadata {
+                    stream_index: 0,
+                    schema_fingerprint: None,
+                    sequence_number: seq as u64,
+                    compression: None,
+                    record_count,
+                    byte_count,
+                },
             })
             .context("failed to send benchmark input batch")?;
     }
@@ -601,11 +601,60 @@ fn destination_input_channel_capacity(batch_count: usize) -> usize {
     batch_count.saturating_add(1).max(8)
 }
 
-fn first_batch_schema_hint(batches: &[RecordBatch]) -> Result<SchemaHint> {
+fn first_batch_schema(batches: &[RecordBatch]) -> Result<StreamSchema> {
     let first = batches
         .first()
         .context("benchmark input batches are empty")?;
-    Ok(SchemaHint::ArrowIpc(record_batch_to_ipc(first)?))
+    let fields = first
+        .schema()
+        .fields()
+        .iter()
+        .map(|f| rapidbyte_types::schema::SchemaField {
+            name: f.name().clone(),
+            arrow_type: canonical_arrow_type_name(f.data_type()),
+            nullable: f.is_nullable(),
+            is_primary_key: false,
+            is_generated: false,
+            is_partition_key: false,
+            default_value: None,
+        })
+        .collect();
+    Ok(StreamSchema {
+        fields,
+        primary_key: vec![],
+        partition_keys: vec![],
+        source_defined_cursor: None,
+        schema_id: None,
+    })
+}
+
+fn canonical_arrow_type_name(data_type: &arrow::datatypes::DataType) -> String {
+    use arrow::datatypes::{DataType, TimeUnit};
+
+    match data_type {
+        DataType::Boolean => "boolean".into(),
+        DataType::Int8 => "int8".into(),
+        DataType::Int16 => "int16".into(),
+        DataType::Int32 => "int32".into(),
+        DataType::Int64 => "int64".into(),
+        DataType::UInt8 => "uint8".into(),
+        DataType::UInt16 => "uint16".into(),
+        DataType::UInt32 => "uint32".into(),
+        DataType::UInt64 => "uint64".into(),
+        DataType::Float16 => "float16".into(),
+        DataType::Float32 => "float32".into(),
+        DataType::Float64 => "float64".into(),
+        DataType::Utf8 => "utf8".into(),
+        DataType::LargeUtf8 => "large_utf8".into(),
+        DataType::Binary => "binary".into(),
+        DataType::LargeBinary => "large_binary".into(),
+        DataType::Date32 => "date32".into(),
+        DataType::Date64 => "date64".into(),
+        DataType::Timestamp(TimeUnit::Millisecond, None) => "timestamp_millis".into(),
+        DataType::Timestamp(TimeUnit::Microsecond, None) => "timestamp_micros".into(),
+        DataType::Timestamp(TimeUnit::Nanosecond, None) => "timestamp_nanos".into(),
+        _ => data_type.to_string(),
+    }
 }
 
 fn row_count_correctness(validator: &str, expected: u64, actual: u64) -> ArtifactCorrectness {
@@ -651,7 +700,10 @@ impl Drop for AotEnvGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::{destination_input_channel_capacity, generate_input_batches};
+    use super::{
+        canonical_arrow_type_name, destination_input_channel_capacity, generate_input_batches,
+    };
+    use arrow::datatypes::{DataType, TimeUnit};
 
     #[test]
     fn destination_input_channel_capacity_scales_with_batch_count() {
@@ -664,6 +716,15 @@ mod tests {
         assert!(
             destination_input_channel_capacity(batches.len()) > batches.len(),
             "capacity must hold all batches plus end-of-stream"
+        );
+    }
+
+    #[test]
+    fn canonical_arrow_type_name_uses_protocol_names() {
+        assert_eq!(canonical_arrow_type_name(&DataType::Int64), "int64");
+        assert_eq!(
+            canonical_arrow_type_name(&DataType::Timestamp(TimeUnit::Microsecond, None)),
+            "timestamp_micros"
         );
     }
 }

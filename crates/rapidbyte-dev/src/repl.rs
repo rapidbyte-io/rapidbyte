@@ -22,8 +22,10 @@ use rapidbyte_runtime::{
     create_component_linker, load_plugin_manifest, resolve_plugin_path, source_bindings,
     source_error_to_sdk, ComponentHostState, Frame, LoadedComponent, WasmRuntime,
 };
-use rapidbyte_types::catalog::{Catalog, SchemaHint};
+use rapidbyte_types::discovery::DiscoveredStream;
 use rapidbyte_types::manifest::Permissions;
+use rapidbyte_types::schema::SchemaField;
+use rapidbyte_types::schema::StreamSchema;
 use rapidbyte_types::state_backend::{NoopStateBackend, StateBackend};
 use rapidbyte_types::stream::{StreamContext, StreamLimits, StreamPolicies};
 use rapidbyte_types::wire::{PluginKind, SyncMode};
@@ -42,7 +44,7 @@ pub(crate) struct ReplState {
 pub(crate) struct ConnectedSource {
     pub plugin_ref: String,
     pub config: serde_json::Value,
-    pub catalog: Catalog,
+    pub streams: Vec<DiscoveredStream>,
     pub loaded_module: LoadedComponent,
     pub permissions: Option<Permissions>,
 }
@@ -80,7 +82,6 @@ pub(crate) async fn run() -> Result<()> {
                 .as_ref()
                 .map(|source| {
                     source
-                        .catalog
                         .streams
                         .iter()
                         .map(|stream| stream.name.clone())
@@ -169,9 +170,9 @@ async fn handle_source(
 
     let result = connect_source(&plugin_ref, &config).await;
     spinner.finish_and_clear();
-    let (catalog, loaded_module, permissions) = result?;
+    let (streams, loaded_module, permissions) = result?;
 
-    let stream_count = catalog.streams.len();
+    let stream_count = streams.len();
     display::print_success(&format!(
         "Connected -- {stream_count} stream{} discovered",
         if stream_count == 1 { "" } else { "s" }
@@ -180,7 +181,7 @@ async fn handle_source(
     state.source = Some(ConnectedSource {
         plugin_ref,
         config,
-        catalog,
+        streams,
         loaded_module,
         permissions,
     });
@@ -192,7 +193,7 @@ async fn handle_source(
 async fn connect_source(
     plugin_ref: &str,
     config: &serde_json::Value,
-) -> Result<(Catalog, LoadedComponent, Option<Permissions>)> {
+) -> Result<(Vec<DiscoveredStream>, LoadedComponent, Option<Permissions>)> {
     let wasm_path = resolve_plugin_path(plugin_ref, PluginKind::Source)?;
     let manifest = load_plugin_manifest(&wasm_path)?;
     let permissions = manifest.as_ref().map(|m| m.permissions.clone());
@@ -201,8 +202,8 @@ async fn connect_source(
     let config = config.clone();
     let plugin_ref = plugin_ref.to_string();
 
-    let (catalog, module) =
-        tokio::task::spawn_blocking(move || -> Result<(Catalog, LoadedComponent)> {
+    let (streams, module) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<DiscoveredStream>, LoadedComponent)> {
             let runtime = WasmRuntime::new()?;
             let module = runtime.load_module(&wasm_path)?;
 
@@ -241,13 +242,70 @@ async fn connect_source(
                 .map_err(source_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
 
-            let discover_json = iface
+            let wit_streams = iface
                 .call_discover(&mut store, session)?
                 .map_err(source_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!("Discover failed: {e}"))?;
 
-            let catalog = serde_json::from_str::<Catalog>(&discover_json)
-                .context("Failed to parse discover catalog JSON")?;
+            let streams = wit_streams
+                .into_iter()
+                .map(|stream| {
+                    let source_bindings::rapidbyte::plugin::types::DiscoveredStream {
+                        name,
+                        schema,
+                        supported_sync_modes,
+                        default_cursor_field,
+                        estimated_row_count,
+                        metadata_json,
+                    } = stream;
+                    let source_bindings::rapidbyte::plugin::types::StreamSchema {
+                        fields,
+                        primary_key,
+                        partition_keys,
+                        source_defined_cursor,
+                        schema_id,
+                    } = schema;
+
+                    DiscoveredStream {
+                        name,
+                        schema: StreamSchema {
+                            fields: fields
+                                .into_iter()
+                                .map(|field| SchemaField {
+                                    name: field.name,
+                                    arrow_type: field.arrow_type,
+                                    nullable: field.nullable,
+                                    is_primary_key: field.is_primary_key,
+                                    is_generated: field.is_generated,
+                                    is_partition_key: field.is_partition_key,
+                                    default_value: field.default_value,
+                                })
+                                .collect(),
+                            primary_key,
+                            partition_keys,
+                            source_defined_cursor,
+                            schema_id,
+                        },
+                        supported_sync_modes: supported_sync_modes
+                            .into_iter()
+                            .map(|sm| match sm {
+                                source_bindings::rapidbyte::plugin::types::SyncMode::FullRefresh => {
+                                    SyncMode::FullRefresh
+                                }
+                                source_bindings::rapidbyte::plugin::types::SyncMode::Incremental => {
+                                    SyncMode::Incremental
+                                }
+                                source_bindings::rapidbyte::plugin::types::SyncMode::Cdc => {
+                                    SyncMode::Cdc
+                                }
+                            })
+                            .collect(),
+                        default_cursor_field,
+                        estimated_row_count,
+                        metadata_json,
+                    }
+                })
+                .collect();
 
             if let Err(err) = iface.call_close(&mut store, session)? {
                 tracing::warn!(
@@ -256,12 +314,12 @@ async fn connect_source(
                 );
             }
 
-            Ok((catalog, module))
+            Ok((streams, module))
         })
         .await
         .context("Plugin task panicked")??;
 
-    Ok((catalog, module, permissions))
+    Ok((streams, module, permissions))
 }
 
 // ── .tables handler ────────────────────────────────────────────────
@@ -269,7 +327,7 @@ async fn connect_source(
 fn handle_tables(state: &ReplState) -> Result<()> {
     let source = require_source(state)?;
 
-    if source.catalog.streams.is_empty() {
+    if source.streams.is_empty() {
         display::print_hint("No streams discovered.");
         return Ok(());
     }
@@ -281,7 +339,7 @@ fn handle_tables(state: &ReplState) -> Result<()> {
         style("Columns").bold().underlined(),
     );
 
-    for stream in &source.catalog.streams {
+    for stream in &source.streams {
         let sync_label = stream
             .supported_sync_modes
             .iter()
@@ -293,7 +351,7 @@ fn handle_tables(state: &ReplState) -> Result<()> {
             "{:<40} {:<15} {}",
             stream.name,
             sync_label,
-            stream.schema.len()
+            stream.schema.fields.len()
         );
     }
 
@@ -304,7 +362,7 @@ fn handle_tables(state: &ReplState) -> Result<()> {
 
 fn handle_schema(state: &ReplState, table: &str) -> Result<()> {
     let source = require_source(state)?;
-    let stream = find_stream(&source.catalog, table)?;
+    let stream = find_stream(&source.streams, table)?;
 
     eprintln!("{}", style(format!("-- {} --", stream.name)).bold());
     eprintln!(
@@ -314,13 +372,9 @@ fn handle_schema(state: &ReplState, table: &str) -> Result<()> {
         style("Nullable").bold().underlined(),
     );
 
-    for col in &stream.schema {
+    for col in &stream.schema.fields {
         let nullable_str = if col.nullable { "YES" } else { "NO" };
-        eprintln!(
-            "{:<30} {:<20} {nullable_str}",
-            col.name,
-            format!("{:?}", col.data_type)
-        );
+        eprintln!("{:<30} {:<20} {nullable_str}", col.name, col.arrow_type);
     }
 
     Ok(())
@@ -330,7 +384,7 @@ fn handle_schema(state: &ReplState, table: &str) -> Result<()> {
 
 async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -> Result<()> {
     let source = require_source(state)?;
-    let stream = find_stream(&source.catalog, table)?.clone();
+    let stream = find_stream(&source.streams, table)?.clone();
 
     let plugin_ref = source.plugin_ref.clone();
     let config = source.config.clone();
@@ -346,7 +400,8 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
     let stream_ctx = StreamContext {
         stream_name: stream.name.clone(),
         source_stream_name: None,
-        schema: SchemaHint::Columns(stream.schema.clone()),
+        stream_index: 0,
+        schema: stream.schema.clone(),
         sync_mode,
         cursor_info: None,
         limits: StreamLimits {
@@ -402,12 +457,10 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
             .map_err(source_error_to_sdk)
             .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
 
-        let ctx_json = serde_json::to_string(&stream_ctx)?;
+        let wit_stream_ctx = dev_stream_context_to_wit(&stream_ctx);
         let run_request = source_bindings::rapidbyte::plugin::types::RunRequest {
-            phase: source_bindings::rapidbyte::plugin::types::RunPhase::Read,
-            stream_context_json: ctx_json,
+            streams: vec![wit_stream_ctx],
             dry_run: false,
-            max_records: limit,
         };
 
         let run_result = iface.call_run(&mut store, session, &run_request)?;
@@ -583,6 +636,76 @@ fn print_banner() {
     eprintln!();
 }
 
+// ── StreamContext → WIT converter for dev shell ────────────────────
+
+fn dev_stream_context_to_wit(
+    ctx: &StreamContext,
+) -> source_bindings::rapidbyte::plugin::types::StreamContext {
+    use source_bindings::rapidbyte::plugin::types as wit;
+
+    let sync_mode = match ctx.sync_mode {
+        SyncMode::FullRefresh => wit::SyncMode::FullRefresh,
+        SyncMode::Incremental => wit::SyncMode::Incremental,
+        SyncMode::Cdc => wit::SyncMode::Cdc,
+    };
+
+    let schema = wit::StreamSchema {
+        fields: ctx
+            .schema
+            .fields
+            .iter()
+            .map(|f| wit::SchemaField {
+                name: f.name.clone(),
+                arrow_type: f.arrow_type.clone(),
+                nullable: f.nullable,
+                is_primary_key: f.is_primary_key,
+                is_generated: f.is_generated,
+                is_partition_key: f.is_partition_key,
+                default_value: f.default_value.clone(),
+            })
+            .collect(),
+        primary_key: ctx.schema.primary_key.clone(),
+        partition_keys: ctx.schema.partition_keys.clone(),
+        source_defined_cursor: ctx.schema.source_defined_cursor.clone(),
+        schema_id: ctx.schema.schema_id.clone(),
+    };
+
+    wit::StreamContext {
+        stream_index: ctx.stream_index,
+        stream_name: ctx.stream_name.clone(),
+        source_stream_name: ctx.source_stream_name.clone(),
+        schema,
+        sync_mode,
+        cursor_info: None,
+        limits: wit::StreamLimits {
+            max_batch_bytes: ctx.limits.max_batch_bytes,
+            max_record_bytes: ctx.limits.max_record_bytes,
+            max_inflight_batches: ctx.limits.max_inflight_batches,
+            max_parallel_requests: ctx.limits.max_parallel_requests,
+            checkpoint_interval_bytes: ctx.limits.checkpoint_interval_bytes,
+            checkpoint_interval_rows: ctx.limits.checkpoint_interval_rows,
+            checkpoint_interval_seconds: ctx.limits.checkpoint_interval_seconds,
+            max_records: ctx.limits.max_records,
+        },
+        policies: wit::StreamPolicies {
+            on_data_error: wit::DataErrorPolicy::Fail,
+            schema_evolution: wit::SchemaEvolutionPolicy {
+                new_column: wit::ColumnPolicy::Ignore,
+                removed_column: wit::ColumnPolicy::Ignore,
+                type_change: wit::TypeChangePolicy::Coerce,
+                nullability_change: wit::NullabilityPolicy::Allow,
+            },
+        },
+        write_mode: None,
+        selected_columns: ctx.selected_columns.clone(),
+        partition_key: ctx.partition_key.clone(),
+        partition_count: ctx.partition_count,
+        partition_index: ctx.partition_index,
+        effective_parallelism: ctx.effective_parallelism,
+        partition_strategy: None,
+    }
+}
+
 // ── Helpers ────────────────────────────────────────────────────────
 
 fn require_source(state: &ReplState) -> Result<&ConnectedSource> {
@@ -592,24 +715,20 @@ fn require_source(state: &ReplState) -> Result<&ConnectedSource> {
         .ok_or_else(|| anyhow::anyhow!("No source connected. Use .source to connect first."))
 }
 
-fn find_stream<'a>(
-    catalog: &'a Catalog,
-    table: &str,
-) -> Result<&'a rapidbyte_types::catalog::Stream> {
+fn find_stream<'a>(streams: &'a [DiscoveredStream], table: &str) -> Result<&'a DiscoveredStream> {
     // Try exact match first.
-    if let Some(stream) = catalog.streams.iter().find(|s| s.name == table) {
+    if let Some(stream) = streams.iter().find(|s| s.name == table) {
         return Ok(stream);
     }
 
     // Try suffix match (e.g., "users" matching "public.users").
-    let matches: Vec<_> = catalog
-        .streams
+    let matches: Vec<_> = streams
         .iter()
         .filter(|s| s.name.rsplit('.').next() == Some(table))
         .collect();
 
     match matches.len() {
-        0 => anyhow::bail!("Stream '{table}' not found in catalog"),
+        0 => anyhow::bail!("Stream '{table}' not found in discovered streams"),
         1 => Ok(matches[0]),
         n => anyhow::bail!(
             "Ambiguous stream name '{table}' matches {n} streams: {}",

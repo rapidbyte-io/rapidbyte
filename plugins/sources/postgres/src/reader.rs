@@ -31,7 +31,7 @@ const BATCH_OVERHEAD_BYTES: usize = 256;
 fn partition_strategy_from_env() -> PartitionStrategy {
     match std::env::var("RAPIDBYTE_SOURCE_PARTITION_MODE") {
         Ok(value) if value.eq_ignore_ascii_case("range") => PartitionStrategy::Range,
-        _ => PartitionStrategy::Mod,
+        _ => PartitionStrategy::ModHash,
     }
 }
 
@@ -682,8 +682,8 @@ pub async fn read_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rapidbyte_sdk::schema::StreamSchema;
     use rapidbyte_sdk::stream::StreamPolicies;
-    use rapidbyte_sdk::catalog::SchemaHint;
 
     #[test]
     fn stream_partition_strategy_override_wins_over_env() {
@@ -693,7 +693,8 @@ mod tests {
         let stream = StreamContext {
             stream_name: "users".to_string(),
             source_stream_name: None,
-            schema: SchemaHint::Columns(vec![]),
+            stream_index: 0,
+            schema: StreamSchema::default(),
             sync_mode: SyncMode::FullRefresh,
             cursor_info: None,
             limits: StreamLimits::default(),
@@ -725,7 +726,8 @@ mod tests {
         let stream = StreamContext {
             stream_name: "users".to_string(),
             source_stream_name: None,
-            schema: SchemaHint::Columns(vec![]),
+            stream_index: 0,
+            schema: StreamSchema::default(),
             sync_mode: SyncMode::FullRefresh,
             cursor_info: None,
             limits: StreamLimits::default(),

@@ -49,6 +49,8 @@ pub async fn discover_plugin(
 mod tests {
     use super::*;
     use crate::application::testing::{fake_context, test_resolved_plugin};
+    use rapidbyte_types::schema::{SchemaField, StreamSchema};
+    use rapidbyte_types::wire::SyncMode;
 
     #[tokio::test]
     async fn discover_resolves_and_discovers() {
@@ -56,12 +58,25 @@ mod tests {
         tc.resolver.register("source-pg", test_resolved_plugin());
         tc.runner.enqueue_discover(Ok(vec![DiscoveredStream {
             name: "users".into(),
-            catalog_json: "{}".into(),
+            schema: StreamSchema {
+                fields: vec![SchemaField::new("id", "int64", false)],
+                primary_key: vec!["id".into()],
+                partition_keys: vec![],
+                source_defined_cursor: None,
+                schema_id: None,
+            },
+            supported_sync_modes: vec![SyncMode::FullRefresh],
+            default_cursor_field: None,
+            estimated_row_count: Some(42),
+            metadata_json: Some(r#"{"source":"test"}"#.into()),
         }]));
 
         let streams = discover_plugin(&tc.ctx, "source-pg", None).await.unwrap();
         assert_eq!(streams.len(), 1);
         assert_eq!(streams[0].name, "users");
+        assert_eq!(streams[0].schema.fields[0].name, "id");
+        assert_eq!(streams[0].supported_sync_modes, vec![SyncMode::FullRefresh]);
+        assert_eq!(streams[0].estimated_row_count, Some(42));
     }
 
     #[tokio::test]
@@ -91,11 +106,31 @@ mod tests {
         tc.runner.enqueue_discover(Ok(vec![
             DiscoveredStream {
                 name: "orders".into(),
-                catalog_json: r#"{"schema":"public"}"#.into(),
+                schema: StreamSchema {
+                    fields: vec![SchemaField::new("order_id", "int64", false)],
+                    primary_key: vec!["order_id".into()],
+                    partition_keys: vec![],
+                    source_defined_cursor: Some("updated_at".into()),
+                    schema_id: None,
+                },
+                supported_sync_modes: vec![SyncMode::Incremental],
+                default_cursor_field: Some("updated_at".into()),
+                estimated_row_count: None,
+                metadata_json: Some(r#"{"schema":"public"}"#.into()),
             },
             DiscoveredStream {
                 name: "products".into(),
-                catalog_json: "{}".into(),
+                schema: StreamSchema {
+                    fields: vec![SchemaField::new("sku", "utf8", false)],
+                    primary_key: vec!["sku".into()],
+                    partition_keys: vec![],
+                    source_defined_cursor: None,
+                    schema_id: None,
+                },
+                supported_sync_modes: vec![SyncMode::FullRefresh],
+                default_cursor_field: None,
+                estimated_row_count: Some(3),
+                metadata_json: None,
             },
         ]));
 
@@ -106,6 +141,11 @@ mod tests {
         assert_eq!(streams.len(), 2);
         assert_eq!(streams[0].name, "orders");
         assert_eq!(streams[1].name, "products");
+        assert_eq!(
+            streams[0].default_cursor_field.as_deref(),
+            Some("updated_at")
+        );
+        assert_eq!(streams[1].estimated_row_count, Some(3));
     }
 
     #[test]
@@ -133,23 +173,73 @@ mod tests {
         tc.runner.enqueue_discover(Ok(vec![
             DiscoveredStream {
                 name: "users".into(),
-                catalog_json: "{}".into(),
+                schema: StreamSchema {
+                    fields: vec![SchemaField::new("id", "int64", false)],
+                    primary_key: vec!["id".into()],
+                    partition_keys: vec![],
+                    source_defined_cursor: None,
+                    schema_id: None,
+                },
+                supported_sync_modes: vec![SyncMode::FullRefresh],
+                default_cursor_field: None,
+                estimated_row_count: None,
+                metadata_json: None,
             },
             DiscoveredStream {
                 name: "orders".into(),
-                catalog_json: "{}".into(),
+                schema: StreamSchema {
+                    fields: vec![SchemaField::new("order_id", "int64", false)],
+                    primary_key: vec!["order_id".into()],
+                    partition_keys: vec![],
+                    source_defined_cursor: None,
+                    schema_id: None,
+                },
+                supported_sync_modes: vec![SyncMode::Incremental],
+                default_cursor_field: Some("updated_at".into()),
+                estimated_row_count: None,
+                metadata_json: None,
             },
             DiscoveredStream {
                 name: "products".into(),
-                catalog_json: "{}".into(),
+                schema: StreamSchema {
+                    fields: vec![SchemaField::new("sku", "utf8", false)],
+                    primary_key: vec!["sku".into()],
+                    partition_keys: vec![],
+                    source_defined_cursor: None,
+                    schema_id: None,
+                },
+                supported_sync_modes: vec![SyncMode::FullRefresh],
+                default_cursor_field: None,
+                estimated_row_count: None,
+                metadata_json: None,
             },
             DiscoveredStream {
                 name: "invoices".into(),
-                catalog_json: "{}".into(),
+                schema: StreamSchema {
+                    fields: vec![SchemaField::new("invoice_id", "int64", false)],
+                    primary_key: vec!["invoice_id".into()],
+                    partition_keys: vec![],
+                    source_defined_cursor: None,
+                    schema_id: None,
+                },
+                supported_sync_modes: vec![SyncMode::FullRefresh],
+                default_cursor_field: None,
+                estimated_row_count: None,
+                metadata_json: None,
             },
             DiscoveredStream {
                 name: "payments".into(),
-                catalog_json: "{}".into(),
+                schema: StreamSchema {
+                    fields: vec![SchemaField::new("payment_id", "int64", false)],
+                    primary_key: vec!["payment_id".into()],
+                    partition_keys: vec![],
+                    source_defined_cursor: None,
+                    schema_id: None,
+                },
+                supported_sync_modes: vec![SyncMode::FullRefresh],
+                default_cursor_field: None,
+                estimated_row_count: None,
+                metadata_json: None,
             },
         ]));
 
@@ -169,7 +259,17 @@ mod tests {
         tc.resolver.register("source-pg", test_resolved_plugin());
         tc.runner.enqueue_discover(Ok(vec![DiscoveredStream {
             name: "public.events".into(),
-            catalog_json: "{}".into(),
+            schema: StreamSchema {
+                fields: vec![SchemaField::new("event_id", "int64", false)],
+                primary_key: vec!["event_id".into()],
+                partition_keys: vec![],
+                source_defined_cursor: None,
+                schema_id: None,
+            },
+            supported_sync_modes: vec![SyncMode::FullRefresh],
+            default_cursor_field: None,
+            estimated_row_count: None,
+            metadata_json: None,
         }]));
 
         // Pass None for config
