@@ -14,7 +14,10 @@ use std::time::Instant;
 use tokio_postgres::Client;
 
 use crate::config::Config;
-use crate::diagnostics::{cdc_checkpoint_failure_diagnostic, cdc_resume_ambiguity_diagnostic};
+use crate::diagnostics::{
+    cdc_checkpoint_failure_diagnostic, cdc_publication_mismatch_diagnostic,
+    cdc_resume_ambiguity_diagnostic, cdc_slot_mismatch_diagnostic,
+};
 use crate::metrics::{emit_batch_counters, emit_source_timings, EmitState, BATCH_SIZE};
 use rapidbyte_sdk::prelude::*;
 
@@ -130,6 +133,136 @@ fn resolve_cdc_names(config: &Config, stream_name: &str) -> Result<(String, Stri
     Ok((slot_name, publication_name))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CdcSlotInfo {
+    database: String,
+    slot_type: String,
+    active: bool,
+}
+
+#[allow(async_fn_in_trait)]
+trait CdcPreflightInspector {
+    async fn replication_slot_info(&self, slot_name: &str) -> Result<Option<CdcSlotInfo>, String>;
+
+    async fn publication_has_stream(
+        &self,
+        publication_name: &str,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<bool, String>;
+}
+
+impl CdcPreflightInspector for Client {
+    async fn replication_slot_info(&self, slot_name: &str) -> Result<Option<CdcSlotInfo>, String> {
+        let row = self
+            .query_opt(
+                "SELECT database, slot_type, active FROM pg_catalog.pg_replication_slots WHERE slot_name = $1",
+                &[&slot_name],
+            )
+            .await
+            .map_err(|e| format!("error querying replication slot metadata for '{slot_name}': {e}"))?;
+
+        Ok(row.map(|row| CdcSlotInfo {
+            database: row.get::<usize, String>(0),
+            slot_type: row.get::<usize, String>(1),
+            active: row.get::<usize, bool>(2),
+        }))
+    }
+
+    async fn publication_has_stream(
+        &self,
+        publication_name: &str,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<bool, String> {
+        self
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_publication_tables WHERE pubname = $1 AND schemaname = $2 AND tablename = $3)",
+                &[&publication_name, &schema_name, &table_name],
+            )
+            .await
+            .map(|row| row.get::<usize, bool>(0))
+            .map_err(|e| format!("error querying publication membership for '{publication_name}': {e}"))
+    }
+}
+
+fn split_stream_name(stream_name: &str, default_schema: Option<&str>) -> (String, String) {
+    let mut parts = stream_name.rsplitn(2, '.');
+    let table = parts.next().unwrap_or(stream_name);
+    let schema = parts
+        .next()
+        .unwrap_or_else(|| default_schema.unwrap_or("public"));
+    (schema.to_string(), table.to_string())
+}
+
+async fn preflight_cdc_checks<I: CdcPreflightInspector>(
+    inspector: &I,
+    config: &Config,
+    stream: &StreamContext,
+    slot_name: &str,
+    publication_name: &str,
+) -> Result<(), String> {
+    if let Some(slot_info) = inspector.replication_slot_info(slot_name).await? {
+        if slot_info.database != config.database {
+            return Err(
+                cdc_slot_mismatch_diagnostic(
+                    &stream.stream_name,
+                    slot_name,
+                    &format!(
+                        "the slot is attached to database '{}' but this CDC run targets database '{}'",
+                        slot_info.database, config.database
+                    ),
+                )
+                .render(),
+            );
+        }
+        if slot_info.slot_type != "logical" {
+            return Err(
+                cdc_slot_mismatch_diagnostic(
+                    &stream.stream_name,
+                    slot_name,
+                    &format!(
+                        "the slot is type '{}' instead of the required 'logical' slot type",
+                        slot_info.slot_type
+                    ),
+                )
+                .render(),
+            );
+        }
+        if slot_info.active {
+            return Err(
+                cdc_slot_mismatch_diagnostic(
+                    &stream.stream_name,
+                    slot_name,
+                    "the slot is already active for another replication session",
+                )
+                .render(),
+            );
+        }
+    }
+
+    let (schema_name, table_name) =
+        split_stream_name(stream.source_stream_or_stream_name(), config.schema.as_deref());
+    let publication_has_stream = inspector
+        .publication_has_stream(publication_name, &schema_name, &table_name)
+        .await?;
+    if !publication_has_stream {
+        return Err(
+            cdc_publication_mismatch_diagnostic(
+                &stream.stream_name,
+                publication_name,
+                &format!(
+                    "the publication does not include the target table '{}.{}'",
+                    schema_name, table_name
+                ),
+            )
+            .render(),
+        );
+    }
+
+    Ok(())
+}
+
 /// Read max changes per CDC query from env, with sane defaults and validation.
 fn cdc_max_changes() -> i32 {
     static CACHED: OnceLock<i32> = OnceLock::new();
@@ -200,10 +333,13 @@ pub async fn read_cdc_changes(
         }
     }
 
-    // 2. Ensure replication slot exists (idempotent)
+    // 2. Preflight server state that we can verify before touching WAL.
+    preflight_cdc_checks(client, config, stream, &slot_name, &publication_name).await?;
+
+    // 3. Ensure replication slot exists (idempotent)
     ensure_replication_slot(client, ctx, &slot_name).await?;
 
-    // 3. Read binary changes from the slot (this CONSUMES them)
+    // 4. Read binary changes from the slot (this CONSUMES them)
     // Uses pgoutput plugin with proto_version 1 and the configured publication.
     let changes_query = "SELECT lsn::text, data \
                          FROM pg_logical_slot_get_binary_changes(\
@@ -238,7 +374,7 @@ pub async fn read_cdc_changes(
     };
     let mut max_lsn: Option<u64> = None;
 
-    // 4. Decode messages, filter to our table, accumulate into batches
+    // 5. Decode messages, filter to our table, accumulate into batches
     let mut relations: HashMap<u32, RelationInfo> = HashMap::new();
     let mut target_oid: Option<u32> = None;
     let mut accumulated_rows: Vec<CdcRow> = Vec::new();
@@ -344,7 +480,7 @@ pub async fn read_cdc_changes(
 
     let fetch_secs = fetch_start.elapsed().as_secs_f64();
 
-    // 5. Emit checkpoint with max LSN
+    // 6. Emit checkpoint with max LSN
     let checkpoint_count = if let Some(lsn) = max_lsn {
         let lsn_string = pgoutput::lsn_to_string(lsn);
         let cp = Checkpoint {
@@ -464,14 +600,56 @@ mod tests {
     use super::encode::CdcRow;
     use super::encode::RelationInfo;
     use super::pgoutput::{CdcOp, ColumnDef, ColumnValue, TupleData};
+    use super::{CdcPreflightInspector, CdcSlotInfo};
     use rapidbyte_sdk::arrow::datatypes::DataType;
     use rapidbyte_sdk::cursor::CursorType;
     use rapidbyte_sdk::stream::CdcResumeToken;
+    use rapidbyte_sdk::wire::SyncMode;
 
     use crate::diagnostics::{
         cdc_checkpoint_failure_diagnostic, cdc_publication_mismatch_diagnostic,
         cdc_resume_ambiguity_diagnostic, cdc_slot_mismatch_diagnostic, DiagnosticLevel,
     };
+    use crate::config::Config;
+
+    struct FakeInspector {
+        slot_info: Option<CdcSlotInfo>,
+        publication_has_stream: bool,
+    }
+
+    impl CdcPreflightInspector for FakeInspector {
+        async fn replication_slot_info(&self, _slot_name: &str) -> Result<Option<CdcSlotInfo>, String> {
+            Ok(self.slot_info.clone())
+        }
+
+        async fn publication_has_stream(
+            &self,
+            _publication_name: &str,
+            _schema_name: &str,
+            _table_name: &str,
+        ) -> Result<bool, String> {
+            Ok(self.publication_has_stream)
+        }
+    }
+
+    fn base_config() -> Config {
+        Config {
+            host: "localhost".to_string(),
+            port: 5432,
+            user: "postgres".to_string(),
+            password: String::new(),
+            database: "test_db".to_string(),
+            schema: Some("public".to_string()),
+            replication_slot: Some("slot_a".to_string()),
+            publication: Some("pub_a".to_string()),
+        }
+    }
+
+    fn cdc_stream_context() -> rapidbyte_sdk::stream::StreamContext {
+        let mut stream = rapidbyte_sdk::stream::StreamContext::test_default("public.orders");
+        stream.sync_mode = SyncMode::Cdc;
+        stream
+    }
 
     #[test]
     fn relation_info_schema_includes_rb_op() {
@@ -629,14 +807,14 @@ mod tests {
     fn cdc_slot_mismatch_diagnostic_is_operator_facing() {
         let diagnostic = cdc_slot_mismatch_diagnostic(
             "public.orders",
-            "rapidbyte_orders_v2",
             "rapidbyte_orders",
+            "the slot is attached to database 'other_db' but this CDC run targets database 'test_db'",
         );
 
         assert_eq!(diagnostic.level, DiagnosticLevel::Error);
         assert!(diagnostic.message.contains("public.orders"));
-        assert!(diagnostic.message.contains("rapidbyte_orders_v2"));
         assert!(diagnostic.message.contains("rapidbyte_orders"));
+        assert!(diagnostic.message.contains("other_db"));
         assert!(diagnostic.fix_hint.as_deref().unwrap_or("").contains("drop"));
     }
 
@@ -644,21 +822,15 @@ mod tests {
     fn cdc_publication_mismatch_diagnostic_is_operator_facing() {
         let diagnostic = cdc_publication_mismatch_diagnostic(
             "public.orders",
-            "rapidbyte_orders_v2",
             "rapidbyte_orders",
+            "the publication does not include the target table 'public.orders'",
         );
 
         assert_eq!(diagnostic.level, DiagnosticLevel::Error);
         assert!(diagnostic.message.contains("public.orders"));
-        assert!(diagnostic.message.contains("rapidbyte_orders_v2"));
         assert!(diagnostic.message.contains("rapidbyte_orders"));
-        assert!(
-            diagnostic
-                .fix_hint
-                .as_deref()
-                .unwrap_or("")
-                .contains("CREATE PUBLICATION")
-        );
+        assert!(diagnostic.message.contains("target table"));
+        assert!(diagnostic.fix_hint.as_deref().unwrap_or("").contains("CREATE PUBLICATION"));
     }
 
     #[test]
@@ -698,5 +870,73 @@ mod tests {
         assert_eq!(error.level, DiagnosticLevel::Error);
         assert!(error.message.contains("LSN"));
         assert!(error.message.contains("Utf8"));
+    }
+
+    #[tokio::test]
+    async fn preflight_cdc_checks_rejects_slot_database_mismatch() {
+        let err = super::preflight_cdc_checks(
+            &FakeInspector {
+                slot_info: Some(CdcSlotInfo {
+                    database: "other_db".to_string(),
+                    slot_type: "logical".to_string(),
+                    active: false,
+                }),
+                publication_has_stream: true,
+            },
+            &base_config(),
+            &cdc_stream_context(),
+            "slot_a",
+            "pub_a",
+        )
+        .await
+        .expect_err("slot database mismatch should fail preflight");
+
+        assert!(err.contains("CDC slot mismatch"));
+        assert!(err.contains("other_db"));
+        assert!(err.contains("test_db"));
+    }
+
+    #[tokio::test]
+    async fn preflight_cdc_checks_rejects_missing_publication_membership() {
+        let err = super::preflight_cdc_checks(
+            &FakeInspector {
+                slot_info: Some(CdcSlotInfo {
+                    database: "test_db".to_string(),
+                    slot_type: "logical".to_string(),
+                    active: false,
+                }),
+                publication_has_stream: false,
+            },
+            &base_config(),
+            &cdc_stream_context(),
+            "slot_a",
+            "pub_a",
+        )
+        .await
+        .expect_err("publication membership mismatch should fail preflight");
+
+        assert!(err.contains("CDC publication mismatch"));
+        assert!(err.contains("public.orders"));
+        assert!(err.contains("publication does not include the target table"));
+    }
+
+    #[tokio::test]
+    async fn preflight_cdc_checks_allows_compatible_slot_and_publication() {
+        super::preflight_cdc_checks(
+            &FakeInspector {
+                slot_info: Some(CdcSlotInfo {
+                    database: "test_db".to_string(),
+                    slot_type: "logical".to_string(),
+                    active: false,
+                }),
+                publication_has_stream: true,
+            },
+            &base_config(),
+            &cdc_stream_context(),
+            "slot_a",
+            "pub_a",
+        )
+        .await
+        .expect("compatible slot and publication should pass preflight");
     }
 }

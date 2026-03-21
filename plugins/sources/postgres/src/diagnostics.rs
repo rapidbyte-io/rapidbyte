@@ -43,27 +43,27 @@ impl Diagnostic {
 
 pub(crate) fn cdc_slot_mismatch_diagnostic(
     stream_name: &str,
-    configured_slot: &str,
-    expected_slot: &str,
+    slot_name: &str,
+    reason: &str,
 ) -> Diagnostic {
     Diagnostic::error(
         format!(
-            "CDC slot mismatch for stream '{stream_name}': configured replication slot '{configured_slot}' does not match the expected slot '{expected_slot}'."
+            "CDC slot mismatch for stream '{stream_name}': replication slot '{slot_name}' is not usable for this CDC run. {reason}"
         ),
-        "drop the stale slot and backfill the stream, or update the stream to use the matching replication slot.",
+        "drop the stale slot and backfill the stream, or fix the replication slot state before retrying.",
     )
 }
 
 pub(crate) fn cdc_publication_mismatch_diagnostic(
     stream_name: &str,
-    configured_publication: &str,
-    expected_publication: &str,
+    publication_name: &str,
+    reason: &str,
 ) -> Diagnostic {
     Diagnostic::error(
         format!(
-            "CDC publication mismatch for stream '{stream_name}': configured publication '{configured_publication}' does not match the expected publication '{expected_publication}'."
+            "CDC publication mismatch for stream '{stream_name}': publication '{publication_name}' does not match the CDC stream's replication requirements. {reason}"
         ),
-        "Create the expected publication with CREATE PUBLICATION ... FOR TABLE ... or update the stream to use the matching publication.",
+        "CREATE PUBLICATION ... FOR TABLE ... so the publication includes the stream's table before retrying.",
     )
 }
 
