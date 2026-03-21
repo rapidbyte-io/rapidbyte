@@ -135,7 +135,7 @@ fn resolve_cdc_names(config: &Config, stream_name: &str) -> Result<(String, Stri
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CdcSlotInfo {
-    database: String,
+    database: Option<String>,
     slot_type: String,
     active: bool,
 }
@@ -163,7 +163,7 @@ impl CdcPreflightInspector for Client {
             .map_err(|e| format!("error querying replication slot metadata for '{slot_name}': {e}"))?;
 
         Ok(row.map(|row| CdcSlotInfo {
-            database: row.get::<usize, String>(0),
+            database: row.get::<usize, Option<String>>(0),
             slot_type: row.get::<usize, String>(1),
             active: row.get::<usize, bool>(2),
         }))
@@ -203,19 +203,6 @@ async fn preflight_cdc_checks<I: CdcPreflightInspector>(
     publication_name: &str,
 ) -> Result<(), String> {
     if let Some(slot_info) = inspector.replication_slot_info(slot_name).await? {
-        if slot_info.database != config.database {
-            return Err(
-                cdc_slot_mismatch_diagnostic(
-                    &stream.stream_name,
-                    slot_name,
-                    &format!(
-                        "the slot is attached to database '{}' but this CDC run targets database '{}'",
-                        slot_info.database, config.database
-                    ),
-                )
-                .render(),
-            );
-        }
         if slot_info.slot_type != "logical" {
             return Err(
                 cdc_slot_mismatch_diagnostic(
@@ -235,6 +222,30 @@ async fn preflight_cdc_checks<I: CdcPreflightInspector>(
                     &stream.stream_name,
                     slot_name,
                     "the slot is already active for another replication session",
+                )
+                .render(),
+            );
+        }
+        if let Some(database) = slot_info.database.as_deref() {
+            if database != config.database {
+                return Err(
+                    cdc_slot_mismatch_diagnostic(
+                        &stream.stream_name,
+                        slot_name,
+                        &format!(
+                            "the slot is attached to database '{}' but this CDC run targets database '{}'",
+                            database, config.database
+                        ),
+                    )
+                    .render(),
+                );
+            }
+        } else {
+            return Err(
+                cdc_slot_mismatch_diagnostic(
+                    &stream.stream_name,
+                    slot_name,
+                    "the slot does not report a database, which is unexpected for a logical replication slot",
                 )
                 .render(),
             );
@@ -325,7 +336,7 @@ pub async fn read_cdc_changes(
     if let Some(resume_diagnostic) = cdc_resume_ambiguity_diagnostic(&stream.stream_name, resume) {
         match resume_diagnostic.level {
             crate::diagnostics::DiagnosticLevel::Warning => {
-                ctx.log(LogLevel::Warn, &resume_diagnostic.message);
+                ctx.log(LogLevel::Warn, &resume_diagnostic.render());
             }
             crate::diagnostics::DiagnosticLevel::Error => {
                 return Err(resume_diagnostic.render());
@@ -872,12 +883,29 @@ mod tests {
         assert!(error.message.contains("Utf8"));
     }
 
+    #[test]
+    fn cdc_resume_ambiguity_diagnostic_rejects_malformed_lsn() {
+        let diagnostic = cdc_resume_ambiguity_diagnostic(
+            "public.orders",
+            &CdcResumeToken {
+                value: Some("abc".to_string()),
+                cursor_type: CursorType::Lsn,
+            },
+        )
+        .expect("malformed LSN should be rejected");
+
+        assert_eq!(diagnostic.level, DiagnosticLevel::Error);
+        assert!(diagnostic.message.contains("valid PostgreSQL LSN"));
+        assert!(diagnostic.message.contains("abc"));
+        assert!(diagnostic.fix_hint.as_deref().unwrap_or("").contains("valid LSN"));
+    }
+
     #[tokio::test]
     async fn preflight_cdc_checks_rejects_slot_database_mismatch() {
         let err = super::preflight_cdc_checks(
             &FakeInspector {
                 slot_info: Some(CdcSlotInfo {
-                    database: "other_db".to_string(),
+                    database: Some("other_db".to_string()),
                     slot_type: "logical".to_string(),
                     active: false,
                 }),
@@ -897,11 +925,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preflight_cdc_checks_rejects_physical_slot_without_database() {
+        let err = super::preflight_cdc_checks(
+            &FakeInspector {
+                slot_info: Some(CdcSlotInfo {
+                    database: None,
+                    slot_type: "physical".to_string(),
+                    active: false,
+                }),
+                publication_has_stream: true,
+            },
+            &base_config(),
+            &cdc_stream_context(),
+            "slot_a",
+            "pub_a",
+        )
+        .await
+        .expect_err("physical slots should fail preflight");
+
+        assert!(err.contains("CDC slot mismatch"));
+        assert!(err.contains("physical"));
+        assert!(err.contains("not usable"));
+    }
+
+    #[tokio::test]
+    async fn preflight_cdc_checks_rejects_active_slot() {
+        let err = super::preflight_cdc_checks(
+            &FakeInspector {
+                slot_info: Some(CdcSlotInfo {
+                    database: Some("test_db".to_string()),
+                    slot_type: "logical".to_string(),
+                    active: true,
+                }),
+                publication_has_stream: true,
+            },
+            &base_config(),
+            &cdc_stream_context(),
+            "slot_a",
+            "pub_a",
+        )
+        .await
+        .expect_err("active slots should fail preflight");
+
+        assert!(err.contains("CDC slot mismatch"));
+        assert!(err.contains("already active"));
+    }
+
+    #[tokio::test]
     async fn preflight_cdc_checks_rejects_missing_publication_membership() {
         let err = super::preflight_cdc_checks(
             &FakeInspector {
                 slot_info: Some(CdcSlotInfo {
-                    database: "test_db".to_string(),
+                    database: Some("test_db".to_string()),
                     slot_type: "logical".to_string(),
                     active: false,
                 }),
@@ -925,7 +1000,7 @@ mod tests {
         super::preflight_cdc_checks(
             &FakeInspector {
                 slot_info: Some(CdcSlotInfo {
-                    database: "test_db".to_string(),
+                    database: Some("test_db".to_string()),
                     slot_type: "logical".to_string(),
                     active: false,
                 }),

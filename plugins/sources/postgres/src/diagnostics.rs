@@ -3,6 +3,8 @@
 use rapidbyte_sdk::cursor::CursorType;
 use rapidbyte_sdk::stream::CdcResumeToken;
 
+use crate::cdc::pgoutput::parse_lsn;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DiagnosticLevel {
     Warning,
@@ -92,7 +94,13 @@ pub(crate) fn cdc_resume_ambiguity_diagnostic(
                 ),
                 "Verify the previous run checkpoint was persisted or backfill the stream if you need to recover from consumed WAL.",
             )),
-            Some(_) => None,
+            Some(value) if parse_lsn(value).is_some() => None,
+            Some(value) => Some(Diagnostic::error(
+                format!(
+                    "CDC resume token for stream '{stream_name}' is not a valid PostgreSQL LSN: '{value}'."
+                ),
+                "Correct the stored resume token or backfill the stream so CDC can resume from a valid LSN checkpoint.",
+            )),
         },
         other => Some(Diagnostic::error(
             format!(
