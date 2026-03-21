@@ -826,19 +826,31 @@ impl ComponentHostState {
         } else {
             txn.cursors
                 .iter()
-                .map(|cu| Checkpoint {
-                    id: checkpoint_id,
-                    kind: txn.kind,
-                    stream: cu.stream_name.clone(),
-                    cursor_field: Some(cu.cursor_field.clone()),
-                    cursor_value: serde_json::from_str::<rapidbyte_types::cursor::CursorValue>(
-                        &cu.cursor_value_json,
-                    )
-                    .ok(),
-                    records_processed,
-                    bytes_processed,
+                .map(|cu| {
+                    let cursor_value =
+                        serde_json::from_str::<rapidbyte_types::cursor::CursorValue>(
+                            &cu.cursor_value_json,
+                        )
+                        .map_err(|e| {
+                            PluginError::internal(
+                                "INVALID_CURSOR_JSON",
+                                format!(
+                                    "failed to decode checkpoint cursor for stream '{}': {e}",
+                                    cu.stream_name
+                                ),
+                            )
+                        })?;
+                    Ok(Checkpoint {
+                        id: checkpoint_id,
+                        kind: txn.kind,
+                        stream: cu.stream_name.clone(),
+                        cursor_field: Some(cu.cursor_field.clone()),
+                        cursor_value: Some(cursor_value),
+                        records_processed,
+                        bytes_processed,
+                    })
                 })
-                .collect()
+                .collect::<Result<Vec<_>, PluginError>>()?
         };
 
         tracing::debug!(
@@ -848,6 +860,29 @@ impl ComponentHostState {
             ?txn.kind,
             "checkpoint-commit"
         );
+
+        // Apply state mutations
+        for m in &txn.mutations {
+            let scoped_key = self.scoped_state_key(m.scope, &m.key);
+            let cursor = CursorState {
+                cursor_field: Some(m.key.clone()),
+                cursor_value: Some(m.value.clone()),
+                updated_at: Utc::now().to_rfc3339(),
+            };
+            self.identity
+                .state_backend
+                .set_cursor(
+                    &self.identity.pipeline,
+                    &StreamName::new(scoped_key),
+                    &cursor,
+                )
+                .map_err(|e| {
+                    PluginError::internal(
+                        "CHECKPOINT_STATE_PERSIST",
+                        format!("failed to persist checkpoint state mutation: {e}"),
+                    )
+                })?;
+        }
 
         match txn.kind {
             CheckpointKind::Source => {
@@ -863,21 +898,6 @@ impl ComponentHostState {
                     "Committed transform checkpoint"
                 );
             }
-        }
-
-        // Apply state mutations
-        for m in &txn.mutations {
-            let scoped_key = self.scoped_state_key(m.scope, &m.key);
-            let cursor = CursorState {
-                cursor_field: Some(m.key.clone()),
-                cursor_value: Some(m.value.clone()),
-                updated_at: Utc::now().to_rfc3339(),
-            };
-            let _ = self.identity.state_backend.set_cursor(
-                &self.identity.pipeline,
-                &StreamName::new(scoped_key),
-                &cursor,
-            );
         }
 
         Ok(())
@@ -1321,12 +1341,21 @@ mod tests {
     /// Minimal in-memory state backend for tests (replaces `SqliteStateBackend`).
     struct FakeStateBackend {
         cursors: Mutex<HashMap<(String, String), rapidbyte_types::state::CursorState>>,
+        fail_set_cursor: bool,
     }
 
     impl FakeStateBackend {
         fn new() -> Self {
             Self {
                 cursors: Mutex::new(HashMap::new()),
+                fail_set_cursor: false,
+            }
+        }
+
+        fn failing_set_cursor() -> Self {
+            Self {
+                cursors: Mutex::new(HashMap::new()),
+                fail_set_cursor: true,
             }
         }
     }
@@ -1351,6 +1380,12 @@ mod tests {
             stream: &rapidbyte_types::state::StreamName,
             cursor: &rapidbyte_types::state::CursorState,
         ) -> rapidbyte_types::state_error::Result<()> {
+            if self.fail_set_cursor {
+                return Err(rapidbyte_types::state_error::StateError::backend_context(
+                    "set_cursor",
+                    std::io::Error::other("forced set_cursor failure"),
+                ));
+            }
             self.cursors
                 .lock()
                 .unwrap()
@@ -1585,7 +1620,7 @@ mod tests {
             CursorUpdate {
                 stream_name: "users".to_string(),
                 cursor_field: "id".to_string(),
-                cursor_value_json: r#"{"Utf8":{"value":"42"}}"#.to_string(),
+                cursor_value_json: r#"{"type":"utf8","value":"42"}"#.to_string(),
             },
         )
         .unwrap();
@@ -1610,7 +1645,7 @@ mod tests {
             CursorUpdate {
                 stream_name: "users".to_string(),
                 cursor_field: "id".to_string(),
-                cursor_value_json: r#"{"Utf8":{"value":"42"}}"#.to_string(),
+                cursor_value_json: r#"{"type":"utf8","value":"42"}"#.to_string(),
             },
         )
         .unwrap();
@@ -1619,7 +1654,7 @@ mod tests {
             CursorUpdate {
                 stream_name: "orders".to_string(),
                 cursor_field: "updated_at".to_string(),
-                cursor_value_json: r#"{"Utf8":{"value":"2026-03-21T00:00:00Z"}}"#.to_string(),
+                cursor_value_json: r#"{"type":"utf8","value":"2026-03-21T00:00:00Z"}"#.to_string(),
             },
         )
         .unwrap();
@@ -1631,6 +1666,61 @@ mod tests {
         assert_eq!(checkpoints[0].stream, "users");
         assert_eq!(checkpoints[1].stream, "orders");
         assert_eq!(checkpoints[1].cursor_field.as_deref(), Some("updated_at"));
+    }
+
+    #[test]
+    fn checkpoint_commit_rejects_invalid_cursor_json() {
+        let mut host = test_host_state();
+        host.batch.last_emitted_checkpoint_id = Some(42);
+
+        let txn_id = host.checkpoint_begin_impl(CheckpointKind::Source).unwrap();
+        host.checkpoint_set_cursor_impl(
+            txn_id,
+            CursorUpdate {
+                stream_name: "users".to_string(),
+                cursor_field: "id".to_string(),
+                cursor_value_json: "{not-json}".to_string(),
+            },
+        )
+        .unwrap();
+
+        let result = host.checkpoint_commit_impl(txn_id, 10, 100);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().code.contains("INVALID_CURSOR_JSON"));
+        let checkpoints = host.checkpoints.source.lock().unwrap();
+        assert!(checkpoints.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_commit_propagates_state_backend_failure() {
+        let state: Arc<dyn StateBackend> = Arc::new(FakeStateBackend::failing_set_cursor());
+        let mut host = ComponentHostState::builder()
+            .pipeline("test-pipeline")
+            .plugin_id("postgres")
+            .stream("users")
+            .state_backend(state)
+            .build()
+            .unwrap();
+
+        let txn_id = host.checkpoint_begin_impl(CheckpointKind::Source).unwrap();
+        host.checkpoint_set_state_impl(
+            txn_id,
+            StateMutation {
+                scope: StateScope::Stream,
+                key: "offset".into(),
+                value: "42".into(),
+            },
+        )
+        .unwrap();
+
+        let result = host.checkpoint_commit_impl(txn_id, 10, 100);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .code
+            .contains("CHECKPOINT_STATE_PERSIST"));
+        let checkpoints = host.checkpoints.source.lock().unwrap();
+        assert!(checkpoints.is_empty());
     }
 
     #[test]

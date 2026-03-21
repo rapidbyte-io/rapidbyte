@@ -31,6 +31,16 @@ use crate::domain::ports::runner::{
 use crate::domain::progress::{Phase, ProgressEvent};
 use crate::domain::retry::{RetryDecision, RetryPolicy};
 
+struct AbortTaskOnDrop(Option<tokio::task::JoinHandle<()>>);
+
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// Convert a `CompressionCodec` enum into its wire-format string name.
 fn compression_name(codec: rapidbyte_types::compression::CompressionCodec) -> &'static str {
     use rapidbyte_types::compression::CompressionCodec;
@@ -132,14 +142,14 @@ pub async fn run_pipeline(
     // watches the CancellationToken and sets the AtomicBool so plugins
     // that poll `is_cancelled()` can exit promptly.
     let cancel_flag = Arc::new(AtomicBool::new(false));
-    {
+    let _cancel_watcher = {
         let flag = Arc::clone(&cancel_flag);
         let token = cancel.clone();
-        tokio::spawn(async move {
+        AbortTaskOnDrop(Some(tokio::spawn(async move {
             token.cancelled().await;
             flag.store(true, Ordering::Relaxed);
-        });
-    }
+        })))
+    };
 
     loop {
         attempt += 1;
