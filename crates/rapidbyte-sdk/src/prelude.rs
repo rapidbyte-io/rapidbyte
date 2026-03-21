@@ -21,11 +21,12 @@ pub use crate::error::{CommitState, PluginError};
 pub use crate::validation::{ValidationReport, ValidationStatus};
 
 // Protocol types — lifecycle
-pub use crate::wire::{Feature, PluginInfo, ProtocolVersion};
+pub use crate::wire::{Feature, ProtocolVersion};
 
-// Protocol types — streams and catalog
-pub use crate::catalog::{Catalog, ColumnSchema, Stream};
+// Protocol types — streams and discovery
+pub use crate::context::CheckpointTxn;
 pub use crate::cursor::{CursorInfo, CursorValue};
+pub use crate::discovery::{DiscoveredStream, PluginSpec};
 pub use crate::stream::{StreamContext, StreamLimits};
 pub use crate::wire::{SyncMode, WriteMode};
 
