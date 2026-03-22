@@ -182,10 +182,11 @@ fn gen_wit_bindings(world_name: &str) -> TokenStream {
 fn gen_common(struct_name: &Ident) -> TokenStream {
     quote! {
         use std::cell::RefCell;
-        use std::sync::OnceLock;
+        use std::sync::{atomic::{AtomicU64, Ordering}, OnceLock};
 
         static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
         static CONFIG_JSON: OnceLock<String> = OnceLock::new();
+        static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
         fn get_runtime() -> &'static tokio::runtime::Runtime {
             RUNTIME.get_or_init(|| {
@@ -198,11 +199,38 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
 
         struct SyncRefCell(RefCell<Option<#struct_name>>);
         unsafe impl Sync for SyncRefCell {}
+        struct SyncSessionCell(RefCell<Option<u64>>);
+        unsafe impl Sync for SyncSessionCell {}
 
         static PLUGIN: OnceLock<SyncRefCell> = OnceLock::new();
+        static ACTIVE_SESSION: OnceLock<SyncSessionCell> = OnceLock::new();
 
         fn get_state() -> &'static RefCell<Option<#struct_name>> {
             &PLUGIN.get_or_init(|| SyncRefCell(RefCell::new(None))).0
+        }
+
+        fn get_session_state() -> &'static RefCell<Option<u64>> {
+            &ACTIVE_SESSION
+                .get_or_init(|| SyncSessionCell(RefCell::new(None)))
+                .0
+        }
+
+        fn validate_session(
+            session: u64,
+        ) -> Result<(), __rb_bindings::rapidbyte::plugin::types::PluginError> {
+            match *get_session_state().borrow() {
+                Some(active) if active == session => Ok(()),
+                Some(active) => Err(to_component_error(
+                    ::rapidbyte_sdk::error::PluginError::internal(
+                        "INVALID_SESSION",
+                        format!("session mismatch: expected {active}, got {session}"),
+                    ),
+                )),
+                None => Err(to_component_error(::rapidbyte_sdk::error::PluginError::internal(
+                    "INVALID_SESSION",
+                    "plugin is not opened",
+                ))),
+            }
         }
 
         fn to_component_error(
@@ -970,8 +998,10 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
                     ::rapidbyte_sdk::plugin::InitInput::new(),
                 ))
                 .map_err(to_component_error)?;
+            let session = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
             *get_state().borrow_mut() = Some(instance);
-            Ok(1)
+            *get_session_state().borrow_mut() = Some(session);
+            Ok(session)
         }
 
         fn validate(
@@ -980,6 +1010,7 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
             __rb_bindings::rapidbyte::plugin::types::ValidationReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
+            validate_session(input.session)?;
             let upstream = input.stream_schema.map(from_component_stream_schema);
 
             let rt = get_runtime();
@@ -997,8 +1028,9 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
         }
 
         fn close(
-            _input: __rb_bindings::rapidbyte::plugin::types::CloseInput,
+            input: __rb_bindings::rapidbyte::plugin::types::CloseInput,
         ) -> Result<(), __rb_bindings::rapidbyte::plugin::types::PluginError> {
+            validate_session(input.session)?;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1011,6 +1043,7 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
             }
             drop(state_ref);
             *get_state().borrow_mut() = None;
+            *get_session_state().borrow_mut() = None;
             Ok(())
         }
     }
@@ -1106,11 +1139,12 @@ fn gen_source_methods(
 
     quote! {
         fn prerequisites(
-            _input: __rb_bindings::rapidbyte::plugin::types::PrerequisitesInput,
+            input: __rb_bindings::rapidbyte::plugin::types::PrerequisitesInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::PrerequisitesReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
+            validate_session(input.session)?;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1125,11 +1159,12 @@ fn gen_source_methods(
         }
 
         fn discover(
-            _input: __rb_bindings::rapidbyte::plugin::types::DiscoverInput,
+            input: __rb_bindings::rapidbyte::plugin::types::DiscoverInput,
         ) -> Result<
             Vec<__rb_bindings::rapidbyte::plugin::types::DiscoveredStream>,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
+            validate_session(input.session)?;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1151,6 +1186,7 @@ fn gen_source_methods(
             __rb_bindings::rapidbyte::plugin::types::ApplyReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
+            validate_session(input.session)?;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1171,6 +1207,7 @@ fn gen_source_methods(
             __rb_bindings::rapidbyte::plugin::types::RunSummary,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
+            validate_session(input.session)?;
             let sdk_request = from_component_run_request(input.request);
             let dry_run = sdk_request.dry_run;
             let rt = get_runtime();
@@ -1211,6 +1248,7 @@ fn gen_source_methods(
             __rb_bindings::rapidbyte::plugin::types::TeardownReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
+            validate_session(input.session)?;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1260,11 +1298,12 @@ fn gen_dest_methods(
 
     quote! {
         fn prerequisites(
-            _input: __rb_bindings::rapidbyte::plugin::types::PrerequisitesInput,
+            input: __rb_bindings::rapidbyte::plugin::types::PrerequisitesInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::PrerequisitesReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
+            validate_session(input.session)?;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1284,6 +1323,7 @@ fn gen_dest_methods(
             __rb_bindings::rapidbyte::plugin::types::ApplyReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
+            validate_session(input.session)?;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1304,6 +1344,7 @@ fn gen_dest_methods(
             __rb_bindings::rapidbyte::plugin::types::RunSummary,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
+            validate_session(input.session)?;
             let sdk_request = from_component_run_request(input.request);
             let dry_run = sdk_request.dry_run;
             let rt = get_runtime();
@@ -1333,6 +1374,7 @@ fn gen_dest_methods(
             __rb_bindings::rapidbyte::plugin::types::TeardownReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
+            validate_session(input.session)?;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1358,6 +1400,7 @@ fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
             __rb_bindings::rapidbyte::plugin::types::RunSummary,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
+            validate_session(input.session)?;
             let sdk_request = from_component_run_request(input.request);
             let dry_run = sdk_request.dry_run;
             let rt = get_runtime();

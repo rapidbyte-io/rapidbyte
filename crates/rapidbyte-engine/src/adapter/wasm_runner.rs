@@ -732,16 +732,25 @@ fn run_source_stream(
         streams: vec![wit_stream_ctx],
         dry_run: false,
     };
-    let run_result = iface
-        .call_run(
-            &mut store,
-            &source_bindings::rapidbyte::plugin::types::RunInput {
-                session,
-                plugin_id: plugin_id.to_string(),
-                request: run_request,
-            },
-        )
-        .map_err(|e| PipelineError::infra(format!("Failed to call source run: {e}")))?;
+    let run_result = match iface.call_run(
+        &mut store,
+        &source_bindings::rapidbyte::plugin::types::RunInput {
+            session,
+            plugin_id: plugin_id.to_string(),
+            request: run_request,
+        },
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = iface.call_close(
+                &mut store,
+                source_bindings::rapidbyte::plugin::types::CloseInput { session },
+            );
+            return Err(PipelineError::infra(format!(
+                "Failed to call source run: {err}"
+            )));
+        }
+    };
 
     let summary = match run_result {
         Ok(run_summary) => {
@@ -919,16 +928,25 @@ fn run_destination_stream(
         streams: vec![wit_stream_ctx],
         dry_run: false,
     };
-    let run_result = iface
-        .call_run(
-            &mut store,
-            &dest_bindings::rapidbyte::plugin::types::RunInput {
-                session,
-                plugin_id: plugin_id.to_string(),
-                request: run_request,
-            },
-        )
-        .map_err(|e| PipelineError::infra(format!("Failed to call destination run: {e}")))?;
+    let run_result = match iface.call_run(
+        &mut store,
+        &dest_bindings::rapidbyte::plugin::types::RunInput {
+            session,
+            plugin_id: plugin_id.to_string(),
+            request: run_request,
+        },
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = iface.call_close(
+                &mut store,
+                dest_bindings::rapidbyte::plugin::types::CloseInput { session },
+            );
+            return Err(PipelineError::infra(format!(
+                "Failed to call destination run: {err}"
+            )));
+        }
+    };
 
     let summary = match run_result {
         Ok(run_summary) => {
@@ -1107,16 +1125,25 @@ fn run_transform_stream(
         streams: vec![wit_stream_ctx],
         dry_run: false,
     };
-    let run_result = iface
-        .call_run(
-            &mut store,
-            &transform_bindings::rapidbyte::plugin::types::RunInput {
-                session,
-                plugin_id: plugin_id.to_string(),
-                request: run_request,
-            },
-        )
-        .map_err(|e| PipelineError::infra(format!("Failed to call transform run: {e}")))?;
+    let run_result = match iface.call_run(
+        &mut store,
+        &transform_bindings::rapidbyte::plugin::types::RunInput {
+            session,
+            plugin_id: plugin_id.to_string(),
+            request: run_request,
+        },
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = iface.call_close(
+                &mut store,
+                transform_bindings::rapidbyte::plugin::types::CloseInput { session },
+            );
+            return Err(PipelineError::infra(format!(
+                "Failed to call transform run: {err}"
+            )));
+        }
+    };
 
     let summary = match run_result {
         Ok(run_summary) => {

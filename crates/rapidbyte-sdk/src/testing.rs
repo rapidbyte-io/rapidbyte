@@ -668,6 +668,15 @@ mod tests {
         let next = input.reader.next_batch(1024).unwrap().expect("batch");
         assert_eq!(next.0.as_ref(), schema.as_ref());
         assert_eq!(next.1.len(), 1);
+        harness.enqueue_input_batch(stream.stream_index, Arc::clone(&schema), vec![batch]);
+        let decoded = input
+            .reader
+            .next_batch_with_decode_timing(1024)
+            .unwrap()
+            .expect("decoded batch");
+        assert_eq!(decoded.metadata.stream_index, stream.stream_index);
+        assert_eq!(decoded.schema.as_ref(), schema.as_ref());
+        assert_eq!(decoded.batches.len(), 1);
 
         input.cancel.check().unwrap();
         input.state.put(StateScope::Stream, "offset", "7").unwrap();
@@ -736,6 +745,7 @@ mod tests {
         drop(txn);
 
         assert!(harness.checkpoint_records().is_empty());
+        assert_eq!(harness.state_value(StateScope::Stream, "offset"), None);
     }
 
     #[test]

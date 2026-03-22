@@ -1386,6 +1386,10 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_native_stub_next_batch_none() {
+        let _guard = test_support::metric_test_lock()
+            .lock()
+            .expect("host ffi test lock poisoned");
+        test_support::reset();
         let result = next_batch(1024).expect("next batch");
         assert!(result.is_none());
     }
@@ -1415,6 +1419,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn stream_error_tracks_reported_stream_once() {
+        let _guard = test_support::metric_test_lock()
+            .lock()
+            .expect("host ffi test lock poisoned");
         test_support::reset();
 
         stream_error(7, &PluginError::internal("TEST", "boom")).expect("stream error should work");
@@ -1430,6 +1437,9 @@ mod tests {
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
 
+        let _guard = test_support::metric_test_lock()
+            .lock()
+            .expect("host ffi test lock poisoned");
         test_support::reset();
 
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, false)]));

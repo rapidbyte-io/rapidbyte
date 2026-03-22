@@ -93,6 +93,7 @@ impl PartitionedSource for SourcePostgres {
         // reader::read_stream extracts them via stream.partition_coordinates().
         let PartitionedReadInput {
             stream,
+            dry_run,
             emit,
             cancel,
             state,
@@ -103,7 +104,7 @@ impl PartitionedSource for SourcePostgres {
         } = input;
         self.read(ReadInput::with_capabilities(
             stream,
-            false,
+            dry_run,
             emit,
             cancel,
             state,
@@ -123,6 +124,7 @@ impl CdcSource for SourcePostgres {
         let CdcReadInput {
             stream,
             resume,
+            dry_run,
             emit,
             cancel,
             state,
@@ -139,7 +141,7 @@ impl CdcSource for SourcePostgres {
         let input = CdcReadInput::with_capabilities(
             stream,
             normalize_cdc_resume_token(&resume),
-            false,
+            dry_run,
             emit,
             cancel,
             state,

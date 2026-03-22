@@ -272,7 +272,7 @@ mod tests {
 
         let partition_input = PartitionedReadInput::new(stream.clone(), partition);
         let cdc_input = CdcReadInput::new(stream.clone(), resume);
-        let multi_input = MultiStreamReadInput::new(vec![stream.clone()]);
+        let multi_input = MultiStreamReadInput::new(vec![stream.clone()], false);
         let bulk_input = BulkWriteInput::new(stream);
 
         assert_eq!(partition_input.partition.count, 4);

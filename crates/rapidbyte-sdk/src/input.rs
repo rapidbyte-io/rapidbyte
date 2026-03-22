@@ -564,6 +564,7 @@ impl<'a> CdcReadInput<'a> {
 #[derive(Debug, Clone)]
 pub struct MultiStreamReadInput<'a> {
     pub streams: Vec<StreamContext>,
+    pub dry_run: bool,
     pub emit: Emit,
     pub cancel: Cancel,
     pub state: State,
@@ -575,9 +576,10 @@ pub struct MultiStreamReadInput<'a> {
 
 impl<'a> MultiStreamReadInput<'a> {
     /// Create a multi-stream read input.
-    pub fn new(streams: Vec<StreamContext>) -> Self {
+    pub fn new(streams: Vec<StreamContext>, dry_run: bool) -> Self {
         Self {
             streams,
+            dry_run,
             emit: Emit,
             cancel: Cancel,
             state: State,
@@ -739,7 +741,7 @@ mod tests {
     fn bulk_and_multi_stream_inputs_construct() {
         let stream = test_stream("events");
         let bulk = BulkWriteInput::new(stream.clone());
-        let multi = MultiStreamReadInput::new(vec![stream.clone()]);
+        let multi = MultiStreamReadInput::new(vec![stream.clone()], false);
         let partition = PartitionCoordinates {
             count: 4,
             index: 1,
@@ -756,6 +758,7 @@ mod tests {
 
         assert_eq!(bulk.stream.stream_name, "events");
         assert_eq!(multi.streams.len(), 1);
+        assert!(!multi.dry_run);
         assert_eq!(cdc.resume.value.as_deref(), Some("42"));
         assert_eq!(partitioned.partition.count, 4);
     }
