@@ -249,12 +249,71 @@ pub async fn write_stream(
 #[cfg(test)]
 mod tests {
     use super::{
-        contract_from_handoff, existing_replace_contract, replace_staging_qualified_table,
-        resolve_copy_flush_bytes, reuse_contract_from_handoff, staging_table_name,
+        contract_from_handoff, existing_replace_contract, live_destination_state_is_fresh,
+        replace_staging_qualified_table, resolve_copy_flush_bytes, reuse_contract_from_handoff,
+        staging_table_name,
     };
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use crate::session::COPY_FLUSH_MAX;
     use crate::WriteMode;
-    use rapidbyte_sdk::schema::StreamSchema;
+    use rapidbyte_sdk::schema::{SchemaField, StreamSchema};
+    use tokio_postgres::NoTls;
+
+    static NEXT_SUFFIX: AtomicU64 = AtomicU64::new(1);
+
+    fn fresh_name(prefix: &str) -> String {
+        format!(
+            "{}_{}_{}",
+            prefix,
+            std::process::id(),
+            NEXT_SUFFIX.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    async fn connect() -> tokio_postgres::Client {
+        let (client, connection) = tokio_postgres::connect(
+            "host=127.0.0.1 port=33603 user=postgres password=postgres dbname=postgres",
+            NoTls,
+        )
+        .await
+        .expect("connect to test postgres");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        client
+    }
+
+    fn live_stream_schema() -> StreamSchema {
+        StreamSchema {
+            fields: vec![
+                SchemaField::new("id", "int64", false).with_primary_key(true),
+                SchemaField::new("name", "utf8", true),
+            ],
+            primary_key: vec!["id".to_string()],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        }
+    }
+
+    async fn create_table(client: &tokio_postgres::Client, schema: &str, table: &str) {
+        let qualified = crate::decode::qualified_name(schema, table);
+        client
+            .execute(
+                &format!("CREATE SCHEMA IF NOT EXISTS {}", pg_escape::quote_identifier(schema)),
+                &[],
+            )
+            .await
+            .expect("create schema");
+        client
+            .execute(
+                &format!("CREATE TABLE {} (\"id\" bigint not null, \"name\" text)", qualified),
+                &[],
+            )
+            .await
+            .expect("create table");
+    }
 
     #[test]
     fn runtime_override_takes_precedence_over_configured_flush_bytes() {
@@ -472,5 +531,69 @@ mod tests {
         };
 
         assert!(reuse_contract_from_handoff(&contract, Some("sig"), Some(&handoff), false).is_none());
+    }
+
+    #[tokio::test]
+    async fn live_drift_detection_forces_safe_reprepare_path() {
+        let schema = fresh_name("rb_writer_drift");
+        let table = "users";
+        let client = connect().await;
+        create_table(&client, &schema, table).await;
+
+        let stream_schema = live_stream_schema();
+        let contract = crate::contract::prepare_stream_once(
+            &schema,
+            table,
+            Some(WriteMode::Append),
+            &stream_schema,
+            true,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy::default(),
+            crate::contract::CheckpointConfig {
+                bytes: 0,
+                rows: 0,
+                seconds: 0,
+            },
+            None,
+            crate::config::LoadMethod::Copy,
+        )
+        .expect("contract");
+        let current_signature = crate::contract::stream_schema_signature(&stream_schema)
+            .expect("signature");
+        let handoff = crate::ddl::ContractHandoff {
+            schema_signature: current_signature.clone().expect("schema signature"),
+            ignored_columns: vec![],
+            type_null_columns: vec![],
+        };
+
+        client
+            .execute(
+                &format!(
+                    "ALTER TABLE {} ADD COLUMN out_of_band text",
+                    crate::decode::qualified_name(&schema, table)
+                ),
+                &[],
+            )
+            .await
+            .expect("out-of-band drift");
+
+        let fresh = live_destination_state_is_fresh(&client, &schema, table, &stream_schema)
+            .await
+            .expect("drift detection");
+        assert!(!fresh);
+
+        let reused = reuse_contract_from_handoff(
+            &contract,
+            current_signature.as_deref(),
+            Some(&handoff),
+            fresh,
+        );
+        assert!(reused.is_none());
+
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &[],
+            )
+            .await;
     }
 }
