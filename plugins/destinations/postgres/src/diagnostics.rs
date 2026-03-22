@@ -2,6 +2,13 @@
 
 use rapidbyte_sdk::prelude::CommitState;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CheckpointSafetyPhase {
+    LoopFailureBeforeNewDurableCommit,
+    PreCommitFailureBeforePostgresCommit,
+    PostCommitSwapOrCheckpointFailure,
+}
+
 pub(crate) fn schema_drift_summary(
     new_columns: usize,
     removed_columns: usize,
@@ -19,16 +26,35 @@ pub(crate) fn stale_watermark_resume_warning(stream_name: &str, committed_rows: 
     )
 }
 
-pub(crate) fn checkpoint_safety_message(commit_state: CommitState) -> &'static str {
-    match commit_state {
-        CommitState::BeforeCommit => {
-            "dest-postgres: write loop failed before any commit; rollback leaves no durable checkpoint"
-        }
-        CommitState::AfterCommitConfirmed => {
-            "dest-postgres: final checkpoint failed after PostgreSQL commit; durable data may already exist, but the checkpoint may not have advanced, so resuming naively can duplicate rows"
-        }
-        CommitState::AfterCommitUnknown => {
-            "dest-postgres: write loop failed after a commit with unknown durability; inspect the destination before resuming"
+pub(crate) fn checkpoint_safety_message(
+    phase: CheckpointSafetyPhase,
+    commit_state: CommitState,
+) -> &'static str {
+    match phase {
+        CheckpointSafetyPhase::LoopFailureBeforeNewDurableCommit => match commit_state {
+            CommitState::BeforeCommit => {
+                "dest-postgres: write loop failed before any new durable commit; rollback leaves no durable checkpoint"
+            }
+            CommitState::AfterCommitConfirmed => {
+                "dest-postgres: write loop failed after a confirmed checkpoint but before a new durable commit; resume from the last checkpoint"
+            }
+            CommitState::AfterCommitUnknown => {
+                "dest-postgres: write loop failed after a commit with unknown durability; inspect the destination before resuming"
+            }
+        },
+        CheckpointSafetyPhase::PreCommitFailureBeforePostgresCommit => match commit_state {
+            CommitState::BeforeCommit => {
+                "dest-postgres: pre-finalization failed before PostgreSQL COMMIT; no durable commit was made"
+            }
+            CommitState::AfterCommitConfirmed => {
+                "dest-postgres: pre-finalization failed before PostgreSQL COMMIT after a confirmed checkpoint; durable data may already exist, but the checkpoint has not advanced"
+            }
+            CommitState::AfterCommitUnknown => {
+                "dest-postgres: pre-finalization failed before PostgreSQL COMMIT after a commit with unknown durability; inspect the destination before resuming"
+            }
+        },
+        CheckpointSafetyPhase::PostCommitSwapOrCheckpointFailure => {
+            "dest-postgres: post-COMMIT swap/checkpoint failed after PostgreSQL commit; durable data may already exist, but the final checkpoint may not have advanced, so resuming naively can duplicate rows"
         }
     }
 }
@@ -49,13 +75,46 @@ mod tests {
 
     #[test]
     fn checkpoint_safety_message_distinguishes_commit_states() {
-        assert!(checkpoint_safety_message(CommitState::BeforeCommit)
-            .contains("before any commit"));
-        let confirmed = checkpoint_safety_message(CommitState::AfterCommitConfirmed);
+        assert!(checkpoint_safety_message(
+            CheckpointSafetyPhase::LoopFailureBeforeNewDurableCommit,
+            CommitState::BeforeCommit,
+        )
+        .contains("before any new durable commit"));
+        let confirmed = checkpoint_safety_message(
+            CheckpointSafetyPhase::PostCommitSwapOrCheckpointFailure,
+            CommitState::AfterCommitConfirmed,
+        );
         assert!(confirmed.contains("checkpoint may not have advanced"));
         assert!(confirmed.contains("duplicate rows"));
-        assert!(checkpoint_safety_message(CommitState::AfterCommitUnknown)
-            .contains("unknown"));
+        assert!(checkpoint_safety_message(
+            CheckpointSafetyPhase::LoopFailureBeforeNewDurableCommit,
+            CommitState::AfterCommitUnknown,
+        )
+        .contains("unknown"));
+    }
+
+    #[test]
+    fn checkpoint_safety_message_distinguishes_failure_phases() {
+        let loop_failure = checkpoint_safety_message(
+            CheckpointSafetyPhase::LoopFailureBeforeNewDurableCommit,
+            CommitState::AfterCommitConfirmed,
+        );
+        assert!(loop_failure.contains("write loop failed after a confirmed checkpoint"));
+        assert!(!loop_failure.contains("final checkpoint failed after PostgreSQL commit"));
+
+        let pre_commit = checkpoint_safety_message(
+            CheckpointSafetyPhase::PreCommitFailureBeforePostgresCommit,
+            CommitState::AfterCommitConfirmed,
+        );
+        assert!(pre_commit.contains("pre-finalization failed before PostgreSQL COMMIT"));
+        assert!(!pre_commit.contains("final checkpoint failed after PostgreSQL commit"));
+
+        let post_commit = checkpoint_safety_message(
+            CheckpointSafetyPhase::PostCommitSwapOrCheckpointFailure,
+            CommitState::AfterCommitConfirmed,
+        );
+        assert!(post_commit.contains("post-COMMIT swap/checkpoint failed"));
+        assert!(post_commit.contains("duplicate rows"));
     }
 
     #[test]

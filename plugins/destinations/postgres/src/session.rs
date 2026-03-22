@@ -8,6 +8,7 @@ use rapidbyte_sdk::arrow::record_batch::RecordBatch;
 use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::stream::SchemaEvolutionPolicy;
 
+use crate::diagnostics::CheckpointSafetyPhase;
 use crate::config::LoadMethod;
 use crate::contract::{CheckpointConfig, WriteContract};
 use crate::ddl::swap_staging_table;
@@ -72,27 +73,26 @@ pub(crate) fn pre_final_commit_failure_state(
 /// Error returned when the session fails during commit orchestration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommitError {
+    pub safety_phase: CheckpointSafetyPhase,
     pub commit_state: CommitState,
     pub message: String,
 }
 
 impl CommitError {
-    pub(crate) fn before_commit(message: impl Into<String>) -> Self {
+    pub(crate) fn pre_commit_failure(
+        commit_state: CommitState,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
-            commit_state: CommitState::BeforeCommit,
-            message: message.into(),
-        }
-    }
-
-    pub(crate) fn after_commit_unknown(message: impl Into<String>) -> Self {
-        Self {
-            commit_state: CommitState::AfterCommitUnknown,
+            safety_phase: CheckpointSafetyPhase::PreCommitFailureBeforePostgresCommit,
+            commit_state,
             message: message.into(),
         }
     }
 
     pub(crate) fn after_commit_confirmed(message: impl Into<String>) -> Self {
         Self {
+            safety_phase: CheckpointSafetyPhase::PostCommitSwapOrCheckpointFailure,
             commit_state: CommitState::AfterCommitConfirmed,
             message: message.into(),
         }
@@ -387,13 +387,13 @@ impl<'a> WriteSession<'a> {
             )
             .await
             .map_err(|e| {
-                CommitError {
-                    commit_state: pre_final_commit_failure_state(
+                CommitError::pre_commit_failure(
+                    pre_final_commit_failure_state(
                         self.stats.checkpoint_count,
                         self.stats.commits_completed,
                     ),
-                    message: format!("Watermark update failed: {e}"),
-                }
+                    format!("Watermark update failed: {e}"),
+                )
             })?;
         }
 
@@ -401,7 +401,15 @@ impl<'a> WriteSession<'a> {
         self.client
             .execute("COMMIT", &[])
             .await
-            .map_err(|e| CommitError::after_commit_unknown(format!("COMMIT failed: {e}")))?;
+            .map_err(|e| {
+                CommitError::pre_commit_failure(
+                    pre_final_commit_failure_state(
+                        self.stats.checkpoint_count,
+                        self.stats.commits_completed,
+                    ),
+                    format!("COMMIT failed: {e}"),
+                )
+            })?;
         self.stats.commits_completed += 1;
         let commit_secs = commit_start.elapsed().as_secs_f64();
 
@@ -509,14 +517,22 @@ mod tests {
 
     #[test]
     fn commit_error_before_commit_is_classified_before_commit() {
-        let err = CommitError::before_commit("watermark failed");
+        let err = CommitError::pre_commit_failure(CommitState::BeforeCommit, "watermark failed");
+        assert_eq!(
+            err.safety_phase,
+            CheckpointSafetyPhase::PreCommitFailureBeforePostgresCommit
+        );
         assert_eq!(err.commit_state, CommitState::BeforeCommit);
         assert!(err.message.contains("watermark failed"));
     }
 
     #[test]
     fn commit_error_after_commit_unknown_is_classified_after_commit_unknown() {
-        let err = CommitError::after_commit_unknown("commit failed");
+        let err = CommitError::pre_commit_failure(CommitState::AfterCommitUnknown, "commit failed");
+        assert_eq!(
+            err.safety_phase,
+            CheckpointSafetyPhase::PreCommitFailureBeforePostgresCommit
+        );
         assert_eq!(err.commit_state, CommitState::AfterCommitUnknown);
         assert!(err.message.contains("commit failed"));
     }
@@ -524,6 +540,10 @@ mod tests {
     #[test]
     fn commit_error_after_commit_confirmed_is_classified_after_commit_confirmed() {
         let err = CommitError::after_commit_confirmed("checkpoint failed");
+        assert_eq!(
+            err.safety_phase,
+            CheckpointSafetyPhase::PostCommitSwapOrCheckpointFailure
+        );
         assert_eq!(err.commit_state, CommitState::AfterCommitConfirmed);
         assert!(err.message.contains("checkpoint failed"));
     }

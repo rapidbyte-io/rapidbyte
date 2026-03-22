@@ -277,7 +277,10 @@ pub async fn write_stream(
         let commit_state = session.loop_error_commit_state();
         ctx.log(
             LogLevel::Warn,
-            crate::diagnostics::checkpoint_safety_message(commit_state),
+            crate::diagnostics::checkpoint_safety_message(
+                crate::diagnostics::CheckpointSafetyPhase::LoopFailureBeforeNewDurableCommit,
+                commit_state,
+            ),
         );
         session.rollback().await;
         return Err(PluginError::transient_db("WRITE_FAILED", err).with_commit_state(commit_state));
@@ -288,7 +291,7 @@ pub async fn write_stream(
         Err(e) => {
             ctx.log(
                 LogLevel::Warn,
-                crate::diagnostics::checkpoint_safety_message(e.commit_state),
+                crate::diagnostics::checkpoint_safety_message(e.safety_phase, e.commit_state),
             );
             return Err(
                 PluginError::transient_db("COMMIT_FAILED", e.message)
