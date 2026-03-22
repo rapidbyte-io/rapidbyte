@@ -1,5 +1,8 @@
 //! Destination `PostgreSQL` prerequisite checks.
 
+use std::future::Future;
+
+use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::prelude::*;
@@ -10,7 +13,10 @@ use crate::config::Config;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PrerequisiteSnapshot {
     pub schema_exists: bool,
-    pub can_create_schema: bool,
+    pub can_create_target_table: bool,
+    pub can_comment_on_table: bool,
+    pub can_write_watermarks: bool,
+    pub can_write_existing_targets: bool,
 }
 
 pub(crate) async fn prerequisites(
@@ -46,37 +52,120 @@ pub(crate) async fn snapshot(
         .map_err(|e| format!("unable to query schema existence: {e}"))?
         .get(0);
 
-    let can_create_schema: bool = if schema_exists {
-        client
-            .query_one(
-                "SELECT has_schema_privilege(current_user, $1, 'CREATE')",
-                &[&config.schema],
-            )
-            .await
-            .map_err(|e| format!("unable to query schema privileges: {e}"))?
-            .get(0)
-    } else {
-        client
-            .query_one(
-                "SELECT has_database_privilege(current_user, current_database(), 'CREATE')",
-                &[],
-            )
-            .await
-            .map_err(|e| format!("unable to query database privileges: {e}"))?
-            .get(0)
-    };
+    client
+        .execute("BEGIN", &[])
+        .await
+        .map_err(|e| format!("unable to start prerequisite transaction: {e}"))?;
 
-    Ok(PrerequisiteSnapshot {
-        schema_exists,
-        can_create_schema,
-    })
+    let result = async {
+        let backend_pid: i32 = client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .await
+            .map_err(|e| format!("unable to query backend pid: {e}"))?
+            .get(0);
+
+        let probe_table_name = format!("__rb_prereq_probe_{backend_pid}");
+        let probe_table = crate::decode::qualified_name(&config.schema, &probe_table_name);
+        let probe_stream_name = format!("__rb_prereq_stream_{backend_pid}");
+
+        let can_create_target_table = with_savepoint(client, "rb_prereq_create_table", || async {
+            if !schema_exists {
+                let create_schema =
+                    format!("CREATE SCHEMA {}", quote_identifier(config.target_schema()));
+                client.execute(&create_schema, &[]).await.map_err(|e| {
+                    format!("unable to create schema '{}': {e}", config.target_schema())
+                })?;
+            }
+
+            let create_table = format!(
+                "CREATE UNLOGGED TABLE {} (
+                    probe_id BIGINT PRIMARY KEY,
+                    payload TEXT NOT NULL
+                )",
+                probe_table
+            );
+            client
+                .execute(&create_table, &[])
+                .await
+                .map_err(|e| format!("unable to create probe table {probe_table}: {e}"))?;
+            Ok(())
+        })
+        .await
+        .is_ok();
+
+        let can_comment_on_table = if can_create_target_table {
+            with_savepoint(client, "rb_prereq_comment", || async {
+                let comment = format!(
+                    "COMMENT ON TABLE {} IS '{}'",
+                    probe_table,
+                    format!("dest-postgres prerequisite probe {backend_pid}").replace('\'', "''")
+                );
+                client
+                    .execute(&comment, &[])
+                    .await
+                    .map_err(|e| format!("unable to COMMENT ON TABLE {probe_table}: {e}"))?;
+                Ok(())
+            })
+            .await
+            .is_ok()
+        } else {
+            false
+        };
+
+        let can_write_existing_targets = if can_create_target_table {
+            with_savepoint(client, "rb_prereq_dml", || async {
+                let insert_sql = format!(
+                    "INSERT INTO {} (probe_id, payload) VALUES (1, 'probe')",
+                    probe_table
+                );
+                client
+                    .execute(&insert_sql, &[])
+                    .await
+                    .map_err(|e| format!("unable to INSERT into {probe_table}: {e}"))?;
+
+                let update_sql = format!(
+                    "UPDATE {} SET payload = 'probe-updated' WHERE probe_id = 1",
+                    probe_table
+                );
+                client
+                    .execute(&update_sql, &[])
+                    .await
+                    .map_err(|e| format!("unable to UPDATE {probe_table}: {e}"))?;
+                Ok(())
+            })
+            .await
+            .is_ok()
+        } else {
+            false
+        };
+
+        let can_write_watermarks = with_savepoint(client, "rb_prereq_watermarks", || async {
+            crate::watermark::ensure_table(client, config.target_schema()).await?;
+            crate::watermark::set(client, config.target_schema(), &probe_stream_name, 1, 1).await?;
+            Ok(())
+        })
+        .await
+        .is_ok();
+
+        Ok(PrerequisiteSnapshot {
+            schema_exists,
+            can_create_target_table,
+            can_comment_on_table,
+            can_write_watermarks,
+            can_write_existing_targets,
+        })
+    }
+    .await;
+
+    let _ = client.execute("ROLLBACK", &[]).await;
+    result
 }
 
 pub(crate) fn build_prerequisites_report(
     config: &Config,
     snapshot: PrerequisiteSnapshot,
 ) -> PrerequisitesReport {
-    let mut checks = Vec::with_capacity(3);
+    let mut checks = Vec::with_capacity(6);
     checks.push(PrerequisiteCheck::passed(
         "db_connectivity",
         "connected to PostgreSQL",
@@ -95,21 +184,28 @@ pub(crate) fn build_prerequisites_report(
             name: "target_schema_missing".to_string(),
             passed: true,
             severity: PrerequisiteSeverity::Info,
-            message: format!(
-                "schema '{}' does not exist yet; apply will create it",
-                config.target_schema()
-            ),
+            message: if snapshot.can_create_target_table {
+                format!(
+                    "schema '{}' does not exist yet; transactional probe verified it can be created",
+                    config.target_schema()
+                )
+            } else {
+                format!(
+                    "schema '{}' does not exist yet; transactional probe could not create it",
+                    config.target_schema()
+                )
+            },
             fix_hint: None,
         });
     }
 
-    if snapshot.can_create_schema {
+    if snapshot.can_create_target_table {
         checks.push(PrerequisiteCheck {
-            name: "target_schema_capability".to_string(),
+            name: "schema_table_ddl".to_string(),
             passed: true,
             severity: PrerequisiteSeverity::Info,
             message: format!(
-                "current role can create tables in schema '{}'",
+                "current role can create and clean up target tables in schema '{}'",
                 config.target_schema()
             ),
             fix_hint: None,
@@ -117,14 +213,86 @@ pub(crate) fn build_prerequisites_report(
     } else {
         checks.push(
             PrerequisiteCheck::error(
-                "target_schema_capability",
+                "schema_table_ddl",
                 &format!(
-                    "current role cannot create schema or tables in '{}'",
+                    "current role cannot create or repair target tables in '{}'",
                     config.target_schema()
                 ),
             )
             .with_fix_hint(&format!(
-                "Grant CREATE on the database or schema '{}' before applying the destination",
+                "Grant the destination role CREATE on schema '{}' and allow it to create target tables",
+                config.target_schema()
+            )),
+        );
+    }
+
+    if snapshot.can_comment_on_table {
+        checks.push(PrerequisiteCheck::passed(
+            "handoff_comment_persistence",
+            &format!(
+                "current role can persist handoff comments on tables in schema '{}'",
+                config.target_schema()
+            ),
+        ));
+    } else {
+        checks.push(
+            PrerequisiteCheck::error(
+                "handoff_comment_persistence",
+                &format!(
+                    "current role cannot comment on tables in schema '{}'",
+                    config.target_schema()
+                ),
+            )
+            .with_fix_hint(&format!(
+                "Ensure the destination role owns the target tables or can run COMMENT ON TABLE in '{}'",
+                config.target_schema()
+            )),
+        );
+    }
+
+    if snapshot.can_write_watermarks {
+        checks.push(PrerequisiteCheck::passed(
+            "watermark_table_write",
+            &format!(
+                "current role can create and upsert watermark rows in schema '{}'",
+                config.target_schema()
+            ),
+        ));
+    } else {
+        checks.push(
+            PrerequisiteCheck::error(
+                "watermark_table_write",
+                &format!(
+                    "current role cannot create or write the watermark table in schema '{}'",
+                    config.target_schema()
+                ),
+            )
+            .with_fix_hint(&format!(
+                "Grant CREATE and INSERT/UPDATE on the watermark table in '{}'",
+                config.target_schema()
+            )),
+        );
+    }
+
+    if snapshot.can_write_existing_targets {
+        checks.push(PrerequisiteCheck::passed(
+            "existing_target_dml",
+            &format!(
+                "current role can write and update rows in existing target tables in schema '{}'",
+                config.target_schema()
+            ),
+        ));
+    } else {
+        checks.push(
+            PrerequisiteCheck::error(
+                "existing_target_dml",
+                &format!(
+                    "current role cannot perform DML against existing target tables in schema '{}'",
+                    config.target_schema()
+                ),
+            )
+            .with_fix_hint(&format!(
+                "Grant INSERT and UPDATE on destination tables in '{}'",
                 config.target_schema()
             )),
         );
@@ -133,11 +301,43 @@ pub(crate) fn build_prerequisites_report(
     PrerequisitesReport::from_checks(checks)
 }
 
+async fn with_savepoint<F, Fut>(client: &Client, savepoint: &str, op: F) -> Result<(), String>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    let savepoint_sql = format!("SAVEPOINT {savepoint}");
+    client
+        .execute(&savepoint_sql, &[])
+        .await
+        .map_err(|e| format!("unable to start prerequisite savepoint {savepoint}: {e}"))?;
+
+    match op().await {
+        Ok(()) => {
+            let release_sql = format!("RELEASE SAVEPOINT {savepoint}");
+            client.execute(&release_sql, &[]).await.map_err(|e| {
+                format!("unable to release prerequisite savepoint {savepoint}: {e}")
+            })?;
+            Ok(())
+        }
+        Err(err) => {
+            let rollback_sql = format!("ROLLBACK TO SAVEPOINT {savepoint}");
+            let _ = client.execute(&rollback_sql, &[]).await;
+            let release_sql = format!("RELEASE SAVEPOINT {savepoint}");
+            let _ = client.execute(&release_sql, &[]).await;
+            Err(err)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rapidbyte_sdk::validation::PrerequisiteSeverity;
+    use tokio_postgres::NoTls;
+
     use crate::config::Config;
-    use super::{build_prerequisites_report, PrerequisiteSnapshot};
+
+    use super::{build_prerequisites_report, snapshot, PrerequisiteSnapshot};
 
     fn base_config() -> Config {
         Config {
@@ -152,13 +352,33 @@ mod tests {
         }
     }
 
+    async fn connect() -> tokio_postgres::Client {
+        let dsn = std::env::var("RAPIDBYTE_POSTGRES_TEST_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| {
+                "host=127.0.0.1 port=33603 user=postgres password=postgres dbname=postgres"
+                    .to_string()
+            });
+
+        let (client, connection) = tokio_postgres::connect(&dsn, NoTls)
+            .await
+            .expect("connect to test postgres");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        client
+    }
+
     #[test]
     fn prerequisites_report_marks_missing_schema_as_structured_info() {
         let report = build_prerequisites_report(
             &base_config(),
             PrerequisiteSnapshot {
                 schema_exists: false,
-                can_create_schema: true,
+                can_create_target_table: true,
+                can_comment_on_table: true,
+                can_write_watermarks: true,
+                can_write_existing_targets: true,
             },
         );
 
@@ -170,18 +390,33 @@ mod tests {
         assert!(report
             .checks
             .iter()
-            .any(|check| check.name == "target_schema_capability"
+            .any(|check| check.name == "schema_table_ddl"
                 && check.passed
                 && check.severity == PrerequisiteSeverity::Info));
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "handoff_comment_persistence" && check.passed));
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "watermark_table_write" && check.passed));
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "existing_target_dml" && check.passed));
     }
 
     #[test]
-    fn prerequisites_report_fails_when_schema_creation_capability_is_missing() {
+    fn prerequisites_report_fails_when_required_destination_capabilities_are_missing() {
         let report = build_prerequisites_report(
             &base_config(),
             PrerequisiteSnapshot {
                 schema_exists: true,
-                can_create_schema: false,
+                can_create_target_table: true,
+                can_comment_on_table: false,
+                can_write_watermarks: false,
+                can_write_existing_targets: false,
             },
         );
 
@@ -189,6 +424,30 @@ mod tests {
         assert!(report
             .checks
             .iter()
-            .any(|check| check.name == "target_schema_capability" && !check.passed));
+            .any(|check| check.name == "handoff_comment_persistence" && !check.passed));
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "watermark_table_write" && !check.passed));
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "existing_target_dml" && !check.passed));
+    }
+
+    #[tokio::test]
+    async fn snapshot_transactional_probe_reports_required_capabilities() {
+        let config = base_config();
+        let client = connect().await;
+
+        let snapshot = snapshot(&client, &config)
+            .await
+            .expect("prerequisite snapshot");
+
+        let _ = snapshot.schema_exists;
+        assert!(snapshot.can_create_target_table);
+        assert!(snapshot.can_comment_on_table);
+        assert!(snapshot.can_write_watermarks);
+        assert!(snapshot.can_write_existing_targets);
     }
 }

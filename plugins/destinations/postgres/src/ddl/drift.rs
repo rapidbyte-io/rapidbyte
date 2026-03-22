@@ -342,8 +342,10 @@ mod tests {
 
     use tokio_postgres::NoTls;
 
-    use rapidbyte_sdk::stream::{ColumnPolicy, NullabilityPolicy, SchemaEvolutionPolicy, TypeChangePolicy};
     use rapidbyte_sdk::prelude::Context;
+    use rapidbyte_sdk::stream::{
+        ColumnPolicy, NullabilityPolicy, SchemaEvolutionPolicy, TypeChangePolicy,
+    };
 
     static NEXT_SUFFIX: AtomicU64 = AtomicU64::new(1);
 
@@ -363,12 +365,9 @@ mod tests {
                 "host=127.0.0.1 port=33603 user=postgres password=postgres dbname=postgres"
                     .to_string()
             });
-        let (client, connection) = tokio_postgres::connect(
-            &dsn,
-            NoTls,
-        )
-        .await
-        .expect("connect to test postgres");
+        let (client, connection) = tokio_postgres::connect(&dsn, NoTls)
+            .await
+            .expect("connect to test postgres");
         tokio::spawn(async move {
             let _ = connection.await;
         });
@@ -377,9 +376,19 @@ mod tests {
 
     async fn create_table(client: &tokio_postgres::Client, schema: &str, table: &str, ddl: &str) {
         let create_schema = format!("CREATE SCHEMA IF NOT EXISTS {}", quote_identifier(schema));
-        client.execute(&create_schema, &[]).await.expect("create schema");
-        let create_table = format!("CREATE TABLE {} ({})", crate::decode::qualified_name(schema, table), ddl);
-        client.execute(&create_table, &[]).await.expect("create table");
+        client
+            .execute(&create_schema, &[])
+            .await
+            .expect("create schema");
+        let create_table = format!(
+            "CREATE TABLE {} ({})",
+            crate::decode::qualified_name(schema, table),
+            ddl
+        );
+        client
+            .execute(&create_table, &[])
+            .await
+            .expect("create table");
     }
 
     async fn column_info(
@@ -427,23 +436,50 @@ mod tests {
 
     #[test]
     fn new_column_policy_outcomes_are_classified() {
-        assert_eq!(new_column_outcome(ColumnPolicy::Add), DriftPolicyOutcome::Add);
-        assert_eq!(new_column_outcome(ColumnPolicy::Ignore), DriftPolicyOutcome::Ignore);
-        assert_eq!(new_column_outcome(ColumnPolicy::Fail), DriftPolicyOutcome::Fail);
+        assert_eq!(
+            new_column_outcome(ColumnPolicy::Add),
+            DriftPolicyOutcome::Add
+        );
+        assert_eq!(
+            new_column_outcome(ColumnPolicy::Ignore),
+            DriftPolicyOutcome::Ignore
+        );
+        assert_eq!(
+            new_column_outcome(ColumnPolicy::Fail),
+            DriftPolicyOutcome::Fail
+        );
     }
 
     #[test]
     fn removed_column_policy_outcomes_are_classified() {
-        assert_eq!(removed_column_outcome(ColumnPolicy::Add), DriftPolicyOutcome::Ignore);
-        assert_eq!(removed_column_outcome(ColumnPolicy::Ignore), DriftPolicyOutcome::Ignore);
-        assert_eq!(removed_column_outcome(ColumnPolicy::Fail), DriftPolicyOutcome::Fail);
+        assert_eq!(
+            removed_column_outcome(ColumnPolicy::Add),
+            DriftPolicyOutcome::Ignore
+        );
+        assert_eq!(
+            removed_column_outcome(ColumnPolicy::Ignore),
+            DriftPolicyOutcome::Ignore
+        );
+        assert_eq!(
+            removed_column_outcome(ColumnPolicy::Fail),
+            DriftPolicyOutcome::Fail
+        );
     }
 
     #[test]
     fn type_change_policy_outcomes_are_classified() {
-        assert_eq!(type_change_outcome(TypeChangePolicy::Coerce), DriftPolicyOutcome::Coerce);
-        assert_eq!(type_change_outcome(TypeChangePolicy::Null), DriftPolicyOutcome::Null);
-        assert_eq!(type_change_outcome(TypeChangePolicy::Fail), DriftPolicyOutcome::Fail);
+        assert_eq!(
+            type_change_outcome(TypeChangePolicy::Coerce),
+            DriftPolicyOutcome::Coerce
+        );
+        assert_eq!(
+            type_change_outcome(TypeChangePolicy::Null),
+            DriftPolicyOutcome::Null
+        );
+        assert_eq!(
+            type_change_outcome(TypeChangePolicy::Fail),
+            DriftPolicyOutcome::Fail
+        );
     }
 
     #[test]
@@ -496,7 +532,10 @@ mod tests {
 
         let _ = client
             .execute(
-                &format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_identifier(&schema)),
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    quote_identifier(&schema)
+                ),
                 &[],
             )
             .await;
@@ -539,11 +578,16 @@ mod tests {
             .await
             .expect("apply removed-column policy");
 
-        assert!(column_info(&client, &schema, table, "legacy").await.is_some());
+        assert!(column_info(&client, &schema, table, "legacy")
+            .await
+            .is_some());
 
         let _ = client
             .execute(
-                &format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_identifier(&schema)),
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    quote_identifier(&schema)
+                ),
                 &[],
             )
             .await;
@@ -587,7 +631,10 @@ mod tests {
 
         let _ = client
             .execute(
-                &format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_identifier(&schema)),
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    quote_identifier(&schema)
+                ),
                 &[],
             )
             .await;
@@ -641,7 +688,10 @@ mod tests {
 
         let _ = client
             .execute(
-                &format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_identifier(&schema)),
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    quote_identifier(&schema)
+                ),
                 &[],
             )
             .await;
@@ -682,7 +732,10 @@ mod tests {
 
         let _ = client
             .execute(
-                &format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_identifier(&schema)),
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    quote_identifier(&schema)
+                ),
                 &[],
             )
             .await;
@@ -727,7 +780,10 @@ mod tests {
 
         let _ = client
             .execute(
-                &format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_identifier(&schema)),
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    quote_identifier(&schema)
+                ),
                 &[],
             )
             .await;
@@ -768,7 +824,10 @@ mod tests {
 
         let _ = client
             .execute(
-                &format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_identifier(&schema)),
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    quote_identifier(&schema)
+                ),
                 &[],
             )
             .await;
