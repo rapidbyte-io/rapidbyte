@@ -99,14 +99,14 @@ impl CdcSource for SourcePostgres {
         &self,
         ctx: &Context,
         stream: StreamContext,
-        _resume: CdcResumeToken,
+        resume: CdcResumeToken,
     ) -> Result<ReadSummary, PluginError> {
         let connect_start = Instant::now();
         let client = client::connect(&self.config)
             .await
             .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
         let connect_secs = connect_start.elapsed().as_secs_f64();
-        let resume = normalize_cdc_resume_token(&_resume);
+        let resume = normalize_cdc_resume_token(&resume);
 
         cdc::read_cdc_changes(&client, ctx, &stream, &resume, &self.config, connect_secs)
             .await

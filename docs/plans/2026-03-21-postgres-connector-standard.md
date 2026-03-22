@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Freeze The Current PostgreSQL Baseline
+## Task 1: Freeze The Current PostgreSQL Baseline
 
 **Files:**
 - Modify: `docs/plans/2026-03-21-postgres-connector-standard-design.md`
@@ -43,7 +43,7 @@ git add docs/plans/2026-03-21-postgres-connector-standard-design.md
 git commit -m "docs: capture postgres connector baseline"
 ```
 
-### Task 2: Add Source PostgreSQL Prerequisites Lifecycle
+## Task 2: Add Source PostgreSQL Prerequisites Lifecycle
 
 **Files:**
 - Create: `plugins/sources/postgres/src/prerequisites.rs`
@@ -94,7 +94,7 @@ git add plugins/sources/postgres/src/prerequisites.rs plugins/sources/postgres/s
 git commit -m "feat(source-postgres): add prerequisite checks"
 ```
 
-### Task 3: Deepen Source Discovery To Production Grade
+## Task 3: Deepen Source Discovery To Production Grade
 
 **Files:**
 - Modify: `plugins/sources/postgres/src/discovery.rs`
@@ -147,7 +147,7 @@ git add plugins/sources/postgres/src/discovery.rs plugins/sources/postgres/src/t
 git commit -m "feat(source-postgres): harden discovery behavior"
 ```
 
-### Task 4: Harden Source CDC Diagnostics And Recovery Semantics
+## Task 4: Harden Source CDC Diagnostics And Recovery Semantics
 
 **Files:**
 - Modify: `plugins/sources/postgres/src/cdc/mod.rs`
@@ -197,7 +197,7 @@ git add plugins/sources/postgres/src/cdc/mod.rs plugins/sources/postgres/src/dia
 git commit -m "feat(source-postgres): improve cdc diagnostics"
 ```
 
-### Task 5: Separate Destination Prerequisites, Validate, And Apply
+## Task 5: Separate Destination Prerequisites, Validate, And Apply
 
 **Files:**
 - Create: `plugins/destinations/postgres/src/prerequisites.rs`
@@ -253,7 +253,7 @@ git add plugins/destinations/postgres/src/prerequisites.rs plugins/destinations/
 git commit -m "feat(dest-postgres): split validate and apply lifecycle"
 ```
 
-### Task 6: Expand Destination Migration And Drift Safety Tests
+## Task 6: Expand Destination Migration And Drift Safety Tests
 
 **Files:**
 - Modify: `plugins/destinations/postgres/src/ddl/drift.rs`
@@ -307,7 +307,7 @@ git add plugins/destinations/postgres/src/ddl/drift.rs plugins/destinations/post
 git commit -m "feat(dest-postgres): harden migration and drift safety"
 ```
 
-### Task 7: Add Connector-Level Operational Docs And Package Standard
+## Task 7: Add Connector-Level Operational Docs And Package Standard
 
 **Files:**
 - Create: `plugins/sources/postgres/README.md`
@@ -344,7 +344,7 @@ git add plugins/sources/postgres/README.md plugins/destinations/postgres/README.
 git commit -m "docs: add postgres connector package docs"
 ```
 
-### Task 8: Full Verification And Standard Lock-In
+## Task 8: Full Verification And Standard Lock-In
 
 **Files:**
 - Verify: `plugins/sources/postgres`

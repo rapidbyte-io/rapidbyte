@@ -92,7 +92,7 @@ mod tests {
     }
 
     #[test]
-    fn dest_postgres_starts_without_prepared_contracts() {
+    fn dest_postgres_default_config_has_public_schema() {
         let plugin = DestPostgres {
             config: config::Config {
                 host: "localhost".to_string(),

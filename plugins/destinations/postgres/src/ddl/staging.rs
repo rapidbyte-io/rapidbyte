@@ -21,10 +21,14 @@ impl ContractHandoff {
         schema_signature: Option<String>,
     ) -> Option<Self> {
         let schema_signature = schema_signature?;
+        let mut ignored_columns: Vec<String> = contract.ignored_columns.iter().cloned().collect();
+        ignored_columns.sort();
+        let mut type_null_columns: Vec<String> = contract.type_null_columns.iter().cloned().collect();
+        type_null_columns.sort();
         Some(Self {
             schema_signature,
-            ignored_columns: contract.ignored_columns.iter().cloned().collect(),
-            type_null_columns: contract.type_null_columns.iter().cloned().collect(),
+            ignored_columns,
+            type_null_columns,
         })
     }
 }
