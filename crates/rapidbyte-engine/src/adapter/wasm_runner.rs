@@ -2132,7 +2132,7 @@ mod tests {
         config_error_as_validation_failure, handle_close_result, parse_compression,
         plugin_instance_key,
     };
-    use rapidbyte_runtime::CompressionCodec;
+    use rapidbyte_runtime::{source_bindings, CompressionCodec};
     use rapidbyte_types::stream::StreamContext;
     use rapidbyte_types::validation::ValidationStatus;
 
@@ -2179,6 +2179,18 @@ mod tests {
             .expect("config errors should map to failed validation");
         assert_eq!(report.status, ValidationStatus::Failed);
         assert!(report.message.contains("invalid config"));
+    }
+
+    #[test]
+    fn wasm_runner_v2_lifecycle_binding_types_exist() {
+        let _: Option<source_bindings::rapidbyte::plugin::types::OpenInput> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::PrerequisitesInput> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::DiscoverInput> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::ValidateInput> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::ApplyInput> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::RunInput> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::CloseInput> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::TeardownInput> = None;
     }
 
     fn test_stream_ctx(stream_name: &str, partition_index: Option<u32>) -> StreamContext {

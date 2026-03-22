@@ -579,6 +579,22 @@ mod tests {
     }
 
     #[test]
+    fn v2_lifecycle_binding_types_exist() {
+        let _: Option<source_bindings::rapidbyte::plugin::types::OpenInput> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::PrerequisitesInput> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::DiscoverInput> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::ValidateInput> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::ApplyInput> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::RunInput> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::CloseInput> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::TeardownInput> = None;
+
+        let _: Option<source_bindings::rapidbyte::plugin::types::FrameHandle> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::SocketHandle> = None;
+        let _: Option<source_bindings::rapidbyte::plugin::types::CheckpointTxn> = None;
+    }
+
+    #[test]
     fn source_validation_conversion_preserves_warnings() {
         let report = source_bindings::rapidbyte::plugin::types::ValidationReport {
             status: source_bindings::rapidbyte::plugin::types::ValidationStatus::Warning,

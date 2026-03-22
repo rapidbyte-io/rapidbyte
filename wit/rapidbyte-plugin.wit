@@ -171,6 +171,43 @@ interface types {
         dry-run: bool,
     }
 
+    // ── Typed lifecycle inputs ──
+    record open-input {
+        config-json: string,
+    }
+
+    record prerequisites-input {
+        session: session,
+    }
+
+    record discover-input {
+        session: session,
+    }
+
+    record validate-input {
+        session: session,
+        stream-schema: option<stream-schema>,
+    }
+
+    record apply-input {
+        session: session,
+        request: apply-request,
+    }
+
+    record run-input {
+        session: session,
+        request: run-request,
+    }
+
+    record close-input {
+        session: session,
+    }
+
+    record teardown-input {
+        session: session,
+        request: teardown-request,
+    }
+
     record stream-result {
         stream-index: u32,
         stream-name: string,
