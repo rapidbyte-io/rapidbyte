@@ -794,7 +794,6 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
         ) -> ::rapidbyte_sdk::lifecycle::ApplyRequest {
             ::rapidbyte_sdk::lifecycle::ApplyRequest {
                 streams: r.streams.into_iter().map(from_component_stream_context).collect(),
-                dry_run: r.dry_run,
             }
         }
 
@@ -842,7 +841,6 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
         ) -> ::rapidbyte_sdk::run::RunRequest {
             ::rapidbyte_sdk::run::RunRequest {
                 streams: r.streams.into_iter().map(from_component_stream_context).collect(),
-                dry_run: r.dry_run,
             }
         }
 
@@ -1065,7 +1063,7 @@ fn gen_read_dispatch(
         return quote! {
             rt.block_on(<#struct_name as #trait_path>::read(
                 conn,
-                ::rapidbyte_sdk::plugin::ReadInput::with_dry_run(stream.clone(), dry_run),
+                ::rapidbyte_sdk::plugin::ReadInput::new(stream.clone()),
             ))
                 .map_err(to_component_error)?
         };
@@ -1075,17 +1073,7 @@ fn gen_read_dispatch(
         if let Some(partition) = stream.partition_coordinates_typed() {
             return <#struct_name as ::rapidbyte_sdk::features::PartitionedSource>::read_partition(
                 conn,
-                ::rapidbyte_sdk::plugin::PartitionedReadInput::with_capabilities(
-                    stream,
-                    partition,
-                    dry_run,
-                    ::rapidbyte_sdk::capabilities::Emit,
-                    ::rapidbyte_sdk::capabilities::Cancel,
-                    ::rapidbyte_sdk::capabilities::State,
-                    ::rapidbyte_sdk::capabilities::Checkpoints,
-                    ::rapidbyte_sdk::capabilities::Metrics,
-                    ::rapidbyte_sdk::capabilities::Log,
-                ),
+                ::rapidbyte_sdk::plugin::PartitionedReadInput::new(stream, partition),
             ).await;
         }
     });
@@ -1101,17 +1089,7 @@ fn gen_read_dispatch(
                 );
                 return <#struct_name as ::rapidbyte_sdk::features::CdcSource>::read_changes(
                     conn,
-                    ::rapidbyte_sdk::plugin::CdcReadInput::with_capabilities(
-                        stream,
-                        resume,
-                        dry_run,
-                        ::rapidbyte_sdk::capabilities::Emit,
-                        ::rapidbyte_sdk::capabilities::Cancel,
-                        ::rapidbyte_sdk::capabilities::State,
-                        ::rapidbyte_sdk::capabilities::Checkpoints,
-                        ::rapidbyte_sdk::capabilities::Metrics,
-                        ::rapidbyte_sdk::capabilities::Log,
-                    ),
+                    ::rapidbyte_sdk::plugin::CdcReadInput::new(stream, resume),
                 ).await;
             }
         }
@@ -1123,7 +1101,7 @@ fn gen_read_dispatch(
             #cdc_branch
             <#struct_name as #trait_path>::read(
                 conn,
-                ::rapidbyte_sdk::plugin::ReadInput::with_dry_run(stream.clone(), dry_run),
+                ::rapidbyte_sdk::plugin::ReadInput::new(stream.clone()),
             ).await
         }).map_err(to_component_error)?
     }
@@ -1209,7 +1187,6 @@ fn gen_source_methods(
         > {
             validate_session(input.session)?;
             let sdk_request = from_component_run_request(input.request);
-            let dry_run = sdk_request.dry_run;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1274,25 +1251,18 @@ fn gen_dest_methods(
     let write_dispatch = if features.is_some_and(|f| f.has_bulk_load) {
         quote! {
             rt.block_on(<#struct_name as ::rapidbyte_sdk::features::BulkDestination>::write_bulk(
-                conn,
-                ::rapidbyte_sdk::plugin::BulkWriteInput::with_capabilities(
-                    stream.clone(),
-                    dry_run,
-                    ::rapidbyte_sdk::capabilities::Reader,
-                    ::rapidbyte_sdk::capabilities::Cancel,
-                    ::rapidbyte_sdk::capabilities::State,
-                    ::rapidbyte_sdk::capabilities::Checkpoints,
-                ),
+            conn,
+            ::rapidbyte_sdk::plugin::BulkWriteInput::new(stream.clone()),
             ))
-            .map_err(to_component_error)?
+        .map_err(to_component_error)?
         }
     } else {
         quote! {
             rt.block_on(<#struct_name as #trait_path>::write(
-                conn,
-                ::rapidbyte_sdk::plugin::WriteInput::with_dry_run(stream.clone(), dry_run),
-            ))
-                .map_err(to_component_error)?
+            conn,
+            ::rapidbyte_sdk::plugin::WriteInput::new(stream.clone()),
+        ))
+            .map_err(to_component_error)?
         }
     };
 
@@ -1346,7 +1316,6 @@ fn gen_dest_methods(
         > {
             validate_session(input.session)?;
             let sdk_request = from_component_run_request(input.request);
-            let dry_run = sdk_request.dry_run;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1402,7 +1371,6 @@ fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
         > {
             validate_session(input.session)?;
             let sdk_request = from_component_run_request(input.request);
-            let dry_run = sdk_request.dry_run;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1419,7 +1387,7 @@ fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
                         ::rapidbyte_sdk::plugin::TransformInput::with_runtime(
                             stream.clone(),
                             input.plugin_id.as_str(),
-                            dry_run,
+                            false,
                         ),
                     ))
                     .map_err(to_component_error)?;
@@ -1490,12 +1458,16 @@ mod tests {
         .to_string();
 
         assert!(generated.contains("InitInput :: new"));
-        assert!(generated.contains("ReadInput :: with_dry_run"));
-        assert!(generated.contains("PartitionedReadInput :: with_capabilities"));
-        assert!(generated.contains("CdcReadInput :: with_capabilities"));
+        assert!(generated.contains("ReadInput :: new"));
+        assert!(generated.contains("PartitionedReadInput :: new"));
+        assert!(generated.contains("CdcReadInput :: new"));
         assert!(generated.contains("PartitionedSource"));
         assert!(generated.contains("CdcSource"));
+        assert!(generated.contains("NEXT_SESSION_ID . fetch_add"));
+        assert!(generated.contains("validate_session"));
         assert!(!generated.contains("Context"));
+        assert!(!generated.contains("with_dry_run"));
+        assert!(!generated.contains("with_capabilities"));
     }
 
     #[test]
@@ -1511,11 +1483,15 @@ mod tests {
         .to_string();
 
         assert!(destination_generated.contains("InitInput :: new"));
-        assert!(destination_generated.contains("WriteInput :: with_dry_run"));
+        assert!(destination_generated.contains("WriteInput :: new"));
         assert!(destination_generated.contains("PrerequisitesInput :: new"));
         assert!(destination_generated.contains("ApplyInput :: new"));
         assert!(destination_generated.contains("TeardownInput :: new"));
+        assert!(destination_generated.contains("NEXT_SESSION_ID . fetch_add"));
+        assert!(destination_generated.contains("validate_session"));
         assert!(!destination_generated.contains("Context"));
+        assert!(!destination_generated.contains("with_dry_run"));
+        assert!(!destination_generated.contains("with_capabilities"));
 
         let struct_name: Ident = parse_quote!(TestTransform);
         let transform_trait = quote!(::rapidbyte_sdk::plugin::Transform);
@@ -1527,6 +1503,8 @@ mod tests {
         assert!(transform_generated.contains("TransformInput :: with_runtime"));
         assert!(transform_generated.contains("ValidateInput :: new"));
         assert!(transform_generated.contains("CloseInput :: new"));
+        assert!(transform_generated.contains("NEXT_SESSION_ID . fetch_add"));
+        assert!(transform_generated.contains("validate_session"));
         assert!(!transform_generated.contains("Context"));
     }
 
@@ -1625,8 +1603,22 @@ mod tests {
         assert!(generated.contains("InitInput :: new"));
         assert!(generated.contains("DiscoverInput :: new"));
         assert!(generated.contains("ValidateInput :: new"));
-        assert!(generated.contains("ReadInput :: with_dry_run"));
+        assert!(generated.contains("ReadInput :: new"));
+        assert!(generated.contains("validate_session"));
         assert!(!generated.contains("Context"));
+        assert!(!generated.contains("with_dry_run"));
+    }
+
+    #[test]
+    fn lifecycle_methods_use_session_validation_and_allocation() {
+        let struct_name: Ident = parse_quote!(TestSource);
+        let trait_path = quote!(::rapidbyte_sdk::plugin::Source);
+
+        let generated = gen_lifecycle_methods(&struct_name, &trait_path).to_string();
+
+        assert!(generated.contains("NEXT_SESSION_ID . fetch_add"));
+        assert!(generated.contains("validate_session"));
+        assert!(generated.contains("get_session_state"));
     }
 
     #[test]
