@@ -1,4 +1,4 @@
-package rapidbyte:plugin@8.0.0;
+package rapidbyte:plugin@9.0.0;
 
 interface types {
     // ── Handles ──
@@ -168,7 +168,6 @@ interface types {
     // ── Run request / results ──
     record run-request {
         streams: list<stream-context>,
-        dry-run: bool,
     }
 
     // ── Typed lifecycle inputs ──
@@ -270,7 +269,6 @@ interface types {
     // ── Apply ──
     record apply-request {
         streams: list<stream-context>,
-        dry-run: bool,
     }
 
     record apply-action {

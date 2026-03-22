@@ -591,10 +591,9 @@ mod tests {
             source_defined_cursor: Some("updated_at".into()),
             schema_id: Some("schema-v1".into()),
         };
-        let request = source_bindings::rapidbyte::plugin::types::RunRequest {
-            streams: vec![],
-            dry_run: true,
-        };
+        let run_request = source_bindings::rapidbyte::plugin::types::RunRequest { streams: vec![] };
+        let apply_request =
+            source_bindings::rapidbyte::plugin::types::ApplyRequest { streams: vec![] };
 
         let open = source_bindings::rapidbyte::plugin::types::OpenInput {
             config_json: r#"{"host":"db"}"#.into(),
@@ -610,7 +609,7 @@ mod tests {
         let run = source_bindings::rapidbyte::plugin::types::RunInput {
             session: 14,
             plugin_id: "test-source".into(),
-            request,
+            request: run_request,
         };
         let close = source_bindings::rapidbyte::plugin::types::CloseInput { session: 15 };
 
@@ -626,9 +625,10 @@ mod tests {
                 .and_then(|schema| schema.schema_id.as_deref()),
             Some("schema-v1")
         );
+        assert_eq!(apply_request.streams.len(), 0);
         assert_eq!(run.session, 14);
         assert_eq!(run.plugin_id, "test-source");
-        assert!(run.request.dry_run);
+        assert_eq!(run.request.streams.len(), 0);
         assert_eq!(close.session, 15);
     }
 

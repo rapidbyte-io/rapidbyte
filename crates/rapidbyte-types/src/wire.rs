@@ -21,15 +21,18 @@ pub enum ProtocolVersion {
     #[serde(rename = "7")]
     V7,
     /// Version 8 — typed lifecycle input protocol.
-    #[default]
     #[serde(rename = "8")]
     V8,
+    /// Version 9 — request shapes without dry-run flags.
+    #[default]
+    #[serde(rename = "9")]
+    V9,
 }
 
 impl ProtocolVersion {
     #[must_use]
     pub const fn current() -> Self {
-        Self::V8
+        Self::V9
     }
 }
 
@@ -148,11 +151,11 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_default_is_v8() {
+    fn protocol_version_default_is_v9() {
         let v = ProtocolVersion::default();
         assert_eq!(v, ProtocolVersion::current());
-        assert_eq!(v, ProtocolVersion::V8);
-        assert_eq!(serde_json::to_string(&v).unwrap(), "\"8\"");
+        assert_eq!(v, ProtocolVersion::V9);
+        assert_eq!(serde_json::to_string(&v).unwrap(), "\"9\"");
     }
 
     #[test]
@@ -171,6 +174,15 @@ mod tests {
         assert_eq!(json, "\"8\"");
         let back: ProtocolVersion = serde_json::from_str(&json).unwrap();
         assert_eq!(back, ProtocolVersion::V8);
+    }
+
+    #[test]
+    fn v9_protocol_version_roundtrip() {
+        let v = ProtocolVersion::V9;
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(json, "\"9\"");
+        let back: ProtocolVersion = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ProtocolVersion::V9);
     }
 
     #[test]
