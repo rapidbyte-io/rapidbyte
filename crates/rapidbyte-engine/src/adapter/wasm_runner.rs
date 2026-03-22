@@ -730,7 +730,6 @@ fn run_source_stream(
     let wit_stream_ctx = stream_context_to_wit_source(stream_ctx)?;
     let run_request = source_bindings::rapidbyte::plugin::types::RunRequest {
         streams: vec![wit_stream_ctx],
-        dry_run: false,
     };
     let run_result = match iface.call_run(
         &mut store,
@@ -926,7 +925,6 @@ fn run_destination_stream(
     let wit_stream_ctx = stream_context_to_wit_dest(stream_ctx)?;
     let run_request = dest_bindings::rapidbyte::plugin::types::RunRequest {
         streams: vec![wit_stream_ctx],
-        dry_run: false,
     };
     let run_result = match iface.call_run(
         &mut store,
@@ -1123,7 +1121,6 @@ fn run_transform_stream(
     let wit_stream_ctx = stream_context_to_wit_transform(stream_ctx)?;
     let run_request = transform_bindings::rapidbyte::plugin::types::RunRequest {
         streams: vec![wit_stream_ctx],
-        dry_run: false,
     };
     let run_result = match iface.call_run(
         &mut store,
@@ -2021,7 +2018,6 @@ fn run_apply_impl(
                 .collect::<Result<_, _>>()?;
             let request = source_bindings::rapidbyte::plugin::types::ApplyRequest {
                 streams: wit_streams,
-                dry_run,
             };
 
             let result = match iface.call_apply(
@@ -2075,7 +2071,6 @@ fn run_apply_impl(
                 .collect::<Result<_, _>>()?;
             let request = dest_bindings::rapidbyte::plugin::types::ApplyRequest {
                 streams: wit_streams,
-                dry_run,
             };
 
             let result = match iface.call_apply(
@@ -2534,7 +2529,6 @@ mod tests {
             plugin_id: "test-source".into(),
             request: source_bindings::rapidbyte::plugin::types::RunRequest {
                 streams: vec![stream],
-                dry_run: false,
             },
         };
         let close = source_bindings::rapidbyte::plugin::types::CloseInput { session: 9 };
