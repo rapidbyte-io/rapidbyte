@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use rapidbyte_sdk::prelude::*;
+use rapidbyte_sdk::stream::{ColumnPolicy, TypeChangePolicy};
 
 use crate::apply::prepare_stream_contract;
 use crate::contract::{mark_contract_prepared, prepare_stream_once, stream_schema_signature, CheckpointConfig};
@@ -43,8 +44,16 @@ async fn live_destination_state_is_fresh(
     target_schema: &str,
     table_name: &str,
     stream_schema: &rapidbyte_sdk::schema::StreamSchema,
+    schema_policy: rapidbyte_sdk::stream::SchemaEvolutionPolicy,
     handoff: &ContractHandoff,
 ) -> Result<bool, PluginError> {
+    if (!handoff.ignored_columns.is_empty() && schema_policy.new_column != ColumnPolicy::Ignore)
+        || (!handoff.type_null_columns.is_empty()
+            && schema_policy.type_change != TypeChangePolicy::Null)
+    {
+        return Ok(false);
+    }
+
     let Some(arrow_schema) = crate::contract::preflight_schema_from_stream_schema(stream_schema)
         .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
     else {
@@ -86,6 +95,7 @@ async fn replace_staging_reuse_is_safe(
     target_schema: &str,
     stream_name: &str,
     stream_schema: &rapidbyte_sdk::schema::StreamSchema,
+    schema_policy: rapidbyte_sdk::stream::SchemaEvolutionPolicy,
     handoff: &ContractHandoff,
 ) -> Result<bool, PluginError> {
     if !live_destination_state_is_fresh(
@@ -93,6 +103,7 @@ async fn replace_staging_reuse_is_safe(
         target_schema,
         &staging_table_name(stream_name),
         stream_schema,
+        schema_policy,
         handoff,
     )
     .await?
@@ -197,6 +208,7 @@ pub async fn write_stream(
                     &setup.target_schema,
                     &setup.stream_name,
                     &stream.schema,
+                    stream.policies.schema_evolution,
                     handoff,
                 )
                 .await?
@@ -229,6 +241,7 @@ pub async fn write_stream(
                     &setup.target_schema,
                     &setup.stream_name,
                     &stream.schema,
+                    stream.policies.schema_evolution,
                     handoff,
                 )
                 .await?
@@ -339,6 +352,7 @@ mod tests {
     use rapidbyte_sdk::context::Context;
     use rapidbyte_sdk::prelude::CommitState;
     use rapidbyte_sdk::schema::{SchemaField, StreamSchema};
+    use rapidbyte_sdk::stream::{ColumnPolicy, NullabilityPolicy, TypeChangePolicy};
     use tokio_postgres::NoTls;
 
     static NEXT_SUFFIX: AtomicU64 = AtomicU64::new(1);
@@ -604,7 +618,19 @@ mod tests {
             type_null_columns: vec![],
         };
 
-        let fresh = live_destination_state_is_fresh(&client, &schema, table, &stream_schema, &handoff)
+        let fresh = live_destination_state_is_fresh(
+            &client,
+            &schema,
+            table,
+            &stream_schema,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                new_column: ColumnPolicy::Ignore,
+                removed_column: ColumnPolicy::Ignore,
+                type_change: TypeChangePolicy::Fail,
+                nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
+            },
+            &handoff,
+        )
             .await
             .expect("freshness");
         assert!(fresh);
@@ -677,7 +703,19 @@ mod tests {
             type_null_columns: vec!["id".to_string()],
         };
 
-        let fresh = live_destination_state_is_fresh(&client, &schema, table, &stream_schema, &handoff)
+        let fresh = live_destination_state_is_fresh(
+            &client,
+            &schema,
+            table,
+            &stream_schema,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                new_column: ColumnPolicy::Add,
+                removed_column: ColumnPolicy::Ignore,
+                type_change: TypeChangePolicy::Null,
+                nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
+            },
+            &handoff,
+        )
             .await
             .expect("freshness");
         assert!(fresh);
@@ -742,7 +780,19 @@ mod tests {
         };
 
         assert!(
-            live_destination_state_is_fresh(&client, &schema, table, &stream_schema, &handoff)
+            live_destination_state_is_fresh(
+                &client,
+                &schema,
+                table,
+                &stream_schema,
+                rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                    new_column: ColumnPolicy::Ignore,
+                    removed_column: ColumnPolicy::Ignore,
+                    type_change: TypeChangePolicy::Fail,
+                    nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
+                },
+                &handoff,
+            )
                 .await
                 .expect("freshness while ignored column is still absent")
         );
@@ -759,7 +809,19 @@ mod tests {
             .expect("repair ignored column");
 
         assert!(
-            !live_destination_state_is_fresh(&client, &schema, table, &stream_schema, &handoff)
+            !live_destination_state_is_fresh(
+                &client,
+                &schema,
+                table,
+                &stream_schema,
+                rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                    new_column: ColumnPolicy::Ignore,
+                    removed_column: ColumnPolicy::Ignore,
+                    type_change: TypeChangePolicy::Fail,
+                    nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
+                },
+                &handoff,
+            )
                 .await
                 .expect("freshness after repair")
         );
@@ -808,7 +870,19 @@ mod tests {
         };
 
         assert!(
-            live_destination_state_is_fresh(&client, &schema, table, &stream_schema, &handoff)
+            live_destination_state_is_fresh(
+                &client,
+                &schema,
+                table,
+                &stream_schema,
+                rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                    new_column: ColumnPolicy::Add,
+                    removed_column: ColumnPolicy::Ignore,
+                    type_change: TypeChangePolicy::Null,
+                    nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
+                },
+                &handoff,
+            )
                 .await
                 .expect("freshness while type-null workaround is still needed")
         );
@@ -825,7 +899,19 @@ mod tests {
             .expect("repair type-null column");
 
         assert!(
-            !live_destination_state_is_fresh(&client, &schema, table, &stream_schema, &handoff)
+            !live_destination_state_is_fresh(
+                &client,
+                &schema,
+                table,
+                &stream_schema,
+                rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                    new_column: ColumnPolicy::Add,
+                    removed_column: ColumnPolicy::Ignore,
+                    type_change: TypeChangePolicy::Null,
+                    nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
+                },
+                &handoff,
+            )
                 .await
                 .expect("freshness after repair")
         );
@@ -933,6 +1019,12 @@ mod tests {
             &schema,
             table,
             &stream_schema,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                new_column: ColumnPolicy::Ignore,
+                removed_column: ColumnPolicy::Ignore,
+                type_change: TypeChangePolicy::Fail,
+                nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
+            },
             &handoff,
         )
         .await
@@ -963,6 +1055,117 @@ mod tests {
             safe,
         );
         assert!(reused.is_some());
+
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &[],
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn live_freshness_rejects_ignore_handoff_when_policy_changes_to_add() {
+        let schema = fresh_name("rb_writer_ignore_policy");
+        let table = "users";
+        let client = connect().await;
+        create_table(&client, &schema, table).await;
+
+        let stream_schema = StreamSchema {
+            fields: vec![
+                SchemaField::new("id", "int64", false).with_primary_key(true),
+                SchemaField::new("name", "utf8", true),
+                SchemaField::new("age", "int64", true),
+            ],
+            primary_key: vec!["id".to_string()],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        };
+        let handoff = crate::ddl::ContractHandoff {
+            schema_signature: crate::contract::stream_schema_signature(&stream_schema)
+                .expect("signature")
+                .expect("schema signature"),
+            ignored_columns: vec!["age".to_string()],
+            type_null_columns: vec![],
+        };
+
+        let fresh = live_destination_state_is_fresh(
+            &client,
+            &schema,
+            table,
+            &stream_schema,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                new_column: ColumnPolicy::Add,
+                removed_column: ColumnPolicy::Ignore,
+                type_change: TypeChangePolicy::Fail,
+                nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
+            },
+            &handoff,
+        )
+        .await
+        .expect("freshness");
+        assert!(!fresh);
+
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &[],
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn live_freshness_rejects_type_null_handoff_when_policy_changes_to_coerce() {
+        let schema = fresh_name("rb_writer_null_policy");
+        let table = "users";
+        let client = connect().await;
+        create_table(&client, &schema, table).await;
+        client
+            .execute(
+                &format!(
+                    "ALTER TABLE {} ALTER COLUMN \"id\" TYPE integer USING \"id\"::integer",
+                    crate::decode::qualified_name(&schema, table)
+                ),
+                &[],
+            )
+            .await
+            .expect("introduce type drift");
+
+        let stream_schema = StreamSchema {
+            fields: vec![
+                SchemaField::new("id", "utf8", false).with_primary_key(true),
+                SchemaField::new("name", "utf8", true),
+            ],
+            primary_key: vec!["id".to_string()],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        };
+        let handoff = crate::ddl::ContractHandoff {
+            schema_signature: crate::contract::stream_schema_signature(&stream_schema)
+                .expect("signature")
+                .expect("schema signature"),
+            ignored_columns: vec![],
+            type_null_columns: vec!["id".to_string()],
+        };
+
+        let fresh = live_destination_state_is_fresh(
+            &client,
+            &schema,
+            table,
+            &stream_schema,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                new_column: ColumnPolicy::Add,
+                removed_column: ColumnPolicy::Ignore,
+                type_change: TypeChangePolicy::Coerce,
+                nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
+            },
+            &handoff,
+        )
+        .await
+        .expect("freshness");
+        assert!(!fresh);
 
         let _ = client
             .execute(
@@ -1106,7 +1309,19 @@ mod tests {
             .await
             .expect("out-of-band drift");
 
-        let fresh = live_destination_state_is_fresh(&client, &schema, table, &stream_schema, &handoff)
+        let fresh = live_destination_state_is_fresh(
+            &client,
+            &schema,
+            table,
+            &stream_schema,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                new_column: ColumnPolicy::Ignore,
+                removed_column: ColumnPolicy::Ignore,
+                type_change: TypeChangePolicy::Fail,
+                nullability_change: NullabilityPolicy::Allow,
+            },
+            &handoff,
+        )
             .await
             .expect("drift detection");
         assert!(!fresh);
@@ -1161,7 +1376,19 @@ mod tests {
         .await
         .expect("write staging handoff");
 
-        let safe = replace_staging_reuse_is_safe(&client, &schema, table, &stream_schema, &handoff)
+        let safe = replace_staging_reuse_is_safe(
+            &client,
+            &schema,
+            table,
+            &stream_schema,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                new_column: ColumnPolicy::Ignore,
+                removed_column: ColumnPolicy::Ignore,
+                type_change: TypeChangePolicy::Fail,
+                nullability_change: NullabilityPolicy::Allow,
+            },
+            &handoff,
+        )
             .await
             .expect("staging safety check");
         assert!(!safe);
