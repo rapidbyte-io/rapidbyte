@@ -327,10 +327,16 @@ mod tests {
         staging_table_name,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
 
+    use rapidbyte_sdk::arrow::array::{Int64Array, StringArray};
+    use rapidbyte_sdk::arrow::datatypes::{DataType, Field, Schema};
+    use rapidbyte_sdk::arrow::record_batch::RecordBatch;
     use crate::session::COPY_FLUSH_MAX;
     use crate::session::CommitError;
+    use crate::session::WriteSession;
     use crate::WriteMode;
+    use rapidbyte_sdk::context::Context;
     use rapidbyte_sdk::prelude::CommitState;
     use rapidbyte_sdk::schema::{SchemaField, StreamSchema};
     use tokio_postgres::NoTls;
@@ -394,6 +400,44 @@ mod tests {
             )
             .await
             .expect("create table");
+    }
+
+    async fn create_deferrable_unique_table(
+        client: &tokio_postgres::Client,
+        schema: &str,
+        table: &str,
+    ) {
+        client
+            .execute(
+                &format!("CREATE SCHEMA IF NOT EXISTS {}", pg_escape::quote_identifier(schema)),
+                &[],
+            )
+            .await
+            .expect("create schema");
+        client
+            .execute(
+                &format!(
+                    "CREATE TABLE {} (\"id\" bigint not null, \"name\" text, CONSTRAINT {} UNIQUE (\"id\") DEFERRABLE INITIALLY DEFERRED)",
+                    crate::decode::qualified_name(schema, table),
+                    pg_escape::quote_identifier(&format!("{table}_id_unique"))
+                ),
+                &[],
+            )
+            .await
+            .expect("create deferrable unique table");
+    }
+
+    fn duplicate_row_schema() -> Arc<Schema> {
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]))
+    }
+
+    fn duplicate_row_batch(schema: Arc<Schema>, id: i64, name: &str) -> RecordBatch {
+        let id_arr = Int64Array::from(vec![Some(id)]);
+        let name_arr = StringArray::from(vec![Some(name)]);
+        RecordBatch::try_new(schema, vec![Arc::new(id_arr), Arc::new(name_arr)]).unwrap()
     }
 
     #[test]
@@ -785,6 +829,70 @@ mod tests {
                 .await
                 .expect("freshness after repair")
         );
+
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &[],
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn checkpoint_commit_failure_preserves_unknown_commit_state() {
+        let schema = fresh_name("rb_writer_checkpoint_unknown");
+        let table = "users";
+        let client = connect().await;
+        create_deferrable_unique_table(&client, &schema, table).await;
+
+        let stream_schema = StreamSchema {
+            fields: vec![
+                SchemaField::new("id", "int64", false).with_primary_key(true),
+                SchemaField::new("name", "utf8", true),
+            ],
+            primary_key: vec!["id".to_string()],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        };
+        let setup = crate::contract::mark_contract_prepared(
+            crate::contract::prepare_stream_once(
+                &schema,
+                table,
+                Some(WriteMode::Append),
+                &stream_schema,
+                false,
+                rapidbyte_sdk::stream::SchemaEvolutionPolicy::default(),
+                crate::contract::CheckpointConfig {
+                    bytes: 0,
+                    rows: 2,
+                    seconds: 0,
+                },
+                None,
+                crate::config::LoadMethod::Insert,
+            )
+            .expect("contract"),
+        );
+        let ctx = Context::new("dest-postgres", table);
+        let mut session = WriteSession::begin(&ctx, &client, &schema, setup)
+            .await
+            .expect("begin session");
+        let batch_schema = duplicate_row_schema();
+
+        let batch1 = duplicate_row_batch(Arc::clone(&batch_schema), 1, "first");
+        let batch2 = duplicate_row_batch(Arc::clone(&batch_schema), 1, "second");
+        session
+            .process_batch(&batch_schema, &[batch1])
+            .await
+            .expect("first batch");
+
+        let err = session
+            .process_batch(&batch_schema, &[batch2])
+            .await
+            .expect_err("checkpoint commit should fail");
+
+        assert!(err.contains("Checkpoint COMMIT failed"));
+        assert_eq!(session.loop_error_commit_state(), CommitState::AfterCommitUnknown);
 
         let _ = client
             .execute(

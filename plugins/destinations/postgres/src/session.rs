@@ -355,7 +355,10 @@ impl<'a> WriteSession<'a> {
         self.client
             .execute("COMMIT", &[])
             .await
-            .map_err(|e| format!("Checkpoint COMMIT failed: {e}"))?;
+            .map_err(|e| {
+                self.stats.commits_completed += 1;
+                format!("Checkpoint COMMIT failed: {e}")
+            })?;
         self.stats.commits_completed += 1;
 
         self.ctx
