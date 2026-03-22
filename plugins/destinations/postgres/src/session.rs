@@ -56,6 +56,19 @@ pub(crate) fn loop_error_commit_state_with_commits(
     }
 }
 
+pub(crate) fn pre_final_commit_failure_state(
+    checkpoint_count: u64,
+    commits_completed: u64,
+) -> CommitState {
+    if checkpoint_count > 0 {
+        CommitState::AfterCommitConfirmed
+    } else if commits_completed > 0 {
+        CommitState::AfterCommitUnknown
+    } else {
+        CommitState::BeforeCommit
+    }
+}
+
 /// Error returned when the session fails during commit orchestration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommitError {
@@ -373,7 +386,15 @@ impl<'a> WriteSession<'a> {
                 self.stats.total_bytes,
             )
             .await
-            .map_err(|e| CommitError::before_commit(format!("Watermark update failed: {e}")))?;
+            .map_err(|e| {
+                CommitError {
+                    commit_state: pre_final_commit_failure_state(
+                        self.stats.checkpoint_count,
+                        self.stats.commits_completed,
+                    ),
+                    message: format!("Watermark update failed: {e}"),
+                }
+            })?;
         }
 
         let commit_start = Instant::now();
@@ -505,5 +526,29 @@ mod tests {
         let err = CommitError::after_commit_confirmed("checkpoint failed");
         assert_eq!(err.commit_state, CommitState::AfterCommitConfirmed);
         assert!(err.message.contains("checkpoint failed"));
+    }
+
+    #[test]
+    fn pre_final_commit_failure_state_is_before_commit_without_prior_commits() {
+        assert_eq!(
+            pre_final_commit_failure_state(0, 0),
+            CommitState::BeforeCommit
+        );
+    }
+
+    #[test]
+    fn pre_final_commit_failure_state_is_confirmed_after_prior_checkpoint() {
+        assert_eq!(
+            pre_final_commit_failure_state(1, 1),
+            CommitState::AfterCommitConfirmed
+        );
+    }
+
+    #[test]
+    fn pre_final_commit_failure_state_is_unknown_after_prior_commit_without_checkpoint() {
+        assert_eq!(
+            pre_final_commit_failure_state(0, 1),
+            CommitState::AfterCommitUnknown
+        );
     }
 }
