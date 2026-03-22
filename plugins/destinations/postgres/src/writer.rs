@@ -7,8 +7,10 @@ use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::stream::{ColumnPolicy, TypeChangePolicy};
 
 use crate::apply::prepare_stream_contract;
-use crate::contract::{mark_contract_prepared, prepare_stream_once, stream_schema_signature, CheckpointConfig};
-use crate::ddl::{read_contract_handoff, ContractHandoff};
+use crate::contract::{
+    mark_contract_prepared, prepare_stream_once, stream_schema_signature, CheckpointConfig,
+};
+use crate::ddl::{read_contract_handoff, table_has_conflict_target, ContractHandoff};
 use crate::metrics::emit_dest_timings;
 use crate::session::{clamp_copy_flush_bytes, CommitError, WriteSession};
 
@@ -45,6 +47,7 @@ async fn live_destination_state_is_fresh(
     table_name: &str,
     stream_schema: &rapidbyte_sdk::schema::StreamSchema,
     schema_policy: rapidbyte_sdk::stream::SchemaEvolutionPolicy,
+    write_mode: Option<&WriteMode>,
     handoff: &ContractHandoff,
 ) -> Result<bool, PluginError> {
     if (!handoff.ignored_columns.is_empty() && schema_policy.new_column != ColumnPolicy::Ignore)
@@ -64,30 +67,50 @@ async fn live_destination_state_is_fresh(
         .await
         .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
 
-    let Some(drift) = drift else {
-        return Ok(handoff.ignored_columns.is_empty() && handoff.type_null_columns.is_empty());
+    let mut fresh = if let Some(drift) = drift {
+        let drift_ignored_columns: HashSet<&str> = drift
+            .new_columns
+            .iter()
+            .map(|(col_name, _)| col_name.as_str())
+            .collect();
+        let drift_type_null_columns: HashSet<&str> = drift
+            .type_changes
+            .iter()
+            .map(|(col_name, _, _)| col_name.as_str())
+            .collect();
+
+        let handoff_ignored_columns: HashSet<&str> = handoff
+            .ignored_columns
+            .iter()
+            .map(|col| col.as_str())
+            .collect();
+        let handoff_type_null_columns: HashSet<&str> = handoff
+            .type_null_columns
+            .iter()
+            .map(|col| col.as_str())
+            .collect();
+
+        drift.removed_columns.is_empty()
+            && drift.nullability_changes.is_empty()
+            && drift_ignored_columns == handoff_ignored_columns
+            && drift_type_null_columns == handoff_type_null_columns
+    } else {
+        handoff.ignored_columns.is_empty() && handoff.type_null_columns.is_empty()
     };
 
-    let drift_ignored_columns: HashSet<&str> =
-        drift.new_columns.iter().map(|(col_name, _)| col_name.as_str()).collect();
-    let drift_type_null_columns: HashSet<&str> = drift
-        .type_changes
-        .iter()
-        .map(|(col_name, _, _)| col_name.as_str())
-        .collect();
+    if fresh {
+        fresh = match write_mode {
+            Some(WriteMode::Upsert { primary_key }) if !primary_key.is_empty() => {
+                let qualified_table = crate::decode::qualified_name(target_schema, table_name);
+                table_has_conflict_target(client, &qualified_table, primary_key)
+                    .await
+                    .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
+            }
+            _ => true,
+        };
+    }
 
-    let handoff_ignored_columns: HashSet<&str> =
-        handoff.ignored_columns.iter().map(|col| col.as_str()).collect();
-    let handoff_type_null_columns: HashSet<&str> = handoff
-        .type_null_columns
-        .iter()
-        .map(|col| col.as_str())
-        .collect();
-
-    Ok(drift.removed_columns.is_empty()
-        && drift.nullability_changes.is_empty()
-        && drift_ignored_columns == handoff_ignored_columns
-        && drift_type_null_columns == handoff_type_null_columns)
+    Ok(fresh)
 }
 
 async fn replace_staging_reuse_is_safe(
@@ -96,6 +119,7 @@ async fn replace_staging_reuse_is_safe(
     stream_name: &str,
     stream_schema: &rapidbyte_sdk::schema::StreamSchema,
     schema_policy: rapidbyte_sdk::stream::SchemaEvolutionPolicy,
+    write_mode: Option<&WriteMode>,
     handoff: &ContractHandoff,
 ) -> Result<bool, PluginError> {
     if !live_destination_state_is_fresh(
@@ -104,6 +128,7 @@ async fn replace_staging_reuse_is_safe(
         &staging_table_name(stream_name),
         stream_schema,
         schema_policy,
+        write_mode,
         handoff,
     )
     .await?
@@ -122,7 +147,9 @@ async fn replace_staging_reuse_is_safe(
     Ok(row.is_none())
 }
 
-fn existing_replace_contract(mut setup: crate::contract::WriteContract) -> crate::contract::WriteContract {
+fn existing_replace_contract(
+    mut setup: crate::contract::WriteContract,
+) -> crate::contract::WriteContract {
     setup.effective_stream = staging_table_name(&setup.stream_name);
     setup.qualified_table =
         crate::decode::qualified_name(&setup.target_schema, &setup.effective_stream);
@@ -209,6 +236,7 @@ pub async fn write_stream(
                     &setup.stream_name,
                     &stream.schema,
                     stream.policies.schema_evolution,
+                    setup.effective_write_mode.as_ref(),
                     handoff,
                 )
                 .await?
@@ -242,6 +270,7 @@ pub async fn write_stream(
                     &setup.stream_name,
                     &stream.schema,
                     stream.policies.schema_evolution,
+                    setup.effective_write_mode.as_ref(),
                     handoff,
                 )
                 .await?
@@ -278,7 +307,10 @@ pub async fn write_stream(
                 arrow_decode_secs += decoded.decode_secs;
                 let _ = ctx.histogram("dest_arrow_decode_secs", decoded.decode_secs);
 
-                if let Err(e) = session.process_batch(&decoded.schema, &decoded.batches).await {
+                if let Err(e) = session
+                    .process_batch(&decoded.schema, &decoded.batches)
+                    .await
+                {
                     loop_error = Some(e);
                     break;
                 }
@@ -342,13 +374,13 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
+    use crate::session::CommitError;
+    use crate::session::WriteSession;
+    use crate::session::COPY_FLUSH_MAX;
+    use crate::WriteMode;
     use rapidbyte_sdk::arrow::array::{Int64Array, StringArray};
     use rapidbyte_sdk::arrow::datatypes::{DataType, Field, Schema};
     use rapidbyte_sdk::arrow::record_batch::RecordBatch;
-    use crate::session::COPY_FLUSH_MAX;
-    use crate::session::CommitError;
-    use crate::session::WriteSession;
-    use crate::WriteMode;
     use rapidbyte_sdk::context::Context;
     use rapidbyte_sdk::prelude::CommitState;
     use rapidbyte_sdk::schema::{SchemaField, StreamSchema};
@@ -373,12 +405,9 @@ mod tests {
                 "host=127.0.0.1 port=33603 user=postgres password=postgres dbname=postgres"
                     .to_string()
             });
-        let (client, connection) = tokio_postgres::connect(
-            &dsn,
-            NoTls,
-        )
-        .await
-        .expect("connect to test postgres");
+        let (client, connection) = tokio_postgres::connect(&dsn, NoTls)
+            .await
+            .expect("connect to test postgres");
         tokio::spawn(async move {
             let _ = connection.await;
         });
@@ -402,14 +431,20 @@ mod tests {
         let qualified = crate::decode::qualified_name(schema, table);
         client
             .execute(
-                &format!("CREATE SCHEMA IF NOT EXISTS {}", pg_escape::quote_identifier(schema)),
+                &format!(
+                    "CREATE SCHEMA IF NOT EXISTS {}",
+                    pg_escape::quote_identifier(schema)
+                ),
                 &[],
             )
             .await
             .expect("create schema");
         client
             .execute(
-                &format!("CREATE TABLE {} (\"id\" bigint not null, \"name\" text)", qualified),
+                &format!(
+                    "CREATE TABLE {} (\"id\" bigint not null, \"name\" text)",
+                    qualified
+                ),
                 &[],
             )
             .await
@@ -423,7 +458,10 @@ mod tests {
     ) {
         client
             .execute(
-                &format!("CREATE SCHEMA IF NOT EXISTS {}", pg_escape::quote_identifier(schema)),
+                &format!(
+                    "CREATE SCHEMA IF NOT EXISTS {}",
+                    pg_escape::quote_identifier(schema)
+                ),
                 &[],
             )
             .await
@@ -439,6 +477,30 @@ mod tests {
             )
             .await
             .expect("create deferrable unique table");
+    }
+
+    async fn create_upsert_table(client: &tokio_postgres::Client, schema: &str, table: &str) {
+        client
+            .execute(
+                &format!(
+                    "CREATE SCHEMA IF NOT EXISTS {}",
+                    pg_escape::quote_identifier(schema)
+                ),
+                &[],
+            )
+            .await
+            .expect("create schema");
+        client
+            .execute(
+                &format!(
+                    "CREATE UNLOGGED TABLE {} (\"id\" bigint not null, \"name\" text, CONSTRAINT {} PRIMARY KEY (\"id\"))",
+                    crate::decode::qualified_name(schema, table),
+                    pg_escape::quote_identifier(&format!("{table}_pkey"))
+                ),
+                &[],
+            )
+            .await
+            .expect("create upsert table");
     }
 
     fn duplicate_row_schema() -> Arc<Schema> {
@@ -488,7 +550,10 @@ mod tests {
         let plugin_err = commit_error_to_plugin_error(err);
 
         assert_eq!(plugin_err.code, "COMMIT_FAILED");
-        assert_eq!(plugin_err.commit_state, Some(CommitState::AfterCommitUnknown));
+        assert_eq!(
+            plugin_err.commit_state,
+            Some(CommitState::AfterCommitUnknown)
+        );
         assert!(plugin_err.message.contains("commit failed"));
     }
 
@@ -629,10 +694,11 @@ mod tests {
                 type_change: TypeChangePolicy::Fail,
                 nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
             },
+            None,
             &handoff,
         )
-            .await
-            .expect("freshness");
+        .await
+        .expect("freshness");
         assert!(fresh);
 
         let contract = crate::contract::prepare_stream_once(
@@ -662,7 +728,10 @@ mod tests {
 
         let _ = client
             .execute(
-                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    pg_escape::quote_identifier(&schema)
+                ),
                 &[],
             )
             .await;
@@ -714,10 +783,11 @@ mod tests {
                 type_change: TypeChangePolicy::Null,
                 nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
             },
+            None,
             &handoff,
         )
-            .await
-            .expect("freshness");
+        .await
+        .expect("freshness");
         assert!(fresh);
 
         let contract = crate::contract::prepare_stream_once(
@@ -747,7 +817,10 @@ mod tests {
 
         let _ = client
             .execute(
-                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    pg_escape::quote_identifier(&schema)
+                ),
                 &[],
             )
             .await;
@@ -779,23 +852,22 @@ mod tests {
             type_null_columns: vec![],
         };
 
-        assert!(
-            live_destination_state_is_fresh(
-                &client,
-                &schema,
-                table,
-                &stream_schema,
-                rapidbyte_sdk::stream::SchemaEvolutionPolicy {
-                    new_column: ColumnPolicy::Ignore,
-                    removed_column: ColumnPolicy::Ignore,
-                    type_change: TypeChangePolicy::Fail,
-                    nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
-                },
-                &handoff,
-            )
-                .await
-                .expect("freshness while ignored column is still absent")
-        );
+        assert!(live_destination_state_is_fresh(
+            &client,
+            &schema,
+            table,
+            &stream_schema,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                new_column: ColumnPolicy::Ignore,
+                removed_column: ColumnPolicy::Ignore,
+                type_change: TypeChangePolicy::Fail,
+                nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
+            },
+            None,
+            &handoff,
+        )
+        .await
+        .expect("freshness while ignored column is still absent"));
 
         client
             .execute(
@@ -808,27 +880,29 @@ mod tests {
             .await
             .expect("repair ignored column");
 
-        assert!(
-            !live_destination_state_is_fresh(
-                &client,
-                &schema,
-                table,
-                &stream_schema,
-                rapidbyte_sdk::stream::SchemaEvolutionPolicy {
-                    new_column: ColumnPolicy::Ignore,
-                    removed_column: ColumnPolicy::Ignore,
-                    type_change: TypeChangePolicy::Fail,
-                    nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
-                },
-                &handoff,
-            )
-                .await
-                .expect("freshness after repair")
-        );
+        assert!(!live_destination_state_is_fresh(
+            &client,
+            &schema,
+            table,
+            &stream_schema,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                new_column: ColumnPolicy::Ignore,
+                removed_column: ColumnPolicy::Ignore,
+                type_change: TypeChangePolicy::Fail,
+                nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
+            },
+            None,
+            &handoff,
+        )
+        .await
+        .expect("freshness after repair"));
 
         let _ = client
             .execute(
-                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    pg_escape::quote_identifier(&schema)
+                ),
                 &[],
             )
             .await;
@@ -869,23 +943,22 @@ mod tests {
             type_null_columns: vec!["id".to_string()],
         };
 
-        assert!(
-            live_destination_state_is_fresh(
-                &client,
-                &schema,
-                table,
-                &stream_schema,
-                rapidbyte_sdk::stream::SchemaEvolutionPolicy {
-                    new_column: ColumnPolicy::Add,
-                    removed_column: ColumnPolicy::Ignore,
-                    type_change: TypeChangePolicy::Null,
-                    nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
-                },
-                &handoff,
-            )
-                .await
-                .expect("freshness while type-null workaround is still needed")
-        );
+        assert!(live_destination_state_is_fresh(
+            &client,
+            &schema,
+            table,
+            &stream_schema,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                new_column: ColumnPolicy::Add,
+                removed_column: ColumnPolicy::Ignore,
+                type_change: TypeChangePolicy::Null,
+                nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
+            },
+            None,
+            &handoff,
+        )
+        .await
+        .expect("freshness while type-null workaround is still needed"));
 
         client
             .execute(
@@ -898,27 +971,29 @@ mod tests {
             .await
             .expect("repair type-null column");
 
-        assert!(
-            !live_destination_state_is_fresh(
-                &client,
-                &schema,
-                table,
-                &stream_schema,
-                rapidbyte_sdk::stream::SchemaEvolutionPolicy {
-                    new_column: ColumnPolicy::Add,
-                    removed_column: ColumnPolicy::Ignore,
-                    type_change: TypeChangePolicy::Null,
-                    nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
-                },
-                &handoff,
-            )
-                .await
-                .expect("freshness after repair")
-        );
+        assert!(!live_destination_state_is_fresh(
+            &client,
+            &schema,
+            table,
+            &stream_schema,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                new_column: ColumnPolicy::Add,
+                removed_column: ColumnPolicy::Ignore,
+                type_change: TypeChangePolicy::Null,
+                nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
+            },
+            None,
+            &handoff,
+        )
+        .await
+        .expect("freshness after repair"));
 
         let _ = client
             .execute(
-                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    pg_escape::quote_identifier(&schema)
+                ),
                 &[],
             )
             .await;
@@ -978,11 +1053,17 @@ mod tests {
             .expect_err("checkpoint commit should fail");
 
         assert!(err.contains("Checkpoint COMMIT failed"));
-        assert_eq!(session.loop_error_commit_state(), CommitState::AfterCommitUnknown);
+        assert_eq!(
+            session.loop_error_commit_state(),
+            CommitState::AfterCommitUnknown
+        );
 
         let _ = client
             .execute(
-                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    pg_escape::quote_identifier(&schema)
+                ),
                 &[],
             )
             .await;
@@ -1025,6 +1106,7 @@ mod tests {
                 type_change: TypeChangePolicy::Fail,
                 nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
             },
+            None,
             &handoff,
         )
         .await
@@ -1058,7 +1140,10 @@ mod tests {
 
         let _ = client
             .execute(
-                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    pg_escape::quote_identifier(&schema)
+                ),
                 &[],
             )
             .await;
@@ -1101,6 +1186,7 @@ mod tests {
                 type_change: TypeChangePolicy::Fail,
                 nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
             },
+            None,
             &handoff,
         )
         .await
@@ -1109,7 +1195,10 @@ mod tests {
 
         let _ = client
             .execute(
-                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    pg_escape::quote_identifier(&schema)
+                ),
                 &[],
             )
             .await;
@@ -1161,6 +1250,7 @@ mod tests {
                 type_change: TypeChangePolicy::Coerce,
                 nullability_change: rapidbyte_sdk::stream::NullabilityPolicy::Allow,
             },
+            None,
             &handoff,
         )
         .await
@@ -1169,7 +1259,120 @@ mod tests {
 
         let _ = client
             .execute(
-                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    pg_escape::quote_identifier(&schema)
+                ),
+                &[],
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn live_freshness_rejects_upsert_handoff_after_unique_constraint_loss() {
+        let schema = fresh_name("rb_writer_upsert_stale");
+        let table = "users";
+        let client = connect().await;
+        create_upsert_table(&client, &schema, table).await;
+
+        let stream_schema = live_stream_schema();
+        let write_mode = WriteMode::Upsert {
+            primary_key: vec!["id".to_string()],
+        };
+        let contract = crate::contract::prepare_stream_once(
+            &schema,
+            table,
+            Some(write_mode.clone()),
+            &stream_schema,
+            true,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy::default(),
+            crate::contract::CheckpointConfig {
+                bytes: 0,
+                rows: 0,
+                seconds: 0,
+            },
+            None,
+            crate::config::LoadMethod::Insert,
+        )
+        .expect("contract");
+        let handoff = crate::ddl::ContractHandoff {
+            schema_signature: crate::contract::stream_schema_signature(&stream_schema)
+                .expect("signature")
+                .expect("schema signature"),
+            ignored_columns: vec![],
+            type_null_columns: vec![],
+        };
+
+        let fresh_before_drop = live_destination_state_is_fresh(
+            &client,
+            &schema,
+            table,
+            &stream_schema,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                new_column: ColumnPolicy::Ignore,
+                removed_column: ColumnPolicy::Ignore,
+                type_change: TypeChangePolicy::Fail,
+                nullability_change: NullabilityPolicy::Allow,
+            },
+            Some(&write_mode),
+            &handoff,
+        )
+        .await
+        .expect("freshness before dropping constraint");
+        assert!(fresh_before_drop);
+
+        let reused_before_drop = reuse_contract_from_handoff(
+            &contract,
+            Some(handoff.schema_signature.as_str()),
+            Some(&handoff),
+            fresh_before_drop,
+        );
+        assert!(reused_before_drop.is_some());
+
+        client
+            .execute(
+                &format!(
+                    "ALTER TABLE {} DROP CONSTRAINT {}",
+                    crate::decode::qualified_name(&schema, table),
+                    pg_escape::quote_identifier(&format!("{table}_pkey"))
+                ),
+                &[],
+            )
+            .await
+            .expect("drop primary key");
+
+        let fresh_after_drop = live_destination_state_is_fresh(
+            &client,
+            &schema,
+            table,
+            &stream_schema,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy {
+                new_column: ColumnPolicy::Ignore,
+                removed_column: ColumnPolicy::Ignore,
+                type_change: TypeChangePolicy::Fail,
+                nullability_change: NullabilityPolicy::Allow,
+            },
+            Some(&write_mode),
+            &handoff,
+        )
+        .await
+        .expect("freshness after dropping constraint");
+        assert!(!fresh_after_drop);
+
+        let reused_after_drop = reuse_contract_from_handoff(
+            &contract,
+            Some(handoff.schema_signature.as_str()),
+            Some(&handoff),
+            fresh_after_drop,
+        );
+        assert!(reused_after_drop.is_none());
+
+        let _ = client
+            .execute(
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    pg_escape::quote_identifier(&schema)
+                ),
                 &[],
             )
             .await;
@@ -1236,7 +1439,10 @@ mod tests {
             type_null_columns: vec![],
         };
 
-        assert!(reuse_contract_from_handoff(&contract, Some("different"), Some(&handoff), true).is_none());
+        assert!(
+            reuse_contract_from_handoff(&contract, Some("different"), Some(&handoff), true)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1263,7 +1469,9 @@ mod tests {
             type_null_columns: vec![],
         };
 
-        assert!(reuse_contract_from_handoff(&contract, Some("sig"), Some(&handoff), false).is_none());
+        assert!(
+            reuse_contract_from_handoff(&contract, Some("sig"), Some(&handoff), false).is_none()
+        );
     }
 
     #[tokio::test]
@@ -1290,8 +1498,8 @@ mod tests {
             crate::config::LoadMethod::Copy,
         )
         .expect("contract");
-        let current_signature = crate::contract::stream_schema_signature(&stream_schema)
-            .expect("signature");
+        let current_signature =
+            crate::contract::stream_schema_signature(&stream_schema).expect("signature");
         let handoff = crate::ddl::ContractHandoff {
             schema_signature: current_signature.clone().expect("schema signature"),
             ignored_columns: vec![],
@@ -1320,10 +1528,11 @@ mod tests {
                 type_change: TypeChangePolicy::Fail,
                 nullability_change: NullabilityPolicy::Allow,
             },
+            None,
             &handoff,
         )
-            .await
-            .expect("drift detection");
+        .await
+        .expect("drift detection");
         assert!(!fresh);
 
         let reused = reuse_contract_from_handoff(
@@ -1336,7 +1545,10 @@ mod tests {
 
         let _ = client
             .execute(
-                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    pg_escape::quote_identifier(&schema)
+                ),
                 &[],
             )
             .await;
@@ -1387,15 +1599,19 @@ mod tests {
                 type_change: TypeChangePolicy::Fail,
                 nullability_change: NullabilityPolicy::Allow,
             },
+            None,
             &handoff,
         )
-            .await
-            .expect("staging safety check");
+        .await
+        .expect("staging safety check");
         assert!(!safe);
 
         let _ = client
             .execute(
-                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &format!(
+                    "DROP SCHEMA IF EXISTS {} CASCADE",
+                    pg_escape::quote_identifier(&schema)
+                ),
                 &[],
             )
             .await;

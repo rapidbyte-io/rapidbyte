@@ -53,7 +53,6 @@ impl SchemaState {
             type_null_columns: HashSet::new(),
         }
     }
-
 }
 
 /// Create the target table if it doesn't exist, based on the Arrow schema.
@@ -128,8 +127,12 @@ async fn create_table(
             );
         }
         Err(error) => {
-            let _ = client.execute("ROLLBACK TO SAVEPOINT rb_create_table", &[]).await;
-            let _ = client.execute("RELEASE SAVEPOINT rb_create_table", &[]).await;
+            let _ = client
+                .execute("ROLLBACK TO SAVEPOINT rb_create_table", &[])
+                .await;
+            let _ = client
+                .execute("RELEASE SAVEPOINT rb_create_table", &[])
+                .await;
             return Err(format_pg_error(
                 &format!("Failed to create table {qualified_table}"),
                 &error,
@@ -138,6 +141,56 @@ async fn create_table(
     }
 
     Ok(())
+}
+
+/// Check whether an existing table still has a unique or primary-key index that
+/// matches the requested conflict target.
+pub(crate) async fn table_has_conflict_target(
+    client: &Client,
+    qualified_table: &str,
+    primary_key: &[String],
+) -> Result<bool, String> {
+    if primary_key.is_empty() {
+        return Ok(false);
+    }
+
+    let mut parts = qualified_table.splitn(2, '.');
+    let schema_name = parts.next().unwrap_or("public");
+    let table_name = parts.next().unwrap_or(qualified_table);
+
+    let sql = r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_constraint c
+            JOIN pg_class t
+              ON t.oid = c.conrelid
+            JOIN pg_namespace n
+              ON n.oid = t.relnamespace
+            WHERE n.nspname = $1
+              AND t.relname = $2
+              AND c.contype IN ('p', 'u')
+              AND (
+                  SELECT array_agg(a.attname::text ORDER BY k.ordinality)
+                  FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ordinality)
+                  JOIN pg_attribute a
+                    ON a.attrelid = c.conrelid
+                   AND a.attnum = k.attnum
+              ) = $3::text[]
+        )
+    "#;
+
+    let has_target = client
+        .query_one(sql, &[&schema_name, &table_name, &primary_key])
+        .await
+        .map_err(|e| {
+            format_pg_error(
+                &format!("failed to inspect conflict target for {qualified_table}"),
+                &e,
+            )
+        })?
+        .get(0);
+
+    Ok(has_target)
 }
 
 impl SchemaState {
@@ -165,12 +218,9 @@ impl SchemaState {
                 "CREATE SCHEMA IF NOT EXISTS {}",
                 quote_identifier(target_schema)
             );
-            client
-                .execute(&create_schema, &[])
-                .await
-                .map_err(|e| {
-                    format_pg_error(&format!("Failed to create schema '{target_schema}'"), &e)
-                })?;
+            client.execute(&create_schema, &[]).await.map_err(|e| {
+                format_pg_error(&format!("Failed to create schema '{target_schema}'"), &e)
+            })?;
 
             let pk = match write_mode {
                 Some(WriteMode::Upsert { primary_key }) => Some(primary_key.as_slice()),

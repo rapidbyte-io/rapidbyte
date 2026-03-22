@@ -413,7 +413,8 @@ pub async fn read_cdc_changes(
     let query_start = Instant::now();
 
     // 1. Derive and validate CDC identifiers.
-    let (slot_name, publication_name) = resolve_cdc_names(config, &stream.stream_name)?;
+    let source_stream_name = stream.source_stream_or_stream_name();
+    let (slot_name, publication_name) = resolve_cdc_names(config, source_stream_name)?;
 
     // 1b. Surface ambiguous resume states before touching the destructive CDC path.
     if let Some(resume_diagnostic) = cdc_resume_ambiguity_diagnostic(&stream.stream_name, resume) {
@@ -472,7 +473,6 @@ pub async fn read_cdc_changes(
     let mut relations: HashMap<u32, RelationInfo> = HashMap::new();
     let mut target_oid: Option<u32> = None;
     let mut accumulated_rows: Vec<CdcRow> = Vec::new();
-    let source_stream_name = stream.source_stream_or_stream_name();
     let mut last_handled_lsn: Option<u64> = None;
 
     for row in &change_rows {
