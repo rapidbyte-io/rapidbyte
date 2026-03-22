@@ -165,7 +165,7 @@ pub(crate) fn build_prerequisites_report(
     config: &Config,
     snapshot: PrerequisiteSnapshot,
 ) -> PrerequisitesReport {
-    let mut checks = Vec::with_capacity(6);
+    let mut checks = Vec::with_capacity(7);
     checks.push(PrerequisiteCheck::passed(
         "db_connectivity",
         "connected to PostgreSQL",
@@ -230,7 +230,7 @@ pub(crate) fn build_prerequisites_report(
         checks.push(PrerequisiteCheck::passed(
             "handoff_comment_persistence",
             &format!(
-                "current role can persist handoff comments on tables in schema '{}'",
+                "transactional probe verified COMMENT ON TABLE on a probe table in schema '{}'",
                 config.target_schema()
             ),
         ));
@@ -239,12 +239,12 @@ pub(crate) fn build_prerequisites_report(
             PrerequisiteCheck::error(
                 "handoff_comment_persistence",
                 &format!(
-                    "current role cannot comment on tables in schema '{}'",
+                    "transactional probe could not COMMENT ON TABLE in schema '{}'",
                     config.target_schema()
                 ),
             )
             .with_fix_hint(&format!(
-                "Ensure the destination role owns the target tables or can run COMMENT ON TABLE in '{}'",
+                "Ensure the destination role can run COMMENT ON TABLE for tables in '{}'",
                 config.target_schema()
             )),
         );
@@ -278,7 +278,7 @@ pub(crate) fn build_prerequisites_report(
         checks.push(PrerequisiteCheck::passed(
             "existing_target_dml",
             &format!(
-                "current role can write and update rows in existing target tables in schema '{}'",
+                "transactional probe verified INSERT/UPDATE on a newly created probe table in schema '{}'",
                 config.target_schema()
             ),
         ));
@@ -287,16 +287,27 @@ pub(crate) fn build_prerequisites_report(
             PrerequisiteCheck::error(
                 "existing_target_dml",
                 &format!(
-                    "current role cannot perform DML against existing target tables in schema '{}'",
+                    "transactional probe could not perform DML on a probe table in schema '{}'",
                     config.target_schema()
                 ),
             )
             .with_fix_hint(&format!(
-                "Grant INSERT and UPDATE on destination tables in '{}'",
+                "Grant INSERT and UPDATE privileges for destination tables in '{}'",
                 config.target_schema()
             )),
         );
     }
+
+    checks.push(PrerequisiteCheck {
+        name: "existing_target_privileges_deferred".to_string(),
+        passed: true,
+        severity: PrerequisiteSeverity::Info,
+        message: format!(
+            "pre-provisioned target-table ownership and privileges are validated later by apply/write; this prerequisite probe only verifies capability on connector-created probe tables in '{}'",
+            config.target_schema()
+        ),
+        fix_hint: None,
+    });
 
     PrerequisitesReport::from_checks(checks)
 }
