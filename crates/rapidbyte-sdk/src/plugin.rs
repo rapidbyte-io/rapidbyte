@@ -290,7 +290,7 @@ mod tests {
         ))
         .expect("init");
 
-        let result = futures::executor::block_on(source.validate(ValidateInput::new(None)))
+        let result = futures::executor::block_on(source.validate(ValidateInput::new(None, None)))
             .expect("default validation");
 
         assert_eq!(result.status, ValidationStatus::Success);
@@ -324,10 +324,7 @@ mod tests {
         ))
         .expect("init");
 
-        let request = ApplyRequest {
-            streams: vec![],
-            dry_run: false,
-        };
+        let request = ApplyRequest { streams: vec![] };
         let report =
             futures::executor::block_on(source.apply(ApplyInput::new(request))).expect("apply");
         assert!(report.actions.is_empty());

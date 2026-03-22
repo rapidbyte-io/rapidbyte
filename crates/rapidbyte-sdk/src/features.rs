@@ -270,10 +270,10 @@ mod tests {
             cursor_type: CursorType::Lsn,
         };
 
-        let partition_input = PartitionedReadInput::new(stream.clone(), partition);
-        let cdc_input = CdcReadInput::new(stream.clone(), resume);
-        let multi_input = MultiStreamReadInput::new(vec![stream.clone()], false);
-        let bulk_input = BulkWriteInput::new(stream);
+        let partition_input = PartitionedReadInput::host(stream.clone(), partition);
+        let cdc_input = CdcReadInput::host(stream.clone(), resume);
+        let multi_input = MultiStreamReadInput::host(vec![stream.clone()]);
+        let bulk_input = BulkWriteInput::host(stream);
 
         assert_eq!(partition_input.partition.count, 4);
         assert_eq!(cdc_input.resume.value.as_deref(), Some("42"));

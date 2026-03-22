@@ -159,9 +159,8 @@ impl TestHarness {
         stream: StreamContext,
     ) -> ReadInput<'static, TestEmit, TestCancel, TestState, TestCheckpoints, TestMetrics, TestLog>
     {
-        ReadInput::with_capabilities(
+        ReadInput::new(
             stream,
-            false,
             TestEmit {
                 emitted_batches: Arc::clone(&self.emitted_batches),
             },
@@ -189,9 +188,8 @@ impl TestHarness {
         &self,
         stream: StreamContext,
     ) -> WriteInput<'static, TestReader, TestCancel, TestState, TestCheckpoints> {
-        WriteInput::with_capabilities(
+        WriteInput::new(
             stream,
-            false,
             TestReader {
                 input_batches: Arc::clone(&self.input_batches),
             },
