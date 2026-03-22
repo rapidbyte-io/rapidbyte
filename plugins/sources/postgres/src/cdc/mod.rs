@@ -136,6 +136,7 @@ fn resolve_cdc_names(config: &Config, stream_name: &str) -> Result<(String, Stri
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CdcSlotInfo {
     database: Option<String>,
+    plugin: String,
     slot_type: String,
     active: bool,
 }
@@ -156,7 +157,7 @@ impl CdcPreflightInspector for Client {
     async fn replication_slot_info(&self, slot_name: &str) -> Result<Option<CdcSlotInfo>, String> {
         let row = self
             .query_opt(
-                "SELECT database, slot_type, active FROM pg_catalog.pg_replication_slots WHERE slot_name = $1",
+                "SELECT database, plugin, slot_type, active FROM pg_catalog.pg_replication_slots WHERE slot_name = $1",
                 &[&slot_name],
             )
             .await
@@ -164,8 +165,9 @@ impl CdcPreflightInspector for Client {
 
         Ok(row.map(|row| CdcSlotInfo {
             database: row.get::<usize, Option<String>>(0),
-            slot_type: row.get::<usize, String>(1),
-            active: row.get::<usize, bool>(2),
+            plugin: row.get::<usize, String>(1),
+            slot_type: row.get::<usize, String>(2),
+            active: row.get::<usize, bool>(3),
         }))
     }
 
@@ -195,6 +197,74 @@ fn split_stream_name(stream_name: &str, default_schema: Option<&str>) -> (String
     (schema.to_string(), table.to_string())
 }
 
+fn relation_matches_stream_identity(source_stream_name: &str, namespace: &str, name: &str) -> bool {
+    name == source_stream_name || format!("{namespace}.{name}") == source_stream_name
+}
+
+fn decode_and_apply_message(
+    source_stream_name: &str,
+    row_lsn: u64,
+    data: &[u8],
+    relations: &mut HashMap<u32, RelationInfo>,
+    target_oid: &mut Option<u32>,
+    accumulated_rows: &mut Vec<CdcRow>,
+) -> Result<Option<u64>, String> {
+    let msg = pgoutput::decode(data).map_err(|e| format!("pgoutput decode error: {e}"))?;
+
+    Ok(match msg {
+        PgOutputMessage::Relation {
+            oid,
+            namespace,
+            name,
+            columns,
+            ..
+        } => {
+            if relation_matches_stream_identity(source_stream_name, &namespace, &name) {
+                *target_oid = Some(oid);
+            }
+            let info = RelationInfo::new(oid, namespace, name, columns);
+            relations.insert(oid, info);
+            None
+        }
+        PgOutputMessage::Insert {
+            relation_oid,
+            new_tuple,
+        } if *target_oid == Some(relation_oid) => {
+            accumulated_rows.push(CdcRow {
+                op: CdcOp::Insert,
+                tuple: new_tuple,
+            });
+            Some(row_lsn)
+        }
+        PgOutputMessage::Update {
+            relation_oid,
+            new_tuple,
+            ..
+        } if *target_oid == Some(relation_oid) => {
+            accumulated_rows.push(CdcRow {
+                op: CdcOp::Update,
+                tuple: new_tuple,
+            });
+            Some(row_lsn)
+        }
+        PgOutputMessage::Delete {
+            relation_oid,
+            key_tuple,
+            old_tuple,
+        } if *target_oid == Some(relation_oid) => {
+            let tuple = old_tuple
+                .or(key_tuple)
+                .unwrap_or_else(|| TupleData { columns: vec![] });
+            accumulated_rows.push(CdcRow {
+                op: CdcOp::Delete,
+                tuple,
+            });
+            Some(row_lsn)
+        }
+        _ => None,
+    })
+}
+
 async fn preflight_cdc_checks<I: CdcPreflightInspector>(
     inspector: &I,
     config: &Config,
@@ -203,6 +273,19 @@ async fn preflight_cdc_checks<I: CdcPreflightInspector>(
     publication_name: &str,
 ) -> Result<(), String> {
     if let Some(slot_info) = inspector.replication_slot_info(slot_name).await? {
+        if slot_info.plugin != "pgoutput" {
+            return Err(
+                cdc_slot_mismatch_diagnostic(
+                    &stream.stream_name,
+                    slot_name,
+                    &format!(
+                        "the slot uses output plugin '{}' instead of the required 'pgoutput'",
+                        slot_info.plugin
+                    ),
+                )
+                .render(),
+            );
+        }
         if slot_info.slot_type != "logical" {
             return Err(
                 cdc_slot_mismatch_diagnostic(
@@ -383,88 +466,39 @@ pub async fn read_cdc_changes(
         last_emitted_records: 0,
         last_emitted_bytes: 0,
     };
-    let mut max_lsn: Option<u64> = None;
+    let mut checkpoint_lsn: Option<u64> = None;
 
     // 5. Decode messages, filter to our table, accumulate into batches
     let mut relations: HashMap<u32, RelationInfo> = HashMap::new();
     let mut target_oid: Option<u32> = None;
     let mut accumulated_rows: Vec<CdcRow> = Vec::new();
+    let source_stream_name = stream.source_stream_or_stream_name();
+    let mut last_handled_lsn: Option<u64> = None;
 
     for row in &change_rows {
         let lsn_str: String = row.get(0);
         let data: &[u8] = row.get(1);
+        let row_lsn = pgoutput::parse_lsn(&lsn_str)
+            .ok_or_else(|| format!("invalid pgoutput LSN '{lsn_str}'"))?;
 
-        // Track max LSN using numeric comparison
-        if let Some(lsn) = pgoutput::parse_lsn(&lsn_str) {
-            if max_lsn.is_none_or(|current| lsn > current) {
-                max_lsn = Some(lsn);
-            }
-        }
+        let handled_lsn = decode_and_apply_message(
+            source_stream_name,
+            row_lsn,
+            data,
+            &mut relations,
+            &mut target_oid,
+            &mut accumulated_rows,
+        )
+        .map_err(|e| {
+            ctx.log(
+                LogLevel::Warn,
+                &format!("pgoutput decode error (failing safe): {e}"),
+            );
+            e
+        })?;
 
-        // Decode binary pgoutput message
-        let msg = match pgoutput::decode(data) {
-            Ok(m) => m,
-            Err(e) => {
-                ctx.log(
-                    LogLevel::Warn,
-                    &format!("pgoutput decode error (skipping): {e}"),
-                );
-                continue;
-            }
-        };
-
-        match msg {
-            PgOutputMessage::Relation {
-                oid,
-                namespace,
-                name,
-                columns,
-                ..
-            } => {
-                // Track whether this relation matches the target stream.
-                // Compare both unqualified name and schema-qualified name to
-                // handle publications that span multiple schemas.
-                if name == stream.stream_name || format!("{namespace}.{name}") == stream.stream_name
-                {
-                    target_oid = Some(oid);
-                }
-                let info = RelationInfo::new(oid, namespace, name, columns);
-                relations.insert(oid, info);
-            }
-            PgOutputMessage::Insert {
-                relation_oid,
-                new_tuple,
-            } if target_oid == Some(relation_oid) => {
-                accumulated_rows.push(CdcRow {
-                    op: CdcOp::Insert,
-                    tuple: new_tuple,
-                });
-            }
-            PgOutputMessage::Update {
-                relation_oid,
-                new_tuple,
-                ..
-            } if target_oid == Some(relation_oid) => {
-                accumulated_rows.push(CdcRow {
-                    op: CdcOp::Update,
-                    tuple: new_tuple,
-                });
-            }
-            PgOutputMessage::Delete {
-                relation_oid,
-                key_tuple,
-                old_tuple,
-            } if target_oid == Some(relation_oid) => {
-                let tuple = old_tuple
-                    .or(key_tuple)
-                    .unwrap_or_else(|| TupleData { columns: vec![] });
-                accumulated_rows.push(CdcRow {
-                    op: CdcOp::Delete,
-                    tuple,
-                });
-            }
-            // Begin, Commit, Truncate, Origin, Type, Message, and non-matching DML — skip
-            _ => {}
+        if handled_lsn.is_some() {
+            last_handled_lsn = handled_lsn;
         }
 
         // Flush batch if accumulated enough
@@ -475,6 +509,7 @@ pub async fn read_cdc_changes(
                     "CDC batch ready but no Relation message received for target stream".to_string()
                 })?;
             emit_batch(&mut accumulated_rows, rel, ctx, &mut state)?;
+            checkpoint_lsn = last_handled_lsn;
         }
     }
 
@@ -487,12 +522,13 @@ pub async fn read_cdc_changes(
                     .to_string()
             })?;
         emit_batch(&mut accumulated_rows, rel, ctx, &mut state)?;
+        checkpoint_lsn = last_handled_lsn;
     }
 
     let fetch_secs = fetch_start.elapsed().as_secs_f64();
 
     // 6. Emit checkpoint with max LSN
-    let checkpoint_count = if let Some(lsn) = max_lsn {
+    let checkpoint_count = if let Some(lsn) = checkpoint_lsn {
         let lsn_string = pgoutput::lsn_to_string(lsn);
         let cp = Checkpoint {
             id: 1,
@@ -608,6 +644,8 @@ async fn ensure_replication_slot(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::encode::CdcRow;
     use super::encode::RelationInfo;
     use super::pgoutput::{CdcOp, ColumnDef, ColumnValue, TupleData};
@@ -815,6 +853,44 @@ mod tests {
     }
 
     #[test]
+    fn relation_matching_uses_source_stream_identity() {
+        let mut stream = rapidbyte_sdk::stream::StreamContext::test_default("orders-alias");
+        stream.source_stream_name = Some("public.orders".to_string());
+
+        assert!(super::relation_matches_stream_identity(
+            stream.source_stream_or_stream_name(),
+            "public",
+            "orders"
+        ));
+        assert!(!super::relation_matches_stream_identity(
+            stream.source_stream_or_stream_name(),
+            "public",
+            "customers"
+        ));
+    }
+
+    #[test]
+    fn decode_failure_returns_error_before_checkpoint_can_advance() {
+        let mut relations = HashMap::new();
+        let mut target_oid = None;
+        let mut accumulated_rows = Vec::new();
+
+        let result = super::decode_and_apply_message(
+            "public.orders",
+            123,
+            b"not-pgoutput",
+            &mut relations,
+            &mut target_oid,
+            &mut accumulated_rows,
+        );
+
+        assert!(result.is_err());
+        assert!(relations.is_empty());
+        assert!(target_oid.is_none());
+        assert!(accumulated_rows.is_empty());
+    }
+
+    #[test]
     fn cdc_slot_mismatch_diagnostic_is_operator_facing() {
         let diagnostic = cdc_slot_mismatch_diagnostic(
             "public.orders",
@@ -842,6 +918,31 @@ mod tests {
         assert!(diagnostic.message.contains("rapidbyte_orders"));
         assert!(diagnostic.message.contains("target table"));
         assert!(diagnostic.fix_hint.as_deref().unwrap_or("").contains("CREATE PUBLICATION"));
+    }
+
+    #[tokio::test]
+    async fn preflight_cdc_checks_rejects_existing_slot_with_wrong_plugin() {
+        let err = super::preflight_cdc_checks(
+            &FakeInspector {
+                slot_info: Some(CdcSlotInfo {
+                    database: Some("test_db".to_string()),
+                    plugin: "test_decoding".to_string(),
+                    slot_type: "logical".to_string(),
+                    active: false,
+                }),
+                publication_has_stream: true,
+            },
+            &base_config(),
+            &cdc_stream_context(),
+            "slot_a",
+            "pub_a",
+        )
+        .await
+        .expect_err("wrong plugin should fail preflight");
+
+        assert!(err.contains("CDC slot mismatch"));
+        assert!(err.contains("test_decoding"));
+        assert!(err.contains("pgoutput"));
     }
 
     #[test]
@@ -906,6 +1007,7 @@ mod tests {
             &FakeInspector {
                 slot_info: Some(CdcSlotInfo {
                     database: Some("other_db".to_string()),
+                    plugin: "pgoutput".to_string(),
                     slot_type: "logical".to_string(),
                     active: false,
                 }),
@@ -930,6 +1032,7 @@ mod tests {
             &FakeInspector {
                 slot_info: Some(CdcSlotInfo {
                     database: None,
+                    plugin: "pgoutput".to_string(),
                     slot_type: "physical".to_string(),
                     active: false,
                 }),
@@ -954,6 +1057,7 @@ mod tests {
             &FakeInspector {
                 slot_info: Some(CdcSlotInfo {
                     database: Some("test_db".to_string()),
+                    plugin: "pgoutput".to_string(),
                     slot_type: "logical".to_string(),
                     active: true,
                 }),
@@ -977,6 +1081,7 @@ mod tests {
             &FakeInspector {
                 slot_info: Some(CdcSlotInfo {
                     database: Some("test_db".to_string()),
+                    plugin: "pgoutput".to_string(),
                     slot_type: "logical".to_string(),
                     active: false,
                 }),
@@ -1001,6 +1106,7 @@ mod tests {
             &FakeInspector {
                 slot_info: Some(CdcSlotInfo {
                     database: Some("test_db".to_string()),
+                    plugin: "pgoutput".to_string(),
                     slot_type: "logical".to_string(),
                     active: false,
                 }),
