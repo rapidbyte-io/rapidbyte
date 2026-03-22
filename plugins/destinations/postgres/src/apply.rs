@@ -179,11 +179,13 @@ pub(crate) async fn prepare_stream_contract(
 
 pub(crate) async fn apply(
     config: &Config,
-    ctx: &Context,
-    request: ApplyRequest,
+    input: ApplyInput<'_>,
 ) -> Result<ApplyReport, PluginError> {
+    let ApplyInput { request, .. } = input;
+
     if request.dry_run {
-        return plan_apply_request(config, &request).map_err(|e| PluginError::config("INVALID_APPLY_REQUEST", e));
+        return plan_apply_request(config, &request)
+            .map_err(|e| PluginError::config("INVALID_APPLY_REQUEST", e));
     }
 
     let client = crate::client::connect(config)
@@ -204,6 +206,7 @@ pub(crate) async fn apply(
                     format!("missing stream context for '{}'", action.stream_name),
                 )
             })?;
+        let ctx = Context::new(env!("CARGO_PKG_NAME"), &stream.stream_name);
 
         let contract = contracts
             .get(&action.stream_name)
@@ -214,13 +217,10 @@ pub(crate) async fn apply(
                     format!("missing prepared contract for '{}'", action.stream_name),
                 )
             })?;
-        let prepared = prepare_stream_contract(ctx, &client, stream, contract)
+        let prepared = prepare_stream_contract(&ctx, &client, stream, contract)
             .await
             .map_err(|e| PluginError::config("INVALID_APPLY_REQUEST", e))?;
-        action.ddl_executed = Some(format!(
-            "prepared {}",
-            prepared.qualified_table
-        ));
+        action.ddl_executed = Some(format!("prepared {}", prepared.qualified_table));
     }
 
     Ok(report)

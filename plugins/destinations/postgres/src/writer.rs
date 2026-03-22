@@ -41,6 +41,10 @@ fn replace_staging_qualified_table(target_schema: &str, stream_name: &str) -> St
     crate::decode::qualified_name(target_schema, &staging_table_name(stream_name))
 }
 
+fn connector_context(stream_name: &str) -> Context {
+    Context::new(env!("CARGO_PKG_NAME"), stream_name)
+}
+
 async fn live_destination_state_is_fresh(
     client: &tokio_postgres::Client,
     target_schema: &str,
@@ -191,9 +195,44 @@ pub(crate) fn reuse_contract_from_handoff(
 /// Entry point for writing a single stream.
 pub async fn write_stream(
     config: &crate::config::Config,
+    input: WriteInput<'_>,
+) -> Result<WriteSummary, PluginError> {
+    let WriteInput {
+        stream,
+        reader,
+        cancel,
+        state: _state,
+        checkpoints: _checkpoints,
+        ..
+    } = input;
+    let ctx = connector_context(&stream.stream_name);
+    write_stream_core(config, &ctx, &stream, reader, cancel).await
+}
+
+pub(crate) async fn write_bulk_stream(
+    config: &crate::config::Config,
+    input: BulkWriteInput<'_>,
+) -> Result<WriteSummary, PluginError> {
+    let BulkWriteInput {
+        stream,
+        reader,
+        cancel,
+        state: _state,
+        checkpoints: _checkpoints,
+        ..
+    } = input;
+    let ctx = connector_context(&stream.stream_name);
+    write_stream_core(config, &ctx, &stream, reader, cancel).await
+}
+
+async fn write_stream_core(
+    config: &crate::config::Config,
     ctx: &Context,
     stream: &StreamContext,
+    reader: Reader,
+    cancel: Cancel,
 ) -> Result<WriteSummary, PluginError> {
+    cancel.check()?;
     let connect_start = Instant::now();
     let client = crate::client::connect(config)
         .await
@@ -300,17 +339,16 @@ pub async fn write_stream(
     let mut arrow_decode_secs = 0.0;
 
     loop {
-        match rapidbyte_sdk::host_ffi::next_batch_with_decode_timing(stream.limits.max_batch_bytes)
-        {
+        cancel.check()?;
+        let decode_start = Instant::now();
+        match reader.next_batch(stream.limits.max_batch_bytes) {
             Ok(None) => break,
-            Ok(Some(decoded)) => {
-                arrow_decode_secs += decoded.decode_secs;
-                let _ = ctx.histogram("dest_arrow_decode_secs", decoded.decode_secs);
+            Ok(Some((schema, batches))) => {
+                let decode_secs = decode_start.elapsed().as_secs_f64();
+                arrow_decode_secs += decode_secs;
+                let _ = ctx.histogram("dest_arrow_decode_secs", decode_secs);
 
-                if let Err(e) = session
-                    .process_batch(&decoded.schema, &decoded.batches)
-                    .await
-                {
+                if let Err(e) = session.process_batch(&schema, &batches).await {
                     loop_error = Some(e);
                     break;
                 }
@@ -369,7 +407,7 @@ mod tests {
         commit_error_to_plugin_error, contract_from_handoff, existing_replace_contract,
         live_destination_state_is_fresh, replace_staging_qualified_table,
         replace_staging_reuse_is_safe, resolve_copy_flush_bytes, reuse_contract_from_handoff,
-        staging_table_name,
+        staging_table_name, write_bulk_stream, write_stream,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -382,9 +420,10 @@ mod tests {
     use rapidbyte_sdk::arrow::datatypes::{DataType, Field, Schema};
     use rapidbyte_sdk::arrow::record_batch::RecordBatch;
     use rapidbyte_sdk::context::Context;
+    use rapidbyte_sdk::input::{BulkWriteInput, WriteInput};
     use rapidbyte_sdk::prelude::CommitState;
     use rapidbyte_sdk::schema::{SchemaField, StreamSchema};
-    use rapidbyte_sdk::stream::{ColumnPolicy, NullabilityPolicy, TypeChangePolicy};
+    use rapidbyte_sdk::stream::{ColumnPolicy, NullabilityPolicy, StreamContext, TypeChangePolicy};
     use tokio_postgres::NoTls;
 
     static NEXT_SUFFIX: AtomicU64 = AtomicU64::new(1);
@@ -514,6 +553,28 @@ mod tests {
         let id_arr = Int64Array::from(vec![Some(id)]);
         let name_arr = StringArray::from(vec![Some(name)]);
         RecordBatch::try_new(schema, vec![Arc::new(id_arr), Arc::new(name_arr)]).unwrap()
+    }
+
+    fn test_config() -> crate::config::Config {
+        crate::config::Config {
+            host: "localhost".to_string(),
+            port: 5432,
+            user: "postgres".to_string(),
+            password: String::new(),
+            database: "postgres".to_string(),
+            schema: "public".to_string(),
+            load_method: crate::config::LoadMethod::Copy,
+            copy_flush_bytes: None,
+        }
+    }
+
+    #[test]
+    fn write_entrypoints_accept_typed_inputs_without_context() {
+        let stream = StreamContext::test_default("users");
+        let config = test_config();
+
+        let _ = write_stream(&config, WriteInput::new(stream.clone()));
+        let _ = write_bulk_stream(&config, BulkWriteInput::new(stream));
     }
 
     #[test]
