@@ -548,9 +548,9 @@ mod tests {
     }
 
     #[test]
-    fn prerequisites_helper_uses_typed_input_without_context() {
+    fn prerequisites_helper_compiles_with_typed_input_without_context() {
         let config = base_config();
-        let future = super::prerequisites(&config, PrerequisitesInput::new());
-        let _ = future;
+        // This is compile-shape coverage for the typed prerequisites helper.
+        let _ = super::prerequisites(&config, PrerequisitesInput::new());
     }
 }

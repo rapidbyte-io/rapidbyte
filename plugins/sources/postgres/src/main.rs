@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn init_stores_shared_discovery_settings_and_exposes_typed_inputs() {
+    async fn init_stores_shared_discovery_settings_and_v2_method_calls_compile() {
         let config = crate::config::Config {
             host: "localhost".to_string(),
             port: 5432,
@@ -213,7 +213,10 @@ mod tests {
             strategy: PartitionStrategy::Range,
         };
 
-        fn assert_source_method_signatures(
+        // This is intentionally compile-shape coverage for the connector's v2
+        // lifecycle surface; the behavior of the async paths is covered by the
+        // connector's existing focused unit tests.
+        fn assert_source_method_calls_compile(
             source: &SourcePostgres,
             stream: StreamContext,
             partition: PartitionCoordinates,
@@ -233,6 +236,6 @@ mod tests {
             let _ = source.close(CloseInput::new());
         }
 
-        assert_source_method_signatures(&source, stream, partition);
+        assert_source_method_calls_compile(&source, stream, partition);
     }
 }
