@@ -27,6 +27,8 @@ pub mod input;
 pub mod plugin;
 #[cfg(feature = "runtime")]
 pub mod prelude;
+#[cfg(feature = "runtime")]
+pub mod testing;
 
 // Type re-exports — always available (no feature gate)
 pub use rapidbyte_types::arrow as arrow_types;

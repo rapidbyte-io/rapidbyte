@@ -127,57 +127,103 @@ impl<'a> ApplyInput<'a> {
 
 /// Input passed to read hooks.
 #[derive(Debug, Clone)]
-pub struct ReadInput<'a> {
+pub struct ReadInput<
+    'a,
+    EmitT = Emit,
+    CancelT = Cancel,
+    StateT = State,
+    CheckpointsT = Checkpoints,
+    MetricsT = Metrics,
+    LogT = Log,
+> {
     /// Stream being read.
     pub stream: StreamContext,
-    pub emit: Emit,
-    pub cancel: Cancel,
-    pub state: State,
-    pub checkpoints: Checkpoints,
-    pub metrics: Metrics,
-    pub log: Log,
+    pub emit: EmitT,
+    pub cancel: CancelT,
+    pub state: StateT,
+    pub checkpoints: CheckpointsT,
+    pub metrics: MetricsT,
+    pub log: LogT,
     _marker: PhantomData<&'a ()>,
 }
 
-impl<'a> ReadInput<'a> {
-    /// Create a read input for a single stream.
-    pub fn new(stream: StreamContext) -> Self {
+impl<'a, EmitT, CancelT, StateT, CheckpointsT, MetricsT, LogT>
+    ReadInput<'a, EmitT, CancelT, StateT, CheckpointsT, MetricsT, LogT>
+{
+    /// Create a read input with explicit capability fakes.
+    pub fn with_capabilities(
+        stream: StreamContext,
+        emit: EmitT,
+        cancel: CancelT,
+        state: StateT,
+        checkpoints: CheckpointsT,
+        metrics: MetricsT,
+        log: LogT,
+    ) -> Self {
         Self {
             stream,
-            emit: Emit,
-            cancel: Cancel,
-            state: State,
-            checkpoints: Checkpoints,
-            metrics: Metrics,
-            log: Log,
+            emit,
+            cancel,
+            state,
+            checkpoints,
+            metrics,
+            log,
             _marker: PhantomData,
         }
     }
 }
 
+impl<'a> ReadInput<'a> {
+    /// Create a read input for a single stream.
+    pub fn new(stream: StreamContext) -> Self {
+        Self::with_capabilities(stream, Emit, Cancel, State, Checkpoints, Metrics, Log)
+    }
+}
+
 /// Input passed to destination write hooks.
 #[derive(Debug, Clone)]
-pub struct WriteInput<'a> {
+pub struct WriteInput<
+    'a,
+    ReaderT = Reader,
+    CancelT = Cancel,
+    StateT = State,
+    CheckpointsT = Checkpoints,
+> {
     /// Stream being written.
     pub stream: StreamContext,
-    pub reader: Reader,
-    pub cancel: Cancel,
-    pub state: State,
-    pub checkpoints: Checkpoints,
+    pub reader: ReaderT,
+    pub cancel: CancelT,
+    pub state: StateT,
+    pub checkpoints: CheckpointsT,
     _marker: PhantomData<&'a ()>,
+}
+
+impl<'a, ReaderT, CancelT, StateT, CheckpointsT>
+    WriteInput<'a, ReaderT, CancelT, StateT, CheckpointsT>
+{
+    /// Create a write input with explicit capability fakes.
+    pub fn with_capabilities(
+        stream: StreamContext,
+        reader: ReaderT,
+        cancel: CancelT,
+        state: StateT,
+        checkpoints: CheckpointsT,
+    ) -> Self {
+        Self {
+            stream,
+            reader,
+            cancel,
+            state,
+            checkpoints,
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<'a> WriteInput<'a> {
     /// Create a write input for a single stream.
     pub fn new(stream: StreamContext) -> Self {
-        Self {
-            stream,
-            reader: Reader,
-            cancel: Cancel,
-            state: State,
-            checkpoints: Checkpoints,
-            _marker: PhantomData,
-        }
+        Self::with_capabilities(stream, Reader, Cancel, State, Checkpoints)
     }
 }
 

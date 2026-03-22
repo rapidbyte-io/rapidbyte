@@ -50,6 +50,9 @@ pub use crate::metric::{ReadPerf, ReadSummary, TransformSummary, WritePerf, Writ
 // Arrow helpers
 pub use crate::arrow::{self, arrow_data_type, build_arrow_schema, decode_ipc, encode_ipc};
 
+// Testing harnesses
+pub use crate::testing::{TestHarness, TestLogEntry, TestMetricCall, TestStateValue};
+
 // Host interop
 pub use crate::host_ffi;
 pub use crate::host_tcp::HostTcpStream;
