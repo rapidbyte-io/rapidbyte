@@ -475,7 +475,7 @@ mod tests {
         checkpoints
             .begin(CheckpointKind::Source)
             .expect("checkpoint");
-        metrics.histogram("read_secs", 0.1).expect("histogram");
+        metrics.counter("my_custom_counter", 1).expect("counter");
         log.debug("read");
         emit.batch_for_stream(stream.stream_index, &test_batch())
             .expect("emit");

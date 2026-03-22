@@ -441,23 +441,22 @@ impl TestCheckpoints {
         stream_name: &str,
         cp: &Checkpoint,
     ) -> Result<(), PluginError> {
+        let mut cursor_updates = Vec::new();
+        if let (Some(field), Some(value)) = (&cp.cursor_field, &cp.cursor_value) {
+            cursor_updates.push(TestCursorUpdate {
+                stream_name: stream_name.to_owned(),
+                cursor_field: field.clone(),
+                cursor_value_json: serde_json::to_string(value)
+                    .map_err(|e| PluginError::internal("SERIALIZE", e.to_string()))?,
+            });
+        }
+
         self.records
             .lock()
             .expect("checkpoints")
             .push(TestCheckpointRecord {
                 kind: cp.kind,
-                cursor_updates: vec![TestCursorUpdate {
-                    stream_name: stream_name.to_owned(),
-                    cursor_field: cp.cursor_field.clone().unwrap_or_default(),
-                    cursor_value_json: cp
-                        .cursor_value
-                        .as_ref()
-                        .map(|value| {
-                            serde_json::to_string(value)
-                                .unwrap_or_else(|e| format!("SERDE_ERROR:{e}"))
-                        })
-                        .unwrap_or_else(|| "null".to_owned()),
-                }],
+                cursor_updates,
                 state_mutations: Vec::new(),
                 records_processed: cp.records_processed,
                 bytes_processed: cp.bytes_processed,
@@ -515,13 +514,15 @@ impl TestCheckpointTxn {
         bytes_processed: u64,
     ) -> Result<(), PluginError> {
         self.committed = true;
+        let cursor_updates = std::mem::take(&mut self.cursor_updates);
+        let state_mutations = std::mem::take(&mut self.state_mutations);
         self.records
             .lock()
             .expect("checkpoints")
             .push(TestCheckpointRecord {
                 kind: self.kind,
-                cursor_updates: self.cursor_updates,
-                state_mutations: self.state_mutations,
+                cursor_updates,
+                state_mutations,
                 records_processed,
                 bytes_processed,
             });
@@ -531,6 +532,14 @@ impl TestCheckpointTxn {
     /// Abort the fake transaction.
     pub fn abort(mut self) {
         self.committed = true;
+    }
+}
+
+impl Drop for TestCheckpointTxn {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.committed = true;
+        }
     }
 }
 
@@ -621,5 +630,47 @@ mod tests {
         harness.cancel();
         assert!(cancel.is_cancelled());
         assert!(cancel.check().is_err());
+    }
+
+    #[test]
+    fn testing_checkpoint_convenience_preserves_absent_cursor_state() {
+        let harness = TestHarness::new();
+        let checkpoints = TestCheckpoints {
+            records: Arc::clone(&harness.checkpoints),
+        };
+
+        checkpoints
+            .checkpoint(
+                "plugin",
+                "users",
+                &Checkpoint {
+                    id: 1,
+                    kind: CheckpointKind::Source,
+                    stream: "users".into(),
+                    cursor_field: None,
+                    cursor_value: None,
+                    records_processed: 3,
+                    bytes_processed: 9,
+                },
+            )
+            .unwrap();
+
+        let records = harness.checkpoint_records();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].cursor_updates.is_empty());
+    }
+
+    #[test]
+    fn dropped_test_checkpoint_txn_does_not_record_checkpoint() {
+        let harness = TestHarness::new();
+        let checkpoints = TestCheckpoints {
+            records: Arc::clone(&harness.checkpoints),
+        };
+
+        let mut txn = checkpoints.begin(CheckpointKind::Source).unwrap();
+        txn.set_state(StateScope::Stream, "offset", "7").unwrap();
+        drop(txn);
+
+        assert!(harness.checkpoint_records().is_empty());
     }
 }
