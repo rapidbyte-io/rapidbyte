@@ -1,5 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+
+fn test_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -18,8 +24,10 @@ fn fixture_manifest(name: &str) -> PathBuf {
 }
 
 fn cargo_check_fixture(name: &str) -> std::process::Output {
+    let _guard = test_lock().lock().expect("plugin ui test lock");
     let target_dir = std::env::temp_dir().join(format!("rapidbyte-plugin-ui-{name}"));
     let _ = std::fs::remove_dir_all(&target_dir);
+    std::fs::create_dir_all(&target_dir).expect("create target dir");
 
     Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string()))
         .arg("check")
@@ -64,16 +72,22 @@ fn plugin_accepts_v2_transform_export() {
 
 #[test]
 fn plugin_rejects_old_context_shaped_source_signatures() {
-    let output = cargo_check_fixture("source-old-context");
-    assert!(
-        !output.status.success(),
-        "expected old-context fixture to fail compilation"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("method `init` has 1 parameter")
-            || stderr.contains("method `discover` has 2 parameters")
-            || stderr.contains("method `read` has 3 parameters"),
-        "expected trait-signature mismatch in stderr, got:\n{stderr}"
-    );
+    for fixture in [
+        "source-old-context",
+        "destination-old-context",
+        "transform-old-context",
+    ] {
+        let output = cargo_check_fixture(fixture);
+        assert!(
+            !output.status.success(),
+            "expected old-context fixture `{fixture}` to fail compilation"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("incompatible type for trait")
+                || stderr.contains("declaration in trait")
+                || stderr.contains("expected signature"),
+            "expected trait-signature mismatch in stderr for `{fixture}`, got:\n{stderr}"
+        );
+    }
 }
