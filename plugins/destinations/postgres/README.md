@@ -10,7 +10,7 @@ The package keeps lifecycle responsibilities separated:
 - `prerequisites()` checks connectivity and destination schema capability.
 - `validate()` checks upstream schema compatibility.
 - `apply()` prepares schema and table structure.
-- `write()` runs the streaming write path and reuses prepared contracts when safe.
+- `write()` runs the streaming write path and reuses prepared contracts when safe, with an explicit fallback through `prepare_stream_contract()` when the durable handoff is missing or stale.
 
 ## Supported Behavior
 
@@ -46,7 +46,7 @@ destination:
 
 ## Example Usage
 
-The destination expects one stream per table. `apply()` prepares the target schema and table before the write loop starts, and `write()` owns runtime reuse, watermark handling, and streaming ingestion.
+The destination expects one stream per table. `apply()` owns the normal target-schema and table preparation path before the write loop starts, and `write()` owns runtime reuse, watermark handling, and streaming ingestion.
 
 ## Local Testing
 
@@ -69,6 +69,5 @@ cargo test --manifest-path plugins/destinations/postgres/Cargo.toml writer
 
 - Validation only accepts the Arrow types supported by the write path; unsupported upstream fields are rejected before apply.
 - `apply()` creates `UNLOGGED` tables, so the destination is optimized for ingestion and replay, not crash-safe durability.
-- Replace mode writes to a staging table named `__rb_staging` and relies on the contract handoff to decide whether the staging state can be reused.
+- Replace mode writes to a per-stream staging table named `{stream_name}__rb_staging` and relies on the contract handoff to decide whether the staging state can be reused.
 - The writer may rebuild the contract when schema signatures drift or the existing handoff is no longer safe to reuse.
-

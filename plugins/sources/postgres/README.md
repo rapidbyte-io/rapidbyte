@@ -21,7 +21,7 @@ The package discovers tables from one schema at a time, emits schema-qualified s
 - PostgreSQL 10 or newer.
 - Network access from Rapidbyte to the database host and port.
 - A database user that can connect and read the target schema.
-- CDC mode additionally requires logical replication support, a logical replication slot, and a publication that includes the target table.
+- CDC mode additionally requires logical replication support and a publication that includes the target table; the connector creates its own logical replication slot.
 
 The source `prerequisites()` lifecycle currently reports database version support and a deferred CDC-readiness note. CDC-specific checks are enforced when a stream enters the read path.
 
@@ -40,7 +40,7 @@ source:
   publication: rapidbyte_orders
 ```
 
-`schema` defaults to `public`. If `replication_slot` or `publication` are omitted, the connector derives `rapidbyte_{stream_name}` at runtime.
+`schema` defaults to `public`. If `replication_slot` or `publication` are omitted, the connector derives sanitized, flattened names from the stream name at runtime.
 
 ## Example Usage
 
@@ -68,4 +68,3 @@ cargo test --manifest-path plugins/sources/postgres/Cargo.toml cdc
 - The connector only discovers one schema per configuration.
 - Publication filtering is applied during discovery and CDC preflight, so tables not in the selected publication are excluded or rejected early.
 - Default CDC slot and publication names are derived from the stream name; override them only when you need to integrate with an existing PostgreSQL setup.
-
