@@ -1394,19 +1394,68 @@ fn gen_embeds(struct_name: &Ident, trait_path: &TokenStream) -> TokenStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use quote::quote;
     use syn::parse_quote;
 
     #[test]
-    fn lifecycle_methods_use_typed_inputs() {
+    fn source_export_uses_v2_typed_inputs_and_feature_traits() {
         let struct_name: Ident = parse_quote!(TestTransform);
-        let trait_path = quote!(::rapidbyte_sdk::plugin::Transform);
+        let trait_path = quote!(::rapidbyte_sdk::plugin::Source);
+        let features = ManifestFeatures {
+            has_partitioned_read: true,
+            has_cdc: true,
+            has_bulk_load: false,
+        };
 
-        let generated = gen_lifecycle_methods(&struct_name, &trait_path).to_string();
+        let generated = gen_guest_impl(
+            &PluginKind::Source,
+            &struct_name,
+            &trait_path,
+            Some(&features),
+        )
+        .to_string();
 
         assert!(generated.contains("InitInput :: new"));
-        assert!(generated.contains("ValidateInput :: new"));
-        assert!(generated.contains("CloseInput :: new"));
+        assert!(generated.contains("ReadInput :: new"));
+        assert!(generated.contains("PartitionedReadInput :: new"));
+        assert!(generated.contains("CdcReadInput :: new"));
+        assert!(generated.contains("PartitionedSource"));
+        assert!(generated.contains("CdcSource"));
+        assert!(!generated.contains("Context"));
+        assert!(!generated.contains("with_stream"));
+    }
+
+    #[test]
+    fn destination_and_transform_exports_use_v2_inputs() {
+        let struct_name: Ident = parse_quote!(TestDestination);
+        let destination_trait = quote!(::rapidbyte_sdk::plugin::Destination);
+        let destination_generated = gen_guest_impl(
+            &PluginKind::Destination,
+            &struct_name,
+            &destination_trait,
+            None,
+        )
+        .to_string();
+
+        assert!(destination_generated.contains("InitInput :: new"));
+        assert!(destination_generated.contains("WriteInput :: new"));
+        assert!(destination_generated.contains("PrerequisitesInput :: new"));
+        assert!(destination_generated.contains("ApplyInput :: new"));
+        assert!(destination_generated.contains("TeardownInput :: new"));
+        assert!(!destination_generated.contains("Context"));
+
+        let struct_name: Ident = parse_quote!(TestTransform);
+        let transform_trait = quote!(::rapidbyte_sdk::plugin::Transform);
+        let transform_generated =
+            gen_guest_impl(&PluginKind::Transform, &struct_name, &transform_trait, None)
+                .to_string();
+
+        assert!(transform_generated.contains("InitInput :: new"));
+        assert!(transform_generated.contains("TransformInput :: new"));
+        assert!(transform_generated.contains("ValidateInput :: new"));
+        assert!(transform_generated.contains("CloseInput :: new"));
+        assert!(!transform_generated.contains("Context"));
     }
 
     #[test]
@@ -1464,6 +1513,49 @@ mod tests {
         assert!(common_generated.contains("fn write_summary_to_run_summary"));
         assert!(common_generated
             .contains("summary : :: rapidbyte_sdk :: metric :: WriteSummary , succeeded : bool"));
+    }
+
+    #[test]
+    fn feature_assertions_use_current_partitioned_source_trait_names() {
+        let features = ManifestFeatures {
+            has_partitioned_read: true,
+            has_cdc: true,
+            has_bulk_load: false,
+        };
+
+        let generated =
+            gen_feature_assertions(&PluginKind::Source, &parse_quote!(TestSource), &features)
+                .to_string();
+
+        assert!(generated.contains("PartitionedSource"));
+        assert!(generated.contains("CdcSource"));
+        assert!(!generated.contains("PartitionPlanner"));
+    }
+
+    #[test]
+    fn old_context_shaped_signatures_are_absent_from_generated_exports() {
+        let struct_name: Ident = parse_quote!(TestSource);
+        let trait_path = quote!(::rapidbyte_sdk::plugin::Source);
+        let features = ManifestFeatures {
+            has_partitioned_read: true,
+            has_cdc: true,
+            has_bulk_load: false,
+        };
+
+        let generated = gen_guest_impl(
+            &PluginKind::Source,
+            &struct_name,
+            &trait_path,
+            Some(&features),
+        )
+        .to_string();
+
+        assert!(generated.contains("InitInput :: new"));
+        assert!(generated.contains("DiscoverInput :: new"));
+        assert!(generated.contains("ValidateInput :: new"));
+        assert!(generated.contains("ReadInput :: new"));
+        assert!(!generated.contains("Context"));
+        assert!(!generated.contains("with_stream"));
     }
 
     #[test]
