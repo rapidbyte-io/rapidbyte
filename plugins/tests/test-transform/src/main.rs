@@ -52,15 +52,23 @@ impl Transform for TestTransform {
         let mut bytes_out: u64 = 0;
         let mut batches_processed: u64 = 0;
 
-        while let Some((_schema, batches)) =
+        while let Some(decoded) =
             rapidbyte_sdk::host_ffi::next_batch(input.stream.limits.max_batch_bytes)?
         {
-            for batch in &batches {
+            for batch in &decoded.batches {
                 input.cancel.check()?;
                 records_in += batch.num_rows() as u64;
                 bytes_in += batch.get_array_memory_size() as u64;
 
-                input.emit.batch_for_stream(input.stream.stream_index, batch)?;
+                let metadata = BatchMetadata {
+                    stream_index: input.stream.stream_index,
+                    schema_fingerprint: None,
+                    sequence_number: 0,
+                    compression: None,
+                    record_count: batch.num_rows() as u32,
+                    byte_count: batch.get_array_memory_size() as u64,
+                };
+                input.emit.batch(batch, &metadata)?;
 
                 records_out += batch.num_rows() as u64;
                 bytes_out += batch.get_array_memory_size() as u64;

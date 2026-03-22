@@ -340,12 +340,12 @@ async fn write_stream_core(
 
     loop {
         cancel.check()?;
-        match reader.next_batch_with_decode_timing(stream.limits.max_batch_bytes) {
+        match reader.next_batch(stream.limits.max_batch_bytes) {
             Ok(None) => break,
             Ok(Some(decoded)) => {
                 let decode_secs = decoded.decode_secs;
                 arrow_decode_secs += decode_secs;
-                let _ = ctx.histogram("dest_arrow_decode_secs", decode_secs);
+                let _ = ctx.histogram("dest_arrow_decode_secs", decode_secs, &[]);
 
                 if let Err(e) = session
                     .process_batch(&decoded.schema, &decoded.batches)
@@ -575,8 +575,8 @@ mod tests {
         let stream = StreamContext::test_default("users");
         let config = test_config();
 
-        let _ = write_stream(&config, WriteInput::new(stream.clone()));
-        let _ = write_bulk_stream(&config, BulkWriteInput::new(stream));
+        let _ = write_stream(&config, WriteInput::host(stream.clone()));
+        let _ = write_bulk_stream(&config, BulkWriteInput::host(stream));
     }
 
     #[test]

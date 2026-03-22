@@ -122,7 +122,15 @@ impl Source for TestSource {
             })?;
 
             bytes_read += batch.get_array_memory_size() as u64;
-            input.emit.batch_for_stream(input.stream.stream_index, &batch)?;
+            let metadata = BatchMetadata {
+                stream_index: input.stream.stream_index,
+                schema_fingerprint: None,
+                sequence_number: 0,
+                compression: None,
+                record_count: batch.num_rows() as u32,
+                byte_count: batch.get_array_memory_size() as u64,
+            };
+            input.emit.batch(&batch, &metadata)?;
 
             total_emitted += batch_rows as u64;
             batches_emitted += 1;

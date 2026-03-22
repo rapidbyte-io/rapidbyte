@@ -41,8 +41,10 @@ pub async fn run(
     let mut bytes_out: u64 = 0;
     let mut batches_processed: u64 = 0;
 
-    while let Some((schema, batches)) = rapidbyte_sdk::host_ffi::next_batch(stream.limits.max_batch_bytes)? {
+    while let Some(decoded) = rapidbyte_sdk::host_ffi::next_batch(stream.limits.max_batch_bytes)? {
         cancel.check()?;
+        let schema = decoded.schema;
+        let batches = decoded.batches;
         if batches.is_empty() || batches.iter().all(|b| b.num_rows() == 0) {
             continue;
         }
@@ -93,7 +95,15 @@ pub async fn run(
             }
             records_out += batch.num_rows() as u64;
             bytes_out += batch.get_array_memory_size() as u64;
-            emit.batch_for_stream(stream.stream_index, &batch)?;
+            let metadata = BatchMetadata {
+                stream_index: stream.stream_index,
+                schema_fingerprint: None,
+                sequence_number: 0,
+                compression: None,
+                record_count: batch.num_rows() as u32,
+                byte_count: batch.get_array_memory_size() as u64,
+            };
+            emit.batch(&batch, &metadata)?;
         }
 
         batches_processed += 1;

@@ -115,17 +115,16 @@ mod tests {
         let stream = StreamContext::test_default("users");
         let apply_request = ApplyRequest {
             streams: vec![stream.clone()],
-            dry_run: true,
         };
 
         // This is intentionally compile-shape coverage for the destination's
         // v2 lifecycle surface; the async write/apply behavior is covered by
         // the connector's existing focused tests.
         let _ = plugin.prerequisites(PrerequisitesInput::new());
-        let _ = plugin.validate(ValidateInput::new(None));
+        let _ = plugin.validate(ValidateInput::new(None, None));
         let _ = plugin.apply(ApplyInput::new(apply_request));
-        let _ = plugin.write(WriteInput::new(stream.clone()));
-        let _ = plugin.write_bulk(BulkWriteInput::new(stream));
+        let _ = plugin.write(WriteInput::host(stream.clone()));
+        let _ = plugin.write_bulk(BulkWriteInput::host(stream));
         let _ = plugin.close(CloseInput::new());
     }
 }

@@ -24,21 +24,21 @@ pub(crate) trait MetricSink {
 
 impl MetricSink for Metrics {
     fn counter(&self, name: &str, value: u64) -> Result<(), PluginError> {
-        Metrics::counter(self, name, value)
+        Metrics::counter(self, name, value, &[])
     }
 
     fn histogram(&self, name: &str, value: f64) -> Result<(), PluginError> {
-        Metrics::histogram(self, name, value)
+        Metrics::histogram(self, name, value, &[])
     }
 }
 
 impl MetricSink for Context {
     fn counter(&self, name: &str, value: u64) -> Result<(), PluginError> {
-        Context::counter(self, name, value)
+        Context::counter(self, name, value, &[])
     }
 
     fn histogram(&self, name: &str, value: f64) -> Result<(), PluginError> {
-        Context::histogram(self, name, value)
+        Context::histogram(self, name, value, &[])
     }
 }
 

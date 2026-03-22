@@ -15,18 +15,11 @@ use crate::contract::{
 use crate::ddl::{prepare_staging, write_contract_handoff, ContractHandoff, DdlLog, SchemaState};
 use crate::decode;
 
-fn apply_action_description(config: &Config, stream_name: &str, dry_run: bool) -> String {
-    if dry_run {
-        format!(
-            "Would prepare schema/table for stream '{stream_name}' in schema '{}'",
-            config.target_schema()
-        )
-    } else {
-        format!(
-            "Prepared schema/table for stream '{stream_name}' in schema '{}'",
-            config.target_schema()
-        )
-    }
+fn apply_action_description(config: &Config, stream_name: &str) -> String {
+    format!(
+        "Prepared schema/table for stream '{stream_name}' in schema '{}'",
+        config.target_schema()
+    )
 }
 
 fn plan_stream_contract(config: &Config, stream: &StreamContext) -> Result<crate::contract::WriteContract, String> {
@@ -82,7 +75,7 @@ pub(crate) fn plan_apply_request_with_contracts(
         prepared_contracts.insert(stream.stream_name.clone(), contract);
         actions.push(ApplyAction {
             stream_name: stream.stream_name.clone(),
-            description: apply_action_description(config, &stream.stream_name, request.dry_run),
+            description: apply_action_description(config, &stream.stream_name),
             ddl_executed: None,
         });
     }
@@ -183,11 +176,6 @@ pub(crate) async fn apply(
 ) -> Result<ApplyReport, PluginError> {
     let ApplyInput { request, log, .. } = input;
 
-    if request.dry_run {
-        return plan_apply_request(config, &request)
-            .map_err(|e| PluginError::config("INVALID_APPLY_REQUEST", e));
-    }
-
     let client = crate::client::connect(config)
         .await
         .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
@@ -284,20 +272,18 @@ mod tests {
     fn apply_plan_builds_structured_actions() {
         let request = ApplyRequest {
             streams: vec![stream_context("users")],
-            dry_run: true,
         };
 
         let report = plan_apply_request(&base_config(), &request).expect("plan");
 
         assert_eq!(report.actions.len(), 1);
-        assert!(report.actions[0].description.contains("Would prepare"));
+        assert!(report.actions[0].description.contains("Prepared"));
     }
 
     #[test]
     fn apply_plan_returns_contracts_for_each_stream() {
         let request = ApplyRequest {
             streams: vec![stream_context("users")],
-            dry_run: false,
         };
 
         let (report, contracts) =

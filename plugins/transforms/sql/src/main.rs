@@ -115,7 +115,7 @@ mod tests {
         .await
         .expect("init should succeed");
         let validation = plugin
-            .validate(ValidateInput::new(None))
+            .validate(ValidateInput::new(None, None))
             .await
             .expect("validate should not return plugin error");
 
@@ -134,7 +134,7 @@ mod tests {
         .expect("init should succeed");
 
         let validation = plugin
-            .validate(ValidateInput::new(None).with_stream_name(Some("public.users")))
+            .validate(ValidateInput::new(None, Some("public.users")))
             .await
             .expect("validate should return a report");
 

@@ -93,7 +93,6 @@ impl PartitionedSource for SourcePostgres {
         // reader::read_stream extracts them via stream.partition_coordinates().
         let PartitionedReadInput {
             stream,
-            dry_run,
             emit,
             cancel,
             state,
@@ -102,16 +101,7 @@ impl PartitionedSource for SourcePostgres {
             log,
             ..
         } = input;
-        self.read(ReadInput::with_capabilities(
-            stream,
-            dry_run,
-            emit,
-            cancel,
-            state,
-            checkpoints,
-            metrics,
-            log,
-        ))
+        self.read(ReadInput::new(stream, emit, cancel, state, checkpoints, metrics, log))
         .await
     }
 }
@@ -124,7 +114,6 @@ impl CdcSource for SourcePostgres {
         let CdcReadInput {
             stream,
             resume,
-            dry_run,
             emit,
             cancel,
             state,
@@ -138,10 +127,9 @@ impl CdcSource for SourcePostgres {
             .await
             .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
         let connect_secs = connect_start.elapsed().as_secs_f64();
-        let input = CdcReadInput::with_capabilities(
+        let input = CdcReadInput::new(
             stream,
             normalize_cdc_resume_token(&resume),
-            dry_run,
             emit,
             cancel,
             state,
@@ -227,10 +215,10 @@ mod tests {
         ) {
             let _ = source.discover(DiscoverInput::new());
             let _ = source.prerequisites(PrerequisitesInput::new());
-            let _ = source.validate(ValidateInput::new(None));
-            let _ = source.read(ReadInput::new(stream.clone()));
-            let _ = source.read_partition(PartitionedReadInput::new(stream.clone(), partition));
-            let _ = source.read_changes(CdcReadInput::new(
+            let _ = source.validate(ValidateInput::new(None, None));
+            let _ = source.read(ReadInput::host(stream.clone()));
+            let _ = source.read_partition(PartitionedReadInput::host(stream.clone(), partition));
+            let _ = source.read_changes(CdcReadInput::host(
                 stream,
                 CdcResumeToken {
                     value: None,

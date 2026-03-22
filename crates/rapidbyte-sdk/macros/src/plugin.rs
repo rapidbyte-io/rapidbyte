@@ -1018,8 +1018,10 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
 
             rt.block_on(<#struct_name as #trait_path>::validate(
                 conn,
-                ::rapidbyte_sdk::plugin::ValidateInput::new(upstream.as_ref())
-                    .with_stream_name(input.stream_name.as_deref()),
+                ::rapidbyte_sdk::plugin::ValidateInput::new(
+                    upstream.as_ref(),
+                    input.stream_name.as_deref(),
+                ),
             ))
                 .map(to_component_validation)
                 .map_err(to_component_error)
@@ -1063,7 +1065,7 @@ fn gen_read_dispatch(
         return quote! {
             rt.block_on(<#struct_name as #trait_path>::read(
                 conn,
-                ::rapidbyte_sdk::plugin::ReadInput::new(stream.clone()),
+                ::rapidbyte_sdk::plugin::ReadInput::host(stream.clone()),
             ))
                 .map_err(to_component_error)?
         };
@@ -1073,7 +1075,7 @@ fn gen_read_dispatch(
         if let Some(partition) = stream.partition_coordinates_typed() {
             return <#struct_name as ::rapidbyte_sdk::features::PartitionedSource>::read_partition(
                 conn,
-                ::rapidbyte_sdk::plugin::PartitionedReadInput::new(stream, partition),
+                ::rapidbyte_sdk::plugin::PartitionedReadInput::host(stream, partition),
             ).await;
         }
     });
@@ -1089,7 +1091,7 @@ fn gen_read_dispatch(
                 );
                 return <#struct_name as ::rapidbyte_sdk::features::CdcSource>::read_changes(
                     conn,
-                    ::rapidbyte_sdk::plugin::CdcReadInput::new(stream, resume),
+                    ::rapidbyte_sdk::plugin::CdcReadInput::host(stream, resume),
                 ).await;
             }
         }
@@ -1101,7 +1103,7 @@ fn gen_read_dispatch(
             #cdc_branch
             <#struct_name as #trait_path>::read(
                 conn,
-                ::rapidbyte_sdk::plugin::ReadInput::new(stream.clone()),
+                ::rapidbyte_sdk::plugin::ReadInput::host(stream.clone()),
             ).await
         }).map_err(to_component_error)?
     }
@@ -1252,7 +1254,7 @@ fn gen_dest_methods(
         quote! {
             rt.block_on(<#struct_name as ::rapidbyte_sdk::features::BulkDestination>::write_bulk(
             conn,
-            ::rapidbyte_sdk::plugin::BulkWriteInput::new(stream.clone()),
+            ::rapidbyte_sdk::plugin::BulkWriteInput::host(stream.clone()),
             ))
         .map_err(to_component_error)?
         }
@@ -1260,7 +1262,7 @@ fn gen_dest_methods(
         quote! {
             rt.block_on(<#struct_name as #trait_path>::write(
             conn,
-            ::rapidbyte_sdk::plugin::WriteInput::new(stream.clone()),
+            ::rapidbyte_sdk::plugin::WriteInput::host(stream.clone()),
         ))
             .map_err(to_component_error)?
         }
@@ -1384,10 +1386,9 @@ fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
                 let summary = rt
                     .block_on(<#struct_name as #trait_path>::transform(
                         conn,
-                        ::rapidbyte_sdk::plugin::TransformInput::with_runtime(
+                        ::rapidbyte_sdk::plugin::TransformInput::host(
                             stream.clone(),
                             input.plugin_id.as_str(),
-                            false,
                         ),
                     ))
                     .map_err(to_component_error)?;
@@ -1458,9 +1459,9 @@ mod tests {
         .to_string();
 
         assert!(generated.contains("InitInput :: new"));
-        assert!(generated.contains("ReadInput :: new"));
-        assert!(generated.contains("PartitionedReadInput :: new"));
-        assert!(generated.contains("CdcReadInput :: new"));
+        assert!(generated.contains("ReadInput :: host"));
+        assert!(generated.contains("PartitionedReadInput :: host"));
+        assert!(generated.contains("CdcReadInput :: host"));
         assert!(generated.contains("PartitionedSource"));
         assert!(generated.contains("CdcSource"));
         assert!(generated.contains("NEXT_SESSION_ID . fetch_add"));
@@ -1483,7 +1484,7 @@ mod tests {
         .to_string();
 
         assert!(destination_generated.contains("InitInput :: new"));
-        assert!(destination_generated.contains("WriteInput :: new"));
+        assert!(destination_generated.contains("WriteInput :: host"));
         assert!(destination_generated.contains("PrerequisitesInput :: new"));
         assert!(destination_generated.contains("ApplyInput :: new"));
         assert!(destination_generated.contains("TeardownInput :: new"));
@@ -1500,7 +1501,7 @@ mod tests {
                 .to_string();
 
         assert!(transform_generated.contains("InitInput :: new"));
-        assert!(transform_generated.contains("TransformInput :: with_runtime"));
+        assert!(transform_generated.contains("TransformInput :: host"));
         assert!(transform_generated.contains("ValidateInput :: new"));
         assert!(transform_generated.contains("CloseInput :: new"));
         assert!(transform_generated.contains("NEXT_SESSION_ID . fetch_add"));
@@ -1603,7 +1604,7 @@ mod tests {
         assert!(generated.contains("InitInput :: new"));
         assert!(generated.contains("DiscoverInput :: new"));
         assert!(generated.contains("ValidateInput :: new"));
-        assert!(generated.contains("ReadInput :: new"));
+        assert!(generated.contains("ReadInput :: host"));
         assert!(generated.contains("validate_session"));
         assert!(!generated.contains("Context"));
         assert!(!generated.contains("with_dry_run"));

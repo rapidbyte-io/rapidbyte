@@ -52,8 +52,8 @@ impl Destination for TestDestination {
         let mut bytes_written: u64 = 0;
         let mut batches_written: u64 = 0;
 
-        while let Some((_schema, batches)) = input.reader.next_batch(input.stream.limits.max_batch_bytes)? {
-            for batch in &batches {
+        while let Some(decoded) = input.reader.next_batch(input.stream.limits.max_batch_bytes)? {
+            for batch in &decoded.batches {
                 records_written += batch.num_rows() as u64;
                 bytes_written += batch.get_array_memory_size() as u64;
                 batches_written += 1;

@@ -235,9 +235,17 @@ fn emit_accumulated_batch(
         state.total_records += batch.num_rows() as u64;
         state.total_bytes += batch.get_array_memory_size() as u64;
         state.batches_emitted += 1;
+        let metadata = BatchMetadata {
+            stream_index,
+            schema_fingerprint: None,
+            sequence_number: 0,
+            compression: None,
+            record_count: batch.num_rows() as u32,
+            byte_count: batch.get_array_memory_size() as u64,
+        };
 
         emit
-            .batch_for_stream(stream_index, &batch)
+            .batch(&batch, &metadata)
             .map_err(|e| format!("emit_batch failed: {}", e.message))?;
         emit_batch_counters(metrics, state);
     }
