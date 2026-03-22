@@ -186,7 +186,6 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
 
         static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
         static CONFIG_JSON: OnceLock<String> = OnceLock::new();
-        static CONTEXT: OnceLock<::rapidbyte_sdk::context::Context> = OnceLock::new();
 
         fn get_runtime() -> &'static tokio::runtime::Runtime {
             RUNTIME.get_or_init(|| {
@@ -970,11 +969,6 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
                     ::rapidbyte_sdk::plugin::InitInput::new(),
                 ))
                 .map_err(to_component_error)?;
-
-            let _ = CONTEXT.set(::rapidbyte_sdk::context::Context::new(
-                env!("CARGO_PKG_NAME"),
-                ::rapidbyte_sdk::host_ffi::current_stream_name(),
-            ));
             *get_state().borrow_mut() = Some(instance);
             Ok(1)
         }
