@@ -54,6 +54,11 @@ async fn drop_staging_table(
     Ok(())
 }
 
+fn drop_target_table_sql(target_schema: &str, stream_name: &str) -> String {
+    let target_table = crate::decode::qualified_name(target_schema, stream_name);
+    format!("DROP TABLE IF EXISTS {target_table}")
+}
+
 /// Atomically swap a staging table into the target position.
 pub(crate) async fn swap_staging_table(
     ctx: &Context,
@@ -70,9 +75,14 @@ pub(crate) async fn swap_staging_table(
         .await
         .map_err(|e| format!("Swap BEGIN failed: {e}"))?;
 
-    let drop_sql = format!("DROP TABLE IF EXISTS {target_table} CASCADE");
+    let drop_sql = drop_target_table_sql(target_schema, stream_name);
     if let Err(e) = client.execute(&drop_sql, &[]).await {
         let _ = client.execute("ROLLBACK", &[]).await;
+        if e.as_db_error().is_some_and(|db| db.code().code() == "2BP01") {
+            return Err(format!(
+                "Swap DROP blocked for {target_table}: dependent objects still reference the target table. Replace mode requires a connector-owned table or those dependents to be removed first."
+            ));
+        }
         return Err(format!("Swap DROP failed for {target_table}: {e}"));
     }
 
@@ -148,4 +158,16 @@ pub(crate) async fn read_contract_handoff(
     let handoff = serde_json::from_str(payload)
         .map_err(|e| format!("parsing contract handoff failed for {qualified_table}: {e}"))?;
     Ok(Some(handoff))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drop_target_table_sql;
+
+    #[test]
+    fn drop_target_table_sql_does_not_use_cascade() {
+        let sql = drop_target_table_sql("public", "users");
+        assert_eq!(sql, "DROP TABLE IF EXISTS public.users");
+        assert!(!sql.contains("CASCADE"));
+    }
 }

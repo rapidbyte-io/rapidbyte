@@ -70,6 +70,22 @@ pub(crate) fn pre_final_commit_failure_state(
     }
 }
 
+fn should_run_intermediate_checkpoint(
+    is_replace: bool,
+    checkpoint_config: &CheckpointConfig,
+    stats: &WriteStats,
+    last_checkpoint_time: Instant,
+) -> bool {
+    if is_replace {
+        return false;
+    }
+
+    (checkpoint_config.bytes > 0 && stats.bytes_since_commit >= checkpoint_config.bytes)
+        || (checkpoint_config.rows > 0 && stats.rows_since_commit >= checkpoint_config.rows)
+        || (checkpoint_config.seconds > 0
+            && last_checkpoint_time.elapsed().as_secs() >= checkpoint_config.seconds)
+}
+
 /// Error returned when the session fails during commit orchestration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommitError {
@@ -331,12 +347,12 @@ impl<'a> WriteSession<'a> {
     }
 
     async fn maybe_checkpoint(&mut self) -> Result<(), String> {
-        let cfg = &self.checkpoint_config;
-        let should_checkpoint = (cfg.bytes > 0 && self.stats.bytes_since_commit >= cfg.bytes)
-            || (cfg.rows > 0 && self.stats.rows_since_commit >= cfg.rows)
-            || (cfg.seconds > 0 && self.last_checkpoint_time.elapsed().as_secs() >= cfg.seconds);
-
-        if !should_checkpoint {
+        if !should_run_intermediate_checkpoint(
+            self.is_replace,
+            &self.checkpoint_config,
+            &self.stats,
+            self.last_checkpoint_time,
+        ) {
             return Ok(());
         }
 
@@ -587,5 +603,59 @@ mod tests {
         );
         assert_eq!(err.commit_state, CommitState::AfterCommitUnknown);
         assert!(err.message.contains("commit failed"));
+    }
+
+    #[test]
+    fn replace_mode_never_runs_intermediate_checkpoint() {
+        let stats = WriteStats {
+            total_rows: 0,
+            total_bytes: 0,
+            batches_written: 0,
+            checkpoint_count: 0,
+            commits_completed: 0,
+            bytes_since_commit: 1024,
+            rows_since_commit: 10,
+            last_emitted_rows: 0,
+            last_emitted_bytes: 0,
+        };
+        let cfg = CheckpointConfig {
+            bytes: 1,
+            rows: 1,
+            seconds: 1,
+        };
+
+        assert!(!should_run_intermediate_checkpoint(
+            true,
+            &cfg,
+            &stats,
+            Instant::now(),
+        ));
+    }
+
+    #[test]
+    fn non_replace_mode_can_run_intermediate_checkpoint() {
+        let stats = WriteStats {
+            total_rows: 0,
+            total_bytes: 0,
+            batches_written: 0,
+            checkpoint_count: 0,
+            commits_completed: 0,
+            bytes_since_commit: 1024,
+            rows_since_commit: 10,
+            last_emitted_rows: 0,
+            last_emitted_bytes: 0,
+        };
+        let cfg = CheckpointConfig {
+            bytes: 1,
+            rows: 1,
+            seconds: 1,
+        };
+
+        assert!(should_run_intermediate_checkpoint(
+            false,
+            &cfg,
+            &stats,
+            Instant::now(),
+        ));
     }
 }
