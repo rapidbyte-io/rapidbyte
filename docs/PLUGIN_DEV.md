@@ -326,7 +326,14 @@ async fn read(
 
     // 3. Emit the batch to the host
     cancel.check()?;
-    emit.batch_for_stream(stream.stream_index, &batch)
+    emit.batch(&batch, &BatchMetadata {
+        stream_index: stream.stream_index,
+        schema_fingerprint: None,
+        sequence_number: 0,
+        compression: None,
+        record_count: batch.num_rows() as u32,
+        byte_count: batch.get_array_memory_size() as u64,
+    })
         .map_err(|e| PluginError::internal("EMIT_FAILED", e.message))?;
 
     checkpoints.checkpoint(
@@ -454,10 +461,10 @@ async fn write(
         cancel.check()?;
         match reader.next_batch(stream.limits.max_batch_bytes) {
             Ok(None) => break, // No more batches
-            Ok(Some((schema, batches))) => {
-                for batch in &batches {
+            Ok(Some(decoded)) => {
+                for batch in &decoded.batches {
                     // Write batch rows to the target system
-                    let rows = write_batch_to_target(&client, &schema, batch).await?;
+                    let rows = write_batch_to_target(&client, &decoded.schema, batch).await?;
                     total_rows += rows;
                     total_bytes += batch.get_array_memory_size() as u64;
                 }
@@ -562,11 +569,7 @@ async fn transform(
     input: TransformInput<'_>,
 ) -> Result<TransformSummary, PluginError> {
     let TransformInput {
-        stream,
-        reader,
-        emit,
-        cancel,
-        ..
+        stream, emit, cancel, ..
     } = input;
     let mut records_in: u64 = 0;
     let mut records_out: u64 = 0;
@@ -575,8 +578,9 @@ async fn transform(
     let mut batches_processed: u64 = 0;
 
     // Receive batches from upstream
-    while let Some((schema, batches)) = reader.next_batch(stream.limits.max_batch_bytes)? {
+    while let Some(decoded) = rapidbyte_sdk::host_ffi::next_batch(stream.limits.max_batch_bytes)? {
         cancel.check()?;
+        let batches = decoded.batches;
         if batches.is_empty() {
             continue;
         }
@@ -591,7 +595,14 @@ async fn transform(
             if result.num_rows() > 0 {
                 records_out += result.num_rows() as u64;
                 bytes_out += result.get_array_memory_size() as u64;
-                emit.batch_for_stream(stream.stream_index, &result)?;
+                emit.batch(&result, &BatchMetadata {
+                    stream_index: stream.stream_index,
+                    schema_fingerprint: None,
+                    sequence_number: 0,
+                    compression: None,
+                    record_count: result.num_rows() as u32,
+                    byte_count: result.get_array_memory_size() as u64,
+                })?;
             }
         }
 
@@ -674,7 +685,7 @@ All data moves between pipeline stages as Arrow IPC batches. The SDK handles the
 ### Sources: Encode and emit
 
 1. Convert your source rows into an Arrow `RecordBatch`
-2. Call `ctx.emit_batch(&batch)` to send it to the host
+2. Call `emit.batch(&batch, &metadata)` to send it to the host
 
 ```rust
 use rapidbyte_sdk::arrow::array::{Int64Array, StringBuilder};
@@ -699,22 +710,30 @@ let batch = RecordBatch::try_new(schema, vec![
 ]).expect("schema matches arrays");
 
 // Emit to host
-ctx.emit_batch(&batch)?;
+let metadata = BatchMetadata {
+    stream_index: stream.stream_index,
+    schema_fingerprint: None,
+    sequence_number: 0,
+    compression: None,
+    record_count: batch.num_rows() as u32,
+    byte_count: batch.get_array_memory_size() as u64,
+};
+emit.batch(&batch, &metadata)?;
 ```
 
 Under the hood, `emit_batch` performs the frame lifecycle: `frame-new` -> `frame-write` (IPC-encoded data) -> `frame-seal` -> `emit-batch`. This is managed by the SDK; plugin authors do not need to call these functions directly.
 
 ### Destinations: Receive and decode
 
-1. Call `ctx.next_batch(max_bytes)` in a loop to receive batches from the host
-2. The returned `(Arc<Schema>, Vec<RecordBatch>)` contains decoded Arrow data
+1. Call `reader.next_batch(max_bytes)` in a loop to receive batches from the host
+2. The returned `DecodedBatch` contains batch metadata, decoded Arrow data, and guest-side decode timing
 
 ```rust
 loop {
-    match ctx.next_batch(stream.limits.max_batch_bytes) {
+    match reader.next_batch(stream.limits.max_batch_bytes) {
         Ok(None) => break,       // End of stream
-        Ok(Some((schema, batches))) => {
-            for batch in &batches {
+        Ok(Some(decoded)) => {
+            for batch in &decoded.batches {
                 // Access columns by index
                 let id_col = batch.column(0)
                     .as_any()
@@ -843,7 +862,7 @@ destination:
 
 ```bash
 # Dry run (validate only, no data movement)
-just run test-pipeline.yaml --dry-run
+just run test-pipeline.yaml
 
 # Run with verbose logging
 just run test-pipeline.yaml -vv

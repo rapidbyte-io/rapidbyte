@@ -103,23 +103,6 @@ Fetch a single run status:
   status <run-id>
 ```
 
-### 5. Dry-run / preview testing
-
-To test preview serving through the agent Flight endpoint:
-
-```bash
-./target/release/rapidbyte \
-  --auth-token "$RAPIDBYTE_AUTH_TOKEN" \
-  --controller http://127.0.0.1:56090 \
-  run --dry-run path/to/pipeline.yaml
-```
-
-That exercises:
-- controller submission
-- agent execution
-- preview ticket issuance
-- preview fetch from the agent Flight endpoint
-
 ### Common local issues
 
 - `controller requires --auth-token ... or --allow-unauthenticated`
@@ -127,10 +110,6 @@ That exercises:
 
 - `controller requires --signing-key ... or --allow-insecure-signing-key`
   - Set `RAPIDBYTE_SIGNING_KEY` or pass `--signing-key`.
-
-- Preview fetch fails
-  - Make sure controller and agent use the same signing key.
-  - Make sure `--flight-advertise` is reachable from the CLI process.
 
 - Run is rejected as not valid for distributed mode
   - Check that the pipeline uses a shared state backend, not SQLite.
