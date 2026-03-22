@@ -51,6 +51,28 @@ async fn live_destination_state_is_fresh(
         .is_none())
 }
 
+async fn replace_staging_reuse_is_safe(
+    client: &tokio_postgres::Client,
+    target_schema: &str,
+    stream_name: &str,
+    stream_schema: &rapidbyte_sdk::schema::StreamSchema,
+) -> Result<bool, PluginError> {
+    if !live_destination_state_is_fresh(client, target_schema, &staging_table_name(stream_name), stream_schema).await? {
+        return Ok(false);
+    }
+
+    let staging_table = replace_staging_qualified_table(target_schema, stream_name);
+    let row = match client
+        .query_one(&format!("SELECT COUNT(*) FROM {staging_table}"), &[])
+        .await
+    {
+        Ok(row) => row,
+        Err(_) => return Ok(false),
+    };
+    let count: i64 = row.get(0);
+    Ok(count == 0)
+}
+
 fn existing_replace_contract(mut setup: crate::contract::WriteContract) -> crate::contract::WriteContract {
     setup.effective_stream = staging_table_name(&setup.stream_name);
     setup.qualified_table =
@@ -132,10 +154,10 @@ pub async fn write_stream(
             Some(handoff)
                 if current_signature.as_deref() == Some(handoff.schema_signature.as_str()) =>
             {
-                live_destination_state_is_fresh(
+                replace_staging_reuse_is_safe(
                     &client,
                     &setup.target_schema,
-                    &staging_table_name(&setup.stream_name),
+                    &setup.stream_name,
                     &stream.schema,
                 )
                 .await?
@@ -250,8 +272,8 @@ pub async fn write_stream(
 mod tests {
     use super::{
         contract_from_handoff, existing_replace_contract, live_destination_state_is_fresh,
-        replace_staging_qualified_table, resolve_copy_flush_bytes, reuse_contract_from_handoff,
-        staging_table_name,
+        replace_staging_qualified_table, replace_staging_reuse_is_safe, resolve_copy_flush_bytes,
+        reuse_contract_from_handoff, staging_table_name,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -272,8 +294,14 @@ mod tests {
     }
 
     async fn connect() -> tokio_postgres::Client {
+        let dsn = std::env::var("RAPIDBYTE_POSTGRES_TEST_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| {
+                "host=127.0.0.1 port=33603 user=postgres password=postgres dbname=postgres"
+                    .to_string()
+            });
         let (client, connection) = tokio_postgres::connect(
-            "host=127.0.0.1 port=33603 user=postgres password=postgres dbname=postgres",
+            &dsn,
             NoTls,
         )
         .await
@@ -588,6 +616,53 @@ mod tests {
             fresh,
         );
         assert!(reused.is_none());
+
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &[],
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn stale_replace_staging_contents_block_contract_reuse() {
+        let schema = fresh_name("rb_replace_stale");
+        let table = "users";
+        let client = connect().await;
+        create_table(&client, &schema, &staging_table_name(table)).await;
+        client
+            .execute(
+                &format!(
+                    "INSERT INTO {} (\"id\", \"name\") VALUES (1, 'stale')",
+                    crate::decode::qualified_name(&schema, &staging_table_name(table))
+                ),
+                &[],
+            )
+            .await
+            .expect("seed stale staging row");
+
+        let stream_schema = live_stream_schema();
+        let handoff = crate::ddl::ContractHandoff {
+            schema_signature: crate::contract::stream_schema_signature(&stream_schema)
+                .expect("signature")
+                .expect("schema signature"),
+            ignored_columns: vec![],
+            type_null_columns: vec![],
+        };
+
+        crate::ddl::write_contract_handoff(
+            &client,
+            &crate::decode::qualified_name(&schema, &staging_table_name(table)),
+            &handoff,
+        )
+        .await
+        .expect("write staging handoff");
+
+        let safe = replace_staging_reuse_is_safe(&client, &schema, table, &stream_schema)
+            .await
+            .expect("staging safety check");
+        assert!(!safe);
 
         let _ = client
             .execute(

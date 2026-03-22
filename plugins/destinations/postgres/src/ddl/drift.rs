@@ -357,8 +357,14 @@ mod tests {
     }
 
     async fn connect() -> tokio_postgres::Client {
+        let dsn = std::env::var("RAPIDBYTE_POSTGRES_TEST_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| {
+                "host=127.0.0.1 port=33603 user=postgres password=postgres dbname=postgres"
+                    .to_string()
+            });
         let (client, connection) = tokio_postgres::connect(
-            "host=127.0.0.1 port=33603 user=postgres password=postgres dbname=postgres",
+            &dsn,
             NoTls,
         )
         .await
@@ -632,6 +638,133 @@ mod tests {
             .await
             .expect("id column should exist after nullability change");
         assert!(!info.1);
+
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_identifier(&schema)),
+                &[],
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn apply_policy_rejects_new_column_when_policy_fails() {
+        let schema = fresh_name("rb_drift_new_fail");
+        let table = "users";
+        let client = connect().await;
+        create_table(&client, &schema, table, r#""id" bigint not null"#).await;
+
+        let ctx = Context::new("dest-postgres", table);
+        let mut state = SchemaState::new();
+        let drift = SchemaDrift {
+            new_columns: vec![("age".to_string(), "integer".to_string())],
+            ..Default::default()
+        };
+        let policy = SchemaEvolutionPolicy {
+            new_column: ColumnPolicy::Fail,
+            removed_column: ColumnPolicy::Ignore,
+            type_change: TypeChangePolicy::Fail,
+            nullability_change: NullabilityPolicy::Allow,
+        };
+
+        let err = state
+            .apply_policy(
+                &ctx,
+                &client,
+                &crate::decode::qualified_name(&schema, table),
+                &drift,
+                &policy,
+            )
+            .await
+            .expect_err("new-column fail policy should reject drift");
+        assert!(err.contains("new column"));
+        assert!(err.contains("fail"));
+
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_identifier(&schema)),
+                &[],
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn apply_policy_nulls_type_changed_columns_when_policy_says_null() {
+        let schema = fresh_name("rb_drift_type_null");
+        let table = "users";
+        let client = connect().await;
+        create_table(&client, &schema, table, r#""id" integer not null"#).await;
+
+        let ctx = Context::new("dest-postgres", table);
+        let mut state = SchemaState::new();
+        let drift = SchemaDrift {
+            type_changes: vec![("id".to_string(), "integer".to_string(), "text".to_string())],
+            ..Default::default()
+        };
+        let policy = SchemaEvolutionPolicy {
+            new_column: ColumnPolicy::Add,
+            removed_column: ColumnPolicy::Ignore,
+            type_change: TypeChangePolicy::Null,
+            nullability_change: NullabilityPolicy::Allow,
+        };
+
+        state
+            .apply_policy(
+                &ctx,
+                &client,
+                &crate::decode::qualified_name(&schema, table),
+                &drift,
+                &policy,
+            )
+            .await
+            .expect("type-null policy should apply");
+
+        assert!(state.type_null_columns.contains("id"));
+        let info = column_info(&client, &schema, table, "id")
+            .await
+            .expect("id column should still exist after type-null policy");
+        assert_eq!(info.0, "integer");
+
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_identifier(&schema)),
+                &[],
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn apply_policy_rejects_nullability_changes_when_policy_fails() {
+        let schema = fresh_name("rb_drift_null_fail");
+        let table = "users";
+        let client = connect().await;
+        create_table(&client, &schema, table, r#""id" bigint"#).await;
+
+        let ctx = Context::new("dest-postgres", table);
+        let mut state = SchemaState::new();
+        let drift = SchemaDrift {
+            nullability_changes: vec![("id".to_string(), true, false)],
+            ..Default::default()
+        };
+        let policy = SchemaEvolutionPolicy {
+            new_column: ColumnPolicy::Add,
+            removed_column: ColumnPolicy::Ignore,
+            type_change: TypeChangePolicy::Fail,
+            nullability_change: NullabilityPolicy::Fail,
+        };
+
+        let err = state
+            .apply_policy(
+                &ctx,
+                &client,
+                &crate::decode::qualified_name(&schema, table),
+                &drift,
+                &policy,
+            )
+            .await
+            .expect_err("nullability fail policy should reject drift");
+        assert!(err.contains("nullability change"));
+        assert!(err.contains("fail"));
 
         let _ = client
             .execute(
