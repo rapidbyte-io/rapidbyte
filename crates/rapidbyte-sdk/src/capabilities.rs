@@ -66,6 +66,14 @@ impl Reader {
     ) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, PluginError> {
         host_ffi::next_batch(max_bytes)
     }
+
+    /// Read the next batch and include guest-side Arrow decode timing.
+    pub fn next_batch_with_decode_timing(
+        &self,
+        max_bytes: u64,
+    ) -> Result<Option<host_ffi::DecodedBatch>, PluginError> {
+        host_ffi::next_batch_with_decode_timing(max_bytes)
+    }
 }
 
 /// Cooperative cancellation view.

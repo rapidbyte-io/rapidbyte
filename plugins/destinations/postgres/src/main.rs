@@ -96,7 +96,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dest_postgres_uses_typed_lifecycle_inputs_without_context() {
+    async fn dest_postgres_v2_lifecycle_calls_compile_without_context() {
         let config = config::Config {
             host: "localhost".to_string(),
             port: 5432,
@@ -118,6 +118,9 @@ mod tests {
             dry_run: true,
         };
 
+        // This is intentionally compile-shape coverage for the destination's
+        // v2 lifecycle surface; the async write/apply behavior is covered by
+        // the connector's existing focused tests.
         let _ = plugin.prerequisites(PrerequisitesInput::new());
         let _ = plugin.validate(ValidateInput::new(None));
         let _ = plugin.apply(ApplyInput::new(apply_request));

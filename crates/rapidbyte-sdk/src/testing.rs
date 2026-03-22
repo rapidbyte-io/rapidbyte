@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
+use rapidbyte_types::batch::BatchMetadata;
 
 use crate::checkpoint::{Checkpoint, CheckpointKind, StateScope};
 use crate::context::LogLevel;
@@ -248,6 +249,31 @@ impl TestReader {
             .lock()
             .expect("input batches")
             .pop_front())
+    }
+
+    /// Pop the next input batch from the queue with zero decode timing.
+    pub fn next_batch_with_decode_timing(
+        &self,
+        max_bytes: u64,
+    ) -> Result<Option<crate::host_ffi::DecodedBatch>, PluginError> {
+        self.next_batch(max_bytes).map(|next| {
+            next.map(|(schema, batches)| crate::host_ffi::DecodedBatch {
+                metadata: BatchMetadata {
+                    stream_index: 0,
+                    schema_fingerprint: None,
+                    sequence_number: 0,
+                    compression: None,
+                    record_count: batches.iter().map(|batch| batch.num_rows() as u32).sum(),
+                    byte_count: batches
+                        .iter()
+                        .map(|batch| batch.get_array_memory_size() as u64)
+                        .sum(),
+                },
+                schema,
+                batches,
+                decode_secs: 0.0,
+            })
+        })
     }
 }
 

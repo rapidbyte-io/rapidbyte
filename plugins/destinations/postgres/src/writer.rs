@@ -340,15 +340,17 @@ async fn write_stream_core(
 
     loop {
         cancel.check()?;
-        let decode_start = Instant::now();
-        match reader.next_batch(stream.limits.max_batch_bytes) {
+        match reader.next_batch_with_decode_timing(stream.limits.max_batch_bytes) {
             Ok(None) => break,
-            Ok(Some((schema, batches))) => {
-                let decode_secs = decode_start.elapsed().as_secs_f64();
+            Ok(Some(decoded)) => {
+                let decode_secs = decoded.decode_secs;
                 arrow_decode_secs += decode_secs;
                 let _ = ctx.histogram("dest_arrow_decode_secs", decode_secs);
 
-                if let Err(e) = session.process_batch(&schema, &batches).await {
+                if let Err(e) = session
+                    .process_batch(&decoded.schema, &decoded.batches)
+                    .await
+                {
                     loop_error = Some(e);
                     break;
                 }
@@ -569,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn write_entrypoints_accept_typed_inputs_without_context() {
+    fn write_entrypoints_compile_with_typed_inputs_without_context() {
         let stream = StreamContext::test_default("users");
         let config = test_config();
 
