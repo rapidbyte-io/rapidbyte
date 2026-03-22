@@ -226,29 +226,26 @@ pub(crate) fn build_prerequisites_report(
         );
     }
 
-    if snapshot.can_comment_on_table {
-        checks.push(PrerequisiteCheck::passed(
-            "handoff_comment_persistence",
-            &format!(
-                "transactional probe verified COMMENT ON TABLE on a probe table in schema '{}'",
+    checks.push(PrerequisiteCheck {
+        name: "handoff_comment_persistence".to_string(),
+        passed: snapshot.can_comment_on_table,
+        severity: PrerequisiteSeverity::Info,
+        message: if snapshot.can_comment_on_table {
+            format!(
+                "transactional probe verified COMMENT ON TABLE on a connector-created probe table in schema '{}'",
                 config.target_schema()
-            ),
-        ));
-    } else {
-        checks.push(
-            PrerequisiteCheck::error(
-                "handoff_comment_persistence",
-                &format!(
-                    "transactional probe could not COMMENT ON TABLE in schema '{}'",
-                    config.target_schema()
-                ),
             )
-            .with_fix_hint(&format!(
-                "Ensure the destination role can run COMMENT ON TABLE for tables in '{}'",
+        } else {
+            format!(
+                "transactional probe could not COMMENT ON TABLE on a connector-created probe table in schema '{}'",
                 config.target_schema()
-            )),
-        );
-    }
+            )
+        },
+        fix_hint: Some(format!(
+            "Existing pre-provisioned target tables may still require ownership or COMMENT privileges in '{}'",
+            config.target_schema()
+        )),
+    });
 
     if snapshot.can_write_watermarks {
         checks.push(PrerequisiteCheck::passed(
@@ -274,29 +271,26 @@ pub(crate) fn build_prerequisites_report(
         );
     }
 
-    if snapshot.can_write_existing_targets {
-        checks.push(PrerequisiteCheck::passed(
-            "existing_target_dml",
-            &format!(
-                "transactional probe verified INSERT/UPDATE on a newly created probe table in schema '{}'",
+    checks.push(PrerequisiteCheck {
+        name: "existing_target_dml".to_string(),
+        passed: snapshot.can_write_existing_targets,
+        severity: PrerequisiteSeverity::Info,
+        message: if snapshot.can_write_existing_targets {
+            format!(
+                "transactional probe verified INSERT/UPDATE on a connector-created probe table in schema '{}'",
                 config.target_schema()
-            ),
-        ));
-    } else {
-        checks.push(
-            PrerequisiteCheck::error(
-                "existing_target_dml",
-                &format!(
-                    "transactional probe could not perform DML on a probe table in schema '{}'",
-                    config.target_schema()
-                ),
             )
-            .with_fix_hint(&format!(
-                "Grant INSERT and UPDATE privileges for destination tables in '{}'",
+        } else {
+            format!(
+                "transactional probe could not perform DML on a connector-created probe table in schema '{}'",
                 config.target_schema()
-            )),
-        );
-    }
+            )
+        },
+        fix_hint: Some(format!(
+            "Pre-provisioned target tables may still require separate INSERT/UPDATE privileges in '{}'",
+            config.target_schema()
+        )),
+    });
 
     checks.push(PrerequisiteCheck {
         name: "existing_target_privileges_deferred".to_string(),

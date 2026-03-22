@@ -54,11 +54,10 @@ pub(crate) fn build_prerequisites_report(
     snapshot: PrerequisiteSnapshot,
 ) -> PrerequisitesReport {
     let mut checks = Vec::new();
-    let has_explicit_cdc_objects =
-        config.publication.is_some() || config.replication_slot.is_some();
+    let has_explicit_cdc_slot = config.replication_slot.is_some();
 
     checks.push(check_server_version(&snapshot.server_version));
-    if has_explicit_cdc_objects {
+    if has_explicit_cdc_slot {
         checks.push(check_wal_level(snapshot.wal_level.as_deref()));
         checks.push(check_replication_capability(snapshot.has_replication_capability));
     } else {
@@ -66,9 +65,9 @@ pub(crate) fn build_prerequisites_report(
             name: "cdc_source_capability_deferred".to_string(),
             passed: true,
             severity: PrerequisiteSeverity::Info,
-            message: "Source-level prerequisites do not require wal_level=logical or replication capability unless CDC object names are explicitly configured".to_string(),
+            message: "Source-level prerequisites do not require wal_level=logical or replication capability unless an explicit CDC replication slot is configured".to_string(),
             fix_hint: Some(
-                "If you intend to run CDC with default object names, readiness is validated later when stream-level execution context is available."
+                "Configured replication slots are validated here; CDC readiness for default object names or discovery-only publication filters is evaluated later when stream-level execution context is available."
                     .to_string(),
             ),
         });
@@ -401,7 +400,7 @@ mod tests {
     fn prerequisites_report_defers_cdc_checks_without_sync_mode() {
         let report = build_prerequisites_report(&config_without_cdc_overrides(), base_snapshot());
         assert!(report.passed);
-        assert_eq!(report.checks.len(), 2);
+        assert_eq!(report.checks.len(), 3);
         let deferred = report
             .checks
             .iter()
@@ -416,7 +415,9 @@ mod tests {
             .find(|check| check.name == "cdc_source_capability_deferred")
             .expect("cdc_source_capability_deferred check");
         assert_eq!(capability.severity, PrerequisiteSeverity::Info);
-        assert!(capability.message.contains("do not require wal_level=logical"));
+        assert!(capability
+            .message
+            .contains("unless an explicit CDC replication slot is configured"));
     }
 
     #[test]
