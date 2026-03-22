@@ -91,7 +91,7 @@ pub struct TestStateMutation {
 /// A test harness that owns all fake capabilities.
 #[derive(Debug, Clone, Default)]
 pub struct TestHarness {
-    emitted_batches: Arc<Mutex<Vec<(u32, RecordBatch)>>>,
+    emitted_batches: Arc<Mutex<Vec<(BatchMetadata, RecordBatch)>>>,
     input_batches: QueuedInputBatches,
     state_values: Arc<Mutex<HashMap<(StateScope, String), String>>>,
     checkpoints: Arc<Mutex<Vec<TestCheckpointRecord>>>,
@@ -107,7 +107,7 @@ impl TestHarness {
     }
 
     /// Return all emitted batches recorded by the fake emitter.
-    pub fn emitted_batches(&self) -> Vec<(u32, RecordBatch)> {
+    pub fn emitted_batches(&self) -> Vec<(BatchMetadata, RecordBatch)> {
         self.emitted_batches
             .lock()
             .expect("emitted batches")
@@ -223,20 +223,16 @@ impl TestHarness {
 /// Fake emitter capability.
 #[derive(Debug, Clone)]
 pub struct TestEmit {
-    emitted_batches: Arc<Mutex<Vec<(u32, RecordBatch)>>>,
+    emitted_batches: Arc<Mutex<Vec<(BatchMetadata, RecordBatch)>>>,
 }
 
 impl TestEmit {
     /// Record an emitted batch.
-    pub fn batch_for_stream(
-        &self,
-        stream_index: u32,
-        batch: &RecordBatch,
-    ) -> Result<(), PluginError> {
+    pub fn batch(&self, batch: &RecordBatch, metadata: &BatchMetadata) -> Result<(), PluginError> {
         self.emitted_batches
             .lock()
             .expect("emitted batches")
-            .push((stream_index, batch.clone()));
+            .push((metadata.clone(), batch.clone()));
         Ok(())
     }
 }
@@ -249,21 +245,7 @@ pub struct TestReader {
 
 impl TestReader {
     /// Pop the next input batch from the queue.
-    #[allow(clippy::type_complexity)]
     pub fn next_batch(
-        &self,
-        _max_bytes: u64,
-    ) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, PluginError> {
-        Ok(self
-            .input_batches
-            .lock()
-            .expect("input batches")
-            .pop_front())
-        .map(|next| next.map(|(_, schema, batches)| (schema, batches)))
-    }
-
-    /// Pop the next input batch from the queue with zero decode timing.
-    pub fn next_batch_with_decode_timing(
         &self,
         _max_bytes: u64,
     ) -> Result<Option<crate::host_ffi::DecodedBatch>, PluginError> {
@@ -361,12 +343,7 @@ pub struct TestMetrics {
 
 impl TestMetrics {
     /// Record a counter increment.
-    pub fn counter(&self, name: &str, value: u64) -> Result<(), PluginError> {
-        self.counter_with_labels(name, value, &[])
-    }
-
-    /// Record a counter increment with labels.
-    pub fn counter_with_labels(
+    pub fn counter(
         &self,
         name: &str,
         value: u64,
@@ -385,12 +362,7 @@ impl TestMetrics {
     }
 
     /// Record a gauge value.
-    pub fn gauge(&self, name: &str, value: f64) -> Result<(), PluginError> {
-        self.gauge_with_labels(name, value, &[])
-    }
-
-    /// Record a gauge value with labels.
-    pub fn gauge_with_labels(
+    pub fn gauge(
         &self,
         name: &str,
         value: f64,
@@ -409,12 +381,7 @@ impl TestMetrics {
     }
 
     /// Record a histogram value.
-    pub fn histogram(&self, name: &str, value: f64) -> Result<(), PluginError> {
-        self.histogram_with_labels(name, value, &[])
-    }
-
-    /// Record a histogram value with labels.
-    pub fn histogram_with_labels(
+    pub fn histogram(
         &self,
         name: &str,
         value: f64,
@@ -627,7 +594,7 @@ mod tests {
         > = harness.read_input(stream.clone());
 
         input.log.info("hello");
-        input.metrics.counter("reads", 1).unwrap();
+        input.metrics.counter("reads", 1, &[]).unwrap();
         input.state.put(StateScope::Stream, "last", "42").unwrap();
         input.cancel.check().unwrap();
 
@@ -636,9 +603,19 @@ mod tests {
             .unwrap();
         txn.commit(1, 2).unwrap();
 
-        input.emit.batch_for_stream(7, &test_batch()).unwrap();
+        let batch = test_batch();
+        let metadata = BatchMetadata {
+            stream_index: 7,
+            schema_fingerprint: None,
+            sequence_number: 0,
+            compression: None,
+            record_count: batch.num_rows() as u32,
+            byte_count: batch.get_array_memory_size() as u64,
+        };
+        input.emit.batch(&batch, &metadata).unwrap();
 
         assert_eq!(harness.emitted_batches().len(), 1);
+        assert_eq!(harness.emitted_batches()[0].0.stream_index, 7);
         assert_eq!(harness.log_entries().len(), 1);
         assert_eq!(harness.metric_calls().len(), 1);
         assert_eq!(
@@ -664,12 +641,12 @@ mod tests {
             harness.write_input(stream.clone());
 
         let next = input.reader.next_batch(1024).unwrap().expect("batch");
-        assert_eq!(next.0.as_ref(), schema.as_ref());
-        assert_eq!(next.1.len(), 1);
+        assert_eq!(next.schema.as_ref(), schema.as_ref());
+        assert_eq!(next.batches.len(), 1);
         harness.enqueue_input_batch(stream.stream_index, Arc::clone(&schema), vec![batch]);
         let decoded = input
             .reader
-            .next_batch_with_decode_timing(1024)
+            .next_batch(1024)
             .unwrap()
             .expect("decoded batch");
         assert_eq!(decoded.metadata.stream_index, stream.stream_index);

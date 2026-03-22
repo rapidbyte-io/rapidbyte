@@ -3,9 +3,6 @@
 //! `Context` bundles stream metadata with host-FFI operations so plugin
 //! authors no longer need to pass `plugin_id` / `stream_name` to every call.
 
-use std::sync::Arc;
-
-use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 
 use rapidbyte_types::batch::BatchMetadata;
@@ -78,19 +75,22 @@ impl Context {
         host_ffi::log(level as i32, message);
     }
 
-    /// Emit an Arrow `RecordBatch` to the host pipeline.
-    pub fn emit_batch(&self, batch: &RecordBatch) -> Result<(), PluginError> {
-        host_ffi::emit_batch(batch)
+    /// Emit an Arrow `RecordBatch` to the host pipeline with explicit metadata.
+    pub fn emit_batch(
+        &self,
+        batch: &RecordBatch,
+        metadata: &BatchMetadata,
+    ) -> Result<(), PluginError> {
+        host_ffi::emit_batch(batch, metadata)
     }
 
     /// Receive the next Arrow `RecordBatch` from the host pipeline.
     ///
     /// Returns `None` when there are no more batches.
-    #[allow(clippy::type_complexity)]
     pub fn next_batch(
         &self,
         max_bytes: u64,
-    ) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, PluginError> {
+    ) -> Result<Option<host_ffi::DecodedBatch>, PluginError> {
         host_ffi::next_batch(max_bytes)
     }
 
@@ -129,35 +129,6 @@ impl Context {
         }
     }
 
-    /// Emit a batch for a specific stream (multi-stream sources).
-    pub fn emit_batch_for_stream(
-        &self,
-        stream_index: u32,
-        batch: &RecordBatch,
-    ) -> Result<(), PluginError> {
-        let imports = host_ffi::host_imports();
-
-        let capacity = batch.get_array_memory_size() as u64 + 1024;
-        let handle = imports.frame_new(capacity)?;
-
-        {
-            let mut writer = crate::frame_writer::FrameWriter::new(handle, imports);
-            crate::arrow::ipc::encode_ipc_into(batch, &mut writer)?;
-        }
-
-        imports.frame_seal(handle)?;
-        let metadata = BatchMetadata {
-            stream_index,
-            schema_fingerprint: None,
-            sequence_number: 0,
-            compression: None,
-            record_count: batch.num_rows() as u32,
-            byte_count: batch.get_array_memory_size() as u64,
-        };
-        imports.emit_batch_with_metadata(handle, &metadata)?;
-        Ok(())
-    }
-
     /// Report an error for a specific stream (multi-stream sources).
     pub fn stream_error(&self, stream_index: u32, error: PluginError) -> Result<(), PluginError> {
         host_ffi::stream_error(stream_index, &error)
@@ -170,12 +141,7 @@ impl Context {
     }
 
     /// Add to a counter metric.
-    pub fn counter(&self, name: &str, value: u64) -> Result<(), PluginError> {
-        self.counter_with_labels(name, value, &[])
-    }
-
-    /// Add to a counter metric with extra labels.
-    pub fn counter_with_labels(
+    pub fn counter(
         &self,
         name: &str,
         value: u64,
@@ -186,12 +152,7 @@ impl Context {
     }
 
     /// Set a gauge metric.
-    pub fn gauge(&self, name: &str, value: f64) -> Result<(), PluginError> {
-        self.gauge_with_labels(name, value, &[])
-    }
-
-    /// Set a gauge metric with extra labels.
-    pub fn gauge_with_labels(
+    pub fn gauge(
         &self,
         name: &str,
         value: f64,
@@ -202,12 +163,7 @@ impl Context {
     }
 
     /// Record a histogram observation.
-    pub fn histogram(&self, name: &str, value: f64) -> Result<(), PluginError> {
-        self.histogram_with_labels(name, value, &[])
-    }
-
-    /// Record a histogram observation with extra labels.
-    pub fn histogram_with_labels(
+    pub fn histogram(
         &self,
         name: &str,
         value: f64,
@@ -322,6 +278,7 @@ fn is_reserved_metric_label(label: &str) -> bool {
 mod tests {
     use super::*;
     use crate::host_ffi::test_support::{self, MetricCall};
+    use std::sync::Arc;
 
     #[test]
     fn test_new_stores_metadata() {
@@ -380,9 +337,17 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, false)]));
         let batch =
             RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1]))]).unwrap();
+        let metadata = BatchMetadata {
+            stream_index: 0,
+            schema_fingerprint: None,
+            sequence_number: 0,
+            compression: None,
+            record_count: batch.num_rows() as u32,
+            byte_count: batch.get_array_memory_size() as u64,
+        };
 
         let ctx = Context::new("c", "s");
-        let result = ctx.emit_batch(&batch);
+        let result = ctx.emit_batch(&batch, &metadata);
         assert!(result.is_ok());
     }
 
@@ -432,9 +397,9 @@ mod tests {
             .expect("metric test lock poisoned");
         test_support::reset();
         let ctx = Context::new("test-plugin", "users");
-        ctx.counter("records_read", 42).unwrap();
-        ctx.histogram("source_connect_secs", 0.5).unwrap();
-        ctx.gauge_with_labels("rows_per_second", 1000.0, &[("phase", "scan")])
+        ctx.counter("records_read", 42, &[]).unwrap();
+        ctx.histogram("source_connect_secs", 0.5, &[]).unwrap();
+        ctx.gauge("rows_per_second", 1000.0, &[("phase", "scan")])
             .unwrap();
 
         let calls = test_support::take_metric_calls();
@@ -485,7 +450,7 @@ mod tests {
             .expect("metric test lock poisoned");
         test_support::reset();
         let ctx = Context::new("test-plugin", "users");
-        ctx.counter_with_labels(
+        ctx.counter(
             "records_read",
             1,
             &[
@@ -528,7 +493,7 @@ mod tests {
 
         let ctx = Context::new("test-plugin", "users");
         let error = ctx
-            .counter("records_read", 1)
+            .counter("records_read", 1, &[])
             .expect_err("counter should return host error");
         assert_eq!(error.code, "METRIC_REJECTED");
         assert!(test_support::take_metric_calls().is_empty());

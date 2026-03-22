@@ -663,8 +663,16 @@ mod tests {
             .expect("checkpoint");
         let _ = metrics;
         log.debug("read");
-        emit.batch_for_stream(stream.stream_index, &test_batch())
-            .expect("emit");
+        let batch = test_batch();
+        let metadata = rapidbyte_types::batch::BatchMetadata {
+            stream_index: stream.stream_index,
+            schema_fingerprint: None,
+            sequence_number: 0,
+            compression: None,
+            record_count: batch.num_rows() as u32,
+            byte_count: batch.get_array_memory_size() as u64,
+        };
+        emit.batch(&batch, &metadata).expect("emit");
         assert_eq!(stream_name, "users");
     }
 

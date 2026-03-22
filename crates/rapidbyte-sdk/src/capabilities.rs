@@ -4,18 +4,14 @@
 //! the existing host FFI and do not add retry, buffering, or orchestration
 //! policy.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-
-use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use rapidbyte_types::batch::BatchMetadata;
+use std::collections::BTreeMap;
 
 use crate::checkpoint::{Checkpoint, CheckpointKind, StateScope};
 use crate::context::LogLevel;
 use crate::cursor::CursorValue;
 use crate::error::PluginError;
-use crate::frame_writer::FrameWriter;
 use crate::host_ffi;
 use crate::host_tcp::HostTcpStream;
 
@@ -24,32 +20,9 @@ use crate::host_tcp::HostTcpStream;
 pub struct Emit;
 
 impl Emit {
-    /// Emit a batch tagged with the provided stream index.
-    pub fn batch_for_stream(
-        &self,
-        stream_index: u32,
-        batch: &RecordBatch,
-    ) -> Result<(), PluginError> {
-        let imports = host_ffi::host_imports();
-        let capacity = batch.get_array_memory_size() as u64 + 1024;
-        let handle = imports.frame_new(capacity)?;
-
-        {
-            let mut writer = FrameWriter::new(handle, imports);
-            crate::arrow::ipc::encode_ipc_into(batch, &mut writer)?;
-        }
-
-        imports.frame_seal(handle)?;
-        let metadata = BatchMetadata {
-            stream_index,
-            schema_fingerprint: None,
-            sequence_number: 0,
-            compression: None,
-            record_count: batch.num_rows() as u32,
-            byte_count: batch.get_array_memory_size() as u64,
-        };
-        imports.emit_batch_with_metadata(handle, &metadata)?;
-        Ok(())
+    /// Emit a batch tagged with explicit metadata.
+    pub fn batch(&self, batch: &RecordBatch, metadata: &BatchMetadata) -> Result<(), PluginError> {
+        host_ffi::emit_batch(batch, metadata)
     }
 }
 
@@ -59,20 +32,11 @@ pub struct Reader;
 
 impl Reader {
     /// Read the next batch using the host batch channel.
-    #[allow(clippy::type_complexity)]
     pub fn next_batch(
         &self,
         max_bytes: u64,
-    ) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, PluginError> {
-        host_ffi::next_batch(max_bytes)
-    }
-
-    /// Read the next batch and include guest-side Arrow decode timing.
-    pub fn next_batch_with_decode_timing(
-        &self,
-        max_bytes: u64,
     ) -> Result<Option<host_ffi::DecodedBatch>, PluginError> {
-        host_ffi::next_batch_with_decode_timing(max_bytes)
+        host_ffi::next_batch(max_bytes)
     }
 }
 
@@ -133,12 +97,7 @@ pub struct Metrics;
 
 impl Metrics {
     /// Add to a counter metric.
-    pub fn counter(&self, name: &str, value: u64) -> Result<(), PluginError> {
-        self.counter_with_labels(name, value, &[])
-    }
-
-    /// Add to a counter metric with extra labels.
-    pub fn counter_with_labels(
+    pub fn counter(
         &self,
         name: &str,
         value: u64,
@@ -148,12 +107,7 @@ impl Metrics {
     }
 
     /// Set a gauge metric.
-    pub fn gauge(&self, name: &str, value: f64) -> Result<(), PluginError> {
-        self.gauge_with_labels(name, value, &[])
-    }
-
-    /// Set a gauge metric with extra labels.
-    pub fn gauge_with_labels(
+    pub fn gauge(
         &self,
         name: &str,
         value: f64,
@@ -163,12 +117,7 @@ impl Metrics {
     }
 
     /// Record a histogram observation.
-    pub fn histogram(&self, name: &str, value: f64) -> Result<(), PluginError> {
-        self.histogram_with_labels(name, value, &[])
-    }
-
-    /// Record a histogram observation with extra labels.
-    pub fn histogram_with_labels(
+    pub fn histogram(
         &self,
         name: &str,
         value: f64,
@@ -313,19 +262,28 @@ mod tests {
     use crate::host_ffi::test_support;
     use arrow::array::Int32Array;
     use arrow::datatypes::{DataType, Field, Schema};
+    use std::sync::Arc;
 
     #[test]
-    fn emit_batch_for_stream_uses_host_transport() {
+    fn emit_batch_uses_host_transport() {
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, false)]));
         let batch =
             RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1]))]).expect("batch");
 
+        let metadata = BatchMetadata {
+            stream_index: 7,
+            schema_fingerprint: None,
+            sequence_number: 0,
+            compression: None,
+            record_count: 1,
+            byte_count: batch.get_array_memory_size() as u64,
+        };
         let emit = Emit;
-        emit.batch_for_stream(7, &batch).expect("emit");
+        emit.batch(&batch, &metadata).expect("emit");
     }
 
     #[test]
-    fn reader_next_batch_is_thin() {
+    fn reader_next_batch_returns_decoded_batch_shape() {
         let reader = Reader;
         let result = reader.next_batch(1024).expect("next batch");
         assert!(result.is_none());
@@ -351,15 +309,17 @@ mod tests {
             .expect("metric test lock poisoned");
         test_support::reset();
         let metrics = Metrics;
-        metrics.counter("reads", 1).expect("counter");
+        metrics.counter("reads", 1, &[]).expect("counter");
         metrics
-            .gauge_with_labels(
+            .gauge(
                 "rows_per_second",
                 42.0,
                 &[("phase", "scan"), ("plugin", "ignored")],
             )
             .expect("gauge");
-        metrics.histogram("latency_secs", 0.5).expect("histogram");
+        metrics
+            .histogram("latency_secs", 0.5, &[])
+            .expect("histogram");
     }
 
     #[test]
