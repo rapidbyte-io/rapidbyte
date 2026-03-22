@@ -237,7 +237,7 @@ mod tests {
     fn assert_bulk_destination<T: Destination + BulkDestination>() {}
 
     #[test]
-    fn feature_trait_shapes_compile() {
+    fn plugin_feature_trait_shapes_compile() {
         fn assert_source<T: Source>() {}
         fn assert_dest<T: Destination>() {}
         fn assert_transform<T: Transform>() {}
@@ -258,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_feature_inputs_are_constructible() {
+    fn plugin_typed_feature_inputs_are_constructible() {
         let stream = test_stream_context("users");
         let partition = PartitionCoordinates {
             count: 4,
