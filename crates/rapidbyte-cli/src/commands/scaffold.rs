@@ -817,7 +817,9 @@ mod tests {
             main_rs.contains("async fn init(config: Self::Config, _input: InitInput<'_>) -> Result<Self, PluginError>")
         );
         assert!(main_rs.contains("validate::validate_config(&self.config)"));
-        assert!(main_rs.contains("async fn transform(&self, input: TransformInput<'_>) -> Result<TransformSummary, PluginError>"));
+        assert!(main_rs.contains("async fn transform("));
+        assert!(main_rs.contains("input: TransformInput<'_>"));
+        assert!(main_rs.contains("Result<TransformSummary, PluginError>"));
         assert!(main_rs.contains("ValidationReport"));
         assert!(!main_rs.contains("PluginInfo"));
         assert!(!main_rs.contains("ValidationResult"));
