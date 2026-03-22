@@ -9,7 +9,11 @@ use crate::apply::prepare_stream_contract;
 use crate::contract::{mark_contract_prepared, prepare_stream_once, stream_schema_signature, CheckpointConfig};
 use crate::ddl::{read_contract_handoff, ContractHandoff};
 use crate::metrics::emit_dest_timings;
-use crate::session::{clamp_copy_flush_bytes, WriteSession};
+use crate::session::{clamp_copy_flush_bytes, CommitError, WriteSession};
+
+fn commit_error_to_plugin_error(e: CommitError) -> PluginError {
+    PluginError::transient_db("COMMIT_FAILED", e.message).with_commit_state(e.commit_state)
+}
 
 fn resolve_copy_flush_bytes(
     stream_override: Option<u64>,
@@ -293,10 +297,7 @@ pub async fn write_stream(
                 LogLevel::Warn,
                 crate::diagnostics::checkpoint_safety_message(e.safety_phase, e.commit_state),
             );
-            return Err(
-                PluginError::transient_db("COMMIT_FAILED", e.message)
-                    .with_commit_state(e.commit_state),
-            );
+            return Err(commit_error_to_plugin_error(e));
         }
     };
 
@@ -320,14 +321,17 @@ pub async fn write_stream(
 #[cfg(test)]
 mod tests {
     use super::{
-        contract_from_handoff, existing_replace_contract, live_destination_state_is_fresh,
-        replace_staging_qualified_table, replace_staging_reuse_is_safe, resolve_copy_flush_bytes,
-        reuse_contract_from_handoff, staging_table_name,
+        commit_error_to_plugin_error, contract_from_handoff, existing_replace_contract,
+        live_destination_state_is_fresh, replace_staging_qualified_table,
+        replace_staging_reuse_is_safe, resolve_copy_flush_bytes, reuse_contract_from_handoff,
+        staging_table_name,
     };
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::session::COPY_FLUSH_MAX;
+    use crate::session::CommitError;
     use crate::WriteMode;
+    use rapidbyte_sdk::prelude::CommitState;
     use rapidbyte_sdk::schema::{SchemaField, StreamSchema};
     use tokio_postgres::NoTls;
 
@@ -417,6 +421,17 @@ mod tests {
 
         let clamped_config = resolve_copy_flush_bytes(None, Some(256 * 1024));
         assert_eq!(clamped_config, Some(1024 * 1024));
+    }
+
+    #[test]
+    fn commit_error_to_plugin_error_preserves_unknown_commit_state() {
+        let err = CommitError::pre_commit_failure(CommitState::AfterCommitUnknown, "commit failed");
+
+        let plugin_err = commit_error_to_plugin_error(err);
+
+        assert_eq!(plugin_err.code, "COMMIT_FAILED");
+        assert_eq!(plugin_err.commit_state, Some(CommitState::AfterCommitUnknown));
+        assert!(plugin_err.message.contains("commit failed"));
     }
 
     #[test]

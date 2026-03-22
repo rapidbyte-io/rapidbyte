@@ -47,7 +47,7 @@ pub(crate) fn checkpoint_safety_message(
                 "dest-postgres: pre-finalization failed before PostgreSQL COMMIT; no durable commit was made"
             }
             CommitState::AfterCommitConfirmed => {
-                "dest-postgres: pre-finalization failed before PostgreSQL COMMIT after a confirmed checkpoint; durable data may already exist, but the checkpoint has not advanced"
+                "dest-postgres: pre-finalization failed before PostgreSQL COMMIT after a confirmed checkpoint; the last durable checkpoint remains the recovery boundary"
             }
             CommitState::AfterCommitUnknown => {
                 "dest-postgres: pre-finalization failed before PostgreSQL COMMIT after a commit with unknown durability; inspect the destination before resuming"
@@ -107,7 +107,8 @@ mod tests {
             CommitState::AfterCommitConfirmed,
         );
         assert!(pre_commit.contains("pre-finalization failed before PostgreSQL COMMIT"));
-        assert!(!pre_commit.contains("final checkpoint failed after PostgreSQL commit"));
+        assert!(pre_commit.contains("last durable checkpoint remains the recovery boundary"));
+        assert!(!pre_commit.contains("durable data may already exist"));
 
         let post_commit = checkpoint_safety_message(
             CheckpointSafetyPhase::PostCommitSwapOrCheckpointFailure,

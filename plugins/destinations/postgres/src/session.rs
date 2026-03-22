@@ -97,6 +97,14 @@ impl CommitError {
             message: message.into(),
         }
     }
+
+    pub(crate) fn postgres_commit_failure(message: impl Into<String>) -> Self {
+        Self {
+            safety_phase: CheckpointSafetyPhase::PreCommitFailureBeforePostgresCommit,
+            commit_state: CommitState::AfterCommitUnknown,
+            message: message.into(),
+        }
+    }
 }
 
 /// Result of a completed write session, used to build `WriteSummary`.
@@ -402,13 +410,7 @@ impl<'a> WriteSession<'a> {
             .execute("COMMIT", &[])
             .await
             .map_err(|e| {
-                CommitError::pre_commit_failure(
-                    pre_final_commit_failure_state(
-                        self.stats.checkpoint_count,
-                        self.stats.commits_completed,
-                    ),
-                    format!("COMMIT failed: {e}"),
-                )
+                CommitError::postgres_commit_failure(format!("COMMIT failed: {e}"))
             })?;
         self.stats.commits_completed += 1;
         let commit_secs = commit_start.elapsed().as_secs_f64();
@@ -570,5 +572,17 @@ mod tests {
             pre_final_commit_failure_state(0, 1),
             CommitState::AfterCommitUnknown
         );
+    }
+
+    #[test]
+    fn postgres_commit_failure_is_classified_after_commit_unknown() {
+        let err = CommitError::postgres_commit_failure("commit failed");
+
+        assert_eq!(
+            err.safety_phase,
+            CheckpointSafetyPhase::PreCommitFailureBeforePostgresCommit
+        );
+        assert_eq!(err.commit_state, CommitState::AfterCommitUnknown);
+        assert!(err.message.contains("commit failed"));
     }
 }
