@@ -38,6 +38,7 @@ async fn live_destination_state_is_fresh(
     target_schema: &str,
     table_name: &str,
     stream_schema: &rapidbyte_sdk::schema::StreamSchema,
+    handoff: &ContractHandoff,
 ) -> Result<bool, PluginError> {
     let Some(arrow_schema) = crate::contract::preflight_schema_from_stream_schema(stream_schema)
         .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
@@ -45,10 +46,24 @@ async fn live_destination_state_is_fresh(
         return Ok(true);
     };
 
-    Ok(crate::ddl::detect_schema_drift(client, target_schema, table_name, &arrow_schema)
+    let drift = crate::ddl::detect_schema_drift(client, target_schema, table_name, &arrow_schema)
         .await
-        .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
-        .is_none())
+        .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
+
+    let Some(drift) = drift else {
+        return Ok(true);
+    };
+
+    Ok(drift.removed_columns.is_empty()
+        && drift.nullability_changes.is_empty()
+        && drift
+            .new_columns
+            .iter()
+            .all(|(col_name, _)| handoff.ignored_columns.contains(col_name))
+        && drift
+            .type_changes
+            .iter()
+            .all(|(col_name, _, _)| handoff.type_null_columns.contains(col_name)))
 }
 
 async fn replace_staging_reuse_is_safe(
@@ -56,21 +71,29 @@ async fn replace_staging_reuse_is_safe(
     target_schema: &str,
     stream_name: &str,
     stream_schema: &rapidbyte_sdk::schema::StreamSchema,
+    handoff: &ContractHandoff,
 ) -> Result<bool, PluginError> {
-    if !live_destination_state_is_fresh(client, target_schema, &staging_table_name(stream_name), stream_schema).await? {
+    if !live_destination_state_is_fresh(
+        client,
+        target_schema,
+        &staging_table_name(stream_name),
+        stream_schema,
+        handoff,
+    )
+    .await?
+    {
         return Ok(false);
     }
 
     let staging_table = replace_staging_qualified_table(target_schema, stream_name);
     let row = match client
-        .query_one(&format!("SELECT COUNT(*) FROM {staging_table}"), &[])
+        .query_opt(&format!("SELECT 1 FROM {staging_table} LIMIT 1"), &[])
         .await
     {
         Ok(row) => row,
         Err(_) => return Ok(false),
     };
-    let count: i64 = row.get(0);
-    Ok(count == 0)
+    Ok(row.is_none())
 }
 
 fn existing_replace_contract(mut setup: crate::contract::WriteContract) -> crate::contract::WriteContract {
@@ -159,6 +182,7 @@ pub async fn write_stream(
                     &setup.target_schema,
                     &setup.stream_name,
                     &stream.schema,
+                    handoff,
                 )
                 .await?
             }
@@ -190,6 +214,7 @@ pub async fn write_stream(
                     &setup.target_schema,
                     &setup.stream_name,
                     &stream.schema,
+                    handoff,
                 )
                 .await?
             }
@@ -247,9 +272,19 @@ pub async fn write_stream(
         return Err(PluginError::transient_db("WRITE_FAILED", err).with_commit_state(commit_state));
     }
 
-    let result = session.commit().await.map_err(|e| {
-        PluginError::transient_db("COMMIT_FAILED", e.message).with_commit_state(e.commit_state)
-    })?;
+    let result = match session.commit().await {
+        Ok(result) => result,
+        Err(e) => {
+            ctx.log(
+                LogLevel::Warn,
+                crate::diagnostics::checkpoint_safety_message(e.commit_state),
+            );
+            return Err(
+                PluginError::transient_db("COMMIT_FAILED", e.message)
+                    .with_commit_state(e.commit_state),
+            );
+        }
+    };
 
     let perf = WritePerf {
         connect_secs,
@@ -470,6 +505,213 @@ mod tests {
         assert!(!reused.needs_schema_ensure);
     }
 
+    #[tokio::test]
+    async fn live_freshness_allows_ignored_new_columns() {
+        let schema = fresh_name("rb_writer_ignore");
+        let table = "users";
+        let client = connect().await;
+        create_table(&client, &schema, table).await;
+
+        let stream_schema = StreamSchema {
+            fields: vec![
+                SchemaField::new("id", "int64", false).with_primary_key(true),
+                SchemaField::new("name", "utf8", true),
+                SchemaField::new("age", "int64", true),
+            ],
+            primary_key: vec!["id".to_string()],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        };
+        let handoff = crate::ddl::ContractHandoff {
+            schema_signature: crate::contract::stream_schema_signature(&stream_schema)
+                .expect("signature")
+                .expect("schema signature"),
+            ignored_columns: vec!["age".to_string()],
+            type_null_columns: vec![],
+        };
+
+        let fresh = live_destination_state_is_fresh(&client, &schema, table, &stream_schema, &handoff)
+            .await
+            .expect("freshness");
+        assert!(fresh);
+
+        let contract = crate::contract::prepare_stream_once(
+            &schema,
+            table,
+            Some(WriteMode::Append),
+            &stream_schema,
+            true,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy::default(),
+            crate::contract::CheckpointConfig {
+                bytes: 0,
+                rows: 0,
+                seconds: 0,
+            },
+            None,
+            crate::config::LoadMethod::Copy,
+        )
+        .expect("contract");
+
+        let reused = reuse_contract_from_handoff(
+            &contract,
+            Some(handoff.schema_signature.as_str()),
+            Some(&handoff),
+            fresh,
+        );
+        assert!(reused.is_some());
+
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &[],
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn live_freshness_allows_type_null_columns() {
+        let schema = fresh_name("rb_writer_null");
+        let table = "users";
+        let client = connect().await;
+        create_table(&client, &schema, table).await;
+        client
+            .execute(
+                &format!(
+                    "ALTER TABLE {} ALTER COLUMN \"id\" TYPE integer USING \"id\"::integer",
+                    crate::decode::qualified_name(&schema, table)
+                ),
+                &[],
+            )
+            .await
+            .expect("set table type for compatibility test");
+
+        let stream_schema = StreamSchema {
+            fields: vec![
+                SchemaField::new("id", "utf8", false).with_primary_key(true),
+                SchemaField::new("name", "utf8", true),
+            ],
+            primary_key: vec!["id".to_string()],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        };
+        let handoff = crate::ddl::ContractHandoff {
+            schema_signature: crate::contract::stream_schema_signature(&stream_schema)
+                .expect("signature")
+                .expect("schema signature"),
+            ignored_columns: vec![],
+            type_null_columns: vec!["id".to_string()],
+        };
+
+        let fresh = live_destination_state_is_fresh(&client, &schema, table, &stream_schema, &handoff)
+            .await
+            .expect("freshness");
+        assert!(fresh);
+
+        let contract = crate::contract::prepare_stream_once(
+            &schema,
+            table,
+            Some(WriteMode::Append),
+            &stream_schema,
+            true,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy::default(),
+            crate::contract::CheckpointConfig {
+                bytes: 0,
+                rows: 0,
+                seconds: 0,
+            },
+            None,
+            crate::config::LoadMethod::Copy,
+        )
+        .expect("contract");
+
+        let reused = reuse_contract_from_handoff(
+            &contract,
+            Some(handoff.schema_signature.as_str()),
+            Some(&handoff),
+            fresh,
+        );
+        assert!(reused.is_some());
+
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &[],
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn replace_mode_reuses_empty_staging_table_when_policy_compatible() {
+        let schema = fresh_name("rb_replace_fresh");
+        let table = "users";
+        let client = connect().await;
+        create_table(&client, &schema, &staging_table_name(table)).await;
+
+        let stream_schema = StreamSchema {
+            fields: vec![
+                SchemaField::new("id", "int64", false).with_primary_key(true),
+                SchemaField::new("name", "utf8", true),
+                SchemaField::new("age", "int64", true),
+            ],
+            primary_key: vec!["id".to_string()],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        };
+        let handoff = crate::ddl::ContractHandoff {
+            schema_signature: crate::contract::stream_schema_signature(&stream_schema)
+                .expect("signature")
+                .expect("schema signature"),
+            ignored_columns: vec!["age".to_string()],
+            type_null_columns: vec![],
+        };
+
+        let safe = replace_staging_reuse_is_safe(
+            &client,
+            &schema,
+            table,
+            &stream_schema,
+            &handoff,
+        )
+        .await
+        .expect("replace freshness");
+        assert!(safe);
+
+        let contract = crate::contract::prepare_stream_once(
+            &schema,
+            table,
+            Some(WriteMode::Replace),
+            &stream_schema,
+            true,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy::default(),
+            crate::contract::CheckpointConfig {
+                bytes: 0,
+                rows: 0,
+                seconds: 0,
+            },
+            None,
+            crate::config::LoadMethod::Copy,
+        )
+        .expect("contract");
+
+        let reused = reuse_contract_from_handoff(
+            &contract,
+            Some(handoff.schema_signature.as_str()),
+            Some(&handoff),
+            safe,
+        );
+        assert!(reused.is_some());
+
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &[],
+            )
+            .await;
+    }
+
     #[test]
     fn reuse_contract_from_handoff_reuses_upsert_contract() {
         let contract = crate::contract::prepare_stream_once(
@@ -604,7 +846,7 @@ mod tests {
             .await
             .expect("out-of-band drift");
 
-        let fresh = live_destination_state_is_fresh(&client, &schema, table, &stream_schema)
+        let fresh = live_destination_state_is_fresh(&client, &schema, table, &stream_schema, &handoff)
             .await
             .expect("drift detection");
         assert!(!fresh);
@@ -659,7 +901,7 @@ mod tests {
         .await
         .expect("write staging handoff");
 
-        let safe = replace_staging_reuse_is_safe(&client, &schema, table, &stream_schema)
+        let safe = replace_staging_reuse_is_safe(&client, &schema, table, &stream_schema, &handoff)
             .await
             .expect("staging safety check");
         assert!(!safe);
