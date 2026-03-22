@@ -480,7 +480,6 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
         let wit_stream_ctx = dev_stream_context_to_wit(&stream_ctx);
         let run_request = source_bindings::rapidbyte::plugin::types::RunRequest {
             streams: vec![wit_stream_ctx],
-            dry_run: false,
         };
 
         let run_result = match iface.call_run(

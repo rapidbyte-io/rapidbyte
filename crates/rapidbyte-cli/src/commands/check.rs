@@ -23,7 +23,6 @@ pub async fn execute(
     registry_config: &rapidbyte_registry::RegistryConfig,
     secrets: &rapidbyte_secrets::SecretProviders,
     apply: bool,
-    dry_run: bool,
 ) -> Result<()> {
     let config = super::load_pipeline(pipeline_path, secrets).await?;
 
@@ -137,7 +136,7 @@ pub async fn execute(
 
     // --- Apply phase (optional) ---
     if apply {
-        run_apply_phase(&ctx, &config, verbosity, dry_run).await?;
+        run_apply_phase(&ctx, &config, verbosity).await?;
     }
 
     Ok(())
@@ -150,14 +149,12 @@ async fn run_apply_phase(
     ctx: &rapidbyte_engine::EngineContext,
     config: &rapidbyte_pipeline_config::PipelineConfig,
     verbosity: Verbosity,
-    dry_run: bool,
 ) -> Result<()> {
     use rapidbyte_engine::domain::ports::runner::ApplyParams;
     use rapidbyte_types::wire::PluginKind;
 
-    let mode = if dry_run { " (dry-run)" } else { "" };
     if verbosity != Verbosity::Quiet {
-        eprintln!("\n{} apply phase{}", style("=>").cyan().bold(), mode);
+        eprintln!("\n{} apply phase", style("=>").cyan().bold());
     }
 
     let source_resolved = ctx
@@ -212,7 +209,6 @@ async fn run_apply_phase(
             plugin_version: src_ver,
             config: config.source.config.clone(),
             streams: apply_streams.clone(),
-            dry_run,
             permissions: src_permissions,
             sandbox_overrides: src_overrides,
         })
@@ -233,7 +229,6 @@ async fn run_apply_phase(
             plugin_version: dst_ver,
             config: config.destination.config.clone(),
             streams: apply_streams,
-            dry_run,
             permissions: dst_permissions,
             sandbox_overrides: dst_overrides,
         })

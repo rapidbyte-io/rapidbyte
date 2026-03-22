@@ -289,7 +289,6 @@ impl PluginRunner for WasmPluginRunner {
         let plugin_version = params.plugin_version.clone();
         let config = params.config.clone();
         let streams = params.streams.clone();
-        let dry_run = params.dry_run;
         let permissions = params.permissions.clone();
         let sandbox_overrides = params.sandbox_overrides.clone();
 
@@ -301,7 +300,6 @@ impl PluginRunner for WasmPluginRunner {
                 &plugin_version,
                 &config,
                 &streams,
-                dry_run,
                 permissions.as_ref(),
                 sandbox_overrides.as_ref(),
             )
@@ -1961,11 +1959,10 @@ fn run_apply_impl(
     plugin_version: &str,
     config: &serde_json::Value,
     streams: &[StreamContext],
-    dry_run: bool,
     permissions: Option<&Permissions>,
     sandbox_overrides: Option<&SandboxOverrides>,
 ) -> anyhow::Result<ApplyReport> {
-    tracing::info!(plugin = plugin_id, version = plugin_version, kind = ?kind, dry_run, "Running apply");
+    tracing::info!(plugin = plugin_id, version = plugin_version, kind = ?kind, "Running apply");
 
     let state = noop_state_backend();
     let mut builder = ComponentHostState::builder()
