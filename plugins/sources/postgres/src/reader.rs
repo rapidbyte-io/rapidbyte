@@ -10,6 +10,9 @@ use pg_escape::quote_identifier;
 use tokio_postgres::Client;
 
 use rapidbyte_sdk::arrow::datatypes::Schema;
+use rapidbyte_sdk::context::Context;
+use rapidbyte_sdk::error::ErrorCategory;
+use rapidbyte_sdk::host_ffi;
 use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::stream::{DataErrorPolicy, PartitionStrategy};
 
@@ -83,7 +86,7 @@ async fn query_primary_key_columns(
 
 async fn resolve_partition_key(
     client: &Client,
-    ctx: &Context,
+    log: &Log,
     stream: &StreamContext,
     columns: &[Column],
 ) -> Result<Option<query::PartitionKey>, String> {
@@ -100,26 +103,20 @@ async fn resolve_partition_key(
         match primary_key_columns.as_slice() {
             [column] => (column.clone(), false),
             [] => {
-                ctx.log(
-                    LogLevel::Warn,
-                    &format!(
-                        "Partitioning disabled for stream '{}' shard {}/{}: no partition_key configured and no primary key discovered",
-                        stream.stream_name, partition_index, partition_count
-                    ),
-                );
+                log.warn(&format!(
+                    "Partitioning disabled for stream '{}' shard {}/{}: no partition_key configured and no primary key discovered",
+                    stream.stream_name, partition_index, partition_count
+                ));
                 return Ok(None);
             }
             columns => {
-                ctx.log(
-                    LogLevel::Warn,
-                    &format!(
-                        "Partitioning disabled for stream '{}' shard {}/{}: primary key is composite ({}) and no partition_key was configured",
-                        stream.stream_name,
-                        partition_index,
-                        partition_count,
-                        columns.join(", ")
-                    ),
-                );
+                log.warn(&format!(
+                    "Partitioning disabled for stream '{}' shard {}/{}: primary key is composite ({}) and no partition_key was configured",
+                    stream.stream_name,
+                    partition_index,
+                    partition_count,
+                    columns.join(", ")
+                ));
                 return Ok(None);
             }
         }
@@ -133,13 +130,10 @@ async fn resolve_partition_key(
             ));
         }
 
-        ctx.log(
-            LogLevel::Warn,
-            &format!(
-                "Partitioning disabled for stream '{}' shard {}/{}: discovered primary key '{}' was not found in table metadata",
-                stream.stream_name, partition_index, partition_count, partition_key_name
-            ),
-        );
+        log.warn(&format!(
+            "Partitioning disabled for stream '{}' shard {}/{}: discovered primary key '{}' was not found in table metadata",
+            stream.stream_name, partition_index, partition_count, partition_key_name
+        ));
         return Ok(None);
     };
 
@@ -161,17 +155,14 @@ async fn resolve_partition_key(
             ));
         }
 
-        ctx.log(
-            LogLevel::Warn,
-            &format!(
-                "Partitioning disabled for stream '{}' shard {}/{}: discovered primary key '{}' is non-numeric ({:?})",
-                stream.stream_name,
-                partition_index,
-                partition_count,
-                partition_key_name,
-                partition_column.arrow_type
-            ),
-        );
+        log.warn(&format!(
+            "Partitioning disabled for stream '{}' shard {}/{}: discovered primary key '{}' is non-numeric ({:?})",
+            stream.stream_name,
+            partition_index,
+            partition_count,
+            partition_key_name,
+            partition_column.arrow_type
+        ));
         return Ok(None);
     }
 
@@ -222,7 +213,9 @@ fn emit_accumulated_batch(
     batch_builder: &mut encode::RecordBatchBuilder,
     columns: &[Column],
     schema: &Arc<Schema>,
-    ctx: &Context,
+    stream_index: u32,
+    emit: &Emit,
+    metrics: &Metrics,
     state: &mut EmitState,
     estimated_bytes: &mut usize,
 ) -> Result<(), String> {
@@ -243,9 +236,10 @@ fn emit_accumulated_batch(
         state.total_bytes += batch.get_array_memory_size() as u64;
         state.batches_emitted += 1;
 
-        ctx.emit_batch(&batch)
+        emit
+            .batch_for_stream(stream_index, &batch)
             .map_err(|e| format!("emit_batch failed: {}", e.message))?;
-        emit_batch_counters(ctx, state);
+        emit_batch_counters(metrics, state);
     }
 
     *estimated_bytes = BATCH_OVERHEAD_BYTES;
@@ -256,21 +250,30 @@ fn emit_accumulated_batch(
 #[allow(clippy::too_many_lines)]
 pub async fn read_stream(
     client: &Client,
-    ctx: &Context,
-    stream: &StreamContext,
+    input: ReadInput<'_>,
     connect_secs: f64,
 ) -> Result<ReadSummary, String> {
+    let ReadInput {
+        stream,
+        emit,
+        cancel,
+        state: _state,
+        checkpoints,
+        metrics,
+        log,
+        ..
+    } = input;
     let source_table_name = stream.source_stream_or_stream_name();
-    ctx.log(
-        LogLevel::Info,
-        &format!("Reading stream: {}", stream.stream_name),
-    );
+    log.info(&format!("Reading stream: {}", stream.stream_name));
+    cancel
+        .check()
+        .map_err(|e| format!("read cancelled: {}", e.message))?;
 
     let query_start = Instant::now();
 
     // ── 1. Schema resolution ──────────────────────────────────────────
     let all_columns = crate::discovery::query_table_columns(client, source_table_name).await?;
-    let partition_key = resolve_partition_key(client, ctx, stream, &all_columns).await?;
+    let partition_key = resolve_partition_key(client, &log, &stream, &all_columns).await?;
 
     // ── 2. Projection pushdown ────────────────────────────────────────
     let columns: Vec<Column> = match &stream.selected_columns {
@@ -329,7 +332,7 @@ pub async fn read_stream(
         .await
         .map_err(|e| format!("BEGIN failed: {e}"))?;
 
-    let partition_range_bounds = if effective_partition_strategy(stream) == PartitionStrategy::Range
+    let partition_range_bounds = if effective_partition_strategy(&stream) == PartitionStrategy::Range
     {
         match (stream.partition_count, stream.partition_index, partition_key.as_ref()) {
             (Some(count), Some(index), Some(partition_key)) => {
@@ -338,13 +341,10 @@ pub async fn read_stream(
                 {
                     Ok(bounds) => bounds,
                     Err(e) => {
-                        ctx.log(
-                            LogLevel::Warn,
-                            &format!(
-                                "Range partitioning disabled for stream '{}': {e}; falling back to modulo",
-                                stream.stream_name
-                            ),
-                        );
+                        log.warn(&format!(
+                            "Range partitioning disabled for stream '{}': {e}; falling back to modulo",
+                            stream.stream_name
+                        ));
                         None
                     }
                 }
@@ -355,9 +355,10 @@ pub async fn read_stream(
         None
     };
 
+    let query_ctx = Context::new("source-postgres", stream.stream_name.clone());
     let cursor_query = query::build_base_query(
-        ctx,
-        stream,
+        &query_ctx,
+        &stream,
         &columns,
         partition_range_bounds,
         partition_key.as_ref(),
@@ -426,6 +427,9 @@ pub async fn read_stream(
     // ── 6. Fetch loop ─────────────────────────────────────────────────
     let fetch_start = Instant::now();
     loop {
+        cancel
+            .check()
+            .map_err(|e| format!("read cancelled: {}", e.message))?;
         let rows = match client.query(&fetch_query, &[]).await {
             Ok(r) => r,
             Err(e) => {
@@ -452,27 +456,22 @@ pub async fn read_stream(
                                 break;
                             }
                             DataErrorPolicy::Skip => {
-                                ctx.log(
-                                    LogLevel::Warn,
-                                    &format!(
-                                        "Skipping row with source decode error in stream '{}': {}",
-                                        stream.stream_name, invalid.message
-                                    ),
-                                );
+                                log.warn(&format!(
+                                    "Skipping row with source decode error in stream '{}': {}",
+                                    stream.stream_name, invalid.message
+                                ));
                                 continue;
                             }
                             DataErrorPolicy::Dlq => {
-                                ctx.log(
-                                    LogLevel::Warn,
-                                    &format!(
-                                        "Routing row with source decode error to DLQ in stream '{}': {}",
-                                        stream.stream_name, invalid.message
-                                    ),
-                                );
-                                ctx.emit_dlq_record(
+                                log.warn(&format!(
+                                    "Routing row with source decode error to DLQ in stream '{}': {}",
+                                    stream.stream_name, invalid.message
+                                ));
+                                host_ffi::emit_dlq_record(
+                                    &stream.stream_name,
                                     &invalid.record_json,
                                     &invalid.message,
-                                    rapidbyte_sdk::error::ErrorCategory::Data,
+                                    ErrorCategory::Data,
                                 )
                                 .map_err(|e| format!("emit_dlq_record failed: {}", e.message))?;
                                 continue;
@@ -497,24 +496,22 @@ pub async fn read_stream(
                         }
                         DataErrorPolicy::Skip => {
                             records_skipped += 1;
-                            ctx.log(
-                                LogLevel::Warn,
-                                &format!(
-                                    "Skipping oversized row in stream '{}': {} bytes > max_record_bytes {}",
-                                    stream.stream_name, actual_row_bytes, max_record_bytes
-                                ),
-                            );
+                            log.warn(&format!(
+                                "Skipping oversized row in stream '{}': {} bytes > max_record_bytes {}",
+                                stream.stream_name, actual_row_bytes, max_record_bytes
+                            ));
                             continue;
                         }
                         DataErrorPolicy::Dlq => {
                             records_skipped += 1;
-                            ctx.emit_dlq_record(
+                            host_ffi::emit_dlq_record(
+                                &stream.stream_name,
                                 &encode::row_to_json(&row, &columns),
                                 &format!(
                                     "row exceeds max_record_bytes: {} bytes > {}",
                                     actual_row_bytes, max_record_bytes
                                 ),
-                                rapidbyte_sdk::error::ErrorCategory::Data,
+                                ErrorCategory::Data,
                             )
                             .map_err(|e| format!("emit_dlq_record failed: {}", e.message))?;
                             continue;
@@ -528,7 +525,9 @@ pub async fn read_stream(
                         &mut batch_builder,
                         &columns,
                         &arrow_schema,
-                        ctx,
+                        stream.stream_index,
+                        &emit,
+                        &metrics,
                         &mut state,
                         &mut estimated_bytes,
                     ) {
@@ -564,7 +563,9 @@ pub async fn read_stream(
                 &mut batch_builder,
                 &columns,
                 &arrow_schema,
-                ctx,
+                stream.stream_index,
+                &emit,
+                &metrics,
                 &mut state,
                 &mut estimated_bytes,
             ) {
@@ -580,13 +581,10 @@ pub async fn read_stream(
         // Stop early if max_records limit reached
         if let Some(max) = stream.limits.max_records {
             if state.total_records >= max {
-                ctx.log(
-                    LogLevel::Info,
-                    &format!(
-                        "Reached max_records limit ({}) for stream '{}'",
-                        max, stream.stream_name
-                    ),
-                );
+                log.info(&format!(
+                    "Reached max_records limit ({}) for stream '{}'",
+                    max, stream.stream_name
+                ));
                 break;
             }
         }
@@ -597,13 +595,10 @@ pub async fn read_stream(
     // ── 7. Cleanup ────────────────────────────────────────────────────
     let close_query = format!("CLOSE {CURSOR_NAME}");
     if let Err(e) = client.execute(&close_query, &[]).await {
-        ctx.log(
-            LogLevel::Warn,
-            &format!(
-                "Warning: cursor CLOSE failed for stream '{}': {} (non-fatal, transaction cleanup will close it)",
-                stream.stream_name, e
-            ),
-        );
+        log.warn(&format!(
+            "Warning: cursor CLOSE failed for stream '{}': {} (non-fatal, transaction cleanup will close it)",
+            stream.stream_name, e
+        ));
     }
     if loop_error.is_some() {
         let _ = client.execute("ROLLBACK", &[]).await;
@@ -632,15 +627,13 @@ pub async fn read_stream(
                     _ => format!("{v:?}"),
                 })
                 .unwrap_or_default();
-            ctx.checkpoint(&cp)
+            checkpoints
+                .checkpoint("source-postgres", &stream.stream_name, &cp)
                 .map_err(|e| format!("Source checkpoint failed: {}", e.message))?;
-            ctx.log(
-                LogLevel::Info,
-                &format!(
-                    "Source checkpoint: stream={} cursor_field={} cursor_value={}",
-                    stream.stream_name, cursor_field, cursor_value
-                ),
-            );
+            log.info(&format!(
+                "Source checkpoint: stream={} cursor_field={} cursor_value={}",
+                stream.stream_name, cursor_field, cursor_value
+            ));
             1u64
         } else {
             0u64
@@ -650,13 +643,10 @@ pub async fn read_stream(
     };
 
     // ── 9. Summary ────────────────────────────────────────────────────
-    ctx.log(
-        LogLevel::Info,
-        &format!(
-            "Stream '{}' complete: {} records, {} bytes, {} batches",
-            stream.stream_name, state.total_records, state.total_bytes, state.batches_emitted
-        ),
-    );
+    log.info(&format!(
+        "Stream '{}' complete: {} records, {} bytes, {} batches",
+        stream.stream_name, state.total_records, state.total_bytes, state.batches_emitted
+    ));
 
     // Safety: nanosecond timing precision loss beyond 52 bits is acceptable for metrics.
     #[allow(clippy::cast_precision_loss)]
@@ -668,7 +658,7 @@ pub async fn read_stream(
         fetch_secs,
         arrow_encode_secs,
     };
-    emit_source_timings(ctx, &perf);
+    emit_source_timings(&metrics, &perf);
 
     Ok(ReadSummary {
         records_read: state.total_records,
