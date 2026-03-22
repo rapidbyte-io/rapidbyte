@@ -27,7 +27,7 @@ impl TransformValidate {
 impl Transform for TransformValidate {
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<Self, PluginError> {
+    async fn init(config: Self::Config, _input: InitInput<'_>) -> Result<Self, PluginError> {
         config.compile().map_err(|message| {
             PluginError::config("VALIDATE_CONFIG", format!("Invalid validation config: {message}"))
         })?;
@@ -39,8 +39,7 @@ impl Transform for TransformValidate {
 
     async fn validate(
         &self,
-        _ctx: &Context,
-        _upstream: Option<&StreamSchema>,
+        _input: ValidateInput<'_>,
     ) -> Result<ValidationReport, PluginError> {
         match self.compiled_config() {
             Ok(_) => Ok(ValidationReport::success(
@@ -54,13 +53,12 @@ impl Transform for TransformValidate {
 
     async fn transform(
         &self,
-        ctx: &Context,
-        stream: StreamContext,
+        input: TransformInput<'_>,
     ) -> Result<TransformSummary, PluginError> {
         let compiled = self.compiled_config().map_err(|message| {
             PluginError::config("VALIDATE_CONFIG", format!("Invalid validation config: {message}"))
         })?;
-        transform::run(ctx, &stream, compiled).await
+        transform::run(input, compiled).await
     }
 }
 
@@ -77,13 +75,13 @@ mod tests {
 
     #[tokio::test]
     async fn init_rejects_config_that_requires_validation() {
-        let result = TransformValidate::init(invalid_regex_config()).await;
+        let result = TransformValidate::init(invalid_regex_config(), InitInput::new()).await;
         assert!(result.is_err(), "init should reject invalid config");
     }
 
     #[tokio::test]
     async fn invalid_config_reports_validation_failure() {
-        let result = TransformValidate::init(invalid_regex_config()).await;
+        let result = TransformValidate::init(invalid_regex_config(), InitInput::new()).await;
         match result {
             Ok(_) => panic!("invalid config should fail init"),
             Err(err) => {

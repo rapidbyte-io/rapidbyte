@@ -44,12 +44,12 @@ pub struct TestSource {
 impl Source for TestSource {
     type Config = Config;
 
-    async fn init(config: Self::Config) -> Result<Self, PluginError> {
+    async fn init(config: Self::Config, _input: InitInput<'_>) -> Result<Self, PluginError> {
         Ok(Self { config })
     }
 
-    async fn discover(&self, ctx: &Context) -> Result<Vec<DiscoveredStream>, PluginError> {
-        ctx.log(LogLevel::Info, "test-source: discover");
+    async fn discover(&self, input: DiscoverInput<'_>) -> Result<Vec<DiscoveredStream>, PluginError> {
+        input.log.info("test-source: discover");
         Ok(vec![DiscoveredStream {
             name: "test-stream".to_string(),
             schema: StreamSchema {
@@ -71,16 +71,14 @@ impl Source for TestSource {
 
     async fn validate(
         &self,
-        _ctx: &Context,
-        _upstream: Option<&StreamSchema>,
+        _input: ValidateInput<'_>,
     ) -> Result<ValidationReport, PluginError> {
         Ok(ValidationReport::success("Test source config is valid"))
     }
 
     async fn read(
         &self,
-        ctx: &Context,
-        _stream: StreamContext,
+        input: ReadInput<'_>,
     ) -> Result<ReadSummary, PluginError> {
         if self.config.should_fail {
             return Err(PluginError::internal(
@@ -89,10 +87,9 @@ impl Source for TestSource {
             ));
         }
 
-        ctx.log(
-            LogLevel::Info,
-            &format!("test-source: emitting {} rows", self.config.row_count),
-        );
+        input
+            .log
+            .info(&format!("test-source: emitting {} rows", self.config.row_count));
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("id", DataType::Int32, false),
@@ -125,7 +122,7 @@ impl Source for TestSource {
             })?;
 
             bytes_read += batch.get_array_memory_size() as u64;
-            ctx.emit_batch(&batch)?;
+            input.emit.batch_for_stream(input.stream.stream_index, &batch)?;
 
             total_emitted += batch_rows as u64;
             batches_emitted += 1;

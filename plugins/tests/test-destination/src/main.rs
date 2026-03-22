@@ -4,7 +4,6 @@
 //! Supports `should_fail` to simulate write failures.
 
 use rapidbyte_sdk::prelude::*;
-use rapidbyte_sdk::schema::StreamSchema;
 use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;
 
@@ -23,14 +22,13 @@ pub struct TestDestination {
 impl Destination for TestDestination {
     type Config = Config;
 
-    async fn init(config: Self::Config) -> Result<Self, PluginError> {
+    async fn init(config: Self::Config, _input: InitInput<'_>) -> Result<Self, PluginError> {
         Ok(Self { config })
     }
 
     async fn validate(
         &self,
-        _ctx: &Context,
-        _upstream: Option<&StreamSchema>,
+        _input: ValidateInput<'_>,
     ) -> Result<ValidationReport, PluginError> {
         Ok(ValidationReport::success(
             "Test destination config is valid",
@@ -39,8 +37,7 @@ impl Destination for TestDestination {
 
     async fn write(
         &self,
-        ctx: &Context,
-        stream: StreamContext,
+        input: WriteInput<'_>,
     ) -> Result<WriteSummary, PluginError> {
         if self.config.should_fail {
             return Err(PluginError::internal(
@@ -49,13 +46,13 @@ impl Destination for TestDestination {
             ));
         }
 
-        ctx.log(LogLevel::Info, "test-destination: consuming batches");
+        rapidbyte_sdk::host_ffi::log(LogLevel::Info as i32, "test-destination: consuming batches");
 
         let mut records_written: u64 = 0;
         let mut bytes_written: u64 = 0;
         let mut batches_written: u64 = 0;
 
-        while let Some((_schema, batches)) = ctx.next_batch(stream.limits.max_batch_bytes)? {
+        while let Some((_schema, batches)) = input.reader.next_batch(input.stream.limits.max_batch_bytes)? {
             for batch in &batches {
                 records_written += batch.num_rows() as u64;
                 bytes_written += batch.get_array_memory_size() as u64;
@@ -63,8 +60,8 @@ impl Destination for TestDestination {
             }
         }
 
-        ctx.log(
-            LogLevel::Info,
+        rapidbyte_sdk::host_ffi::log(
+            LogLevel::Info as i32,
             &format!(
                 "test-destination: wrote {} records in {} batches",
                 records_written, batches_written

@@ -238,12 +238,18 @@ async fn connect_source(
 
             let config_json = serde_json::to_string(&config)?;
             let session = iface
-                .call_open(&mut store, &config_json)?
+                .call_open(
+                    &mut store,
+                    &source_bindings::rapidbyte::plugin::types::OpenInput { config_json },
+                )?
                 .map_err(source_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
 
             let wit_streams = iface
-                .call_discover(&mut store, session)?
+                .call_discover(
+                    &mut store,
+                    source_bindings::rapidbyte::plugin::types::DiscoverInput { session },
+                )?
                 .map_err(source_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!("Discover failed: {e}"))?;
 
@@ -307,7 +313,10 @@ async fn connect_source(
                 })
                 .collect();
 
-            if let Err(err) = iface.call_close(&mut store, session)? {
+            if let Err(err) = iface.call_close(
+                &mut store,
+                source_bindings::rapidbyte::plugin::types::CloseInput { session },
+            )? {
                 tracing::warn!(
                     "Source close failed after discover: {}",
                     source_error_to_sdk(err)
@@ -453,7 +462,10 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
 
         let config_json = serde_json::to_string(&config)?;
         let session = iface
-            .call_open(&mut store, &config_json)?
+            .call_open(
+                &mut store,
+                &source_bindings::rapidbyte::plugin::types::OpenInput { config_json },
+            )?
             .map_err(source_error_to_sdk)
             .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
 
@@ -463,14 +475,26 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
             dry_run: false,
         };
 
-        let run_result = iface.call_run(&mut store, session, &run_request)?;
+        let run_result = iface.call_run(
+            &mut store,
+            &source_bindings::rapidbyte::plugin::types::RunInput {
+                session,
+                request: run_request,
+            },
+        )?;
         if let Err(err) = &run_result {
-            let _ = iface.call_close(&mut store, session);
+            let _ = iface.call_close(
+                &mut store,
+                source_bindings::rapidbyte::plugin::types::CloseInput { session },
+            );
             let sdk_err = source_error_to_sdk(err.clone());
             anyhow::bail!("Source run failed: {sdk_err}");
         }
 
-        if let Err(err) = iface.call_close(&mut store, session)? {
+        if let Err(err) = iface.call_close(
+            &mut store,
+            source_bindings::rapidbyte::plugin::types::CloseInput { session },
+        )? {
             tracing::warn!("Source close failed: {}", source_error_to_sdk(err));
         }
 
