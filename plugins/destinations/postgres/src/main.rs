@@ -11,6 +11,7 @@ mod ddl;
 mod decode;
 mod insert;
 mod metrics;
+mod diagnostics;
 mod pg_error;
 mod prerequisites;
 mod session;

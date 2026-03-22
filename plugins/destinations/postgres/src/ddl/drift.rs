@@ -12,6 +12,46 @@ use rapidbyte_sdk::stream::{
 
 use crate::types::{arrow_to_pg_type, pg_types_compatible};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DriftPolicyOutcome {
+    Add,
+    Ignore,
+    Fail,
+    Coerce,
+    Null,
+    Allow,
+}
+
+pub(crate) fn new_column_outcome(policy: ColumnPolicy) -> DriftPolicyOutcome {
+    match policy {
+        ColumnPolicy::Add => DriftPolicyOutcome::Add,
+        ColumnPolicy::Ignore => DriftPolicyOutcome::Ignore,
+        ColumnPolicy::Fail => DriftPolicyOutcome::Fail,
+    }
+}
+
+pub(crate) fn removed_column_outcome(policy: ColumnPolicy) -> DriftPolicyOutcome {
+    match policy {
+        ColumnPolicy::Fail => DriftPolicyOutcome::Fail,
+        ColumnPolicy::Add | ColumnPolicy::Ignore => DriftPolicyOutcome::Ignore,
+    }
+}
+
+pub(crate) fn type_change_outcome(policy: TypeChangePolicy) -> DriftPolicyOutcome {
+    match policy {
+        TypeChangePolicy::Coerce => DriftPolicyOutcome::Coerce,
+        TypeChangePolicy::Null => DriftPolicyOutcome::Null,
+        TypeChangePolicy::Fail => DriftPolicyOutcome::Fail,
+    }
+}
+
+pub(crate) fn nullability_change_outcome(policy: NullabilityPolicy) -> DriftPolicyOutcome {
+    match policy {
+        NullabilityPolicy::Allow => DriftPolicyOutcome::Allow,
+        NullabilityPolicy::Fail => DriftPolicyOutcome::Fail,
+    }
+}
+
 /// Detected differences between an incoming Arrow schema and an existing PG table.
 #[derive(Debug, Default)]
 pub(crate) struct SchemaDrift {
@@ -318,5 +358,38 @@ mod tests {
         assert_eq!(drift.removed_columns.len(), 1);
         assert_eq!(drift.type_changes.len(), 1);
         assert_eq!(drift.nullability_changes.len(), 1);
+    }
+
+    #[test]
+    fn new_column_policy_outcomes_are_classified() {
+        assert_eq!(new_column_outcome(ColumnPolicy::Add), DriftPolicyOutcome::Add);
+        assert_eq!(new_column_outcome(ColumnPolicy::Ignore), DriftPolicyOutcome::Ignore);
+        assert_eq!(new_column_outcome(ColumnPolicy::Fail), DriftPolicyOutcome::Fail);
+    }
+
+    #[test]
+    fn removed_column_policy_outcomes_are_classified() {
+        assert_eq!(removed_column_outcome(ColumnPolicy::Add), DriftPolicyOutcome::Ignore);
+        assert_eq!(removed_column_outcome(ColumnPolicy::Ignore), DriftPolicyOutcome::Ignore);
+        assert_eq!(removed_column_outcome(ColumnPolicy::Fail), DriftPolicyOutcome::Fail);
+    }
+
+    #[test]
+    fn type_change_policy_outcomes_are_classified() {
+        assert_eq!(type_change_outcome(TypeChangePolicy::Coerce), DriftPolicyOutcome::Coerce);
+        assert_eq!(type_change_outcome(TypeChangePolicy::Null), DriftPolicyOutcome::Null);
+        assert_eq!(type_change_outcome(TypeChangePolicy::Fail), DriftPolicyOutcome::Fail);
+    }
+
+    #[test]
+    fn nullability_policy_outcomes_are_classified() {
+        assert_eq!(
+            nullability_change_outcome(NullabilityPolicy::Allow),
+            DriftPolicyOutcome::Allow
+        );
+        assert_eq!(
+            nullability_change_outcome(NullabilityPolicy::Fail),
+            DriftPolicyOutcome::Fail
+        );
     }
 }

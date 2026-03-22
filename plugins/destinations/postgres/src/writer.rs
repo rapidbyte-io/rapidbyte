@@ -49,6 +49,25 @@ fn contract_from_handoff(
     mark_contract_prepared(setup)
 }
 
+pub(crate) fn reuse_contract_from_handoff(
+    setup: &crate::contract::WriteContract,
+    current_signature: Option<&str>,
+    handoff: Option<&ContractHandoff>,
+) -> Option<crate::contract::WriteContract> {
+    let handoff = handoff?;
+    if current_signature != Some(handoff.schema_signature.as_str()) {
+        return None;
+    }
+
+    let setup = setup.clone();
+
+    Some(if setup.is_replace {
+        contract_from_handoff(existing_replace_contract(setup), handoff)
+    } else {
+        contract_from_handoff(setup, handoff)
+    })
+}
+
 /// Entry point for writing a single stream.
 pub async fn write_stream(
     config: &crate::config::Config,
@@ -82,18 +101,17 @@ pub async fn write_stream(
         .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
 
     let setup = if setup.is_replace {
-        let staging_table = replace_staging_qualified_table(&setup.target_schema, &setup.stream_name);
+        let staging_table =
+            replace_staging_qualified_table(&setup.target_schema, &setup.stream_name);
         let handoff = read_contract_handoff(&client, &staging_table)
             .await
             .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
-        if let Some(handoff) = handoff {
-            if current_signature.as_deref() == Some(handoff.schema_signature.as_str()) {
-                contract_from_handoff(existing_replace_contract(setup), &handoff)
-            } else {
-                prepare_stream_contract(ctx, &client, stream, setup)
-                    .await
-                    .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
-            }
+        if let Some(reused) = reuse_contract_from_handoff(
+            &setup,
+            current_signature.as_deref(),
+            handoff.as_ref(),
+        ) {
+            reused
         } else {
             prepare_stream_contract(ctx, &client, stream, setup)
                 .await
@@ -103,14 +121,12 @@ pub async fn write_stream(
         let handoff = read_contract_handoff(&client, &setup.qualified_table)
             .await
             .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
-        if let Some(handoff) = handoff {
-            if current_signature.as_deref() == Some(handoff.schema_signature.as_str()) {
-                contract_from_handoff(setup, &handoff)
-            } else {
-                prepare_stream_contract(ctx, &client, stream, setup)
-                    .await
-                    .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
-            }
+        if let Some(reused) = reuse_contract_from_handoff(
+            &setup,
+            current_signature.as_deref(),
+            handoff.as_ref(),
+        ) {
+            reused
         } else {
             prepare_stream_contract(ctx, &client, stream, setup)
                 .await
@@ -147,6 +163,10 @@ pub async fn write_stream(
 
     if let Some(err) = loop_error {
         let commit_state = session.loop_error_commit_state();
+        ctx.log(
+            LogLevel::Warn,
+            crate::diagnostics::checkpoint_safety_message(commit_state),
+        );
         session.rollback().await;
         return Err(PluginError::transient_db("WRITE_FAILED", err).with_commit_state(commit_state));
     }
@@ -177,7 +197,7 @@ pub async fn write_stream(
 mod tests {
     use super::{
         contract_from_handoff, existing_replace_contract, replace_staging_qualified_table,
-        resolve_copy_flush_bytes, staging_table_name,
+        resolve_copy_flush_bytes, reuse_contract_from_handoff, staging_table_name,
     };
     use crate::session::COPY_FLUSH_MAX;
     use crate::WriteMode;
@@ -276,5 +296,101 @@ mod tests {
         assert!(prepared.ignored_columns.contains("legacy"));
         assert!(prepared.type_null_columns.contains("coerce_me"));
         assert!(!prepared.needs_schema_ensure);
+    }
+
+    #[test]
+    fn reuse_contract_from_handoff_reuses_append_contract() {
+        let contract = crate::contract::prepare_stream_once(
+            "public",
+            "users",
+            Some(WriteMode::Append),
+            &StreamSchema::default(),
+            true,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy::default(),
+            crate::contract::CheckpointConfig {
+                bytes: 0,
+                rows: 0,
+                seconds: 0,
+            },
+            None,
+            crate::config::LoadMethod::Copy,
+        )
+        .expect("contract");
+        let handoff = crate::ddl::ContractHandoff {
+            schema_signature: "sig".to_string(),
+            ignored_columns: vec!["legacy".to_string()],
+            type_null_columns: vec!["coerce_me".to_string()],
+        };
+
+        let reused = reuse_contract_from_handoff(&contract, Some("sig"), Some(&handoff))
+            .expect("handoff should be reused");
+        assert_eq!(reused.effective_write_mode, Some(WriteMode::Append));
+        assert!(reused.ignored_columns.contains("legacy"));
+        assert!(reused.type_null_columns.contains("coerce_me"));
+        assert!(!reused.needs_schema_ensure);
+    }
+
+    #[test]
+    fn reuse_contract_from_handoff_reuses_upsert_contract() {
+        let contract = crate::contract::prepare_stream_once(
+            "public",
+            "users",
+            Some(WriteMode::Upsert {
+                primary_key: vec!["id".to_string()],
+            }),
+            &StreamSchema::default(),
+            true,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy::default(),
+            crate::contract::CheckpointConfig {
+                bytes: 0,
+                rows: 0,
+                seconds: 0,
+            },
+            None,
+            crate::config::LoadMethod::Insert,
+        )
+        .expect("contract");
+        let handoff = crate::ddl::ContractHandoff {
+            schema_signature: "sig".to_string(),
+            ignored_columns: vec![],
+            type_null_columns: vec![],
+        };
+
+        let reused = reuse_contract_from_handoff(&contract, Some("sig"), Some(&handoff))
+            .expect("handoff should be reused");
+        assert_eq!(
+            reused.effective_write_mode,
+            Some(WriteMode::Upsert {
+                primary_key: vec!["id".to_string()],
+            })
+        );
+        assert!(!reused.needs_schema_ensure);
+    }
+
+    #[test]
+    fn reuse_contract_from_handoff_rejects_schema_signature_drift() {
+        let contract = crate::contract::prepare_stream_once(
+            "public",
+            "users",
+            Some(WriteMode::Append),
+            &StreamSchema::default(),
+            true,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy::default(),
+            crate::contract::CheckpointConfig {
+                bytes: 0,
+                rows: 0,
+                seconds: 0,
+            },
+            None,
+            crate::config::LoadMethod::Copy,
+        )
+        .expect("contract");
+        let handoff = crate::ddl::ContractHandoff {
+            schema_signature: "sig".to_string(),
+            ignored_columns: vec![],
+            type_null_columns: vec![],
+        };
+
+        assert!(reuse_contract_from_handoff(&contract, Some("different"), Some(&handoff)).is_none());
     }
 }

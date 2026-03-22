@@ -150,9 +150,9 @@ pub(crate) async fn prepare_stream_contract(
                 if w > 0 {
                     ctx.log(
                         LogLevel::Warn,
-                        &format!(
-                            "dest-postgres: ignoring stale watermark for stream '{}' ({w} committed records); row-count resume is disabled until checkpoint-safe recovery lands",
-                            contract.stream_name
+                        &crate::diagnostics::stale_watermark_resume_warning(
+                            &contract.stream_name,
+                            w,
                         ),
                     );
                     let _ = crate::watermark::clear(

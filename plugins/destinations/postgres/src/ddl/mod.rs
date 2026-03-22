@@ -183,12 +183,14 @@ impl SchemaState {
                     ctx.log(
                         LogLevel::Info,
                         &format!(
-                            "dest-postgres: schema drift detected for {}: {} new, {} removed, {} type changes, {} nullability changes",
-                            qualified_table,
-                            drift.new_columns.len(),
-                            drift.removed_columns.len(),
-                            drift.type_changes.len(),
-                            drift.nullability_changes.len()
+                            "{} for {}",
+                            crate::diagnostics::schema_drift_summary(
+                                drift.new_columns.len(),
+                                drift.removed_columns.len(),
+                                drift.type_changes.len(),
+                                drift.nullability_changes.len()
+                            ),
+                            qualified_table
                         ),
                     );
                     self.apply_policy(ctx, client, &qualified_table, &drift, policy)
