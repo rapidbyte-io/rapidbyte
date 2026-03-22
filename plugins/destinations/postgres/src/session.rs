@@ -56,6 +56,36 @@ pub(crate) fn loop_error_commit_state_with_commits(
     }
 }
 
+/// Error returned when the session fails during commit orchestration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CommitError {
+    pub commit_state: CommitState,
+    pub message: String,
+}
+
+impl CommitError {
+    pub(crate) fn before_commit(message: impl Into<String>) -> Self {
+        Self {
+            commit_state: CommitState::BeforeCommit,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn after_commit_unknown(message: impl Into<String>) -> Self {
+        Self {
+            commit_state: CommitState::AfterCommitUnknown,
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn after_commit_confirmed(message: impl Into<String>) -> Self {
+        Self {
+            commit_state: CommitState::AfterCommitConfirmed,
+            message: message.into(),
+        }
+    }
+}
+
 /// Result of a completed write session, used to build `WriteSummary`.
 pub struct SessionResult {
     pub total_rows: u64,
@@ -331,7 +361,7 @@ impl<'a> WriteSession<'a> {
         Ok(())
     }
 
-    pub async fn commit(mut self) -> Result<SessionResult, String> {
+    pub async fn commit(mut self) -> Result<SessionResult, CommitError> {
         let flush_secs = self.flush_start.elapsed().as_secs_f64();
 
         if self.use_watermarks {
@@ -343,26 +373,29 @@ impl<'a> WriteSession<'a> {
                 self.stats.total_bytes,
             )
             .await
-            .map_err(|e| format!("Watermark update failed: {e}"))?;
+            .map_err(|e| CommitError::before_commit(format!("Watermark update failed: {e}")))?;
         }
 
         let commit_start = Instant::now();
         self.client
             .execute("COMMIT", &[])
             .await
-            .map_err(|e| format!("COMMIT failed: {e}"))?;
+            .map_err(|e| CommitError::after_commit_unknown(format!("COMMIT failed: {e}")))?;
         self.stats.commits_completed += 1;
         let commit_secs = commit_start.elapsed().as_secs_f64();
 
         if self.is_replace {
             swap_staging_table(self.ctx, self.client, self.target_schema, &self.stream_name)
                 .await
-                .map_err(|e| format!("{e:#}"))?;
+                .map_err(|e| CommitError::after_commit_confirmed(format!("{e:#}")))?;
         }
 
         self.ctx
             .checkpoint(&self.build_checkpoint())
-            .map_err(|e| format!("Destination checkpoint failed: {}", e.message))?;
+            .map_err(|e| CommitError::after_commit_confirmed(format!(
+                "Destination checkpoint failed: {}",
+                e.message
+            )))?;
         self.stats.checkpoint_count += 1;
 
         if self.use_watermarks {
@@ -451,5 +484,26 @@ mod tests {
             loop_error_commit_state_with_commits(0, 1),
             CommitState::AfterCommitUnknown,
         );
+    }
+
+    #[test]
+    fn commit_error_before_commit_is_classified_before_commit() {
+        let err = CommitError::before_commit("watermark failed");
+        assert_eq!(err.commit_state, CommitState::BeforeCommit);
+        assert!(err.message.contains("watermark failed"));
+    }
+
+    #[test]
+    fn commit_error_after_commit_unknown_is_classified_after_commit_unknown() {
+        let err = CommitError::after_commit_unknown("commit failed");
+        assert_eq!(err.commit_state, CommitState::AfterCommitUnknown);
+        assert!(err.message.contains("commit failed"));
+    }
+
+    #[test]
+    fn commit_error_after_commit_confirmed_is_classified_after_commit_confirmed() {
+        let err = CommitError::after_commit_confirmed("checkpoint failed");
+        assert_eq!(err.commit_state, CommitState::AfterCommitConfirmed);
+        assert!(err.message.contains("checkpoint failed"));
     }
 }

@@ -33,6 +33,24 @@ fn replace_staging_qualified_table(target_schema: &str, stream_name: &str) -> St
     crate::decode::qualified_name(target_schema, &staging_table_name(stream_name))
 }
 
+async fn live_destination_state_is_fresh(
+    client: &tokio_postgres::Client,
+    target_schema: &str,
+    table_name: &str,
+    stream_schema: &rapidbyte_sdk::schema::StreamSchema,
+) -> Result<bool, PluginError> {
+    let Some(arrow_schema) = crate::contract::preflight_schema_from_stream_schema(stream_schema)
+        .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
+    else {
+        return Ok(true);
+    };
+
+    Ok(crate::ddl::detect_schema_drift(client, target_schema, table_name, &arrow_schema)
+        .await
+        .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?
+        .is_none())
+}
+
 fn existing_replace_contract(mut setup: crate::contract::WriteContract) -> crate::contract::WriteContract {
     setup.effective_stream = staging_table_name(&setup.stream_name);
     setup.qualified_table =
@@ -53,9 +71,13 @@ pub(crate) fn reuse_contract_from_handoff(
     setup: &crate::contract::WriteContract,
     current_signature: Option<&str>,
     handoff: Option<&ContractHandoff>,
+    destination_state_is_fresh: bool,
 ) -> Option<crate::contract::WriteContract> {
     let handoff = handoff?;
     if current_signature != Some(handoff.schema_signature.as_str()) {
+        return None;
+    }
+    if !destination_state_is_fresh {
         return None;
     }
 
@@ -106,10 +128,26 @@ pub async fn write_stream(
         let handoff = read_contract_handoff(&client, &staging_table)
             .await
             .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
+        let destination_state_is_fresh = match handoff.as_ref() {
+            Some(handoff)
+                if current_signature.as_deref() == Some(handoff.schema_signature.as_str()) =>
+            {
+                live_destination_state_is_fresh(
+                    &client,
+                    &setup.target_schema,
+                    &staging_table_name(&setup.stream_name),
+                    &stream.schema,
+                )
+                .await?
+            }
+            _ => false,
+        };
+
         if let Some(reused) = reuse_contract_from_handoff(
             &setup,
             current_signature.as_deref(),
             handoff.as_ref(),
+            destination_state_is_fresh,
         ) {
             reused
         } else {
@@ -121,10 +159,26 @@ pub async fn write_stream(
         let handoff = read_contract_handoff(&client, &setup.qualified_table)
             .await
             .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
+        let destination_state_is_fresh = match handoff.as_ref() {
+            Some(handoff)
+                if current_signature.as_deref() == Some(handoff.schema_signature.as_str()) =>
+            {
+                live_destination_state_is_fresh(
+                    &client,
+                    &setup.target_schema,
+                    &setup.stream_name,
+                    &stream.schema,
+                )
+                .await?
+            }
+            _ => false,
+        };
+
         if let Some(reused) = reuse_contract_from_handoff(
             &setup,
             current_signature.as_deref(),
             handoff.as_ref(),
+            destination_state_is_fresh,
         ) {
             reused
         } else {
@@ -172,8 +226,7 @@ pub async fn write_stream(
     }
 
     let result = session.commit().await.map_err(|e| {
-        PluginError::transient_db("COMMIT_FAILED", e)
-            .with_commit_state(CommitState::AfterCommitUnknown)
+        PluginError::transient_db("COMMIT_FAILED", e.message).with_commit_state(e.commit_state)
     })?;
 
     let perf = WritePerf {
@@ -322,7 +375,7 @@ mod tests {
             type_null_columns: vec!["coerce_me".to_string()],
         };
 
-        let reused = reuse_contract_from_handoff(&contract, Some("sig"), Some(&handoff))
+        let reused = reuse_contract_from_handoff(&contract, Some("sig"), Some(&handoff), true)
             .expect("handoff should be reused");
         assert_eq!(reused.effective_write_mode, Some(WriteMode::Append));
         assert!(reused.ignored_columns.contains("legacy"));
@@ -356,7 +409,7 @@ mod tests {
             type_null_columns: vec![],
         };
 
-        let reused = reuse_contract_from_handoff(&contract, Some("sig"), Some(&handoff))
+        let reused = reuse_contract_from_handoff(&contract, Some("sig"), Some(&handoff), true)
             .expect("handoff should be reused");
         assert_eq!(
             reused.effective_write_mode,
@@ -391,6 +444,33 @@ mod tests {
             type_null_columns: vec![],
         };
 
-        assert!(reuse_contract_from_handoff(&contract, Some("different"), Some(&handoff)).is_none());
+        assert!(reuse_contract_from_handoff(&contract, Some("different"), Some(&handoff), true).is_none());
+    }
+
+    #[test]
+    fn reuse_contract_from_handoff_rejects_stale_destination_state() {
+        let contract = crate::contract::prepare_stream_once(
+            "public",
+            "users",
+            Some(WriteMode::Append),
+            &StreamSchema::default(),
+            true,
+            rapidbyte_sdk::stream::SchemaEvolutionPolicy::default(),
+            crate::contract::CheckpointConfig {
+                bytes: 0,
+                rows: 0,
+                seconds: 0,
+            },
+            None,
+            crate::config::LoadMethod::Copy,
+        )
+        .expect("contract");
+        let handoff = crate::ddl::ContractHandoff {
+            schema_signature: "sig".to_string(),
+            ignored_columns: vec![],
+            type_null_columns: vec![],
+        };
+
+        assert!(reuse_contract_from_handoff(&contract, Some("sig"), Some(&handoff), false).is_none());
     }
 }

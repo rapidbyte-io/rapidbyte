@@ -11,11 +11,14 @@ use tokio_postgres::Client;
 use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::stream::SchemaEvolutionPolicy;
 
-use self::drift::detect_schema_drift;
 use crate::pg_error::format_pg_error;
 use crate::types::arrow_to_pg_type;
 
-pub(crate) use self::staging::{prepare_staging, read_contract_handoff, swap_staging_table, write_contract_handoff, ContractHandoff};
+pub(crate) use self::drift::detect_schema_drift;
+pub(crate) use self::staging::{
+    prepare_staging, read_contract_handoff, swap_staging_table, write_contract_handoff,
+    ContractHandoff,
+};
 
 fn is_pg_type_typname_race(code: &str, message: &str, detail: &str) -> bool {
     code == "23505"
