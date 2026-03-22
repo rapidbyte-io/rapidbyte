@@ -122,6 +122,12 @@ impl CdcSource for SourcePostgres {
         let CdcReadInput {
             stream,
             resume,
+            emit,
+            cancel,
+            state,
+            checkpoints,
+            metrics,
+            log,
             ..
         } = input;
         let connect_start = Instant::now();
@@ -129,10 +135,18 @@ impl CdcSource for SourcePostgres {
             .await
             .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
         let connect_secs = connect_start.elapsed().as_secs_f64();
-        let resume = normalize_cdc_resume_token(&resume);
-        let ctx = Context::new("source-postgres", stream.stream_name.clone());
+        let input = CdcReadInput::with_capabilities(
+            stream,
+            normalize_cdc_resume_token(&resume),
+            emit,
+            cancel,
+            state,
+            checkpoints,
+            metrics,
+            log,
+        );
 
-        cdc::read_cdc_changes(&client, &ctx, &stream, &resume, &self.config, connect_secs)
+        cdc::read_cdc_changes(&client, input, &self.config, connect_secs)
             .await
             .map_err(|e| PluginError::internal("CDC_READ_FAILED", e))
     }
@@ -199,21 +213,26 @@ mod tests {
             strategy: PartitionStrategy::Range,
         };
 
-        let discover = source.discover(DiscoverInput::new());
-        let prerequisites = source.prerequisites(PrerequisitesInput::new());
-        let validate = source.validate(ValidateInput::new(None));
-        let read = source.read(ReadInput::new(stream.clone()));
-        let partitioned = source.read_partition(
-            PartitionedReadInput::new(stream.clone(), partition),
-        );
-        let cdc = source.read_changes(
-            CdcReadInput::new(stream, CdcResumeToken {
-                value: None,
-                cursor_type: CursorType::Utf8,
-            }),
-        );
-        let close = source.close(CloseInput::new());
+        fn assert_source_method_signatures(
+            source: &SourcePostgres,
+            stream: StreamContext,
+            partition: PartitionCoordinates,
+        ) {
+            let _ = source.discover(DiscoverInput::new());
+            let _ = source.prerequisites(PrerequisitesInput::new());
+            let _ = source.validate(ValidateInput::new(None));
+            let _ = source.read(ReadInput::new(stream.clone()));
+            let _ = source.read_partition(PartitionedReadInput::new(stream.clone(), partition));
+            let _ = source.read_changes(CdcReadInput::new(
+                stream,
+                CdcResumeToken {
+                    value: None,
+                    cursor_type: CursorType::Utf8,
+                },
+            ));
+            let _ = source.close(CloseInput::new());
+        }
 
-        let _ = (discover, prerequisites, validate, read, partitioned, cdc, close);
+        assert_source_method_signatures(&source, stream, partition);
     }
 }

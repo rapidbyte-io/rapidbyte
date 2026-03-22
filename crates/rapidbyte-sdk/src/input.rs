@@ -331,32 +331,67 @@ impl<'a> PartitionedReadInput<'a> {
 
 /// Input passed to CDC source reads.
 #[derive(Debug, Clone)]
-pub struct CdcReadInput<'a> {
+pub struct CdcReadInput<
+    'a,
+    EmitT = Emit,
+    CancelT = Cancel,
+    StateT = State,
+    CheckpointsT = Checkpoints,
+    MetricsT = Metrics,
+    LogT = Log,
+> {
     pub stream: StreamContext,
     pub resume: CdcResumeToken,
-    pub emit: Emit,
-    pub cancel: Cancel,
-    pub state: State,
-    pub checkpoints: Checkpoints,
-    pub metrics: Metrics,
-    pub log: Log,
+    pub emit: EmitT,
+    pub cancel: CancelT,
+    pub state: StateT,
+    pub checkpoints: CheckpointsT,
+    pub metrics: MetricsT,
+    pub log: LogT,
     _marker: PhantomData<&'a ()>,
+}
+
+impl<'a, EmitT, CancelT, StateT, CheckpointsT, MetricsT, LogT>
+    CdcReadInput<'a, EmitT, CancelT, StateT, CheckpointsT, MetricsT, LogT>
+{
+    /// Create a CDC read input with explicit capability fakes.
+    pub fn with_capabilities(
+        stream: StreamContext,
+        resume: CdcResumeToken,
+        emit: EmitT,
+        cancel: CancelT,
+        state: StateT,
+        checkpoints: CheckpointsT,
+        metrics: MetricsT,
+        log: LogT,
+    ) -> Self {
+        Self {
+            stream,
+            resume,
+            emit,
+            cancel,
+            state,
+            checkpoints,
+            metrics,
+            log,
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<'a> CdcReadInput<'a> {
     /// Create a CDC read input.
     pub fn new(stream: StreamContext, resume: CdcResumeToken) -> Self {
-        Self {
+        Self::with_capabilities(
             stream,
             resume,
-            emit: Emit,
-            cancel: Cancel,
-            state: State,
-            checkpoints: Checkpoints,
-            metrics: Metrics,
-            log: Log,
-            _marker: PhantomData,
-        }
+            Emit,
+            Cancel,
+            State,
+            Checkpoints,
+            Metrics,
+            Log,
+        )
     }
 }
 
