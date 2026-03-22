@@ -1250,7 +1250,7 @@ fn validate_plugin_impl(
                     &mut store,
                     &source_bindings::rapidbyte::plugin::types::ValidateInput {
                         session,
-                        stream_schema: wit_schema.as_ref().cloned(),
+                        stream_schema: wit_schema.clone(),
                     },
                 )?
                 .map(source_validation_to_sdk)
@@ -1294,7 +1294,7 @@ fn validate_plugin_impl(
                     &mut store,
                     &dest_bindings::rapidbyte::plugin::types::ValidateInput {
                         session,
-                        stream_schema: wit_schema.as_ref().cloned(),
+                        stream_schema: wit_schema.clone(),
                     },
                 )?
                 .map(dest_validation_to_sdk)
@@ -1338,7 +1338,7 @@ fn validate_plugin_impl(
                     &mut store,
                     &transform_bindings::rapidbyte::plugin::types::ValidateInput {
                         session,
-                        stream_schema: wit_schema.as_ref().cloned(),
+                        stream_schema: wit_schema.clone(),
                     },
                 )?
                 .map(transform_validation_to_sdk)
@@ -1874,6 +1874,7 @@ fn run_prerequisites_impl(
 
 /// Apply schema changes for streams.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn run_apply_impl(
     module: &LoadedComponent,
     kind: PluginKind,
@@ -2015,6 +2016,7 @@ fn run_apply_impl(
 
 /// Tear down resources for streams.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn run_teardown_impl(
     module: &LoadedComponent,
     kind: PluginKind,

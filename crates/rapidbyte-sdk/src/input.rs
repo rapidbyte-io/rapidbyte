@@ -355,6 +355,7 @@ impl<'a, EmitT, CancelT, StateT, CheckpointsT, MetricsT, LogT>
     CdcReadInput<'a, EmitT, CancelT, StateT, CheckpointsT, MetricsT, LogT>
 {
     /// Create a CDC read input with explicit capability fakes.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_capabilities(
         stream: StreamContext,
         resume: CdcResumeToken,

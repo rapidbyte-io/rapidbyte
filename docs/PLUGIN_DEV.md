@@ -240,32 +240,27 @@ impl Source for SourceMydb {
 
 ### init
 
-Called once at startup. Validate config and return a `PluginInfo` describing the plugin's capabilities.
+Called once at startup. Validate config, initialize any shared connector state,
+and receive plugin-scope capabilities via `InitInput`.
 
 ```rust
-async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
+async fn init(config: Self::Config, _input: InitInput<'_>) -> Result<Self, PluginError> {
     config.validate()?;
-    Ok((
-        Self { config },
-        PluginInfo {
-            protocol_version: ProtocolVersion::V5,
-            features: vec![],
-            default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
-        },
-    ))
+    Ok(Self { config })
 }
 ```
 
 ### validate
 
-Called during `rapidbyte check`. Test connectivity without reading data.
+Called during `rapidbyte check`. Return a `ValidationReport` without reading or
+writing data.
 
 ```rust
 async fn validate(
-    config: &Self::Config,
-    _ctx: &Context,
-) -> Result<ValidationResult, PluginError> {
-    let client = client::connect(config)
+    &self,
+    _input: ValidateInput<'_>,
+) -> Result<ValidationReport, PluginError> {
+    let client = client::connect(&self.config)
         .await
         .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
 
@@ -274,19 +269,21 @@ async fn validate(
             format!("Connection test failed: {e}"))
     })?;
 
-    Ok(ValidationResult {
-        status: ValidationStatus::Success,
-        message: format!("Connected to {}:{}/{}", config.host, config.port, config.database),
-    })
+    Ok(ValidationReport::success(&format!(
+        "Connected to {}:{}/{}",
+        self.config.host, self.config.port, self.config.database
+    )))
 }
 ```
 
 ### discover
 
-Return a `Catalog` describing available streams and their schemas.
+Return typed `DiscoveredStream` values and use `DiscoverInput` for discovery-time
+capabilities like cancellation/logging.
 
 ```rust
-async fn discover(&mut self, _ctx: &Context) -> Result<Catalog, PluginError> {
+async fn discover(&self, input: DiscoverInput<'_>) -> Result<Vec<DiscoveredStream>, PluginError> {
+    input.cancel.check()?;
     let client = client::connect(&self.config)
         .await
         .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
@@ -294,20 +291,28 @@ async fn discover(&mut self, _ctx: &Context) -> Result<Catalog, PluginError> {
     let streams = discover_streams(&client).await
         .map_err(|e| PluginError::transient_db("DISCOVERY_FAILED", e))?;
 
-    Ok(Catalog { streams })
+    Ok(streams)
 }
 ```
 
 ### read
 
-The main data path. Connect, query, iterate rows, build Arrow batches, and emit them to the host.
+The main data path. Use `ReadInput` to access the stream plus explicit emit,
+state, checkpoint, metrics, log, and cancellation capabilities.
 
 ```rust
 async fn read(
-    &mut self,
-    ctx: &Context,
-    stream: StreamContext,
+    &self,
+    input: ReadInput<'_>,
 ) -> Result<ReadSummary, PluginError> {
+    let ReadInput {
+        stream,
+        emit,
+        cancel,
+        checkpoints,
+        ..
+    } = input;
+
     let client = client::connect(&self.config)
         .await
         .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
@@ -320,8 +325,23 @@ async fn read(
     let batch = encode::rows_to_record_batch(&rows, &columns, &schema)?;
 
     // 3. Emit the batch to the host
-    ctx.emit_batch(&batch)
+    cancel.check()?;
+    emit.batch_for_stream(stream.stream_index, &batch)
         .map_err(|e| PluginError::internal("EMIT_FAILED", e.message))?;
+
+    checkpoints.checkpoint(
+        "source-mydb",
+        &stream.stream_name,
+        &Checkpoint {
+            id: 0,
+            kind: CheckpointKind::Source,
+            stream: stream.stream_name.clone(),
+            cursor_field: None,
+            cursor_value: None,
+            records_processed: batch.num_rows() as u64,
+            bytes_processed: batch.get_array_memory_size() as u64,
+        },
+    )?;
 
     // 4. Return summary
     Ok(ReadSummary {
@@ -330,7 +350,6 @@ async fn read(
         batches_emitted: 1,
         checkpoint_count: 0,
         records_skipped: 0,
-        perf: None,
     })
 }
 ```
@@ -354,8 +373,8 @@ interchangeable.
 Called at the end of the pipeline run. Clean up any resources.
 
 ```rust
-async fn close(&mut self, ctx: &Context) -> Result<(), PluginError> {
-    ctx.log(LogLevel::Info, "source-mydb: close");
+async fn close(&self, input: CloseInput<'_>) -> Result<(), PluginError> {
+    input.log.info("source-mydb: close");
     Ok(())
 }
 ```
@@ -388,41 +407,40 @@ impl Destination for DestMydb {
 ### init
 
 ```rust
-async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
-    Ok((
-        Self { config },
-        PluginInfo {
-            protocol_version: ProtocolVersion::V5,
-            features: vec![Feature::ExactlyOnce],
-            default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
-        },
-    ))
+async fn init(config: Self::Config, _input: InitInput<'_>) -> Result<Self, PluginError> {
+    Ok(Self { config })
 }
 ```
 
 ### validate
 
-Same pattern as source -- test connectivity and return `ValidationResult`.
+Same pattern as source, but return `ValidationReport`.
 
 ```rust
-async fn validate(
-    config: &Self::Config,
-    _ctx: &Context,
-) -> Result<ValidationResult, PluginError> {
-    client::validate(config).await
+async fn validate(&self, input: ValidateInput<'_>) -> Result<ValidationReport, PluginError> {
+    let _ = input;
+    client::validate(&self.config).await
 }
 ```
 
 ### write
 
-The main data path. Receive batches in a loop via `ctx.next_batch()`, write them to the target, and checkpoint periodically.
+The main data path. Receive batches from `WriteInput.reader`, write them to the
+target, and checkpoint periodically.
 
 ```rust
 async fn write(
-    &mut self,
-    ctx: &Context,
-    stream: StreamContext,
+    &self,
+    input: WriteInput<'_>,
 ) -> Result<WriteSummary, PluginError> {
+    let WriteInput {
+        stream,
+        reader,
+        cancel,
+        checkpoints,
+        ..
+    } = input;
+
     let client = client::connect(&self.config)
         .await
         .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
@@ -433,7 +451,8 @@ async fn write(
 
     // Receive batches from the host in a loop
     loop {
-        match ctx.next_batch(stream.limits.max_batch_bytes) {
+        cancel.check()?;
+        match reader.next_batch(stream.limits.max_batch_bytes) {
             Ok(None) => break, // No more batches
             Ok(Some((schema, batches))) => {
                 for batch in &batches {
@@ -459,7 +478,6 @@ async fn write(
         batches_written,
         checkpoint_count: 0,
         records_failed: 0,
-        perf: None,
     })
 }
 ```
@@ -479,7 +497,7 @@ let checkpoint = Checkpoint {
     records_processed: total_rows,
     bytes_processed: total_bytes,
 };
-ctx.checkpoint(&checkpoint)?;
+checkpoints.checkpoint("dest-mydb", &stream.stream_name, &checkpoint)?;
 ```
 
 Emit the checkpoint only after the destination commit that makes the reported
@@ -488,8 +506,8 @@ frontier durable.
 ### close
 
 ```rust
-async fn close(&mut self, ctx: &Context) -> Result<(), PluginError> {
-    ctx.log(LogLevel::Info, "dest-mydb: close");
+async fn close(&self, input: CloseInput<'_>) -> Result<(), PluginError> {
+    input.log.info("dest-mydb: close");
     Ok(())
 }
 ```
@@ -521,31 +539,16 @@ impl Transform for TransformCustom {
 ### init
 
 ```rust
-async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
-    // Validate config at init time
-    Ok((
-        Self { config },
-        PluginInfo {
-            protocol_version: ProtocolVersion::V5,
-            features: vec![],
-            default_max_batch_bytes: StreamLimits::DEFAULT_MAX_BATCH_BYTES,
-        },
-    ))
+async fn init(config: Self::Config, _input: InitInput<'_>) -> Result<Self, PluginError> {
+    Ok(Self { config })
 }
 ```
 
 ### validate
 
 ```rust
-async fn validate(
-    config: &Self::Config,
-    _ctx: &Context,
-) -> Result<ValidationResult, PluginError> {
-    // Validate config without side effects
-    Ok(ValidationResult {
-        status: ValidationStatus::Success,
-        message: "Configuration is valid".to_string(),
-    })
+async fn validate(&self, _input: ValidateInput<'_>) -> Result<ValidationReport, PluginError> {
+    Ok(ValidationReport::success("Configuration is valid"))
 }
 ```
 
@@ -555,10 +558,16 @@ The core method. Receive batches, transform them, and emit results downstream.
 
 ```rust
 async fn transform(
-    &mut self,
-    ctx: &Context,
-    stream: StreamContext,
+    &self,
+    input: TransformInput<'_>,
 ) -> Result<TransformSummary, PluginError> {
+    let TransformInput {
+        stream,
+        reader,
+        emit,
+        cancel,
+        ..
+    } = input;
     let mut records_in: u64 = 0;
     let mut records_out: u64 = 0;
     let mut bytes_in: u64 = 0;
@@ -566,7 +575,8 @@ async fn transform(
     let mut batches_processed: u64 = 0;
 
     // Receive batches from upstream
-    while let Some((schema, batches)) = ctx.next_batch(stream.limits.max_batch_bytes)? {
+    while let Some((schema, batches)) = reader.next_batch(stream.limits.max_batch_bytes)? {
+        cancel.check()?;
         if batches.is_empty() {
             continue;
         }
@@ -581,7 +591,7 @@ async fn transform(
             if result.num_rows() > 0 {
                 records_out += result.num_rows() as u64;
                 bytes_out += result.get_array_memory_size() as u64;
-                ctx.emit_batch(&result)?;
+                emit.batch_for_stream(stream.stream_index, &result)?;
             }
         }
 
@@ -599,10 +609,9 @@ async fn transform(
 ```
 
 The built-in `transform-sql` plugin uses Apache DataFusion to execute SQL
-queries on each batch. It registers incoming batches as a MemTable named
-the current stream name, parses the query once during init, re-plans it per
-batch against that stream's current snapshot, and streams result batches
-downstream without calling `collect()`.
+queries on each batch. It parses and validates the query once, then re-plans it
+per batch against the current stream snapshot and emits result batches through
+the typed transform input.
 
 ## 9. Networking
 

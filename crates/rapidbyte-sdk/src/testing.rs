@@ -19,6 +19,9 @@ use crate::error::PluginError;
 use crate::input::{ReadInput, WriteInput};
 use crate::stream::StreamContext;
 
+type QueuedInputBatch = (Arc<Schema>, Vec<RecordBatch>);
+type QueuedInputBatches = Arc<Mutex<VecDeque<QueuedInputBatch>>>;
+
 /// Recorded state-store value for assertions.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestStateValue {
@@ -89,7 +92,7 @@ pub struct TestStateMutation {
 #[derive(Debug, Clone, Default)]
 pub struct TestHarness {
     emitted_batches: Arc<Mutex<Vec<(u32, RecordBatch)>>>,
-    input_batches: Arc<Mutex<VecDeque<(Arc<Schema>, Vec<RecordBatch>)>>>,
+    input_batches: QueuedInputBatches,
     state_values: Arc<Mutex<HashMap<(StateScope, String), String>>>,
     checkpoints: Arc<Mutex<Vec<TestCheckpointRecord>>>,
     cancelled: Arc<AtomicBool>,
@@ -234,7 +237,7 @@ impl TestEmit {
 /// Fake reader capability.
 #[derive(Debug, Clone)]
 pub struct TestReader {
-    input_batches: Arc<Mutex<VecDeque<(Arc<Schema>, Vec<RecordBatch>)>>>,
+    input_batches: QueuedInputBatches,
 }
 
 impl TestReader {

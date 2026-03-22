@@ -33,6 +33,7 @@ fn cargo_check_fixture(name: &str) -> std::process::Output {
         .arg("check")
         .arg("--manifest-path")
         .arg(fixture_manifest(name))
+        .arg("--offline")
         .arg("--quiet")
         .env("CARGO_TARGET_DIR", target_dir)
         .current_dir(repo_root())
