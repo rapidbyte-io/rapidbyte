@@ -298,6 +298,15 @@ async fn query_publication_tables(
     schema_name: &str,
     publication_name: &str,
 ) -> Result<HashSet<String>, String> {
+    let publication_exists = client
+        .query_opt(
+            "SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = $1",
+            &[&publication_name],
+        )
+        .await
+        .map_err(|e| format!("publication discovery failed for '{publication_name}': {e}"))?
+        .is_some();
+
     let query = r"
         SELECT schemaname, tablename
         FROM pg_catalog.pg_publication_tables
@@ -308,6 +317,18 @@ async fn query_publication_tables(
         .query(query, &[&publication_name, &schema_name])
         .await
         .map_err(|e| format!("publication discovery failed for '{publication_name}': {e}"))?;
+
+    publication_rows_to_tables(publication_name, publication_exists, &rows)
+}
+
+fn publication_rows_to_tables(
+    publication_name: &str,
+    publication_exists: bool,
+    rows: &[tokio_postgres::Row],
+) -> Result<HashSet<String>, String> {
+    if rows.is_empty() && !publication_exists {
+        return Err(format!("publication '{publication_name}' does not exist"));
+    }
 
     let mut tables = HashSet::with_capacity(rows.len());
     for row in rows {
@@ -525,6 +546,59 @@ mod tests {
 
         assert_eq!(streams.len(), 1);
         assert_eq!(streams[0].name, "users");
+    }
+
+    #[test]
+    fn publication_filter_allows_valid_publication_with_zero_matching_tables() {
+        let published = HashSet::new();
+        let rows = vec![CatalogRow {
+            schema: "analytics".to_string(),
+            table: "events".to_string(),
+            column: "id".to_string(),
+            data_type: "int4".to_string(),
+            nullable: false,
+            is_generated: false,
+            ordinal_position: 1,
+        }];
+        let primary_keys = HashMap::from([(
+            ("analytics".to_string(), "events".to_string()),
+            vec!["id".to_string()],
+        )]);
+
+        let streams =
+            build_discovered_streams(rows, primary_keys, Some("existing_publication"), Some(&published));
+
+        assert!(streams.is_empty());
+    }
+
+    #[test]
+    fn metadata_json_includes_publication_name_when_present() {
+        let metadata = build_metadata_json("analytics", Some("rb_pub"))
+            .expect("metadata should be present");
+        let value: serde_json::Value =
+            serde_json::from_str(&metadata).expect("metadata should be valid json");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "schema": "analytics",
+                "publication": "rb_pub",
+            })
+        );
+    }
+
+    #[test]
+    fn publication_rows_to_tables_rejects_missing_publication() {
+        let result = publication_rows_to_tables("missing_pub", false, &[]);
+        assert_eq!(
+            result.expect_err("missing publication must fail"),
+            "publication 'missing_pub' does not exist"
+        );
+    }
+
+    #[test]
+    fn publication_rows_to_tables_allows_empty_existing_publication() {
+        let result = publication_rows_to_tables("existing_pub", true, &[]);
+        assert!(result.expect("existing publication should succeed").is_empty());
     }
 
     #[test]
