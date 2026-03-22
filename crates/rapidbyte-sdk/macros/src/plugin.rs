@@ -955,8 +955,9 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
         }
 
         fn open(
-            config_json: String,
+            input: __rb_bindings::rapidbyte::plugin::types::OpenInput,
         ) -> Result<u64, __rb_bindings::rapidbyte::plugin::types::PluginError> {
+            let config_json = input.config_json;
             let _ = CONFIG_JSON.set(config_json.clone());
 
             let config: <#struct_name as #trait_path>::Config =
@@ -974,13 +975,12 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
         }
 
         fn validate(
-            _session: u64,
-            stream_schema: Option<__rb_bindings::rapidbyte::plugin::types::StreamSchema>,
+            input: __rb_bindings::rapidbyte::plugin::types::ValidateInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::ValidationReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let upstream = stream_schema.map(from_component_stream_schema);
+            let upstream = input.stream_schema.map(from_component_stream_schema);
 
             let rt = get_runtime();
             let state_cell = get_state();
@@ -995,7 +995,9 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
                 .map_err(to_component_error)
         }
 
-        fn close(_session: u64) -> Result<(), __rb_bindings::rapidbyte::plugin::types::PluginError> {
+        fn close(
+            _input: __rb_bindings::rapidbyte::plugin::types::CloseInput,
+        ) -> Result<(), __rb_bindings::rapidbyte::plugin::types::PluginError> {
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1083,7 +1085,7 @@ fn gen_source_methods(
 
     quote! {
         fn prerequisites(
-            _session: u64,
+            _input: __rb_bindings::rapidbyte::plugin::types::PrerequisitesInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::PrerequisitesReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
@@ -1102,7 +1104,7 @@ fn gen_source_methods(
         }
 
         fn discover(
-            _session: u64,
+            _input: __rb_bindings::rapidbyte::plugin::types::DiscoverInput,
         ) -> Result<
             Vec<__rb_bindings::rapidbyte::plugin::types::DiscoveredStream>,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
@@ -1123,8 +1125,7 @@ fn gen_source_methods(
         }
 
         fn apply(
-            _session: u64,
-            request: __rb_bindings::rapidbyte::plugin::types::ApplyRequest,
+            input: __rb_bindings::rapidbyte::plugin::types::ApplyInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::ApplyReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
@@ -1134,7 +1135,7 @@ fn gen_source_methods(
             let state_ref = state_cell.borrow();
             let conn = state_ref.as_ref().expect("Plugin not opened");
 
-            let sdk_request = from_component_apply_request(request);
+            let sdk_request = from_component_apply_request(input.request);
             rt.block_on(<#struct_name as #trait_path>::apply(
                 conn,
                 ::rapidbyte_sdk::plugin::ApplyInput::new(sdk_request),
@@ -1144,13 +1145,12 @@ fn gen_source_methods(
         }
 
         fn run(
-            _session: u64,
-            request: __rb_bindings::rapidbyte::plugin::types::RunRequest,
+            input: __rb_bindings::rapidbyte::plugin::types::RunInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::RunSummary,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let sdk_request = from_component_run_request(request);
+            let sdk_request = from_component_run_request(input.request);
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1184,8 +1184,7 @@ fn gen_source_methods(
         }
 
         fn teardown(
-            _session: u64,
-            request: __rb_bindings::rapidbyte::plugin::types::TeardownRequest,
+            input: __rb_bindings::rapidbyte::plugin::types::TeardownInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::TeardownReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
@@ -1195,7 +1194,7 @@ fn gen_source_methods(
             let state_ref = state_cell.borrow();
             let conn = state_ref.as_ref().expect("Plugin not opened");
 
-            let sdk_request = from_component_teardown_request(request);
+            let sdk_request = from_component_teardown_request(input.request);
             rt.block_on(<#struct_name as #trait_path>::teardown(
                 conn,
                 ::rapidbyte_sdk::plugin::TeardownInput::new(sdk_request),
@@ -1232,7 +1231,7 @@ fn gen_dest_methods(
 
     quote! {
         fn prerequisites(
-            _session: u64,
+            _input: __rb_bindings::rapidbyte::plugin::types::PrerequisitesInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::PrerequisitesReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
@@ -1251,8 +1250,7 @@ fn gen_dest_methods(
         }
 
         fn apply(
-            _session: u64,
-            request: __rb_bindings::rapidbyte::plugin::types::ApplyRequest,
+            input: __rb_bindings::rapidbyte::plugin::types::ApplyInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::ApplyReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
@@ -1262,7 +1260,7 @@ fn gen_dest_methods(
             let state_ref = state_cell.borrow();
             let conn = state_ref.as_ref().expect("Plugin not opened");
 
-            let sdk_request = from_component_apply_request(request);
+            let sdk_request = from_component_apply_request(input.request);
             rt.block_on(<#struct_name as #trait_path>::apply(
                 conn,
                 ::rapidbyte_sdk::plugin::ApplyInput::new(sdk_request),
@@ -1272,13 +1270,12 @@ fn gen_dest_methods(
         }
 
         fn run(
-            _session: u64,
-            request: __rb_bindings::rapidbyte::plugin::types::RunRequest,
+            input: __rb_bindings::rapidbyte::plugin::types::RunInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::RunSummary,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let sdk_request = from_component_run_request(request);
+            let sdk_request = from_component_run_request(input.request);
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1301,8 +1298,7 @@ fn gen_dest_methods(
         }
 
         fn teardown(
-            _session: u64,
-            request: __rb_bindings::rapidbyte::plugin::types::TeardownRequest,
+            input: __rb_bindings::rapidbyte::plugin::types::TeardownInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::TeardownReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
@@ -1312,7 +1308,7 @@ fn gen_dest_methods(
             let state_ref = state_cell.borrow();
             let conn = state_ref.as_ref().expect("Plugin not opened");
 
-            let sdk_request = from_component_teardown_request(request);
+            let sdk_request = from_component_teardown_request(input.request);
             rt.block_on(<#struct_name as #trait_path>::teardown(
                 conn,
                 ::rapidbyte_sdk::plugin::TeardownInput::new(sdk_request),
@@ -1327,13 +1323,12 @@ fn gen_dest_methods(
 fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> TokenStream {
     quote! {
         fn run(
-            _session: u64,
-            request: __rb_bindings::rapidbyte::plugin::types::RunRequest,
+            input: __rb_bindings::rapidbyte::plugin::types::RunInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::RunSummary,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let sdk_request = from_component_run_request(request);
+            let sdk_request = from_component_run_request(input.request);
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();

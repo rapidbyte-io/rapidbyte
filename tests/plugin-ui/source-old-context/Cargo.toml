@@ -1,0 +1,16 @@
+[package]
+name = "plugin-ui-source-old-context"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+rapidbyte-sdk = { path = "../../../crates/rapidbyte-sdk" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", default-features = false, features = ["rt"] }
+wit-bindgen = "0.46"
+
+[build-dependencies]
+rapidbyte-sdk = { path = "../../../crates/rapidbyte-sdk" }
