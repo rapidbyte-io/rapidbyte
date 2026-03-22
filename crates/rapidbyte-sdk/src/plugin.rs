@@ -3,249 +3,18 @@
 //! Defines the plugin lifecycle for [`Source`], [`Destination`], and
 //! [`Transform`] plugins using typed lifecycle inputs.
 
-use core::marker::PhantomData;
-
 use serde::de::DeserializeOwned;
 
 use crate::discovery::{DiscoveredStream, PluginSpec};
 use crate::error::PluginError;
-use crate::lifecycle::{ApplyReport, ApplyRequest, TeardownReport, TeardownRequest};
+pub use crate::input::{
+    ApplyInput, BulkWriteInput, CdcReadInput, CloseInput, DiscoverInput, InitInput,
+    MultiStreamReadInput, PartitionedReadInput, PrerequisitesInput, ReadInput, TeardownInput,
+    TransformInput, ValidateInput, WriteInput,
+};
+use crate::lifecycle::{ApplyReport, TeardownReport};
 use crate::metric::{ReadSummary, TransformSummary, WriteSummary};
-use crate::schema::StreamSchema;
-use crate::stream::{CdcResumeToken, PartitionCoordinates, StreamContext};
 use crate::validation::{PrerequisitesReport, ValidationReport};
-
-/// Marker input passed to [`Source::init`] and [`Destination::init`].
-#[derive(Debug, Clone, Copy, Default)]
-pub struct InitInput<'a> {
-    _marker: PhantomData<&'a ()>,
-}
-
-impl<'a> InitInput<'a> {
-    /// Create an empty init input.
-    pub const fn new() -> Self {
-        Self {
-            _marker: PhantomData,
-        }
-    }
-}
-
-/// Marker input passed to pre-flight checks.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PrerequisitesInput<'a> {
-    _marker: PhantomData<&'a ()>,
-}
-
-impl<'a> PrerequisitesInput<'a> {
-    /// Create an empty prerequisites input.
-    pub const fn new() -> Self {
-        Self {
-            _marker: PhantomData,
-        }
-    }
-}
-
-/// Marker input passed to discovery.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DiscoverInput<'a> {
-    _marker: PhantomData<&'a ()>,
-}
-
-impl<'a> DiscoverInput<'a> {
-    /// Create an empty discovery input.
-    pub const fn new() -> Self {
-        Self {
-            _marker: PhantomData,
-        }
-    }
-}
-
-/// Marker input passed to validation.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ValidateInput<'a> {
-    /// Optional upstream schema being validated against.
-    pub upstream: Option<&'a StreamSchema>,
-}
-
-impl<'a> ValidateInput<'a> {
-    /// Create a validation input.
-    pub const fn new(upstream: Option<&'a StreamSchema>) -> Self {
-        Self { upstream }
-    }
-}
-
-/// Input passed to schema-apply hooks.
-#[derive(Debug, Clone)]
-pub struct ApplyInput<'a> {
-    /// Streams being prepared or applied.
-    pub request: ApplyRequest,
-    _marker: PhantomData<&'a ()>,
-}
-
-impl<'a> ApplyInput<'a> {
-    /// Create an apply input from a request.
-    pub fn new(request: ApplyRequest) -> Self {
-        Self {
-            request,
-            _marker: PhantomData,
-        }
-    }
-}
-
-/// Input passed to read hooks.
-#[derive(Debug, Clone)]
-pub struct ReadInput<'a> {
-    /// Stream being read.
-    pub stream: StreamContext,
-    _marker: PhantomData<&'a ()>,
-}
-
-impl<'a> ReadInput<'a> {
-    /// Create a read input for a single stream.
-    pub fn new(stream: StreamContext) -> Self {
-        Self {
-            stream,
-            _marker: PhantomData,
-        }
-    }
-}
-
-/// Input passed to destination write hooks.
-#[derive(Debug, Clone)]
-pub struct WriteInput<'a> {
-    /// Stream being written.
-    pub stream: StreamContext,
-    _marker: PhantomData<&'a ()>,
-}
-
-impl<'a> WriteInput<'a> {
-    /// Create a write input for a single stream.
-    pub fn new(stream: StreamContext) -> Self {
-        Self {
-            stream,
-            _marker: PhantomData,
-        }
-    }
-}
-
-/// Input passed to transform hooks.
-#[derive(Debug, Clone)]
-pub struct TransformInput<'a> {
-    /// Stream being transformed.
-    pub stream: StreamContext,
-    _marker: PhantomData<&'a ()>,
-}
-
-impl<'a> TransformInput<'a> {
-    /// Create a transform input for a single stream.
-    pub fn new(stream: StreamContext) -> Self {
-        Self {
-            stream,
-            _marker: PhantomData,
-        }
-    }
-}
-
-/// Input passed to close hooks.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CloseInput<'a> {
-    _marker: PhantomData<&'a ()>,
-}
-
-impl<'a> CloseInput<'a> {
-    /// Create an empty close input.
-    pub const fn new() -> Self {
-        Self {
-            _marker: PhantomData,
-        }
-    }
-}
-
-/// Input passed to teardown hooks.
-#[derive(Debug, Clone)]
-pub struct TeardownInput<'a> {
-    /// Streams being torn down.
-    pub request: TeardownRequest,
-    _marker: PhantomData<&'a ()>,
-}
-
-impl<'a> TeardownInput<'a> {
-    /// Create a teardown input from a request.
-    pub fn new(request: TeardownRequest) -> Self {
-        Self {
-            request,
-            _marker: PhantomData,
-        }
-    }
-}
-
-/// Input passed to partitioned source reads.
-#[derive(Debug, Clone)]
-pub struct PartitionedReadInput<'a> {
-    pub stream: StreamContext,
-    pub partition: PartitionCoordinates,
-    _marker: PhantomData<&'a ()>,
-}
-
-impl<'a> PartitionedReadInput<'a> {
-    pub fn new(stream: StreamContext, partition: PartitionCoordinates) -> Self {
-        Self {
-            stream,
-            partition,
-            _marker: PhantomData,
-        }
-    }
-}
-
-/// Input passed to CDC source reads.
-#[derive(Debug, Clone)]
-pub struct CdcReadInput<'a> {
-    pub stream: StreamContext,
-    pub resume: CdcResumeToken,
-    _marker: PhantomData<&'a ()>,
-}
-
-impl<'a> CdcReadInput<'a> {
-    pub fn new(stream: StreamContext, resume: CdcResumeToken) -> Self {
-        Self {
-            stream,
-            resume,
-            _marker: PhantomData,
-        }
-    }
-}
-
-/// Input passed to multi-stream source reads.
-#[derive(Debug, Clone)]
-pub struct MultiStreamReadInput<'a> {
-    pub streams: Vec<StreamContext>,
-    _marker: PhantomData<&'a ()>,
-}
-
-impl<'a> MultiStreamReadInput<'a> {
-    pub fn new(streams: Vec<StreamContext>) -> Self {
-        Self {
-            streams,
-            _marker: PhantomData,
-        }
-    }
-}
-
-/// Input passed to bulk destination writes.
-#[derive(Debug, Clone)]
-pub struct BulkWriteInput<'a> {
-    pub stream: StreamContext,
-    _marker: PhantomData<&'a ()>,
-}
-
-impl<'a> BulkWriteInput<'a> {
-    pub fn new(stream: StreamContext) -> Self {
-        Self {
-            stream,
-            _marker: PhantomData,
-        }
-    }
-}
 
 /// Source plugin lifecycle.
 ///
@@ -402,6 +171,7 @@ mod tests {
     use crate::context::Context;
     use crate::discovery::{DiscoveredStream, PluginSpec};
     use crate::error::PluginError;
+    use crate::lifecycle::{ApplyRequest, TeardownRequest};
     use crate::metric::{ReadSummary, TransformSummary, WriteSummary};
     use crate::schema::StreamSchema;
     use crate::stream::{StreamContext, StreamLimits, StreamPolicies};

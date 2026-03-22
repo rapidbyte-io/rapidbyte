@@ -5,8 +5,8 @@
 //! enforces this at compile time.
 
 use crate::error::PluginError;
+use crate::input::{BulkWriteInput, CdcReadInput, MultiStreamReadInput, PartitionedReadInput};
 use crate::metric::{ReadSummary, WriteSummary};
-use crate::plugin::{BulkWriteInput, CdcReadInput, MultiStreamReadInput, PartitionedReadInput};
 use crate::plugin::{Destination, Source};
 use crate::run::RunSummary;
 
@@ -58,7 +58,7 @@ pub trait BulkDestination: Destination {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::{
+    use crate::input::{
         BulkWriteInput, CdcReadInput, InitInput, MultiStreamReadInput, PartitionedReadInput,
         TransformInput, WriteInput,
     };

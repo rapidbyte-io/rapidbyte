@@ -7,6 +7,8 @@
 pub mod arrow;
 #[cfg(feature = "build")]
 pub mod build;
+#[cfg(feature = "runtime")]
+pub mod capabilities;
 #[cfg(feature = "conformance")]
 pub mod conformance;
 #[cfg(feature = "runtime")]
@@ -19,6 +21,8 @@ pub mod frame_writer;
 pub mod host_ffi;
 #[cfg(feature = "runtime")]
 pub mod host_tcp;
+#[cfg(feature = "runtime")]
+pub mod input;
 #[cfg(feature = "runtime")]
 pub mod plugin;
 #[cfg(feature = "runtime")]

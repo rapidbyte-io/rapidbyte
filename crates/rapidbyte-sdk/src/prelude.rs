@@ -5,6 +5,11 @@
 //! ```
 
 // Plugin traits
+pub use crate::input::{
+    ApplyInput, BulkWriteInput, CdcReadInput, CloseInput, DiscoverInput, InitInput,
+    MultiStreamReadInput, PartitionedReadInput, PrerequisitesInput, ReadInput, TeardownInput,
+    TransformInput, ValidateInput, WriteInput,
+};
 pub use crate::plugin::{Destination, Source, Transform};
 
 // Feature traits
@@ -14,6 +19,7 @@ pub use crate::features::{
 pub use crate::stream::{CdcResumeToken, PartitionCoordinates};
 
 // Context and logging
+pub use crate::capabilities::{Cancel, Checkpoints, Emit, Log, Metrics, Network, Reader, State};
 pub use crate::context::{Context, LogLevel};
 
 // Errors
