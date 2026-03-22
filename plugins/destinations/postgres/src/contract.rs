@@ -1,15 +1,12 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use tokio_postgres::Client;
-
 use rapidbyte_sdk::arrow::datatypes::Schema;
 use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::schema::StreamSchema;
 use rapidbyte_sdk::stream::SchemaEvolutionPolicy;
 
 use crate::config::LoadMethod;
-use crate::ddl::prepare_staging;
 use crate::decode;
 
 /// Immutable setup output for destination worker execution.
@@ -40,7 +37,9 @@ pub struct CheckpointConfig {
     pub seconds: u64,
 }
 
-fn preflight_schema_from_stream_schema(schema: &StreamSchema) -> Result<Option<Arc<Schema>>, String> {
+pub(crate) fn preflight_schema_from_stream_schema(
+    schema: &StreamSchema,
+) -> Result<Option<Arc<Schema>>, String> {
     use rapidbyte_sdk::arrow::datatypes::Field;
 
     if schema.fields.is_empty() {
@@ -100,8 +99,13 @@ fn parse_arrow_type(s: &str) -> Option<rapidbyte_sdk::arrow::datatypes::DataType
     })
 }
 
-pub(crate) fn schema_hint_has_shape(schema: &StreamSchema) -> bool {
-    !schema.fields.is_empty()
+pub(crate) fn stream_schema_signature(schema: &StreamSchema) -> Result<Option<String>, String> {
+    if schema.fields.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(schema)
+        .map(Some)
+        .map_err(|e| format!("failed to encode stream schema signature: {e}"))
 }
 
 /// Build a destination write contract for a stream.
@@ -146,85 +150,9 @@ pub(crate) fn prepare_stream_once(
     })
 }
 
-pub(crate) async fn async_prepare_stream_once(
-    ctx: &Context,
-    client: &Client,
-    schema: &StreamSchema,
-    mut contract: WriteContract,
-) -> Result<WriteContract, String> {
-    if contract.use_watermarks {
-        crate::watermark::ensure_table(client, &contract.target_schema)
-            .await
-            .map_err(|e| format!("dest-postgres: watermarks table creation failed: {e}"))?;
-    }
-
-    if contract.is_replace {
-        let staging_name =
-            prepare_staging(ctx, client, &contract.target_schema, &contract.stream_name)
-                .await
-                .map_err(|e| format!("{e:#}"))?;
-        ctx.log(
-            LogLevel::Info,
-            &format!("dest-postgres: Replace mode — writing to staging table '{staging_name}'"),
-        );
-        contract.effective_stream = staging_name;
-        contract.effective_write_mode = Some(WriteMode::Append);
-    }
-
-    let mut schema_state = crate::ddl::SchemaState::new();
-    if let Some(schema) = preflight_schema_from_stream_schema(schema)? {
-        schema_state
-            .ensure_table(
-                ctx,
-                client,
-                &contract.target_schema,
-                &contract.effective_stream,
-                contract.effective_write_mode.as_ref(),
-                Some(&contract.schema_policy),
-                &schema,
-            )
-            .await?;
-        contract.needs_schema_ensure = false;
-    }
-
-    contract.qualified_table =
-        decode::qualified_name(&contract.target_schema, &contract.effective_stream);
-    contract.ignored_columns = schema_state.ignored_columns;
-    contract.type_null_columns = schema_state.type_null_columns;
-
-    contract.watermark_records = if contract.is_replace || !contract.use_watermarks {
-        0
-    } else {
-        match crate::watermark::get(client, &contract.target_schema, &contract.stream_name).await {
-            Ok(w) => {
-                if w > 0 {
-                    ctx.log(
-                        LogLevel::Warn,
-                        &format!(
-                            "dest-postgres: ignoring stale watermark for stream '{}' ({w} committed records); row-count resume is disabled until checkpoint-safe recovery lands",
-                            contract.stream_name
-                        ),
-                    );
-                    let _ = crate::watermark::clear(
-                        client,
-                        &contract.target_schema,
-                        &contract.stream_name,
-                    )
-                    .await;
-                }
-                0
-            }
-            Err(e) => {
-                ctx.log(
-                    LogLevel::Warn,
-                    &format!("dest-postgres: watermark query failed (starting fresh): {e}"),
-                );
-                0
-            }
-        }
-    };
-
-    Ok(contract)
+pub(crate) fn mark_contract_prepared(mut contract: WriteContract) -> WriteContract {
+    contract.needs_schema_ensure = false;
+    contract
 }
 
 #[cfg(test)]

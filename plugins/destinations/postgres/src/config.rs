@@ -51,6 +51,12 @@ pub struct Config {
     pub copy_flush_bytes: Option<usize>,
 }
 
+impl Config {
+    pub(crate) fn target_schema(&self) -> &str {
+        &self.schema
+    }
+}
+
 fn default_port() -> u16 {
     5432
 }

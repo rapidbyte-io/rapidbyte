@@ -11,9 +11,13 @@ mod ddl;
 mod decode;
 mod insert;
 mod metrics;
+mod diagnostics;
 mod pg_error;
+mod prerequisites;
 mod session;
 mod types;
+mod validate;
+mod apply;
 mod watermark;
 mod writer;
 
@@ -31,12 +35,24 @@ impl Destination for DestPostgres {
         Ok(Self { config })
     }
 
+    async fn prerequisites(&self, ctx: &Context) -> Result<PrerequisitesReport, PluginError> {
+        prerequisites::prerequisites(&self.config, ctx).await
+    }
+
     async fn validate(
         &self,
         _ctx: &Context,
-        _upstream: Option<&rapidbyte_sdk::schema::StreamSchema>,
+        upstream: Option<&rapidbyte_sdk::schema::StreamSchema>,
     ) -> Result<ValidationReport, PluginError> {
-        client::validate(&self.config).await
+        validate::validate(&self.config, upstream)
+    }
+
+    async fn apply(
+        &self,
+        ctx: &Context,
+        request: ApplyRequest,
+    ) -> Result<ApplyReport, PluginError> {
+        apply::apply(&self.config, ctx, request).await
     }
 
     async fn write(
@@ -73,5 +89,22 @@ mod tests {
     #[test]
     fn dest_postgres_implements_bulk_destination() {
         assert_bulk_destination_impl::<DestPostgres>();
+    }
+
+    #[test]
+    fn dest_postgres_default_config_has_public_schema() {
+        let plugin = DestPostgres {
+            config: config::Config {
+                host: "localhost".to_string(),
+                port: 5432,
+                user: "postgres".to_string(),
+                password: String::new(),
+                database: "postgres".to_string(),
+                schema: "public".to_string(),
+                load_method: config::LoadMethod::Copy,
+                copy_flush_bytes: None,
+            },
+        };
+        assert_eq!(plugin.config.schema, "public");
     }
 }

@@ -49,11 +49,43 @@ impl Column {
     /// Convert to SDK `SchemaField` for typed discovery and runtime schema flow.
     #[must_use]
     pub fn to_schema_field(&self) -> rapidbyte_sdk::schema::SchemaField {
+        self.to_schema_field_with_flags(false, false)
+    }
+
+    /// Convert to SDK `SchemaField` while preserving primary-key and generated flags.
+    #[must_use]
+    pub fn to_schema_field_with_flags(
+        &self,
+        is_primary_key: bool,
+        is_generated: bool,
+    ) -> rapidbyte_sdk::schema::SchemaField {
         rapidbyte_sdk::schema::SchemaField::new(
             self.name.clone(),
             arrow_type_canonical_name(self.arrow_type),
             self.nullable,
         )
+        .with_primary_key(is_primary_key)
+        .with_generated(is_generated)
+    }
+
+    /// Whether this column is a strong cursor suggestion candidate.
+    #[must_use]
+    pub fn is_cursor_candidate(&self) -> bool {
+        matches!(self.arrow_type, ArrowDataType::TimestampMicros | ArrowDataType::Date32)
+            && !self.needs_cast
+    }
+
+    /// Preference score for cursor suggestion ordering.
+    ///
+    /// Lower scores are preferred.
+    #[must_use]
+    pub fn cursor_suggestion_rank(&self) -> u8 {
+        let name = self.name.to_ascii_lowercase();
+        match name.as_str() {
+            "updated_at" | "updated_on" | "modified_at" | "modified_on" => 0,
+            "created_at" | "created_on" => 1,
+            _ => 2,
+        }
     }
 }
 

@@ -11,11 +11,14 @@ use tokio_postgres::Client;
 use rapidbyte_sdk::prelude::*;
 use rapidbyte_sdk::stream::SchemaEvolutionPolicy;
 
-use self::drift::detect_schema_drift;
 use crate::pg_error::format_pg_error;
 use crate::types::arrow_to_pg_type;
 
-pub(crate) use self::staging::{prepare_staging, swap_staging_table};
+pub(crate) use self::drift::detect_schema_drift;
+pub(crate) use self::staging::{
+    prepare_staging, read_contract_handoff, swap_staging_table, write_contract_handoff,
+    ContractHandoff,
+};
 
 fn is_pg_type_typname_race(code: &str, message: &str, detail: &str) -> bool {
     code == "23505"
@@ -34,7 +37,6 @@ fn is_concurrent_create_table_race(error: &tokio_postgres::Error) -> bool {
         db_error.detail().unwrap_or_default(),
     )
 }
-
 
 /// Bundles the mutable schema-tracking sets used during DDL orchestration.
 pub(crate) struct SchemaState {
@@ -125,8 +127,12 @@ async fn create_table(
             );
         }
         Err(error) => {
-            let _ = client.execute("ROLLBACK TO SAVEPOINT rb_create_table", &[]).await;
-            let _ = client.execute("RELEASE SAVEPOINT rb_create_table", &[]).await;
+            let _ = client
+                .execute("ROLLBACK TO SAVEPOINT rb_create_table", &[])
+                .await;
+            let _ = client
+                .execute("RELEASE SAVEPOINT rb_create_table", &[])
+                .await;
             return Err(format_pg_error(
                 &format!("Failed to create table {qualified_table}"),
                 &error,
@@ -135,6 +141,49 @@ async fn create_table(
     }
 
     Ok(())
+}
+
+/// Check whether an existing table still has a unique or primary-key index that
+/// matches the requested conflict target.
+pub(crate) async fn table_has_conflict_target(
+    client: &Client,
+    qualified_table: &str,
+    primary_key: &[String],
+) -> Result<bool, String> {
+    if primary_key.is_empty() {
+        return Ok(false);
+    }
+    let mut sorted_primary_key = primary_key.to_vec();
+    sorted_primary_key.sort();
+
+    let sql = r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM pg_constraint c
+            WHERE c.conrelid = to_regclass($1)
+              AND c.contype IN ('p', 'u')
+              AND (
+                  SELECT array_agg(a.attname::text ORDER BY a.attname)
+                  FROM unnest(c.conkey) WITH ORDINALITY AS k(attnum, ordinality)
+                  JOIN pg_attribute a
+                    ON a.attrelid = c.conrelid
+                   AND a.attnum = k.attnum
+              ) = $2::text[]
+        )
+    "#;
+
+    let has_target = client
+        .query_one(sql, &[&qualified_table, &sorted_primary_key])
+        .await
+        .map_err(|e| {
+            format_pg_error(
+                &format!("failed to inspect conflict target for {qualified_table}"),
+                &e,
+            )
+        })?
+        .get(0);
+
+    Ok(has_target)
 }
 
 impl SchemaState {
@@ -162,12 +211,9 @@ impl SchemaState {
                 "CREATE SCHEMA IF NOT EXISTS {}",
                 quote_identifier(target_schema)
             );
-            client
-                .execute(&create_schema, &[])
-                .await
-                .map_err(|e| {
-                    format_pg_error(&format!("Failed to create schema '{target_schema}'"), &e)
-                })?;
+            client.execute(&create_schema, &[]).await.map_err(|e| {
+                format_pg_error(&format!("Failed to create schema '{target_schema}'"), &e)
+            })?;
 
             let pk = match write_mode {
                 Some(WriteMode::Upsert { primary_key }) => Some(primary_key.as_slice()),
@@ -183,12 +229,14 @@ impl SchemaState {
                     ctx.log(
                         LogLevel::Info,
                         &format!(
-                            "dest-postgres: schema drift detected for {}: {} new, {} removed, {} type changes, {} nullability changes",
-                            qualified_table,
-                            drift.new_columns.len(),
-                            drift.removed_columns.len(),
-                            drift.type_changes.len(),
-                            drift.nullability_changes.len()
+                            "{} for {}",
+                            crate::diagnostics::schema_drift_summary(
+                                drift.new_columns.len(),
+                                drift.removed_columns.len(),
+                                drift.type_changes.len(),
+                                drift.nullability_changes.len()
+                            ),
+                            qualified_table
                         ),
                     );
                     self.apply_policy(ctx, client, &qualified_table, &drift, policy)

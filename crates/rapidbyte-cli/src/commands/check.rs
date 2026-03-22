@@ -5,7 +5,9 @@ use std::path::Path;
 use anyhow::Result;
 use console::style;
 use rapidbyte_engine::CheckStatus;
-use rapidbyte_types::validation::{PrerequisitesReport, ValidationReport, ValidationStatus};
+use rapidbyte_types::validation::{
+    PrerequisiteSeverity, PrerequisitesReport, ValidationReport, ValidationStatus,
+};
 
 use crate::Verbosity;
 
@@ -317,20 +319,72 @@ fn print_validation_details(result: &ValidationReport) {
 }
 
 fn print_prerequisites(label: &str, report: &PrerequisitesReport) {
-    if report.passed {
-        eprintln!("{} {:<20} passed", style("\u{2713}").green().bold(), label);
-    } else {
-        eprintln!("{} {:<20} failed", style("\u{2717}").red().bold(), label);
+    match prerequisites_display_state(report) {
+        PrerequisiteDisplayState::Passed => {
+            eprintln!("{} {:<20} passed", style("\u{2713}").green().bold(), label);
+        }
+        PrerequisiteDisplayState::Info => {
+            eprintln!("{} {:<20} info", style("i").blue().bold(), label);
+        }
+        PrerequisiteDisplayState::Warning => {
+            eprintln!("{} {:<20} warning", style("!").yellow().bold(), label);
+        }
+        PrerequisiteDisplayState::Failed => {
+            eprintln!("{} {:<20} failed", style("\u{2717}").red().bold(), label);
+        }
     }
     for check in &report.checks {
-        if check.passed {
-            eprintln!("  {} {}", style("\u{2713}").green(), check.message);
-        } else {
-            eprintln!("  {} {}", style("\u{2717}").red(), check.message);
-            if let Some(hint) = &check.fix_hint {
-                eprintln!("    fix: {hint}");
+        match check.severity {
+            PrerequisiteSeverity::Warning => {
+                eprintln!("  {} {}", style("!").yellow(), check.message);
+                if let Some(hint) = &check.fix_hint {
+                    eprintln!("    fix: {hint}");
+                }
+            }
+            PrerequisiteSeverity::Info => {
+                eprintln!("  {} {}", style("i").blue(), check.message);
+                if let Some(hint) = &check.fix_hint {
+                    eprintln!("    fix: {hint}");
+                }
+            }
+            PrerequisiteSeverity::Error if !check.passed => {
+                eprintln!("  {} {}", style("\u{2717}").red(), check.message);
+                if let Some(hint) = &check.fix_hint {
+                    eprintln!("    fix: {hint}");
+                }
+            }
+            PrerequisiteSeverity::Error => {
+                eprintln!("  {} {}", style("\u{2713}").green(), check.message);
             }
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrerequisiteDisplayState {
+    Passed,
+    Info,
+    Warning,
+    Failed,
+}
+
+fn prerequisites_display_state(report: &PrerequisitesReport) -> PrerequisiteDisplayState {
+    if !report.passed {
+        PrerequisiteDisplayState::Failed
+    } else if report
+        .checks
+        .iter()
+        .any(|check| check.severity == PrerequisiteSeverity::Warning)
+    {
+        PrerequisiteDisplayState::Warning
+    } else if report
+        .checks
+        .iter()
+        .any(|check| check.severity == PrerequisiteSeverity::Info)
+    {
+        PrerequisiteDisplayState::Info
+    } else {
+        PrerequisiteDisplayState::Passed
     }
 }
 
@@ -363,5 +417,91 @@ mod tests {
         };
 
         assert!(!check_item_passes(Some(&result)));
+    }
+
+    #[test]
+    fn warning_prerequisites_render_as_warning_state() {
+        let report = PrerequisitesReport {
+            passed: true,
+            checks: vec![rapidbyte_types::validation::PrerequisiteCheck {
+                name: "cdc_runtime_replication_slot".to_string(),
+                passed: true,
+                severity: PrerequisiteSeverity::Warning,
+                message: "runtime slot is not prevalidated".to_string(),
+                fix_hint: Some("Set replication_slot explicitly.".to_string()),
+            }],
+        };
+
+        assert_eq!(
+            prerequisites_display_state(&report),
+            PrerequisiteDisplayState::Warning
+        );
+    }
+
+    #[test]
+    fn info_prerequisites_render_as_info_state() {
+        let report = PrerequisitesReport {
+            passed: true,
+            checks: vec![rapidbyte_types::validation::PrerequisiteCheck {
+                name: "cdc_prerequisites_deferred".to_string(),
+                passed: true,
+                severity: PrerequisiteSeverity::Info,
+                message: "CDC-specific prerequisites are deferred until stream sync mode is known"
+                    .to_string(),
+                fix_hint: Some("Run a CDC-enabled check to validate them.".to_string()),
+            }],
+        };
+
+        assert_eq!(
+            prerequisites_display_state(&report),
+            PrerequisiteDisplayState::Info
+        );
+    }
+
+    #[test]
+    fn warning_precedence_wins_over_info() {
+        let report = PrerequisitesReport {
+            passed: true,
+            checks: vec![
+                rapidbyte_types::validation::PrerequisiteCheck {
+                    name: "cdc_prerequisites_deferred".to_string(),
+                    passed: true,
+                    severity: PrerequisiteSeverity::Info,
+                    message: "deferred".to_string(),
+                    fix_hint: None,
+                },
+                rapidbyte_types::validation::PrerequisiteCheck {
+                    name: "replication_slot_state".to_string(),
+                    passed: true,
+                    severity: PrerequisiteSeverity::Warning,
+                    message: "slot missing".to_string(),
+                    fix_hint: None,
+                },
+            ],
+        };
+
+        assert_eq!(
+            prerequisites_display_state(&report),
+            PrerequisiteDisplayState::Warning
+        );
+    }
+
+    #[test]
+    fn failed_prerequisites_render_as_failed_state() {
+        let report = PrerequisitesReport {
+            passed: false,
+            checks: vec![rapidbyte_types::validation::PrerequisiteCheck {
+                name: "replication_slot_state".to_string(),
+                passed: false,
+                severity: PrerequisiteSeverity::Error,
+                message: "slot missing".to_string(),
+                fix_hint: Some("Create the slot.".to_string()),
+            }],
+        };
+
+        assert_eq!(
+            prerequisites_display_state(&report),
+            PrerequisiteDisplayState::Failed
+        );
     }
 }

@@ -10,7 +10,9 @@ mod config;
 mod cursor;
 mod discovery;
 mod encode;
+mod diagnostics;
 mod metrics;
+mod prerequisites;
 mod query;
 mod reader;
 mod types;
@@ -23,6 +25,7 @@ use rapidbyte_sdk::schema::StreamSchema;
 #[rapidbyte_sdk::plugin(source)]
 pub struct SourcePostgres {
     config: config::Config,
+    discovery_settings: config::DiscoverySettings,
 }
 
 impl Source for SourcePostgres {
@@ -30,7 +33,15 @@ impl Source for SourcePostgres {
 
     async fn init(config: Self::Config) -> Result<Self, PluginError> {
         config.validate()?;
-        Ok(Self { config })
+        let discovery_settings = config.discovery_settings();
+        Ok(Self {
+            config,
+            discovery_settings,
+        })
+    }
+
+    async fn prerequisites(&self, ctx: &Context) -> Result<PrerequisitesReport, PluginError> {
+        prerequisites::prerequisites(&self.config, ctx).await
     }
 
     async fn discover(&self, ctx: &Context) -> Result<Vec<DiscoveredStream>, PluginError> {
@@ -38,7 +49,7 @@ impl Source for SourcePostgres {
         let client = client::connect(&self.config)
             .await
             .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
-        discovery::discover_catalog(&client)
+        discovery::discover_catalog_with_settings(&client, &self.discovery_settings)
             .await
             .map_err(|e| PluginError::transient_db("DISCOVERY_FAILED", e))
     }
@@ -52,11 +63,7 @@ impl Source for SourcePostgres {
         client::validate(&self.config).await
     }
 
-    async fn read(
-        &self,
-        ctx: &Context,
-        stream: StreamContext,
-    ) -> Result<ReadSummary, PluginError> {
+    async fn read(&self, ctx: &Context, stream: StreamContext) -> Result<ReadSummary, PluginError> {
         let connect_start = Instant::now();
         let client = client::connect(&self.config)
             .await
@@ -92,16 +99,46 @@ impl CdcSource for SourcePostgres {
         &self,
         ctx: &Context,
         stream: StreamContext,
-        _resume: CdcResumeToken,
+        resume: CdcResumeToken,
     ) -> Result<ReadSummary, PluginError> {
         let connect_start = Instant::now();
         let client = client::connect(&self.config)
             .await
             .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
         let connect_secs = connect_start.elapsed().as_secs_f64();
+        let resume = normalize_cdc_resume_token(&resume);
 
-        cdc::read_cdc_changes(&client, ctx, &stream, &self.config, connect_secs)
+        cdc::read_cdc_changes(&client, ctx, &stream, &resume, &self.config, connect_secs)
             .await
             .map_err(|e| PluginError::internal("CDC_READ_FAILED", e))
+    }
+}
+
+fn normalize_cdc_resume_token(resume: &CdcResumeToken) -> CdcResumeToken {
+    if resume.value.is_none() {
+        CdcResumeToken {
+            value: None,
+            cursor_type: rapidbyte_sdk::cursor::CursorType::Lsn,
+        }
+    } else {
+        resume.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_cdc_resume_token;
+    use rapidbyte_sdk::cursor::CursorType;
+    use rapidbyte_sdk::stream::CdcResumeToken;
+
+    #[test]
+    fn normalize_cdc_resume_token_promotes_missing_resume_to_lsn() {
+        let normalized = normalize_cdc_resume_token(&CdcResumeToken {
+            value: None,
+            cursor_type: CursorType::Utf8,
+        });
+
+        assert_eq!(normalized.value, None);
+        assert_eq!(normalized.cursor_type, CursorType::Lsn);
     }
 }
