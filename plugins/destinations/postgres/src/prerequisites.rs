@@ -21,7 +21,7 @@ pub(crate) struct PrerequisiteSnapshot {
 
 pub(crate) async fn prerequisites(
     config: &Config,
-    ctx: &Context,
+    input: PrerequisitesInput<'_>,
 ) -> Result<PrerequisitesReport, PluginError> {
     let client = crate::client::connect(config)
         .await
@@ -31,10 +31,9 @@ pub(crate) async fn prerequisites(
         .await
         .map_err(|e| PluginError::transient_db("PREREQUISITES_FAILED", e))?;
 
-    ctx.log(
-        LogLevel::Info,
-        "dest-postgres: prerequisite checks complete",
-    );
+    input
+        .log
+        .info("dest-postgres: prerequisite checks complete");
 
     Ok(build_prerequisites_report(config, snapshot))
 }

@@ -5,6 +5,11 @@
 //! ```
 
 // Plugin traits
+pub use crate::input::{
+    ApplyInput, BulkWriteInput, CdcReadInput, CloseInput, DiscoverInput, InitInput,
+    MultiStreamReadInput, PartitionedReadInput, PrerequisitesInput, ReadInput, TeardownInput,
+    TransformInput, ValidateInput, WriteInput,
+};
 pub use crate::plugin::{Destination, Source, Transform};
 
 // Feature traits
@@ -14,6 +19,7 @@ pub use crate::features::{
 pub use crate::stream::{CdcResumeToken, PartitionCoordinates};
 
 // Context and logging
+pub use crate::capabilities::{Cancel, Checkpoints, Emit, Log, Metrics, Network, Reader, State};
 pub use crate::context::{Context, LogLevel};
 
 // Errors
@@ -37,12 +43,16 @@ pub use crate::wire::{SyncMode, WriteMode};
 // Protocol types — data flow
 pub use crate::arrow_types::ArrowDataType;
 pub use crate::checkpoint::{Checkpoint, CheckpointKind};
+pub use rapidbyte_types::batch::BatchMetadata;
 
 // Protocol types — summaries
 pub use crate::metric::{ReadPerf, ReadSummary, TransformSummary, WritePerf, WriteSummary};
 
 // Arrow helpers
 pub use crate::arrow::{self, arrow_data_type, build_arrow_schema, decode_ipc, encode_ipc};
+
+// Testing harnesses
+pub use crate::testing::{TestHarness, TestLogEntry, TestMetricCall, TestStateValue};
 
 // Host interop
 pub use crate::host_ffi;

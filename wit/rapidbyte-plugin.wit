@@ -1,4 +1,4 @@
-package rapidbyte:plugin@7.0.0;
+package rapidbyte:plugin@9.0.0;
 
 interface types {
     // ── Handles ──
@@ -168,7 +168,45 @@ interface types {
     // ── Run request / results ──
     record run-request {
         streams: list<stream-context>,
-        dry-run: bool,
+    }
+
+    // ── Typed lifecycle inputs ──
+    record open-input {
+        config-json: string,
+    }
+
+    record prerequisites-input {
+        session: session,
+    }
+
+    record discover-input {
+        session: session,
+    }
+
+    record validate-input {
+        session: session,
+        stream-name: option<string>,
+        stream-schema: option<stream-schema>,
+    }
+
+    record apply-input {
+        session: session,
+        request: apply-request,
+    }
+
+    record run-input {
+        session: session,
+        plugin-id: string,
+        request: run-request,
+    }
+
+    record close-input {
+        session: session,
+    }
+
+    record teardown-input {
+        session: session,
+        request: teardown-request,
     }
 
     record stream-result {
@@ -231,7 +269,6 @@ interface types {
     // ── Apply ──
     record apply-request {
         streams: list<stream-context>,
-        dry-run: bool,
     }
 
     record apply-action {
@@ -355,17 +392,19 @@ interface source {
         validation-report, prerequisites-report,
         apply-report, apply-request,
         teardown-request, teardown-report, stream-schema,
+        open-input, prerequisites-input, discover-input, validate-input,
+        apply-input, run-input, close-input, teardown-input,
     };
 
     spec: func() -> result<plugin-spec, plugin-error>;
-    open: func(config-json: string) -> result<session, plugin-error>;
-    prerequisites: func(session: session) -> result<prerequisites-report, plugin-error>;
-    discover: func(session: session) -> result<list<discovered-stream>, plugin-error>;
-    validate: func(session: session, stream-schema: option<stream-schema>) -> result<validation-report, plugin-error>;
-    apply: func(session: session, request: apply-request) -> result<apply-report, plugin-error>;
-    run: func(session: session, request: run-request) -> result<run-summary, plugin-error>;
-    close: func(session: session) -> result<_, plugin-error>;
-    teardown: func(session: session, request: teardown-request) -> result<teardown-report, plugin-error>;
+    open: func(input: open-input) -> result<session, plugin-error>;
+    prerequisites: func(input: prerequisites-input) -> result<prerequisites-report, plugin-error>;
+    discover: func(input: discover-input) -> result<list<discovered-stream>, plugin-error>;
+    validate: func(input: validate-input) -> result<validation-report, plugin-error>;
+    apply: func(input: apply-input) -> result<apply-report, plugin-error>;
+    run: func(input: run-input) -> result<run-summary, plugin-error>;
+    close: func(input: close-input) -> result<_, plugin-error>;
+    teardown: func(input: teardown-input) -> result<teardown-report, plugin-error>;
 }
 
 interface destination {
@@ -375,16 +414,18 @@ interface destination {
         validation-report, prerequisites-report,
         apply-report, apply-request,
         teardown-request, teardown-report, stream-schema,
+        open-input, prerequisites-input, validate-input, apply-input,
+        run-input, close-input, teardown-input,
     };
 
     spec: func() -> result<plugin-spec, plugin-error>;
-    open: func(config-json: string) -> result<session, plugin-error>;
-    prerequisites: func(session: session) -> result<prerequisites-report, plugin-error>;
-    validate: func(session: session, stream-schema: option<stream-schema>) -> result<validation-report, plugin-error>;
-    apply: func(session: session, request: apply-request) -> result<apply-report, plugin-error>;
-    run: func(session: session, request: run-request) -> result<run-summary, plugin-error>;
-    close: func(session: session) -> result<_, plugin-error>;
-    teardown: func(session: session, request: teardown-request) -> result<teardown-report, plugin-error>;
+    open: func(input: open-input) -> result<session, plugin-error>;
+    prerequisites: func(input: prerequisites-input) -> result<prerequisites-report, plugin-error>;
+    validate: func(input: validate-input) -> result<validation-report, plugin-error>;
+    apply: func(input: apply-input) -> result<apply-report, plugin-error>;
+    run: func(input: run-input) -> result<run-summary, plugin-error>;
+    close: func(input: close-input) -> result<_, plugin-error>;
+    teardown: func(input: teardown-input) -> result<teardown-report, plugin-error>;
 }
 
 interface transform {
@@ -392,13 +433,14 @@ interface transform {
         plugin-error, plugin-spec, session,
         run-request, run-summary,
         validation-report, stream-schema,
+        open-input, validate-input, run-input, close-input,
     };
 
     spec: func() -> result<plugin-spec, plugin-error>;
-    open: func(config-json: string) -> result<session, plugin-error>;
-    validate: func(session: session, stream-schema: option<stream-schema>) -> result<validation-report, plugin-error>;
-    run: func(session: session, request: run-request) -> result<run-summary, plugin-error>;
-    close: func(session: session) -> result<_, plugin-error>;
+    open: func(input: open-input) -> result<session, plugin-error>;
+    validate: func(input: validate-input) -> result<validation-report, plugin-error>;
+    run: func(input: run-input) -> result<run-summary, plugin-error>;
+    close: func(input: close-input) -> result<_, plugin-error>;
 }
 
 world rapidbyte-host {

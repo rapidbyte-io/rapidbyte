@@ -11,8 +11,6 @@ use serde::{Deserialize, Serialize};
 pub struct RunRequest {
     /// Stream contexts describing each stream to process.
     pub streams: Vec<StreamContext>,
-    /// When `true`, validate the pipeline without executing it.
-    pub dry_run: bool,
 }
 
 /// Outcome of a single stream within a pipeline run.
@@ -101,11 +99,19 @@ mod tests {
     fn run_request_single_stream() {
         let req = RunRequest {
             streams: vec![StreamContext::test_default("users")],
-            dry_run: true,
         };
         let json = serde_json::to_string(&req).unwrap();
         let back: RunRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(req, back);
-        assert!(back.dry_run);
+    }
+
+    #[test]
+    fn run_request_deserializes_without_flags() {
+        let json = serde_json::json!({
+            "streams": [StreamContext::test_default("users")]
+        });
+        let back: RunRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(back.streams.len(), 1);
+        assert_eq!(back.streams[0].stream_name, "users");
     }
 }

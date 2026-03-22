@@ -34,7 +34,7 @@ pub(crate) struct ConfiguredSlotState {
 
 pub(crate) async fn prerequisites(
     config: &Config,
-    ctx: &Context,
+    input: PrerequisitesInput<'_>,
 ) -> Result<PrerequisitesReport, PluginError> {
     let client = crate::client::connect(config)
         .await
@@ -42,10 +42,9 @@ pub(crate) async fn prerequisites(
     let snapshot = snapshot(&client, config)
         .await
         .map_err(|e| PluginError::transient_db("PREREQUISITES_FAILED", e))?;
-    ctx.log(
-        LogLevel::Info,
-        "source-postgres: prerequisite checks complete",
-    );
+    input
+        .log
+        .info("source-postgres: prerequisite checks complete");
     Ok(build_prerequisites_report(config, snapshot))
 }
 
@@ -323,6 +322,7 @@ pub(crate) fn server_version_metadata_from_raw(raw: &str) -> ServerVersionMetada
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rapidbyte_sdk::input::PrerequisitesInput;
     use rapidbyte_sdk::validation::PrerequisiteSeverity;
 
     fn base_config() -> Config {
@@ -545,5 +545,12 @@ mod tests {
             .expect("configured_replication_slot check");
         assert!(!check.passed);
         assert!(!report.passed);
+    }
+
+    #[test]
+    fn prerequisites_helper_compiles_with_typed_input_without_context() {
+        let config = base_config();
+        // This is compile-shape coverage for the typed prerequisites helper.
+        let _ = super::prerequisites(&config, PrerequisitesInput::new());
     }
 }

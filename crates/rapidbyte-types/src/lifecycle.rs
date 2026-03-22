@@ -15,14 +15,12 @@ use crate::stream::StreamContext;
 
 /// Request to apply schema changes for one or more streams.
 ///
-/// When `dry_run` is `true`, the plugin should report what it *would* do
-/// without executing any DDL.
+/// The plugin should report the actions it takes while executing schema
+/// application.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ApplyRequest {
     /// Streams whose schemas should be applied.
     pub streams: Vec<StreamContext>,
-    /// If `true`, report planned actions without executing them.
-    pub dry_run: bool,
 }
 
 /// A single action taken (or planned) during schema apply.
@@ -139,14 +137,22 @@ mod tests {
     }
 
     #[test]
-    fn apply_request_dry_run() {
+    fn apply_request_roundtrip() {
         let req = ApplyRequest {
             streams: vec![test_stream_context("public.users")],
-            dry_run: true,
         };
-        assert!(req.dry_run);
         assert_eq!(req.streams.len(), 1);
         assert_eq!(req.streams[0].stream_name, "public.users");
+    }
+
+    #[test]
+    fn apply_request_deserializes_without_flags() {
+        let json = serde_json::json!({
+            "streams": [test_stream_context("public.users")]
+        });
+        let back: ApplyRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(back.streams.len(), 1);
+        assert_eq!(back.streams[0].stream_name, "public.users");
     }
 
     #[test]

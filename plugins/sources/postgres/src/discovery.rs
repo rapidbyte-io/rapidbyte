@@ -42,23 +42,41 @@ impl DiscoveryColumn {
 /// Returns `Err` if any catalog query fails or result parsing encounters an
 /// unexpected column type.
 #[allow(dead_code)]
-pub async fn discover_catalog(client: &Client) -> Result<Vec<DiscoveredStream>, String> {
-    discover_catalog_with_settings(client, &DiscoverySettings::default()).await
+pub async fn discover_catalog(
+    client: &Client,
+    input: DiscoverInput<'_>,
+) -> Result<Vec<DiscoveredStream>, String> {
+    discover_catalog_with_settings(client, &DiscoverySettings::default(), input).await
 }
 
 pub(crate) async fn discover_catalog_with_settings(
     client: &Client,
     settings: &DiscoverySettings,
+    input: DiscoverInput<'_>,
 ) -> Result<Vec<DiscoveredStream>, String> {
+    input
+        .cancel
+        .check()
+        .map_err(|e| format!("discovery cancelled: {}", e.message))?;
+    input.log.info("source-postgres: discovery starting");
+
     let schema_name = settings.schema.as_deref().unwrap_or("public");
 
     let table_rows = query_catalog_rows(client, schema_name).await?;
+    input
+        .cancel
+        .check()
+        .map_err(|e| format!("discovery cancelled: {}", e.message))?;
     let primary_keys = query_primary_keys(client, schema_name).await?;
 
     let published_tables = match settings.publication.as_deref() {
-        Some(publication_name) => Some(
-            query_publication_tables(client, schema_name, publication_name).await?,
-        ),
+        Some(publication_name) => {
+            input
+                .cancel
+                .check()
+                .map_err(|e| format!("discovery cancelled: {}", e.message))?;
+            Some(query_publication_tables(client, schema_name, publication_name).await?)
+        }
         None => None,
     };
 

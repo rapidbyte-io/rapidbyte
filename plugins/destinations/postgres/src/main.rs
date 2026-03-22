@@ -31,51 +31,38 @@ pub struct DestPostgres {
 impl Destination for DestPostgres {
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<Self, PluginError> {
+    async fn init(config: Self::Config, _input: InitInput<'_>) -> Result<Self, PluginError> {
         Ok(Self { config })
     }
 
-    async fn prerequisites(&self, ctx: &Context) -> Result<PrerequisitesReport, PluginError> {
-        prerequisites::prerequisites(&self.config, ctx).await
-    }
-
-    async fn validate(
+    async fn prerequisites(
         &self,
-        _ctx: &Context,
-        upstream: Option<&rapidbyte_sdk::schema::StreamSchema>,
-    ) -> Result<ValidationReport, PluginError> {
-        validate::validate(&self.config, upstream)
+        input: PrerequisitesInput<'_>,
+    ) -> Result<PrerequisitesReport, PluginError> {
+        prerequisites::prerequisites(&self.config, input).await
     }
 
-    async fn apply(
-        &self,
-        ctx: &Context,
-        request: ApplyRequest,
-    ) -> Result<ApplyReport, PluginError> {
-        apply::apply(&self.config, ctx, request).await
+    async fn validate(&self, input: ValidateInput<'_>) -> Result<ValidationReport, PluginError> {
+        validate::validate(&self.config, input.upstream)
     }
 
-    async fn write(
-        &self,
-        ctx: &Context,
-        stream: StreamContext,
-    ) -> Result<WriteSummary, PluginError> {
-        writer::write_stream(&self.config, ctx, &stream).await
+    async fn apply(&self, input: ApplyInput<'_>) -> Result<ApplyReport, PluginError> {
+        apply::apply(&self.config, input).await
     }
 
-    async fn close(&self, ctx: &Context) -> Result<(), PluginError> {
-        ctx.log(LogLevel::Info, "dest-postgres: close (no-op)");
+    async fn write(&self, input: WriteInput<'_>) -> Result<WriteSummary, PluginError> {
+        writer::write_stream(&self.config, input).await
+    }
+
+    async fn close(&self, input: CloseInput<'_>) -> Result<(), PluginError> {
+        input.log.info("dest-postgres: close (no-op)");
         Ok(())
     }
 }
 
 impl BulkDestination for DestPostgres {
-    async fn write_bulk(
-        &self,
-        ctx: &Context,
-        stream: StreamContext,
-    ) -> Result<WriteSummary, PluginError> {
-        writer::write_stream(&self.config, ctx, &stream).await
+    async fn write_bulk(&self, input: BulkWriteInput<'_>) -> Result<WriteSummary, PluginError> {
+        writer::write_bulk_stream(&self.config, input).await
     }
 }
 
@@ -106,5 +93,38 @@ mod tests {
             },
         };
         assert_eq!(plugin.config.schema, "public");
+    }
+
+    #[tokio::test]
+    async fn dest_postgres_v2_lifecycle_calls_compile_without_context() {
+        let config = config::Config {
+            host: "localhost".to_string(),
+            port: 5432,
+            user: "postgres".to_string(),
+            password: String::new(),
+            database: "postgres".to_string(),
+            schema: "public".to_string(),
+            load_method: config::LoadMethod::Copy,
+            copy_flush_bytes: None,
+        };
+
+        let plugin = DestPostgres::init(config, InitInput::new())
+            .await
+            .expect("init");
+
+        let stream = StreamContext::test_default("users");
+        let apply_request = ApplyRequest {
+            streams: vec![stream.clone()],
+        };
+
+        // This is intentionally compile-shape coverage for the destination's
+        // v2 lifecycle surface; the async write/apply behavior is covered by
+        // the connector's existing focused tests.
+        let _ = plugin.prerequisites(PrerequisitesInput::new());
+        let _ = plugin.validate(ValidateInput::new(None, None));
+        let _ = plugin.apply(ApplyInput::new(apply_request));
+        let _ = plugin.write(WriteInput::host(stream.clone()));
+        let _ = plugin.write_bulk(BulkWriteInput::host(stream));
+        let _ = plugin.close(CloseInput::new());
     }
 }

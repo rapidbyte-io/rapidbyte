@@ -4,7 +4,6 @@
 //! unchanged to downstream. Supports `should_fail` to simulate errors.
 
 use rapidbyte_sdk::prelude::*;
-use rapidbyte_sdk::schema::StreamSchema;
 use rapidbyte_sdk::ConfigSchema;
 use serde::Deserialize;
 
@@ -23,22 +22,20 @@ pub struct TestTransform {
 impl Transform for TestTransform {
     type Config = Config;
 
-    async fn init(config: Self::Config) -> Result<Self, PluginError> {
+    async fn init(config: Self::Config, _input: InitInput<'_>) -> Result<Self, PluginError> {
         Ok(Self { config })
     }
 
     async fn validate(
         &self,
-        _ctx: &Context,
-        _upstream: Option<&StreamSchema>,
+        _input: ValidateInput<'_>,
     ) -> Result<ValidationReport, PluginError> {
         Ok(ValidationReport::success("Test transform config is valid"))
     }
 
     async fn transform(
         &self,
-        ctx: &Context,
-        stream: StreamContext,
+        input: TransformInput<'_>,
     ) -> Result<TransformSummary, PluginError> {
         if self.config.should_fail {
             return Err(PluginError::internal(
@@ -47,7 +44,7 @@ impl Transform for TestTransform {
             ));
         }
 
-        ctx.log(LogLevel::Info, "test-transform: pass-through mode");
+        input.log.info("test-transform: pass-through mode");
 
         let mut records_in: u64 = 0;
         let mut records_out: u64 = 0;
@@ -55,12 +52,23 @@ impl Transform for TestTransform {
         let mut bytes_out: u64 = 0;
         let mut batches_processed: u64 = 0;
 
-        while let Some((_schema, batches)) = ctx.next_batch(stream.limits.max_batch_bytes)? {
-            for batch in &batches {
+        while let Some(decoded) =
+            rapidbyte_sdk::host_ffi::next_batch(input.stream.limits.max_batch_bytes)?
+        {
+            for batch in &decoded.batches {
+                input.cancel.check()?;
                 records_in += batch.num_rows() as u64;
                 bytes_in += batch.get_array_memory_size() as u64;
 
-                ctx.emit_batch(batch)?;
+                let metadata = BatchMetadata {
+                    stream_index: input.stream.stream_index,
+                    schema_fingerprint: None,
+                    sequence_number: 0,
+                    compression: None,
+                    record_count: batch.num_rows() as u32,
+                    byte_count: batch.get_array_memory_size() as u64,
+                };
+                input.emit.batch(batch, &metadata)?;
 
                 records_out += batch.num_rows() as u64;
                 bytes_out += batch.get_array_memory_size() as u64;

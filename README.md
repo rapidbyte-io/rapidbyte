@@ -30,10 +30,8 @@ path.
 - **Configurable checkpointing** by bytes, rows, or elapsed time
 - **Autotune** for parallelism, partition strategy, and COPY flush thresholds
 - **Environment variable substitution** in pipeline YAML configs (`${VAR_NAME}`)
-- **Dry-run mode** with `--limit` for instant feedback without writing data
 - **Interactive dev shell** (REPL) with DataFusion, Arrow workspace, and stream discovery
 - **Distributed controller/agent runtime** for queueing, remote execution, and run tracking
-- **Distributed preview replay** over Arrow Flight with signed preview access
 - **Pipeline parallelism** -- stages run concurrently, connected by bounded channels
 
 ## Quick Start
@@ -56,12 +54,6 @@ Run with diagnostic-level output:
 
 ```bash
 just run tests/fixtures/pipelines/simple_pg_to_pg.yaml -vv
-```
-
-Preview the first 100 rows without writing to the destination:
-
-```bash
-just run tests/fixtures/pipelines/simple_pg_to_pg.yaml --dry-run --limit 100
 ```
 
 Launch the interactive dev shell:
@@ -110,7 +102,7 @@ For distributed controller/agent execution, see
 | `-vv` | Diagnostic | Diagnostic command output and `debug`-level tracing |
 | `--quiet` | Quiet | Suppress all output; exit code only, errors on stderr |
 
-**Other flags:** `--dry-run`, `--limit N`, `--log-level <level>`
+**Other flags:** `--log-level <level>`
 
 ### Global Flags
 
@@ -278,7 +270,7 @@ Rapidbyte supports two execution modes:
 - **Distributed:** `rapidbyte --controller http://127.0.0.1:9090 run pipeline.yaml`
 
 In distributed mode, the controller owns run/task/agent metadata and scheduling,
-while agents execute pipelines and serve dry-run previews. The user-facing
+while agents execute pipelines. The user-facing
 distributed CLI surface is:
 
 - `run`
@@ -300,7 +292,7 @@ rapidbyte controller \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--listen` | `[::]:9090` | gRPC listen address |
-| `--signing-key` | *(required)* | Shared key for preview ticket signing (env: `RAPIDBYTE_SIGNING_KEY`) |
+| `--signing-key` | *(required)* | Shared controller/agent signing key (env: `RAPIDBYTE_SIGNING_KEY`) |
 | `--allow-unauthenticated` | | Disable auth (local dev only) |
 | `--allow-insecure-signing-key` | | Allow built-in dev signing key |
 | `--tls-cert` / `--tls-key` | | PEM cert/key pair for TLS |
@@ -329,8 +321,8 @@ High-level operational rules:
 - Distributed mode requires a shared state backend such as Postgres.
 - SQLite is for standalone and local development workflows.
 - Controller auth is required by default.
-- Preview signing keys should be explicitly configured outside local/dev.
-- TLS is supported for both control-plane gRPC and Flight preview access.
+- Signing keys should be explicitly configured outside local/dev.
+- TLS is supported for control-plane gRPC.
 
 See [`docs/ARCHITECTUREv2.md`](docs/ARCHITECTUREv2.md) for the detailed
 controller/agent design and security model.
@@ -392,10 +384,9 @@ ACLs.
                   Arrow IPC batches          Arrow IPC batches
 ```
 
-The distributed runtime layers a controller control plane and agent preview
-data plane on top of this same engine core. The controller schedules work and
-tracks runs; agents execute full pipelines and expose replay-based dry-run
-previews over Arrow Flight.
+The distributed runtime layers a controller control plane and agent execution
+plane on top of this same engine core. The controller schedules work and
+tracks runs; agents execute full pipelines remotely.
 
 ### Crate Dependency Graph
 
@@ -419,7 +410,7 @@ sdk            (types -- plugins depend only on this)
 | `rapidbyte-runtime` | Wasmtime component runtime, host imports, sandbox |
 | `rapidbyte-engine` | Pipeline orchestrator, config parsing, Arrow utilities |
 | `rapidbyte-controller` | Distributed control plane (scheduling, run/task/agent state) |
-| `rapidbyte-agent` | Distributed worker runtime and Flight preview server |
+| `rapidbyte-agent` | Distributed worker runtime |
 | `rapidbyte-dev` | Interactive dev shell (REPL with DataFusion, Arrow workspace) |
 | `rapidbyte-cli` | CLI binary (`run`, `check`, `discover`, `dev`, `plugins`, `scaffold`, `controller`, `agent`, `status`, `watch`, `list-runs`) |
 | `rapidbyte-sdk` | Plugin SDK (protocol types, component host bindings) |
@@ -431,7 +422,7 @@ sdk            (types -- plugins depend only on this)
 | `just dev-up` | Start dev environment (Docker, build, seed) |
 | `just dev-down` | Stop dev environment and clean state |
 | `just dev` | Launch interactive dev shell (builds host + plugins first) |
-| `just run <pipeline>` | Build and run a pipeline (supports `-v`, `-vv`, `--dry-run`) |
+| `just run <pipeline>` | Build and run a pipeline (supports `-v`, `-vv`) |
 | `just test` | Run workspace tests (`cargo test`) |
 | `just e2e` | End-to-end tests (requires Docker) |
 | `just lint` | Clippy with `-D warnings` |

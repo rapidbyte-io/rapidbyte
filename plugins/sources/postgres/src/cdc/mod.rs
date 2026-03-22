@@ -372,7 +372,9 @@ fn cdc_max_changes() -> i32 {
 fn emit_batch(
     rows: &mut Vec<CdcRow>,
     relation: &RelationInfo,
-    ctx: &Context,
+    stream_index: u32,
+    emit: &Emit,
+    metrics: &Metrics,
     state: &mut EmitState,
 ) -> Result<(), String> {
     let encode_start = Instant::now();
@@ -386,10 +388,18 @@ fn emit_batch(
     state.total_records += rows.len() as u64;
     state.total_bytes += batch.get_array_memory_size() as u64;
     state.batches_emitted += 1;
+    let metadata = BatchMetadata {
+        stream_index,
+        schema_fingerprint: None,
+        sequence_number: 0,
+        compression: None,
+        record_count: batch.num_rows() as u32,
+        byte_count: batch.get_array_memory_size() as u64,
+    };
 
-    ctx.emit_batch(&batch)
+    emit.batch(&batch, &metadata)
         .map_err(|e| format!("emit_batch failed: {}", e.message))?;
-    emit_batch_counters(ctx, state);
+    emit_batch_counters(metrics, state);
 
     rows.clear();
     Ok(())
@@ -399,16 +409,24 @@ fn emit_batch(
 #[allow(clippy::too_many_lines)]
 pub async fn read_cdc_changes(
     client: &Client,
-    ctx: &Context,
-    stream: &StreamContext,
-    resume: &CdcResumeToken,
+    input: CdcReadInput<'_>,
     config: &Config,
     connect_secs: f64,
 ) -> Result<ReadSummary, String> {
-    ctx.log(
-        LogLevel::Info,
-        &format!("CDC reading stream: {}", stream.stream_name),
-    );
+    let CdcReadInput {
+        stream,
+        resume,
+        emit,
+        cancel,
+        checkpoints,
+        metrics,
+        log,
+        ..
+    } = input;
+    log.info(&format!("CDC reading stream: {}", stream.stream_name));
+    cancel
+        .check()
+        .map_err(|e| format!("cdc read cancelled: {}", e.message))?;
 
     let query_start = Instant::now();
 
@@ -417,10 +435,10 @@ pub async fn read_cdc_changes(
     let (slot_name, publication_name) = resolve_cdc_names(config, source_stream_name)?;
 
     // 1b. Surface ambiguous resume states before touching the destructive CDC path.
-    if let Some(resume_diagnostic) = cdc_resume_ambiguity_diagnostic(&stream.stream_name, resume) {
+    if let Some(resume_diagnostic) = cdc_resume_ambiguity_diagnostic(&stream.stream_name, &resume) {
         match resume_diagnostic.level {
             crate::diagnostics::DiagnosticLevel::Warning => {
-                ctx.log(LogLevel::Warn, &resume_diagnostic.render());
+                log.warn(&resume_diagnostic.render());
             }
             crate::diagnostics::DiagnosticLevel::Error => {
                 return Err(resume_diagnostic.render());
@@ -429,10 +447,10 @@ pub async fn read_cdc_changes(
     }
 
     // 2. Preflight server state that we can verify before touching WAL.
-    preflight_cdc_checks(client, config, stream, &slot_name, &publication_name).await?;
+    preflight_cdc_checks(client, config, &stream, &slot_name, &publication_name).await?;
 
     // 3. Ensure replication slot exists (idempotent)
-    ensure_replication_slot(client, ctx, &slot_name).await?;
+    ensure_replication_slot(client, &log, &slot_name).await?;
 
     // 4. Read binary changes from the slot (this CONSUMES them)
     // Uses pgoutput plugin with proto_version 1 and the configured publication.
@@ -490,10 +508,7 @@ pub async fn read_cdc_changes(
             &mut accumulated_rows,
         )
         .map_err(|e| {
-            ctx.log(
-                LogLevel::Warn,
-                &format!("pgoutput decode error (failing safe): {e}"),
-            );
+            log.warn(&format!("pgoutput decode error (failing safe): {e}"));
             e
         })?;
 
@@ -508,7 +523,14 @@ pub async fn read_cdc_changes(
                 .ok_or_else(|| {
                     "CDC batch ready but no Relation message received for target stream".to_string()
                 })?;
-            emit_batch(&mut accumulated_rows, rel, ctx, &mut state)?;
+            emit_batch(
+                &mut accumulated_rows,
+                rel,
+                stream.stream_index,
+                &emit,
+                &metrics,
+                &mut state,
+            )?;
             checkpoint_lsn = last_handled_lsn;
         }
     }
@@ -521,7 +543,14 @@ pub async fn read_cdc_changes(
                 "CDC rows accumulated but no Relation message received for target stream"
                     .to_string()
             })?;
-        emit_batch(&mut accumulated_rows, rel, ctx, &mut state)?;
+        emit_batch(
+            &mut accumulated_rows,
+            rel,
+            stream.stream_index,
+            &emit,
+            &metrics,
+            &mut state,
+        )?;
         checkpoint_lsn = last_handled_lsn;
     }
 
@@ -542,32 +571,25 @@ pub async fn read_cdc_changes(
             bytes_processed: state.total_bytes,
         };
         // CDC uses get_binary_changes (destructive) so checkpoint MUST succeed to avoid data loss.
-        ctx.checkpoint(&cp).map_err(|e| {
+        checkpoints
+            .checkpoint("source-postgres", &stream.stream_name, &cp)
+            .map_err(|e| {
             cdc_checkpoint_failure_diagnostic(&stream.stream_name, &lsn_string, &e.message).render()
         })?;
-        ctx.log(
-            LogLevel::Info,
-            &format!(
-                "CDC checkpoint: stream={} lsn={}",
-                stream.stream_name, lsn_string
-            ),
-        );
+        log.info(&format!(
+            "CDC checkpoint: stream={} lsn={}",
+            stream.stream_name, lsn_string
+        ));
         1u64
     } else {
-        ctx.log(
-            LogLevel::Info,
-            &format!("CDC: no new changes for stream '{}'", stream.stream_name),
-        );
+        log.info(&format!("CDC: no new changes for stream '{}'", stream.stream_name));
         0u64
     };
 
-    ctx.log(
-        LogLevel::Info,
-        &format!(
-            "CDC stream '{}' complete: {} records, {} bytes, {} batches",
-            stream.stream_name, state.total_records, state.total_bytes, state.batches_emitted
-        ),
-    );
+    log.info(&format!(
+        "CDC stream '{}' complete: {} records, {} bytes, {} batches",
+        stream.stream_name, state.total_records, state.total_bytes, state.batches_emitted
+    ));
 
     // Safety: nanosecond timing precision loss beyond 52 bits is acceptable for metrics.
     #[allow(clippy::cast_precision_loss)]
@@ -579,7 +601,7 @@ pub async fn read_cdc_changes(
         fetch_secs,
         arrow_encode_secs,
     };
-    emit_source_timings(ctx, &perf);
+    emit_source_timings(&metrics, &perf);
 
     Ok(ReadSummary {
         records_read: state.total_records,
@@ -594,13 +616,10 @@ pub async fn read_cdc_changes(
 /// Uses try-create to avoid TOCTOU race between check and create.
 async fn ensure_replication_slot(
     client: &Client,
-    ctx: &Context,
+    log: &Log,
     slot_name: &str,
 ) -> Result<(), String> {
-    ctx.log(
-        LogLevel::Debug,
-        &format!("Ensuring replication slot '{slot_name}' exists"),
-    );
+    log.debug(&format!("Ensuring replication slot '{slot_name}' exists"));
 
     // Try to create; if it already exists, PG raises duplicate_object (42710).
     let result = client
@@ -612,10 +631,7 @@ async fn ensure_replication_slot(
 
     match result {
         Ok(_) => {
-            ctx.log(
-                LogLevel::Info,
-                &format!("Created replication slot '{slot_name}' with pgoutput"),
-            );
+            log.info(&format!("Created replication slot '{slot_name}' with pgoutput"));
         }
         Err(e) => {
             // Check for duplicate_object error (SQLSTATE 42710)
@@ -624,10 +640,7 @@ async fn ensure_replication_slot(
                 .is_some_and(|db| db.code().code() == "42710");
 
             if is_duplicate {
-                ctx.log(
-                    LogLevel::Debug,
-                    &format!("Replication slot '{slot_name}' already exists"),
-                );
+                log.debug(&format!("Replication slot '{slot_name}' already exists"));
             } else {
                 return Err(format!(
                     "Failed to create logical replication slot '{slot_name}'. \

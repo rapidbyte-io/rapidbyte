@@ -222,6 +222,7 @@ pub mod test_support {
 
     static METRIC_CALLS: OnceLock<Mutex<Vec<MetricCall>>> = OnceLock::new();
     static METRIC_ERROR: OnceLock<Mutex<Option<PluginError>>> = OnceLock::new();
+    static METRIC_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     static NEXT_BATCH_FRAME: OnceLock<Mutex<Option<NextBatchFrame>>> = OnceLock::new();
     static DROPPED_HANDLES: OnceLock<Mutex<Vec<u64>>> = OnceLock::new();
     static NEXT_BATCH_METADATA_CALLS: OnceLock<Mutex<Vec<u64>>> = OnceLock::new();
@@ -232,6 +233,10 @@ pub mod test_support {
 
     fn metric_error() -> &'static Mutex<Option<PluginError>> {
         METRIC_ERROR.get_or_init(|| Mutex::new(None))
+    }
+
+    pub fn metric_test_lock() -> &'static Mutex<()> {
+        METRIC_TEST_LOCK.get_or_init(|| Mutex::new(()))
     }
 
     fn next_batch_frame() -> &'static Mutex<Option<NextBatchFrame>> {
@@ -1080,7 +1085,28 @@ pub fn log_error(message: &str) {
 /// # Errors
 ///
 /// Returns `Err` if frame creation, IPC encoding, or frame sealing fails.
-pub fn emit_batch(batch: &RecordBatch) -> Result<(), PluginError> {
+pub fn emit_batch(batch: &RecordBatch, metadata: &BatchMetadata) -> Result<(), PluginError> {
+    let expected_record_count = batch.num_rows() as u32;
+    if metadata.record_count != expected_record_count {
+        return Err(PluginError::internal(
+            "BATCH_METADATA_MISMATCH",
+            format!(
+                "metadata record_count={} does not match batch rows={expected_record_count}",
+                metadata.record_count
+            ),
+        ));
+    }
+    let expected_byte_count = batch.get_array_memory_size() as u64;
+    if metadata.byte_count != expected_byte_count {
+        return Err(PluginError::internal(
+            "BATCH_METADATA_MISMATCH",
+            format!(
+                "metadata byte_count={} does not match batch bytes={expected_byte_count}",
+                metadata.byte_count
+            ),
+        ));
+    }
+
     let imports = host_imports();
 
     let capacity = batch.get_array_memory_size() as u64 + 1024;
@@ -1093,7 +1119,7 @@ pub fn emit_batch(batch: &RecordBatch) -> Result<(), PluginError> {
     }
 
     imports.frame_seal(handle)?;
-    imports.emit_batch(handle)?;
+    imports.emit_batch_with_metadata(handle, metadata)?;
     Ok(())
 }
 
@@ -1125,21 +1151,7 @@ pub struct DecodedBatch {
 /// # Errors
 ///
 /// Returns `Err` if frame reading or IPC decoding fails.
-#[allow(clippy::type_complexity)]
-pub fn next_batch(max_bytes: u64) -> Result<Option<(Arc<Schema>, Vec<RecordBatch>)>, PluginError> {
-    next_batch_with_decode_timing(max_bytes)
-        .map(|result| result.map(|decoded| (decoded.schema, decoded.batches)))
-}
-
-/// Receive the next Arrow RecordBatch from the host pipeline and report guest-side IPC decode time.
-///
-/// Returns `None` when there are no more batches.
-///
-/// # Errors
-///
-/// Returns `Err` if frame reading or IPC decoding fails.
-#[allow(clippy::type_complexity)]
-pub fn next_batch_with_decode_timing(max_bytes: u64) -> Result<Option<DecodedBatch>, PluginError> {
+pub fn next_batch(max_bytes: u64) -> Result<Option<DecodedBatch>, PluginError> {
     let imports = host_imports();
 
     let Some(handle) = imports.next_batch()? else {
@@ -1281,15 +1293,6 @@ pub fn take_reported_stream_error(stream_index: u32) -> bool {
         .remove(&stream_index)
 }
 
-/// Emit a batch with metadata for a specific stream.
-///
-/// # Errors
-///
-/// Returns `Err` if the host rejects the batch emission.
-pub fn emit_batch_with_metadata(handle: u64, metadata: &BatchMetadata) -> Result<(), PluginError> {
-    host_imports().emit_batch_with_metadata(handle, metadata)
-}
-
 /// Log a warning message through the host runtime.
 pub fn log_warn(message: &str) {
     log(1, message);
@@ -1381,6 +1384,10 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_native_stub_next_batch_none() {
+        let _guard = test_support::metric_test_lock()
+            .lock()
+            .expect("host ffi test lock poisoned");
+        test_support::reset();
         let result = next_batch(1024).expect("next batch");
         assert!(result.is_none());
     }
@@ -1396,7 +1403,15 @@ mod tests {
         let batch =
             RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1]))]).unwrap();
 
-        let result = emit_batch(&batch);
+        let metadata = BatchMetadata {
+            stream_index: 0,
+            schema_fingerprint: None,
+            sequence_number: 0,
+            compression: None,
+            record_count: 1,
+            byte_count: batch.get_array_memory_size() as u64,
+        };
+        let result = emit_batch(&batch, &metadata);
         assert!(result.is_ok());
     }
 
@@ -1407,9 +1422,34 @@ mod tests {
         assert!(err.message.contains("frame_len=3"));
     }
 
+    #[test]
+    fn test_emit_batch_rejects_mismatched_metadata() {
+        use arrow::array::Int32Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, false)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1, 2]))]).unwrap();
+        let metadata = BatchMetadata {
+            stream_index: 0,
+            schema_fingerprint: None,
+            sequence_number: 0,
+            compression: None,
+            record_count: 1,
+            byte_count: batch.get_array_memory_size() as u64,
+        };
+
+        let err = emit_batch(&batch, &metadata).expect_err("metadata mismatch should fail");
+        assert_eq!(err.code, "BATCH_METADATA_MISMATCH");
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn stream_error_tracks_reported_stream_once() {
+        let _guard = test_support::metric_test_lock()
+            .lock()
+            .expect("host ffi test lock poisoned");
         test_support::reset();
 
         stream_error(7, &PluginError::internal("TEST", "boom")).expect("stream error should work");
@@ -1420,11 +1460,14 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn next_batch_with_decode_timing_returns_metadata_and_drains_it() {
+    fn next_batch_returns_metadata_and_drains_it() {
         use arrow::array::Int32Array;
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
 
+        let _guard = test_support::metric_test_lock()
+            .lock()
+            .expect("host ffi test lock poisoned");
         test_support::reset();
 
         let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, false)]));
@@ -1441,7 +1484,7 @@ mod tests {
         };
         test_support::set_next_batch_frame(41, ipc, metadata.clone());
 
-        let decoded = next_batch_with_decode_timing(u64::MAX)
+        let decoded = next_batch(u64::MAX)
             .expect("next batch should succeed")
             .expect("batch should exist");
 

@@ -312,22 +312,50 @@ fn evaluate_unique_rule(
 }
 
 /// Best-effort: metric failures are silently ignored.
-pub(crate) fn emit_validation_metrics(ctx: &Context, evaluation: &BatchEvaluation) {
+pub(crate) fn emit_validation_metrics(
+    plugin_id: &str,
+    stream: &StreamContext,
+    evaluation: &BatchEvaluation,
+) {
     for ((rule, field), count) in &evaluation.failure_counts {
-        let _ = ctx.counter_with_labels(
-            "validation_failures_total",
-            *count,
+        let labels = metric_labels(
+            plugin_id,
+            stream.stream_name.as_str(),
             &[("rule", rule.as_str()), ("field", field.as_str())],
         );
+        let _ = rapidbyte_sdk::host_ffi::counter_add("validation_failures_total", *count, &labels);
     }
-    let _ = ctx.counter(
+    let valid_labels = metric_labels(plugin_id, stream.stream_name.as_str(), &[]);
+    let _ = rapidbyte_sdk::host_ffi::counter_add(
         "validation_rows_valid_total",
         evaluation.valid_indices.len() as u64,
+        &valid_labels,
     );
-    let _ = ctx.counter(
+    let invalid_labels = metric_labels(plugin_id, stream.stream_name.as_str(), &[]);
+    let _ = rapidbyte_sdk::host_ffi::counter_add(
         "validation_rows_invalid_total",
         evaluation.invalid_rows.len() as u64,
+        &invalid_labels,
     );
+}
+
+fn metric_labels(plugin_id: &str, stream_name: &str, extra: &[(&str, &str)]) -> String {
+    let mut labels = serde_json::Map::new();
+    labels.insert(
+        "plugin".to_string(),
+        serde_json::Value::String(plugin_id.to_string()),
+    );
+    labels.insert(
+        "stream".to_string(),
+        serde_json::Value::String(stream_name.to_string()),
+    );
+    for (key, value) in extra {
+        labels.insert(
+            (*key).to_string(),
+            serde_json::Value::String((*value).to_string()),
+        );
+    }
+    serde_json::Value::Object(labels).to_string()
 }
 
 fn string_value<'a>(array: &'a dyn Array, row: usize) -> Option<&'a str> {
@@ -704,7 +732,7 @@ mod tests {
     #[test]
     fn emit_validation_metrics_records_rule_and_field_labels() {
         drain_stale_metric_calls();
-        let ctx = Context::new("validate", "users");
+        let stream = StreamContext::test_default("users");
         let evaluation = BatchEvaluation {
             valid_indices: vec![0, 2],
             invalid_rows: vec![InvalidRow {
@@ -714,7 +742,7 @@ mod tests {
             failure_counts: BTreeMap::from([(("regex".to_string(), "email".to_string()), 3)]),
         };
 
-        emit_validation_metrics(&ctx, &evaluation);
+        emit_validation_metrics("transform-validate", &stream, &evaluation);
 
         let calls = test_support::take_metric_calls();
         let MetricCall::Counter {
@@ -732,7 +760,7 @@ mod tests {
         assert_eq!(
             labels,
             serde_json::json!({
-                "plugin": "validate",
+                "plugin": env!("CARGO_PKG_NAME"),
                 "stream": "users",
                 "rule": "regex",
                 "field": "email"
@@ -743,7 +771,10 @@ mod tests {
             MetricCall::Counter {
                 name: "validation_rows_valid_total".to_string(),
                 value: 2,
-                labels_json: r#"{"plugin":"validate","stream":"users"}"#.to_string(),
+                labels_json: format!(
+                    r#"{{"plugin":"{}","stream":"users"}}"#,
+                    env!("CARGO_PKG_NAME")
+                ),
             }
         );
         assert_eq!(
@@ -751,7 +782,10 @@ mod tests {
             MetricCall::Counter {
                 name: "validation_rows_invalid_total".to_string(),
                 value: 1,
-                labels_json: r#"{"plugin":"validate","stream":"users"}"#.to_string(),
+                labels_json: format!(
+                    r#"{{"plugin":"{}","stream":"users"}}"#,
+                    env!("CARGO_PKG_NAME")
+                ),
             }
         );
     }

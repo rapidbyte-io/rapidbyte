@@ -394,8 +394,10 @@ Leaf crates (`types`, `state`) `SHOULD` provide a `prelude` module for ergonomic
 /// use rapidbyte_types::prelude::*;
 /// ```
 pub mod prelude {
-    pub use crate::error::{PluginError, ErrorCategory, ValidationResult};
-    pub use crate::wire::{PluginInfo, PluginKind, Feature, SyncMode};
+    pub use crate::error::{PluginError, ErrorCategory};
+    pub use crate::plugin::{Destination, Source, Transform};
+    pub use crate::input::{InitInput, ReadInput, WriteInput, TransformInput, ValidateInput};
+    pub use crate::wire::{PluginKind, Feature, SyncMode};
     // ...
 }
 ```
@@ -474,14 +476,14 @@ pub struct SourcePostgres {
 impl Source for SourcePostgres {
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<(Self, PluginInfo), PluginError> {
+    async fn init(config: Self::Config, _input: InitInput<'_>) -> Result<Self, PluginError> {
         config.validate()?;
-        Ok((Self { config }, PluginInfo { ... }))
+        Ok(Self { config })
     }
 
-    async fn discover(&mut self, ctx: &Context) -> Result<Catalog, PluginError> { ... }
-    async fn read(&mut self, ctx: &Context, stream: StreamContext) -> Result<ReadSummary, PluginError> { ... }
-    async fn close(&mut self, ctx: &Context) -> Result<(), PluginError> { ... }
+    async fn discover(&self, input: DiscoverInput<'_>) -> Result<Vec<DiscoveredStream>, PluginError> { ... }
+    async fn read(&self, input: ReadInput<'_>) -> Result<ReadSummary, PluginError> { ... }
+    async fn close(&self, input: CloseInput<'_>) -> Result<(), PluginError> { ... }
 }
 ```
 
@@ -569,10 +571,10 @@ pub(crate) async fn connect(config: &Config) -> Result<Client, String> {
 - `MUST` implement a `validate` helper that performs a live connectivity test (e.g., `SELECT 1`) before signaling `ValidationStatus::Success`.
 - `SHOULD` provide descriptive success messages that include connection details (host, port, target database/schema).
 
-Example from `dest-postgres/src/client.rs`:
+Example validation result from a destination plugin:
 
 ```rust
-pub(crate) async fn validate(config: &Config) -> Result<ValidationResult, PluginError> {
+pub(crate) async fn validate(config: &Config) -> Result<ValidationReport, PluginError> {
     let client = connect(config)
         .await
         .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
@@ -602,10 +604,7 @@ pub(crate) async fn validate(config: &Config) -> Result<ValidationResult, Plugin
         ),
     };
 
-    Ok(ValidationResult {
-        status: ValidationStatus::Success,
-        message,
-    })
+    Ok(ValidationReport::success(&message))
 }
 ```
 

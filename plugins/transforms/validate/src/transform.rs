@@ -17,17 +17,26 @@ use crate::validate::{emit_validation_metrics, evaluate_batch};
 ///
 /// Returns `Err` if a failing row is encountered and the stream error policy is `Fail`.
 pub async fn run(
-    ctx: &Context,
-    stream: &StreamContext,
+    input: TransformInput<'_>,
     config: &CompiledConfig,
 ) -> Result<TransformSummary, PluginError> {
+    let TransformInput {
+        stream,
+        plugin_id,
+        emit,
+        cancel,
+        log,
+        ..
+    } = input;
     let mut records_in: u64 = 0;
     let mut records_out: u64 = 0;
     let mut bytes_in: u64 = 0;
     let mut bytes_out: u64 = 0;
     let mut batches_processed: u64 = 0;
 
-    while let Some((_schema, batches)) = ctx.next_batch(stream.limits.max_batch_bytes)? {
+    while let Some(decoded) = rapidbyte_sdk::host_ffi::next_batch(stream.limits.max_batch_bytes)? {
+        cancel.check()?;
+        let batches = decoded.batches;
         for batch in &batches {
             if batch.num_rows() == 0 {
                 continue;
@@ -37,13 +46,21 @@ pub async fn run(
             bytes_in += batch.get_array_memory_size() as u64;
 
             let evaluation = evaluate_batch(batch, config);
-            emit_validation_metrics(ctx, &evaluation);
+            emit_validation_metrics(&plugin_id, &stream, &evaluation);
 
             if !evaluation.valid_indices.is_empty() {
                 let filtered = select_rows(batch, &evaluation.valid_indices)?;
                 records_out += filtered.num_rows() as u64;
                 bytes_out += filtered.get_array_memory_size() as u64;
-                ctx.emit_batch(&filtered)?;
+                let metadata = BatchMetadata {
+                    stream_index: stream.stream_index,
+                    schema_fingerprint: None,
+                    sequence_number: 0,
+                    compression: None,
+                    record_count: filtered.num_rows() as u32,
+                    byte_count: filtered.get_array_memory_size() as u64,
+                };
+                emit.batch(&filtered, &metadata)?;
             }
 
             if !evaluation.invalid_rows.is_empty() {
@@ -70,7 +87,8 @@ pub async fn run(
                         let dlq_batch = select_rows(batch, &invalid_indices)?;
                         for (i, invalid) in evaluation.invalid_rows.iter().enumerate() {
                             let record_json = row_to_json_from_batch(&dlq_batch, i)?;
-                            ctx.emit_dlq_record(
+                            rapidbyte_sdk::host_ffi::emit_dlq_record(
+                                &stream.stream_name,
                                 &record_json,
                                 &invalid.message,
                                 rapidbyte_sdk::error::ErrorCategory::Data,
@@ -82,13 +100,10 @@ pub async fn run(
         }
     }
 
-    ctx.log(
-        LogLevel::Info,
-        &format!(
-            "Validation transform complete: {} rows in, {} rows out, {} batches",
-            records_in, records_out, batches_processed
-        ),
-    );
+    log.info(&format!(
+        "Validation transform complete: {} rows in, {} rows out, {} batches",
+        records_in, records_out, batches_processed
+    ));
 
     Ok(TransformSummary {
         records_in,

@@ -345,28 +345,27 @@ pub struct {struct_name} {{
 impl Source for {struct_name} {{
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<Self, PluginError> {{
+    async fn init(config: Self::Config, _input: InitInput<'_>) -> Result<Self, PluginError> {{
         Ok(Self {{ config }})
     }}
 
-    async fn discover(&self, _ctx: &Context) -> Result<Vec<DiscoveredStream>, PluginError> {{
-        discover::discover_streams(&self.config)
+    async fn discover(&self, input: DiscoverInput<'_>) -> Result<Vec<DiscoveredStream>, PluginError> {{
+        discover::discover_streams(&self.config, input)
     }}
 
     async fn validate(
         &self,
-        _ctx: &Context,
-        _upstream: Option<&StreamSchema>,
+        input: ValidateInput<'_>,
     ) -> Result<ValidationReport, PluginError> {{
-        client::validate(&self.config).await
+        client::validate(&self.config, input.upstream).await
     }}
 
-    async fn read(&self, ctx: &Context, stream: StreamContext) -> Result<ReadSummary, PluginError> {{
-        read::read_stream(&self.config, ctx, &stream).await
+    async fn read(&self, input: ReadInput<'_>) -> Result<ReadSummary, PluginError> {{
+        read::read_stream(&self.config, input).await
     }}
 
-    async fn close(&self, ctx: &Context) -> Result<(), PluginError> {{
-        ctx.log(LogLevel::Info, &format!("{{}}: close", env!("CARGO_PKG_NAME")));
+    async fn close(&self, input: CloseInput<'_>) -> Result<(), PluginError> {{
+        input.log.info(&format!("{{}}: close", env!("CARGO_PKG_NAME")));
         Ok(())
     }}
 }}
@@ -393,24 +392,23 @@ pub struct {struct_name} {{
 impl Destination for {struct_name} {{
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<Self, PluginError> {{
+    async fn init(config: Self::Config, _input: InitInput<'_>) -> Result<Self, PluginError> {{
         Ok(Self {{ config }})
     }}
 
     async fn validate(
         &self,
-        _ctx: &Context,
-        _upstream: Option<&StreamSchema>,
+        input: ValidateInput<'_>,
     ) -> Result<ValidationReport, PluginError> {{
-        client::validate(&self.config).await
+        client::validate(&self.config, input.upstream).await
     }}
 
-    async fn write(&self, ctx: &Context, stream: StreamContext) -> Result<WriteSummary, PluginError> {{
-        write::write_stream(&self.config, ctx, &stream).await
+    async fn write(&self, input: WriteInput<'_>) -> Result<WriteSummary, PluginError> {{
+        write::write_stream(&self.config, input).await
     }}
 
-    async fn close(&self, ctx: &Context) -> Result<(), PluginError> {{
-        ctx.log(LogLevel::Info, &format!("{{}}: close", env!("CARGO_PKG_NAME")));
+    async fn close(&self, input: CloseInput<'_>) -> Result<(), PluginError> {{
+        input.log.info(&format!("{{}}: close", env!("CARGO_PKG_NAME")));
         Ok(())
     }}
 }}
@@ -481,24 +479,22 @@ pub struct {struct_name} {{
 impl Transform for {struct_name} {{
     type Config = config::Config;
 
-    async fn init(config: Self::Config) -> Result<Self, PluginError> {{
+    async fn init(config: Self::Config, _input: InitInput<'_>) -> Result<Self, PluginError> {{
         Ok(Self {{ config }})
     }}
 
     async fn validate(
         &self,
-        _ctx: &Context,
-        _upstream: Option<&StreamSchema>,
+        _input: ValidateInput<'_>,
     ) -> Result<ValidationReport, PluginError> {{
         validate::validate_config(&self.config)
     }}
 
     async fn transform(
         &self,
-        ctx: &Context,
-        stream: StreamContext,
+        input: TransformInput<'_>,
     ) -> Result<TransformSummary, PluginError> {{
-        transform::run(ctx, &stream, &self.config).await
+        transform::run(input, &self.config).await
     }}
 }}
 "
@@ -512,8 +508,11 @@ fn gen_client_rs() -> &'static str {
 use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
-pub async fn validate(config: &Config) -> Result<ValidationReport, PluginError> {
-    let _ = config;
+pub async fn validate(
+    config: &Config,
+    upstream: Option<&StreamSchema>,
+) -> Result<ValidationReport, PluginError> {
+    let _ = (config, upstream);
     Ok(ValidationReport::failed(
         "UNIMPLEMENTED: connection validation is not implemented yet",
     ))
@@ -528,8 +527,8 @@ fn gen_read_rs() -> &'static str {
 use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
-pub async fn read_stream(config: &Config, ctx: &Context, stream: &StreamContext) -> Result<ReadSummary, PluginError> {
-    let _ = (config, ctx, stream);
+pub async fn read_stream(config: &Config, input: ReadInput<'_>) -> Result<ReadSummary, PluginError> {
+    let _ = (config, input);
     Err(PluginError::internal(
         "UNIMPLEMENTED",
         "Stream reading is not implemented yet".to_string(),
@@ -545,8 +544,8 @@ fn gen_discover_rs() -> &'static str {
 use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
-pub fn discover_streams(config: &Config) -> Result<Vec<DiscoveredStream>, PluginError> {
-    let _ = config;
+pub fn discover_streams(config: &Config, input: DiscoverInput<'_>) -> Result<Vec<DiscoveredStream>, PluginError> {
+    let _ = (config, input);
     Err(PluginError::schema(
         "UNIMPLEMENTED",
         "Schema discovery is not implemented yet".to_string(),
@@ -562,8 +561,8 @@ fn gen_write_rs() -> &'static str {
 use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
-pub async fn write_stream(config: &Config, ctx: &Context, stream: &StreamContext) -> Result<WriteSummary, PluginError> {
-    let _ = (config, ctx, stream);
+pub async fn write_stream(config: &Config, input: WriteInput<'_>) -> Result<WriteSummary, PluginError> {
+    let _ = (config, input);
     Err(PluginError::internal(
         "UNIMPLEMENTED",
         "Stream writing is not implemented yet".to_string(),
@@ -622,11 +621,10 @@ use crate::config::Config;
 use rapidbyte_sdk::prelude::*;
 
 pub async fn run(
-    ctx: &Context,
-    stream: &StreamContext,
+    input: TransformInput<'_>,
     config: &Config,
 ) -> Result<TransformSummary, PluginError> {
-    let _ = (ctx, stream, config);
+    let _ = (input, config);
     Err(PluginError::internal(
         "UNIMPLEMENTED",
         "Batch transformation is not implemented yet".to_string(),
@@ -691,15 +689,20 @@ mod tests {
         assert!(readme.contains("UNIMPLEMENTED"));
         assert!(main_rs.contains("#[rapidbyte_sdk::plugin(source)]"));
         assert!(
-            main_rs.contains("async fn init(config: Self::Config) -> Result<Self, PluginError>")
+            main_rs.contains("async fn init(config: Self::Config, _input: InitInput<'_>) -> Result<Self, PluginError>")
         );
-        assert!(main_rs.contains("async fn discover(&self, _ctx: &Context) -> Result<Vec<DiscoveredStream>, PluginError>"));
+        assert!(main_rs.contains(
+            "async fn discover(&self, input: DiscoverInput<'_>) -> Result<Vec<DiscoveredStream>, PluginError>"
+        ));
+        assert!(main_rs.contains(
+            "async fn read(&self, input: ReadInput<'_>) -> Result<ReadSummary, PluginError>"
+        ));
         assert!(main_rs.contains("ValidationReport"));
         assert!(!main_rs.contains("PluginInfo"));
         assert!(!main_rs.contains("ValidationResult"));
         assert!(!main_rs.contains("Result<Catalog, PluginError>"));
         assert!(!main_rs.contains("&mut self"));
-        assert!(main_rs.contains("discover::discover_streams(&self.config)"));
+        assert!(main_rs.contains("discover::discover_streams(&self.config, input)"));
         assert!(!config_rs.contains("3306"));
         assert!(config_rs.contains("pub struct Config"));
         assert!(client_rs.contains("NOT PRODUCTION-READY"));
@@ -716,6 +719,10 @@ mod tests {
         assert!(client_rs.contains("ValidationReport"));
         assert!(!client_rs.contains("ValidationResult"));
         assert!(!read_rs.contains("records_read: 0"));
+        assert!(!main_rs.contains("&Context"));
+        assert!(!read_rs.contains("&Context"));
+        assert!(read_rs.contains("ReadInput<'_>"));
+        assert!(discover_rs.contains("DiscoverInput<'_>"));
 
         assert_generated_rust_parses("source main.rs", &main_rs);
         assert_generated_rust_parses("source config.rs", &config_rs);
@@ -751,8 +758,11 @@ mod tests {
         assert!(readme.contains("UNIMPLEMENTED"));
         assert!(main_rs.contains("#[rapidbyte_sdk::plugin(destination)]"));
         assert!(
-            main_rs.contains("async fn init(config: Self::Config) -> Result<Self, PluginError>")
+            main_rs.contains("async fn init(config: Self::Config, _input: InitInput<'_>) -> Result<Self, PluginError>")
         );
+        assert!(main_rs.contains(
+            "async fn write(&self, input: WriteInput<'_>) -> Result<WriteSummary, PluginError>"
+        ));
         assert!(main_rs.contains("ValidationReport"));
         assert!(!main_rs.contains("PluginInfo"));
         assert!(!main_rs.contains("ValidationResult"));
@@ -767,6 +777,9 @@ mod tests {
         assert!(write_rs.contains("PluginError::internal("));
         assert!(write_rs.contains("\"UNIMPLEMENTED\""));
         assert!(!write_rs.contains("records_written: 0"));
+        assert!(!main_rs.contains("&Context"));
+        assert!(!write_rs.contains("&Context"));
+        assert!(write_rs.contains("WriteInput<'_>"));
 
         assert_generated_rust_parses("destination main.rs", &main_rs);
         assert_generated_rust_parses("destination config.rs", &config_rs);
@@ -801,9 +814,12 @@ mod tests {
         assert!(readme.contains("UNIMPLEMENTED"));
         assert!(main_rs.contains("#[rapidbyte_sdk::plugin(transform)]"));
         assert!(
-            main_rs.contains("async fn init(config: Self::Config) -> Result<Self, PluginError>")
+            main_rs.contains("async fn init(config: Self::Config, _input: InitInput<'_>) -> Result<Self, PluginError>")
         );
         assert!(main_rs.contains("validate::validate_config(&self.config)"));
+        assert!(main_rs.contains("async fn transform("));
+        assert!(main_rs.contains("input: TransformInput<'_>"));
+        assert!(main_rs.contains("Result<TransformSummary, PluginError>"));
         assert!(main_rs.contains("ValidationReport"));
         assert!(!main_rs.contains("PluginInfo"));
         assert!(!main_rs.contains("ValidationResult"));
@@ -818,6 +834,9 @@ mod tests {
         assert!(transform_rs.contains("PluginError::internal("));
         assert!(transform_rs.contains("\"UNIMPLEMENTED\""));
         assert!(!transform_rs.contains("records_out: 0"));
+        assert!(!main_rs.contains("&Context"));
+        assert!(!transform_rs.contains("&Context"));
+        assert!(transform_rs.contains("TransformInput<'_>"));
 
         assert_generated_rust_parses("transform main.rs", &main_rs);
         assert_generated_rust_parses("transform config.rs", &config_rs);

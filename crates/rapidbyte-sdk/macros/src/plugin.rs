@@ -182,11 +182,11 @@ fn gen_wit_bindings(world_name: &str) -> TokenStream {
 fn gen_common(struct_name: &Ident) -> TokenStream {
     quote! {
         use std::cell::RefCell;
-        use std::sync::OnceLock;
+        use std::sync::{atomic::{AtomicU64, Ordering}, OnceLock};
 
         static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
         static CONFIG_JSON: OnceLock<String> = OnceLock::new();
-        static CONTEXT: OnceLock<::rapidbyte_sdk::context::Context> = OnceLock::new();
+        static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
         fn get_runtime() -> &'static tokio::runtime::Runtime {
             RUNTIME.get_or_init(|| {
@@ -199,11 +199,38 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
 
         struct SyncRefCell(RefCell<Option<#struct_name>>);
         unsafe impl Sync for SyncRefCell {}
+        struct SyncSessionCell(RefCell<Option<u64>>);
+        unsafe impl Sync for SyncSessionCell {}
 
         static PLUGIN: OnceLock<SyncRefCell> = OnceLock::new();
+        static ACTIVE_SESSION: OnceLock<SyncSessionCell> = OnceLock::new();
 
         fn get_state() -> &'static RefCell<Option<#struct_name>> {
             &PLUGIN.get_or_init(|| SyncRefCell(RefCell::new(None))).0
+        }
+
+        fn get_session_state() -> &'static RefCell<Option<u64>> {
+            &ACTIVE_SESSION
+                .get_or_init(|| SyncSessionCell(RefCell::new(None)))
+                .0
+        }
+
+        fn validate_session(
+            session: u64,
+        ) -> Result<(), __rb_bindings::rapidbyte::plugin::types::PluginError> {
+            match *get_session_state().borrow() {
+                Some(active) if active == session => Ok(()),
+                Some(active) => Err(to_component_error(
+                    ::rapidbyte_sdk::error::PluginError::internal(
+                        "INVALID_SESSION",
+                        format!("session mismatch: expected {active}, got {session}"),
+                    ),
+                )),
+                None => Err(to_component_error(::rapidbyte_sdk::error::PluginError::internal(
+                    "INVALID_SESSION",
+                    "plugin is not opened",
+                ))),
+            }
         }
 
         fn to_component_error(
@@ -767,7 +794,6 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
         ) -> ::rapidbyte_sdk::lifecycle::ApplyRequest {
             ::rapidbyte_sdk::lifecycle::ApplyRequest {
                 streams: r.streams.into_iter().map(from_component_stream_context).collect(),
-                dry_run: r.dry_run,
             }
         }
 
@@ -815,7 +841,6 @@ fn gen_common(struct_name: &Ident) -> TokenStream {
         ) -> ::rapidbyte_sdk::run::RunRequest {
             ::rapidbyte_sdk::run::RunRequest {
                 streams: r.streams.into_iter().map(from_component_stream_context).collect(),
-                dry_run: r.dry_run,
             }
         }
 
@@ -956,8 +981,9 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
         }
 
         fn open(
-            config_json: String,
+            input: __rb_bindings::rapidbyte::plugin::types::OpenInput,
         ) -> Result<u64, __rb_bindings::rapidbyte::plugin::types::PluginError> {
+            let config_json = input.config_json;
             let _ = CONFIG_JSON.set(config_json.clone());
 
             let config: <#struct_name as #trait_path>::Config =
@@ -965,51 +991,59 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
 
             let rt = get_runtime();
             let instance = rt
-                .block_on(<#struct_name as #trait_path>::init(config))
+                .block_on(<#struct_name as #trait_path>::init(
+                    config,
+                    ::rapidbyte_sdk::plugin::InitInput::new(),
+                ))
                 .map_err(to_component_error)?;
-
-            let _ = CONTEXT.set(::rapidbyte_sdk::context::Context::new(
-                env!("CARGO_PKG_NAME"),
-                ::rapidbyte_sdk::host_ffi::current_stream_name(),
-            ));
+            let session = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
             *get_state().borrow_mut() = Some(instance);
-            Ok(1)
+            *get_session_state().borrow_mut() = Some(session);
+            Ok(session)
         }
 
         fn validate(
-            _session: u64,
-            stream_schema: Option<__rb_bindings::rapidbyte::plugin::types::StreamSchema>,
+            input: __rb_bindings::rapidbyte::plugin::types::ValidateInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::ValidationReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let ctx = CONTEXT
-                .get()
-                .expect("open must be called before validate")
-                .with_stream(::rapidbyte_sdk::host_ffi::current_stream_name());
-            let upstream = stream_schema.map(from_component_stream_schema);
+            validate_session(input.session)?;
+            let upstream = input.stream_schema.map(from_component_stream_schema);
 
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
             let conn = state_ref.as_ref().expect("Plugin not opened");
 
-            rt.block_on(<#struct_name as #trait_path>::validate(conn, &ctx, upstream.as_ref()))
+            rt.block_on(<#struct_name as #trait_path>::validate(
+                conn,
+                ::rapidbyte_sdk::plugin::ValidateInput::new(
+                    upstream.as_ref(),
+                    input.stream_name.as_deref(),
+                ),
+            ))
                 .map(to_component_validation)
                 .map_err(to_component_error)
         }
 
-        fn close(_session: u64) -> Result<(), __rb_bindings::rapidbyte::plugin::types::PluginError> {
+        fn close(
+            input: __rb_bindings::rapidbyte::plugin::types::CloseInput,
+        ) -> Result<(), __rb_bindings::rapidbyte::plugin::types::PluginError> {
+            validate_session(input.session)?;
             let rt = get_runtime();
-            let ctx = CONTEXT.get().expect("open must be called before close");
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
             if let Some(conn) = state_ref.as_ref() {
-                rt.block_on(<#struct_name as #trait_path>::close(conn, ctx))
+                rt.block_on(<#struct_name as #trait_path>::close(
+                    conn,
+                    ::rapidbyte_sdk::plugin::CloseInput::new(),
+                ))
                     .map_err(to_component_error)?;
             }
             drop(state_ref);
             *get_state().borrow_mut() = None;
+            *get_session_state().borrow_mut() = None;
             Ok(())
         }
     }
@@ -1029,7 +1063,10 @@ fn gen_read_dispatch(
 
     if !has_partitioned && !has_cdc {
         return quote! {
-            rt.block_on(<#struct_name as #trait_path>::read(conn, &ctx, stream.clone()))
+            rt.block_on(<#struct_name as #trait_path>::read(
+                conn,
+                ::rapidbyte_sdk::plugin::ReadInput::host(stream.clone()),
+            ))
                 .map_err(to_component_error)?
         };
     }
@@ -1037,7 +1074,8 @@ fn gen_read_dispatch(
     let partition_branch = has_partitioned.then(|| quote! {
         if let Some(partition) = stream.partition_coordinates_typed() {
             return <#struct_name as ::rapidbyte_sdk::features::PartitionedSource>::read_partition(
-                conn, &ctx, stream, partition
+                conn,
+                ::rapidbyte_sdk::plugin::PartitionedReadInput::host(stream, partition),
             ).await;
         }
     });
@@ -1052,7 +1090,8 @@ fn gen_read_dispatch(
                     }
                 );
                 return <#struct_name as ::rapidbyte_sdk::features::CdcSource>::read_changes(
-                    conn, &ctx, stream, resume
+                    conn,
+                    ::rapidbyte_sdk::plugin::CdcReadInput::host(stream, resume),
                 ).await;
             }
         }
@@ -1062,7 +1101,10 @@ fn gen_read_dispatch(
         rt.block_on(async {
             #partition_branch
             #cdc_branch
-            <#struct_name as #trait_path>::read(conn, &ctx, stream.clone()).await
+            <#struct_name as #trait_path>::read(
+                conn,
+                ::rapidbyte_sdk::plugin::ReadInput::host(stream.clone()),
+            ).await
         }).map_err(to_component_error)?
     }
 }
@@ -1077,69 +1119,76 @@ fn gen_source_methods(
 
     quote! {
         fn prerequisites(
-            _session: u64,
+            input: __rb_bindings::rapidbyte::plugin::types::PrerequisitesInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::PrerequisitesReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let ctx = CONTEXT.get().expect("Plugin not opened");
+            validate_session(input.session)?;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
             let conn = state_ref.as_ref().expect("Plugin not opened");
 
-            rt.block_on(<#struct_name as #trait_path>::prerequisites(conn, ctx))
+            rt.block_on(<#struct_name as #trait_path>::prerequisites(
+                conn,
+                ::rapidbyte_sdk::plugin::PrerequisitesInput::new(),
+            ))
                 .map(to_component_prerequisites_report)
                 .map_err(to_component_error)
         }
 
         fn discover(
-            _session: u64,
+            input: __rb_bindings::rapidbyte::plugin::types::DiscoverInput,
         ) -> Result<
             Vec<__rb_bindings::rapidbyte::plugin::types::DiscoveredStream>,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let ctx = CONTEXT.get().expect("Plugin not opened");
+            validate_session(input.session)?;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
             let conn = state_ref.as_ref().expect("Plugin not opened");
 
             let streams = rt
-                .block_on(<#struct_name as #trait_path>::discover(conn, ctx))
+                .block_on(<#struct_name as #trait_path>::discover(
+                    conn,
+                    ::rapidbyte_sdk::plugin::DiscoverInput::new(),
+                ))
                 .map_err(to_component_error)?;
 
             Ok(streams.into_iter().map(to_component_discovered_stream).collect())
         }
 
         fn apply(
-            _session: u64,
-            request: __rb_bindings::rapidbyte::plugin::types::ApplyRequest,
+            input: __rb_bindings::rapidbyte::plugin::types::ApplyInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::ApplyReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let ctx = CONTEXT.get().expect("Plugin not opened");
+            validate_session(input.session)?;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
             let conn = state_ref.as_ref().expect("Plugin not opened");
 
-            let sdk_request = from_component_apply_request(request);
-            rt.block_on(<#struct_name as #trait_path>::apply(conn, ctx, sdk_request))
+            let sdk_request = from_component_apply_request(input.request);
+            rt.block_on(<#struct_name as #trait_path>::apply(
+                conn,
+                ::rapidbyte_sdk::plugin::ApplyInput::new(sdk_request),
+            ))
                 .map(to_component_apply_report)
                 .map_err(to_component_error)
         }
 
         fn run(
-            _session: u64,
-            request: __rb_bindings::rapidbyte::plugin::types::RunRequest,
+            input: __rb_bindings::rapidbyte::plugin::types::RunInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::RunSummary,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let sdk_request = from_component_run_request(request);
-            let base_ctx = CONTEXT.get().expect("Plugin not opened");
+            validate_session(input.session)?;
+            let sdk_request = from_component_run_request(input.request);
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1148,7 +1197,6 @@ fn gen_source_methods(
             // Process each stream and collect results
             let mut results = Vec::new();
             for stream in sdk_request.streams {
-                let ctx = base_ctx.with_stream(&stream.stream_name);
                 let stream_idx = stream.stream_index;
                 let stream_nm = stream.stream_name.clone();
                 let _ = ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream_idx);
@@ -1174,20 +1222,22 @@ fn gen_source_methods(
         }
 
         fn teardown(
-            _session: u64,
-            request: __rb_bindings::rapidbyte::plugin::types::TeardownRequest,
+            input: __rb_bindings::rapidbyte::plugin::types::TeardownInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::TeardownReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let ctx = CONTEXT.get().expect("Plugin not opened");
+            validate_session(input.session)?;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
             let conn = state_ref.as_ref().expect("Plugin not opened");
 
-            let sdk_request = from_component_teardown_request(request);
-            rt.block_on(<#struct_name as #trait_path>::teardown(conn, ctx, sdk_request))
+            let sdk_request = from_component_teardown_request(input.request);
+            rt.block_on(<#struct_name as #trait_path>::teardown(
+                conn,
+                ::rapidbyte_sdk::plugin::TeardownInput::new(sdk_request),
+            ))
                 .map(to_component_teardown_report)
                 .map_err(to_component_error)
         }
@@ -1203,65 +1253,71 @@ fn gen_dest_methods(
     let write_dispatch = if features.is_some_and(|f| f.has_bulk_load) {
         quote! {
             rt.block_on(<#struct_name as ::rapidbyte_sdk::features::BulkDestination>::write_bulk(
-                conn,
-                &ctx,
-                stream.clone(),
+            conn,
+            ::rapidbyte_sdk::plugin::BulkWriteInput::host(stream.clone()),
             ))
-            .map_err(to_component_error)?
+        .map_err(to_component_error)?
         }
     } else {
         quote! {
-            rt.block_on(<#struct_name as #trait_path>::write(conn, &ctx, stream.clone()))
-                .map_err(to_component_error)?
+            rt.block_on(<#struct_name as #trait_path>::write(
+            conn,
+            ::rapidbyte_sdk::plugin::WriteInput::host(stream.clone()),
+        ))
+            .map_err(to_component_error)?
         }
     };
 
     quote! {
         fn prerequisites(
-            _session: u64,
+            input: __rb_bindings::rapidbyte::plugin::types::PrerequisitesInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::PrerequisitesReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let ctx = CONTEXT.get().expect("Plugin not opened");
+            validate_session(input.session)?;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
             let conn = state_ref.as_ref().expect("Plugin not opened");
 
-            rt.block_on(<#struct_name as #trait_path>::prerequisites(conn, ctx))
+            rt.block_on(<#struct_name as #trait_path>::prerequisites(
+                conn,
+                ::rapidbyte_sdk::plugin::PrerequisitesInput::new(),
+            ))
                 .map(to_component_prerequisites_report)
                 .map_err(to_component_error)
         }
 
         fn apply(
-            _session: u64,
-            request: __rb_bindings::rapidbyte::plugin::types::ApplyRequest,
+            input: __rb_bindings::rapidbyte::plugin::types::ApplyInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::ApplyReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let ctx = CONTEXT.get().expect("Plugin not opened");
+            validate_session(input.session)?;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
             let conn = state_ref.as_ref().expect("Plugin not opened");
 
-            let sdk_request = from_component_apply_request(request);
-            rt.block_on(<#struct_name as #trait_path>::apply(conn, ctx, sdk_request))
+            let sdk_request = from_component_apply_request(input.request);
+            rt.block_on(<#struct_name as #trait_path>::apply(
+                conn,
+                ::rapidbyte_sdk::plugin::ApplyInput::new(sdk_request),
+            ))
                 .map(to_component_apply_report)
                 .map_err(to_component_error)
         }
 
         fn run(
-            _session: u64,
-            request: __rb_bindings::rapidbyte::plugin::types::RunRequest,
+            input: __rb_bindings::rapidbyte::plugin::types::RunInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::RunSummary,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let sdk_request = from_component_run_request(request);
-            let base_ctx = CONTEXT.get().expect("Plugin not opened");
+            validate_session(input.session)?;
+            let sdk_request = from_component_run_request(input.request);
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1270,7 +1326,6 @@ fn gen_dest_methods(
             // Process each stream and collect results
             let mut results = Vec::new();
             for stream in sdk_request.streams {
-                let ctx = base_ctx.with_stream(&stream.stream_name);
                 let _ = ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
 
                 let summary = #write_dispatch;
@@ -1285,20 +1340,22 @@ fn gen_dest_methods(
         }
 
         fn teardown(
-            _session: u64,
-            request: __rb_bindings::rapidbyte::plugin::types::TeardownRequest,
+            input: __rb_bindings::rapidbyte::plugin::types::TeardownInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::TeardownReport,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let ctx = CONTEXT.get().expect("Plugin not opened");
+            validate_session(input.session)?;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
             let conn = state_ref.as_ref().expect("Plugin not opened");
 
-            let sdk_request = from_component_teardown_request(request);
-            rt.block_on(<#struct_name as #trait_path>::teardown(conn, ctx, sdk_request))
+            let sdk_request = from_component_teardown_request(input.request);
+            rt.block_on(<#struct_name as #trait_path>::teardown(
+                conn,
+                ::rapidbyte_sdk::plugin::TeardownInput::new(sdk_request),
+            ))
                 .map(to_component_teardown_report)
                 .map_err(to_component_error)
         }
@@ -1309,14 +1366,13 @@ fn gen_dest_methods(
 fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> TokenStream {
     quote! {
         fn run(
-            _session: u64,
-            request: __rb_bindings::rapidbyte::plugin::types::RunRequest,
+            input: __rb_bindings::rapidbyte::plugin::types::RunInput,
         ) -> Result<
             __rb_bindings::rapidbyte::plugin::types::RunSummary,
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
-            let sdk_request = from_component_run_request(request);
-            let base_ctx = CONTEXT.get().expect("Plugin not opened");
+            validate_session(input.session)?;
+            let sdk_request = from_component_run_request(input.request);
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1325,11 +1381,16 @@ fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
             // Process each stream and collect results
             let mut results = Vec::new();
             for stream in sdk_request.streams {
-                let ctx = base_ctx.with_stream(&stream.stream_name);
                 let _ = ::rapidbyte_sdk::host_ffi::take_reported_stream_error(stream.stream_index);
 
                 let summary = rt
-                    .block_on(<#struct_name as #trait_path>::transform(conn, &ctx, stream.clone()))
+                    .block_on(<#struct_name as #trait_path>::transform(
+                        conn,
+                        ::rapidbyte_sdk::plugin::TransformInput::host(
+                            stream.clone(),
+                            input.plugin_id.as_str(),
+                        ),
+                    ))
                     .map_err(to_component_error)?;
 
                 let succeeded =
@@ -1375,18 +1436,77 @@ fn gen_embeds(struct_name: &Ident, trait_path: &TokenStream) -> TokenStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use quote::quote;
     use syn::parse_quote;
 
     #[test]
-    fn lifecycle_validate_uses_current_stream_name() {
+    fn source_export_uses_v2_typed_inputs_and_feature_traits() {
         let struct_name: Ident = parse_quote!(TestTransform);
-        let trait_path = quote!(::rapidbyte_sdk::plugin::Transform);
+        let trait_path = quote!(::rapidbyte_sdk::plugin::Source);
+        let features = ManifestFeatures {
+            has_partitioned_read: true,
+            has_cdc: true,
+            has_bulk_load: false,
+        };
 
-        let generated = gen_lifecycle_methods(&struct_name, &trait_path).to_string();
+        let generated = gen_guest_impl(
+            &PluginKind::Source,
+            &struct_name,
+            &trait_path,
+            Some(&features),
+        )
+        .to_string();
 
-        assert!(generated.contains("current_stream_name"));
-        assert!(generated.contains("with_stream"));
+        assert!(generated.contains("InitInput :: new"));
+        assert!(generated.contains("ReadInput :: host"));
+        assert!(generated.contains("PartitionedReadInput :: host"));
+        assert!(generated.contains("CdcReadInput :: host"));
+        assert!(generated.contains("PartitionedSource"));
+        assert!(generated.contains("CdcSource"));
+        assert!(generated.contains("NEXT_SESSION_ID . fetch_add"));
+        assert!(generated.contains("validate_session"));
+        assert!(!generated.contains("Context"));
+        assert!(!generated.contains("with_dry_run"));
+        assert!(!generated.contains("with_capabilities"));
+    }
+
+    #[test]
+    fn destination_and_transform_exports_use_v2_inputs() {
+        let struct_name: Ident = parse_quote!(TestDestination);
+        let destination_trait = quote!(::rapidbyte_sdk::plugin::Destination);
+        let destination_generated = gen_guest_impl(
+            &PluginKind::Destination,
+            &struct_name,
+            &destination_trait,
+            None,
+        )
+        .to_string();
+
+        assert!(destination_generated.contains("InitInput :: new"));
+        assert!(destination_generated.contains("WriteInput :: host"));
+        assert!(destination_generated.contains("PrerequisitesInput :: new"));
+        assert!(destination_generated.contains("ApplyInput :: new"));
+        assert!(destination_generated.contains("TeardownInput :: new"));
+        assert!(destination_generated.contains("NEXT_SESSION_ID . fetch_add"));
+        assert!(destination_generated.contains("validate_session"));
+        assert!(!destination_generated.contains("Context"));
+        assert!(!destination_generated.contains("with_dry_run"));
+        assert!(!destination_generated.contains("with_capabilities"));
+
+        let struct_name: Ident = parse_quote!(TestTransform);
+        let transform_trait = quote!(::rapidbyte_sdk::plugin::Transform);
+        let transform_generated =
+            gen_guest_impl(&PluginKind::Transform, &struct_name, &transform_trait, None)
+                .to_string();
+
+        assert!(transform_generated.contains("InitInput :: new"));
+        assert!(transform_generated.contains("TransformInput :: host"));
+        assert!(transform_generated.contains("ValidateInput :: new"));
+        assert!(transform_generated.contains("CloseInput :: new"));
+        assert!(transform_generated.contains("NEXT_SESSION_ID . fetch_add"));
+        assert!(transform_generated.contains("validate_session"));
+        assert!(!transform_generated.contains("Context"));
     }
 
     #[test]
@@ -1444,6 +1564,62 @@ mod tests {
         assert!(common_generated.contains("fn write_summary_to_run_summary"));
         assert!(common_generated
             .contains("summary : :: rapidbyte_sdk :: metric :: WriteSummary , succeeded : bool"));
+    }
+
+    #[test]
+    fn feature_assertions_use_current_partitioned_source_trait_names() {
+        let features = ManifestFeatures {
+            has_partitioned_read: true,
+            has_cdc: true,
+            has_bulk_load: false,
+        };
+
+        let generated =
+            gen_feature_assertions(&PluginKind::Source, &parse_quote!(TestSource), &features)
+                .to_string();
+
+        assert!(generated.contains("PartitionedSource"));
+        assert!(generated.contains("CdcSource"));
+        assert!(!generated.contains("PartitionPlanner"));
+    }
+
+    #[test]
+    fn old_context_shaped_signatures_are_absent_from_generated_exports() {
+        let struct_name: Ident = parse_quote!(TestSource);
+        let trait_path = quote!(::rapidbyte_sdk::plugin::Source);
+        let features = ManifestFeatures {
+            has_partitioned_read: true,
+            has_cdc: true,
+            has_bulk_load: false,
+        };
+
+        let generated = gen_guest_impl(
+            &PluginKind::Source,
+            &struct_name,
+            &trait_path,
+            Some(&features),
+        )
+        .to_string();
+
+        assert!(generated.contains("InitInput :: new"));
+        assert!(generated.contains("DiscoverInput :: new"));
+        assert!(generated.contains("ValidateInput :: new"));
+        assert!(generated.contains("ReadInput :: host"));
+        assert!(generated.contains("validate_session"));
+        assert!(!generated.contains("Context"));
+        assert!(!generated.contains("with_dry_run"));
+    }
+
+    #[test]
+    fn lifecycle_methods_use_session_validation_and_allocation() {
+        let struct_name: Ident = parse_quote!(TestSource);
+        let trait_path = quote!(::rapidbyte_sdk::plugin::Source);
+
+        let generated = gen_lifecycle_methods(&struct_name, &trait_path).to_string();
+
+        assert!(generated.contains("NEXT_SESSION_ID . fetch_add"));
+        assert!(generated.contains("validate_session"));
+        assert!(generated.contains("get_session_state"));
     }
 
     #[test]

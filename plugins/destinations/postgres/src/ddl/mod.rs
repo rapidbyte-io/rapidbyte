@@ -20,6 +20,22 @@ pub(crate) use self::staging::{
     ContractHandoff,
 };
 
+pub(crate) trait DdlLog {
+    fn log(&self, level: LogLevel, message: &str);
+}
+
+impl DdlLog for Context {
+    fn log(&self, level: LogLevel, message: &str) {
+        Context::log(self, level, message);
+    }
+}
+
+impl DdlLog for Log {
+    fn log(&self, level: LogLevel, message: &str) {
+        Log::log(self, level, message);
+    }
+}
+
 fn is_pg_type_typname_race(code: &str, message: &str, detail: &str) -> bool {
     code == "23505"
         && (message.contains("pg_type_typname_nsp_index")
@@ -57,7 +73,7 @@ impl SchemaState {
 
 /// Create the target table if it doesn't exist, based on the Arrow schema.
 async fn create_table(
-    ctx: &Context,
+    ctx: &impl DdlLog,
     client: &Client,
     qualified_table: &str,
     arrow_schema: &rapidbyte_sdk::arrow::datatypes::Schema,
@@ -191,7 +207,7 @@ impl SchemaState {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn ensure_table(
         &mut self,
-        ctx: &Context,
+        ctx: &impl DdlLog,
         client: &Client,
         target_schema: &str,
         stream_name: &str,

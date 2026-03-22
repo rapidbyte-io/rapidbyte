@@ -323,10 +323,10 @@ impl<'a> WriteSession<'a> {
         self.stats.last_emitted_rows = self.stats.total_rows;
         self.stats.last_emitted_bytes = self.stats.total_bytes;
         if delta_rows > 0 {
-            let _ = self.ctx.counter("records_written", delta_rows);
+            let _ = self.ctx.counter("records_written", delta_rows, &[]);
         }
         if delta_bytes > 0 {
-            let _ = self.ctx.counter("bytes_written", delta_bytes);
+            let _ = self.ctx.counter("bytes_written", delta_bytes, &[]);
         }
 
         self.maybe_checkpoint().await?;

@@ -21,13 +21,19 @@ use crate::config::Config;
 ///
 /// Returns `Err` if SQL execution fails or batch emission encounters an error.
 pub async fn run(
-    ctx: &Context,
-    stream: &StreamContext,
+    input: TransformInput<'_>,
     _config: &Config,
     statement: &Statement,
 ) -> Result<TransformSummary, PluginError> {
+    let TransformInput {
+        stream,
+        emit,
+        cancel,
+        log,
+        ..
+    } = input;
     let session = SessionContext::new();
-    let stream_name = ctx.stream_name();
+    let stream_name = stream.source_stream_or_stream_name();
 
     let mut records_in: u64 = 0;
     let mut records_out: u64 = 0;
@@ -35,7 +41,10 @@ pub async fn run(
     let mut bytes_out: u64 = 0;
     let mut batches_processed: u64 = 0;
 
-    while let Some((schema, batches)) = ctx.next_batch(stream.limits.max_batch_bytes)? {
+    while let Some(decoded) = rapidbyte_sdk::host_ffi::next_batch(stream.limits.max_batch_bytes)? {
+        cancel.check()?;
+        let schema = decoded.schema;
+        let batches = decoded.batches;
         if batches.is_empty() || batches.iter().all(|b| b.num_rows() == 0) {
             continue;
         }
@@ -77,6 +86,7 @@ pub async fn run(
         })?;
 
         while let Some(batch) = result_stream.next().await {
+            cancel.check()?;
             let batch = batch.map_err(|e| {
                 PluginError::internal("SQL_EXEC", format!("Query execution failed: {e}"))
             })?;
@@ -85,18 +95,23 @@ pub async fn run(
             }
             records_out += batch.num_rows() as u64;
             bytes_out += batch.get_array_memory_size() as u64;
-            ctx.emit_batch(&batch)?;
+            let metadata = BatchMetadata {
+                stream_index: stream.stream_index,
+                schema_fingerprint: None,
+                sequence_number: 0,
+                compression: None,
+                record_count: batch.num_rows() as u32,
+                byte_count: batch.get_array_memory_size() as u64,
+            };
+            emit.batch(&batch, &metadata)?;
         }
 
         batches_processed += 1;
     }
 
-    ctx.log(
-        LogLevel::Info,
-        &format!(
-            "SQL transform complete: {records_in} rows in, {records_out} rows out, {batches_processed} batches"
-        ),
-    );
+    log.info(&format!(
+        "SQL transform complete: {records_in} rows in, {records_out} rows out, {batches_processed} batches"
+    ));
 
     Ok(TransformSummary {
         records_in,

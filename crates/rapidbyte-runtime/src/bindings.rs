@@ -567,6 +567,10 @@ for_each_world!(define_world_glue);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{mpsc, Arc, Mutex};
+
+    use rapidbyte_types::checkpoint::Checkpoint;
+    use rapidbyte_types::state_backend::noop_state_backend;
 
     #[test]
     fn v7_world_bindings_exist() {
@@ -576,6 +580,136 @@ mod tests {
 
         let _: Option<source_bindings::rapidbyte::plugin::types::RunRequest> = None;
         let _: Option<source_bindings::rapidbyte::plugin::types::RunSummary> = None;
+    }
+
+    #[test]
+    fn v2_lifecycle_binding_inputs_preserve_payloads() {
+        let schema = source_bindings::rapidbyte::plugin::types::StreamSchema {
+            fields: vec![],
+            primary_key: vec!["id".into()],
+            partition_keys: vec![],
+            source_defined_cursor: Some("updated_at".into()),
+            schema_id: Some("schema-v1".into()),
+        };
+        let run_request = source_bindings::rapidbyte::plugin::types::RunRequest { streams: vec![] };
+        let apply_request =
+            source_bindings::rapidbyte::plugin::types::ApplyRequest { streams: vec![] };
+
+        let open = source_bindings::rapidbyte::plugin::types::OpenInput {
+            config_json: r#"{"host":"db"}"#.into(),
+        };
+        let prerequisites =
+            source_bindings::rapidbyte::plugin::types::PrerequisitesInput { session: 11 };
+        let discover = source_bindings::rapidbyte::plugin::types::DiscoverInput { session: 12 };
+        let validate = source_bindings::rapidbyte::plugin::types::ValidateInput {
+            session: 13,
+            stream_name: Some("users".into()),
+            stream_schema: Some(schema),
+        };
+        let run = source_bindings::rapidbyte::plugin::types::RunInput {
+            session: 14,
+            plugin_id: "test-source".into(),
+            request: run_request,
+        };
+        let close = source_bindings::rapidbyte::plugin::types::CloseInput { session: 15 };
+
+        assert_eq!(open.config_json, r#"{"host":"db"}"#);
+        assert_eq!(prerequisites.session, 11);
+        assert_eq!(discover.session, 12);
+        assert_eq!(validate.session, 13);
+        assert_eq!(validate.stream_name.as_deref(), Some("users"));
+        assert_eq!(
+            validate
+                .stream_schema
+                .as_ref()
+                .and_then(|schema| schema.schema_id.as_deref()),
+            Some("schema-v1")
+        );
+        assert_eq!(apply_request.streams.len(), 0);
+        assert_eq!(run.session, 14);
+        assert_eq!(run.plugin_id, "test-source");
+        assert_eq!(run.request.streams.len(), 0);
+        assert_eq!(close.session, 15);
+    }
+
+    #[test]
+    fn source_host_binding_round_trips_frame_and_checkpoint_handles() {
+        use source_bindings::rapidbyte::plugin::host::Host;
+        use source_bindings::rapidbyte::plugin::types::{
+            BatchMetadata as WBatchMetadata, CheckpointKind as WCheckpointKind,
+            CursorUpdate as WCursorUpdate,
+        };
+
+        let (tx, rx) = mpsc::sync_channel(1);
+        let checkpoints: Arc<Mutex<Vec<Checkpoint>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut host = ComponentHostState::builder()
+            .pipeline("binding-test")
+            .plugin_id("source-plugin")
+            .stream("users")
+            .state_backend(noop_state_backend())
+            .sender(tx)
+            .receiver(rx)
+            .source_checkpoints(checkpoints.clone())
+            .build()
+            .expect("host state");
+
+        let frame = <ComponentHostState as Host>::frame_new(&mut host, 16).expect("frame_new");
+        let written = <ComponentHostState as Host>::frame_write(&mut host, frame, vec![1, 2, 3, 4])
+            .expect("frame_write");
+        assert_eq!(written, 4);
+        <ComponentHostState as Host>::frame_seal(&mut host, frame).expect("frame_seal");
+
+        <ComponentHostState as Host>::emit_batch(
+            &mut host,
+            frame,
+            WBatchMetadata {
+                stream_index: 7,
+                schema_fingerprint: Some("schema-a".into()),
+                sequence_number: 9,
+                compression: None,
+                record_count: 2,
+                byte_count: 4,
+            },
+        )
+        .expect("emit_batch");
+
+        let next = <ComponentHostState as Host>::next_batch(&mut host)
+            .expect("next_batch")
+            .expect("frame handle");
+        let len = <ComponentHostState as Host>::frame_len(&mut host, next).expect("frame_len");
+        let payload =
+            <ComponentHostState as Host>::frame_read(&mut host, next, 0, len).expect("frame_read");
+        let meta =
+            <ComponentHostState as Host>::next_batch_metadata(&mut host, next).expect("metadata");
+
+        assert_eq!(payload, vec![1, 2, 3, 4]);
+        assert_eq!(meta.stream_index, 7);
+        assert_eq!(meta.schema_fingerprint.as_deref(), Some("schema-a"));
+        assert_eq!(meta.sequence_number, 9);
+        assert_eq!(meta.compression, None);
+        assert_eq!(meta.record_count, 2);
+        assert_eq!(meta.byte_count, 4);
+
+        let txn =
+            <ComponentHostState as Host>::checkpoint_begin(&mut host, WCheckpointKind::Source)
+                .expect("checkpoint_begin");
+        <ComponentHostState as Host>::checkpoint_set_cursor(
+            &mut host,
+            txn,
+            WCursorUpdate {
+                stream_name: "users".into(),
+                cursor_field: "id".into(),
+                cursor_value_json: r#"{"type":"utf8","value":"4"}"#.into(),
+            },
+        )
+        .expect("checkpoint_set_cursor");
+        <ComponentHostState as Host>::checkpoint_commit(&mut host, txn, 2, 4)
+            .expect("checkpoint_commit");
+
+        let stored = checkpoints.lock().expect("lock checkpoints");
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].stream, "users");
+        assert_eq!(stored[0].cursor_field.as_deref(), Some("id"));
     }
 
     #[test]

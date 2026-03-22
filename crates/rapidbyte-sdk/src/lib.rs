@@ -2,11 +2,21 @@
 //!
 //! Provides traits, protocol types, and host-import wrappers for building
 //! WASI-based data pipeline plugins.
+//!
+//! Public modules most plugin authors care about:
+//! - `capabilities`: thin wrappers over host log/metrics/state/checkpoint/network/batch APIs
+//! - `input`: typed lifecycle input structs
+//! - `plugin`: core plugin traits
+//! - `features`: optional feature traits like CDC and bulk write
+//! - `testing`: lightweight in-memory harnesses for plugin tests
+//! - `prelude`: ergonomic re-exports for author-facing code
 
 #[cfg(feature = "runtime")]
 pub mod arrow;
 #[cfg(feature = "build")]
 pub mod build;
+#[cfg(feature = "runtime")]
+pub mod capabilities;
 #[cfg(feature = "conformance")]
 pub mod conformance;
 #[cfg(feature = "runtime")]
@@ -20,9 +30,13 @@ pub mod host_ffi;
 #[cfg(feature = "runtime")]
 pub mod host_tcp;
 #[cfg(feature = "runtime")]
+pub mod input;
+#[cfg(feature = "runtime")]
 pub mod plugin;
 #[cfg(feature = "runtime")]
 pub mod prelude;
+#[cfg(feature = "runtime")]
+pub mod testing;
 
 // Type re-exports — always available (no feature gate)
 pub use rapidbyte_types::arrow as arrow_types;

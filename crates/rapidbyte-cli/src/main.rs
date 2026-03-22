@@ -132,7 +132,7 @@ enum Commands {
         /// Maximum number of runs to return
         #[arg(long, default_value_t = 20)]
         limit: i32,
-        /// Optional state filter (pending, assigned, running, `preview_ready`, completed, failed, cancelled)
+        /// Optional state filter (pending, running, completed, failed, cancelled)
         #[arg(long)]
         state: Option<String>,
     },
@@ -143,9 +143,6 @@ enum Commands {
         /// Run apply phase after validation passes (provision resources)
         #[arg(long)]
         apply: bool,
-        /// Report planned apply actions without executing them (requires --apply)
-        #[arg(long)]
-        dry_run: bool,
     },
     /// Discover available streams from a source plugin
     Discover {
@@ -512,25 +509,13 @@ async fn main() -> ExitCode {
             )
             .await
         }
-        Commands::Check {
-            pipeline,
-            apply,
-            dry_run,
-        } => {
+        Commands::Check { pipeline, apply } => {
             let Some(secrets) =
                 try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id)
             else {
                 return ExitCode::FAILURE;
             };
-            commands::check::execute(
-                &pipeline,
-                verbosity,
-                &registry_config,
-                &secrets,
-                apply,
-                dry_run,
-            )
-            .await
+            commands::check::execute(&pipeline, verbosity, &registry_config, &secrets, apply).await
         }
         Commands::Discover { pipeline } => {
             let Some(secrets) =
@@ -640,7 +625,8 @@ async fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_controller_url_with;
+    use super::{resolve_controller_url_with, Cli};
+    use clap::Parser;
 
     #[test]
     fn controller_url_resolution_run_ignores_config_fallback() {
@@ -692,5 +678,11 @@ mod tests {
         assert!(merge_insecure(true, false), "local alone → insecure");
         assert!(!merge_insecure(false, false), "neither → secure");
         assert!(merge_insecure(true, true), "both → insecure");
+    }
+
+    #[test]
+    fn check_command_rejects_dry_run_flag() {
+        let parsed = Cli::try_parse_from(["rapidbyte", "check", "pipe.yaml", "--dry-run"]);
+        assert!(parsed.is_err());
     }
 }

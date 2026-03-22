@@ -211,8 +211,6 @@ pub struct ApplyParams {
     pub config: serde_json::Value,
     /// Stream contexts for schema apply.
     pub streams: Vec<StreamContext>,
-    /// If `true`, report planned actions without executing them.
-    pub dry_run: bool,
     /// Manifest-declared permissions.
     pub permissions: Option<Permissions>,
     /// Pipeline-level sandbox overrides (permissions/limits from YAML config).

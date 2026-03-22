@@ -225,7 +225,6 @@ pub async fn run_pipeline(
                     plugin_version: src_apply_ver,
                     config: pipeline.source.config.clone(),
                     streams: apply_streams.clone(),
-                    dry_run: false,
                     permissions: src_apply_permissions,
                     sandbox_overrides: src_apply_overrides,
                 })
@@ -240,7 +239,6 @@ pub async fn run_pipeline(
                     plugin_version: dst_apply_ver,
                     config: pipeline.destination.config.clone(),
                     streams: apply_streams,
-                    dry_run: false,
                     permissions: dst_apply_permissions,
                     sandbox_overrides: dst_apply_overrides,
                 })
