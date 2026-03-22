@@ -12,7 +12,7 @@ use crate::contract::{
     mark_contract_prepared, preflight_schema_from_stream_schema, stream_schema_signature,
     CheckpointConfig,
 };
-use crate::ddl::{prepare_staging, write_contract_handoff, ContractHandoff, SchemaState};
+use crate::ddl::{prepare_staging, write_contract_handoff, ContractHandoff, DdlLog, SchemaState};
 use crate::decode;
 
 fn apply_action_description(config: &Config, stream_name: &str, dry_run: bool) -> String {
@@ -91,7 +91,7 @@ pub(crate) fn plan_apply_request_with_contracts(
 }
 
 pub(crate) async fn prepare_stream_contract(
-    ctx: &Context,
+    log: &impl DdlLog,
     client: &Client,
     stream: &StreamContext,
     mut contract: crate::contract::WriteContract,
@@ -104,10 +104,10 @@ pub(crate) async fn prepare_stream_contract(
 
     if contract.is_replace {
         let staging_name =
-            prepare_staging(ctx, client, &contract.target_schema, &contract.stream_name)
+            prepare_staging(log, client, &contract.target_schema, &contract.stream_name)
                 .await
                 .map_err(|e| format!("{e:#}"))?;
-        ctx.log(
+        log.log(
             LogLevel::Info,
             &format!("dest-postgres: Replace mode - writing to staging table '{staging_name}'"),
         );
@@ -119,7 +119,7 @@ pub(crate) async fn prepare_stream_contract(
     if let Some(schema) = preflight_schema_from_stream_schema(&stream.schema)? {
         schema_state
             .ensure_table(
-                ctx,
+                log,
                 client,
                 &contract.target_schema,
                 &contract.effective_stream,
@@ -148,7 +148,7 @@ pub(crate) async fn prepare_stream_contract(
         match crate::watermark::get(client, &contract.target_schema, &contract.stream_name).await {
             Ok(w) => {
                 if w > 0 {
-                    ctx.log(
+                    log.log(
                         LogLevel::Warn,
                         &crate::diagnostics::stale_watermark_resume_warning(
                             &contract.stream_name,
@@ -165,7 +165,7 @@ pub(crate) async fn prepare_stream_contract(
                 0
             }
             Err(e) => {
-                ctx.log(
+                log.log(
                     LogLevel::Warn,
                     &format!("dest-postgres: watermark query failed (starting fresh): {e}"),
                 );
@@ -181,7 +181,7 @@ pub(crate) async fn apply(
     config: &Config,
     input: ApplyInput<'_>,
 ) -> Result<ApplyReport, PluginError> {
-    let ApplyInput { request, .. } = input;
+    let ApplyInput { request, log, .. } = input;
 
     if request.dry_run {
         return plan_apply_request(config, &request)
@@ -206,8 +206,6 @@ pub(crate) async fn apply(
                     format!("missing stream context for '{}'", action.stream_name),
                 )
             })?;
-        let ctx = Context::new(env!("CARGO_PKG_NAME"), &stream.stream_name);
-
         let contract = contracts
             .get(&action.stream_name)
             .cloned()
@@ -217,7 +215,7 @@ pub(crate) async fn apply(
                     format!("missing prepared contract for '{}'", action.stream_name),
                 )
             })?;
-        let prepared = prepare_stream_contract(&ctx, &client, stream, contract)
+        let prepared = prepare_stream_contract(&log, &client, stream, contract)
             .await
             .map_err(|e| PluginError::config("INVALID_APPLY_REQUEST", e))?;
         action.ddl_executed = Some(format!("prepared {}", prepared.qualified_table));

@@ -181,13 +181,14 @@ pub(crate) async fn detect_schema_drift(
 }
 
 use super::SchemaState;
+use super::DdlLog;
 
 impl SchemaState {
     /// Apply schema evolution policy to detected drift, executing DDL as needed.
     #[allow(clippy::too_many_lines)]
     pub(crate) async fn apply_policy(
         &mut self,
-        ctx: &Context,
+        ctx: &impl DdlLog,
         client: &Client,
         qualified_table: &str,
         drift: &SchemaDrift,

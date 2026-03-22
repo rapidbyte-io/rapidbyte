@@ -103,6 +103,7 @@ impl PartitionedSource for SourcePostgres {
         } = input;
         self.read(ReadInput::with_capabilities(
             stream,
+            false,
             emit,
             cancel,
             state,
@@ -138,6 +139,7 @@ impl CdcSource for SourcePostgres {
         let input = CdcReadInput::with_capabilities(
             stream,
             normalize_cdc_resume_token(&resume),
+            false,
             emit,
             cancel,
             state,

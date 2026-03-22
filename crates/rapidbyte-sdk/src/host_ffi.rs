@@ -222,6 +222,7 @@ pub mod test_support {
 
     static METRIC_CALLS: OnceLock<Mutex<Vec<MetricCall>>> = OnceLock::new();
     static METRIC_ERROR: OnceLock<Mutex<Option<PluginError>>> = OnceLock::new();
+    static METRIC_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     static NEXT_BATCH_FRAME: OnceLock<Mutex<Option<NextBatchFrame>>> = OnceLock::new();
     static DROPPED_HANDLES: OnceLock<Mutex<Vec<u64>>> = OnceLock::new();
     static NEXT_BATCH_METADATA_CALLS: OnceLock<Mutex<Vec<u64>>> = OnceLock::new();
@@ -232,6 +233,10 @@ pub mod test_support {
 
     fn metric_error() -> &'static Mutex<Option<PluginError>> {
         METRIC_ERROR.get_or_init(|| Mutex::new(None))
+    }
+
+    pub fn metric_test_lock() -> &'static Mutex<()> {
+        METRIC_TEST_LOCK.get_or_init(|| Mutex::new(()))
     }
 
     fn next_batch_frame() -> &'static Mutex<Option<NextBatchFrame>> {

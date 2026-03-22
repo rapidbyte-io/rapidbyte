@@ -84,6 +84,7 @@ pub async fn run(
         })?;
 
         while let Some(batch) = result_stream.next().await {
+            cancel.check()?;
             let batch = batch.map_err(|e| {
                 PluginError::internal("SQL_EXEC", format!("Query execution failed: {e}"))
             })?;

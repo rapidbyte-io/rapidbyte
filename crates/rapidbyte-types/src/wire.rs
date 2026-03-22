@@ -17,16 +17,19 @@ pub enum ProtocolVersion {
     /// Version 6 — previous stable protocol.
     #[serde(rename = "6")]
     V6,
-    /// Version 7 — current stable protocol.
-    #[default]
+    /// Version 7 — previous stable protocol.
     #[serde(rename = "7")]
     V7,
+    /// Version 8 — typed lifecycle input protocol.
+    #[default]
+    #[serde(rename = "8")]
+    V8,
 }
 
 impl ProtocolVersion {
     #[must_use]
     pub const fn current() -> Self {
-        Self::V7
+        Self::V8
     }
 }
 
@@ -145,11 +148,11 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_default_is_v7() {
+    fn protocol_version_default_is_v8() {
         let v = ProtocolVersion::default();
         assert_eq!(v, ProtocolVersion::current());
-        assert_eq!(v, ProtocolVersion::V7);
-        assert_eq!(serde_json::to_string(&v).unwrap(), "\"7\"");
+        assert_eq!(v, ProtocolVersion::V8);
+        assert_eq!(serde_json::to_string(&v).unwrap(), "\"8\"");
     }
 
     #[test]
@@ -159,6 +162,15 @@ mod tests {
         assert_eq!(json, "\"7\"");
         let back: ProtocolVersion = serde_json::from_str(&json).unwrap();
         assert_eq!(back, ProtocolVersion::V7);
+    }
+
+    #[test]
+    fn v8_protocol_version_roundtrip() {
+        let v = ProtocolVersion::V8;
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(json, "\"8\"");
+        let back: ProtocolVersion = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ProtocolVersion::V8);
     }
 
     #[test]

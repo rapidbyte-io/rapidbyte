@@ -111,7 +111,7 @@ fn validate_manifest_compatibility(
         anyhow::bail!(
             "Plugin '{plugin_ref}' protocol version mismatch: manifest={:?}, host={:?}. \
              Protocol V5/V6 plugins are intentionally rejected because the host import ABI changed; \
-             rebuild the plugin against rapidbyte:plugin@7.0.0.",
+             rebuild the plugin against rapidbyte:plugin@8.0.0.",
             manifest.protocol_version,
             host_protocol
         );
@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn validate_manifest_compatibility_accepts_current_protocol_version() {
         validate_manifest_compatibility(
-            &test_source_manifest(ProtocolVersion::V7),
+            &test_source_manifest(ProtocolVersion::V8),
             "test-plugin",
             PluginKind::Source,
         )
@@ -207,14 +207,14 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("protocol version mismatch"));
         assert!(message.contains("manifest=V5"));
-        assert!(message.contains("host=V7"));
-        assert!(message.contains("rebuild the plugin against rapidbyte:plugin@7.0.0"));
+        assert!(message.contains("host=V8"));
+        assert!(message.contains("rebuild the plugin against rapidbyte:plugin@8.0.0"));
     }
 
     fn manifest_with_schema(schema: serde_json::Value) -> PluginManifest {
         PluginManifest {
             config_schema: Some(schema),
-            ..test_source_manifest(ProtocolVersion::V7)
+            ..test_source_manifest(ProtocolVersion::V8)
         }
     }
 

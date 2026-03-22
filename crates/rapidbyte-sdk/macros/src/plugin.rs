@@ -989,7 +989,8 @@ fn gen_lifecycle_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
 
             rt.block_on(<#struct_name as #trait_path>::validate(
                 conn,
-                ::rapidbyte_sdk::plugin::ValidateInput::new(upstream.as_ref()),
+                ::rapidbyte_sdk::plugin::ValidateInput::new(upstream.as_ref())
+                    .with_stream_name(input.stream_name.as_deref()),
             ))
                 .map(to_component_validation)
                 .map_err(to_component_error)
@@ -1031,7 +1032,7 @@ fn gen_read_dispatch(
         return quote! {
             rt.block_on(<#struct_name as #trait_path>::read(
                 conn,
-                ::rapidbyte_sdk::plugin::ReadInput::new(stream.clone()),
+                ::rapidbyte_sdk::plugin::ReadInput::with_dry_run(stream.clone(), dry_run),
             ))
                 .map_err(to_component_error)?
         };
@@ -1041,7 +1042,17 @@ fn gen_read_dispatch(
         if let Some(partition) = stream.partition_coordinates_typed() {
             return <#struct_name as ::rapidbyte_sdk::features::PartitionedSource>::read_partition(
                 conn,
-                ::rapidbyte_sdk::plugin::PartitionedReadInput::new(stream, partition),
+                ::rapidbyte_sdk::plugin::PartitionedReadInput::with_capabilities(
+                    stream,
+                    partition,
+                    dry_run,
+                    ::rapidbyte_sdk::capabilities::Emit,
+                    ::rapidbyte_sdk::capabilities::Cancel,
+                    ::rapidbyte_sdk::capabilities::State,
+                    ::rapidbyte_sdk::capabilities::Checkpoints,
+                    ::rapidbyte_sdk::capabilities::Metrics,
+                    ::rapidbyte_sdk::capabilities::Log,
+                ),
             ).await;
         }
     });
@@ -1057,7 +1068,17 @@ fn gen_read_dispatch(
                 );
                 return <#struct_name as ::rapidbyte_sdk::features::CdcSource>::read_changes(
                     conn,
-                    ::rapidbyte_sdk::plugin::CdcReadInput::new(stream, resume),
+                    ::rapidbyte_sdk::plugin::CdcReadInput::with_capabilities(
+                        stream,
+                        resume,
+                        dry_run,
+                        ::rapidbyte_sdk::capabilities::Emit,
+                        ::rapidbyte_sdk::capabilities::Cancel,
+                        ::rapidbyte_sdk::capabilities::State,
+                        ::rapidbyte_sdk::capabilities::Checkpoints,
+                        ::rapidbyte_sdk::capabilities::Metrics,
+                        ::rapidbyte_sdk::capabilities::Log,
+                    ),
                 ).await;
             }
         }
@@ -1069,7 +1090,7 @@ fn gen_read_dispatch(
             #cdc_branch
             <#struct_name as #trait_path>::read(
                 conn,
-                ::rapidbyte_sdk::plugin::ReadInput::new(stream.clone()),
+                ::rapidbyte_sdk::plugin::ReadInput::with_dry_run(stream.clone(), dry_run),
             ).await
         }).map_err(to_component_error)?
     }
@@ -1151,6 +1172,7 @@ fn gen_source_methods(
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
             let sdk_request = from_component_run_request(input.request);
+            let dry_run = sdk_request.dry_run;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1215,7 +1237,14 @@ fn gen_dest_methods(
         quote! {
             rt.block_on(<#struct_name as ::rapidbyte_sdk::features::BulkDestination>::write_bulk(
                 conn,
-                ::rapidbyte_sdk::plugin::BulkWriteInput::new(stream.clone()),
+                ::rapidbyte_sdk::plugin::BulkWriteInput::with_capabilities(
+                    stream.clone(),
+                    dry_run,
+                    ::rapidbyte_sdk::capabilities::Reader,
+                    ::rapidbyte_sdk::capabilities::Cancel,
+                    ::rapidbyte_sdk::capabilities::State,
+                    ::rapidbyte_sdk::capabilities::Checkpoints,
+                ),
             ))
             .map_err(to_component_error)?
         }
@@ -1223,7 +1252,7 @@ fn gen_dest_methods(
         quote! {
             rt.block_on(<#struct_name as #trait_path>::write(
                 conn,
-                ::rapidbyte_sdk::plugin::WriteInput::new(stream.clone()),
+                ::rapidbyte_sdk::plugin::WriteInput::with_dry_run(stream.clone(), dry_run),
             ))
                 .map_err(to_component_error)?
         }
@@ -1276,6 +1305,7 @@ fn gen_dest_methods(
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
             let sdk_request = from_component_run_request(input.request);
+            let dry_run = sdk_request.dry_run;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1329,6 +1359,7 @@ fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
             __rb_bindings::rapidbyte::plugin::types::PluginError,
         > {
             let sdk_request = from_component_run_request(input.request);
+            let dry_run = sdk_request.dry_run;
             let rt = get_runtime();
             let state_cell = get_state();
             let state_ref = state_cell.borrow();
@@ -1342,7 +1373,11 @@ fn gen_transform_methods(struct_name: &Ident, trait_path: &TokenStream) -> Token
                 let summary = rt
                     .block_on(<#struct_name as #trait_path>::transform(
                         conn,
-                        ::rapidbyte_sdk::plugin::TransformInput::new(stream.clone()),
+                        ::rapidbyte_sdk::plugin::TransformInput::with_runtime(
+                            stream.clone(),
+                            input.plugin_id.as_str(),
+                            dry_run,
+                        ),
                     ))
                     .map_err(to_component_error)?;
 
@@ -1412,13 +1447,12 @@ mod tests {
         .to_string();
 
         assert!(generated.contains("InitInput :: new"));
-        assert!(generated.contains("ReadInput :: new"));
-        assert!(generated.contains("PartitionedReadInput :: new"));
-        assert!(generated.contains("CdcReadInput :: new"));
+        assert!(generated.contains("ReadInput :: with_dry_run"));
+        assert!(generated.contains("PartitionedReadInput :: with_capabilities"));
+        assert!(generated.contains("CdcReadInput :: with_capabilities"));
         assert!(generated.contains("PartitionedSource"));
         assert!(generated.contains("CdcSource"));
         assert!(!generated.contains("Context"));
-        assert!(!generated.contains("with_stream"));
     }
 
     #[test]
@@ -1434,7 +1468,7 @@ mod tests {
         .to_string();
 
         assert!(destination_generated.contains("InitInput :: new"));
-        assert!(destination_generated.contains("WriteInput :: new"));
+        assert!(destination_generated.contains("WriteInput :: with_dry_run"));
         assert!(destination_generated.contains("PrerequisitesInput :: new"));
         assert!(destination_generated.contains("ApplyInput :: new"));
         assert!(destination_generated.contains("TeardownInput :: new"));
@@ -1447,7 +1481,7 @@ mod tests {
                 .to_string();
 
         assert!(transform_generated.contains("InitInput :: new"));
-        assert!(transform_generated.contains("TransformInput :: new"));
+        assert!(transform_generated.contains("TransformInput :: with_runtime"));
         assert!(transform_generated.contains("ValidateInput :: new"));
         assert!(transform_generated.contains("CloseInput :: new"));
         assert!(!transform_generated.contains("Context"));
@@ -1548,9 +1582,8 @@ mod tests {
         assert!(generated.contains("InitInput :: new"));
         assert!(generated.contains("DiscoverInput :: new"));
         assert!(generated.contains("ValidateInput :: new"));
-        assert!(generated.contains("ReadInput :: new"));
+        assert!(generated.contains("ReadInput :: with_dry_run"));
         assert!(!generated.contains("Context"));
-        assert!(!generated.contains("with_stream"));
     }
 
     #[test]

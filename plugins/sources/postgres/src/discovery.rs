@@ -63,12 +63,20 @@ pub(crate) async fn discover_catalog_with_settings(
     let schema_name = settings.schema.as_deref().unwrap_or("public");
 
     let table_rows = query_catalog_rows(client, schema_name).await?;
+    input
+        .cancel
+        .check()
+        .map_err(|e| format!("discovery cancelled: {}", e.message))?;
     let primary_keys = query_primary_keys(client, schema_name).await?;
 
     let published_tables = match settings.publication.as_deref() {
-        Some(publication_name) => Some(
-            query_publication_tables(client, schema_name, publication_name).await?,
-        ),
+        Some(publication_name) => {
+            input
+                .cancel
+                .check()
+                .map_err(|e| format!("discovery cancelled: {}", e.message))?;
+            Some(query_publication_tables(client, schema_name, publication_name).await?)
+        }
         None => None,
     };
 

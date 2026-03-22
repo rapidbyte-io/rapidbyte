@@ -5,6 +5,7 @@ use tokio_postgres::Client;
 
 use rapidbyte_sdk::prelude::*;
 use serde::{Deserialize, Serialize};
+use super::DdlLog;
 
 pub(crate) const CONTRACT_HANDOFF_PREFIX: &str = "rapidbyte:dest-postgres:handoff:";
 
@@ -40,7 +41,7 @@ fn staging_name(stream_name: &str) -> String {
 
 /// Drop an existing staging table if it exists.
 async fn drop_staging_table(
-    ctx: &Context,
+    ctx: &impl DdlLog,
     client: &Client,
     target_schema: &str,
     stream_name: &str,
@@ -65,7 +66,7 @@ fn drop_target_table_sql(target_schema: &str, stream_name: &str) -> String {
 
 /// Atomically swap a staging table into the target position.
 pub(crate) async fn swap_staging_table(
-    ctx: &Context,
+    ctx: &impl DdlLog,
     client: &Client,
     target_schema: &str,
     stream_name: &str,
@@ -110,7 +111,7 @@ pub(crate) async fn swap_staging_table(
 
 /// Prepare a fresh staging table for Replace mode.
 pub(crate) async fn prepare_staging(
-    ctx: &Context,
+    ctx: &impl DdlLog,
     client: &Client,
     target_schema: &str,
     stream_name: &str,

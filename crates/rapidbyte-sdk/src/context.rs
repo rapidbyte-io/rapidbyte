@@ -322,9 +322,6 @@ fn is_reserved_metric_label(label: &str) -> bool {
 mod tests {
     use super::*;
     use crate::host_ffi::test_support::{self, MetricCall};
-    use std::sync::{LazyLock, Mutex};
-
-    static METRIC_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
     fn test_new_stores_metadata() {
@@ -430,7 +427,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_typed_metric_delegates_with_expected_labels() {
-        let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
+        let _guard = test_support::metric_test_lock()
+            .lock()
+            .expect("metric test lock poisoned");
         test_support::reset();
         let ctx = Context::new("test-plugin", "users");
         ctx.counter("records_read", 42).unwrap();
@@ -481,7 +480,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_reserved_metric_labels_are_not_overridden() {
-        let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
+        let _guard = test_support::metric_test_lock()
+            .lock()
+            .expect("metric test lock poisoned");
         test_support::reset();
         let ctx = Context::new("test-plugin", "users");
         ctx.counter_with_labels(
@@ -516,7 +517,9 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn test_typed_metric_methods_surface_host_failures() {
-        let _guard = METRIC_TEST_LOCK.lock().expect("metric test lock poisoned");
+        let _guard = test_support::metric_test_lock()
+            .lock()
+            .expect("metric test lock poisoned");
         test_support::reset();
         test_support::set_metric_error(PluginError::internal(
             "METRIC_REJECTED",

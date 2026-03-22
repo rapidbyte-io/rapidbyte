@@ -22,6 +22,7 @@ pub async fn run(
 ) -> Result<TransformSummary, PluginError> {
     let TransformInput {
         stream,
+        plugin_id,
         emit,
         cancel,
         log,
@@ -45,7 +46,7 @@ pub async fn run(
             bytes_in += batch.get_array_memory_size() as u64;
 
             let evaluation = evaluate_batch(batch, config);
-            emit_validation_metrics(&stream, &evaluation);
+            emit_validation_metrics(&plugin_id, &stream, &evaluation);
 
             if !evaluation.valid_indices.is_empty() {
                 let filtered = select_rows(batch, &evaluation.valid_indices)?;

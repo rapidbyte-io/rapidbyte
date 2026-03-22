@@ -604,10 +604,12 @@ mod tests {
         let discover = source_bindings::rapidbyte::plugin::types::DiscoverInput { session: 12 };
         let validate = source_bindings::rapidbyte::plugin::types::ValidateInput {
             session: 13,
+            stream_name: Some("users".into()),
             stream_schema: Some(schema),
         };
         let run = source_bindings::rapidbyte::plugin::types::RunInput {
             session: 14,
+            plugin_id: "test-source".into(),
             request,
         };
         let close = source_bindings::rapidbyte::plugin::types::CloseInput { session: 15 };
@@ -616,6 +618,7 @@ mod tests {
         assert_eq!(prerequisites.session, 11);
         assert_eq!(discover.session, 12);
         assert_eq!(validate.session, 13);
+        assert_eq!(validate.stream_name.as_deref(), Some("users"));
         assert_eq!(
             validate
                 .stream_schema
@@ -624,6 +627,7 @@ mod tests {
             Some("schema-v1")
         );
         assert_eq!(run.session, 14);
+        assert_eq!(run.plugin_id, "test-source");
         assert!(run.request.dry_run);
         assert_eq!(close.session, 15);
     }

@@ -1,4 +1,4 @@
-package rapidbyte:plugin@7.0.0;
+package rapidbyte:plugin@8.0.0;
 
 interface types {
     // ── Handles ──
@@ -186,6 +186,7 @@ interface types {
 
     record validate-input {
         session: session,
+        stream-name: option<string>,
         stream-schema: option<stream-schema>,
     }
 
@@ -196,6 +197,7 @@ interface types {
 
     record run-input {
         session: session,
+        plugin-id: string,
         request: run-request,
     }
 

@@ -56,6 +56,7 @@ impl Transform for TestTransform {
             rapidbyte_sdk::host_ffi::next_batch(input.stream.limits.max_batch_bytes)?
         {
             for batch in &batches {
+                input.cancel.check()?;
                 records_in += batch.num_rows() as u64;
                 bytes_in += batch.get_array_memory_size() as u64;
 

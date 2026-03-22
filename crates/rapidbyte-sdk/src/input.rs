@@ -82,6 +82,8 @@ impl<'a> DiscoverInput<'a> {
 pub struct ValidateInput<'a> {
     /// Optional upstream schema being validated against.
     pub upstream: Option<&'a StreamSchema>,
+    /// Optional stream name when validation is scoped to a specific stream.
+    pub stream_name: Option<&'a str>,
     pub log: Log,
     pub metrics: Metrics,
     _marker: PhantomData<&'a ()>,
@@ -92,10 +94,17 @@ impl<'a> ValidateInput<'a> {
     pub const fn new(upstream: Option<&'a StreamSchema>) -> Self {
         Self {
             upstream,
+            stream_name: None,
             log: Log,
             metrics: Metrics,
             _marker: PhantomData,
         }
+    }
+
+    /// Associate validation with a specific stream identity.
+    pub const fn with_stream_name(mut self, stream_name: Option<&'a str>) -> Self {
+        self.stream_name = stream_name;
+        self
     }
 }
 
@@ -138,6 +147,7 @@ pub struct ReadInput<
 > {
     /// Stream being read.
     pub stream: StreamContext,
+    pub dry_run: bool,
     pub emit: EmitT,
     pub cancel: CancelT,
     pub state: StateT,
@@ -151,8 +161,10 @@ impl<'a, EmitT, CancelT, StateT, CheckpointsT, MetricsT, LogT>
     ReadInput<'a, EmitT, CancelT, StateT, CheckpointsT, MetricsT, LogT>
 {
     /// Create a read input with explicit capability fakes.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_capabilities(
         stream: StreamContext,
+        dry_run: bool,
         emit: EmitT,
         cancel: CancelT,
         state: StateT,
@@ -162,6 +174,7 @@ impl<'a, EmitT, CancelT, StateT, CheckpointsT, MetricsT, LogT>
     ) -> Self {
         Self {
             stream,
+            dry_run,
             emit,
             cancel,
             state,
@@ -176,7 +189,30 @@ impl<'a, EmitT, CancelT, StateT, CheckpointsT, MetricsT, LogT>
 impl<'a> ReadInput<'a> {
     /// Create a read input for a single stream.
     pub fn new(stream: StreamContext) -> Self {
-        Self::with_capabilities(stream, Emit, Cancel, State, Checkpoints, Metrics, Log)
+        Self::with_capabilities(
+            stream,
+            false,
+            Emit,
+            Cancel,
+            State,
+            Checkpoints,
+            Metrics,
+            Log,
+        )
+    }
+
+    /// Create a read input for a single stream with an explicit dry-run flag.
+    pub fn with_dry_run(stream: StreamContext, dry_run: bool) -> Self {
+        Self::with_capabilities(
+            stream,
+            dry_run,
+            Emit,
+            Cancel,
+            State,
+            Checkpoints,
+            Metrics,
+            Log,
+        )
     }
 }
 
@@ -191,6 +227,7 @@ pub struct WriteInput<
 > {
     /// Stream being written.
     pub stream: StreamContext,
+    pub dry_run: bool,
     pub reader: ReaderT,
     pub cancel: CancelT,
     pub state: StateT,
@@ -204,6 +241,7 @@ impl<'a, ReaderT, CancelT, StateT, CheckpointsT>
     /// Create a write input with explicit capability fakes.
     pub fn with_capabilities(
         stream: StreamContext,
+        dry_run: bool,
         reader: ReaderT,
         cancel: CancelT,
         state: StateT,
@@ -211,6 +249,7 @@ impl<'a, ReaderT, CancelT, StateT, CheckpointsT>
     ) -> Self {
         Self {
             stream,
+            dry_run,
             reader,
             cancel,
             state,
@@ -223,37 +262,118 @@ impl<'a, ReaderT, CancelT, StateT, CheckpointsT>
 impl<'a> WriteInput<'a> {
     /// Create a write input for a single stream.
     pub fn new(stream: StreamContext) -> Self {
-        Self::with_capabilities(stream, Reader, Cancel, State, Checkpoints)
+        Self::with_capabilities(stream, false, Reader, Cancel, State, Checkpoints)
+    }
+
+    /// Create a write input for a single stream with an explicit dry-run flag.
+    pub fn with_dry_run(stream: StreamContext, dry_run: bool) -> Self {
+        Self::with_capabilities(stream, dry_run, Reader, Cancel, State, Checkpoints)
     }
 }
 
 /// Input passed to transform hooks.
 #[derive(Debug, Clone)]
-pub struct TransformInput<'a> {
+pub struct TransformInput<
+    'a,
+    EmitT = Emit,
+    CancelT = Cancel,
+    StateT = State,
+    CheckpointsT = Checkpoints,
+    MetricsT = Metrics,
+    LogT = Log,
+> {
     /// Stream being transformed.
     pub stream: StreamContext,
-    pub emit: Emit,
-    pub cancel: Cancel,
-    pub state: State,
-    pub checkpoints: Checkpoints,
-    pub metrics: Metrics,
-    pub log: Log,
+    pub plugin_id: String,
+    pub dry_run: bool,
+    pub emit: EmitT,
+    pub cancel: CancelT,
+    pub state: StateT,
+    pub checkpoints: CheckpointsT,
+    pub metrics: MetricsT,
+    pub log: LogT,
     _marker: PhantomData<&'a ()>,
+}
+
+impl<'a, EmitT, CancelT, StateT, CheckpointsT, MetricsT, LogT>
+    TransformInput<'a, EmitT, CancelT, StateT, CheckpointsT, MetricsT, LogT>
+{
+    /// Create a transform input with explicit capability fakes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_capabilities(
+        stream: StreamContext,
+        plugin_id: impl Into<String>,
+        dry_run: bool,
+        emit: EmitT,
+        cancel: CancelT,
+        state: StateT,
+        checkpoints: CheckpointsT,
+        metrics: MetricsT,
+        log: LogT,
+    ) -> Self {
+        Self {
+            stream,
+            plugin_id: plugin_id.into(),
+            dry_run,
+            emit,
+            cancel,
+            state,
+            checkpoints,
+            metrics,
+            log,
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<'a> TransformInput<'a> {
     /// Create a transform input for a single stream.
     pub fn new(stream: StreamContext) -> Self {
-        Self {
+        Self::with_capabilities(
             stream,
-            emit: Emit,
-            cancel: Cancel,
-            state: State,
-            checkpoints: Checkpoints,
-            metrics: Metrics,
-            log: Log,
-            _marker: PhantomData,
-        }
+            "",
+            false,
+            Emit,
+            Cancel,
+            State,
+            Checkpoints,
+            Metrics,
+            Log,
+        )
+    }
+
+    /// Create a transform input for a single stream with an explicit dry-run flag.
+    pub fn with_dry_run(stream: StreamContext, dry_run: bool) -> Self {
+        Self::with_capabilities(
+            stream,
+            "",
+            dry_run,
+            Emit,
+            Cancel,
+            State,
+            Checkpoints,
+            Metrics,
+            Log,
+        )
+    }
+
+    /// Create a transform input for a single stream with explicit runtime metadata.
+    pub fn with_runtime(
+        stream: StreamContext,
+        plugin_id: impl Into<String>,
+        dry_run: bool,
+    ) -> Self {
+        Self::with_capabilities(
+            stream,
+            plugin_id,
+            dry_run,
+            Emit,
+            Cancel,
+            State,
+            Checkpoints,
+            Metrics,
+            Log,
+        )
     }
 }
 
@@ -300,32 +420,72 @@ impl<'a> TeardownInput<'a> {
 
 /// Input passed to partitioned source reads.
 #[derive(Debug, Clone)]
-pub struct PartitionedReadInput<'a> {
+pub struct PartitionedReadInput<
+    'a,
+    EmitT = Emit,
+    CancelT = Cancel,
+    StateT = State,
+    CheckpointsT = Checkpoints,
+    MetricsT = Metrics,
+    LogT = Log,
+> {
     pub stream: StreamContext,
     pub partition: PartitionCoordinates,
-    pub emit: Emit,
-    pub cancel: Cancel,
-    pub state: State,
-    pub checkpoints: Checkpoints,
-    pub metrics: Metrics,
-    pub log: Log,
+    pub dry_run: bool,
+    pub emit: EmitT,
+    pub cancel: CancelT,
+    pub state: StateT,
+    pub checkpoints: CheckpointsT,
+    pub metrics: MetricsT,
+    pub log: LogT,
     _marker: PhantomData<&'a ()>,
+}
+
+impl<'a, EmitT, CancelT, StateT, CheckpointsT, MetricsT, LogT>
+    PartitionedReadInput<'a, EmitT, CancelT, StateT, CheckpointsT, MetricsT, LogT>
+{
+    /// Create a partitioned read input with explicit capability fakes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_capabilities(
+        stream: StreamContext,
+        partition: PartitionCoordinates,
+        dry_run: bool,
+        emit: EmitT,
+        cancel: CancelT,
+        state: StateT,
+        checkpoints: CheckpointsT,
+        metrics: MetricsT,
+        log: LogT,
+    ) -> Self {
+        Self {
+            stream,
+            partition,
+            dry_run,
+            emit,
+            cancel,
+            state,
+            checkpoints,
+            metrics,
+            log,
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<'a> PartitionedReadInput<'a> {
     /// Create a partitioned read input.
     pub fn new(stream: StreamContext, partition: PartitionCoordinates) -> Self {
-        Self {
+        Self::with_capabilities(
             stream,
             partition,
-            emit: Emit,
-            cancel: Cancel,
-            state: State,
-            checkpoints: Checkpoints,
-            metrics: Metrics,
-            log: Log,
-            _marker: PhantomData,
-        }
+            false,
+            Emit,
+            Cancel,
+            State,
+            Checkpoints,
+            Metrics,
+            Log,
+        )
     }
 }
 
@@ -342,6 +502,7 @@ pub struct CdcReadInput<
 > {
     pub stream: StreamContext,
     pub resume: CdcResumeToken,
+    pub dry_run: bool,
     pub emit: EmitT,
     pub cancel: CancelT,
     pub state: StateT,
@@ -359,6 +520,7 @@ impl<'a, EmitT, CancelT, StateT, CheckpointsT, MetricsT, LogT>
     pub fn with_capabilities(
         stream: StreamContext,
         resume: CdcResumeToken,
+        dry_run: bool,
         emit: EmitT,
         cancel: CancelT,
         state: StateT,
@@ -369,6 +531,7 @@ impl<'a, EmitT, CancelT, StateT, CheckpointsT, MetricsT, LogT>
         Self {
             stream,
             resume,
+            dry_run,
             emit,
             cancel,
             state,
@@ -386,6 +549,7 @@ impl<'a> CdcReadInput<'a> {
         Self::with_capabilities(
             stream,
             resume,
+            false,
             Emit,
             Cancel,
             State,
@@ -427,26 +591,50 @@ impl<'a> MultiStreamReadInput<'a> {
 
 /// Input passed to bulk destination writes.
 #[derive(Debug, Clone)]
-pub struct BulkWriteInput<'a> {
+pub struct BulkWriteInput<
+    'a,
+    ReaderT = Reader,
+    CancelT = Cancel,
+    StateT = State,
+    CheckpointsT = Checkpoints,
+> {
     pub stream: StreamContext,
-    pub reader: Reader,
-    pub cancel: Cancel,
-    pub state: State,
-    pub checkpoints: Checkpoints,
+    pub dry_run: bool,
+    pub reader: ReaderT,
+    pub cancel: CancelT,
+    pub state: StateT,
+    pub checkpoints: CheckpointsT,
     _marker: PhantomData<&'a ()>,
+}
+
+impl<'a, ReaderT, CancelT, StateT, CheckpointsT>
+    BulkWriteInput<'a, ReaderT, CancelT, StateT, CheckpointsT>
+{
+    /// Create a bulk write input with explicit capability fakes.
+    pub fn with_capabilities(
+        stream: StreamContext,
+        dry_run: bool,
+        reader: ReaderT,
+        cancel: CancelT,
+        state: StateT,
+        checkpoints: CheckpointsT,
+    ) -> Self {
+        Self {
+            stream,
+            dry_run,
+            reader,
+            cancel,
+            state,
+            checkpoints,
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<'a> BulkWriteInput<'a> {
     /// Create a bulk write input.
     pub fn new(stream: StreamContext) -> Self {
-        Self {
-            stream,
-            reader: Reader,
-            cancel: Cancel,
-            state: State,
-            checkpoints: Checkpoints,
-            _marker: PhantomData,
-        }
+        Self::with_capabilities(stream, false, Reader, Cancel, State, Checkpoints)
     }
 }
 
@@ -483,7 +671,7 @@ mod tests {
         } = InitInput::new();
 
         log.info("init");
-        metrics.counter("init_runs", 1).expect("counter");
+        let _ = metrics;
         assert_eq!(std::mem::size_of_val(&network), 0);
     }
 
@@ -494,6 +682,7 @@ mod tests {
 
         let ReadInput {
             stream,
+            dry_run,
             emit,
             cancel,
             state,
@@ -504,6 +693,7 @@ mod tests {
         } = input;
 
         let stream_name = stream.stream_name.clone();
+        assert!(!dry_run);
         cancel.check().expect("cancel");
         state
             .put(StateScope::Stream, "key", "value")
@@ -511,7 +701,7 @@ mod tests {
         checkpoints
             .begin(CheckpointKind::Source)
             .expect("checkpoint");
-        metrics.counter("my_custom_counter", 1).expect("counter");
+        let _ = metrics;
         log.debug("read");
         emit.batch_for_stream(stream.stream_index, &test_batch())
             .expect("emit");
@@ -525,6 +715,7 @@ mod tests {
 
         let WriteInput {
             stream,
+            dry_run,
             reader,
             cancel,
             state,
@@ -533,6 +724,7 @@ mod tests {
         } = input;
 
         let stream_name = stream.stream_name.clone();
+        assert!(!dry_run);
         assert!(reader.next_batch(1024).expect("next batch").is_none());
         cancel.check().expect("cancel");
         state

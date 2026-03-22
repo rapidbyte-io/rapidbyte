@@ -312,21 +312,26 @@ fn evaluate_unique_rule(
 }
 
 /// Best-effort: metric failures are silently ignored.
-pub(crate) fn emit_validation_metrics(stream: &StreamContext, evaluation: &BatchEvaluation) {
+pub(crate) fn emit_validation_metrics(
+    plugin_id: &str,
+    stream: &StreamContext,
+    evaluation: &BatchEvaluation,
+) {
     for ((rule, field), count) in &evaluation.failure_counts {
         let labels = metric_labels(
+            plugin_id,
             stream.stream_name.as_str(),
             &[("rule", rule.as_str()), ("field", field.as_str())],
         );
         let _ = rapidbyte_sdk::host_ffi::counter_add("validation_failures_total", *count, &labels);
     }
-    let valid_labels = metric_labels(stream.stream_name.as_str(), &[]);
+    let valid_labels = metric_labels(plugin_id, stream.stream_name.as_str(), &[]);
     let _ = rapidbyte_sdk::host_ffi::counter_add(
         "validation_rows_valid_total",
         evaluation.valid_indices.len() as u64,
         &valid_labels,
     );
-    let invalid_labels = metric_labels(stream.stream_name.as_str(), &[]);
+    let invalid_labels = metric_labels(plugin_id, stream.stream_name.as_str(), &[]);
     let _ = rapidbyte_sdk::host_ffi::counter_add(
         "validation_rows_invalid_total",
         evaluation.invalid_rows.len() as u64,
@@ -334,11 +339,11 @@ pub(crate) fn emit_validation_metrics(stream: &StreamContext, evaluation: &Batch
     );
 }
 
-fn metric_labels(stream_name: &str, extra: &[(&str, &str)]) -> String {
+fn metric_labels(plugin_id: &str, stream_name: &str, extra: &[(&str, &str)]) -> String {
     let mut labels = serde_json::Map::new();
     labels.insert(
         "plugin".to_string(),
-        serde_json::Value::String(env!("CARGO_PKG_NAME").to_string()),
+        serde_json::Value::String(plugin_id.to_string()),
     );
     labels.insert(
         "stream".to_string(),
@@ -737,7 +742,7 @@ mod tests {
             failure_counts: BTreeMap::from([(("regex".to_string(), "email".to_string()), 3)]),
         };
 
-        emit_validation_metrics(&stream, &evaluation);
+        emit_validation_metrics("transform-validate", &stream, &evaluation);
 
         let calls = test_support::take_metric_calls();
         let MetricCall::Counter {

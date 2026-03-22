@@ -10,7 +10,7 @@
 
 ---
 
-### Task 1: Define failing protocol-shape tests for typed inputs and capability separation
+## Task 1: Define failing protocol-shape tests for typed inputs and capability separation
 
 **Files:**
 - Modify: `crates/rapidbyte-sdk/src/plugin.rs`
@@ -72,7 +72,7 @@ git add crates/rapidbyte-sdk/src/plugin.rs crates/rapidbyte-sdk/src/features.rs 
 git commit -m "refactor(sdk): define capability-oriented v2 plugin traits"
 ```
 
-### Task 2: Add failing SDK tests for capability wrappers and typed lifecycle inputs
+## Task 2: Add failing SDK tests for capability wrappers and typed lifecycle inputs
 
 **Files:**
 - Create: `crates/rapidbyte-sdk/src/input.rs`
@@ -139,7 +139,7 @@ git add crates/rapidbyte-sdk/src/input.rs crates/rapidbyte-sdk/src/capabilities.
 git commit -m "feat(sdk): add typed lifecycle inputs and capability wrappers"
 ```
 
-### Task 3: Add failing WIT and runtime binding tests for the v2 capability contract
+## Task 3: Add failing WIT and runtime binding tests for the v2 capability contract
 
 **Files:**
 - Modify: `wit/rapidbyte-plugin.wit`
@@ -194,7 +194,7 @@ git add wit/rapidbyte-plugin.wit crates/rapidbyte-runtime/src/bindings.rs crates
 git commit -m "refactor(wit): introduce capability-oriented plugin v2 contract"
 ```
 
-### Task 4: Add failing tests for proc-macro export of the v2 plugin surface
+## Task 4: Add failing tests for proc-macro export of the v2 plugin surface
 
 **Files:**
 - Modify: `crates/rapidbyte-sdk/macros/src/plugin.rs`
@@ -242,7 +242,7 @@ git add crates/rapidbyte-sdk/macros/src/plugin.rs
 git commit -m "refactor(macros): export capability-oriented v2 plugins"
 ```
 
-### Task 5: Add failing SDK tests for author-facing test fakes and harnesses
+## Task 5: Add failing SDK tests for author-facing test fakes and harnesses
 
 **Files:**
 - Create: `crates/rapidbyte-sdk/src/testing.rs`
@@ -304,7 +304,7 @@ git add crates/rapidbyte-sdk/src/testing.rs crates/rapidbyte-sdk/src/lib.rs crat
 git commit -m "feat(sdk): add v2 plugin testing harnesses"
 ```
 
-### Task 6: Migrate one representative source plugin to v2 and validate author DX
+## Task 6: Migrate one representative source plugin to v2 and validate author DX
 
 **Files:**
 - Modify: `plugins/sources/postgres/src/main.rs`
@@ -359,7 +359,7 @@ git add plugins/sources/postgres/src/main.rs plugins/sources/postgres/src/reader
 git commit -m "refactor(source-postgres): migrate to plugin sdk v2"
 ```
 
-### Task 7: Migrate one representative destination plugin to v2 and validate symmetry
+## Task 7: Migrate one representative destination plugin to v2 and validate symmetry
 
 **Files:**
 - Modify: `plugins/destinations/postgres/src/main.rs`
@@ -411,7 +411,7 @@ git add plugins/destinations/postgres/src/main.rs plugins/destinations/postgres/
 git commit -m "refactor(dest-postgres): migrate to plugin sdk v2"
 ```
 
-### Task 8: Remove the legacy `Context` API and old trait surface
+## Task 8: Remove the legacy `Context` API and old trait surface
 
 **Files:**
 - Modify: `crates/rapidbyte-sdk/src/context.rs`
@@ -467,7 +467,7 @@ git add crates/rapidbyte-sdk/src/context.rs crates/rapidbyte-sdk/src/plugin.rs c
 git commit -m "refactor(sdk): remove legacy context-driven plugin api"
 ```
 
-### Task 9: Run full branch verification and update author docs
+## Task 9: Run full branch verification and update author docs
 
 **Files:**
 - Modify: plugin author documentation files that describe SDK usage

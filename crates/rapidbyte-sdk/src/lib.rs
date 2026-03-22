@@ -2,6 +2,14 @@
 //!
 //! Provides traits, protocol types, and host-import wrappers for building
 //! WASI-based data pipeline plugins.
+//!
+//! Public modules most plugin authors care about:
+//! - `capabilities`: thin wrappers over host log/metrics/state/checkpoint/network/batch APIs
+//! - `input`: typed lifecycle input structs
+//! - `plugin`: core plugin traits
+//! - `features`: optional feature traits like CDC and bulk write
+//! - `testing`: lightweight in-memory harnesses for plugin tests
+//! - `prelude`: ergonomic re-exports for author-facing code
 
 #[cfg(feature = "runtime")]
 pub mod arrow;

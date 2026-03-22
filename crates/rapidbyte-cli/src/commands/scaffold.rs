@@ -357,8 +357,7 @@ impl Source for {struct_name} {{
         &self,
         input: ValidateInput<'_>,
     ) -> Result<ValidationReport, PluginError> {{
-        let _ = input;
-        client::validate(&self.config).await
+        client::validate(&self.config, input.upstream).await
     }}
 
     async fn read(&self, input: ReadInput<'_>) -> Result<ReadSummary, PluginError> {{
@@ -401,8 +400,7 @@ impl Destination for {struct_name} {{
         &self,
         input: ValidateInput<'_>,
     ) -> Result<ValidationReport, PluginError> {{
-        let _ = input;
-        client::validate(&self.config).await
+        client::validate(&self.config, input.upstream).await
     }}
 
     async fn write(&self, input: WriteInput<'_>) -> Result<WriteSummary, PluginError> {{
@@ -487,9 +485,8 @@ impl Transform for {struct_name} {{
 
     async fn validate(
         &self,
-        input: ValidateInput<'_>,
+        _input: ValidateInput<'_>,
     ) -> Result<ValidationReport, PluginError> {{
-        let _ = input;
         validate::validate_config(&self.config)
     }}
 
@@ -511,8 +508,11 @@ fn gen_client_rs() -> &'static str {
 use rapidbyte_sdk::prelude::*;
 use crate::config::Config;
 
-pub async fn validate(config: &Config) -> Result<ValidationReport, PluginError> {
-    let _ = config;
+pub async fn validate(
+    config: &Config,
+    upstream: Option<&StreamSchema>,
+) -> Result<ValidationReport, PluginError> {
+    let _ = (config, upstream);
     Ok(ValidationReport::failed(
         "UNIMPLEMENTED: connection validation is not implemented yet",
     ))

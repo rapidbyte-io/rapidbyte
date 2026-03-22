@@ -113,7 +113,7 @@ impl Log {
 
     /// Write a warning log entry.
     pub fn warn(&self, message: &str) {
-        host_ffi::log_warn(message);
+        self.log(LogLevel::Warn, message);
     }
 
     /// Write an info log entry.
@@ -310,6 +310,7 @@ fn is_reserved_metric_label(label: &str) -> bool {
 mod tests {
     use super::*;
 
+    use crate::host_ffi::test_support;
     use arrow::array::Int32Array;
     use arrow::datatypes::{DataType, Field, Schema};
 
@@ -345,6 +346,10 @@ mod tests {
 
     #[test]
     fn metrics_delegate_with_explicit_labels() {
+        let _guard = test_support::metric_test_lock()
+            .lock()
+            .expect("metric test lock poisoned");
+        test_support::reset();
         let metrics = Metrics;
         metrics.counter("reads", 1).expect("counter");
         metrics

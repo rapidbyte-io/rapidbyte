@@ -19,7 +19,7 @@ use crate::error::PluginError;
 use crate::input::{ReadInput, WriteInput};
 use crate::stream::StreamContext;
 
-type QueuedInputBatch = (Arc<Schema>, Vec<RecordBatch>);
+type QueuedInputBatch = (u32, Arc<Schema>, Vec<RecordBatch>);
 type QueuedInputBatches = Arc<Mutex<VecDeque<QueuedInputBatch>>>;
 
 /// Recorded state-store value for assertions.
@@ -120,7 +120,7 @@ impl TestHarness {
             .lock()
             .expect("input batches")
             .iter()
-            .cloned()
+            .map(|(_, schema, batches)| (Arc::clone(schema), batches.clone()))
             .collect()
     }
 
@@ -161,6 +161,7 @@ impl TestHarness {
     {
         ReadInput::with_capabilities(
             stream,
+            false,
             TestEmit {
                 emitted_batches: Arc::clone(&self.emitted_batches),
             },
@@ -172,6 +173,7 @@ impl TestHarness {
             },
             TestCheckpoints {
                 records: Arc::clone(&self.checkpoints),
+                state_values: Arc::clone(&self.state_values),
             },
             TestMetrics {
                 metrics: Arc::clone(&self.metrics),
@@ -189,6 +191,7 @@ impl TestHarness {
     ) -> WriteInput<'static, TestReader, TestCancel, TestState, TestCheckpoints> {
         WriteInput::with_capabilities(
             stream,
+            false,
             TestReader {
                 input_batches: Arc::clone(&self.input_batches),
             },
@@ -200,16 +203,22 @@ impl TestHarness {
             },
             TestCheckpoints {
                 records: Arc::clone(&self.checkpoints),
+                state_values: Arc::clone(&self.state_values),
             },
         )
     }
 
     /// Enqueue a batch for the fake reader to return.
-    pub fn enqueue_input_batch(&self, schema: Arc<Schema>, batches: Vec<RecordBatch>) {
+    pub fn enqueue_input_batch(
+        &self,
+        stream_index: u32,
+        schema: Arc<Schema>,
+        batches: Vec<RecordBatch>,
+    ) {
         self.input_batches
             .lock()
             .expect("input batches")
-            .push_back((schema, batches));
+            .push_back((stream_index, schema, batches));
     }
 }
 
@@ -252,30 +261,38 @@ impl TestReader {
             .lock()
             .expect("input batches")
             .pop_front())
+        .map(|next| next.map(|(_, schema, batches)| (schema, batches)))
     }
 
     /// Pop the next input batch from the queue with zero decode timing.
     pub fn next_batch_with_decode_timing(
         &self,
-        max_bytes: u64,
+        _max_bytes: u64,
     ) -> Result<Option<crate::host_ffi::DecodedBatch>, PluginError> {
-        self.next_batch(max_bytes).map(|next| {
-            next.map(|(schema, batches)| crate::host_ffi::DecodedBatch {
-                metadata: BatchMetadata {
-                    stream_index: 0,
-                    schema_fingerprint: None,
-                    sequence_number: 0,
-                    compression: None,
-                    record_count: batches.iter().map(|batch| batch.num_rows() as u32).sum(),
-                    byte_count: batches
-                        .iter()
-                        .map(|batch| batch.get_array_memory_size() as u64)
-                        .sum(),
+        Ok(self
+            .input_batches
+            .lock()
+            .expect("input batches")
+            .pop_front())
+        .map(|next| {
+            next.map(
+                |(stream_index, schema, batches)| crate::host_ffi::DecodedBatch {
+                    metadata: BatchMetadata {
+                        stream_index,
+                        schema_fingerprint: None,
+                        sequence_number: 0,
+                        compression: None,
+                        record_count: batches.iter().map(|batch| batch.num_rows() as u32).sum(),
+                        byte_count: batches
+                            .iter()
+                            .map(|batch| batch.get_array_memory_size() as u64)
+                            .sum(),
+                    },
+                    schema,
+                    batches,
+                    decode_secs: 0.0,
                 },
-                schema,
-                batches,
-                decode_secs: 0.0,
-            })
+            )
         })
     }
 }
@@ -449,6 +466,7 @@ impl TestState {
 #[derive(Debug, Clone)]
 pub struct TestCheckpoints {
     records: Arc<Mutex<Vec<TestCheckpointRecord>>>,
+    state_values: Arc<Mutex<HashMap<(StateScope, String), String>>>,
 }
 
 impl TestCheckpoints {
@@ -459,6 +477,7 @@ impl TestCheckpoints {
             cursor_updates: Vec::new(),
             state_mutations: Vec::new(),
             records: Arc::clone(&self.records),
+            state_values: Arc::clone(&self.state_values),
             committed: false,
         })
     }
@@ -501,6 +520,7 @@ pub struct TestCheckpointTxn {
     cursor_updates: Vec<TestCursorUpdate>,
     state_mutations: Vec<TestStateMutation>,
     records: Arc<Mutex<Vec<TestCheckpointRecord>>>,
+    state_values: Arc<Mutex<HashMap<(StateScope, String), String>>>,
     committed: bool,
 }
 
@@ -545,6 +565,15 @@ impl TestCheckpointTxn {
         self.committed = true;
         let cursor_updates = std::mem::take(&mut self.cursor_updates);
         let state_mutations = std::mem::take(&mut self.state_mutations);
+        {
+            let mut state_values = self.state_values.lock().expect("state values");
+            for mutation in &state_mutations {
+                state_values.insert(
+                    (mutation.scope, mutation.key.clone()),
+                    mutation.value.clone(),
+                );
+            }
+        }
         self.records
             .lock()
             .expect("checkpoints")
@@ -627,7 +656,11 @@ mod tests {
         let stream = StreamContext::test_default("orders");
         let batch = test_batch();
         let schema = batch.schema();
-        harness.enqueue_input_batch(Arc::clone(&schema), vec![batch.clone()]);
+        harness.enqueue_input_batch(
+            stream.stream_index,
+            Arc::clone(&schema),
+            vec![batch.clone()],
+        );
 
         let input: WriteInput<'_, TestReader, TestCancel, TestState, TestCheckpoints> =
             harness.write_input(stream.clone());
@@ -666,6 +699,7 @@ mod tests {
         let harness = TestHarness::new();
         let checkpoints = TestCheckpoints {
             records: Arc::clone(&harness.checkpoints),
+            state_values: Arc::clone(&harness.state_values),
         };
 
         checkpoints
@@ -694,6 +728,7 @@ mod tests {
         let harness = TestHarness::new();
         let checkpoints = TestCheckpoints {
             records: Arc::clone(&harness.checkpoints),
+            state_values: Arc::clone(&harness.state_values),
         };
 
         let mut txn = checkpoints.begin(CheckpointKind::Source).unwrap();
@@ -701,5 +736,23 @@ mod tests {
         drop(txn);
 
         assert!(harness.checkpoint_records().is_empty());
+    }
+
+    #[test]
+    fn committed_test_checkpoint_txn_applies_state_mutations() {
+        let harness = TestHarness::new();
+        let checkpoints = TestCheckpoints {
+            records: Arc::clone(&harness.checkpoints),
+            state_values: Arc::clone(&harness.state_values),
+        };
+
+        let mut txn = checkpoints.begin(CheckpointKind::Dest).unwrap();
+        txn.set_state(StateScope::Stream, "offset", "8").unwrap();
+        txn.commit(1, 2).unwrap();
+
+        assert_eq!(
+            harness.state_value(StateScope::Stream, "offset"),
+            Some("8".into())
+        );
     }
 }

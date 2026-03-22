@@ -65,11 +65,16 @@ impl Transform for TransformSql {
 
     async fn validate(
         &self,
-        _input: ValidateInput<'_>,
+        input: ValidateInput<'_>,
     ) -> Result<ValidationReport, PluginError> {
-        let _ = self
+        let prepared = self
             .prepared_query()
             .map_err(|message| PluginError::config("SQL_CONFIG", message))?;
+        if let Some(stream_name) = input.stream_name {
+            if let Err(message) = validate_query_for_stream_name(&prepared.query, stream_name) {
+                return Ok(ValidationReport::failed(&message));
+            }
+        }
         Ok(ValidationReport::success("SQL query configuration is valid"))
     }
 
@@ -115,6 +120,25 @@ mod tests {
             .expect("validate should not return plugin error");
 
         assert_eq!(validation.status, ValidationStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_stream_specific_query_mismatch() {
+        let plugin = TransformSql::init(
+            config::Config {
+                query: "SELECT * FROM public.orders".to_string(),
+            },
+            InitInput::new(),
+        )
+        .await
+        .expect("init should succeed");
+
+        let validation = plugin
+            .validate(ValidateInput::new(None).with_stream_name(Some("public.users")))
+            .await
+            .expect("validate should return a report");
+
+        assert_eq!(validation.status, ValidationStatus::Failed);
     }
 
     #[tokio::test]

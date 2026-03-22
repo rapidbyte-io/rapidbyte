@@ -245,13 +245,21 @@ async fn connect_source(
                 .map_err(source_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
 
-            let wit_streams = iface
-                .call_discover(
-                    &mut store,
-                    source_bindings::rapidbyte::plugin::types::DiscoverInput { session },
-                )?
-                .map_err(source_error_to_sdk)
-                .map_err(|e| anyhow::anyhow!("Discover failed: {e}"))?;
+            let wit_streams = match iface.call_discover(
+                &mut store,
+                source_bindings::rapidbyte::plugin::types::DiscoverInput { session },
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    let _ = iface.call_close(
+                        &mut store,
+                        source_bindings::rapidbyte::plugin::types::CloseInput { session },
+                    );
+                    return Err(err);
+                }
+            }
+            .map_err(source_error_to_sdk)
+            .map_err(|e| anyhow::anyhow!("Discover failed: {e}"))?;
 
             let streams = wit_streams
                 .into_iter()
@@ -475,13 +483,23 @@ async fn handle_stream(state: &mut ReplState, table: &str, limit: Option<u64>) -
             dry_run: false,
         };
 
-        let run_result = iface.call_run(
+        let run_result = match iface.call_run(
             &mut store,
             &source_bindings::rapidbyte::plugin::types::RunInput {
                 session,
+                plugin_id: plugin_ref.clone(),
                 request: run_request,
             },
-        )?;
+        ) {
+            Ok(result) => result,
+            Err(err) => {
+                let _ = iface.call_close(
+                    &mut store,
+                    source_bindings::rapidbyte::plugin::types::CloseInput { session },
+                );
+                return Err(err);
+            }
+        };
         if let Err(err) = &run_result {
             let _ = iface.call_close(
                 &mut store,

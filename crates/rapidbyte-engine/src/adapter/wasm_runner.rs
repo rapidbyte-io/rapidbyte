@@ -737,6 +737,7 @@ fn run_source_stream(
             &mut store,
             &source_bindings::rapidbyte::plugin::types::RunInput {
                 session,
+                plugin_id: plugin_id.to_string(),
                 request: run_request,
             },
         )
@@ -923,6 +924,7 @@ fn run_destination_stream(
             &mut store,
             &dest_bindings::rapidbyte::plugin::types::RunInput {
                 session,
+                plugin_id: plugin_id.to_string(),
                 request: run_request,
             },
         )
@@ -1110,6 +1112,7 @@ fn run_transform_stream(
             &mut store,
             &transform_bindings::rapidbyte::plugin::types::RunInput {
                 session,
+                plugin_id: plugin_id.to_string(),
                 request: run_request,
             },
         )
@@ -1245,17 +1248,26 @@ fn validate_plugin_impl(
             };
 
             let wit_schema = upstream_schema.map(schema_to_wit_source);
-            let result = iface
-                .call_validate(
-                    &mut store,
-                    &source_bindings::rapidbyte::plugin::types::ValidateInput {
-                        session,
-                        stream_schema: wit_schema.clone(),
-                    },
-                )?
-                .map(source_validation_to_sdk)
-                .map_err(source_error_to_sdk)
-                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let result = match iface.call_validate(
+                &mut store,
+                &source_bindings::rapidbyte::plugin::types::ValidateInput {
+                    session,
+                    stream_name: Some(stream_name.to_string()),
+                    stream_schema: wit_schema.clone(),
+                },
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    let _ = iface.call_close(
+                        &mut store,
+                        source_bindings::rapidbyte::plugin::types::CloseInput { session },
+                    );
+                    return Err(err);
+                }
+            }
+            .map(source_validation_to_sdk)
+            .map_err(source_error_to_sdk)
+            .map_err(|e| anyhow::anyhow!(e.to_string()));
             let _ = iface.call_close(
                 &mut store,
                 source_bindings::rapidbyte::plugin::types::CloseInput { session },
@@ -1289,17 +1301,26 @@ fn validate_plugin_impl(
             };
 
             let wit_schema = upstream_schema.map(schema_to_wit_dest);
-            let result = iface
-                .call_validate(
-                    &mut store,
-                    &dest_bindings::rapidbyte::plugin::types::ValidateInput {
-                        session,
-                        stream_schema: wit_schema.clone(),
-                    },
-                )?
-                .map(dest_validation_to_sdk)
-                .map_err(dest_error_to_sdk)
-                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let result = match iface.call_validate(
+                &mut store,
+                &dest_bindings::rapidbyte::plugin::types::ValidateInput {
+                    session,
+                    stream_name: Some(stream_name.to_string()),
+                    stream_schema: wit_schema.clone(),
+                },
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    let _ = iface.call_close(
+                        &mut store,
+                        dest_bindings::rapidbyte::plugin::types::CloseInput { session },
+                    );
+                    return Err(err);
+                }
+            }
+            .map(dest_validation_to_sdk)
+            .map_err(dest_error_to_sdk)
+            .map_err(|e| anyhow::anyhow!(e.to_string()));
             let _ = iface.call_close(
                 &mut store,
                 dest_bindings::rapidbyte::plugin::types::CloseInput { session },
@@ -1333,17 +1354,26 @@ fn validate_plugin_impl(
             };
 
             let wit_schema = upstream_schema.map(schema_to_wit_transform);
-            let result = iface
-                .call_validate(
-                    &mut store,
-                    &transform_bindings::rapidbyte::plugin::types::ValidateInput {
-                        session,
-                        stream_schema: wit_schema.clone(),
-                    },
-                )?
-                .map(transform_validation_to_sdk)
-                .map_err(transform_error_to_sdk)
-                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let result = match iface.call_validate(
+                &mut store,
+                &transform_bindings::rapidbyte::plugin::types::ValidateInput {
+                    session,
+                    stream_name: Some(stream_name.to_string()),
+                    stream_schema: wit_schema.clone(),
+                },
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    let _ = iface.call_close(
+                        &mut store,
+                        transform_bindings::rapidbyte::plugin::types::CloseInput { session },
+                    );
+                    return Err(err);
+                }
+            }
+            .map(transform_validation_to_sdk)
+            .map_err(transform_error_to_sdk)
+            .map_err(|e| anyhow::anyhow!(e.to_string()));
             let _ = iface.call_close(
                 &mut store,
                 transform_bindings::rapidbyte::plugin::types::CloseInput { session },
@@ -1419,13 +1449,21 @@ fn run_discover_impl(
         .map_err(source_error_to_sdk)
         .map_err(|e| anyhow::anyhow!("Source open failed for discover: {e}"))?;
 
-    let wit_streams = iface
-        .call_discover(
-            &mut store,
-            source_bindings::rapidbyte::plugin::types::DiscoverInput { session },
-        )?
-        .map_err(source_error_to_sdk)
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    let wit_streams = match iface.call_discover(
+        &mut store,
+        source_bindings::rapidbyte::plugin::types::DiscoverInput { session },
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            let _ = iface.call_close(
+                &mut store,
+                source_bindings::rapidbyte::plugin::types::CloseInput { session },
+            );
+            return Err(err);
+        }
+    }
+    .map_err(source_error_to_sdk)
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
     let streams = wit_streams
         .into_iter()
@@ -1753,6 +1791,7 @@ fn run_spec_impl(
 
 /// Run prerequisite checks against the plugin.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn run_prerequisites_impl(
     module: &LoadedComponent,
     kind: PluginKind,
@@ -1809,14 +1848,22 @@ fn run_prerequisites_impl(
                 .map_err(source_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!("Source open failed: {e}"))?;
 
-            let result = iface
-                .call_prerequisites(
-                    &mut store,
-                    source_bindings::rapidbyte::plugin::types::PrerequisitesInput { session },
-                )?
-                .map(source_prerequisites_to_sdk)
-                .map_err(source_error_to_sdk)
-                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let result = match iface.call_prerequisites(
+                &mut store,
+                source_bindings::rapidbyte::plugin::types::PrerequisitesInput { session },
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    let _ = iface.call_close(
+                        &mut store,
+                        source_bindings::rapidbyte::plugin::types::CloseInput { session },
+                    );
+                    return Err(err);
+                }
+            }
+            .map(source_prerequisites_to_sdk)
+            .map_err(source_error_to_sdk)
+            .map_err(|e| anyhow::anyhow!(e.to_string()));
             let _ = iface.call_close(
                 &mut store,
                 source_bindings::rapidbyte::plugin::types::CloseInput { session },
@@ -1846,14 +1893,22 @@ fn run_prerequisites_impl(
                 .map_err(dest_error_to_sdk)
                 .map_err(|e| anyhow::anyhow!("Destination open failed: {e}"))?;
 
-            let result = iface
-                .call_prerequisites(
-                    &mut store,
-                    dest_bindings::rapidbyte::plugin::types::PrerequisitesInput { session },
-                )?
-                .map(dest_prerequisites_to_sdk)
-                .map_err(dest_error_to_sdk)
-                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let result = match iface.call_prerequisites(
+                &mut store,
+                dest_bindings::rapidbyte::plugin::types::PrerequisitesInput { session },
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    let _ = iface.call_close(
+                        &mut store,
+                        dest_bindings::rapidbyte::plugin::types::CloseInput { session },
+                    );
+                    return Err(err);
+                }
+            }
+            .map(dest_prerequisites_to_sdk)
+            .map_err(dest_error_to_sdk)
+            .map_err(|e| anyhow::anyhow!(e.to_string()));
             let _ = iface.call_close(
                 &mut store,
                 dest_bindings::rapidbyte::plugin::types::CloseInput { session },
@@ -1942,14 +1997,22 @@ fn run_apply_impl(
                 dry_run,
             };
 
-            let result = iface
-                .call_apply(
-                    &mut store,
-                    &source_bindings::rapidbyte::plugin::types::ApplyInput { session, request },
-                )?
-                .map(source_apply_report_to_sdk)
-                .map_err(source_error_to_sdk)
-                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let result = match iface.call_apply(
+                &mut store,
+                &source_bindings::rapidbyte::plugin::types::ApplyInput { session, request },
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    let _ = iface.call_close(
+                        &mut store,
+                        source_bindings::rapidbyte::plugin::types::CloseInput { session },
+                    );
+                    return Err(err);
+                }
+            }
+            .map(source_apply_report_to_sdk)
+            .map_err(source_error_to_sdk)
+            .map_err(|e| anyhow::anyhow!(e.to_string()));
             let _ = iface.call_close(
                 &mut store,
                 source_bindings::rapidbyte::plugin::types::CloseInput { session },
@@ -1988,14 +2051,22 @@ fn run_apply_impl(
                 dry_run,
             };
 
-            let result = iface
-                .call_apply(
-                    &mut store,
-                    &dest_bindings::rapidbyte::plugin::types::ApplyInput { session, request },
-                )?
-                .map(dest_apply_report_to_sdk)
-                .map_err(dest_error_to_sdk)
-                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let result = match iface.call_apply(
+                &mut store,
+                &dest_bindings::rapidbyte::plugin::types::ApplyInput { session, request },
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    let _ = iface.call_close(
+                        &mut store,
+                        dest_bindings::rapidbyte::plugin::types::CloseInput { session },
+                    );
+                    return Err(err);
+                }
+            }
+            .map(dest_apply_report_to_sdk)
+            .map_err(dest_error_to_sdk)
+            .map_err(|e| anyhow::anyhow!(e.to_string()));
             let _ = iface.call_close(
                 &mut store,
                 dest_bindings::rapidbyte::plugin::types::CloseInput { session },
@@ -2080,14 +2151,22 @@ fn run_teardown_impl(
                 reason: reason.to_string(),
             };
 
-            let result = iface
-                .call_teardown(
-                    &mut store,
-                    &source_bindings::rapidbyte::plugin::types::TeardownInput { session, request },
-                )?
-                .map(source_teardown_report_to_sdk)
-                .map_err(source_error_to_sdk)
-                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let result = match iface.call_teardown(
+                &mut store,
+                &source_bindings::rapidbyte::plugin::types::TeardownInput { session, request },
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    let _ = iface.call_close(
+                        &mut store,
+                        source_bindings::rapidbyte::plugin::types::CloseInput { session },
+                    );
+                    return Err(err);
+                }
+            }
+            .map(source_teardown_report_to_sdk)
+            .map_err(source_error_to_sdk)
+            .map_err(|e| anyhow::anyhow!(e.to_string()));
             let _ = iface.call_close(
                 &mut store,
                 source_bindings::rapidbyte::plugin::types::CloseInput { session },
@@ -2122,14 +2201,22 @@ fn run_teardown_impl(
                 reason: reason.to_string(),
             };
 
-            let result = iface
-                .call_teardown(
-                    &mut store,
-                    &dest_bindings::rapidbyte::plugin::types::TeardownInput { session, request },
-                )?
-                .map(dest_teardown_report_to_sdk)
-                .map_err(dest_error_to_sdk)
-                .map_err(|e| anyhow::anyhow!(e.to_string()));
+            let result = match iface.call_teardown(
+                &mut store,
+                &dest_bindings::rapidbyte::plugin::types::TeardownInput { session, request },
+            ) {
+                Ok(result) => result,
+                Err(err) => {
+                    let _ = iface.call_close(
+                        &mut store,
+                        dest_bindings::rapidbyte::plugin::types::CloseInput { session },
+                    );
+                    return Err(err);
+                }
+            }
+            .map(dest_teardown_report_to_sdk)
+            .map_err(dest_error_to_sdk)
+            .map_err(|e| anyhow::anyhow!(e.to_string()));
             let _ = iface.call_close(
                 &mut store,
                 dest_bindings::rapidbyte::plugin::types::CloseInput { session },
@@ -2412,10 +2499,12 @@ mod tests {
         };
         let validate = source_bindings::rapidbyte::plugin::types::ValidateInput {
             session: 9,
+            stream_name: Some("users".into()),
             stream_schema: Some(stream.schema.clone()),
         };
         let run = source_bindings::rapidbyte::plugin::types::RunInput {
             session: 9,
+            plugin_id: "test-source".into(),
             request: source_bindings::rapidbyte::plugin::types::RunRequest {
                 streams: vec![stream],
                 dry_run: false,
@@ -2425,6 +2514,7 @@ mod tests {
 
         assert_eq!(open.config_json, "{}");
         assert_eq!(validate.session, 9);
+        assert_eq!(validate.stream_name.as_deref(), Some("users"));
         assert_eq!(
             validate
                 .stream_schema
@@ -2433,6 +2523,7 @@ mod tests {
             Some("updated_at")
         );
         assert_eq!(run.session, 9);
+        assert_eq!(run.plugin_id, "test-source");
         assert_eq!(run.request.streams.len(), 1);
         assert_eq!(run.request.streams[0].stream_name, "users");
         assert_eq!(close.session, 9);
