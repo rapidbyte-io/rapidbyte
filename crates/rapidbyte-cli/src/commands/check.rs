@@ -353,7 +353,7 @@ fn print_prerequisites(label: &str, report: &PrerequisitesReport) {
                     eprintln!("    fix: {hint}");
                 }
             }
-            _ => {
+            PrerequisiteSeverity::Error => {
                 eprintln!("  {} {}", style("\u{2713}").green(), check.message);
             }
         }
