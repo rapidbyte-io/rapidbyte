@@ -1,5 +1,6 @@
 //! Stream write orchestration for destination `PostgreSQL` plugin.
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use rapidbyte_sdk::prelude::*;
@@ -51,19 +52,29 @@ async fn live_destination_state_is_fresh(
         .map_err(|e| PluginError::config("INVALID_STREAM_SETUP", e))?;
 
     let Some(drift) = drift else {
-        return Ok(true);
+        return Ok(handoff.ignored_columns.is_empty() && handoff.type_null_columns.is_empty());
     };
+
+    let drift_ignored_columns: HashSet<&str> =
+        drift.new_columns.iter().map(|(col_name, _)| col_name.as_str()).collect();
+    let drift_type_null_columns: HashSet<&str> = drift
+        .type_changes
+        .iter()
+        .map(|(col_name, _, _)| col_name.as_str())
+        .collect();
+
+    let handoff_ignored_columns: HashSet<&str> =
+        handoff.ignored_columns.iter().map(|col| col.as_str()).collect();
+    let handoff_type_null_columns: HashSet<&str> = handoff
+        .type_null_columns
+        .iter()
+        .map(|col| col.as_str())
+        .collect();
 
     Ok(drift.removed_columns.is_empty()
         && drift.nullability_changes.is_empty()
-        && drift
-            .new_columns
-            .iter()
-            .all(|(col_name, _)| handoff.ignored_columns.contains(col_name))
-        && drift
-            .type_changes
-            .iter()
-            .all(|(col_name, _, _)| handoff.type_null_columns.contains(col_name)))
+        && drift_ignored_columns == handoff_ignored_columns
+        && drift_type_null_columns == handoff_type_null_columns)
 }
 
 async fn replace_staging_reuse_is_safe(
@@ -633,6 +644,129 @@ mod tests {
             fresh,
         );
         assert!(reused.is_some());
+
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &[],
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn live_freshness_rejects_stale_ignored_columns_after_repair() {
+        let schema = fresh_name("rb_writer_ignore_stale");
+        let table = "users";
+        let client = connect().await;
+        create_table(&client, &schema, table).await;
+
+        let stream_schema = StreamSchema {
+            fields: vec![
+                SchemaField::new("id", "int64", false).with_primary_key(true),
+                SchemaField::new("name", "utf8", true),
+                SchemaField::new("age", "int64", true),
+            ],
+            primary_key: vec!["id".to_string()],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        };
+        let handoff = crate::ddl::ContractHandoff {
+            schema_signature: crate::contract::stream_schema_signature(&stream_schema)
+                .expect("signature")
+                .expect("schema signature"),
+            ignored_columns: vec!["age".to_string()],
+            type_null_columns: vec![],
+        };
+
+        assert!(
+            live_destination_state_is_fresh(&client, &schema, table, &stream_schema, &handoff)
+                .await
+                .expect("freshness while ignored column is still absent")
+        );
+
+        client
+            .execute(
+                &format!(
+                    "ALTER TABLE {} ADD COLUMN age bigint",
+                    crate::decode::qualified_name(&schema, table)
+                ),
+                &[],
+            )
+            .await
+            .expect("repair ignored column");
+
+        assert!(
+            !live_destination_state_is_fresh(&client, &schema, table, &stream_schema, &handoff)
+                .await
+                .expect("freshness after repair")
+        );
+
+        let _ = client
+            .execute(
+                &format!("DROP SCHEMA IF EXISTS {} CASCADE", pg_escape::quote_identifier(&schema)),
+                &[],
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn live_freshness_rejects_stale_type_null_columns_after_repair() {
+        let schema = fresh_name("rb_writer_null_stale");
+        let table = "users";
+        let client = connect().await;
+        create_table(&client, &schema, table).await;
+        client
+            .execute(
+                &format!(
+                    "ALTER TABLE {} ALTER COLUMN \"id\" TYPE integer USING \"id\"::integer",
+                    crate::decode::qualified_name(&schema, table)
+                ),
+                &[],
+            )
+            .await
+            .expect("introduce type drift");
+
+        let stream_schema = StreamSchema {
+            fields: vec![
+                SchemaField::new("id", "utf8", false).with_primary_key(true),
+                SchemaField::new("name", "utf8", true),
+            ],
+            primary_key: vec!["id".to_string()],
+            partition_keys: vec![],
+            source_defined_cursor: None,
+            schema_id: None,
+        };
+        let handoff = crate::ddl::ContractHandoff {
+            schema_signature: crate::contract::stream_schema_signature(&stream_schema)
+                .expect("signature")
+                .expect("schema signature"),
+            ignored_columns: vec![],
+            type_null_columns: vec!["id".to_string()],
+        };
+
+        assert!(
+            live_destination_state_is_fresh(&client, &schema, table, &stream_schema, &handoff)
+                .await
+                .expect("freshness while type-null workaround is still needed")
+        );
+
+        client
+            .execute(
+                &format!(
+                    "ALTER TABLE {} ALTER COLUMN \"id\" TYPE text USING \"id\"::text",
+                    crate::decode::qualified_name(&schema, table)
+                ),
+                &[],
+            )
+            .await
+            .expect("repair type-null column");
+
+        assert!(
+            !live_destination_state_is_fresh(&client, &schema, table, &stream_schema, &handoff)
+                .await
+                .expect("freshness after repair")
+        );
 
         let _ = client
             .execute(

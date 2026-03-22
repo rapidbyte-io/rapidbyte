@@ -25,7 +25,7 @@ pub(crate) fn checkpoint_safety_message(commit_state: CommitState) -> &'static s
             "dest-postgres: write loop failed before any commit; rollback leaves no durable checkpoint"
         }
         CommitState::AfterCommitConfirmed => {
-            "dest-postgres: write loop failed after a confirmed checkpoint; resume is safe from the last checkpoint"
+            "dest-postgres: final checkpoint failed after PostgreSQL commit; durable data may already exist, but the checkpoint may not have advanced, so resuming naively can duplicate rows"
         }
         CommitState::AfterCommitUnknown => {
             "dest-postgres: write loop failed after a commit with unknown durability; inspect the destination before resuming"
@@ -51,8 +51,9 @@ mod tests {
     fn checkpoint_safety_message_distinguishes_commit_states() {
         assert!(checkpoint_safety_message(CommitState::BeforeCommit)
             .contains("before any commit"));
-        assert!(checkpoint_safety_message(CommitState::AfterCommitConfirmed)
-            .contains("confirmed checkpoint"));
+        let confirmed = checkpoint_safety_message(CommitState::AfterCommitConfirmed);
+        assert!(confirmed.contains("checkpoint may not have advanced"));
+        assert!(confirmed.contains("duplicate rows"));
         assert!(checkpoint_safety_message(CommitState::AfterCommitUnknown)
             .contains("unknown"));
     }
