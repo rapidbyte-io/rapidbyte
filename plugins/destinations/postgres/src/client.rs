@@ -1,8 +1,6 @@
-//! `PostgreSQL` client connection and validation helpers for dest-postgres.
+//! `PostgreSQL` client connection helpers for dest-postgres.
 
 use tokio_postgres::{Client, Config as PgConfig, NoTls};
-
-use rapidbyte_sdk::prelude::*;
 
 /// Connect to `PostgreSQL` using the provided config.
 ///
@@ -38,44 +36,4 @@ pub(crate) async fn connect(config: &crate::config::Config) -> Result<Client, St
         .map_err(|e| format!("Failed to set synchronous_commit: {e}"))?;
 
     Ok(client)
-}
-
-/// Validate `PostgreSQL` connectivity and target schema.
-///
-/// # Errors
-///
-/// Returns `Err` if the connection fails or the `SELECT 1` health check fails.
-pub(crate) async fn validate(
-    config: &crate::config::Config,
-) -> Result<ValidationReport, PluginError> {
-    let client = connect(config)
-        .await
-        .map_err(|e| PluginError::transient_network("CONNECTION_FAILED", e))?;
-
-    client.query_one("SELECT 1", &[]).await.map_err(|e| {
-        PluginError::transient_network(
-            "CONNECTION_TEST_FAILED",
-            format!("Connection test failed: {e}"),
-        )
-    })?;
-
-    let schema_check = client
-        .query_one(
-            "SELECT schema_name FROM information_schema.schemata WHERE schema_name = $1",
-            &[&config.schema],
-        )
-        .await;
-
-    let message = match schema_check {
-        Ok(_) => format!(
-            "Connected to {}:{}/{} (schema: {})",
-            config.host, config.port, config.database, config.schema
-        ),
-        Err(_) => format!(
-            "Connected to {}:{}/{} (schema '{}' does not exist, will be created)",
-            config.host, config.port, config.database, config.schema
-        ),
-    };
-
-    Ok(ValidationReport::success(&message))
 }
