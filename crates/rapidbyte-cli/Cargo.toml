@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 rapidbyte-agent = { path = "../rapidbyte-agent" }
+rapidbyte-api = { path = "../rapidbyte-api" }
 rapidbyte-controller = { path = "../rapidbyte-controller" }
 rapidbyte-metrics = { path = "../rapidbyte-metrics" }
 rapidbyte-dev = { path = "../rapidbyte-dev" }
@@ -18,6 +19,10 @@ rapidbyte-secrets = { path = "../rapidbyte-secrets" }
 rapidbyte-registry = { path = "../rapidbyte-registry" }
 rapidbyte-runtime = { path = "../rapidbyte-runtime" }
 rapidbyte-types = { path = "../rapidbyte-types" }
+axum = { workspace = true }
+axum-extra = { workspace = true }
+tower-http = { workspace = true }
+async-stream = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 clap = { workspace = true }

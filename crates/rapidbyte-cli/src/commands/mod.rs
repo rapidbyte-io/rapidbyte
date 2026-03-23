@@ -18,6 +18,7 @@ pub mod list_runs;
 pub mod plugin;
 pub mod run;
 pub mod scaffold;
+pub mod serve;
 pub mod status;
 pub mod teardown;
 pub mod transport;

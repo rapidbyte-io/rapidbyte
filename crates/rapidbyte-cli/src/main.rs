@@ -172,6 +172,20 @@ enum Commands {
     },
     /// Launch interactive dev shell
     Dev,
+    /// Start the REST API server
+    Serve {
+        /// Address to listen on
+        #[arg(long, default_value = "0.0.0.0:8080")]
+        listen: String,
+
+        /// Disable authentication (development only)
+        #[arg(long)]
+        allow_unauthenticated: bool,
+
+        /// Bearer token(s) for API auth (comma-separated)
+        #[arg(long, env = "RAPIDBYTE_AUTH_TOKEN")]
+        auth_token: Option<String>,
+    },
     /// Start the controller server (long-running)
     Controller {
         /// gRPC listen address
@@ -406,6 +420,7 @@ async fn main() -> ExitCode {
     let service_name = match &cli.command {
         Commands::Controller { .. } => "rapidbyte-controller",
         Commands::Agent { .. } => "rapidbyte-agent",
+        Commands::Serve { .. } => "rapidbyte-api",
         _ => "rapidbyte-cli",
     };
     let otel_guard = match rapidbyte_metrics::init(service_name) {
@@ -537,6 +552,25 @@ async fn main() -> ExitCode {
         Commands::Plugin { command } => commands::plugin::execute(command, &registry_config).await,
         Commands::Scaffold { name, output } => commands::scaffold::run(&name, output.as_deref()),
         Commands::Dev => commands::dev::execute().await,
+        Commands::Serve {
+            listen,
+            allow_unauthenticated,
+            auth_token: serve_auth_token,
+        } => {
+            let Some(secrets) =
+                try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id)
+            else {
+                return ExitCode::FAILURE;
+            };
+            commands::serve::execute(
+                &listen,
+                allow_unauthenticated,
+                serve_auth_token.as_deref(),
+                &registry_config,
+                &secrets,
+            )
+            .await
+        }
         Commands::Controller {
             listen,
             metadata_database_url,
