@@ -123,7 +123,45 @@ impl RunService for LocalRunService {
         })
     }
 
+    #[allow(clippy::cast_precision_loss)]
     async fn events(&self, run_id: &str) -> Result<EventStream<SseEvent>> {
+        let snap = self.run_manager.get(run_id).ok_or_else(|| {
+            ApiError::not_found("run_not_found", format!("Run '{run_id}' not found"))
+        })?;
+
+        // If the run is already in a terminal state, return a stream that
+        // immediately yields the final event and closes. This prevents the
+        // client from hanging forever on a broadcast receiver that will
+        // never receive another message.
+        if snap.status.is_terminal() {
+            let final_event = match snap.status {
+                RunStatus::Completed => SseEvent::Complete {
+                    run_id: snap.run_id.clone(),
+                    status: RunStatus::Completed,
+                    duration_secs: snap.finished_at.map_or(0.0, |f| {
+                        (f - snap.started_at).num_milliseconds() as f64 / 1000.0
+                    }),
+                    counts: snap.result.as_ref().map(|r| PipelineCounts {
+                        records_read: r.counts.records_read,
+                        records_written: r.counts.records_written,
+                        bytes_read: r.counts.bytes_read,
+                        bytes_written: r.counts.bytes_written,
+                    }),
+                },
+                RunStatus::Failed => SseEvent::Failed {
+                    run_id: snap.run_id.clone(),
+                    error: snap.error.unwrap_or_default(),
+                },
+                RunStatus::Cancelled => SseEvent::Cancelled {
+                    run_id: snap.run_id.clone(),
+                    reason: "cancelled".into(),
+                },
+                _ => unreachable!("is_terminal() returned true for non-terminal status"),
+            };
+            let stream = futures::stream::once(async move { final_event });
+            return Ok(Box::pin(stream));
+        }
+
         let mut rx = self.run_manager.subscribe(run_id).ok_or_else(|| {
             ApiError::not_found("run_not_found", format!("Run '{run_id}' not found"))
         })?;
@@ -477,6 +515,72 @@ mod tests {
         assert!(matches!(event, SseEvent::Complete { .. }));
 
         // Stream should be exhausted after terminal event.
+        let next = stream.next().await;
+        assert!(next.is_none());
+    }
+
+    // ----- events: terminal run returns final event immediately (Bug 4) -----
+
+    #[tokio::test]
+    async fn events_completed_run_returns_final_event() {
+        let (mgr, svc) = setup();
+        let run_id = mgr.create_run("p".into());
+        let result = rapidbyte_engine::PipelineResult {
+            counts: rapidbyte_engine::PipelineCounts {
+                records_read: 42,
+                records_written: 40,
+                bytes_read: 1024,
+                bytes_written: 900,
+            },
+            source: rapidbyte_engine::SourceTiming::default(),
+            dest: rapidbyte_engine::DestTiming::default(),
+            num_transforms: 0,
+            total_transform_secs: 0.0,
+            transform_load_times_ms: vec![],
+            duration_secs: 2.0,
+            wasm_overhead_secs: 0.0,
+            retry_count: 0,
+            parallelism: 1,
+            stream_metrics: vec![],
+        };
+        mgr.complete(&run_id, result);
+
+        // Subscribe AFTER completion — should not hang.
+        let mut stream = svc.events(&run_id).await.unwrap();
+        let event = stream.next().await.unwrap();
+        assert!(matches!(event, SseEvent::Complete { .. }));
+
+        // Stream should close after the single terminal event.
+        let next = stream.next().await;
+        assert!(next.is_none());
+    }
+
+    #[tokio::test]
+    async fn events_failed_run_returns_final_event() {
+        let (mgr, svc) = setup();
+        let run_id = mgr.create_run("p".into());
+        mgr.fail(&run_id, "connection refused".into());
+
+        let mut stream = svc.events(&run_id).await.unwrap();
+        let event = stream.next().await.unwrap();
+        assert!(
+            matches!(event, SseEvent::Failed { ref error, .. } if error == "connection refused")
+        );
+
+        let next = stream.next().await;
+        assert!(next.is_none());
+    }
+
+    #[tokio::test]
+    async fn events_cancelled_run_returns_final_event() {
+        let (mgr, svc) = setup();
+        let run_id = mgr.create_run("p".into());
+        mgr.update_status(&run_id, RunStatus::Cancelled);
+
+        let mut stream = svc.events(&run_id).await.unwrap();
+        let event = stream.next().await.unwrap();
+        assert!(matches!(event, SseEvent::Cancelled { .. }));
+
         let next = stream.next().await;
         assert!(next.is_none());
     }

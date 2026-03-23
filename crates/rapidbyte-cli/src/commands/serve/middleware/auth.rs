@@ -78,6 +78,10 @@ pub async fn auth_middleware(
         return unauthorized_response("Authorization header must use Bearer scheme");
     };
 
+    if token.is_empty() {
+        return unauthorized_response("bearer token must not be empty");
+    }
+
     if !config.tokens.iter().any(|t| t == token) {
         return unauthorized_response("invalid bearer token");
     }
@@ -223,6 +227,22 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("missing"));
+    }
+
+    #[tokio::test]
+    async fn empty_bearer_token_returns_401() {
+        let config = test_config(true, vec!["secret123"]);
+        let resp = app(config)
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/api/v1/pipelines")
+                    .header("Authorization", "Bearer ")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

@@ -35,6 +35,14 @@ pub enum RunStatus {
     Cancelled,
 }
 
+impl RunStatus {
+    /// Returns `true` if this status is a terminal state (no further transitions).
+    #[must_use]
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+    }
+}
+
 /// Active/paused state of a pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

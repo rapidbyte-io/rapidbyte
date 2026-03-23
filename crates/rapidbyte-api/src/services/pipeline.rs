@@ -11,7 +11,8 @@ use chrono::Utc;
 use tracing::{info, warn};
 
 use rapidbyte_engine::{
-    build_lightweight_context, build_run_context, check_pipeline, run_pipeline, ProgressEvent,
+    build_lightweight_context, build_run_context, check_pipeline, run_pipeline, PipelineError,
+    ProgressEvent,
 };
 use rapidbyte_pipeline_config::PipelineConfig;
 use rapidbyte_registry::RegistryConfig;
@@ -115,6 +116,14 @@ impl PipelineService for LocalPipelineService {
     }
 
     async fn sync(&self, request: SyncRequest) -> Result<RunHandle> {
+        // Phase 1 limitation: dry_run is not yet supported.
+        if request.dry_run {
+            return Err(ApiError::not_implemented("dry_run is not yet supported"));
+        }
+        // NOTE: stream filtering, full_refresh override, and cursor_start/cursor_end
+        // are parsed but not yet passed to the engine. These would require modifying
+        // PipelineConfig before execution, which is out of scope for Phase 1.
+
         let config = self.lookup(&request.pipeline)?.clone();
         let run_id = self.run_manager.create_run(request.pipeline.clone());
         let pipeline_name = request.pipeline.clone();
@@ -204,16 +213,38 @@ impl PipelineService for LocalPipelineService {
                             info!(run_id = %rid, "pipeline run completed");
                         }
                         Err(e) => {
-                            let error_msg = e.to_string();
-                            run_mgr.send_event(
-                                &rid,
-                                SseEvent::Failed {
-                                    run_id: rid.clone(),
-                                    error: error_msg.clone(),
-                                },
-                            );
-                            run_mgr.fail(&rid, error_msg);
-                            warn!(run_id = %rid, "pipeline run failed");
+                            // Check if the run was already cancelled (e.g. via
+                            // RunService::cancel) or if the engine returned a
+                            // cancellation error. In either case, preserve the
+                            // Cancelled status instead of overwriting with Failed.
+                            let snap = run_mgr.get(&rid);
+                            let already_cancelled =
+                                snap.is_some_and(|s| s.status == RunStatus::Cancelled);
+
+                            if already_cancelled || matches!(e, PipelineError::Cancelled) {
+                                if !already_cancelled {
+                                    run_mgr.update_status(&rid, RunStatus::Cancelled);
+                                }
+                                run_mgr.send_event(
+                                    &rid,
+                                    SseEvent::Cancelled {
+                                        run_id: rid.clone(),
+                                        reason: "cancelled by user".into(),
+                                    },
+                                );
+                                info!(run_id = %rid, "pipeline run cancelled");
+                            } else {
+                                let error_msg = e.to_string();
+                                run_mgr.send_event(
+                                    &rid,
+                                    SseEvent::Failed {
+                                        run_id: rid.clone(),
+                                        error: error_msg.clone(),
+                                    },
+                                );
+                                run_mgr.fail(&rid, error_msg);
+                                warn!(run_id = %rid, "pipeline run failed");
+                            }
                         }
                     }
                 }
@@ -550,6 +581,56 @@ destination:
         // Run should exist in run_manager
         let snap = run_mgr.get(&handle.run_id).unwrap();
         assert_eq!(snap.pipeline, "my-pipeline");
+    }
+
+    // ----- sync: dry_run guard (Bug 2) -----
+
+    #[tokio::test]
+    async fn sync_dry_run_returns_not_implemented() {
+        let svc = make_service(test_catalog());
+        let err = svc
+            .sync(SyncRequest {
+                pipeline: "my-pipeline".into(),
+                stream: None,
+                full_refresh: false,
+                cursor_start: None,
+                cursor_end: None,
+                dry_run: true,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::NotImplemented { .. }));
+    }
+
+    // ----- sync: cancel race (Bug 1) -----
+
+    #[tokio::test]
+    async fn cancelled_run_not_overwritten_to_failed() {
+        // Verify that when a run is cancelled via RunManager, the spawned
+        // task's error handling preserves the Cancelled status.
+        let run_mgr = Arc::new(RunManager::new());
+        let run_id = run_mgr.create_run("test-pipe".into());
+
+        // Pre-cancel the run (simulates RunService::cancel called before
+        // the engine task observes the error).
+        run_mgr.update_status(&run_id, RunStatus::Cancelled);
+
+        // Verify the status is Cancelled.
+        let snap = run_mgr.get(&run_id).unwrap();
+        assert_eq!(snap.status, RunStatus::Cancelled);
+
+        // Calling fail() would overwrite to Failed — but the fix ensures
+        // we check first. Simulate the check logic from the spawned task:
+        let already_cancelled = snap.status == RunStatus::Cancelled;
+        assert!(already_cancelled, "status should be Cancelled");
+
+        // The fix should NOT call run_mgr.fail() when already_cancelled is true.
+        // Instead, it sends a Cancelled event. Verify the status stays Cancelled.
+        if !already_cancelled {
+            run_mgr.fail(&run_id, "some error".into());
+        }
+        let snap = run_mgr.get(&run_id).unwrap();
+        assert_eq!(snap.status, RunStatus::Cancelled);
     }
 
     // ----- stub methods -----

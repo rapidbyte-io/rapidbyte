@@ -103,8 +103,14 @@ pub async fn execute(
     let ctx =
         ApiContext::from_project(&cwd, DeploymentMode::Local, secrets, registry_config).await?;
 
-    let tokens = auth_token
-        .map(|t| t.split(',').map(|s| s.trim().to_string()).collect())
+    let tokens: Vec<String> = auth_token
+        .map(|t| {
+            t.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default();
 
     let auth_config = middleware::AuthConfig {
@@ -384,6 +390,61 @@ mod tests {
     async fn plugins_returns_200() {
         let resp = test_app()
             .oneshot(Request::get("/api/v1/plugins").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ------------------------------------------------------------------
+    // Auth: empty / trailing-comma token handling (Bug 3)
+    // ------------------------------------------------------------------
+
+    /// Build an app whose token list comes from comma-separated parsing
+    /// (mirrors the logic in `execute`).
+    fn test_app_with_parsed_tokens(raw: &str) -> Router {
+        let tokens: Vec<String> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        let ctx = test_api_context();
+        build_router(
+            ctx,
+            middleware::AuthConfig {
+                required: true,
+                tokens,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn trailing_comma_does_not_create_empty_token() {
+        // "secret," should produce ["secret"], not ["secret", ""]
+        let app = test_app_with_parsed_tokens("secret,");
+        // Empty bearer should be rejected.
+        let resp = app
+            .oneshot(
+                Request::get("/api/v1/pipelines")
+                    .header("Authorization", "Bearer ")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn trailing_comma_valid_token_still_works() {
+        let app = test_app_with_parsed_tokens("secret,");
+        let resp = app
+            .oneshot(
+                Request::get("/api/v1/pipelines")
+                    .header("Authorization", "Bearer secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
