@@ -15,6 +15,7 @@ members = [
     "crates/rapidbyte-types",
     "crates/rapidbyte-secrets",
     "crates/rapidbyte-pipeline-config",
+    "crates/rapidbyte-api",
 ]
 # Plugins target wasm32-wasip2 — build separately
 exclude = [
@@ -79,3 +80,9 @@ oci-client = "0.16"
 http = "1"
 ed25519-dalek = { version = "2", features = ["pem", "pkcs8", "rand_core"] }
 rand = "0.8"
+axum = "0.8"
+axum-extra = { version = "0.10", features = ["typed-header"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+ulid = "1"
+futures = "0.3"
+async-stream = "0.3"

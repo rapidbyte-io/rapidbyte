@@ -1,0 +1,23 @@
+[package]
+name = "rapidbyte-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rapidbyte-engine = { path = "../rapidbyte-engine" }
+rapidbyte-types = { path = "../rapidbyte-types" }
+rapidbyte-pipeline-config = { path = "../rapidbyte-pipeline-config" }
+rapidbyte-registry = { path = "../rapidbyte-registry" }
+rapidbyte-secrets = { path = "../rapidbyte-secrets" }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+ulid = { workspace = true }
+dashmap = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+tokio-util = { workspace = true }
