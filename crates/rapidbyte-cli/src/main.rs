@@ -566,8 +566,8 @@ async fn main() -> ExitCode {
                 &listen,
                 allow_unauthenticated,
                 serve_auth_token.as_deref(),
-                &registry_config,
-                &secrets,
+                registry_config,
+                secrets,
             )
             .await
         }

@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 /// Query parameters for paginated list endpoints.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct PaginationParams {
     pub limit: Option<u32>,
     pub cursor: Option<String>,
