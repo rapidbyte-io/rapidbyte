@@ -78,3 +78,36 @@ impl From<anyhow::Error> for ApiError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pipeline_cancelled_maps_to_conflict() {
+        let err: ApiError = PipelineError::Cancelled.into();
+        assert!(matches!(err, ApiError::Conflict { .. }));
+    }
+
+    #[test]
+    fn infrastructure_error_maps_to_internal() {
+        let err: ApiError =
+            PipelineError::Infrastructure(anyhow::anyhow!("db connection failed")).into();
+        assert!(matches!(err, ApiError::Internal { .. }));
+        assert!(err.to_string().contains("db connection failed"));
+    }
+
+    #[test]
+    fn not_found_helper() {
+        let err = ApiError::not_found("pipeline_not_found", "Pipeline 'foo' does not exist");
+        assert!(
+            matches!(err, ApiError::NotFound { code, message } if code == "pipeline_not_found" && message.contains("foo"))
+        );
+    }
+
+    #[test]
+    fn not_implemented_helper() {
+        let err = ApiError::not_implemented("batch sync");
+        assert!(matches!(err, ApiError::NotImplemented { message } if message == "batch sync"));
+    }
+}
