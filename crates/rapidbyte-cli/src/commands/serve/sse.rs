@@ -7,6 +7,7 @@ use tokio::sync::broadcast;
 /// Bridges a `broadcast::Receiver<SseEvent>` into an axum `Sse` response
 /// stream. Terminal events (complete, failed, cancelled) close the stream.
 /// Lagged subscribers log a warning and continue.
+#[allow(dead_code)]
 pub fn sse_from_broadcast(
     mut rx: broadcast::Receiver<SseEvent>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {

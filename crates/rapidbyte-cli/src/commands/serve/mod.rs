@@ -162,7 +162,7 @@ mod tests {
             )),
             runs: Arc::new(LocalRunService::new(Arc::clone(&run_manager))),
             connections: Arc::new(LocalConnectionService::new(Arc::clone(&catalog))),
-            plugins: Arc::new(LocalPluginService::default()),
+            plugins: Arc::new(LocalPluginService),
             operations: Arc::new(LocalOperationsService::new(
                 Arc::clone(&catalog),
                 Arc::clone(&run_manager),

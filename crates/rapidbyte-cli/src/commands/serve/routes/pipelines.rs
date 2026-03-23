@@ -14,6 +14,7 @@ use crate::commands::serve::extract::PaginationParams;
 pub struct ListPipelinesParams {
     pub tag: Option<Vec<String>>,
     #[serde(flatten)]
+    #[allow(dead_code)]
     pub pagination: PaginationParams,
 }
 

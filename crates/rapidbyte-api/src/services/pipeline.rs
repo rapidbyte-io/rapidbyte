@@ -685,7 +685,7 @@ destination:
         assert!(obj.contains_key("schema_negotiation"));
 
         let sm = obj.get("source_manifest").unwrap();
-        assert_eq!(sm.get("ok").unwrap().as_bool().unwrap(), true);
+        assert!(sm.get("ok").unwrap().as_bool().unwrap());
         assert_eq!(sm.get("message").unwrap().as_str().unwrap(), "found");
     }
 }

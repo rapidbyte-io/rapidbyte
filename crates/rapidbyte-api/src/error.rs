@@ -68,10 +68,7 @@ impl From<PipelineError> for ApiError {
                 code: "run_cancelled".into(),
                 message: "Pipeline run was cancelled".into(),
             },
-            PipelineError::Plugin(_) => Self::Internal {
-                message: err.to_string(),
-            },
-            PipelineError::Infrastructure(_) => Self::Internal {
+            PipelineError::Plugin(_) | PipelineError::Infrastructure(_) => Self::Internal {
                 message: err.to_string(),
             },
         }

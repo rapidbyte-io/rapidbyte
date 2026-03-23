@@ -77,7 +77,7 @@ struct ConnectionInfo {
     used_by: Vec<String>,
 }
 
-/// Scan catalog and collect connection info keyed by connection name (use_ref).
+/// Scan catalog and collect connection info keyed by connection name (`use_ref`).
 fn collect_connections(
     catalog: &HashMap<String, PipelineConfig>,
 ) -> HashMap<String, ConnectionInfo> {
@@ -292,7 +292,7 @@ destination:
         let result = svc.list().await.unwrap();
         let names: Vec<&str> = result.iter().map(|c| c.name.as_str()).collect();
         let mut sorted = names.clone();
-        sorted.sort();
+        sorted.sort_unstable();
         assert_eq!(names, sorted);
     }
 

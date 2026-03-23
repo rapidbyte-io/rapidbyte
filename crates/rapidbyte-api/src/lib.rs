@@ -3,7 +3,7 @@
 //! # rapidbyte-api
 //!
 //! Application-layer service traits and local-mode implementations for
-//! the RapidByte data pipeline engine.
+//! the `RapidByte` data pipeline engine.
 //!
 //! ## Modules
 //!

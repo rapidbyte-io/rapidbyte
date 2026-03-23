@@ -111,6 +111,7 @@ mod tests {
 
     #[test]
     fn default_creates_service() {
-        let _svc = LocalPluginService::default();
+        let svc = LocalPluginService;
+        assert!(std::mem::size_of_val(&svc) == 0);
     }
 }

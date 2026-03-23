@@ -27,6 +27,7 @@ pub fn test_api_context() -> ApiContext {
 
 /// Build an [`ApiContext`] with a pre-populated pipeline catalog.
 #[must_use]
+#[allow(clippy::implicit_hasher)]
 pub fn test_api_context_with_catalog(catalog: HashMap<String, PipelineConfig>) -> ApiContext {
     let catalog = Arc::new(catalog);
     let run_manager = Arc::new(RunManager::new());
