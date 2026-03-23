@@ -21,8 +21,12 @@ rapidbyte-runtime = { path = "../rapidbyte-runtime" }
 rapidbyte-types = { path = "../rapidbyte-types" }
 axum = { workspace = true }
 axum-extra = { workspace = true }
+tower = { workspace = true }
 tower-http = { workspace = true }
 async-stream = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+http = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 clap = { workspace = true }
