@@ -11,7 +11,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use tower_http::cors::CorsLayer;
 
-use rapidbyte_api::{ApiContext, DeploymentMode};
+use rapidbyte_api::{ApiContext, ApiServerConfig, DeploymentMode};
 
 /// Build the full axum router with all routes, auth middleware, and CORS.
 pub fn build_router(ctx: ApiContext, auth_config: middleware::AuthConfig) -> Router {
@@ -100,8 +100,29 @@ pub async fn execute(
     secrets: rapidbyte_secrets::SecretProviders,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
-    let ctx =
-        ApiContext::from_project(&cwd, DeploymentMode::Local, secrets, registry_config).await?;
+
+    let auth_required = !allow_unauthenticated;
+
+    // Parse the port from the listen address (e.g., "0.0.0.0:8080" -> 8080).
+    let port = listen
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(8080);
+
+    let server_config = ApiServerConfig {
+        port,
+        auth_required,
+    };
+
+    let ctx = ApiContext::from_project(
+        &cwd,
+        DeploymentMode::Local,
+        secrets,
+        registry_config,
+        server_config,
+    )
+    .await?;
 
     let tokens: Vec<String> = auth_token
         .map(|t| {
@@ -114,7 +135,7 @@ pub async fn execute(
         .unwrap_or_default();
 
     let auth_config = middleware::AuthConfig {
-        required: !allow_unauthenticated,
+        required: auth_required,
         tokens,
     };
 
@@ -173,7 +194,7 @@ mod tests {
                 Arc::clone(&catalog),
                 Arc::clone(&run_manager),
             )),
-            server: Arc::new(LocalServerService::new(Instant::now())),
+            server: Arc::new(LocalServerService::new(Instant::now(), 8080, false)),
         }
     }
 

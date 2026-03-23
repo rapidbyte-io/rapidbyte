@@ -116,13 +116,26 @@ impl PipelineService for LocalPipelineService {
     }
 
     async fn sync(&self, request: SyncRequest) -> Result<RunHandle> {
-        // Phase 1 limitation: dry_run is not yet supported.
+        // Phase 1 limitations: reject unsupported fields up front so callers
+        // get a clear 501 instead of silently ignoring their intent.
         if request.dry_run {
             return Err(ApiError::not_implemented("dry_run is not yet supported"));
         }
-        // NOTE: stream filtering, full_refresh override, and cursor_start/cursor_end
-        // are parsed but not yet passed to the engine. These would require modifying
-        // PipelineConfig before execution, which is out of scope for Phase 1.
+        if request.stream.is_some() {
+            return Err(ApiError::not_implemented(
+                "stream filtering is not yet supported",
+            ));
+        }
+        if request.full_refresh {
+            return Err(ApiError::not_implemented(
+                "full_refresh is not yet supported",
+            ));
+        }
+        if request.cursor_start.is_some() || request.cursor_end.is_some() {
+            return Err(ApiError::not_implemented(
+                "cursor_start/cursor_end are not yet supported",
+            ));
+        }
 
         let config = self.lookup(&request.pipeline)?.clone();
         let run_id = self.run_manager.create_run(request.pipeline.clone());
@@ -144,11 +157,21 @@ impl PipelineService for LocalPipelineService {
             );
             run_mgr.update_status(&rid, RunStatus::Running);
 
-            // Progress channel: engine -> SSE bridge
+            // Progress channel: engine -> SSE bridge.
+            //
+            // The engine's `build_run_context` API requires an
+            // `UnboundedSender<ProgressEvent>`, so we use an unbounded mpsc
+            // here. Back-pressure is provided by the bridge task below,
+            // which drains the mpsc as fast as events arrive and forwards
+            // them to a bounded broadcast channel (capacity 256 inside
+            // `RunManager`). Because the bridge performs only a lightweight
+            // enum translation and a non-blocking broadcast send, the mpsc
+            // queue depth stays near zero under normal operation — the
+            // broadcast capacity is the effective bound.
             let (progress_tx, mut progress_rx) =
                 tokio::sync::mpsc::unbounded_channel::<ProgressEvent>();
 
-            // Bridge task: translate engine progress events to SSE events
+            // Bridge task: translate engine progress events to SSE events.
             let bridge_mgr = Arc::clone(&run_mgr);
             let bridge_rid = rid.clone();
             tokio::spawn(async move {
@@ -596,6 +619,74 @@ destination:
                 cursor_start: None,
                 cursor_end: None,
                 dry_run: true,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::NotImplemented { .. }));
+    }
+
+    #[tokio::test]
+    async fn sync_stream_filter_returns_not_implemented() {
+        let svc = make_service(test_catalog());
+        let err = svc
+            .sync(SyncRequest {
+                pipeline: "my-pipeline".into(),
+                stream: Some("users".into()),
+                full_refresh: false,
+                cursor_start: None,
+                cursor_end: None,
+                dry_run: false,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::NotImplemented { .. }));
+    }
+
+    #[tokio::test]
+    async fn sync_full_refresh_returns_not_implemented() {
+        let svc = make_service(test_catalog());
+        let err = svc
+            .sync(SyncRequest {
+                pipeline: "my-pipeline".into(),
+                stream: None,
+                full_refresh: true,
+                cursor_start: None,
+                cursor_end: None,
+                dry_run: false,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::NotImplemented { .. }));
+    }
+
+    #[tokio::test]
+    async fn sync_cursor_start_returns_not_implemented() {
+        let svc = make_service(test_catalog());
+        let err = svc
+            .sync(SyncRequest {
+                pipeline: "my-pipeline".into(),
+                stream: None,
+                full_refresh: false,
+                cursor_start: Some("2026-01-01".into()),
+                cursor_end: None,
+                dry_run: false,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ApiError::NotImplemented { .. }));
+    }
+
+    #[tokio::test]
+    async fn sync_cursor_end_returns_not_implemented() {
+        let svc = make_service(test_catalog());
+        let err = svc
+            .sync(SyncRequest {
+                pipeline: "my-pipeline".into(),
+                stream: None,
+                full_refresh: false,
+                cursor_start: None,
+                cursor_end: Some("2026-12-31".into()),
+                dry_run: false,
             })
             .await
             .unwrap_err();

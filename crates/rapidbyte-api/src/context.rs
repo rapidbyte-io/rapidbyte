@@ -19,6 +19,27 @@ use crate::traits::{
     ConnectionService, OperationsService, PipelineService, PluginService, RunService, ServerService,
 };
 
+/// Runtime server configuration passed into [`ApiContext::from_project`].
+///
+/// These values are determined at startup (CLI flags, environment) and
+/// surfaced by the `/server/config` endpoint.
+#[derive(Debug, Clone)]
+pub struct ApiServerConfig {
+    /// TCP port the HTTP server is listening on.
+    pub port: u16,
+    /// Whether bearer-token authentication is required.
+    pub auth_required: bool,
+}
+
+impl Default for ApiServerConfig {
+    fn default() -> Self {
+        Self {
+            port: 8080,
+            auth_required: false,
+        }
+    }
+}
+
 /// Deployment mode for the API server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeploymentMode {
@@ -52,6 +73,8 @@ impl ApiContext {
     /// all six service implementations.
     ///
     /// `secrets` is consumed and shared across services that need it.
+    /// `server_config` carries runtime values (port, auth) that the
+    /// server-info endpoint should report.
     ///
     /// # Errors
     ///
@@ -62,9 +85,12 @@ impl ApiContext {
         mode: DeploymentMode,
         secrets: SecretProviders,
         registry_config: RegistryConfig,
+        server_config: ApiServerConfig,
     ) -> Result<Self> {
         match mode {
-            DeploymentMode::Local => Self::build_local(project_dir, secrets, registry_config).await,
+            DeploymentMode::Local => {
+                Self::build_local(project_dir, secrets, registry_config, server_config).await
+            }
             DeploymentMode::Distributed { .. } => {
                 anyhow::bail!("distributed mode not yet implemented")
             }
@@ -76,6 +102,7 @@ impl ApiContext {
         project_dir: &Path,
         secrets: SecretProviders,
         registry_config: RegistryConfig,
+        server_config: ApiServerConfig,
     ) -> Result<Self> {
         let catalog = scan_pipelines(project_dir, &secrets).await;
 
@@ -98,7 +125,11 @@ impl ApiContext {
                 Arc::clone(&catalog),
                 Arc::clone(&run_manager),
             )),
-            server: Arc::new(LocalServerService::new(Instant::now())),
+            server: Arc::new(LocalServerService::new(
+                Instant::now(),
+                server_config.port,
+                server_config.auth_required,
+            )),
         })
     }
 }
@@ -193,6 +224,7 @@ mod tests {
             DeploymentMode::Local,
             SecretProviders::default(),
             RegistryConfig::default(),
+            ApiServerConfig::default(),
         )
         .await
         .unwrap();
@@ -214,6 +246,7 @@ mod tests {
             },
             SecretProviders::default(),
             RegistryConfig::default(),
+            ApiServerConfig::default(),
         )
         .await;
         match result {
@@ -239,6 +272,7 @@ mod tests {
             DeploymentMode::Local,
             SecretProviders::default(),
             RegistryConfig::default(),
+            ApiServerConfig::default(),
         )
         .await
         .unwrap();
@@ -257,6 +291,7 @@ mod tests {
             DeploymentMode::Local,
             SecretProviders::default(),
             RegistryConfig::default(),
+            ApiServerConfig::default(),
         )
         .await
         .unwrap();

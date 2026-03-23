@@ -24,7 +24,7 @@ pub mod traits;
 pub mod types;
 
 // Context and error re-exports.
-pub use context::{ApiContext, DeploymentMode};
+pub use context::{ApiContext, ApiServerConfig, DeploymentMode};
 pub use error::{ApiError, FieldError};
 
 // Trait re-exports.

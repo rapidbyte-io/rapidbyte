@@ -48,7 +48,7 @@ pub fn test_api_context_with_catalog(catalog: HashMap<String, PipelineConfig>) -
             Arc::clone(&catalog),
             Arc::clone(&run_manager),
         )),
-        server: Arc::new(LocalServerService::new(Instant::now())),
+        server: Arc::new(LocalServerService::new(Instant::now(), 8080, false)),
     }
 }
 
