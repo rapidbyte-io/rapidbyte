@@ -20,6 +20,7 @@ ulid = { workspace = true }
 dashmap = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
+async-stream = { workspace = true }
 tokio-util = { workspace = true }
 
 [dev-dependencies]

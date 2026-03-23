@@ -41,6 +41,13 @@ impl ApiError {
         }
     }
 
+    pub fn conflict(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Conflict {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
     pub fn not_implemented(message: impl Into<String>) -> Self {
         Self::NotImplemented {
             message: message.into(),

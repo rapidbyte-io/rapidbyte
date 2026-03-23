@@ -6,4 +6,5 @@ pub mod run;
 pub mod server;
 
 pub use pipeline::LocalPipelineService;
+pub use run::LocalRunService;
 pub use server::LocalServerService;
