@@ -52,7 +52,10 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Response {
     // Health endpoint always passes through.
-    if request.uri().path() == "/api/v1/server/health" {
+    // The middleware runs inside the nested `/api/v1` router, so the
+    // path seen here is the stripped path (e.g. `/server/health`).
+    let path = request.uri().path();
+    if path == "/server/health" || path == "/api/v1/server/health" {
         return next.run(request).await;
     }
 

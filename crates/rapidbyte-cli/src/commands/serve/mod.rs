@@ -127,3 +127,291 @@ async fn shutdown_signal() {
     tokio::signal::ctrl_c().await.ok();
     tracing::info!("Shutting down...");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::HashMap;
+    use std::time::Instant;
+
+    use axum::body::Body;
+    use http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    use rapidbyte_api::run_manager::RunManager;
+    use rapidbyte_api::services::{
+        LocalConnectionService, LocalOperationsService, LocalPipelineService, LocalPluginService,
+        LocalRunService, LocalServerService,
+    };
+    use rapidbyte_api::ApiContext;
+
+    /// Build an `ApiContext` with an empty catalog for testing.
+    fn test_api_context() -> ApiContext {
+        let catalog = Arc::new(HashMap::new());
+        let run_manager = Arc::new(RunManager::new());
+        let registry_config = Arc::new(rapidbyte_registry::RegistryConfig::default());
+        let secrets = Arc::new(rapidbyte_secrets::SecretProviders::default());
+
+        ApiContext {
+            pipelines: Arc::new(LocalPipelineService::new(
+                Arc::clone(&catalog),
+                Arc::clone(&run_manager),
+                Arc::clone(&registry_config),
+                Arc::clone(&secrets),
+            )),
+            runs: Arc::new(LocalRunService::new(Arc::clone(&run_manager))),
+            connections: Arc::new(LocalConnectionService::new(Arc::clone(&catalog))),
+            plugins: Arc::new(LocalPluginService::default()),
+            operations: Arc::new(LocalOperationsService::new(
+                Arc::clone(&catalog),
+                Arc::clone(&run_manager),
+            )),
+            server: Arc::new(LocalServerService::new(Instant::now())),
+        }
+    }
+
+    fn test_app() -> Router {
+        let ctx = test_api_context();
+        build_router(
+            ctx,
+            middleware::AuthConfig {
+                required: false,
+                tokens: vec![],
+            },
+        )
+    }
+
+    fn test_app_with_auth() -> Router {
+        let ctx = test_api_context();
+        build_router(
+            ctx,
+            middleware::AuthConfig {
+                required: true,
+                tokens: vec!["test-secret".into()],
+            },
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // Server endpoints
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn health_returns_200() {
+        let resp = test_app()
+            .oneshot(
+                Request::get("/api/v1/server/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn version_returns_200() {
+        let resp = test_app()
+            .oneshot(
+                Request::get("/api/v1/server/version")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ------------------------------------------------------------------
+    // Pipeline endpoints
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_pipelines_returns_200_empty() {
+        let resp = test_app()
+            .oneshot(
+                Request::get("/api/v1/pipelines")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_nonexistent_pipeline_returns_404() {
+        let resp = test_app()
+            .oneshot(
+                Request::get("/api/v1/pipelines/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn sync_batch_returns_501() {
+        let resp = test_app()
+            .oneshot(
+                Request::post("/api/v1/pipelines/sync")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    // ------------------------------------------------------------------
+    // Auth middleware integration
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn auth_required_rejects_without_token() {
+        let resp = test_app_with_auth()
+            .oneshot(
+                Request::get("/api/v1/pipelines")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn auth_required_allows_with_valid_token() {
+        let resp = test_app_with_auth()
+            .oneshot(
+                Request::get("/api/v1/pipelines")
+                    .header("Authorization", "Bearer test-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn health_skips_auth() {
+        let resp = test_app_with_auth()
+            .oneshot(
+                Request::get("/api/v1/server/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ------------------------------------------------------------------
+    // Error envelope format
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn error_response_json_format() {
+        let resp = test_app()
+            .oneshot(
+                Request::get("/api/v1/pipelines/nope")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"]["code"].is_string());
+        assert!(json["error"]["message"].is_string());
+    }
+
+    // ------------------------------------------------------------------
+    // Operations endpoints
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn status_returns_200() {
+        let resp = test_app()
+            .oneshot(Request::get("/api/v1/status").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn pause_returns_501() {
+        let resp = test_app()
+            .oneshot(
+                Request::post("/api/v1/pipelines/test/pause")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    // ------------------------------------------------------------------
+    // Connection endpoints
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn connections_returns_200() {
+        let resp = test_app()
+            .oneshot(
+                Request::get("/api/v1/connections")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ------------------------------------------------------------------
+    // Plugin endpoints
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn plugins_returns_200() {
+        let resp = test_app()
+            .oneshot(Request::get("/api/v1/plugins").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // ------------------------------------------------------------------
+    // Run endpoints
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn runs_list_returns_200() {
+        let resp = test_app()
+            .oneshot(Request::get("/api/v1/runs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_nonexistent_run_returns_404() {
+        let resp = test_app()
+            .oneshot(
+                Request::get("/api/v1/runs/run_nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+}
