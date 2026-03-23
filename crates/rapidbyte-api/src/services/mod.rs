@@ -6,6 +6,7 @@ pub mod run;
 pub mod server;
 
 pub use connection::LocalConnectionService;
+pub use operations::LocalOperationsService;
 pub use pipeline::LocalPipelineService;
 pub use plugin::LocalPluginService;
 pub use run::LocalRunService;
