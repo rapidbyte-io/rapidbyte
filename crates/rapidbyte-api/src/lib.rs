@@ -23,5 +23,14 @@ pub mod services;
 pub mod traits;
 pub mod types;
 
+// Context and error re-exports.
 pub use context::{ApiContext, DeploymentMode};
 pub use error::{ApiError, FieldError};
+
+// Trait re-exports.
+pub use traits::{
+    ConnectionService, OperationsService, PipelineService, PluginService, RunService, ServerService,
+};
+
+// Most-used type re-exports.
+pub use types::{EventStream, PaginatedList, PipelineState, RunStatus, SseEvent};
