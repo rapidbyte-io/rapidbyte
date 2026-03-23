@@ -21,3 +21,6 @@ dashmap = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = { workspace = true }
