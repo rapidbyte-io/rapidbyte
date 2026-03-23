@@ -195,6 +195,15 @@ impl RunManager {
             }
         });
     }
+
+    /// Synchronously evict finished runs older than the given cutoff.
+    ///
+    /// This is the same logic used by `start_eviction_task` but exposed
+    /// for deterministic testing without waiting for the background timer.
+    pub fn evict_before(&self, cutoff: DateTime<Utc>) {
+        self.runs
+            .retain(|_id, state| state.finished_at.is_none_or(|finished| finished > cutoff));
+    }
 }
 
 impl Default for RunManager {
@@ -336,5 +345,52 @@ mod tests {
     fn list_runs_empty() {
         let mgr = RunManager::new();
         assert!(mgr.list_runs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn start_eviction_task_does_not_panic() {
+        let mgr = std::sync::Arc::new(RunManager::new());
+        mgr.start_eviction_task();
+        // The task is spawned; if it panics the runtime would propagate it.
+        // Yield briefly so the task has a chance to start.
+        tokio::task::yield_now().await;
+    }
+
+    #[test]
+    fn evict_before_removes_old_finished_runs() {
+        let mgr = RunManager::new();
+        let run_id = mgr.create_run("p".into());
+        mgr.fail(&run_id, "boom".into());
+
+        // Evict everything finished before "now + 1 hour" — should remove the run.
+        let future_cutoff = Utc::now() + chrono::Duration::hours(1);
+        mgr.evict_before(future_cutoff);
+        assert!(mgr.get(&run_id).is_none(), "finished run should be evicted");
+    }
+
+    #[test]
+    fn evict_before_keeps_pending_runs() {
+        let mgr = RunManager::new();
+        let run_id = mgr.create_run("p".into());
+
+        // Pending run has no finished_at — should not be evicted.
+        let future_cutoff = Utc::now() + chrono::Duration::hours(1);
+        mgr.evict_before(future_cutoff);
+        assert!(mgr.get(&run_id).is_some(), "pending run should be kept");
+    }
+
+    #[test]
+    fn evict_before_keeps_recent_finished_runs() {
+        let mgr = RunManager::new();
+        let run_id = mgr.create_run("p".into());
+        mgr.fail(&run_id, "boom".into());
+
+        // Cutoff in the past — the just-finished run should survive.
+        let past_cutoff = Utc::now() - chrono::Duration::hours(2);
+        mgr.evict_before(past_cutoff);
+        assert!(
+            mgr.get(&run_id).is_some(),
+            "recently finished run should be kept"
+        );
     }
 }

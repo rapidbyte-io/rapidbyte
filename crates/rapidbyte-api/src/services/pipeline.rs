@@ -236,52 +236,18 @@ impl PipelineService for LocalPipelineService {
                             info!(run_id = %rid, "pipeline run completed");
                         }
                         Err(e) => {
-                            // Check if the run was already cancelled (e.g. via
-                            // RunService::cancel) or if the engine returned a
-                            // cancellation error. In either case, preserve the
-                            // Cancelled status instead of overwriting with Failed.
-                            let snap = run_mgr.get(&rid);
-                            let already_cancelled =
-                                snap.is_some_and(|s| s.status == RunStatus::Cancelled);
-
-                            if already_cancelled || matches!(e, PipelineError::Cancelled) {
-                                if !already_cancelled {
-                                    run_mgr.update_status(&rid, RunStatus::Cancelled);
-                                }
-                                run_mgr.send_event(
-                                    &rid,
-                                    SseEvent::Cancelled {
-                                        run_id: rid.clone(),
-                                        reason: "cancelled by user".into(),
-                                    },
-                                );
-                                info!(run_id = %rid, "pipeline run cancelled");
-                            } else {
-                                let error_msg = e.to_string();
-                                run_mgr.send_event(
-                                    &rid,
-                                    SseEvent::Failed {
-                                        run_id: rid.clone(),
-                                        error: error_msg.clone(),
-                                    },
-                                );
-                                run_mgr.fail(&rid, error_msg);
-                                warn!(run_id = %rid, "pipeline run failed");
-                            }
+                            handle_run_error(
+                                &run_mgr,
+                                &rid,
+                                e.to_string(),
+                                matches!(e, PipelineError::Cancelled),
+                            );
                         }
                     }
                 }
                 Err(e) => {
                     let error_msg = format!("failed to build engine context: {e}");
-                    run_mgr.send_event(
-                        &rid,
-                        SseEvent::Failed {
-                            run_id: rid.clone(),
-                            error: error_msg.clone(),
-                        },
-                    );
-                    run_mgr.fail(&rid, error_msg);
-                    warn!(run_id = %rid, "engine context build failed");
+                    handle_run_error(&run_mgr, &rid, error_msg, false);
                 }
             }
         });
@@ -342,6 +308,47 @@ impl PipelineService for LocalPipelineService {
 
     async fn teardown(&self, _request: TeardownRequest) -> Result<RunHandle> {
         Err(ApiError::not_implemented("teardown"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Run error handling helper
+// ---------------------------------------------------------------------------
+
+/// Handle a run error, preserving `Cancelled` status if the run was already
+/// cancelled by the user. This avoids a race where `fail()` overwrites a
+/// `Cancelled` status set by `RunService::cancel`.
+fn handle_run_error(
+    run_mgr: &Arc<RunManager>,
+    run_id: &str,
+    error_msg: String,
+    engine_cancelled: bool,
+) {
+    let snap = run_mgr.get(run_id);
+    let already_cancelled = snap.is_some_and(|s| s.status == RunStatus::Cancelled);
+
+    if already_cancelled || engine_cancelled {
+        if !already_cancelled {
+            run_mgr.update_status(run_id, RunStatus::Cancelled);
+        }
+        run_mgr.send_event(
+            run_id,
+            SseEvent::Cancelled {
+                run_id: run_id.to_string(),
+                reason: "cancelled by user".into(),
+            },
+        );
+        info!(run_id = %run_id, "pipeline run cancelled");
+    } else {
+        run_mgr.send_event(
+            run_id,
+            SseEvent::Failed {
+                run_id: run_id.to_string(),
+                error: error_msg.clone(),
+            },
+        );
+        run_mgr.fail(run_id, error_msg);
+        warn!(run_id = %run_id, "pipeline run failed");
     }
 }
 
@@ -722,6 +729,55 @@ destination:
         }
         let snap = run_mgr.get(&run_id).unwrap();
         assert_eq!(snap.status, RunStatus::Cancelled);
+    }
+
+    // ----- handle_run_error helper -----
+
+    #[tokio::test]
+    async fn handle_run_error_preserves_cancelled_on_context_build_failure() {
+        // Simulates: user cancels run, then build_run_context fails.
+        // The helper should detect the Cancelled status and NOT overwrite it.
+        let run_mgr = Arc::new(RunManager::new());
+        let run_id = run_mgr.create_run("test-pipe".into());
+
+        // Pre-cancel the run.
+        run_mgr.update_status(&run_id, RunStatus::Cancelled);
+
+        // Call the helper as the build_run_context error path would.
+        handle_run_error(
+            &run_mgr,
+            &run_id,
+            "failed to build engine context: timeout".into(),
+            false,
+        );
+
+        let snap = run_mgr.get(&run_id).unwrap();
+        assert_eq!(
+            snap.status,
+            RunStatus::Cancelled,
+            "cancelled status should be preserved, not overwritten to Failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_run_error_sets_failed_when_not_cancelled() {
+        let run_mgr = Arc::new(RunManager::new());
+        let run_id = run_mgr.create_run("test-pipe".into());
+        run_mgr.update_status(&run_id, RunStatus::Running);
+
+        handle_run_error(
+            &run_mgr,
+            &run_id,
+            "failed to build engine context: no plugin".into(),
+            false,
+        );
+
+        let snap = run_mgr.get(&run_id).unwrap();
+        assert_eq!(snap.status, RunStatus::Failed);
+        assert_eq!(
+            snap.error.as_deref(),
+            Some("failed to build engine context: no plugin")
+        );
     }
 
     // ----- stub methods -----

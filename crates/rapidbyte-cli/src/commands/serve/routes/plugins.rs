@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::Json;
 use rapidbyte_api::types::PluginSummary;
 use rapidbyte_api::{ApiContext, ApiError};
@@ -22,4 +22,18 @@ pub async fn search(State(_ctx): State<Arc<ApiContext>>) -> ApiErrorResponse {
 
 pub async fn install(State(_ctx): State<Arc<ApiContext>>) -> ApiErrorResponse {
     ApiErrorResponse(ApiError::not_implemented("plugin install"))
+}
+
+pub async fn info(
+    State(_ctx): State<Arc<ApiContext>>,
+    Path((_org, _name)): Path<(String, String)>,
+) -> ApiErrorResponse {
+    ApiErrorResponse(ApiError::not_implemented("plugin info"))
+}
+
+pub async fn remove(
+    State(_ctx): State<Arc<ApiContext>>,
+    Path((_org, _name)): Path<(String, String)>,
+) -> ApiErrorResponse {
+    ApiErrorResponse(ApiError::not_implemented("plugin remove"))
 }

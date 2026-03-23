@@ -108,6 +108,7 @@ impl ApiContext {
 
         let catalog = Arc::new(catalog);
         let run_manager = Arc::new(RunManager::new());
+        run_manager.start_eviction_task();
         let registry_config = Arc::new(registry_config);
         let secrets = Arc::new(secrets);
 
@@ -279,6 +280,25 @@ mod tests {
 
         let pipelines = ctx.pipelines.list(PipelineFilter::default()).await.unwrap();
         assert!(pipelines.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn from_project_starts_eviction_task() {
+        // Verify that building a local context does not panic when
+        // starting the eviction background task.
+        let dir = TempDir::new().unwrap();
+        let _ctx = ApiContext::from_project(
+            dir.path(),
+            DeploymentMode::Local,
+            SecretProviders::default(),
+            RegistryConfig::default(),
+            ApiServerConfig::default(),
+        )
+        .await
+        .unwrap();
+
+        // Yield so the spawned eviction task has a chance to run its first tick.
+        tokio::task::yield_now().await;
     }
 
     #[tokio::test]

@@ -78,12 +78,20 @@ struct ConnectionInfo {
 }
 
 /// Scan catalog and collect connection info keyed by connection name (`use_ref`).
+///
+/// Iterates catalog keys in sorted order so that the config chosen for a
+/// given connector is deterministic when multiple pipelines share the same
+/// `use_ref`.
 fn collect_connections(
     catalog: &HashMap<String, PipelineConfig>,
 ) -> HashMap<String, ConnectionInfo> {
     let mut connections: HashMap<String, ConnectionInfo> = HashMap::new();
 
-    for (pipeline_name, config) in catalog {
+    let mut sorted_names: Vec<&String> = catalog.keys().collect();
+    sorted_names.sort();
+
+    for pipeline_name in sorted_names {
+        let config = &catalog[pipeline_name];
         // Source connection
         let src_name = &config.source.use_ref;
         connections
@@ -399,5 +407,84 @@ destination:
 
         let input = serde_json::json!("hello");
         assert_eq!(redact_sensitive(&input), serde_json::json!("hello"));
+    }
+
+    // ----- deterministic connection resolution -----
+
+    #[tokio::test]
+    async fn collect_connections_deterministic_config() {
+        // Two pipelines share the same connector ("postgres") but with
+        // different configs. The first alphabetically ("alpha") should win
+        // the `or_insert_with` slot every time.
+        let alpha_yaml = r#"
+version: "1.0"
+pipeline: alpha-pipe
+source:
+  use: postgres
+  config:
+    host: alpha-host
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: postgres
+  config:
+    host: alpha-dest
+  write_mode: append
+"#;
+        let zeta_yaml = r#"
+version: "1.0"
+pipeline: zeta-pipe
+source:
+  use: postgres
+  config:
+    host: zeta-host
+  streams:
+    - name: users
+      sync_mode: full_refresh
+destination:
+  use: postgres
+  config:
+    host: zeta-dest
+  write_mode: append
+"#;
+        let alpha: PipelineConfig = serde_yaml::from_str(alpha_yaml).unwrap();
+        let zeta: PipelineConfig = serde_yaml::from_str(zeta_yaml).unwrap();
+
+        // Run 10 times to exercise HashMap nondeterminism.
+        for _ in 0..10 {
+            let mut catalog = HashMap::new();
+            catalog.insert("zeta-pipe".to_string(), zeta.clone());
+            catalog.insert("alpha-pipe".to_string(), alpha.clone());
+            let connections = collect_connections(&catalog);
+            let pg = connections.get("postgres").unwrap();
+            // Because we sort catalog keys, "alpha-pipe" is inserted first.
+            assert_eq!(
+                pg.config.get("host").and_then(|v| v.as_str()),
+                Some("alpha-host"),
+                "config should come from the alphabetically first pipeline"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn collect_connections_used_by_sorted() {
+        // Verify that used_by contains both pipelines regardless of
+        // HashMap insertion order.
+        let mut catalog = HashMap::new();
+        catalog.insert(
+            "z-pipe".into(),
+            minimal_pipeline_config("z-pipe", "postgres", "postgres"),
+        );
+        catalog.insert(
+            "a-pipe".into(),
+            minimal_pipeline_config("a-pipe", "postgres", "postgres"),
+        );
+        let connections = collect_connections(&catalog);
+        let pg = connections.get("postgres").unwrap();
+        assert_eq!(pg.used_by.len(), 2);
+        // First entry should be a-pipe (sorted).
+        assert_eq!(pg.used_by[0], "a-pipe");
+        assert_eq!(pg.used_by[1], "z-pipe");
     }
 }

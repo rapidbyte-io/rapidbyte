@@ -71,6 +71,10 @@ pub fn build_router(ctx: ApiContext, auth_config: middleware::AuthConfig) -> Rou
         .route("/plugins", get(routes::plugins::list))
         .route("/plugins/search", get(routes::plugins::search))
         .route("/plugins/install", post(routes::plugins::install))
+        .route(
+            "/plugins/{org}/{name}",
+            get(routes::plugins::info).delete(routes::plugins::remove),
+        )
         // Operations
         .route("/status", get(routes::operations::status))
         .route("/status/{name}", get(routes::operations::status_detail))
@@ -414,6 +418,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn plugin_info_returns_501() {
+        let resp = test_app()
+            .oneshot(
+                Request::get("/api/v1/plugins/myorg/myplug")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn plugin_remove_returns_501() {
+        let resp = test_app()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/plugins/myorg/myplug")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     }
 
     // ------------------------------------------------------------------
