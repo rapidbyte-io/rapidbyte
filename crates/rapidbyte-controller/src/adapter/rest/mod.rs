@@ -2,6 +2,7 @@ pub mod error;
 pub mod extractors;
 pub mod pagination;
 pub mod server;
+pub mod sse;
 
 use axum::routing::get;
 use axum::Router;
