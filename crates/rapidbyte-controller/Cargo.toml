@@ -39,9 +39,11 @@ protoc-bin-vendored = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
+tower = { workspace = true }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 
 [features]
 integration = []
+testing = []

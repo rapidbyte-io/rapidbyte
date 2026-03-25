@@ -11,5 +11,5 @@ pub mod services;
 pub mod submit;
 pub mod timeout;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;
