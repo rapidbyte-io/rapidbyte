@@ -49,55 +49,33 @@ impl ConnectionService for AppServices {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::application::testing::fake_context;
+    use crate::application::testing::fake_app_services;
 
     #[tokio::test]
     async fn list_returns_empty() {
-        let tc = fake_context();
-        let services = AppServices::new(
-            Arc::new(tc.ctx),
-            chrono::Utc::now(),
-            "0.0.0.0:8080".parse().unwrap(),
-        );
+        let services = fake_app_services();
         let result = services.list().await.unwrap();
         assert!(result.is_empty());
     }
 
     #[tokio::test]
     async fn get_returns_not_found() {
-        let tc = fake_context();
-        let services = AppServices::new(
-            Arc::new(tc.ctx),
-            chrono::Utc::now(),
-            "0.0.0.0:8080".parse().unwrap(),
-        );
+        let services = fake_app_services();
         let result = services.get("nonexistent").await;
         assert!(matches!(result, Err(ServiceError::NotFound { .. })));
     }
 
     #[tokio::test]
     async fn test_returns_not_found() {
-        let tc = fake_context();
-        let services = AppServices::new(
-            Arc::new(tc.ctx),
-            chrono::Utc::now(),
-            "0.0.0.0:8080".parse().unwrap(),
-        );
+        let services = fake_app_services();
         let result = services.test("nonexistent").await;
         assert!(matches!(result, Err(ServiceError::NotFound { .. })));
     }
 
     #[tokio::test]
     async fn discover_returns_not_found() {
-        let tc = fake_context();
-        let services = AppServices::new(
-            Arc::new(tc.ctx),
-            chrono::Utc::now(),
-            "0.0.0.0:8080".parse().unwrap(),
-        );
+        let services = fake_app_services();
         let result = services.discover("nonexistent", None).await;
         assert!(matches!(result, Err(ServiceError::NotFound { .. })));
     }

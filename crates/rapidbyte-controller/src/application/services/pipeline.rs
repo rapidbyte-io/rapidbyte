@@ -79,19 +79,12 @@ impl PipelineService for AppServices {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::application::testing::fake_context;
+    use crate::application::testing::fake_app_services;
 
     #[tokio::test]
     async fn sync_returns_not_implemented() {
-        let tc = fake_context();
-        let services = AppServices::new(
-            Arc::new(tc.ctx),
-            chrono::Utc::now(),
-            "0.0.0.0:8080".parse().unwrap(),
-        );
+        let services = fake_app_services();
 
         let request = SyncRequest {
             pipeline: "pipeline: test-pipe\nversion: '1.0'".into(),
@@ -108,12 +101,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_returns_empty() {
-        let tc = fake_context();
-        let services = AppServices::new(
-            Arc::new(tc.ctx),
-            chrono::Utc::now(),
-            "0.0.0.0:8080".parse().unwrap(),
-        );
+        let services = fake_app_services();
 
         let result = services.list(PipelineFilter::default()).await.unwrap();
         assert!(result.items.is_empty());
@@ -122,12 +110,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_returns_not_implemented() {
-        let tc = fake_context();
-        let services = AppServices::new(
-            Arc::new(tc.ctx),
-            chrono::Utc::now(),
-            "0.0.0.0:8080".parse().unwrap(),
-        );
+        let services = fake_app_services();
 
         let result = services.get("any-pipeline").await;
         assert!(matches!(result, Err(ServiceError::NotImplemented { .. })));

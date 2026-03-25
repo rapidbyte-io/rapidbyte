@@ -804,3 +804,18 @@ pub fn fake_context() -> TestContext {
         clock,
     }
 }
+
+/// Create AppServices backed by fakes for unit testing.
+///
+/// Returns an Arc-wrapped `AppServices` bound to in-memory test repositories.
+/// # Panics
+/// Never panics; uses hardcoded test address and current UTC time.
+#[must_use]
+pub fn fake_app_services() -> Arc<crate::application::services::AppServices> {
+    let tc = fake_context();
+    Arc::new(crate::application::services::AppServices::new(
+        Arc::new(tc.ctx),
+        chrono::Utc::now(),
+        "0.0.0.0:8080".parse().unwrap(),
+    ))
+}

@@ -173,43 +173,26 @@ impl OperationsService for AppServices {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::application::testing::fake_context;
+    use crate::application::testing::fake_app_services;
 
     #[tokio::test]
     async fn status_returns_empty_vec() {
-        let tc = fake_context();
-        let services = AppServices::new(
-            Arc::new(tc.ctx),
-            chrono::Utc::now(),
-            "0.0.0.0:8080".parse().unwrap(),
-        );
+        let services = fake_app_services();
         let result = services.status().await.unwrap();
         assert!(result.is_empty());
     }
 
     #[tokio::test]
     async fn pipeline_status_no_cursors_returns_not_found() {
-        let tc = fake_context();
-        let services = AppServices::new(
-            Arc::new(tc.ctx),
-            chrono::Utc::now(),
-            "0.0.0.0:8080".parse().unwrap(),
-        );
+        let services = fake_app_services();
         let result = services.pipeline_status("nonexistent").await;
         assert!(matches!(result, Err(ServiceError::NotFound { .. })));
     }
 
     #[tokio::test]
     async fn reset_with_no_cursors_returns_zero_cleared() {
-        let tc = fake_context();
-        let services = AppServices::new(
-            Arc::new(tc.ctx),
-            chrono::Utc::now(),
-            "0.0.0.0:8080".parse().unwrap(),
-        );
+        let services = fake_app_services();
         let result = services
             .reset(ResetRequest {
                 pipeline: "test-pipeline".into(),
@@ -224,12 +207,7 @@ mod tests {
 
     #[tokio::test]
     async fn logs_returns_empty_for_unknown_pipeline() {
-        let tc = fake_context();
-        let services = AppServices::new(
-            Arc::new(tc.ctx),
-            chrono::Utc::now(),
-            "0.0.0.0:8080".parse().unwrap(),
-        );
+        let services = fake_app_services();
         let result = services
             .logs(LogsRequest {
                 pipeline: "test-pipeline".into(),

@@ -114,31 +114,19 @@ impl PluginService for AppServices {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
-    use crate::application::testing::fake_context;
+    use crate::application::testing::fake_app_services;
 
     #[tokio::test]
     async fn list_returns_empty() {
-        let tc = fake_context();
-        let services = AppServices::new(
-            Arc::new(tc.ctx),
-            chrono::Utc::now(),
-            "0.0.0.0:8080".parse().unwrap(),
-        );
+        let services = fake_app_services();
         let result = services.list().await.unwrap();
         assert!(result.is_empty());
     }
 
     #[tokio::test]
     async fn search_returns_empty() {
-        let tc = fake_context();
-        let services = AppServices::new(
-            Arc::new(tc.ctx),
-            chrono::Utc::now(),
-            "0.0.0.0:8080".parse().unwrap(),
-        );
+        let services = fake_app_services();
         let result = services
             .search(PluginSearchRequest {
                 query: "postgres".into(),
@@ -151,12 +139,7 @@ mod tests {
 
     #[tokio::test]
     async fn install_returns_error() {
-        let tc = fake_context();
-        let services = AppServices::new(
-            Arc::new(tc.ctx),
-            chrono::Utc::now(),
-            "0.0.0.0:8080".parse().unwrap(),
-        );
+        let services = fake_app_services();
         let result = services.install("rapidbyte/source-postgres:1.0.0").await;
         assert!(matches!(result, Err(ServiceError::Internal { .. })));
     }
