@@ -36,4 +36,10 @@ pub trait CursorStore: Send + Sync {
         &self,
         pipelines: &[String],
     ) -> Result<Vec<SyncTimestamp>, CursorError>;
+
+    /// Get pipeline operational state (e.g. `"active"` or `"paused"`).
+    async fn get_pipeline_state(&self, pipeline: &str) -> Result<Option<String>, CursorError>;
+
+    /// Set pipeline operational state.
+    async fn set_pipeline_state(&self, pipeline: &str, state: &str) -> Result<(), CursorError>;
 }

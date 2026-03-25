@@ -34,10 +34,12 @@ impl RunService for AppServices {
     }
 
     async fn events(&self, run_id: &str) -> Result<EventStream<ProgressEvent>, ServiceError> {
-        // Verify run exists first
-        query::get_run(&self.ctx, run_id)
+        // Verify run exists and capture pipeline name for Started events.
+        let run = query::get_run(&self.ctx, run_id)
             .await
             .map_err(app_error_to_service)?;
+        let pipeline_name = run.pipeline_name().to_string();
+
         // Subscribe to events
         let stream =
             self.ctx
@@ -48,7 +50,10 @@ impl RunService for AppServices {
                     message: e.to_string(),
                 })?;
         // Map DomainEvent -> ProgressEvent, filtering out None
-        let mapped = stream.filter_map(|event| async move { domain_event_to_progress(event) });
+        let mapped = stream.filter_map(move |event| {
+            let pipeline = pipeline_name.clone();
+            async move { domain_event_to_progress(event, &pipeline) }
+        });
         Ok(Box::pin(mapped))
     }
 
@@ -124,13 +129,16 @@ fn run_to_summary(run: &Run) -> RunSummary {
     }
 }
 
-fn domain_event_to_progress(event: crate::domain::event::DomainEvent) -> Option<ProgressEvent> {
+fn domain_event_to_progress(
+    event: crate::domain::event::DomainEvent,
+    pipeline: &str,
+) -> Option<ProgressEvent> {
     use crate::domain::event::DomainEvent;
     match event {
         DomainEvent::RunStateChanged { run_id, state, .. } => match state {
             RunState::Running => Some(ProgressEvent::Started {
                 run_id,
-                pipeline: String::new(),
+                pipeline: pipeline.to_string(),
             }),
             RunState::Cancelled => Some(ProgressEvent::Cancelled { run_id }),
             _ => None,

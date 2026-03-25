@@ -8,9 +8,9 @@ use tonic::{Request, Response, Status};
 
 use crate::adapter::grpc::convert;
 use crate::application::services::AppServices;
-use crate::domain::ports::repository::{Pagination, RunFilter};
 use crate::proto::rapidbyte::v1 as pb;
 use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineService;
+use crate::traits::run::{RunFilter, RunService};
 
 pub struct PipelineGrpcService {
     services: Arc<AppServices>,
@@ -29,6 +29,8 @@ impl PipelineService for PipelineGrpcService {
         &self,
         req: Request<pb::SubmitPipelineRequest>,
     ) -> Result<Response<pb::SubmitPipelineResponse>, Status> {
+        // TODO: migrate to PipelineService::sync() once it supports idempotency_key,
+        // max_retries, and timeout_seconds.
         let req = req.into_inner();
         let max_retries = req.options.as_ref().map_or(0, |o| o.max_retries);
         let timeout_seconds = req.options.as_ref().and_then(|o| {
@@ -65,12 +67,14 @@ impl PipelineService for PipelineGrpcService {
         req: Request<pb::GetRunRequest>,
     ) -> Result<Response<pb::GetRunResponse>, Status> {
         let run_id = req.into_inner().run_id;
-        let run = crate::application::query::get_run(&self.services.ctx, &run_id)
+        let detail = self
+            .services
+            .get(&run_id)
             .await
-            .map_err(convert::app_error_to_status)?;
+            .map_err(convert::service_error_to_status)?;
 
         Ok(Response::new(pb::GetRunResponse {
-            run: Some(convert::run_to_detail(&run)),
+            run: Some(run_detail_to_proto(&detail)),
         }))
     }
 
@@ -78,6 +82,8 @@ impl PipelineService for PipelineGrpcService {
         &self,
         req: Request<pb::CancelRunRequest>,
     ) -> Result<Response<pb::CancelRunResponse>, Status> {
+        // Intentionally kept on direct call: the gRPC response needs `accepted: bool`
+        // (false for terminal runs), which RunService::cancel() does not expose.
         let run_id = req.into_inner().run_id;
         let result = crate::application::cancel::cancel_run(&self.services.ctx, &run_id)
             .await
@@ -121,20 +127,22 @@ impl PipelineService for PipelineGrpcService {
             req.page_size.min(1000)
         };
 
-        let page = crate::application::query::list_runs(
-            &self.services.ctx,
-            RunFilter { state },
-            Pagination {
-                page_size,
-                page_token,
-            },
-        )
-        .await
-        .map_err(convert::app_error_to_status)?;
+        let status_str = state.map(|s| s.as_str().to_string());
+
+        let page = self
+            .services
+            .list(RunFilter {
+                pipeline: None,
+                status: status_str,
+                limit: page_size,
+                cursor: page_token,
+            })
+            .await
+            .map_err(convert::service_error_to_status)?;
 
         Ok(Response::new(pb::ListRunsResponse {
-            runs: page.runs.iter().map(convert::run_to_summary).collect(),
-            next_page_token: page.next_page_token.unwrap_or_default(),
+            runs: page.items.iter().map(run_summary_to_proto).collect(),
+            next_page_token: page.next_cursor.unwrap_or_default(),
         }))
     }
 
@@ -145,6 +153,8 @@ impl PipelineService for PipelineGrpcService {
         &self,
         req: Request<pb::WatchRunRequest>,
     ) -> Result<Response<Self::WatchRunStream>, Status> {
+        // Intentionally kept on direct calls: watch_run has complex snapshot/dedup
+        // logic specific to gRPC streaming that does not map cleanly to RunService::events().
         let run_id = req.into_inner().run_id;
 
         // Subscribe FIRST to avoid missing events between snapshot and subscribe.
@@ -234,6 +244,56 @@ impl Drop for CleanupStream {
                 bus.cleanup(&run_id).await;
             });
         }
+    }
+}
+
+// --- Conversion helpers from service-layer types to proto types ---
+
+fn status_str_to_run_state(status: &str) -> crate::domain::run::RunState {
+    use crate::domain::run::RunState;
+    match status {
+        "Running" | "running" => RunState::Running,
+        "Completed" | "completed" => RunState::Completed,
+        "Failed" | "failed" => RunState::Failed,
+        "Cancelled" | "cancelled" => RunState::Cancelled,
+        _ => RunState::Pending,
+    }
+}
+
+fn run_detail_to_proto(detail: &crate::traits::run::RunDetail) -> pb::RunDetail {
+    pb::RunDetail {
+        run_id: detail.run_id.clone(),
+        pipeline_name: detail.pipeline.clone(),
+        state: convert::run_state_to_proto(status_str_to_run_state(&detail.status)),
+        cancel_requested: false,
+        attempt: detail.retry_count + 1,
+        max_retries: detail.retry_count,
+        metrics: detail.counts.as_ref().map(|c| pb::RunMetrics {
+            rows_read: c.records_read,
+            rows_written: c.records_written,
+            bytes_read: c.bytes_read,
+            bytes_written: c.bytes_written,
+            duration_ms: detail.duration_secs.map_or(0, |d| (d * 1000.0) as u64),
+        }),
+        error: detail.error.as_ref().map(|e| pb::RunError {
+            code: e.code.clone(),
+            message: e.message.clone(),
+        }),
+        created_at: detail.started_at.map(convert::to_proto_timestamp),
+        updated_at: detail
+            .finished_at
+            .or(detail.started_at)
+            .map(convert::to_proto_timestamp),
+    }
+}
+
+fn run_summary_to_proto(summary: &crate::traits::run::RunSummary) -> pb::RunSummary {
+    pb::RunSummary {
+        run_id: summary.run_id.clone(),
+        pipeline_name: summary.pipeline.clone(),
+        state: convert::run_state_to_proto(status_str_to_run_state(&summary.status)),
+        attempt: 1,
+        created_at: summary.started_at.map(convert::to_proto_timestamp),
     }
 }
 

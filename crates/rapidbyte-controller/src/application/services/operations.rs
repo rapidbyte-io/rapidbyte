@@ -52,7 +52,13 @@ impl OperationsService for AppServices {
     }
 
     async fn pause(&self, name: &str) -> Result<PipelineStateChange, ServiceError> {
-        // Pause/resume requires a pipeline_states table; returning stub for now.
+        self.ctx
+            .cursor_store
+            .set_pipeline_state(name, "paused")
+            .await
+            .map_err(|e| ServiceError::Internal {
+                message: e.to_string(),
+            })?;
         Ok(PipelineStateChange {
             pipeline: name.to_string(),
             state: "paused".into(),
@@ -62,7 +68,13 @@ impl OperationsService for AppServices {
     }
 
     async fn resume(&self, name: &str) -> Result<PipelineStateChange, ServiceError> {
-        // Pause/resume requires a pipeline_states table; returning stub for now.
+        self.ctx
+            .cursor_store
+            .set_pipeline_state(name, "active")
+            .await
+            .map_err(|e| ServiceError::Internal {
+                message: e.to_string(),
+            })?;
         Ok(PipelineStateChange {
             pipeline: name.to_string(),
             state: "active".into(),

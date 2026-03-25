@@ -523,6 +523,7 @@ impl Clock for FakeClock {
 
 pub struct FakeCursorStore {
     cursors: Mutex<HashMap<String, Vec<StreamCursor>>>,
+    pipeline_states: Mutex<HashMap<String, String>>,
 }
 
 impl FakeCursorStore {
@@ -530,6 +531,7 @@ impl FakeCursorStore {
     pub fn new() -> Self {
         Self {
             cursors: Mutex::new(HashMap::new()),
+            pipeline_states: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -578,6 +580,18 @@ impl CursorStore for FakeCursorStore {
                 last_sync_at: None,
             })
             .collect())
+    }
+
+    async fn get_pipeline_state(&self, pipeline: &str) -> Result<Option<String>, CursorError> {
+        Ok(self.pipeline_states.lock().unwrap().get(pipeline).cloned())
+    }
+
+    async fn set_pipeline_state(&self, pipeline: &str, state: &str) -> Result<(), CursorError> {
+        self.pipeline_states
+            .lock()
+            .unwrap()
+            .insert(pipeline.to_string(), state.to_string());
+        Ok(())
     }
 }
 
