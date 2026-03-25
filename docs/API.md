@@ -1,8 +1,12 @@
 # RapidByte — API Reference
 
-> Hexagonal architecture: six driving-port traits define the API surface.
-> CLI calls them in-process; REST is a thin axum adapter over the same
-> traits. Both `serve` and `controller` expose identical endpoints.
+> Hexagonal architecture: the controller owns the entire external API
+> surface — REST (axum) for CLI and web clients, gRPC (tonic) for
+> internal agent communication. Both are integral to the controller.
+>
+> **Status:** The REST endpoints in this document are the design
+> specification. The controller currently serves gRPC only; the REST
+> adapter is planned.
 
 ---
 
@@ -10,7 +14,7 @@
 
 1. [Overview](#1-overview)
    - [Hexagonal architecture](#hexagonal-architecture)
-   - [ApiContext: the DI container](#apicontext-the-di-container)
+   - [AppContext: the DI container](#appcontext-the-di-container)
    - [Crate structure](#crate-structure)
 2. [Authentication](#2-authentication)
 3. [Conventions](#3-conventions)
@@ -73,44 +77,47 @@
 
 ### Hexagonal architecture
 
-RapidByte follows a hexagonal (ports & adapters) architecture with three
-nested hexagonal boundaries — `rapidbyte-api`, `rapidbyte-engine`, and
-`rapidbyte-controller` — each with its own domain, ports, adapters, and
-application core.
+RapidByte follows a hexagonal (ports & adapters) architecture with two
+hexagonal boundaries — `rapidbyte-engine` and `rapidbyte-controller` —
+each with its own domain, ports, adapters, and application core.
+
+The controller owns ALL external surfaces: REST (planned) + gRPC
+(implemented). The engine is a pure execution library with no network
+surface of its own.
 
 ```
  ┌─────────────────────────────────────────────────────────────────────┐
  │                      DRIVING ADAPTERS                              │
- │  ┌──────────┐  ┌──────────┐  ┌────────────┐                       │
- │  │ CLI      │  │ axum     │  │ scheduler  │                       │
- │  │ (clap)   │  │ (REST)   │  │ (cron)     │                       │
- │  └────┬─────┘  └────┬─────┘  └─────┬──────┘                       │
- │       │             │              │                               │
- ├───────┴─────────────┴──────────────┴───────────────────────────────┤
+ │  ┌──────────┐  ┌──────────────┐  ┌──────────────────┐             │
+ │  │ CLI      │  │ axum (REST)  │  │ scheduler (cron) │             │
+ │  │ (clap)   │  │ (planned)    │  │ (planned)        │             │
+ │  └────┬─────┘  └──────┬───────┘  └────────┬─────────┘             │
+ │       │               │                   │                       │
+ ├───────┴───────────────┴───────────────────┴───────────────────────┤
  │                    DRIVING PORTS (traits)                          │
  │  PipelineService · RunService · ConnectionService                 │
  │  PluginService · OperationsService · ServerService                │
  ├────────────────────────────────────────────────────────────────────┤
  │                                                                    │
- │                    APPLICATION CORE                                │
- │                    rapidbyte-api                                   │
+ │                    rapidbyte-controller                            │
  │                                                                    │
- │  ApiContext { services, engine_ctx, project_config }               │
+ │  REST API + gRPC + scheduling                                      │
+ │  AppContext { repos, event_bus, secrets, clock, config }            │
  │                                                                    │
- │  Orchestrates: config loading, connection resolution,              │
- │  project defaults, scheduling, and deployment-mode routing.        │
+ │  Orchestrates: task distribution, run lifecycle,                    │
+ │  agent coordination (gRPC), and REST API (planned).                │
  │                                                                    │
  ├─────────────────────────┬──────────────────────────────────────────┤
- │  DRIVEN: engine         │  DRIVEN: controller                     │
- │  (local / standalone)   │  (distributed)                          │
+ │  DRIVEN: engine         │  DRIVEN: distributed workers            │
+ │  (local / standalone)   │  (controller + agents via gRPC)         │
  │                         │                                          │
- │  PluginRunner           │  PipelineStore                          │
- │  PluginResolver         │  RunRepository · TaskRepository         │
- │  CursorRepository       │  AgentRepository · EventBus             │
+ │  PluginRunner           │  RunRepository · TaskRepository         │
+ │  PluginResolver         │  AgentRepository · EventBus             │
+ │  CursorRepository       │  PipelineStore                          │
  │  RunRecordRepository    │  Clock · SecretResolver                 │
  │  DlqRepository          │                                          │
  │  ProgressReporter       ├──────────────────────────────────────────┤
- │  MetricsSnapshot        │  DRIVEN ADAPTERS (controller)           │
+ │  MetricsSnapshot        │  DRIVEN ADAPTERS (distributed)          │
  │                         │  ┌──────────┐  ┌──────────────────────┐ │
  ├─────────────────────────┤  │ Postgres  │  │ gRPC (agent ↔ ctrl) │ │
  │  DRIVEN ADAPTERS (eng)  │  └──────────┘  └──────────────────────┘ │
@@ -124,56 +131,57 @@ application core.
  └─────────────────────────┴──────────────────────────────────────────┘
 ```
 
-The driving ports (service traits) are the public API of `rapidbyte-api`.
-Every consumer — CLI, REST, scheduler — depends only on these traits.
-They never reach past `rapidbyte-api` into engine or controller internals.
+The driving port traits (service traits) are defined inside
+`rapidbyte-controller`. Every consumer — CLI, REST, scheduler — depends
+only on these traits. They never reach past the controller into engine
+internals.
 
-The driven side has **two hexagonal boundaries**, selected by deployment
-mode:
+The driven side has **two execution modes**, selected at startup:
 
 - **Engine** (`rapidbyte-engine`) — used in local (`sync`) and standalone
-  (`serve`) modes. Has its own domain/ports/adapters/application with
-  `EngineContext` as DI container. Driven adapters: Wasmtime, OCI registry,
-  Postgres/SQLite, OTel.
+  (`serve`) modes. The controller embeds the engine and delegates
+  directly to its use-cases via `EngineContext`. Driven adapters:
+  Wasmtime, OCI registry, Postgres/SQLite, OTel.
 
-- **Controller** (`rapidbyte-controller`) — used in distributed
-  (`controller` + `agent`) mode. Has its own domain/ports/adapters/
-  application with `AppContext` as DI container. Driven adapters: Postgres,
-  gRPC (agent communication).
+- **Distributed** — used in `rapidbyte serve --metadata-database-url` mode.
+  The controller manages task distribution across remote agents via gRPC.
+  Each agent runs `rapidbyte-engine` locally. Driven adapters: Postgres, gRPC.
 
-### Three hexagons
+### Two hexagons
 
 Each hexagon follows the same internal layout:
 
 ```
-rapidbyte-api              rapidbyte-engine           rapidbyte-controller
-─────────────              ────────────────           ────────────────────
-traits/                    domain/ports/              domain/ports/
-  PipelineService            PluginRunner               RunRepository
-  RunService                 PluginResolver             TaskRepository
-  ConnectionService          CursorRepository           AgentRepository
-  PluginService              RunRecordRepository        PipelineStore
-  OperationsService          DlqRepository              EventBus
-  ServerService              ProgressReporter           Clock
-                             MetricsSnapshot            SecretResolver
+rapidbyte-controller                     rapidbyte-engine
+────────────────────                     ────────────────
+domain/ports/                            domain/ports/
+  RunRepository                            PluginRunner
+  TaskRepository                           PluginResolver
+  AgentRepository                          CursorRepository
+  PipelineStore                            RunRecordRepository
+  EventBus                                 DlqRepository
+  Clock                                    ProgressReporter
+  SecretResolver                           MetricsSnapshot
 
-services/                  application/               application/
-  (trait impls)              check, run, discover       submit, poll, complete
-                             teardown                   cancel, heartbeat
-                                                        register, query, timeout
-
-context.rs                 context.rs                 context.rs
-  ApiContext                 EngineContext               AppContext
-  Arc<dyn Trait>…            Arc<dyn Trait>…             Arc<dyn Trait>…
-
-                           adapter/                    adapter/
-                             wasm_runner                 postgres/
-                             registry_resolver           grpc/ (driving)
-                             postgres/                   clock, secrets
-                             progress, metrics
+application/                             application/
+  submit, poll, complete                   check, run, discover
+  cancel, heartbeat                        teardown
+  register, query, timeout
+  background (lease_sweep,               context.rs
+    agent_reaper)                           EngineContext
+                                           Arc<dyn Trait>…
+context.rs
+  AppContext                             adapter/
+  Arc<dyn Trait>…                          wasm_runner
+                                           registry_resolver
+adapter/                                   postgres/
+  postgres/                                progress, metrics
+  grpc/            (implemented)
+  rest/            (planned)
+  clock, secrets
 ```
 
-All three crates share the same conventions:
+Both crates share the same conventions:
 - **Domain/ports** define trait interfaces (driven ports)
 - **Application** contains use-case functions and a DI context
 - **Adapters** implement traits with concrete infrastructure
@@ -181,163 +189,127 @@ All three crates share the same conventions:
 
 ### Deployment-mode routing
 
-`rapidbyte-api` is the single boundary that driving adapters see. Its
-service implementations route to the appropriate inner hexagon based on
-deployment mode:
+Routing depends on how RapidByte is invoked:
+
+- **CLI local** — `rapidbyte sync` routes directly to
+  `rapidbyte-engine` (in-process, no network hop).
+- **CLI distributed** — `rapidbyte sync --controller <url>` sends
+  requests to a running controller via gRPC.
+- **`rapidbyte serve`** (planned standalone mode) — the controller
+  embeds the engine, serves REST + gRPC on the same port.
+- **`rapidbyte serve --metadata-database-url`** (distributed) — the
+  controller coordinates remote agents via gRPC, serves REST.
 
 ```
-┌──────────────┐     ┌──────────────────┐
-│   Driving    │     │  rapidbyte-api   │
-│   Adapters   │────→│                  │
-│              │     │  ApiContext       │
-│  CLI, axum,  │     │  Service impls   │
-│  scheduler   │     │  Config loading  │
-└──────────────┘     └────────┬─────────┘
-                              │
-                    ┌─────────┴──────────┐
-                    │                    │
-              local / standalone    distributed
-                    │                    │
-                    ▼                    ▼
-          ┌──────────────────┐  ┌─────────────────────┐
-          │ rapidbyte-engine │  │ rapidbyte-controller │
-          │                  │  │                      │
-          │  EngineContext   │  │  AppContext           │
-          │  check, run,    │  │  submit, poll,       │
-          │  discover,      │  │  complete, cancel,   │
-          │  teardown       │  │  heartbeat, register │
-          └──────────────────┘  └──────────┬──────────┘
-                                           │
-                                    ┌──────┴──────┐
-                                    │  agent(s)   │
-                                    │  (workers)  │
-                                    │             │
-                                    │  engine     │
-                                    │  (local)    │
-                                    └─────────────┘
+┌──────────────────┐     ┌──────────────────────────┐
+│  CLI (local)     │────→│   rapidbyte-engine       │
+│                  │     │   (in-process)            │
+└──────────────────┘     └──────────────────────────┘
+
+┌──────────────────┐     ┌──────────────────────────┐
+│  CLI             │     │   rapidbyte-controller   │
+│  (distributed)   │────→│   (gRPC client)          │
+└──────────────────┘     └──────────────────────────┘
+
+┌──────────────────┐     ┌──────────────────────────┐
+│  rapidbyte serve │     │   rapidbyte-controller   │
+│  (standalone)    │────→│   embeds engine           │
+│                  │     │   REST + gRPC             │
+└──────────────────┘     └──────────────────────────┘
+
+┌──────────────────┐     ┌──────────────────────────┐
+│  rapidbyte serve │     │   rapidbyte-controller   │
+│  --metadata-     │────→│   coordinates agents     │
+│  database-url    │     │   REST + gRPC             │
+└──────────────────┘     └──────────────────────────┘
 ```
 
-In local and standalone modes, `rapidbyte-api` delegates directly to
-`rapidbyte-engine` use-cases. In distributed mode, it delegates to
-`rapidbyte-controller`, which manages task distribution across remote
-agents. Each agent runs `rapidbyte-engine` locally to execute its
-assigned work.
+```rust
+// Current: start the controller gRPC server
+rapidbyte_controller::run(config, otel_guard, secrets).await
 
-The CLI calls service traits directly (in-process) for local execution.
-When a server is configured, it speaks REST instead — the axum adapter
-translates HTTP to the same trait calls. The API crate is identical in
-both paths.
+// Planned: unified server (gRPC + REST on the same port)
+rapidbyte_controller::serve(config).await
+```
 
 ### Crate dependency graph
 
 ```
-cli  ──→ rapidbyte-api ──┬→ engine     ──→ runtime, state, types
-axum ──→ rapidbyte-api ──┤
-                         └→ controller ──→ types, pipeline-config, secrets
+cli  ──→ controller ──→ types, pipeline-config, secrets, metrics
+     ──→ agent     ──→ engine, types, pipeline-config, secrets, metrics, registry
+     ──→ engine    ──→ runtime, state, types
 ```
 
-The CLI and axum layer depend only on `rapidbyte-api`. They never import
-`rapidbyte-engine`, `rapidbyte-runtime`, `rapidbyte-controller`, or
-`rapidbyte-state` directly.
+Note: controller does NOT depend on engine. The agent bridges controller
+and engine.
 
 ### Crate structure
 
 ```
-rapidbyte-api/
-├── lib.rs              # ApiContext builder, re-exports all service traits
-│
-│   # ── Driving ports (trait definitions) ──
-├── traits/
-│   ├── pipeline.rs     # PipelineService trait
-│   ├── run.rs          # RunService trait
-│   ├── connection.rs   # ConnectionService trait
-│   ├── plugin.rs       # PluginService trait
-│   ├── operations.rs   # OperationsService trait
-│   └── server.rs       # ServerService trait
-│
-│   # ── Application core (trait implementations) ──
-├── services/
-│   ├── pipeline.rs     # PipelineService impl → routes to engine or controller
-│   ├── run.rs          # RunService impl → routes to engine or controller
-│   ├── connection.rs   # ConnectionService impl → config + engine
-│   ├── plugin.rs       # PluginService impl → registry resolver
-│   ├── operations.rs   # OperationsService impl → state + engine or controller
-│   └── server.rs       # ServerService impl → health, version
-│
-│   # ── Supporting modules ──
-├── context.rs          # ApiContext DI container
-├── config.rs           # Project config loading, connection resolution
-├── auth.rs             # Token validation
-└── types.rs            # Shared request/response types
+rapidbyte-controller/
+├── lib.rs              # re-exports: ControllerConfig, ServerTlsConfig, run()
+├── domain/
+│   ├── ports/          # driven port traits (RunRepository, TaskRepository, etc.)
+│   ├── run.rs          # Run entity + RunState
+│   ├── task.rs         # Task entity + TaskState
+│   ├── agent.rs        # Agent entity
+│   ├── lease.rs        # Lease value object
+│   ├── event.rs        # DomainEvent enum
+│   └── error.rs        # DomainError
+├── application/
+│   ├── context.rs      # AppContext (DI container) + AppConfig
+│   ├── submit.rs       # submit_pipeline()
+│   ├── poll.rs         # poll_task()
+│   ├── complete.rs     # complete_task()
+│   ├── heartbeat.rs    # heartbeat()
+│   ├── cancel.rs       # cancel_run()
+│   ├── query.rs        # get_run(), list_runs()
+│   ├── register.rs     # register(), deregister()
+│   ├── timeout.rs      # handle_task_timeout()
+│   ├── background/     # lease_sweep, agent_reaper
+│   ├── error.rs        # AppError
+│   └── testing.rs      # in-memory fakes
+├── adapter/
+│   ├── postgres/       # PgRunRepo, PgTaskRepo, PgAgentRepo, PgPipelineStore, PgEventBus
+│   ├── grpc/           # PipelineGrpcService, AgentGrpcService, auth, convert
+│   ├── rest/           # PLANNED: axum REST handlers (/api/v1/*)
+│   ├── clock.rs        # SystemClock
+│   └── secrets.rs      # VaultSecretResolver
+├── config.rs           # ControllerConfig, AuthConfig, TimerConfig, ServerTlsConfig
+├── server.rs           # run() — composition root (gRPC server)
+└── proto.rs            # tonic generated code
 ```
 
-### ApiContext: the DI container
+### AppContext: the DI container
 
-`ApiContext` is the single entry point. It holds all service
-implementations and the underlying engine or controller context.
-Driving adapters construct it once at startup and share it immutably.
-
-The deployment mode determines which inner hexagon is wired:
+`AppContext` is the controller's DI container. It holds all driven-port
+trait objects wired at startup. The composition root in `server.rs`
+builds it once and passes it to gRPC service implementations.
 
 ```rust
-/// Application-level dependency container for the API layer.
-///
-/// Mirrors the engine's `EngineContext` and controller's `AppContext`
-/// patterns — bundles all service trait objects so driving adapters
-/// (CLI, axum) receive one value regardless of deployment mode.
-pub struct ApiContext {
-    pub pipelines: Arc<dyn PipelineService>,
-    pub runs: Arc<dyn RunService>,
-    pub connections: Arc<dyn ConnectionService>,
-    pub plugins: Arc<dyn PluginService>,
-    pub operations: Arc<dyn OperationsService>,
-    pub server: Arc<dyn ServerService>,
-}
-
-/// Deployment mode determines which inner hexagon backs the services.
-pub enum DeploymentMode {
-    /// Local one-shot or standalone server: delegates to `EngineContext`.
-    Local,
-    /// Distributed controller + agents: delegates to `AppContext`.
-    Distributed { controller_url: String },
-}
-
-impl ApiContext {
-    /// Build an `ApiContext` from a project directory and deployment mode.
-    ///
-    /// - **Local**: loads project config, resolves connections, constructs
-    ///   `EngineContext` with concrete adapters, wires service impls that
-    ///   call engine use-cases directly.
-    /// - **Distributed**: connects to the controller, wires service impls
-    ///   that delegate to the controller via gRPC.
-    pub async fn from_project(
-        project_dir: &Path,
-        mode: DeploymentMode,
-    ) -> Result<Self> { .. }
+pub struct AppContext {
+    pub runs: Arc<dyn RunRepository>,
+    pub tasks: Arc<dyn TaskRepository>,
+    pub agents: Arc<dyn AgentRepository>,
+    pub store: Arc<dyn PipelineStore>,
+    pub event_bus: Arc<dyn EventBus>,
+    pub secrets: Arc<dyn SecretResolver>,
+    pub clock: Arc<dyn Clock>,
+    pub config: AppConfig,
 }
 ```
 
-Both the CLI and axum construct `ApiContext` the same way — the
-deployment mode is the only difference:
+The composition root in `server.rs` wires concrete adapters:
 
 ```rust
-// CLI — local (in-process engine)
-let ctx = ApiContext::from_project(&dir, DeploymentMode::Local).await?;
-ctx.pipelines.sync(request).await?;
-
-// CLI — distributed (delegates to controller)
-let mode = DeploymentMode::Distributed { controller_url: url.into() };
-let ctx = ApiContext::from_project(&dir, mode).await?;
-ctx.pipelines.sync(request).await?;  // same trait, different backend
-
-// axum (REST adapter — serve mode)
-let ctx = ApiContext::from_project(&dir, DeploymentMode::Local).await?;
-let app = build_router(ctx);
-axum::serve(listener, app).await?;
+// Current: start the controller gRPC server
+let ctx = AppContext { runs, tasks, agents, store, event_bus, secrets, clock, config };
+rapidbyte_controller::run(config, otel_guard, secrets).await
 ```
 
-The driving adapters never know which inner hexagon is handling their
-requests. The service traits are identical regardless of deployment mode.
+> **Note:** When REST and standalone mode are added, `AppContext` will
+> expand to include driving-port service traits and an optional
+> `EngineContext`.
 
 ### Base URL & versioning
 
@@ -362,28 +334,28 @@ All API requests require a bearer token (except
 Authorization: Bearer <token>
 ```
 
-### CLI login / logout
+### CLI login / logout (planned)
 
 Tokens are provisioned out-of-band (generated by an admin, CI secret,
 etc.). The `login` command stores a token locally for convenience —
 it does not issue tokens.
 
 ```bash
-rapidbyte login --server http://localhost:8080
+rapidbyte login --controller http://localhost:8080   # (planned)
 # Prompts for token, stores in ~/.rapidbyte/config.yaml
 
-rapidbyte logout
+rapidbyte logout                                      # (planned)
 # Removes stored token
 
-rapidbyte logout --server http://localhost:8080
-# Removes token for a specific server
+rapidbyte logout --controller http://localhost:8080   # (planned)
+# Removes token for a specific controller
 ```
 
 Stored config:
 
 ```yaml
 # ~/.rapidbyte/config.yaml
-server:
+controller:
   url: http://localhost:8080
   token: rb_tok_abc123...
 ```
@@ -392,7 +364,7 @@ The CLI resolves auth in order:
 
 1. `--auth-token <token>` flag
 2. `RAPIDBYTE_AUTH_TOKEN` environment variable
-3. `server.token` in `~/.rapidbyte/config.yaml`
+3. `controller.token` in `~/.rapidbyte/config.yaml`
 
 ### Unauthenticated mode
 
@@ -540,12 +512,20 @@ The SSE stream closes when the run reaches a terminal state.
 
 ## 4. Pipelines
 
+> **Design specification:** The service traits and REST endpoints below
+> define the planned REST API surface. The controller currently serves
+> gRPC only. These traits will be implemented as driving ports inside
+> `rapidbyte-controller/traits/` with REST handlers in
+> `rapidbyte-controller/adapter/rest/`.
+
 Each domain section below follows the same pattern:
 
-1. **Driving port** — the Rust service trait in `rapidbyte-api/traits/`.
-   This is the interface that CLI and REST adapters call.
-2. **REST adapter** — the HTTP endpoints in axum that translate
-   requests into trait method calls and responses back to JSON.
+1. **Driving port** — the Rust service trait (planned) that will live in
+   `rapidbyte-controller/traits/`. This is the interface that CLI and
+   REST adapters call.
+2. **REST adapter** — the HTTP endpoints in
+   `rapidbyte-controller/adapter/rest/` that translate requests into
+   trait method calls and responses back to JSON.
 
 The trait is the source of truth. The REST API is a projection of it.
 
@@ -555,8 +535,9 @@ The trait is the source of truth. The REST API is a projection of it.
 /// Application-layer service for pipeline operations.
 ///
 /// This is the primary boundary between driving adapters (CLI, REST)
-/// and the engine. Handles config loading, connection resolution,
-/// project defaults, and delegation to engine use-cases.
+/// and the execution backend. Handles config loading, connection
+/// resolution, project defaults, and delegation to engine (local) or
+/// agents (distributed).
 #[async_trait]
 pub trait PipelineService: Send + Sync {
     /// List all discovered pipelines in the project.
