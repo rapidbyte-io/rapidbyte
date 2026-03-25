@@ -7,6 +7,7 @@ use crate::domain::ports::cursor_store::CursorStore;
 use crate::domain::ports::event_bus::EventBus;
 use crate::domain::ports::log_store::LogStore;
 use crate::domain::ports::pipeline_store::PipelineStore;
+use crate::domain::ports::plugin_registry::PluginRegistry;
 use crate::domain::ports::repository::{AgentRepository, RunRepository, TaskRepository};
 use crate::domain::ports::secrets::SecretResolver;
 
@@ -47,6 +48,7 @@ pub struct AppContext {
     pub cursor_store: Arc<dyn CursorStore>,
     pub log_store: Arc<dyn LogStore>,
     pub connection_tester: Arc<dyn ConnectionTester>,
+    pub plugin_registry: Arc<dyn PluginRegistry>,
     pub config: AppConfig,
 }
 

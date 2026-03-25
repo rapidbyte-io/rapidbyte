@@ -23,6 +23,9 @@ use crate::domain::ports::log_store::{
     LogError, LogFilter, LogStore, LogStreamFilter, StoredLogEntry,
 };
 use crate::domain::ports::pipeline_store::PipelineStore;
+use crate::domain::ports::plugin_registry::{
+    InstalledPlugin, PluginMetadata, PluginRegistry, RegistryEntry, RegistryError,
+};
 use crate::domain::ports::repository::{
     AgentRepository, Pagination, RepositoryError, RunFilter, RunPage, RunRepository, TaskRepository,
 };
@@ -649,6 +652,46 @@ impl ConnectionTester for FakeConnectionTester {
 }
 
 // ---------------------------------------------------------------------------
+// FakePluginRegistry
+// ---------------------------------------------------------------------------
+
+/// A no-op `PluginRegistry` for use in unit and integration tests.
+/// All mutating operations return an `Internal` error; read operations
+/// return empty results.
+pub struct FakePluginRegistry;
+
+#[async_trait]
+impl PluginRegistry for FakePluginRegistry {
+    async fn list_installed(&self) -> Result<Vec<InstalledPlugin>, RegistryError> {
+        Ok(vec![])
+    }
+
+    async fn search(
+        &self,
+        _query: &str,
+        _plugin_type: Option<&str>,
+    ) -> Result<Vec<RegistryEntry>, RegistryError> {
+        Ok(vec![])
+    }
+
+    async fn info(&self, plugin_ref: &str) -> Result<PluginMetadata, RegistryError> {
+        Err(RegistryError::NotFound(plugin_ref.to_string()))
+    }
+
+    async fn install(&self, _plugin_ref: &str) -> Result<InstalledPlugin, RegistryError> {
+        Err(RegistryError::Registry(
+            "plugin installation requires engine context".into(),
+        ))
+    }
+
+    async fn remove(&self, _plugin_ref: &str) -> Result<(), RegistryError> {
+        Err(RegistryError::Registry(
+            "plugin removal requires engine context".into(),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TestContext + factory
 // ---------------------------------------------------------------------------
 
@@ -719,6 +762,7 @@ pub fn fake_context() -> TestContext {
         cursor_store,
         log_store,
         connection_tester: Arc::new(FakeConnectionTester),
+        plugin_registry: Arc::new(FakePluginRegistry),
         config: AppConfig {
             default_lease_duration: Duration::from_secs(300),
             lease_check_interval: Duration::from_secs(30),

@@ -24,6 +24,9 @@ use crate::config::ControllerConfig;
 use crate::domain::ports::connection_tester::{
     ConnectionTestError, ConnectionTester, DiscoveryResult, TestResult,
 };
+use crate::domain::ports::plugin_registry::{
+    InstalledPlugin, PluginMetadata, PluginRegistry, RegistryEntry, RegistryError,
+};
 use crate::proto::rapidbyte::v1::agent_service_server::AgentServiceServer;
 use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineServiceServer;
 
@@ -53,6 +56,50 @@ impl ConnectionTester for NoOpConnectionTester {
     ) -> Result<DiscoveryResult, ConnectionTestError> {
         Err(ConnectionTestError::Plugin(
             "connection discovery requires engine context".into(),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NoOpPluginRegistry
+// ---------------------------------------------------------------------------
+
+/// Placeholder `PluginRegistry` used by the standalone controller server.
+///
+/// The real implementation lives in the CLI crate where the local plugin
+/// store and remote registry are accessible.  This no-op returns a `Registry`
+/// error so callers know that plugin operations require engine context.
+struct NoOpPluginRegistry;
+
+#[async_trait::async_trait]
+impl PluginRegistry for NoOpPluginRegistry {
+    async fn list_installed(&self) -> Result<Vec<InstalledPlugin>, RegistryError> {
+        Ok(vec![])
+    }
+
+    async fn search(
+        &self,
+        _query: &str,
+        _plugin_type: Option<&str>,
+    ) -> Result<Vec<RegistryEntry>, RegistryError> {
+        Ok(vec![])
+    }
+
+    async fn info(&self, _plugin_ref: &str) -> Result<PluginMetadata, RegistryError> {
+        Err(RegistryError::Registry(
+            "plugin info requires engine context".into(),
+        ))
+    }
+
+    async fn install(&self, _plugin_ref: &str) -> Result<InstalledPlugin, RegistryError> {
+        Err(RegistryError::Registry(
+            "plugin installation requires engine context".into(),
+        ))
+    }
+
+    async fn remove(&self, _plugin_ref: &str) -> Result<(), RegistryError> {
+        Err(RegistryError::Registry(
+            "plugin removal requires engine context".into(),
         ))
     }
 }
@@ -172,6 +219,7 @@ async fn setup(
         cursor_store,
         log_store,
         connection_tester: Arc::new(NoOpConnectionTester),
+        plugin_registry: Arc::new(NoOpPluginRegistry),
         config: app_config,
     });
 

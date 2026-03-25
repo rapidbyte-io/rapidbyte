@@ -263,7 +263,8 @@ mod tests {
         use crate::application::context::{AppConfig, AppContext};
         use crate::application::testing::{
             FakeAgentRepository, FakeClock, FakeConnectionTester, FakeCursorStore, FakeEventBus,
-            FakeLogStore, FakePipelineStore, FakeRunRepository, FakeStorage, FakeTaskRepository,
+            FakeLogStore, FakePipelineStore, FakePluginRegistry, FakeRunRepository, FakeStorage,
+            FakeTaskRepository,
         };
         use crate::domain::ports::secrets::{SecretError, SecretResolver};
         use std::sync::Arc;
@@ -292,6 +293,7 @@ mod tests {
             cursor_store: Arc::new(FakeCursorStore::new()),
             log_store: Arc::new(FakeLogStore::new()),
             connection_tester: Arc::new(FakeConnectionTester),
+            plugin_registry: Arc::new(FakePluginRegistry),
             config: AppConfig {
                 default_lease_duration: Duration::from_secs(300),
                 lease_check_interval: Duration::from_secs(30),

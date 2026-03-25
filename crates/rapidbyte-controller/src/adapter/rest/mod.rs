@@ -4,6 +4,7 @@ pub mod extractors;
 pub mod operations;
 pub mod pagination;
 pub mod pipelines;
+pub mod plugins;
 pub mod runs;
 pub mod server;
 pub mod sse;
@@ -66,6 +67,14 @@ pub fn router(state: RestState) -> Router {
         .route(
             "/api/v1/connections/{name}/discover",
             get(connections::discover),
+        )
+        // Plugins — static routes BEFORE wildcard to avoid capture conflicts
+        .route("/api/v1/plugins", get(plugins::list))
+        .route("/api/v1/plugins/search", get(plugins::search))
+        .route("/api/v1/plugins/install", post(plugins::install))
+        .route(
+            "/api/v1/plugins/{*plugin_ref}",
+            get(plugins::info).delete(plugins::remove),
         );
 
     public.merge(protected).with_state(state)
