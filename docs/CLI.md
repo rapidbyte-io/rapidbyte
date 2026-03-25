@@ -35,9 +35,8 @@
    - [Global flags](#global-flags)
    - [Routing](#routing)
 7. [Deployment](#7-deployment)
-   - [Local (one-shot)](#local-one-shot)
-   - [Standalone (serve)](#standalone-serve)
-   - [Distributed (serve + agents)](#distributed-serve--agents)
+   - [One-shot](#one-shot)
+   - [Long-running server](#long-running-server)
    - [Progression](#progression)
 8. [Examples](#8-examples)
    - [Minimal pipeline](#minimal-single-pipeline)
@@ -992,89 +991,76 @@ rapidbyte [command] \
 
 ### Routing
 
-RapidByte resolves the controller endpoint in order:
+`rapidbyte sync` always executes through a controller. Without
+`--controller`, an embedded controller runs in-process. With
+`--controller <url>`, it connects to a running `rapidbyte serve`
+instance. The execution path is identical either way.
+
+Controller endpoint resolution order:
 
 1. `--controller <url>` flag
 2. `RAPIDBYTE_CONTROLLER` environment variable
 3. `controller.url` in `~/.rapidbyte/config.yaml`
-
-`sync` does NOT use config file fallback — it runs locally by default.
-`status`, `watch`, `list-runs` DO use config file fallback.
-
-Pipeline commands (`sync`, `check`, `discover`, `compile`, `diff`,
-`assert`) run in-process by default (embedded engine). When a
-controller is configured, they route via REST instead — same
-command, same output, different execution backend.
+4. No controller configured → embedded (in-process)
 
 ```
-                              ┌─ in-process (embedded engine)
-rapidbyte sync ──→ routing ──┤
-                              └─ REST client → serve
+                                  ┌─ embedded controller (in-process)
+rapidbyte sync ──→ controller ──┤
+                                  └─ remote controller (--controller <url>)
 ```
+
+Same command, same output, different execution backend. Graduating
+from local to distributed is just adding `--controller <url>`.
 
 ---
 
 ## 7. Deployment
 
-Three deployment modes. Same pipelines, same config, same CLI.
+Same pipelines, same config, same CLI — regardless of where the
+controller runs. `rapidbyte sync` always goes through a controller;
+the only question is whether it's embedded or remote.
 
-### Local (one-shot)
+### One-shot
 
-Run pipelines directly. No server, no scheduler. For development,
-CI/CD, and external orchestrators (Airflow, Dagster).
+Embedded controller, in-process. For development, CI/CD, and
+external orchestrators (Airflow, Dagster).
 
 ```bash
-rapidbyte sync pipeline.yml                 # run and exit
+rapidbyte sync pipeline.yml                 # embedded controller, run and exit
 rapidbyte sync --pipeline salesforce-crm    # run by name
 ```
 
 Works everywhere: laptop, CI runner, Docker, cron job.
 
-### Standalone (serve)
+### Long-running server
 
-Long-running single-node deployment. `rapidbyte serve` runs with an
-embedded engine: built-in scheduler (planned), REST API (planned),
-metrics endpoint. No agents needed — pipelines execute locally within
-the serve process.
+`rapidbyte serve` starts a persistent controller with built-in
+scheduler (planned), REST API (planned), metrics endpoint. Pipelines
+can execute locally (embedded engine) or be delegated to agents.
 
 ```bash
+# Single node — embedded engine, no agents needed
 rapidbyte serve --metrics-listen 0.0.0.0:9090
-```
 
-Pipelines run on schedule. Use the CLI or REST API to monitor and
-control:
-
-```bash
-rapidbyte status <run_id> --controller http://localhost:9090
-rapidbyte sync --pipeline salesforce-crm --controller http://localhost:9090
-```
-
-### Distributed (serve + agents)
-
-Multi-node deployment. `rapidbyte serve --metadata-database-url` runs
-in distributed coordinator mode: same REST API as standalone, plus
-internal gRPC for agent coordination. Agents execute pipeline work.
-
-```bash
-# Start coordinator
+# Multi-node — add agents for distributed execution
 rapidbyte serve --metadata-database-url postgres://... \
   --listen [::]:9090
 
-# Start agents (on worker nodes, connect via gRPC)
 rapidbyte agent --controller http://coordinator:9090 --max-tasks 4
+```
 
-# CLI talks to coordinator via REST — same commands as standalone
-rapidbyte sync --pipeline salesforce-crm --controller http://coordinator:9090
-rapidbyte status <run_id> --controller http://coordinator:9090
+The CLI connects to the running server — same commands either way:
+
+```bash
+rapidbyte sync pipeline.yml --controller http://localhost:9090
+rapidbyte status <run_id> --controller http://localhost:9090
 ```
 
 ### Progression
 
-Most teams start local, move to standalone, scale to distributed:
-
 ```
-rapidbyte sync          →  rapidbyte serve  →  serve + agents
-(laptop / CI)              (single node)       (multi-node)
+rapidbyte sync              →  rapidbyte serve        →  serve + agents
+(embedded controller)          (persistent controller)    (distributed)
 ```
 
 Same pipeline files at every stage. No config migration.
@@ -1333,9 +1319,9 @@ rapidbyte serve
 | Scheduling | `every 30m` syntax, `cron()` escape hatch | Human-readable first, power when needed |
 | Transforms | Closed set of operations, not SQL | Keep boundary clean — dbt does transforms |
 | Assertions | Stream properties, not separate contracts | Same inheritance as all other config. One mental model |
-| Pipeline routing | In-process by default, REST when controller configured | Zero-dep quickstart, seamless scale-up |
-| Deployment modes | sync → serve → serve + agents | Same config at every stage, progressive complexity |
-| REST API | Lives in serve; same surface for standalone and distributed | CLI doesn't care where pipelines execute |
+| Pipeline routing | Always through controller (embedded or remote) | One execution path, zero surprises scaling up |
+| Deployment modes | sync (embedded) → serve → serve + agents | Same config at every stage, progressive complexity |
+| REST API | Lives in controller; same surface everywhere | CLI doesn't care where pipelines execute |
 | Schema evolution | First-class declarative block | THE differentiator vs Airbyte/Fivetran |
 | Config inheritance | Project defaults → pipeline → stream overrides | Three levels max. No directory-level cascading |
 | Connection management | Named refs in connections.yml | Solves copy-paste, env vars solve environments |
