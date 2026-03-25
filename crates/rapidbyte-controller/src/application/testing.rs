@@ -14,6 +14,9 @@ use crate::domain::agent::Agent;
 use crate::domain::event::DomainEvent;
 use crate::domain::lease::Lease;
 use crate::domain::ports::clock::Clock;
+use crate::domain::ports::connection_tester::{
+    ConnectionTestError, ConnectionTester, DiscoveryResult, TestResult,
+};
 use crate::domain::ports::cursor_store::{CursorError, CursorStore, StreamCursor, SyncTimestamp};
 use crate::domain::ports::event_bus::{EventBus, EventBusError, EventStream};
 use crate::domain::ports::log_store::{
@@ -612,6 +615,40 @@ impl LogStore for FakeLogStore {
 }
 
 // ---------------------------------------------------------------------------
+// FakeConnectionTester
+// ---------------------------------------------------------------------------
+
+/// A no-op `ConnectionTester` for use in unit and integration tests.
+/// Both methods always return a successful "ok" result.
+pub struct FakeConnectionTester;
+
+#[async_trait]
+impl ConnectionTester for FakeConnectionTester {
+    async fn test(
+        &self,
+        _connection_config: &serde_json::Value,
+    ) -> Result<TestResult, ConnectionTestError> {
+        Ok(TestResult {
+            status: "ok".into(),
+            latency_ms: Some(1),
+            details: None,
+            error: None,
+        })
+    }
+
+    async fn discover(
+        &self,
+        _connection_config: &serde_json::Value,
+        _table: Option<&str>,
+    ) -> Result<DiscoveryResult, ConnectionTestError> {
+        Ok(DiscoveryResult {
+            connection: "fake".into(),
+            streams: vec![],
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TestContext + factory
 // ---------------------------------------------------------------------------
 
@@ -681,6 +718,7 @@ pub fn fake_context() -> TestContext {
         clock: Arc::clone(&clock) as Arc<dyn Clock>,
         cursor_store,
         log_store,
+        connection_tester: Arc::new(FakeConnectionTester),
         config: AppConfig {
             default_lease_duration: Duration::from_secs(300),
             lease_check_interval: Duration::from_secs(30),

@@ -1,3 +1,4 @@
+pub mod connections;
 pub mod error;
 pub mod extractors;
 pub mod operations;
@@ -57,7 +58,15 @@ pub fn router(state: RestState) -> Router {
         .route("/api/v1/status/{name}", get(operations::pipeline_status))
         .route("/api/v1/freshness", get(operations::freshness))
         .route("/api/v1/logs", get(operations::logs))
-        .route("/api/v1/logs/stream", get(operations::logs_stream));
+        .route("/api/v1/logs/stream", get(operations::logs_stream))
+        // Connections
+        .route("/api/v1/connections", get(connections::list))
+        .route("/api/v1/connections/{name}", get(connections::get))
+        .route("/api/v1/connections/{name}/test", post(connections::test))
+        .route(
+            "/api/v1/connections/{name}/discover",
+            get(connections::discover),
+        );
 
     public.merge(protected).with_state(state)
 }

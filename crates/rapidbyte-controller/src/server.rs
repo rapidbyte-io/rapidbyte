@@ -21,8 +21,43 @@ use crate::adapter::secrets::VaultSecretResolver;
 use crate::application::context::{AppConfig, AppContext, RegistryConfig};
 use crate::application::services::AppServices;
 use crate::config::ControllerConfig;
+use crate::domain::ports::connection_tester::{
+    ConnectionTestError, ConnectionTester, DiscoveryResult, TestResult,
+};
 use crate::proto::rapidbyte::v1::agent_service_server::AgentServiceServer;
 use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineServiceServer;
+
+// ---------------------------------------------------------------------------
+// NoOpConnectionTester
+// ---------------------------------------------------------------------------
+
+/// Placeholder `ConnectionTester` used by the standalone controller server.
+///
+/// The real implementation lives in the CLI crate where Wasmtime plugins are
+/// available.  This no-op returns a `Plugin` error so callers know that
+/// connection testing requires engine context.
+struct NoOpConnectionTester;
+
+#[async_trait::async_trait]
+impl ConnectionTester for NoOpConnectionTester {
+    async fn test(&self, _config: &serde_json::Value) -> Result<TestResult, ConnectionTestError> {
+        Err(ConnectionTestError::Plugin(
+            "connection testing requires engine context".into(),
+        ))
+    }
+
+    async fn discover(
+        &self,
+        _config: &serde_json::Value,
+        _table: Option<&str>,
+    ) -> Result<DiscoveryResult, ConnectionTestError> {
+        Err(ConnectionTestError::Plugin(
+            "connection discovery requires engine context".into(),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 /// Shared server components produced by [`setup`].
 struct ServerComponents {
@@ -136,6 +171,7 @@ async fn setup(
         clock,
         cursor_store,
         log_store,
+        connection_tester: Arc::new(NoOpConnectionTester),
         config: app_config,
     });
 

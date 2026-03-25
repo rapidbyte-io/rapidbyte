@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::domain::ports::clock::Clock;
+use crate::domain::ports::connection_tester::ConnectionTester;
 use crate::domain::ports::cursor_store::CursorStore;
 use crate::domain::ports::event_bus::EventBus;
 use crate::domain::ports::log_store::LogStore;
@@ -45,6 +46,7 @@ pub struct AppContext {
     pub clock: Arc<dyn Clock>,
     pub cursor_store: Arc<dyn CursorStore>,
     pub log_store: Arc<dyn LogStore>,
+    pub connection_tester: Arc<dyn ConnectionTester>,
     pub config: AppConfig,
 }
 
