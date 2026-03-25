@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use crate::domain::ports::cursor_store::PipelineState;
 use crate::domain::ports::log_store::{LogFilter, LogStreamFilter, StoredLogEntry};
 use crate::traits::error::{EventStream, ServiceError};
 use crate::traits::operations::{
@@ -28,7 +29,9 @@ impl OperationsService for AppServices {
             .map_err(|e| ServiceError::Internal {
                 message: e.to_string(),
             })?
-            .unwrap_or_else(|| "active".to_string());
+            .unwrap_or(PipelineState::Active)
+            .as_str()
+            .to_string();
 
         let cursors = cursors_result.map_err(|e| ServiceError::Internal {
             message: e.to_string(),
@@ -61,7 +64,7 @@ impl OperationsService for AppServices {
     async fn pause(&self, name: &str) -> Result<PipelineStateChange, ServiceError> {
         self.ctx
             .cursor_store
-            .set_pipeline_state(name, "paused")
+            .set_pipeline_state(name, PipelineState::Paused)
             .await
             .map_err(|e| ServiceError::Internal {
                 message: e.to_string(),
@@ -77,7 +80,7 @@ impl OperationsService for AppServices {
     async fn resume(&self, name: &str) -> Result<PipelineStateChange, ServiceError> {
         self.ctx
             .cursor_store
-            .set_pipeline_state(name, "active")
+            .set_pipeline_state(name, PipelineState::Active)
             .await
             .map_err(|e| ServiceError::Internal {
                 message: e.to_string(),

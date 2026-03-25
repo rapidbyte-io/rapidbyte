@@ -44,7 +44,6 @@ impl RunService for AppServices {
         // rather than a heap allocation for the pipeline name clone.
         let pipeline_name: Arc<str> = Arc::from(run.pipeline_name());
 
-        // Subscribe to events
         let stream =
             self.ctx
                 .event_bus
@@ -53,7 +52,6 @@ impl RunService for AppServices {
                 .map_err(|e| ServiceError::Internal {
                     message: e.to_string(),
                 })?;
-        // Map DomainEvent -> ProgressEvent, filtering out None
         let mapped = stream.filter_map(move |event| {
             let pipeline = Arc::clone(&pipeline_name);
             async move { domain_event_to_progress(event, &pipeline) }
@@ -135,6 +133,7 @@ fn run_to_summary(run: &Run) -> RunSummary {
         started_at: Some(run.created_at()),
         duration_secs: run.metrics().map(|m| m.duration_ms as f64 / 1000.0),
         records_written: run.metrics().map(|m| m.rows_written),
+        attempt: run.current_attempt(),
     }
 }
 

@@ -62,6 +62,7 @@ pub struct RunSummary {
     pub started_at: Option<DateTime<Utc>>,
     pub duration_secs: Option<f64>,
     pub records_written: Option<u64>,
+    pub attempt: u32,
 }
 
 #[derive(Debug, Clone)]

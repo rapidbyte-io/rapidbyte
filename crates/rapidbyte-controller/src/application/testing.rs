@@ -17,7 +17,9 @@ use crate::domain::ports::clock::Clock;
 use crate::domain::ports::connection_tester::{
     ConnectionTestError, ConnectionTester, DiscoveryResult, TestResult,
 };
-use crate::domain::ports::cursor_store::{CursorError, CursorStore, StreamCursor, SyncTimestamp};
+use crate::domain::ports::cursor_store::{
+    CursorError, CursorStore, PipelineState, StreamCursor, SyncTimestamp,
+};
 use crate::domain::ports::event_bus::{EventBus, EventBusError, EventStream};
 use crate::domain::ports::log_store::{
     LogError, LogFilter, LogStore, LogStreamFilter, StoredLogEntry,
@@ -523,7 +525,7 @@ impl Clock for FakeClock {
 
 pub struct FakeCursorStore {
     cursors: Mutex<HashMap<String, Vec<StreamCursor>>>,
-    pipeline_states: Mutex<HashMap<String, String>>,
+    pipeline_states: Mutex<HashMap<String, PipelineState>>,
 }
 
 impl FakeCursorStore {
@@ -582,15 +584,22 @@ impl CursorStore for FakeCursorStore {
             .collect())
     }
 
-    async fn get_pipeline_state(&self, pipeline: &str) -> Result<Option<String>, CursorError> {
-        Ok(self.pipeline_states.lock().unwrap().get(pipeline).cloned())
+    async fn get_pipeline_state(
+        &self,
+        pipeline: &str,
+    ) -> Result<Option<PipelineState>, CursorError> {
+        Ok(self.pipeline_states.lock().unwrap().get(pipeline).copied())
     }
 
-    async fn set_pipeline_state(&self, pipeline: &str, state: &str) -> Result<(), CursorError> {
+    async fn set_pipeline_state(
+        &self,
+        pipeline: &str,
+        state: PipelineState,
+    ) -> Result<(), CursorError> {
         self.pipeline_states
             .lock()
             .unwrap()
-            .insert(pipeline.to_string(), state.to_string());
+            .insert(pipeline.to_string(), state);
         Ok(())
     }
 }

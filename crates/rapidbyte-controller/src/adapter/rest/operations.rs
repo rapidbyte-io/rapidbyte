@@ -86,7 +86,7 @@ pub async fn freshness(
     Query(params): Query<FreshnessParams>,
 ) -> Result<Json<Vec<FreshnessStatus>>, RestError> {
     let filter = FreshnessFilter {
-        tag: params.tag.map(|t| t.split(',').map(String::from).collect()),
+        tag: super::pagination::split_tags(params.tag),
     };
     let result = state.services.freshness(filter).await?;
     Ok(Json(result))

@@ -2,6 +2,39 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+/// Operational state of a pipeline (active or paused).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineState {
+    Active,
+    Paused,
+}
+
+impl PipelineState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+        }
+    }
+}
+
+impl std::str::FromStr for PipelineState {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "active" => Ok(Self::Active),
+            "paused" => Ok(Self::Paused),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for PipelineState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct StreamCursor {
     pub stream: String,
@@ -38,8 +71,15 @@ pub trait CursorStore: Send + Sync {
     ) -> Result<Vec<SyncTimestamp>, CursorError>;
 
     /// Get pipeline operational state (e.g. `"active"` or `"paused"`).
-    async fn get_pipeline_state(&self, pipeline: &str) -> Result<Option<String>, CursorError>;
+    async fn get_pipeline_state(
+        &self,
+        pipeline: &str,
+    ) -> Result<Option<PipelineState>, CursorError>;
 
     /// Set pipeline operational state.
-    async fn set_pipeline_state(&self, pipeline: &str, state: &str) -> Result<(), CursorError>;
+    async fn set_pipeline_state(
+        &self,
+        pipeline: &str,
+        state: PipelineState,
+    ) -> Result<(), CursorError>;
 }

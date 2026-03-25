@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use sqlx::PgPool;
 
-use crate::domain::ports::cursor_store::{CursorError, CursorStore, StreamCursor, SyncTimestamp};
+use crate::domain::ports::cursor_store::{
+    CursorError, CursorStore, PipelineState, StreamCursor, SyncTimestamp,
+};
 
 #[derive(sqlx::FromRow)]
 struct CursorRow {
@@ -109,23 +111,34 @@ impl CursorStore for PgCursorStore {
             .collect())
     }
 
-    async fn get_pipeline_state(&self, pipeline: &str) -> Result<Option<String>, CursorError> {
+    async fn get_pipeline_state(
+        &self,
+        pipeline: &str,
+    ) -> Result<Option<PipelineState>, CursorError> {
         let row = sqlx::query("SELECT state FROM pipeline_states WHERE pipeline = $1")
             .bind(pipeline)
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| CursorError::Database(e.to_string()))?;
         use sqlx::Row;
-        Ok(row.map(|r| r.get("state")))
+        use std::str::FromStr;
+        Ok(row.and_then(|r| {
+            let s: String = r.get("state");
+            PipelineState::from_str(&s).ok()
+        }))
     }
 
-    async fn set_pipeline_state(&self, pipeline: &str, state: &str) -> Result<(), CursorError> {
+    async fn set_pipeline_state(
+        &self,
+        pipeline: &str,
+        state: PipelineState,
+    ) -> Result<(), CursorError> {
         sqlx::query(
             "INSERT INTO pipeline_states (pipeline, state, updated_at) VALUES ($1, $2, now()) \
              ON CONFLICT (pipeline) DO UPDATE SET state = EXCLUDED.state, updated_at = now()",
         )
         .bind(pipeline)
-        .bind(state)
+        .bind(state.as_str())
         .execute(&self.pool)
         .await
         .map_err(|e| CursorError::Database(e.to_string()))?;

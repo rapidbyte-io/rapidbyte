@@ -127,13 +127,11 @@ impl PipelineService for PipelineGrpcService {
             req.page_size.min(1000)
         };
 
-        let status_str = state.map(|s| s.as_str().to_string());
-
         let page = self
             .services
             .list(RunFilter {
                 pipeline: None,
-                status: status_str,
+                status: state.map(|s| s.as_str().to_string()),
                 limit: page_size,
                 cursor: page_token,
             })
@@ -287,7 +285,7 @@ fn run_summary_to_proto(summary: &crate::traits::run::RunSummary) -> pb::RunSumm
         run_id: summary.run_id.clone(),
         pipeline_name: summary.pipeline.clone(),
         state: convert::run_state_to_proto(state),
-        attempt: 1,
+        attempt: summary.attempt,
         created_at: summary.started_at.map(convert::to_proto_timestamp),
     }
 }

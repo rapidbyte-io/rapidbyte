@@ -23,7 +23,7 @@ pub struct PipelineListParams {
 
 impl PipelineListParams {
     fn limit(&self) -> u32 {
-        self.limit.unwrap_or(20).min(100).max(1)
+        super::pagination::clamp_page_limit(self.limit)
     }
 }
 
@@ -35,7 +35,7 @@ pub async fn list(
 ) -> Result<Json<PaginatedList<PipelineSummary>>, RestError> {
     let limit = params.limit();
     let filter = PipelineFilter {
-        tag: params.tag.map(|t| t.split(',').map(String::from).collect()),
+        tag: super::pagination::split_tags(params.tag),
         limit,
         cursor: params.cursor,
     };

@@ -22,7 +22,7 @@ pub struct ListRunsParams {
 
 impl ListRunsParams {
     fn limit(&self) -> u32 {
-        self.limit.unwrap_or(20).min(100).max(1)
+        super::pagination::clamp_page_limit(self.limit)
     }
 }
 

@@ -5,6 +5,9 @@ use crate::traits::ServiceError;
 
 use super::AppServices;
 
+const MODE: &str = "controller";
+const STATE_BACKEND: &str = "postgres";
+
 #[async_trait]
 impl ServerService for AppServices {
     async fn health(&self) -> Result<HealthStatus, ServiceError> {
@@ -16,9 +19,9 @@ impl ServerService for AppServices {
 
         Ok(HealthStatus {
             status: "healthy".to_string(),
-            mode: "controller".to_string(),
+            mode: MODE.to_string(),
             uptime_secs,
-            state_backend: "postgres".to_string(),
+            state_backend: STATE_BACKEND.to_string(),
             state_backend_healthy: true,
             agents_connected: 0,
         })
@@ -27,15 +30,15 @@ impl ServerService for AppServices {
     async fn version(&self) -> Result<VersionInfo, ServiceError> {
         Ok(VersionInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
-            mode: "controller".to_string(),
+            mode: MODE.to_string(),
         })
     }
 
     async fn config(&self) -> Result<ServerConfigInfo, ServiceError> {
         Ok(ServerConfigInfo {
-            mode: "controller".to_string(),
+            mode: MODE.to_string(),
             port: self.listen_addr.port(),
-            state_backend: "postgres".to_string(),
+            state_backend: STATE_BACKEND.to_string(),
             auth_required: !self.ctx.config.allow_unauthenticated,
         })
     }
