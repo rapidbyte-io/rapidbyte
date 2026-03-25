@@ -18,14 +18,21 @@ impl OperationsService for AppServices {
 
     async fn pipeline_status(&self, name: &str) -> Result<PipelineStatusDetail, ServiceError> {
         // Pipeline discovery not yet implemented; check cursors to build stream list.
-        let cursors =
-            self.ctx
-                .cursor_store
-                .get_cursors(name)
-                .await
-                .map_err(|e| ServiceError::Internal {
-                    message: e.to_string(),
-                })?;
+        // Run get_pipeline_state and get_cursors concurrently since they are independent.
+        let (state_result, cursors_result) = tokio::join!(
+            self.ctx.cursor_store.get_pipeline_state(name),
+            self.ctx.cursor_store.get_cursors(name),
+        );
+
+        let state = state_result
+            .map_err(|e| ServiceError::Internal {
+                message: e.to_string(),
+            })?
+            .unwrap_or_else(|| "active".to_string());
+
+        let cursors = cursors_result.map_err(|e| ServiceError::Internal {
+            message: e.to_string(),
+        })?;
 
         if cursors.is_empty() {
             return Err(ServiceError::NotFound {
@@ -45,7 +52,7 @@ impl OperationsService for AppServices {
 
         Ok(PipelineStatusDetail {
             pipeline: name.to_string(),
-            state: "active".into(),
+            state,
             health: "ok".into(),
             streams,
         })
@@ -122,7 +129,7 @@ impl OperationsService for AppServices {
             pipeline: request.pipeline,
             run_id: request.run_id,
             limit: request.limit.unwrap_or(100),
-            cursor: None,
+            cursor: request.cursor,
         };
 
         let page = self
@@ -225,6 +232,7 @@ mod tests {
                 pipeline: "test-pipeline".into(),
                 run_id: None,
                 limit: None,
+                cursor: None,
             })
             .await
             .unwrap();

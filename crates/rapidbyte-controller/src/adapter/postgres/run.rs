@@ -9,16 +9,10 @@ use crate::domain::run::{Run, RunError, RunMetrics, RunState};
 use super::error::box_err;
 
 fn parse_run_state(s: &str) -> Result<RunState, RepositoryError> {
-    match s {
-        "pending" => Ok(RunState::Pending),
-        "running" => Ok(RunState::Running),
-        "completed" => Ok(RunState::Completed),
-        "failed" => Ok(RunState::Failed),
-        "cancelled" => Ok(RunState::Cancelled),
-        other => Err(RepositoryError::Other(Box::from(format!(
-            "unknown run state in database: {other}"
-        )))),
-    }
+    use std::str::FromStr;
+    RunState::from_str(s).map_err(|()| {
+        RepositoryError::Other(Box::from(format!("unknown run state in database: {s}")))
+    })
 }
 
 pub(super) fn run_state_to_str(state: RunState) -> &'static str {

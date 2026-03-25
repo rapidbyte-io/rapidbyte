@@ -249,25 +249,17 @@ impl Drop for CleanupStream {
 
 // --- Conversion helpers from service-layer types to proto types ---
 
-fn status_str_to_run_state(status: &str) -> crate::domain::run::RunState {
-    use crate::domain::run::RunState;
-    match status {
-        "Running" | "running" => RunState::Running,
-        "Completed" | "completed" => RunState::Completed,
-        "Failed" | "failed" => RunState::Failed,
-        "Cancelled" | "cancelled" => RunState::Cancelled,
-        _ => RunState::Pending,
-    }
-}
-
 fn run_detail_to_proto(detail: &crate::traits::run::RunDetail) -> pb::RunDetail {
+    use crate::domain::run::RunState;
+    use std::str::FromStr;
+    let state = RunState::from_str(&detail.status).unwrap_or(RunState::Pending);
     pb::RunDetail {
         run_id: detail.run_id.clone(),
         pipeline_name: detail.pipeline.clone(),
-        state: convert::run_state_to_proto(status_str_to_run_state(&detail.status)),
-        cancel_requested: false,
+        state: convert::run_state_to_proto(state),
+        cancel_requested: detail.cancel_requested,
         attempt: detail.retry_count + 1,
-        max_retries: detail.retry_count,
+        max_retries: detail.max_retries,
         metrics: detail.counts.as_ref().map(|c| pb::RunMetrics {
             rows_read: c.records_read,
             rows_written: c.records_written,
@@ -288,10 +280,13 @@ fn run_detail_to_proto(detail: &crate::traits::run::RunDetail) -> pb::RunDetail 
 }
 
 fn run_summary_to_proto(summary: &crate::traits::run::RunSummary) -> pb::RunSummary {
+    use crate::domain::run::RunState;
+    use std::str::FromStr;
+    let state = RunState::from_str(&summary.status).unwrap_or(RunState::Pending);
     pb::RunSummary {
         run_id: summary.run_id.clone(),
         pipeline_name: summary.pipeline.clone(),
-        state: convert::run_state_to_proto(status_str_to_run_state(&summary.status)),
+        state: convert::run_state_to_proto(state),
         attempt: 1,
         created_at: summary.started_at.map(convert::to_proto_timestamp),
     }

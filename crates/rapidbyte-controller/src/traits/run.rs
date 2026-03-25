@@ -28,6 +28,8 @@ pub struct RunDetail {
     pub counts: Option<RunCounts>,
     pub timing: Option<RunTiming>,
     pub retry_count: u32,
+    pub cancel_requested: bool,
+    pub max_retries: u32,
     pub error: Option<RunErrorInfo>,
 }
 

@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 
-use crate::application::submit;
 use crate::traits::pipeline::{
     AssertRequest, AssertResult, BatchRunHandle, CheckResult, DiffResult, PipelineDetail,
     PipelineFilter, PipelineService, PipelineSummary, ResolvedConfig, RunHandle, SyncBatchRequest,
@@ -8,7 +7,7 @@ use crate::traits::pipeline::{
 };
 use crate::traits::{PaginatedList, ServiceError};
 
-use super::{app_error_to_service, AppServices};
+use super::AppServices;
 
 #[async_trait]
 impl PipelineService for AppServices {
@@ -29,26 +28,9 @@ impl PipelineService for AppServices {
         })
     }
 
-    async fn sync(&self, request: SyncRequest) -> Result<RunHandle, ServiceError> {
-        // For now, sync requires the pipeline YAML to be submitted directly.
-        // In server mode, the pipeline_yaml comes from the PipelineStore or project files.
-        // For the REST API, we need the pipeline name to resolve to YAML.
-        // Current implementation: use the pipeline name as-is and submit with empty YAML
-        // placeholder. This will be enhanced when pipeline discovery is implemented.
-        let result = submit::submit_pipeline(
-            &self.ctx,
-            None,             // no idempotency key from REST
-            request.pipeline, // pipeline name used as identifier
-            0,                // default max_retries
-            None,             // no timeout
-        )
-        .await
-        .map_err(app_error_to_service)?;
-
-        Ok(RunHandle {
-            run_id: result.run_id,
-            status: "pending".into(),
-            links: None, // populated by REST adapter
+    async fn sync(&self, _request: SyncRequest) -> Result<RunHandle, ServiceError> {
+        Err(ServiceError::NotImplemented {
+            feature: "REST pipeline sync (requires pipeline YAML resolution)".into(),
         })
     }
 
@@ -103,7 +85,7 @@ mod tests {
     use crate::application::testing::fake_context;
 
     #[tokio::test]
-    async fn sync_with_valid_yaml_returns_run_handle() {
+    async fn sync_returns_not_implemented() {
         let tc = fake_context();
         let services = AppServices::new(
             Arc::new(tc.ctx),
@@ -120,33 +102,8 @@ mod tests {
             dry_run: false,
         };
 
-        let result = services.sync(request).await.unwrap();
-        assert!(!result.run_id.is_empty());
-        assert_eq!(result.status, "pending");
-        assert!(result.links.is_none());
-    }
-
-    #[tokio::test]
-    async fn sync_with_invalid_yaml_returns_error() {
-        let tc = fake_context();
-        let services = AppServices::new(
-            Arc::new(tc.ctx),
-            chrono::Utc::now(),
-            "0.0.0.0:8080".parse().unwrap(),
-        );
-
-        let request = SyncRequest {
-            pipeline: "not: [valid: yaml: {{{}}}".into(),
-            stream: None,
-            full_refresh: false,
-            cursor_start: None,
-            cursor_end: None,
-            dry_run: false,
-        };
-
         let result = services.sync(request).await;
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ServiceError::Conflict { .. }));
+        assert!(matches!(result, Err(ServiceError::NotImplemented { .. })));
     }
 
     #[tokio::test]

@@ -55,11 +55,8 @@ async fn get_pipeline_returns_501_not_implemented() {
 }
 
 #[tokio::test]
-async fn sync_pipeline_with_plain_name_returns_202() {
-    // The current PipelineService::sync passes the pipeline name as YAML to
-    // submit_pipeline. A plain string like "test-pipeline" is valid YAML;
-    // extract_pipeline_name falls back to "unknown" when no `pipeline:` key
-    // is present. The submit succeeds and returns 202 Accepted.
+async fn sync_pipeline_returns_501_not_implemented() {
+    // sync() returns NotImplemented until pipeline YAML resolution is available.
     let app = test_app();
     let resp = app
         .oneshot(
@@ -70,44 +67,9 @@ async fn sync_pipeline_with_plain_name_returns_202() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     let body = parse_json(resp).await;
-    assert!(!body["run_id"].as_str().unwrap_or("").is_empty());
-    assert_eq!(body["status"], "pending");
-}
-
-#[tokio::test]
-async fn sync_pipeline_returns_202() {
-    // Use URL-encoded YAML as the pipeline name path segment so submit_pipeline
-    // can extract a valid pipeline name from it.
-    //
-    // Axum decodes %XX sequences in path params, so
-    // "pipeline%3A%20test%0Aversion%3A%20'1.0'" becomes "pipeline: test\nversion: '1.0'",
-    // which is valid YAML with a `pipeline:` key.
-    let app = test_app();
-    let resp = app
-        .oneshot(
-            Request::post("/api/v1/pipelines/pipeline%3A%20test%0Aversion%3A%20'1.0'/sync")
-                .header("content-type", "application/json")
-                .body(Body::from("{}"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    let body = parse_json(resp).await;
-    let run_id = body["run_id"].as_str().unwrap_or("");
-    assert!(!run_id.is_empty());
-    assert_eq!(body["status"], "pending");
-    // links populated by the REST handler
-    assert_eq!(
-        body["links"]["self"],
-        serde_json::json!(format!("/api/v1/runs/{run_id}"))
-    );
-    assert_eq!(
-        body["links"]["events"],
-        serde_json::json!(format!("/api/v1/runs/{run_id}/events"))
-    );
+    assert_eq!(body["error"]["code"], "not_implemented");
 }
 
 #[tokio::test]

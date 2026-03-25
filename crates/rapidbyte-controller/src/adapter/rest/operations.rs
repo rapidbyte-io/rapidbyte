@@ -98,6 +98,7 @@ pub struct LogsParams {
     pub pipeline: String,
     pub run_id: Option<String>,
     pub limit: Option<u32>,
+    pub cursor: Option<String>,
 }
 
 /// GET /api/v1/logs
@@ -110,6 +111,7 @@ pub async fn logs(
         pipeline: params.pipeline,
         run_id: params.run_id,
         limit: params.limit,
+        cursor: params.cursor,
     };
     let result = state.services.logs(request).await?;
     Ok(Json(result))

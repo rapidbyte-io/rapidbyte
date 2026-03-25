@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use futures::StreamExt;
 
@@ -38,7 +40,9 @@ impl RunService for AppServices {
         let run = query::get_run(&self.ctx, run_id)
             .await
             .map_err(app_error_to_service)?;
-        let pipeline_name = run.pipeline_name().to_string();
+        // Use Arc<str> so each event only pays an atomic ref-count increment
+        // rather than a heap allocation for the pipeline name clone.
+        let pipeline_name: Arc<str> = Arc::from(run.pipeline_name());
 
         // Subscribe to events
         let stream =
@@ -51,7 +55,7 @@ impl RunService for AppServices {
                 })?;
         // Map DomainEvent -> ProgressEvent, filtering out None
         let mapped = stream.filter_map(move |event| {
-            let pipeline = pipeline_name.clone();
+            let pipeline = Arc::clone(&pipeline_name);
             async move { domain_event_to_progress(event, &pipeline) }
         });
         Ok(Box::pin(mapped))
@@ -61,7 +65,10 @@ impl RunService for AppServices {
         cancel::cancel_run(&self.ctx, run_id)
             .await
             .map_err(app_error_to_service)?;
-        // Re-fetch to return updated state
+        // Re-fetch to return updated state. cancel_run returns CancelResult { accepted }
+        // but does not return the run itself, so a second DB round-trip is needed here.
+        // This is a minor inefficiency; the tradeoff is accepted to keep cancel_run's
+        // contract minimal (it is also called directly from the gRPC adapter).
         let run = query::get_run(&self.ctx, run_id)
             .await
             .map_err(app_error_to_service)?;
@@ -111,6 +118,8 @@ fn run_to_detail(run: &Run) -> RunDetail {
         }),
         timing: None, // Not available from current domain model
         retry_count: run.current_attempt().saturating_sub(1),
+        cancel_requested: run.is_cancel_requested(),
+        max_retries: run.max_retries(),
         error: run.error().map(|e| RunErrorInfo {
             code: e.code.clone(),
             message: e.message.clone(),
@@ -145,7 +154,7 @@ fn domain_event_to_progress(
         },
         DomainEvent::RunCompleted { run_id, metrics } => Some(ProgressEvent::Complete {
             run_id,
-            status: "completed".into(),
+            status: RunState::Completed.as_str().to_string(),
             duration_secs: Some(metrics.duration_ms as f64 / 1000.0),
         }),
         DomainEvent::RunFailed { run_id, error } => Some(ProgressEvent::Failed {
@@ -169,14 +178,12 @@ fn domain_event_to_progress(
 }
 
 fn to_domain_filter(filter: &RunFilter) -> DomainRunFilter {
-    let state = filter.status.as_deref().and_then(|s| match s {
-        "pending" | "Pending" => Some(RunState::Pending),
-        "running" | "Running" => Some(RunState::Running),
-        "completed" | "Completed" => Some(RunState::Completed),
-        "failed" | "Failed" => Some(RunState::Failed),
-        "cancelled" | "Cancelled" => Some(RunState::Cancelled),
-        _ => None,
-    });
+    use std::str::FromStr;
+    let state = filter
+        .status
+        .as_deref()
+        .and_then(|s| RunState::from_str(s).ok());
+    // TODO: forward `filter.pipeline` once DomainRunFilter gains a `pipeline` field
     DomainRunFilter { state }
 }
 

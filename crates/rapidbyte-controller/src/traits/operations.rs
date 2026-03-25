@@ -102,6 +102,7 @@ pub struct LogsRequest {
     pub pipeline: String,
     pub run_id: Option<String>,
     pub limit: Option<u32>,
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
