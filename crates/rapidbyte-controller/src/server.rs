@@ -111,6 +111,7 @@ pub async fn run(
         agent_reap_interval: config.timers.agent_reap_interval,
         default_max_retries: config.timers.default_max_retries,
         registry,
+        allow_unauthenticated: config.auth.allow_unauthenticated,
     };
 
     // 5. Compose AppContext
@@ -153,10 +154,7 @@ pub async fn run(
     });
 
     // 7. Build gRPC services with auth interceptor
-    let auth = BearerAuthInterceptor::new(
-        config.auth.tokens.clone(),
-        config.auth.allow_unauthenticated,
-    );
+    let auth = BearerAuthInterceptor::new(config.auth.clone());
     let pipeline_svc = PipelineServiceServer::with_interceptor(
         PipelineGrpcService::new(ctx.clone()),
         auth.clone(),

@@ -21,6 +21,8 @@ pub struct AppConfig {
     pub agent_reap_interval: Duration,
     pub default_max_retries: u32,
     pub registry: Option<RegistryConfig>,
+    /// When `true`, requests without a valid bearer token are permitted.
+    pub allow_unauthenticated: bool,
 }
 
 impl AppConfig {

@@ -296,6 +296,7 @@ mod tests {
                 agent_reap_interval: Duration::from_secs(30),
                 default_max_retries: 0,
                 registry: None,
+                allow_unauthenticated: true,
             },
         };
 
