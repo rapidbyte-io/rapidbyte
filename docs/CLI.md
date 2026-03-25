@@ -37,7 +37,7 @@
 7. [Deployment](#7-deployment)
    - [Local (one-shot)](#local-one-shot)
    - [Standalone (serve)](#standalone-serve)
-   - [Distributed (controller + agents)](#distributed-controller--agents)
+   - [Distributed (serve + agents)](#distributed-serve--agents)
    - [Progression](#progression)
 8. [Examples](#8-examples)
    - [Minimal pipeline](#minimal-single-pipeline)
@@ -767,8 +767,12 @@ every container, CI system, and Kubernetes deployment already works.
 ### Pipeline commands
 
 ```bash
-# ── sync ──────────────────────────────────────────────────────────
-# Run pipelines. The main command.
+# ── sync (implemented) ────────────────────────────────────────────
+# Run pipelines. The main command. (Renamed from `run`.)
+#
+# NOTE: The current CLI takes a positional pipeline path
+# (e.g. `rapidbyte sync pipeline.yml`). The --pipeline flag shown
+# below is the planned design for named pipeline selection.
 
 rapidbyte sync                              # run all pipelines
 rapidbyte sync pipeline.yml                 # run one file directly
@@ -793,12 +797,12 @@ rapidbyte sync --pipeline postgres-product \
 rapidbyte sync --dry-run                    # resolve config, show plan, don't execute
 rapidbyte sync --pipeline salesforce-crm --dry-run
 
-# ── check ─────────────────────────────────────────────────────────
+# ── check (implemented) ──────────────────────────────────────────
 rapidbyte check                             # validate all pipeline configs
 rapidbyte check --pipeline salesforce-crm   # validate one
 rapidbyte check --apply                     # provision resources after validation
 
-# ── discover ──────────────────────────────────────────────────────
+# ── discover (implemented) ───────────────────────────────────────
 rapidbyte discover --connection postgres_app
 rapidbyte discover --connection postgres_app --table users
 # OUTPUT:
@@ -812,11 +816,11 @@ rapidbyte discover --connection postgres_app --table users
 #     primary_key: [id]
 #     cursor_field: updated_at
 
-# ── compile ───────────────────────────────────────────────────────
+# ── compile (planned) ────────────────────────────────────────────
 # Resolve all env vars and defaults. Show final effective config.
 rapidbyte compile --pipeline salesforce-crm
 
-# ── diff ──────────────────────────────────────────────────────────
+# ── diff (planned) ───────────────────────────────────────────────
 # Show what changed since last sync (schema drift detection).
 rapidbyte diff --pipeline postgres-product
 # OUTPUT:
@@ -826,13 +830,13 @@ rapidbyte diff --pipeline postgres-product
 #   STREAM: orders
 #     (no changes)
 
-# ── assert ────────────────────────────────────────────────────────
+# ── assert (planned) ─────────────────────────────────────────────
 # Run data quality assertions.
 rapidbyte assert                            # run all assertions
 rapidbyte assert --pipeline salesforce-crm  # one pipeline
 rapidbyte assert --tag tier-1               # by tag
 
-# ── teardown ──────────────────────────────────────────────────────
+# ── teardown (implemented) ───────────────────────────────────────
 # Tear down resources provisioned by a pipeline (tables, replication slots, etc.)
 rapidbyte teardown --pipeline salesforce-crm
 rapidbyte teardown --pipeline salesforce-crm --reason pipeline_deleted
@@ -841,44 +845,37 @@ rapidbyte teardown --pipeline salesforce-crm --reason pipeline_deleted
 ### Server commands
 
 ```bash
-# ── serve (standalone single-node) ────────────────────────────────
-# Start daemon mode: built-in scheduler + REST API + metrics endpoint.
-# Use for standalone deployments without an external orchestrator.
+# ── serve (long-running daemon) ───────────────────────────────────
+# Starts the server. Mode depends on configuration:
+#   - No --metadata-database-url: standalone (embedded engine, local execution)
+#   - With --metadata-database-url: distributed coordinator (agents execute)
 
-rapidbyte serve                             # start scheduler + API
-rapidbyte serve --port 8080                 # custom API port
-rapidbyte serve --metrics-port 9090         # Prometheus metrics
+rapidbyte serve                             # standalone (embedded engine)
+rapidbyte serve --port 8080                 # custom listen port (planned)
+rapidbyte serve --metrics-listen 0.0.0.0:9090  # Prometheus metrics
 
-# ── controller (distributed coordinator) ──────────────────────────
-# Start distributed coordinator with same REST API as serve.
-# Delegates execution to agents instead of running locally.
-
-rapidbyte controller                        # start distributed coordinator
-rapidbyte controller --listen [::]:9090
-rapidbyte controller --metadata-database-url postgres://...
+# Distributed mode (coordinator)
+rapidbyte serve --metadata-database-url postgres://...
+rapidbyte serve --listen [::]:9090 --metadata-database-url postgres://...
 
 # ── agent (distributed worker) ────────────────────────────────────
-# Start a worker that connects to a controller.
+# Start a worker that connects to a serve instance via gRPC.
 
-rapidbyte agent --server http://controller:9090
-rapidbyte agent --max-tasks 4
-rapidbyte agent --metrics-port 9191
+rapidbyte agent --controller http://coordinator:9090
+rapidbyte agent --controller http://coordinator:9090 --max-tasks 4
+rapidbyte agent --metrics-listen 0.0.0.0:9191
 ```
 
 ### Operational commands
 
-These commands query or control a running system (`serve` or `controller`).
+These commands query or control a running system (`serve`).
 
 ```bash
-# ── status ────────────────────────────────────────────────────────
-rapidbyte status
-# PIPELINE             SCHEDULE    LAST RUN     NEXT RUN    STATUS
-# salesforce-crm       every 30m   12m ago      18m         ✓ healthy
-# postgres-product     every 15m   3m ago       12m         ✓ healthy
-# stripe-payments      every 6h    2h ago       4h          ⚠ 2 DLQ rows
-# s3-clickstream       every 1h    7h ago       —           ✗ paused
+# ── status (implemented) ─────────────────────────────────────────
+# NOTE: The current CLI takes a positional <run_id> argument.
+# The --pipeline flag shown below is the planned design.
 
-rapidbyte status --pipeline salesforce-crm
+rapidbyte status <run_id>
 # Pipeline: salesforce-crm
 # Schedule: every 30m
 # Last 5 runs:
@@ -894,17 +891,30 @@ rapidbyte status --pipeline salesforce-crm
 #   events         incremental  cursor: 2025-03-19T14:30:01Z    600 rows
 # DLQ: 0 rows
 
+# ── watch (implemented) ──────────────────────────────────────────
+rapidbyte watch <run_id>                    # live-follow a running sync
+
+# ── list-runs (implemented) ──────────────────────────────────────
+rapidbyte list-runs                         # recent runs
+rapidbyte list-runs --limit 20             # last 20 runs
+rapidbyte list-runs --state failed         # filter by state
+# PIPELINE             SCHEDULE    LAST RUN     NEXT RUN    STATUS
+# salesforce-crm       every 30m   12m ago      18m         ✓ healthy
+# postgres-product     every 15m   3m ago       12m         ✓ healthy
+# stripe-payments      every 6h    2h ago       4h          ⚠ 2 DLQ rows
+# s3-clickstream       every 1h    7h ago       —           ✗ paused
+
 # ── Retry / recovery ─────────────────────────────────────────────
 rapidbyte sync --failed                     # retry all failed from last run
 rapidbyte sync --stale                      # run anything past freshness SLA
 
-# ── Pipeline control ──────────────────────────────────────────────
+# ── Pipeline control (planned) ───────────────────────────────────
 rapidbyte pause --pipeline salesforce-crm   # pause scheduled runs
 rapidbyte resume --pipeline salesforce-crm  # resume
 rapidbyte reset --pipeline salesforce-crm   # clear state (next run = full refresh)
 rapidbyte reset --pipeline salesforce-crm --stream events  # per-stream
 
-# ── Freshness ─────────────────────────────────────────────────────
+# ── Freshness (planned) ──────────────────────────────────────────
 rapidbyte freshness                         # check all pipelines
 rapidbyte freshness --tag tier-1
 # OUTPUT:
@@ -912,7 +922,7 @@ rapidbyte freshness --tag tier-1
 #   postgres-product    last sync: 8h ago    SLA: 6h    ✗ stale
 #   stripe-payments     last sync: 45m ago   SLA: 1h    ✓ fresh
 
-# ── Logs ──────────────────────────────────────────────────────────
+# ── Logs (planned) ───────────────────────────────────────────────
 rapidbyte logs --pipeline salesforce-crm    # recent logs
 rapidbyte logs --pipeline salesforce-crm --run latest
 rapidbyte logs --pipeline salesforce-crm --run 2025-03-19T14:30:00Z
@@ -924,93 +934,82 @@ rapidbyte logs --follow                     # tail all pipeline logs
 ```bash
 # ── Connector plugins (WASM, distributed via OCI) ─────────────────
 
-rapidbyte plugin list                       # installed plugins
-rapidbyte plugin search postgres            # search registry
-rapidbyte plugin install rapidbyte/source-postgres           # install latest
-rapidbyte plugin install rapidbyte/source-postgres:1.2.3    # specific version
-rapidbyte plugin update                                     # update all to latest
-rapidbyte plugin update rapidbyte/source-postgres           # update one
-rapidbyte plugin info rapidbyte/source-postgres             # show plugin details
-
-# ── Local plugin development ──────────────────────────────────────
-rapidbyte plugin dev ./my-connector         # use local WASM build
-rapidbyte plugin package ./my-connector     # package for distribution
-rapidbyte plugin push ./my-connector.wasm   # push to registry
+rapidbyte plugin pull <ref>                 # pull from OCI registry
+rapidbyte plugin push <ref> <wasm_path>     # push to OCI registry
+rapidbyte plugin inspect <ref>              # inspect metadata
+rapidbyte plugin tags <ref>                 # list available tags
+rapidbyte plugin list                       # list locally cached
+rapidbyte plugin remove <ref>              # remove from cache
+rapidbyte plugin search [query]             # search registry
+rapidbyte plugin keygen                     # generate signing keypair
 ```
 
 ### Project commands
 
 ```bash
-# ── init ───────────────────────────────────────────────────────────
+# ── dev (implemented) ─────────────────────────────────────────────
+rapidbyte dev                               # interactive dev shell (REPL)
+
+# ── scaffold (implemented) ───────────────────────────────────────
+rapidbyte scaffold <name>                   # scaffold a new plugin project
+
+# ── init (planned) ───────────────────────────────────────────────
 rapidbyte init                              # scaffold new project
 rapidbyte init --template minimal           # just pipeline.yml
 rapidbyte init --template standard          # full project structure
-
-# ── ls ─────────────────────────────────────────────────────────────
-rapidbyte ls                                # list all pipelines
-rapidbyte ls --tag tier-1                   # filtered
-rapidbyte ls --json                         # machine-readable output
-
-# ── debug ──────────────────────────────────────────────────────────
-rapidbyte debug                             # validate all connections
-rapidbyte debug --connection postgres_app   # test one connection
-# OUTPUT:
-#   Connection: postgres_app
-#   Type: postgres
-#   Host: db.acme.com:5432
-#   Status: ✓ connected (latency: 12ms)
-#   Version: PostgreSQL 15.4
-#   Tables accessible: 42
-#   Replication slot: ✓ available (for CDC)
 
 # ── version ────────────────────────────────────────────────────────
 rapidbyte version
 # rapidbyte 0.1.0 (rustc 1.82.0, wasmtime 41.0.0)
 # plugins: postgres@1.2.3, salesforce@1.5.1, snowflake@2.0.0
 
-# ── dev ────────────────────────────────────────────────────────────
-rapidbyte dev                               # interactive dev shell (REPL)
-
-# ── login / logout ────────────────────────────────────────────────
-rapidbyte login --server http://localhost:8080   # store auth token
-rapidbyte logout                                 # remove stored token
-rapidbyte logout --server http://localhost:8080  # remove token for specific server
+# ── login / logout (planned) ─────────────────────────────────────
+rapidbyte login --controller http://localhost:8080   # store auth token
+rapidbyte logout                                     # remove stored token
+rapidbyte logout --controller http://localhost:8080  # remove token for specific controller
 ```
 
 ### Global flags
 
 ```bash
-rapidbyte sync \
-  --config ./custom/rapidbyte.yml \         # custom project file
-  --connections ./custom/connections.yml \   # custom connections file
-  --env-file .env.staging \                 # load env vars from file
-  --env SNOWFLAKE_DB=STAGING_RAW \          # override single env var
-  --log-level debug \                       # override log level
-  --log-format text \                       # override log format
-  --json \                                  # JSON output (for scripting)
-  -v                                        # verbose (-vv for diagnostic)
-  -q                                        # quiet (exit code only)
+rapidbyte [command] \
+  --controller <url> \                    # controller endpoint (RAPIDBYTE_CONTROLLER)
+  --auth-token <token> \                  # bearer token (RAPIDBYTE_AUTH_TOKEN)
+  --tls-ca-cert <path> \                  # TLS CA cert (RAPIDBYTE_TLS_CA_CERT)
+  --tls-domain <name> \                   # TLS domain override (RAPIDBYTE_TLS_DOMAIN)
+  --log-level info \                      # trace | debug | info | warn | error
+  -v                                      # verbose (-vv for diagnostic)
+  -q                                      # quiet (exit code only)
+  --registry-url <url> \                  # OCI registry (RAPIDBYTE_REGISTRY_URL)
+  --registry-insecure \                   # HTTP instead of HTTPS
+  --trust-policy skip \                   # plugin trust: skip | warn | verify
+  --trust-key <path> \                    # Ed25519 public key for verification
+  --vault-addr <url> \                    # Vault address (VAULT_ADDR)
+  --vault-token <token> \                 # Vault token (VAULT_TOKEN)
+  --vault-role-id <id> \                  # Vault AppRole role ID (VAULT_ROLE_ID)
+  --vault-secret-id <id>                  # Vault AppRole secret ID (VAULT_SECRET_ID)
 ```
 
 ### Routing
 
-Commands that query or control a running system (`status`, `pause`,
-`resume`, `reset`, `freshness`, `logs`) require a server. RapidByte
-resolves the server endpoint in order:
+RapidByte resolves the controller endpoint in order:
 
-1. `--server <url>` flag
-2. `RAPIDBYTE_SERVER` environment variable
-3. `server.url` in `~/.rapidbyte/config.yaml`
+1. `--controller <url>` flag
+2. `RAPIDBYTE_CONTROLLER` environment variable
+3. `controller.url` in `~/.rapidbyte/config.yaml`
+
+`sync` does NOT use config file fallback — it runs locally by default.
+`status`, `watch`, `list-runs` DO use config file fallback.
 
 Pipeline commands (`sync`, `check`, `discover`, `compile`, `diff`,
-`assert`) run in-process by default. When a server is configured, they
-route to the server instead — same command, same output, different
-execution backend.
+`assert`) run in-process by default (embedded engine). When a
+controller is configured, they route via REST instead — same
+command, same output, different execution backend.
 
 ```
-                              ┌─ in-process (no server needed)
+                              ┌─ in-process (embedded engine)
 rapidbyte sync ──→ routing ──┤
-                              └─ REST client → serve | controller
+                              └─ REST client → serve
 ```
 
 ---
@@ -1025,45 +1024,48 @@ Run pipelines directly. No server, no scheduler. For development,
 CI/CD, and external orchestrators (Airflow, Dagster).
 
 ```bash
-rapidbyte sync                              # run and exit
-rapidbyte sync --pipeline salesforce-crm    # one pipeline
+rapidbyte sync pipeline.yml                 # run and exit
+rapidbyte sync --pipeline salesforce-crm    # run by name
 ```
 
 Works everywhere: laptop, CI runner, Docker, cron job.
 
 ### Standalone (serve)
 
-Long-running single-node deployment. Built-in scheduler, REST API,
-metrics endpoint. For teams that want a self-contained system.
+Long-running single-node deployment. `rapidbyte serve` runs with an
+embedded engine: built-in scheduler (planned), REST API (planned),
+metrics endpoint. No agents needed — pipelines execute locally within
+the serve process.
 
 ```bash
-rapidbyte serve --port 8080 --metrics-port 9090
+rapidbyte serve --metrics-listen 0.0.0.0:9090
 ```
 
 Pipelines run on schedule. Use the CLI or REST API to monitor and
 control:
 
 ```bash
-rapidbyte status --server http://localhost:8080
-rapidbyte sync --pipeline salesforce-crm --server http://localhost:8080
+rapidbyte status <run_id> --controller http://localhost:9090
+rapidbyte sync --pipeline salesforce-crm --controller http://localhost:9090
 ```
 
-### Distributed (controller + agents)
+### Distributed (serve + agents)
 
-Multi-node deployment. Controller coordinates, agents execute. Same
-REST API as standalone — the CLI doesn't know the difference.
+Multi-node deployment. `rapidbyte serve --metadata-database-url` runs
+in distributed coordinator mode: same REST API as standalone, plus
+internal gRPC for agent coordination. Agents execute pipeline work.
 
 ```bash
-# Start controller
-rapidbyte controller --listen [::]:9090 \
-  --metadata-database-url postgres://...
+# Start coordinator
+rapidbyte serve --metadata-database-url postgres://... \
+  --listen [::]:9090
 
-# Start agents (on worker nodes)
-rapidbyte agent --server http://controller:9090 --max-tasks 4
+# Start agents (on worker nodes, connect via gRPC)
+rapidbyte agent --controller http://coordinator:9090 --max-tasks 4
 
-# CLI talks to controller — same commands as standalone
-rapidbyte sync --pipeline salesforce-crm --server http://controller:9090
-rapidbyte status --server http://controller:9090
+# CLI talks to coordinator via REST — same commands as standalone
+rapidbyte sync --pipeline salesforce-crm --controller http://coordinator:9090
+rapidbyte status <run_id> --controller http://coordinator:9090
 ```
 
 ### Progression
@@ -1071,7 +1073,7 @@ rapidbyte status --server http://controller:9090
 Most teams start local, move to standalone, scale to distributed:
 
 ```
-rapidbyte sync          →  rapidbyte serve  →  controller + agents
+rapidbyte sync          →  rapidbyte serve  →  serve + agents
 (laptop / CI)              (single node)       (multi-node)
 ```
 
@@ -1331,9 +1333,9 @@ rapidbyte serve
 | Scheduling | `every 30m` syntax, `cron()` escape hatch | Human-readable first, power when needed |
 | Transforms | Closed set of operations, not SQL | Keep boundary clean — dbt does transforms |
 | Assertions | Stream properties, not separate contracts | Same inheritance as all other config. One mental model |
-| Pipeline routing | In-process by default, REST when server configured | Zero-dep quickstart, seamless scale-up |
-| Deployment modes | local → serve → distributed | Same config at every stage, progressive complexity |
-| REST API | Same surface for serve and controller | CLI doesn't care where pipelines execute |
+| Pipeline routing | In-process by default, REST when controller configured | Zero-dep quickstart, seamless scale-up |
+| Deployment modes | sync → serve → serve + agents | Same config at every stage, progressive complexity |
+| REST API | Lives in serve; same surface for standalone and distributed | CLI doesn't care where pipelines execute |
 | Schema evolution | First-class declarative block | THE differentiator vs Airbyte/Fivetran |
 | Config inheritance | Project defaults → pipeline → stream overrides | Three levels max. No directory-level cascading |
 | Connection management | Named refs in connections.yml | Solves copy-paste, env vars solve environments |
