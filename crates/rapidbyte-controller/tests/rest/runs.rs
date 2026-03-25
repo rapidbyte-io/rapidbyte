@@ -47,3 +47,20 @@ async fn cancel_not_found_returns_404() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn list_runs_invalid_status_returns_422() {
+    let app = test_app();
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/runs?status=bogus")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = parse_json(resp).await;
+    assert_eq!(body["error"]["code"], "validation_failed");
+    assert_eq!(body["error"]["details"][0]["field"], "status");
+}

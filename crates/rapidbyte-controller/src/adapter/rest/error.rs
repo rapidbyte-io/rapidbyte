@@ -64,12 +64,16 @@ impl IntoResponse for RestError {
                 "Missing or invalid bearer token".into(),
                 None,
             ),
-            ServiceError::Internal { message } => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error".into(),
-                message.clone(),
-                None,
-            ),
+            ServiceError::Internal { message } => {
+                // Log the real error for operators but don't leak internals to clients.
+                tracing::error!(error = %message, "internal service error");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error".into(),
+                    "An internal error occurred".into(),
+                    None,
+                )
+            }
             ServiceError::NotImplemented { feature } => (
                 StatusCode::NOT_IMPLEMENTED,
                 "not_implemented".into(),

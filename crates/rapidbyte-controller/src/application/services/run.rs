@@ -24,6 +24,20 @@ impl RunService for AppServices {
     }
 
     async fn list(&self, filter: RunFilter) -> Result<PaginatedList<RunSummary>, ServiceError> {
+        // Reject unknown status values rather than silently ignoring them.
+        if let Some(ref status) = filter.status {
+            use std::str::FromStr;
+            if RunState::from_str(status).is_err() {
+                return Err(ServiceError::ValidationFailed {
+                    details: vec![crate::traits::FieldError {
+                        field: "status".into(),
+                        reason: format!(
+                            "unknown status '{status}'; valid values: pending, running, completed, failed, cancelled"
+                        ),
+                    }],
+                });
+            }
+        }
         let domain_filter = to_domain_filter(&filter);
         let pagination = to_pagination(&filter);
         let page = query::list_runs(&self.ctx, domain_filter, pagination)
@@ -273,5 +287,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(empty.items.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn list_rejects_invalid_status() {
+        let tc = fake_context();
+        let services = AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:8080".parse().unwrap(),
+        );
+        let result = services
+            .list(crate::traits::run::RunFilter {
+                pipeline: None,
+                status: Some("bogus".into()),
+                limit: 20,
+                cursor: None,
+            })
+            .await;
+        assert!(matches!(result, Err(ServiceError::ValidationFailed { .. })));
     }
 }

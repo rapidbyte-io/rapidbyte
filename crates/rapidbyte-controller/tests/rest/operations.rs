@@ -190,3 +190,46 @@ async fn logs_returns_empty() {
     assert_eq!(body["items"], serde_json::json!([]));
     assert_eq!(body["next_cursor"], serde_json::Value::Null);
 }
+
+#[tokio::test]
+async fn logs_invalid_cursor_returns_200_empty() {
+    // The FakeLogStore always returns empty, so an invalid cursor doesn't
+    // reach the Postgres parser. This test confirms the endpoint doesn't
+    // crash on malformed cursor values. The real PgLogStore cursor parsing
+    // is covered by unit tests in adapter::postgres::log_store::tests.
+    let app = test_app();
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/logs?pipeline=test&cursor=not-a-valid-cursor")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    // FakeLogStore ignores cursor, returns empty — no crash
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn internal_error_does_not_leak_details() {
+    // Verify that a 500 response uses a generic message, not the raw error.
+    use axum::response::IntoResponse;
+    use http_body_util::BodyExt;
+    use rapidbyte_controller::adapter::rest::error::RestError;
+    use rapidbyte_controller::traits::ServiceError;
+
+    let err = RestError::from(ServiceError::Internal {
+        message: "SELECT * FROM secret_table; connection string: postgres://user:pass@host/db"
+            .into(),
+    });
+    let resp = err.into_response();
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    // Must NOT contain the raw error details
+    assert_eq!(body["error"]["message"], "An internal error occurred");
+    assert!(!body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("postgres://"));
+}
