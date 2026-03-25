@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use futures::StreamExt;
 
-use crate::application::error::AppError;
 use crate::application::{cancel, query};
 use crate::domain::ports::repository::{Pagination, RunFilter as DomainRunFilter};
 use crate::domain::run::{Run, RunState};
@@ -11,7 +10,7 @@ use crate::traits::run::{
     RunSummary,
 };
 
-use super::AppServices;
+use super::{app_error_to_service, AppServices};
 
 #[async_trait]
 impl RunService for AppServices {
@@ -158,24 +157,6 @@ fn domain_event_to_progress(event: crate::domain::event::DomainEvent) -> Option<
             records_written: None,
         }),
         DomainEvent::RunCancelled { run_id } => Some(ProgressEvent::Cancelled { run_id }),
-    }
-}
-
-fn app_error_to_service(err: AppError) -> ServiceError {
-    match err {
-        AppError::NotFound { entity, id } => ServiceError::NotFound {
-            resource: entity.to_lowercase(),
-            id,
-        },
-        AppError::AlreadyExists { run_id } => ServiceError::Conflict {
-            message: format!("run already exists: {run_id}"),
-        },
-        AppError::Domain(e) => ServiceError::Conflict {
-            message: e.to_string(),
-        },
-        _ => ServiceError::Internal {
-            message: err.to_string(),
-        },
     }
 }
 

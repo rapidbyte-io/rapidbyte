@@ -1,9 +1,12 @@
+pub mod pipeline;
 pub mod run;
 pub mod server;
 
 use std::sync::Arc;
 
 use crate::application::context::AppContext;
+use crate::application::error::AppError;
+use crate::traits::ServiceError;
 
 /// Holds all driving-port service trait implementations.
 /// Both REST and gRPC adapters share this struct.
@@ -26,5 +29,24 @@ impl AppServices {
             started_at,
             listen_addr,
         }
+    }
+}
+
+/// Map an [`AppError`] to a [`ServiceError`] for use by service implementations.
+pub(crate) fn app_error_to_service(err: AppError) -> ServiceError {
+    match err {
+        AppError::NotFound { entity, id } => ServiceError::NotFound {
+            resource: entity.to_lowercase().to_string(),
+            id,
+        },
+        AppError::AlreadyExists { run_id } => ServiceError::Conflict {
+            message: format!("run already exists: {run_id}"),
+        },
+        AppError::Domain(e) => ServiceError::Conflict {
+            message: e.to_string(),
+        },
+        _ => ServiceError::Internal {
+            message: err.to_string(),
+        },
     }
 }
