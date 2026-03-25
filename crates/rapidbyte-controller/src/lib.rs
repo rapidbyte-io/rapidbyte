@@ -5,6 +5,7 @@ pub mod application;
 pub mod config;
 pub mod domain;
 pub mod proto;
+pub mod traits;
 
 mod server;
 pub use config::{ControllerConfig, ServerTlsConfig};
