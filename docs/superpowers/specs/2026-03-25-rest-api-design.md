@@ -58,9 +58,9 @@ The controller crate follows hexagonal architecture. The REST API adds:
  │  New: PluginRegistry, ConnectionTester, CursorStore, LogStore     │
  ├────────────────────────────────────────────────────────────────────┤
  │                    DRIVEN ADAPTERS                                 │
- │  Existing: Postgres repos, PgEventBus, Vault, SystemClock         │
- │  New: PgCursorStore, PgLogStore, EnginePluginRegistry,            │
- │       EngineConnectionTester                                       │
+ │  In controller: Postgres repos, PgEventBus, Vault, SystemClock,   │
+ │                 PgCursorStore, PgLogStore                          │
+ │  In CLI (injected): EnginePluginRegistry, EngineConnectionTester  │
  └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -131,12 +131,19 @@ rapidbyte-controller/src/
 │   │   ├── cursor_store.rs        # NEW: PgCursorStore
 │   │   ├── log_store.rs           # NEW: PgLogStore
 │   │   └── ...                    # (existing repos)
-│   ├── engine/                    # NEW: standalone-mode adapters
-│   │   ├── mod.rs
-│   │   ├── plugin_registry.rs     # EnginePluginRegistry
-│   │   └── connection_tester.rs   # EngineConnectionTester
 │   ├── clock.rs                   # (existing)
 │   └── secrets.rs                 # (existing)
+
+# Engine-wrapping adapters live OUTSIDE the controller crate,
+# in rapidbyte-cli (which depends on both controller and engine):
+#
+# rapidbyte-cli/src/
+# ├── engine_adapters/
+# │   ├── plugin_registry.rs       # EnginePluginRegistry (wraps engine OCI resolver)
+# │   └── connection_tester.rs     # EngineConnectionTester (wraps engine plugin runner)
+#
+# These are injected into AppContext as Arc<dyn Trait> at the composition root.
+# This preserves the invariant: controller does NOT depend on engine.
 │
 ├── server.rs                      # EXTENDED: new serve() for REST
 ├── config.rs                      # EXTENDED: rest_port
@@ -289,7 +296,7 @@ pub trait PluginRegistry: Send + Sync {
 }
 ```
 
-Standalone adapter: `adapter/engine/plugin_registry.rs` — wraps engine's OCI resolver + local plugin cache directory.
+Standalone adapter: `rapidbyte-cli/src/engine_adapters/plugin_registry.rs` — wraps engine's OCI resolver + local plugin cache directory. Lives in the CLI crate (not controller) to preserve the invariant that controller does not depend on engine. Injected into `AppContext` as `Arc<dyn PluginRegistry>` at the composition root.
 
 ### ConnectionTester
 
@@ -303,7 +310,7 @@ pub trait ConnectionTester: Send + Sync {
 }
 ```
 
-Standalone adapter: `adapter/engine/connection_tester.rs` — wraps engine's plugin runner to invoke source plugin's `validate`/`discover` WIT exports.
+Standalone adapter: `rapidbyte-cli/src/engine_adapters/connection_tester.rs` — wraps engine's plugin runner to invoke source plugin's `validate`/`discover` WIT exports. Lives in the CLI crate (not controller) for the same reason as `PluginRegistry`.
 
 The service impl resolves connection name to `ConnectionConfig` via pipeline YAML, then passes config to the port. The port doesn't know about pipeline files.
 
@@ -415,11 +422,14 @@ pub fn router(services: Arc<AppServices>, auth_config: AuthConfig) -> Router {
         .route("/api/v1/connections/{name}/test", post(connections::test))
         .route("/api/v1/connections/{name}/discover", get(connections::discover))
         // Plugins
+        // Note: plugin refs contain slashes (e.g., "rapidbyte/source-postgres:1.2.3").
+        // Use wildcard path param {*ref} and register these routes AFTER /search and /install
+        // to avoid conflicts with the wildcard capture.
         .route("/api/v1/plugins", get(plugins::list))
         .route("/api/v1/plugins/search", get(plugins::search))
         .route("/api/v1/plugins/install", post(plugins::install))
-        .route("/api/v1/plugins/{ref}", get(plugins::info))
-        .route("/api/v1/plugins/{ref}", delete(plugins::remove))
+        .route("/api/v1/plugins/{*ref}", get(plugins::info))
+        .route("/api/v1/plugins/{*ref}", delete(plugins::remove))
         // Operations
         .route("/api/v1/status", get(operations::status))
         .route("/api/v1/status/{name}", get(operations::pipeline_status))
@@ -557,11 +567,24 @@ pub struct AppContext {
 `server.rs` gets a new `serve()` function:
 
 1. Same setup as `run()`: pool, migrations, adapter construction
-2. Build new driven-port adapters (`EnginePluginRegistry`, `EngineConnectionTester`, `PgCursorStore`, `PgLogStore`)
-3. Build `AppContext` with all ports
-4. Build `AppServices`
-5. Build REST router
-6. Start both REST and gRPC via `tokio::select!` / `tokio::spawn`
+2. Build Postgres driven-port adapters (`PgCursorStore`, `PgLogStore`) inside the controller
+3. Receive engine-wrapping adapters (`EnginePluginRegistry`, `EngineConnectionTester`) as `Arc<dyn Trait>` parameters — constructed by the CLI crate's composition root, which has access to both controller and engine
+4. Build `AppContext` with all ports (existing + new)
+5. Build `AppServices`
+6. Build REST router
+7. Start both REST and gRPC via `tokio::select!` / `tokio::spawn`
+
+**Crate boundary:** The `serve()` function signature accepts the engine adapters as trait objects. The CLI crate constructs them and passes them in. This preserves the invariant: controller does NOT depend on engine.
+
+```rust
+// rapidbyte-controller::serve() signature
+pub async fn serve(
+    config: ControllerConfig,
+    plugin_registry: Arc<dyn PluginRegistry>,
+    connection_tester: Arc<dyn ConnectionTester>,
+    // ... other params
+) -> Result<()>
+```
 
 Config extended with `rest_port: u16` (default 8080).
 
@@ -681,13 +704,13 @@ Axum skeleton + auth + error handling + `ServerService`. Proves the infrastructu
 
 ### Slice 5: Connections
 
-`ConnectionService` + `ConnectionTester` driven port + engine adapter.
+`ConnectionService` + `ConnectionTester` driven port (trait in controller, engine adapter in CLI crate).
 
 **Delivers:** Connection list/get/test/discover via REST.
 
 ### Slice 6: Plugins
 
-`PluginService` + `PluginRegistry` driven port + engine adapter.
+`PluginService` + `PluginRegistry` driven port (trait in controller, engine adapter in CLI crate). Plugin ref routing uses `{*ref}` wildcard.
 
 **Delivers:** Plugin list/search/install/remove via REST.
 
