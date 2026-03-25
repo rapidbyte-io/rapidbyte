@@ -164,7 +164,7 @@ fn domain_event_to_progress(event: crate::domain::event::DomainEvent) -> Option<
 fn app_error_to_service(err: AppError) -> ServiceError {
     match err {
         AppError::NotFound { entity, id } => ServiceError::NotFound {
-            resource: entity.to_string(),
+            resource: entity.to_lowercase(),
             id,
         },
         AppError::AlreadyExists { run_id } => ServiceError::Conflict {
