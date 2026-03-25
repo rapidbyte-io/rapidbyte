@@ -14,28 +14,35 @@ use crate::adapter::postgres::event_bus::PgEventBus;
 use crate::adapter::postgres::run::PgRunRepository;
 use crate::adapter::postgres::store::PgPipelineStore;
 use crate::adapter::postgres::task::PgTaskRepository;
+use crate::adapter::rest::extractors::RestState;
 use crate::adapter::secrets::VaultSecretResolver;
 use crate::application::context::{AppConfig, AppContext, RegistryConfig};
+use crate::application::services::AppServices;
 use crate::config::ControllerConfig;
 use crate::proto::rapidbyte::v1::agent_service_server::AgentServiceServer;
 use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineServiceServer;
 
-/// Start the controller gRPC server.
-///
-/// This is the composition root: it builds adapters from configuration, wires
-/// them into the application context, spawns background tasks, and starts
-/// serving gRPC requests.
+/// Shared server components produced by [`setup`].
+struct ServerComponents {
+    ctx: Arc<AppContext>,
+    config: ControllerConfig,
+    started_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Perform shared setup: metrics, auth validation, DB pool + migrations, adapters,
+/// event bus listener, `AppContext`, and background tasks.
 ///
 /// # Errors
 ///
-/// Returns an error if the database connection, migration, TLS setup, or gRPC
-/// server startup fails.
-#[allow(clippy::similar_names, clippy::too_many_lines)]
-pub async fn run(
+/// Returns an error if auth config is invalid, the database connection or
+/// migration fails, or the event bus listener cannot be started.
+async fn setup(
     config: ControllerConfig,
     otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
     secrets: SecretProviders,
-) -> Result<()> {
+) -> Result<ServerComponents> {
+    let started_at = chrono::Utc::now();
+
     // 0. Optionally bind Prometheus metrics endpoint.
     //    The otel_guard is kept alive for the server lifetime regardless.
     let _otel_keep = otel_guard.clone();
@@ -99,7 +106,7 @@ pub async fn run(
     event_bus.start_listener().await?;
 
     // 4. Build AppConfig from ControllerConfig
-    let registry = config.registry.url.map(|url| RegistryConfig {
+    let registry = config.registry.url.clone().map(|url| RegistryConfig {
         url,
         insecure: config.registry.insecure,
     });
@@ -153,29 +160,104 @@ pub async fn run(
         }
     });
 
-    // 7. Build gRPC services with auth interceptor
-    let auth = BearerAuthInterceptor::new(config.auth.clone());
+    Ok(ServerComponents {
+        ctx,
+        config,
+        started_at,
+    })
+}
+
+/// Build the gRPC server future from shared components.
+fn build_grpc_server(
+    components: &ServerComponents,
+) -> Result<impl std::future::Future<Output = Result<(), tonic::transport::Error>>> {
+    let auth = BearerAuthInterceptor::new(components.config.auth.clone());
     let pipeline_svc = PipelineServiceServer::with_interceptor(
-        PipelineGrpcService::new(ctx.clone()),
+        PipelineGrpcService::new(components.ctx.clone()),
         auth.clone(),
     );
-    let agent_svc = AgentServiceServer::with_interceptor(AgentGrpcService::new(ctx.clone()), auth);
+    let agent_svc =
+        AgentServiceServer::with_interceptor(AgentGrpcService::new(components.ctx.clone()), auth);
 
-    // 8. Configure TLS if provided
     let mut builder = Server::builder();
-    if let Some(tls) = config.tls {
-        let identity = tonic::transport::Identity::from_pem(tls.cert_pem, tls.key_pem);
+    if let Some(ref tls) = components.config.tls {
+        let identity =
+            tonic::transport::Identity::from_pem(tls.cert_pem.clone(), tls.key_pem.clone());
         builder =
             builder.tls_config(tonic::transport::ServerTlsConfig::new().identity(identity))?;
     }
 
-    // 9. Start server
-    tracing::info!(addr = %config.listen_addr, "controller listening");
-    builder
+    let listen_addr = components.config.listen_addr;
+    tracing::info!(addr = %listen_addr, "controller gRPC listening");
+    Ok(builder
         .add_service(pipeline_svc)
         .add_service(agent_svc)
-        .serve(config.listen_addr)
-        .await?;
+        .serve(listen_addr))
+}
+
+/// Start the controller gRPC server.
+///
+/// This is the composition root: it builds adapters from configuration, wires
+/// them into the application context, spawns background tasks, and starts
+/// serving gRPC requests.
+///
+/// # Errors
+///
+/// Returns an error if the database connection, migration, TLS setup, or gRPC
+/// server startup fails.
+#[allow(clippy::similar_names, clippy::too_many_lines)]
+pub async fn run(
+    config: ControllerConfig,
+    otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
+    secrets: SecretProviders,
+) -> Result<()> {
+    let components = setup(config, otel_guard, secrets).await?;
+    let grpc_server = build_grpc_server(&components)?;
+    grpc_server.await?;
+    Ok(())
+}
+
+/// Start the controller gRPC server and REST API server.
+///
+/// This is the full composition root for `rapidbyte serve`: it wires all
+/// adapters, spawns background tasks, and starts both the gRPC server and
+/// the REST HTTP server in parallel. If `config.rest_listen_addr` is `None`,
+/// only the gRPC server is started (identical to [`run`]).
+///
+/// # Errors
+///
+/// Returns an error if the database connection, migration, TLS setup, gRPC
+/// server startup, or REST server startup fails.
+#[allow(clippy::similar_names, clippy::too_many_lines)]
+pub async fn serve(
+    config: ControllerConfig,
+    otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
+    secrets: SecretProviders,
+) -> Result<()> {
+    let components = setup(config, otel_guard, secrets).await?;
+    let grpc_server = build_grpc_server(&components)?;
+
+    if let Some(rest_addr) = components.config.rest_listen_addr {
+        let services = Arc::new(AppServices::new(
+            components.ctx.clone(),
+            components.started_at,
+            rest_addr,
+        ));
+        let rest_state = RestState {
+            services,
+            auth_config: components.config.auth.clone(),
+        };
+        let rest_router = crate::adapter::rest::router(rest_state);
+        let rest_listener = tokio::net::TcpListener::bind(rest_addr).await?;
+        tracing::info!(addr = %rest_addr, "controller REST listening");
+
+        tokio::select! {
+            result = grpc_server => result?,
+            result = axum::serve(rest_listener, rest_router) => result?,
+        }
+    } else {
+        grpc_server.await?;
+    }
 
     Ok(())
 }

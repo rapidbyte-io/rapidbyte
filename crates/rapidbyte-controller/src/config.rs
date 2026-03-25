@@ -95,6 +95,8 @@ pub struct ControllerConfig {
     pub tls: Option<ServerTlsConfig>,
     pub metrics_listen: Option<String>,
     pub registry: RegistryConfig,
+    /// REST API listen address. If None, REST server is not started.
+    pub rest_listen_addr: Option<SocketAddr>,
 }
 
 impl Default for ControllerConfig {
@@ -107,6 +109,7 @@ impl Default for ControllerConfig {
             tls: None,
             metrics_listen: None,
             registry: RegistryConfig::default(),
+            rest_listen_addr: None,
         }
     }
 }

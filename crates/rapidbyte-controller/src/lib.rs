@@ -9,4 +9,4 @@ pub mod traits;
 
 mod server;
 pub use config::{ControllerConfig, ServerTlsConfig};
-pub use server::run;
+pub use server::{run, serve};
