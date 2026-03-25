@@ -25,18 +25,12 @@ impl FromRequestParts<RestState> for Auth {
         parts: &mut Parts,
         state: &RestState,
     ) -> Result<Self, Self::Rejection> {
-        // When unauthenticated access is allowed, tolerate a missing token by
-        // substituting an empty string so validate_token's allow-all path fires.
-        let token = match extract_bearer(&parts.headers) {
-            Ok(t) => t,
-            Err(e) => {
-                if state.auth_config.allow_unauthenticated {
-                    String::new()
-                } else {
-                    return Err(RestError::from(e));
-                }
-            }
-        };
+        if state.auth_config.allow_unauthenticated {
+            return Ok(Auth(AuthContext {
+                token: String::new(),
+            }));
+        }
+        let token = extract_bearer(&parts.headers).map_err(RestError::from)?;
         let ctx = validate_token(&state.auth_config, &token).map_err(RestError::from)?;
         Ok(Auth(ctx))
     }

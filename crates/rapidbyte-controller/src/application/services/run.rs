@@ -116,7 +116,7 @@ fn run_to_detail(run: &Run) -> RunDetail {
             bytes_read: m.bytes_read,
             bytes_written: m.bytes_written,
         }),
-        timing: None, // Not available from current domain model
+        timing: None, // Requires per-stage timing breakdown from Run
         retry_count: run.current_attempt().saturating_sub(1),
         cancel_requested: run.is_cancel_requested(),
         max_retries: run.max_retries(),

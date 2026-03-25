@@ -20,7 +20,7 @@ impl PgLogStore {
 #[async_trait]
 impl LogStore for PgLogStore {
     async fn query(&self, filter: LogFilter) -> Result<PaginatedList<StoredLogEntry>, LogError> {
-        let limit = filter.limit.min(100).max(1);
+        let limit = filter.limit;
 
         let mut query = String::from(
             r#"SELECT id, run_id, pipeline, "timestamp", level, message, fields
