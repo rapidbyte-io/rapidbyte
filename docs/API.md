@@ -136,16 +136,17 @@ The driving port traits (service traits) are defined inside
 only on these traits. They never reach past the controller into engine
 internals.
 
-The driven side has **two execution modes**, selected at startup:
+The driven side selects execution strategy at startup:
 
-- **Engine** (`rapidbyte-engine`) — used in local (`sync`) and standalone
-  (`serve`) modes. The controller embeds the engine and delegates
-  directly to its use-cases via `EngineContext`. Driven adapters:
-  Wasmtime, OCI registry, Postgres/SQLite, OTel.
+- **Embedded engine** — the controller runs `rapidbyte-engine`
+  in-process. Used in both `rapidbyte sync` (embedded controller) and
+  `rapidbyte serve` without agents. Driven adapters: Wasmtime, OCI
+  registry, Postgres/SQLite, OTel.
 
-- **Distributed** — used in `rapidbyte serve --metadata-database-url` mode.
-  The controller manages task distribution across remote agents via gRPC.
-  Each agent runs `rapidbyte-engine` locally. Driven adapters: Postgres, gRPC.
+- **Agent delegation** — the controller coordinates remote agents via
+  gRPC; each agent runs `rapidbyte-engine` locally. Used when
+  `rapidbyte serve` has registered agents. Driven adapters: Postgres,
+  gRPC.
 
 ### Two hexagons
 
@@ -187,42 +188,28 @@ Both crates share the same conventions:
 - **Adapters** implement traits with concrete infrastructure
 - Tests use in-memory fakes via a `testing` module
 
-### Deployment-mode routing
+### Routing
 
-Routing depends on how RapidByte is invoked:
-
-- **CLI local** — `rapidbyte sync` routes directly to
-  `rapidbyte-engine` (in-process, no network hop).
-- **CLI distributed** — `rapidbyte sync --controller <url>` sends
-  requests to a running controller via gRPC.
-- **`rapidbyte serve`** (planned standalone mode) — the controller
-  embeds the engine, serves REST + gRPC on the same port.
-- **`rapidbyte serve --metadata-database-url`** (distributed) — the
-  controller coordinates remote agents via gRPC, serves REST.
+`rapidbyte sync` always executes through a controller. Without
+`--controller`, an embedded controller runs in-process. With
+`--controller <url>`, it connects to a running `rapidbyte serve`
+instance. The execution path is identical either way.
 
 ```
-┌──────────────────┐     ┌──────────────────────────┐
-│  CLI (local)     │────→│   rapidbyte-engine       │
-│                  │     │   (in-process)            │
-└──────────────────┘     └──────────────────────────┘
+                                    ┌──────────────────────────┐
+rapidbyte sync ──→ controller ──→   │  rapidbyte-engine        │
+                   (embedded)       │  (in-process)            │
+                                    └──────────────────────────┘
 
-┌──────────────────┐     ┌──────────────────────────┐
-│  CLI             │     │   rapidbyte-controller   │
-│  (distributed)   │────→│   (gRPC client)          │
-└──────────────────┘     └──────────────────────────┘
-
-┌──────────────────┐     ┌──────────────────────────┐
-│  rapidbyte serve │     │   rapidbyte-controller   │
-│  (standalone)    │────→│   embeds engine           │
-│                  │     │   REST + gRPC             │
-└──────────────────┘     └──────────────────────────┘
-
-┌──────────────────┐     ┌──────────────────────────┐
-│  rapidbyte serve │     │   rapidbyte-controller   │
-│  --metadata-     │────→│   coordinates agents     │
-│  database-url    │     │   REST + gRPC             │
-└──────────────────┘     └──────────────────────────┘
+                                    ┌──────────────────────────┐
+rapidbyte sync ──→ controller ──→   │  rapidbyte-controller    │
+  --controller url (remote)         │  (gRPC / REST)           │
+                                    └──────────────────────────┘
 ```
+
+Whether the controller is embedded or remote, the same service traits
+handle the request. Graduating from local to distributed is just adding
+`--controller <url>`.
 
 ```rust
 // Current: start the controller gRPC server
@@ -1753,6 +1740,73 @@ probes and load balancer health checks.
   "mode": "serve",
   "uptime_secs": 86400,
   "state_backend": "postgres",
+  "state_backend_healthy": true,
+  "agents_connected": 0
+}
+```
+
+In distributed mode (`controller`):
+
+```json
+{
+  "status": "healthy",
+  "mode": "controller",
+  "uptime_secs": 172800,
+  "state_backend": "postgres",
+  "state_backend_healthy": true,
+  "agents_connected": 3
+}
+```
+
+| `status` | Meaning |
+|-----------|---------|
+| `healthy` | All subsystems operational |
+| `degraded` | Running but with issues (e.g., state backend unreachable) |
+| `unhealthy` | Critical failure |
+
+HTTP status: `200` for healthy/degraded, `503` for unhealthy.
+
+### Version
+
+```
+GET /api/v1/server/version
+```
+
+```json
+{
+  "version": "0.1.0",
+  "rustc": "1.82.0",
+  "wasmtime": "41.0.0",
+  "mode": "serve",
+  "plugins": [
+    { "name": "rapidbyte/source-postgres", "version": "1.2.3" },
+    { "name": "rapidbyte/dest-snowflake", "version": "2.0.0" }
+  ]
+}
+```
+
+### Server config
+
+```
+GET /api/v1/server/config
+```
+
+Returns non-sensitive server configuration:
+
+```json
+{
+  "mode": "serve",
+  "port": 8080,
+  "metrics_port": 9090,
+  "state_backend": "postgres",
+  "registry_url": "registry.example.com/plugins",
+  "trust_policy": "verify",
+  "auth_required": true,
+  "pipelines_discovered": 4,
+  "scheduler_active": true
+}
+```
+ostgres",
   "state_backend_healthy": true,
   "agents_connected": 0
 }
