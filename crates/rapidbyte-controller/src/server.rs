@@ -10,7 +10,9 @@ use crate::adapter::grpc::agent::AgentGrpcService;
 use crate::adapter::grpc::auth::BearerAuthInterceptor;
 use crate::adapter::grpc::pipeline::PipelineGrpcService;
 use crate::adapter::postgres::agent::PgAgentRepository;
+use crate::adapter::postgres::cursor_store::PgCursorStore;
 use crate::adapter::postgres::event_bus::PgEventBus;
+use crate::adapter::postgres::log_store::PgLogStore;
 use crate::adapter::postgres::run::PgRunRepository;
 use crate::adapter::postgres::store::PgPipelineStore;
 use crate::adapter::postgres::task::PgTaskRepository;
@@ -99,6 +101,8 @@ async fn setup(
     let agents = Arc::new(PgAgentRepository::new(pool.clone()));
     let store = Arc::new(PgPipelineStore::new(pool.clone()));
     let event_bus = Arc::new(PgEventBus::new(pool.clone()));
+    let cursor_store = Arc::new(PgCursorStore::new(pool.clone()));
+    let log_store = Arc::new(PgLogStore::new(pool.clone()));
     let secrets_resolver = Arc::new(VaultSecretResolver::new(secrets));
     let clock = Arc::new(SystemClock);
 
@@ -130,6 +134,8 @@ async fn setup(
         event_bus,
         secrets: secrets_resolver,
         clock,
+        cursor_store,
+        log_store,
         config: app_config,
     });
 

@@ -14,7 +14,11 @@ use crate::domain::agent::Agent;
 use crate::domain::event::DomainEvent;
 use crate::domain::lease::Lease;
 use crate::domain::ports::clock::Clock;
+use crate::domain::ports::cursor_store::{CursorError, CursorStore, StreamCursor, SyncTimestamp};
 use crate::domain::ports::event_bus::{EventBus, EventBusError, EventStream};
+use crate::domain::ports::log_store::{
+    LogError, LogFilter, LogStore, LogStreamFilter, StoredLogEntry,
+};
 use crate::domain::ports::pipeline_store::PipelineStore;
 use crate::domain::ports::repository::{
     AgentRepository, Pagination, RepositoryError, RunFilter, RunPage, RunRepository, TaskRepository,
@@ -22,6 +26,7 @@ use crate::domain::ports::repository::{
 use crate::domain::ports::secrets::{SecretError, SecretResolver};
 use crate::domain::run::Run;
 use crate::domain::task::{Task, TaskState};
+use crate::traits::{EventStream as TraitEventStream, PaginatedList};
 
 // ---------------------------------------------------------------------------
 // Shared backing store
@@ -507,6 +512,106 @@ impl Clock for FakeClock {
 }
 
 // ---------------------------------------------------------------------------
+// FakeCursorStore
+// ---------------------------------------------------------------------------
+
+pub struct FakeCursorStore {
+    cursors: Mutex<HashMap<String, Vec<StreamCursor>>>,
+}
+
+impl FakeCursorStore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            cursors: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for FakeCursorStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl CursorStore for FakeCursorStore {
+    async fn get_cursors(&self, pipeline: &str) -> Result<Vec<StreamCursor>, CursorError> {
+        Ok(self
+            .cursors
+            .lock()
+            .unwrap()
+            .get(pipeline)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn clear(&self, pipeline: &str, stream: Option<&str>) -> Result<u64, CursorError> {
+        let mut map = self.cursors.lock().unwrap();
+        if let Some(cursors) = map.get_mut(pipeline) {
+            let before = cursors.len();
+            if let Some(s) = stream {
+                cursors.retain(|c| c.stream != s);
+            } else {
+                cursors.clear();
+            }
+            Ok((before - cursors.len()) as u64)
+        } else {
+            Ok(0)
+        }
+    }
+
+    async fn last_sync_times(
+        &self,
+        pipelines: &[String],
+    ) -> Result<Vec<SyncTimestamp>, CursorError> {
+        Ok(pipelines
+            .iter()
+            .map(|p| SyncTimestamp {
+                pipeline: p.clone(),
+                last_sync_at: None,
+            })
+            .collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakeLogStore
+// ---------------------------------------------------------------------------
+
+pub struct FakeLogStore;
+
+impl FakeLogStore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for FakeLogStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl LogStore for FakeLogStore {
+    async fn query(&self, _filter: LogFilter) -> Result<PaginatedList<StoredLogEntry>, LogError> {
+        Ok(PaginatedList {
+            items: vec![],
+            next_cursor: None,
+        })
+    }
+
+    async fn subscribe(
+        &self,
+        _filter: LogStreamFilter,
+    ) -> Result<TraitEventStream<StoredLogEntry>, LogError> {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TestContext + factory
 // ---------------------------------------------------------------------------
 
@@ -563,6 +668,9 @@ pub fn fake_context() -> TestContext {
     let event_bus = Arc::new(FakeEventBus::new());
     let clock = Arc::new(FakeClock::new(Utc::now()));
 
+    let cursor_store = Arc::new(FakeCursorStore::new());
+    let log_store = Arc::new(FakeLogStore::new());
+
     let ctx = AppContext {
         runs: Arc::new(FakeRunRepository::new(storage.clone())),
         tasks: Arc::new(FakeTaskRepository::new(storage.clone())),
@@ -571,6 +679,8 @@ pub fn fake_context() -> TestContext {
         event_bus: Arc::clone(&event_bus) as Arc<dyn EventBus>,
         secrets: Arc::new(FakeSecretResolver),
         clock: Arc::clone(&clock) as Arc<dyn Clock>,
+        cursor_store,
+        log_store,
         config: AppConfig {
             default_lease_duration: Duration::from_secs(300),
             lease_check_interval: Duration::from_secs(30),
