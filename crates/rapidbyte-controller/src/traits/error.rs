@@ -10,6 +10,7 @@ pub enum ServiceError {
     ValidationFailed { details: Vec<FieldError> },
     Unauthorized,
     Internal { message: String },
+    NotImplemented { feature: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -28,6 +29,7 @@ impl fmt::Display for ServiceError {
             }
             Self::Unauthorized => write!(f, "unauthorized"),
             Self::Internal { message } => write!(f, "internal error: {message}"),
+            Self::NotImplemented { feature } => write!(f, "not implemented: {feature}"),
         }
     }
 }

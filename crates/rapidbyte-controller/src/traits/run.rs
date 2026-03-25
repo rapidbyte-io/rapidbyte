@@ -89,11 +89,12 @@ pub struct BatchRunEntry {
 /// Progress event emitted during pipeline execution.
 /// Used by both run SSE and batch SSE streams.
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProgressEvent {
-    #[serde(rename = "started")]
-    Started { run_id: String, pipeline: String },
-    #[serde(rename = "progress")]
+    Started {
+        run_id: String,
+        pipeline: String,
+    },
     Progress {
         run_id: String,
         phase: String,
@@ -101,16 +102,18 @@ pub enum ProgressEvent {
         records_read: Option<u64>,
         records_written: Option<u64>,
     },
-    #[serde(rename = "complete")]
     Complete {
         run_id: String,
         status: String,
         duration_secs: Option<f64>,
     },
-    #[serde(rename = "failed")]
-    Failed { run_id: String, error: RunErrorInfo },
-    #[serde(rename = "cancelled")]
-    Cancelled { run_id: String },
+    Failed {
+        run_id: String,
+        error: RunErrorInfo,
+    },
+    Cancelled {
+        run_id: String,
+    },
 }
 
 impl ProgressEvent {

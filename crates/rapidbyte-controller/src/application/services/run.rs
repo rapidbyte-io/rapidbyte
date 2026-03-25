@@ -65,8 +65,8 @@ impl RunService for AppServices {
 
     async fn get_batch(&self, _batch_id: &str) -> Result<BatchDetail, ServiceError> {
         // Batch support requires new domain types — not yet implemented
-        Err(ServiceError::Internal {
-            message: "batch operations not yet available".into(),
+        Err(ServiceError::NotImplemented {
+            feature: "batch operations".into(),
         })
     }
 
@@ -74,8 +74,8 @@ impl RunService for AppServices {
         &self,
         _batch_id: &str,
     ) -> Result<EventStream<ProgressEvent>, ServiceError> {
-        Err(ServiceError::Internal {
-            message: "batch operations not yet available".into(),
+        Err(ServiceError::NotImplemented {
+            feature: "batch operations".into(),
         })
     }
 }

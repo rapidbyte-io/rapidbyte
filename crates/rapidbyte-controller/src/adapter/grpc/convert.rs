@@ -51,6 +51,7 @@ pub fn service_error_to_status(err: ServiceError) -> Status {
         }
         ServiceError::Unauthorized => Status::unauthenticated("unauthorized"),
         ServiceError::Internal { message } => Status::internal(message),
+        ServiceError::NotImplemented { feature } => Status::unimplemented(feature),
     }
 }
 

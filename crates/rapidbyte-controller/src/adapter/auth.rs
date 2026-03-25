@@ -1,5 +1,7 @@
 //! Transport-agnostic bearer-token validation shared by gRPC and REST adapters.
 
+use subtle::ConstantTimeEq;
+
 use crate::config::AuthConfig;
 
 /// Identity resolved from a valid bearer token.
@@ -35,7 +37,11 @@ pub fn validate_token(config: &AuthConfig, raw_token: &str) -> Result<AuthContex
             token: raw_token.to_string(),
         });
     }
-    if config.tokens.iter().any(|t| t == raw_token) {
+    if config
+        .tokens
+        .iter()
+        .any(|t| t.len() == raw_token.len() && bool::from(t.as_bytes().ct_eq(raw_token.as_bytes())))
+    {
         Ok(AuthContext {
             token: raw_token.to_string(),
         })

@@ -24,8 +24,8 @@ impl PipelineService for AppServices {
     }
 
     async fn get(&self, _name: &str) -> Result<PipelineDetail, ServiceError> {
-        Err(ServiceError::Internal {
-            message: "pipeline detail not yet available in server mode".into(),
+        Err(ServiceError::NotImplemented {
+            feature: "pipeline detail".into(),
         })
     }
 
@@ -53,44 +53,44 @@ impl PipelineService for AppServices {
     }
 
     async fn sync_batch(&self, _request: SyncBatchRequest) -> Result<BatchRunHandle, ServiceError> {
-        Err(ServiceError::Internal {
-            message: "batch sync not yet available in server mode".into(),
+        Err(ServiceError::NotImplemented {
+            feature: "batch sync".into(),
         })
     }
 
     async fn check(&self, _name: &str) -> Result<CheckResult, ServiceError> {
-        Err(ServiceError::Internal {
-            message: "check not yet available in server mode".into(),
+        Err(ServiceError::NotImplemented {
+            feature: "check".into(),
         })
     }
 
     async fn check_apply(&self, _name: &str) -> Result<RunHandle, ServiceError> {
-        Err(ServiceError::Internal {
-            message: "check-apply not yet available in server mode".into(),
+        Err(ServiceError::NotImplemented {
+            feature: "check-apply".into(),
         })
     }
 
     async fn compile(&self, _name: &str) -> Result<ResolvedConfig, ServiceError> {
-        Err(ServiceError::Internal {
-            message: "compile not yet available in server mode".into(),
+        Err(ServiceError::NotImplemented {
+            feature: "compile".into(),
         })
     }
 
     async fn diff(&self, _name: &str) -> Result<DiffResult, ServiceError> {
-        Err(ServiceError::Internal {
-            message: "diff not yet available in server mode".into(),
+        Err(ServiceError::NotImplemented {
+            feature: "diff".into(),
         })
     }
 
     async fn assert(&self, _request: AssertRequest) -> Result<AssertResult, ServiceError> {
-        Err(ServiceError::Internal {
-            message: "assert not yet available in server mode".into(),
+        Err(ServiceError::NotImplemented {
+            feature: "assert".into(),
         })
     }
 
     async fn teardown(&self, _request: TeardownRequest) -> Result<RunHandle, ServiceError> {
-        Err(ServiceError::Internal {
-            message: "teardown not yet available in server mode".into(),
+        Err(ServiceError::NotImplemented {
+            feature: "teardown".into(),
         })
     }
 }
@@ -164,7 +164,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_returns_internal_error() {
+    async fn get_returns_not_implemented() {
         let tc = fake_context();
         let services = AppServices::new(
             Arc::new(tc.ctx),
@@ -173,6 +173,6 @@ mod tests {
         );
 
         let result = services.get("any-pipeline").await;
-        assert!(matches!(result, Err(ServiceError::Internal { .. })));
+        assert!(matches!(result, Err(ServiceError::NotImplemented { .. })));
     }
 }

@@ -11,6 +11,9 @@ pub mod sse;
 
 use axum::routing::{get, post};
 use axum::Router;
+use tower_http::cors::CorsLayer;
+use tower_http::trace::TraceLayer;
+
 use extractors::RestState;
 
 /// Build the REST API router.
@@ -77,5 +80,9 @@ pub fn router(state: RestState) -> Router {
             get(plugins::info).delete(plugins::remove),
         );
 
-    public.merge(protected).with_state(state)
+    public
+        .merge(protected)
+        .layer(TraceLayer::new_for_http())
+        .layer(CorsLayer::permissive())
+        .with_state(state)
 }

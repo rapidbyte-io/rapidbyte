@@ -1,6 +1,6 @@
 CREATE TABLE run_logs (
     id          BIGSERIAL PRIMARY KEY,
-    run_id      TEXT NOT NULL,
+    run_id      TEXT NOT NULL REFERENCES runs(id),
     pipeline    TEXT NOT NULL,
     "timestamp" TIMESTAMPTZ NOT NULL DEFAULT now(),
     level       TEXT NOT NULL,

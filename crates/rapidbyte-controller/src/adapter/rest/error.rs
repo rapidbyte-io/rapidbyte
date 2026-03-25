@@ -70,6 +70,12 @@ impl IntoResponse for RestError {
                 message.clone(),
                 None,
             ),
+            ServiceError::NotImplemented { feature } => (
+                StatusCode::NOT_IMPLEMENTED,
+                "not_implemented".into(),
+                format!("{feature} is not yet available"),
+                None,
+            ),
         };
 
         let body = ErrorResponse {
