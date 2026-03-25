@@ -4,7 +4,6 @@ use serde::Deserialize;
 
 use super::error::RestError;
 use super::extractors::{Auth, RestState};
-use super::pagination::PaginationParams;
 use super::sse::to_sse_response;
 use crate::traits::run::{BatchDetail, ProgressEvent, RunDetail, RunFilter, RunSummary};
 use crate::traits::{PaginatedList, RunService};
@@ -23,11 +22,7 @@ pub struct ListRunsParams {
 
 impl ListRunsParams {
     fn limit(&self) -> u32 {
-        PaginationParams {
-            limit: self.limit,
-            cursor: self.cursor.clone(),
-        }
-        .limit()
+        self.limit.unwrap_or(20).min(100).max(1)
     }
 }
 

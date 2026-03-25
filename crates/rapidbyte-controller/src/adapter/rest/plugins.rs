@@ -1,4 +1,5 @@
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::Json;
 use serde::Deserialize;
 
@@ -78,7 +79,7 @@ pub async fn remove(
     _auth: Auth,
     State(state): State<RestState>,
     Path(plugin_ref): Path<String>,
-) -> Result<Json<()>, RestError> {
+) -> Result<StatusCode, RestError> {
     state.services.remove(&plugin_ref).await?;
-    Ok(Json(()))
+    Ok(StatusCode::NO_CONTENT)
 }

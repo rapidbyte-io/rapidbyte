@@ -1,7 +1,15 @@
 use async_trait::async_trait;
-use sqlx::{PgPool, Row};
+use sqlx::PgPool;
 
 use crate::domain::ports::cursor_store::{CursorError, CursorStore, StreamCursor, SyncTimestamp};
+
+#[derive(sqlx::FromRow)]
+struct CursorRow {
+    stream: String,
+    cursor_field: String,
+    cursor_value: String,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
 
 pub struct PgCursorStore {
     pool: PgPool,
@@ -17,7 +25,7 @@ impl PgCursorStore {
 #[async_trait]
 impl CursorStore for PgCursorStore {
     async fn get_cursors(&self, pipeline: &str) -> Result<Vec<StreamCursor>, CursorError> {
-        let rows = sqlx::query(
+        let rows: Vec<CursorRow> = sqlx::query_as::<_, CursorRow>(
             "SELECT stream, cursor_field, cursor_value, updated_at \
              FROM cursors \
              WHERE pipeline = $1 \
@@ -28,28 +36,15 @@ impl CursorStore for PgCursorStore {
         .await
         .map_err(|e| CursorError::Database(e.to_string()))?;
 
-        rows.iter()
-            .map(|row| {
-                let stream: String = row
-                    .try_get("stream")
-                    .map_err(|e| CursorError::Database(e.to_string()))?;
-                let cursor_field: String = row
-                    .try_get("cursor_field")
-                    .map_err(|e| CursorError::Database(e.to_string()))?;
-                let cursor_value: String = row
-                    .try_get("cursor_value")
-                    .map_err(|e| CursorError::Database(e.to_string()))?;
-                let updated_at: chrono::DateTime<chrono::Utc> = row
-                    .try_get("updated_at")
-                    .map_err(|e| CursorError::Database(e.to_string()))?;
-                Ok(StreamCursor {
-                    stream,
-                    cursor_field,
-                    cursor_value,
-                    updated_at,
-                })
+        Ok(rows
+            .into_iter()
+            .map(|row| StreamCursor {
+                stream: row.stream,
+                cursor_field: row.cursor_field,
+                cursor_value: row.cursor_value,
+                updated_at: row.updated_at,
             })
-            .collect()
+            .collect())
     }
 
     async fn clear(&self, pipeline: &str, stream: Option<&str>) -> Result<u64, CursorError> {
@@ -76,32 +71,41 @@ impl CursorStore for PgCursorStore {
         &self,
         pipelines: &[String],
     ) -> Result<Vec<SyncTimestamp>, CursorError> {
-        let mut results = Vec::with_capacity(pipelines.len());
-        for pipeline in pipelines {
-            let row = sqlx::query(
-                "SELECT MAX(updated_at) AS last_sync_at \
-                 FROM cursors \
-                 WHERE pipeline = $1",
-            )
-            .bind(pipeline)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| CursorError::Database(e.to_string()))?;
-
-            let last_sync_at = row
-                .as_ref()
-                .map(|r| {
-                    r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_sync_at")
-                        .map_err(|e| CursorError::Database(e.to_string()))
-                })
-                .transpose()?
-                .flatten();
-
-            results.push(SyncTimestamp {
-                pipeline: pipeline.clone(),
-                last_sync_at,
-            });
+        if pipelines.is_empty() {
+            return Ok(vec![]);
         }
-        Ok(results)
+
+        let rows = sqlx::query(
+            r#"SELECT pipeline, MAX(updated_at) as last_sync_at
+               FROM cursors
+               WHERE pipeline = ANY($1)
+               GROUP BY pipeline"#,
+        )
+        .bind(pipelines)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| CursorError::Database(e.to_string()))?;
+
+        use sqlx::Row;
+        let mut result_map: std::collections::HashMap<
+            String,
+            Option<chrono::DateTime<chrono::Utc>>,
+        > = rows
+            .into_iter()
+            .map(|row| {
+                let pipeline: String = row.get("pipeline");
+                let last_sync_at: Option<chrono::DateTime<chrono::Utc>> = row.get("last_sync_at");
+                (pipeline, last_sync_at)
+            })
+            .collect();
+
+        // Ensure all requested pipelines are in the result (even if no cursors exist).
+        Ok(pipelines
+            .iter()
+            .map(|p| SyncTimestamp {
+                pipeline: p.clone(),
+                last_sync_at: result_map.remove(p).flatten(),
+            })
+            .collect())
     }
 }
