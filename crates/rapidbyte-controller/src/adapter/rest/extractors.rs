@@ -1,13 +1,17 @@
+use std::sync::Arc;
+
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 
 use crate::adapter::auth::{validate_token, AuthContext, AuthError};
 use crate::adapter::rest::error::RestError;
+use crate::application::services::AppServices;
 use crate::config::AuthConfig;
 
 /// Shared state for the REST router.
 #[derive(Clone)]
 pub struct RestState {
+    pub services: Arc<AppServices>,
     pub auth_config: AuthConfig,
 }
 
