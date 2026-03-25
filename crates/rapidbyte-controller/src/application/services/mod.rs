@@ -1,3 +1,4 @@
+pub mod operations;
 pub mod pipeline;
 pub mod run;
 pub mod server;
