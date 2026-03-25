@@ -172,8 +172,17 @@ fn build_grpc_server(
     components: &ServerComponents,
 ) -> Result<impl std::future::Future<Output = Result<(), tonic::transport::Error>>> {
     let auth = BearerAuthInterceptor::new(components.config.auth.clone());
+
+    // Use a placeholder address for gRPC-only mode; the listen_addr is only
+    // relevant for REST URL generation which is not used by the gRPC adapter.
+    let grpc_services = Arc::new(AppServices::new(
+        components.ctx.clone(),
+        components.started_at,
+        components.config.listen_addr,
+    ));
+
     let pipeline_svc = PipelineServiceServer::with_interceptor(
-        PipelineGrpcService::new(components.ctx.clone()),
+        PipelineGrpcService::new(grpc_services),
         auth.clone(),
     );
     let agent_svc =

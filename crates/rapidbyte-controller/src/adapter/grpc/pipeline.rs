@@ -7,19 +7,19 @@ use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
 
 use crate::adapter::grpc::convert;
-use crate::application::context::AppContext;
+use crate::application::services::AppServices;
 use crate::domain::ports::repository::{Pagination, RunFilter};
 use crate::proto::rapidbyte::v1 as pb;
 use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineService;
 
 pub struct PipelineGrpcService {
-    ctx: Arc<AppContext>,
+    services: Arc<AppServices>,
 }
 
 impl PipelineGrpcService {
     #[must_use]
-    pub fn new(ctx: Arc<AppContext>) -> Self {
-        Self { ctx }
+    pub fn new(services: Arc<AppServices>) -> Self {
+        Self { services }
     }
 }
 
@@ -45,7 +45,7 @@ impl PipelineService for PipelineGrpcService {
         };
 
         let result = crate::application::submit::submit_pipeline(
-            &self.ctx,
+            &self.services.ctx,
             idempotency_key,
             req.pipeline_yaml,
             max_retries,
@@ -65,7 +65,7 @@ impl PipelineService for PipelineGrpcService {
         req: Request<pb::GetRunRequest>,
     ) -> Result<Response<pb::GetRunResponse>, Status> {
         let run_id = req.into_inner().run_id;
-        let run = crate::application::query::get_run(&self.ctx, &run_id)
+        let run = crate::application::query::get_run(&self.services.ctx, &run_id)
             .await
             .map_err(convert::app_error_to_status)?;
 
@@ -79,7 +79,7 @@ impl PipelineService for PipelineGrpcService {
         req: Request<pb::CancelRunRequest>,
     ) -> Result<Response<pb::CancelRunResponse>, Status> {
         let run_id = req.into_inner().run_id;
-        let result = crate::application::cancel::cancel_run(&self.ctx, &run_id)
+        let result = crate::application::cancel::cancel_run(&self.services.ctx, &run_id)
             .await
             .map_err(convert::app_error_to_status)?;
 
@@ -122,7 +122,7 @@ impl PipelineService for PipelineGrpcService {
         };
 
         let page = crate::application::query::list_runs(
-            &self.ctx,
+            &self.services.ctx,
             RunFilter { state },
             Pagination {
                 page_size,
@@ -149,6 +149,7 @@ impl PipelineService for PipelineGrpcService {
 
         // Subscribe FIRST to avoid missing events between snapshot and subscribe.
         let event_stream = self
+            .services
             .ctx
             .event_bus
             .subscribe(&run_id)
@@ -156,11 +157,11 @@ impl PipelineService for PipelineGrpcService {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         // Validate run exists and get current state for catch-up.
-        let run = match crate::application::query::get_run(&self.ctx, &run_id).await {
+        let run = match crate::application::query::get_run(&self.services.ctx, &run_id).await {
             Ok(run) => run,
             Err(e) => {
                 drop(event_stream);
-                self.ctx.event_bus.cleanup(&run_id).await;
+                self.services.ctx.event_bus.cleanup(&run_id).await;
                 return Err(convert::app_error_to_status(e));
             }
         };
@@ -193,7 +194,7 @@ impl PipelineService for PipelineGrpcService {
         let initial_stream = tokio_stream::once(Ok(initial));
 
         // Wrap in a cleanup stream that removes the subscriber entry on drop
-        let event_bus = self.ctx.event_bus.clone();
+        let event_bus = self.services.ctx.event_bus.clone();
         let cleanup_run_id = run_id.clone();
         let combined = initial_stream.chain(mapped);
         let with_cleanup = CleanupStream {
@@ -243,6 +244,7 @@ mod tests {
     use tokio_stream::StreamExt;
     use tonic::Request;
 
+    use crate::application::services::AppServices;
     use crate::application::testing::fake_context;
     use crate::proto::rapidbyte::v1 as pb;
     use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineService;
@@ -251,11 +253,19 @@ mod tests {
 
     const YAML: &str = "pipeline: test-pipe\nversion: '1.0'";
 
+    fn make_service(services: Arc<AppServices>) -> PipelineGrpcService {
+        PipelineGrpcService::new(services)
+    }
+
     #[tokio::test]
     async fn submit_empty_idempotency_key_treated_as_none() {
         let tc = fake_context();
-        let ctx = Arc::new(tc.ctx);
-        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:50051".parse().unwrap(),
+        ));
+        let svc = make_service(Arc::clone(&services));
 
         let first = svc
             .submit_pipeline(Request::new(pb::SubmitPipelineRequest {
@@ -286,8 +296,12 @@ mod tests {
     #[tokio::test]
     async fn submit_options_default_when_missing() {
         let tc = fake_context();
-        let ctx = Arc::new(tc.ctx);
-        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:50051".parse().unwrap(),
+        ));
+        let svc = make_service(Arc::clone(&services));
 
         let resp = svc
             .submit_pipeline(Request::new(pb::SubmitPipelineRequest {
@@ -315,8 +329,12 @@ mod tests {
     #[tokio::test]
     async fn list_runs_page_size_zero_defaults_to_twenty() {
         let tc = fake_context();
-        let ctx = Arc::new(tc.ctx);
-        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:50051".parse().unwrap(),
+        ));
+        let svc = make_service(Arc::clone(&services));
 
         // Submit 25 runs
         for _ in 0..25 {
@@ -345,8 +363,12 @@ mod tests {
     #[tokio::test]
     async fn list_runs_page_size_clamped_to_thousand() {
         let tc = fake_context();
-        let ctx = Arc::new(tc.ctx);
-        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:50051".parse().unwrap(),
+        ));
+        let svc = make_service(Arc::clone(&services));
 
         // Submit one run so the response is not empty
         svc.submit_pipeline(Request::new(pb::SubmitPipelineRequest {
@@ -374,8 +396,12 @@ mod tests {
     #[tokio::test]
     async fn list_runs_unknown_state_filter_returns_invalid_argument() {
         let tc = fake_context();
-        let ctx = Arc::new(tc.ctx);
-        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:50051".parse().unwrap(),
+        ));
+        let svc = make_service(services);
 
         let status = svc
             .list_runs(Request::new(pb::ListRunsRequest {
@@ -392,8 +418,12 @@ mod tests {
     #[tokio::test]
     async fn cancel_run_returns_accepted_field() {
         let tc = fake_context();
-        let ctx = Arc::new(tc.ctx);
-        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:50051".parse().unwrap(),
+        ));
+        let svc = make_service(Arc::clone(&services));
 
         // Submit a pipeline (Pending)
         let submit = svc
@@ -431,7 +461,12 @@ mod tests {
     async fn watch_run_dedup_skips_exact_snapshot_match() {
         let tc = fake_context();
         let ctx = Arc::new(tc.ctx);
-        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+        let services = Arc::new(AppServices::new(
+            Arc::clone(&ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:50051".parse().unwrap(),
+        ));
+        let svc = make_service(Arc::clone(&services));
 
         // Submit a pipeline
         let submit = svc
