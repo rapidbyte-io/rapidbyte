@@ -185,8 +185,10 @@ fn to_domain_filter(filter: &RunFilter) -> DomainRunFilter {
         .status
         .as_deref()
         .and_then(|s| RunState::from_str(s).ok());
-    // TODO: forward `filter.pipeline` once DomainRunFilter gains a `pipeline` field
-    DomainRunFilter { state }
+    DomainRunFilter {
+        state,
+        pipeline: filter.pipeline.clone(),
+    }
 }
 
 fn to_pagination(filter: &RunFilter) -> Pagination {
@@ -213,5 +215,63 @@ mod tests {
         );
         let result = services.get("nonexistent").await;
         assert!(matches!(result, Err(ServiceError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn list_filters_by_pipeline() {
+        let tc = fake_context();
+
+        // Submit two runs with different pipeline names
+        let yaml_a = "pipeline: pipe-a\nversion: '1.0'";
+        let yaml_b = "pipeline: pipe-b\nversion: '1.0'";
+        crate::application::submit::submit_pipeline(&tc.ctx, None, yaml_a.to_string(), 0, None)
+            .await
+            .unwrap();
+        crate::application::submit::submit_pipeline(&tc.ctx, None, yaml_b.to_string(), 0, None)
+            .await
+            .unwrap();
+
+        let services = AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:8080".parse().unwrap(),
+        );
+
+        // List all — should see 2
+        let all = services
+            .list(crate::traits::run::RunFilter {
+                pipeline: None,
+                status: None,
+                limit: 20,
+                cursor: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(all.items.len(), 2);
+
+        // Filter by pipe-a — should see 1
+        let filtered = services
+            .list(crate::traits::run::RunFilter {
+                pipeline: Some("pipe-a".into()),
+                status: None,
+                limit: 20,
+                cursor: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(filtered.items.len(), 1);
+        assert_eq!(filtered.items[0].pipeline, "pipe-a");
+
+        // Filter by nonexistent — should see 0
+        let empty = services
+            .list(crate::traits::run::RunFilter {
+                pipeline: Some("nonexistent".into()),
+                status: None,
+                limit: 20,
+                cursor: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(empty.items.len(), 0);
     }
 }

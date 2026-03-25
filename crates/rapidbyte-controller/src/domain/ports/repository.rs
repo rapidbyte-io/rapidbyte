@@ -25,6 +25,7 @@ impl RepositoryError {
 
 pub struct RunFilter {
     pub state: Option<RunState>,
+    pub pipeline: Option<String>,
 }
 
 pub struct Pagination {

@@ -18,7 +18,7 @@ async fn status_returns_empty_list() {
 }
 
 #[tokio::test]
-async fn pipeline_status_unknown_returns_404() {
+async fn pipeline_status_unknown_returns_200_with_empty_streams() {
     let app = test_app();
     let resp = app
         .oneshot(
@@ -28,9 +28,61 @@ async fn pipeline_status_unknown_returns_404() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(resp.status(), StatusCode::OK);
     let body = parse_json(resp).await;
-    assert_eq!(body["error"]["code"], "pipeline_not_found");
+    assert_eq!(body["pipeline"], "unknown-pipeline");
+    assert_eq!(body["state"], "active");
+    assert_eq!(body["streams"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn pause_then_pipeline_status_shows_paused() {
+    // Pause, then check status reflects the paused state
+    let app = test_app();
+    // First pause
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/pipelines/my-pipe/pause")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Then check status
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/status/my-pipe")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = parse_json(resp).await;
+    assert_eq!(body["pipeline"], "my-pipe");
+    assert_eq!(body["state"], "paused");
+}
+
+#[tokio::test]
+async fn logs_limit_is_clamped() {
+    // Requesting a very large limit should not cause issues —
+    // the service clamps it to 100.
+    let app = test_app();
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/logs?pipeline=test&limit=999999")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = parse_json(resp).await;
+    // Empty result but no error — limit was clamped, not rejected
+    assert_eq!(body["items"], serde_json::json!([]));
 }
 
 #[tokio::test]

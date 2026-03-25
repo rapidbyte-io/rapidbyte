@@ -114,6 +114,12 @@ impl RunRepository for FakeRunRepository {
                     .as_ref()
                     .is_none_or(|state| r.state() == *state)
             })
+            .filter(|r| {
+                filter
+                    .pipeline
+                    .as_ref()
+                    .is_none_or(|name| r.pipeline_name() == name)
+            })
             .cloned()
             .collect();
         runs.sort_by_key(Run::created_at);

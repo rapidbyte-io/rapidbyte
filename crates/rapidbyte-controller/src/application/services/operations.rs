@@ -37,13 +37,8 @@ impl OperationsService for AppServices {
             message: e.to_string(),
         })?;
 
-        if cursors.is_empty() {
-            return Err(ServiceError::NotFound {
-                resource: "pipeline".into(),
-                id: name.to_string(),
-            });
-        }
-
+        // Build stream list from cursors (may be empty for newly paused pipelines
+        // or pipelines that haven't synced yet).
         let streams = cursors
             .iter()
             .map(|c| crate::traits::operations::StreamStatus {
@@ -131,7 +126,7 @@ impl OperationsService for AppServices {
         let filter = LogFilter {
             pipeline: request.pipeline,
             run_id: request.run_id,
-            limit: request.limit.unwrap_or(100),
+            limit: request.limit.unwrap_or(20).clamp(1, 100),
             cursor: request.cursor,
         };
 
@@ -184,10 +179,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pipeline_status_no_cursors_returns_not_found() {
+    async fn pipeline_status_no_cursors_returns_ok_with_empty_streams() {
         let services = fake_app_services();
-        let result = services.pipeline_status("nonexistent").await;
-        assert!(matches!(result, Err(ServiceError::NotFound { .. })));
+        let result = services.pipeline_status("some-pipeline").await.unwrap();
+        assert_eq!(result.pipeline, "some-pipeline");
+        assert_eq!(result.state, "active");
+        assert!(result.streams.is_empty());
     }
 
     #[tokio::test]
