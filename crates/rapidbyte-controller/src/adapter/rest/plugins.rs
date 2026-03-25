@@ -1,3 +1,5 @@
+#![allow(clippy::missing_errors_doc, clippy::doc_markdown)]
+
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;

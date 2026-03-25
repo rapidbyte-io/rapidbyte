@@ -5,7 +5,7 @@ use subtle::ConstantTimeEq;
 use crate::config::AuthConfig;
 
 /// Identity resolved from a valid bearer token.
-/// Will expand with tenant_id, roles, permissions when RBAC lands.
+/// Will expand with `tenant_id`, roles, permissions when RBAC lands.
 #[derive(Clone, Debug)]
 pub struct AuthContext {
     pub token: String,
@@ -31,6 +31,11 @@ impl std::error::Error for AuthError {}
 
 /// Transport-agnostic token validation. Called by both gRPC interceptor and
 /// axum middleware.
+///
+/// # Errors
+///
+/// Returns [`AuthError::InvalidToken`] when the token does not match any
+/// configured token, or [`AuthError::MissingToken`] if no token is present.
 pub fn validate_token(config: &AuthConfig, raw_token: &str) -> Result<AuthContext, AuthError> {
     if config.allow_unauthenticated {
         return Ok(AuthContext {

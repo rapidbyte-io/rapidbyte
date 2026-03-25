@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
+use std::str::FromStr;
 
 use crate::domain::ports::cursor_store::{
     CursorError, CursorStore, PipelineState, StreamCursor, SyncTimestamp,
@@ -78,17 +79,16 @@ impl CursorStore for PgCursorStore {
         }
 
         let rows = sqlx::query(
-            r#"SELECT pipeline, MAX(updated_at) as last_sync_at
+            r"SELECT pipeline, MAX(updated_at) as last_sync_at
                FROM cursors
                WHERE pipeline = ANY($1)
-               GROUP BY pipeline"#,
+               GROUP BY pipeline",
         )
         .bind(pipelines)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| CursorError::Database(e.to_string()))?;
 
-        use sqlx::Row;
         let mut result_map: std::collections::HashMap<
             String,
             Option<chrono::DateTime<chrono::Utc>>,
@@ -120,8 +120,6 @@ impl CursorStore for PgCursorStore {
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| CursorError::Database(e.to_string()))?;
-        use sqlx::Row;
-        use std::str::FromStr;
         Ok(row.and_then(|r| {
             let s: String = r.get("state");
             PipelineState::from_str(&s).ok()

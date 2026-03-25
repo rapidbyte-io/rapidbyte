@@ -107,6 +107,7 @@ fn run_to_detail(run: &Run) -> RunDetail {
         } else {
             None
         },
+        #[allow(clippy::cast_precision_loss)]
         duration_secs: run.metrics().map(|m| m.duration_ms as f64 / 1000.0),
         counts: run.metrics().map(|m| RunCounts {
             records_read: m.rows_read,
@@ -131,6 +132,7 @@ fn run_to_summary(run: &Run) -> RunSummary {
         pipeline: run.pipeline_name().to_string(),
         status: run.state().as_str().to_string(),
         started_at: Some(run.created_at()),
+        #[allow(clippy::cast_precision_loss)]
         duration_secs: run.metrics().map(|m| m.duration_ms as f64 / 1000.0),
         records_written: run.metrics().map(|m| m.rows_written),
         attempt: run.current_attempt(),
@@ -154,6 +156,7 @@ fn domain_event_to_progress(
         DomainEvent::RunCompleted { run_id, metrics } => Some(ProgressEvent::Complete {
             run_id,
             status: RunState::Completed.as_str().to_string(),
+            #[allow(clippy::cast_precision_loss)]
             duration_secs: Some(metrics.duration_ms as f64 / 1000.0),
         }),
         DomainEvent::RunFailed { run_id, error } => Some(ProgressEvent::Failed {

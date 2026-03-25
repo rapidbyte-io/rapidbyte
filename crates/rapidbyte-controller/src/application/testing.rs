@@ -805,7 +805,7 @@ pub fn fake_context() -> TestContext {
     }
 }
 
-/// Create AppServices backed by fakes for unit testing.
+/// Create `AppServices` backed by fakes for unit testing.
 ///
 /// Returns an Arc-wrapped `AppServices` bound to in-memory test repositories.
 /// # Panics

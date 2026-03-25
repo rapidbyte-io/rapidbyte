@@ -10,6 +10,7 @@ pub enum PipelineState {
 }
 
 impl PipelineState {
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",

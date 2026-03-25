@@ -1,11 +1,13 @@
 use serde::Deserialize;
 
 /// Clamp a pagination limit: default 20, min 1, max 100.
+#[must_use]
 pub fn clamp_page_limit(limit: Option<u32>) -> u32 {
-    limit.unwrap_or(20).min(100).max(1)
+    limit.unwrap_or(20).clamp(1, 100)
 }
 
 /// Split a comma-separated tag string into a Vec.
+#[must_use]
 pub fn split_tags(tags: Option<String>) -> Option<Vec<String>> {
     tags.map(|t| {
         t.split(',')
@@ -25,10 +27,12 @@ pub struct PaginationParams {
 }
 
 impl PaginationParams {
+    #[must_use]
     pub fn limit(&self) -> u32 {
         clamp_page_limit(self.limit)
     }
 
+    #[must_use]
     pub fn cursor(&self) -> Option<&str> {
         self.cursor.as_deref()
     }

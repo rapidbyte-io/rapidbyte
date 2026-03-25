@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::adapter::auth::AuthError;
 use crate::traits::error::{FieldError, ServiceError};
 
-/// Wrapper for REST error responses. Converts ServiceError and AuthError
+/// Wrapper for REST error responses. Converts [`ServiceError`] and [`AuthError`]
 /// into JSON error bodies with appropriate HTTP status codes.
 pub struct RestError(ServiceError);
 

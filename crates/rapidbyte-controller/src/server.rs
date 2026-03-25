@@ -120,6 +120,7 @@ struct ServerComponents {
 ///
 /// Returns an error if auth config is invalid, the database connection or
 /// migration fails, or the event bus listener cannot be started.
+#[allow(clippy::too_many_lines)]
 async fn setup(
     config: ControllerConfig,
     otel_guard: Arc<rapidbyte_metrics::OtelGuard>,

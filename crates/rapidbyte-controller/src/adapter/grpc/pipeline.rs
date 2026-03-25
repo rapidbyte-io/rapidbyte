@@ -263,7 +263,10 @@ fn run_detail_to_proto(detail: &crate::traits::run::RunDetail) -> pb::RunDetail 
             rows_written: c.records_written,
             bytes_read: c.bytes_read,
             bytes_written: c.bytes_written,
-            duration_ms: detail.duration_secs.map_or(0, |d| (d * 1000.0) as u64),
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            duration_ms: detail
+                .duration_secs
+                .map_or(0, |d| (d * 1000.0_f64).max(0.0) as u64),
         }),
         error: detail.error.as_ref().map(|e| pb::RunError {
             code: e.code.clone(),

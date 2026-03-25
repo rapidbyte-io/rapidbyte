@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::traits::EventStream;
 
-/// Convert an application-layer EventStream into an axum SSE response.
+/// Convert an application-layer `EventStream` into an axum SSE response.
 ///
 /// `event_name` maps each item to an SSE event type (e.g., "progress", "complete").
 /// The item is serialized as JSON in the `data` field.

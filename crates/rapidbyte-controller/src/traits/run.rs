@@ -120,6 +120,7 @@ pub enum ProgressEvent {
 }
 
 impl ProgressEvent {
+    #[must_use]
     pub fn event_name(&self) -> &'static str {
         match self {
             Self::Started { .. } => "started",

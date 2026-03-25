@@ -15,7 +15,8 @@ impl ServerService for AppServices {
         let uptime_secs = now
             .signed_duration_since(self.started_at)
             .num_seconds()
-            .max(0) as u64;
+            .max(0)
+            .cast_unsigned();
 
         Ok(HealthStatus {
             status: "healthy".to_string(),

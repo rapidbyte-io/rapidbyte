@@ -1,3 +1,5 @@
+#![allow(clippy::missing_errors_doc)]
+
 use axum::extract::State;
 use axum::Json;
 

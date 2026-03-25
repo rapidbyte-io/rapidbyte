@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use async_trait::async_trait;
 use sqlx::{PgPool, Row};
 
@@ -29,15 +31,15 @@ impl LogStore for PgLogStore {
         let mut param_idx = 2usize;
 
         if filter.run_id.is_some() {
-            query.push_str(&format!(" AND run_id = ${param_idx}"));
+            write!(query, " AND run_id = ${param_idx}").unwrap();
             param_idx += 1;
         }
         if filter.cursor.is_some() {
-            query.push_str(&format!(" AND id < ${param_idx}"));
+            write!(query, " AND id < ${param_idx}").unwrap();
             param_idx += 1;
         }
 
-        query.push_str(&format!(r#" ORDER BY "timestamp" DESC LIMIT ${param_idx}"#));
+        write!(query, r#" ORDER BY "timestamp" DESC LIMIT ${param_idx}"#).unwrap();
 
         let mut q = sqlx::query(&query).bind(&filter.pipeline);
         if let Some(ref run_id) = filter.run_id {
