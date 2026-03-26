@@ -97,6 +97,8 @@ The function:
 3. Spawns embedded agent (passing `engine_ctx`)
 4. Starts gRPC + REST servers
 
+**CLI integration:** The existing `controller` subcommand in `cli/src/commands/controller.rs` is modified — not a new subcommand. The CLI crate already depends on the engine crate (per CLAUDE.md: `cli -> engine, runtime, types, dev, controller`), so it can build `EngineContext` via the existing factory functions (`build_run_context()`, `build_lightweight_context()`). The `controller` command's `execute()` function builds the `ServeContext` struct with engine adapters and passes it to `rapidbyte_controller::serve()`.
+
 ---
 
 ## 3. New Driven Ports
@@ -150,14 +152,25 @@ pub enum InspectorError {
 
 #[async_trait]
 pub trait PipelineInspector: Send + Sync {
-    async fn check(&self, pipeline_yaml: &str, secrets: &str) -> Result<CheckOutput, InspectorError>;
+    /// Fast check: validate config, plugin connectivity, schema negotiation.
+    /// The pipeline YAML should already have secrets resolved by the caller
+    /// (via `AppContext.secrets.resolve()`). The inspector only validates,
+    /// it does not resolve secrets.
+    async fn check(&self, pipeline_yaml: &str) -> Result<CheckOutput, InspectorError>;
+
+    /// Compare source schema against last-synced schema.
     async fn diff(&self, pipeline_yaml: &str) -> Result<DiffOutput, InspectorError>;
 }
 ```
 
 `CheckOutput` and `DiffOutput` are engine-domain types mapped to the REST response types in the service layer.
 
-Adapter: `cli/src/engine_adapters/pipeline_inspector.rs` — wraps `check_pipeline()` and schema comparison.
+Secret resolution flow for `check()`:
+1. `PipelineService::check(name)` calls `pipeline_source.get(name)` to get raw YAML
+2. Resolves secrets via `ctx.secrets.resolve(&yaml)` (existing `SecretResolver` port)
+3. Passes resolved YAML to `pipeline_inspector.check(&resolved_yaml)`
+
+Adapter: `cli/src/engine_adapters/pipeline_inspector.rs` — wraps `check_pipeline()` and schema comparison. The `EnginePipelineInspector` receives a pre-built `EngineContext` and delegates to `rapidbyte_engine::check_pipeline()`.
 
 ---
 
@@ -203,7 +216,18 @@ impl FromStr for TaskOperation {
 
 ### Task entity changes
 
-`Task` gains an `operation: TaskOperation` field. Default is `Sync` for backwards compatibility.
+`Task` gains an `operation: TaskOperation` field with getter `operation()`. The field is set at construction via `Task::new()` and persisted via `Task::from_row()`.
+
+The `operation` field lives on `Task` (not `Run`) because:
+- A Run may be retried with different task instances
+- The agent polls for tasks and needs to know the operation type
+- `poll_task()` already returns `(Task, Run)`, so the agent has both
+
+All existing code that constructs `Task` values must be updated:
+- `Task::new()` — new `operation` parameter
+- `Task::from_row()` — parse operation from DB row
+- `PipelineStore::submit_run(&run, &task)` — task now carries operation, written to DB
+- `FakePipelineStore` in testing.rs — updated accordingly
 
 ### Migration
 
@@ -257,6 +281,7 @@ pub async fn run_embedded_agent(
     app_ctx: Arc<AppContext>,
     engine_ctx: Arc<EngineContext>,
     config: EmbeddedAgentConfig,
+    cancel_token: CancellationToken,  // for graceful shutdown
 ) -> Result<()> {
     // 1. Register agent
     let agent_id = register::register(
@@ -267,48 +292,95 @@ pub async fn run_embedded_agent(
         },
     ).await?;
 
-    // 2. Poll-execute loop
+    // 2. Concurrency limiter
+    let semaphore = Arc::new(Semaphore::new(config.max_concurrent_tasks as usize));
+
+    // 3. Poll-execute loop (exits on cancellation)
     loop {
+        tokio::select! {
+            _ = cancel_token.cancelled() => break,
+            _ = tokio::time::sleep(config.poll_interval) => {}
+        }
+
+        let permit = semaphore.clone().try_acquire_owned();
+        if permit.is_err() {
+            continue; // at capacity, skip this poll
+        }
+
+        // poll_task returns (Task, Run) — the Run contains pipeline_yaml
         match poll::poll_task(&app_ctx, &agent_id).await? {
-            Some(assignment) => {
+            Some((task, run)) => {
                 let engine = engine_ctx.clone();
+                let ctx = app_ctx.clone();
+                let _permit = permit.unwrap();
                 tokio::spawn(async move {
-                    execute_task(assignment, engine).await
+                    execute_task(&ctx, &engine, &task, &run).await;
+                    drop(_permit); // release semaphore slot
                 });
             }
-            None => tokio::time::sleep(config.poll_interval).await,
+            None => {} // no pending tasks
         }
     }
+
+    // Drain: wait for in-flight tasks to complete
+    let _ = semaphore.acquire_many(config.max_concurrent_tasks).await;
+    register::deregister(&app_ctx, &agent_id).await?;
+    Ok(())
 }
 
-async fn execute_task(assignment: TaskAssignment, engine_ctx: Arc<EngineContext>) {
-    let result = match assignment.operation {
+async fn execute_task(
+    app_ctx: &AppContext,
+    engine_ctx: &EngineContext,
+    task: &Task,
+    run: &Run,
+) {
+    // The Run entity stores pipeline_yaml. Parse it to get the pipeline config.
+    let pipeline_yaml = run.pipeline_yaml();
+
+    let result = match task.operation() {
         TaskOperation::Sync => {
-            run_pipeline(&engine_ctx, &config).await
+            // Build pipeline config from YAML, run through engine
+            run_pipeline(engine_ctx, pipeline_yaml).await
         }
         TaskOperation::CheckApply => {
-            check_pipeline(&engine_ctx, &config).await
-            // then apply
+            // Validate config + provision resources (create tables, replication slots)
+            check_pipeline(engine_ctx, pipeline_yaml).await
+                .and_then(|_| apply_resources(engine_ctx, pipeline_yaml).await)
         }
         TaskOperation::Teardown => {
-            teardown_pipeline(&engine_ctx, &config).await
+            teardown_pipeline(engine_ctx, pipeline_yaml).await
         }
         TaskOperation::Assert => {
-            // run assertions
+            // Query destination and run data quality assertions
+            run_assertions(engine_ctx, pipeline_yaml).await
         }
     };
 
-    // Complete or fail the task based on result
+    // Complete or fail the task via application functions
     match result {
-        Ok(metrics) => complete_task(&app_ctx, task_id, metrics).await,
-        Err(e) => fail_task(&app_ctx, task_id, e).await,
+        Ok(metrics) => {
+            let _ = complete::complete_task(
+                app_ctx, task.id(), &agent_id, task.lease_epoch(),
+                TaskOutcome::Completed, Some(metrics), None,
+            ).await;
+        }
+        Err(e) => {
+            let _ = complete::complete_task(
+                app_ctx, task.id(), &agent_id, task.lease_epoch(),
+                TaskOutcome::Failed, None, Some(e.to_string()),
+            ).await;
+        }
     }
 }
 ```
 
-The agent uses the existing application functions (`register`, `poll_task`, `complete_task`, `heartbeat`) directly on `AppContext` — no gRPC overhead.
+**Data flow:** `poll_task()` already returns `(Task, Run)` — the `Run` entity stores the `pipeline_yaml` field. The agent extracts the YAML from the Run, dispatches based on `task.operation()`, and calls the appropriate engine function.
 
-Progress events are forwarded from the engine's `ProgressReporter` to the controller's `EventBus` during execution, so SSE streams work for `watch`.
+**Concurrency control:** A `tokio::Semaphore` limits in-flight tasks to `max_concurrent_tasks`. The poll loop skips when at capacity.
+
+**Graceful shutdown:** The loop checks a `CancellationToken` (from `tokio_util`) on each iteration. On shutdown, it stops polling and waits for in-flight tasks to drain before deregistering.
+
+**Progress events:** During execution, the engine's `ProgressReporter` channel is bridged to the controller's `EventBus`. The agent creates a `ChannelProgressReporter`, spawns a forwarder task that reads progress events and publishes them to `event_bus.publish()`. This makes SSE streams work for `watch`.
 
 ---
 
@@ -336,12 +408,26 @@ Progress events are forwarded from the engine's `ProgressReporter` to the contro
 
 ### ConnectionService completion
 
+Connection config lives in `connections.yml` in the project directory. Add a method to `PipelineSource` for reading it:
+
+```rust
+#[async_trait]
+pub trait PipelineSource: Send + Sync {
+    async fn list(&self) -> Result<Vec<PipelineInfo>, PipelineSourceError>;
+    async fn get(&self, name: &str) -> Result<String, PipelineSourceError>;
+    /// Read the project's connections.yml file, if it exists.
+    async fn connections_yaml(&self) -> Result<Option<String>, PipelineSourceError>;
+}
+```
+
+`FsPipelineSource` implements `connections_yaml()` by reading `{project_dir}/connections.yml`.
+
 | Method | Implementation |
 |---|---|
-| `list()` | Parse `connections.yml` from project dir (via `PipelineSource` or new method) |
-| `get()` | Parse + redact sensitive fields |
-| `test()` | Resolve connection config → `connection_tester.test(config)` |
-| `discover()` | Resolve connection config → `connection_tester.discover(config, table)` |
+| `list()` | `pipeline_source.connections_yaml()` → parse YAML → list connection names + connector types |
+| `get()` | Same parse + redact sensitive fields (password, api_key, secret, token) |
+| `test()` | Parse connection config from YAML → `connection_tester.test(config)` |
+| `discover()` | Parse connection config → `connection_tester.discover(config, table)` |
 
 ---
 
