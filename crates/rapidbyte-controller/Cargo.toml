@@ -24,7 +24,13 @@ tokio-stream = { workspace = true }
 tower = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "migrate"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "migrate", "derive"] }
+axum = { version = "0.8", features = ["macros"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tower-http = { version = "0.6", features = ["trace"] }
+futures = "0.3"
+http-body-util = "0.1"
+subtle = "2"
 
 [build-dependencies]
 tonic-build = { workspace = true }
@@ -34,9 +40,11 @@ protoc-bin-vendored = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
+tower = { workspace = true }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 
 [features]
 integration = []
+testing = []

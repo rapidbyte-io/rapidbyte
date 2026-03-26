@@ -262,8 +262,9 @@ mod tests {
     async fn poll_secret_resolution_failure_compensates() {
         use crate::application::context::{AppConfig, AppContext};
         use crate::application::testing::{
-            FakeAgentRepository, FakeClock, FakeEventBus, FakePipelineStore, FakeRunRepository,
-            FakeStorage, FakeTaskRepository,
+            FakeAgentRepository, FakeClock, FakeConnectionTester, FakeCursorStore, FakeEventBus,
+            FakeLogStore, FakePipelineStore, FakePluginRegistry, FakeRunRepository, FakeStorage,
+            FakeTaskRepository,
         };
         use crate::domain::ports::secrets::{SecretError, SecretResolver};
         use std::sync::Arc;
@@ -289,6 +290,10 @@ mod tests {
             event_bus: Arc::clone(&event_bus) as Arc<dyn crate::domain::ports::event_bus::EventBus>,
             secrets: Arc::new(FailingSecretResolver),
             clock: Arc::clone(&clock) as Arc<dyn crate::domain::ports::clock::Clock>,
+            cursor_store: Arc::new(FakeCursorStore::new()),
+            log_store: Arc::new(FakeLogStore::new()),
+            connection_tester: Arc::new(FakeConnectionTester),
+            plugin_registry: Arc::new(FakePluginRegistry),
             config: AppConfig {
                 default_lease_duration: Duration::from_secs(300),
                 lease_check_interval: Duration::from_secs(30),
@@ -296,6 +301,7 @@ mod tests {
                 agent_reap_interval: Duration::from_secs(30),
                 default_max_retries: 0,
                 registry: None,
+                allow_unauthenticated: true,
             },
         };
 

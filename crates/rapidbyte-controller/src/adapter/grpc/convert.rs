@@ -8,6 +8,7 @@ use crate::domain::error::DomainError;
 use crate::domain::event::DomainEvent;
 use crate::domain::run::{Run, RunState};
 use crate::proto::rapidbyte::v1 as pb;
+use crate::traits::ServiceError;
 
 /// Map an `AppError` to a gRPC `Status` with the appropriate code.
 #[allow(clippy::needless_pass_by_value, clippy::must_use_candidate)]
@@ -29,6 +30,28 @@ pub fn app_error_to_status(err: AppError) -> Status {
         AppError::AlreadyExists { .. } => Status::already_exists(err.to_string()),
         AppError::Repository(_) | AppError::EventBus(_) => Status::internal("internal error"),
         AppError::SecretResolution(_) => Status::internal("secret resolution failed"),
+    }
+}
+
+/// Map a `ServiceError` to a gRPC `Status` with the appropriate code.
+#[allow(clippy::needless_pass_by_value, clippy::must_use_candidate)]
+pub fn service_error_to_status(err: ServiceError) -> Status {
+    match err {
+        ServiceError::NotFound { resource, id } => {
+            Status::not_found(format!("{resource} '{id}' not found"))
+        }
+        ServiceError::Conflict { message } => Status::already_exists(message),
+        ServiceError::ValidationFailed { details } => {
+            let msg = details
+                .iter()
+                .map(|d| format!("{}: {}", d.field, d.reason))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Status::invalid_argument(msg)
+        }
+        ServiceError::Unauthorized => Status::unauthenticated("unauthorized"),
+        ServiceError::Internal { message } => Status::internal(message),
+        ServiceError::NotImplemented { feature } => Status::unimplemented(feature),
     }
 }
 

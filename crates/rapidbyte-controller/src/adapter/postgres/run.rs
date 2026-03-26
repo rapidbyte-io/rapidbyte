@@ -9,16 +9,10 @@ use crate::domain::run::{Run, RunError, RunMetrics, RunState};
 use super::error::box_err;
 
 fn parse_run_state(s: &str) -> Result<RunState, RepositoryError> {
-    match s {
-        "pending" => Ok(RunState::Pending),
-        "running" => Ok(RunState::Running),
-        "completed" => Ok(RunState::Completed),
-        "failed" => Ok(RunState::Failed),
-        "cancelled" => Ok(RunState::Cancelled),
-        other => Err(RepositoryError::Other(Box::from(format!(
-            "unknown run state in database: {other}"
-        )))),
-    }
+    use std::str::FromStr;
+    RunState::from_str(s).map_err(|()| {
+        RepositoryError::Other(Box::from(format!("unknown run state in database: {s}")))
+    })
 }
 
 pub(super) fn run_state_to_str(state: RunState) -> &'static str {
@@ -196,14 +190,34 @@ impl RunRepository for PgRunRepository {
     ) -> Result<RunPage, RepositoryError> {
         // Cursor-based pagination using (created_at, id).
         // page_token format: "<created_at_rfc3339>|<id>"
+        // Dynamic query building to support optional state + pipeline filters.
+        use std::fmt::Write;
+
         let page_size = if pagination.page_size == 0 {
             20
         } else {
             pagination.page_size
         };
-        let limit = i64::from(page_size) + 1; // fetch one extra to detect next page
+        let limit = i64::from(page_size) + 1;
 
-        let rows = if let Some(ref token) = pagination.page_token {
+        let mut sql = String::from("SELECT * FROM runs WHERE true");
+        let mut param_idx: u32 = 1;
+
+        // Optional state filter
+        let state_str = filter.state.map(|s| run_state_to_str(s).to_string());
+        if state_str.is_some() {
+            let _ = write!(sql, " AND state = ${param_idx}");
+            param_idx += 1;
+        }
+
+        // Optional pipeline filter
+        if filter.pipeline.is_some() {
+            let _ = write!(sql, " AND pipeline_name = ${param_idx}");
+            param_idx += 1;
+        }
+
+        // Cursor-based pagination
+        let cursor = if let Some(ref token) = pagination.page_token {
             let parts: Vec<&str> = token.splitn(2, '|').collect();
             if parts.len() != 2 {
                 return Err(RepositoryError::Other(Box::from("invalid page token")));
@@ -211,46 +225,36 @@ impl RunRepository for PgRunRepository {
             let cursor_ts: chrono::DateTime<chrono::Utc> = parts[0]
                 .parse()
                 .map_err(|e: chrono::ParseError| RepositoryError::Other(Box::new(e)))?;
-            let cursor_id = parts[1];
-
-            if let Some(ref state) = filter.state {
-                sqlx::query(
-                    "SELECT * FROM runs WHERE state = $1 AND (created_at, id) < ($2, $3) ORDER BY created_at DESC, id DESC LIMIT $4",
-                )
-                .bind(run_state_to_str(*state))
-                .bind(cursor_ts)
-                .bind(cursor_id)
-                .bind(limit)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(box_err)?
-            } else {
-                sqlx::query(
-                    "SELECT * FROM runs WHERE (created_at, id) < ($1, $2) ORDER BY created_at DESC, id DESC LIMIT $3",
-                )
-                .bind(cursor_ts)
-                .bind(cursor_id)
-                .bind(limit)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(box_err)?
-            }
-        } else if let Some(ref state) = filter.state {
-            sqlx::query(
-                "SELECT * FROM runs WHERE state = $1 ORDER BY created_at DESC, id DESC LIMIT $2",
-            )
-            .bind(run_state_to_str(*state))
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await
-            .map_err(box_err)?
+            let cursor_id = parts[1].to_string();
+            let _ = write!(
+                sql,
+                " AND (created_at, id) < (${}, ${})",
+                param_idx,
+                param_idx + 1
+            );
+            param_idx += 2;
+            Some((cursor_ts, cursor_id))
         } else {
-            sqlx::query("SELECT * FROM runs ORDER BY created_at DESC, id DESC LIMIT $1")
-                .bind(limit)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(box_err)?
+            None
         };
+
+        let _ = write!(sql, " ORDER BY created_at DESC, id DESC LIMIT ${param_idx}");
+
+        // Bind parameters in order
+        let mut query = sqlx::query(&sql);
+        if let Some(ref s) = state_str {
+            query = query.bind(s);
+        }
+        if let Some(ref p) = filter.pipeline {
+            query = query.bind(p);
+        }
+        if let Some((ref ts, ref id)) = cursor {
+            query = query.bind(ts);
+            query = query.bind(id);
+        }
+        query = query.bind(limit);
+
+        let rows = query.fetch_all(&self.pool).await.map_err(box_err)?;
 
         let has_next = rows.len() > page_size as usize;
         let take = if has_next {

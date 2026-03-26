@@ -7,19 +7,19 @@ use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
 
 use crate::adapter::grpc::convert;
-use crate::application::context::AppContext;
-use crate::domain::ports::repository::{Pagination, RunFilter};
+use crate::application::services::AppServices;
 use crate::proto::rapidbyte::v1 as pb;
 use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineService;
+use crate::traits::run::{RunFilter, RunService};
 
 pub struct PipelineGrpcService {
-    ctx: Arc<AppContext>,
+    services: Arc<AppServices>,
 }
 
 impl PipelineGrpcService {
     #[must_use]
-    pub fn new(ctx: Arc<AppContext>) -> Self {
-        Self { ctx }
+    pub fn new(services: Arc<AppServices>) -> Self {
+        Self { services }
     }
 }
 
@@ -29,6 +29,8 @@ impl PipelineService for PipelineGrpcService {
         &self,
         req: Request<pb::SubmitPipelineRequest>,
     ) -> Result<Response<pb::SubmitPipelineResponse>, Status> {
+        // TODO: migrate to PipelineService::sync() once it supports idempotency_key,
+        // max_retries, and timeout_seconds.
         let req = req.into_inner();
         let max_retries = req.options.as_ref().map_or(0, |o| o.max_retries);
         let timeout_seconds = req.options.as_ref().and_then(|o| {
@@ -45,7 +47,7 @@ impl PipelineService for PipelineGrpcService {
         };
 
         let result = crate::application::submit::submit_pipeline(
-            &self.ctx,
+            &self.services.ctx,
             idempotency_key,
             req.pipeline_yaml,
             max_retries,
@@ -65,12 +67,14 @@ impl PipelineService for PipelineGrpcService {
         req: Request<pb::GetRunRequest>,
     ) -> Result<Response<pb::GetRunResponse>, Status> {
         let run_id = req.into_inner().run_id;
-        let run = crate::application::query::get_run(&self.ctx, &run_id)
+        let detail = self
+            .services
+            .get(&run_id)
             .await
-            .map_err(convert::app_error_to_status)?;
+            .map_err(convert::service_error_to_status)?;
 
         Ok(Response::new(pb::GetRunResponse {
-            run: Some(convert::run_to_detail(&run)),
+            run: Some(run_detail_to_proto(&detail)),
         }))
     }
 
@@ -78,8 +82,10 @@ impl PipelineService for PipelineGrpcService {
         &self,
         req: Request<pb::CancelRunRequest>,
     ) -> Result<Response<pb::CancelRunResponse>, Status> {
+        // Intentionally kept on direct call: the gRPC response needs `accepted: bool`
+        // (false for terminal runs), which RunService::cancel() does not expose.
         let run_id = req.into_inner().run_id;
-        let result = crate::application::cancel::cancel_run(&self.ctx, &run_id)
+        let result = crate::application::cancel::cancel_run(&self.services.ctx, &run_id)
             .await
             .map_err(convert::app_error_to_status)?;
 
@@ -121,20 +127,20 @@ impl PipelineService for PipelineGrpcService {
             req.page_size.min(1000)
         };
 
-        let page = crate::application::query::list_runs(
-            &self.ctx,
-            RunFilter { state },
-            Pagination {
-                page_size,
-                page_token,
-            },
-        )
-        .await
-        .map_err(convert::app_error_to_status)?;
+        let page = self
+            .services
+            .list(RunFilter {
+                pipeline: None,
+                status: state.map(|s| s.as_str().to_string()),
+                limit: page_size,
+                cursor: page_token,
+            })
+            .await
+            .map_err(convert::service_error_to_status)?;
 
         Ok(Response::new(pb::ListRunsResponse {
-            runs: page.runs.iter().map(convert::run_to_summary).collect(),
-            next_page_token: page.next_page_token.unwrap_or_default(),
+            runs: page.items.iter().map(run_summary_to_proto).collect(),
+            next_page_token: page.next_cursor.unwrap_or_default(),
         }))
     }
 
@@ -145,10 +151,13 @@ impl PipelineService for PipelineGrpcService {
         &self,
         req: Request<pb::WatchRunRequest>,
     ) -> Result<Response<Self::WatchRunStream>, Status> {
+        // Intentionally kept on direct calls: watch_run has complex snapshot/dedup
+        // logic specific to gRPC streaming that does not map cleanly to RunService::events().
         let run_id = req.into_inner().run_id;
 
         // Subscribe FIRST to avoid missing events between snapshot and subscribe.
         let event_stream = self
+            .services
             .ctx
             .event_bus
             .subscribe(&run_id)
@@ -156,11 +165,11 @@ impl PipelineService for PipelineGrpcService {
             .map_err(|e| Status::internal(e.to_string()))?;
 
         // Validate run exists and get current state for catch-up.
-        let run = match crate::application::query::get_run(&self.ctx, &run_id).await {
+        let run = match crate::application::query::get_run(&self.services.ctx, &run_id).await {
             Ok(run) => run,
             Err(e) => {
                 drop(event_stream);
-                self.ctx.event_bus.cleanup(&run_id).await;
+                self.services.ctx.event_bus.cleanup(&run_id).await;
                 return Err(convert::app_error_to_status(e));
             }
         };
@@ -193,7 +202,7 @@ impl PipelineService for PipelineGrpcService {
         let initial_stream = tokio_stream::once(Ok(initial));
 
         // Wrap in a cleanup stream that removes the subscriber entry on drop
-        let event_bus = self.ctx.event_bus.clone();
+        let event_bus = self.services.ctx.event_bus.clone();
         let cleanup_run_id = run_id.clone();
         let combined = initial_stream.chain(mapped);
         let with_cleanup = CleanupStream {
@@ -236,6 +245,54 @@ impl Drop for CleanupStream {
     }
 }
 
+// --- Conversion helpers from service-layer types to proto types ---
+
+fn run_detail_to_proto(detail: &crate::traits::run::RunDetail) -> pb::RunDetail {
+    use crate::domain::run::RunState;
+    use std::str::FromStr;
+    let state = RunState::from_str(&detail.status).unwrap_or(RunState::Pending);
+    pb::RunDetail {
+        run_id: detail.run_id.clone(),
+        pipeline_name: detail.pipeline.clone(),
+        state: convert::run_state_to_proto(state),
+        cancel_requested: detail.cancel_requested,
+        attempt: detail.retry_count + 1,
+        max_retries: detail.max_retries,
+        metrics: detail.counts.as_ref().map(|c| pb::RunMetrics {
+            rows_read: c.records_read,
+            rows_written: c.records_written,
+            bytes_read: c.bytes_read,
+            bytes_written: c.bytes_written,
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            duration_ms: detail
+                .duration_secs
+                .map_or(0, |d| (d * 1000.0_f64).max(0.0) as u64),
+        }),
+        error: detail.error.as_ref().map(|e| pb::RunError {
+            code: e.code.clone(),
+            message: e.message.clone(),
+        }),
+        created_at: detail.started_at.map(convert::to_proto_timestamp),
+        updated_at: detail
+            .finished_at
+            .or(detail.started_at)
+            .map(convert::to_proto_timestamp),
+    }
+}
+
+fn run_summary_to_proto(summary: &crate::traits::run::RunSummary) -> pb::RunSummary {
+    use crate::domain::run::RunState;
+    use std::str::FromStr;
+    let state = RunState::from_str(&summary.status).unwrap_or(RunState::Pending);
+    pb::RunSummary {
+        run_id: summary.run_id.clone(),
+        pipeline_name: summary.pipeline.clone(),
+        state: convert::run_state_to_proto(state),
+        attempt: summary.attempt,
+        created_at: summary.started_at.map(convert::to_proto_timestamp),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -243,6 +300,7 @@ mod tests {
     use tokio_stream::StreamExt;
     use tonic::Request;
 
+    use crate::application::services::AppServices;
     use crate::application::testing::fake_context;
     use crate::proto::rapidbyte::v1 as pb;
     use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineService;
@@ -251,11 +309,19 @@ mod tests {
 
     const YAML: &str = "pipeline: test-pipe\nversion: '1.0'";
 
+    fn make_service(services: Arc<AppServices>) -> PipelineGrpcService {
+        PipelineGrpcService::new(services)
+    }
+
     #[tokio::test]
     async fn submit_empty_idempotency_key_treated_as_none() {
         let tc = fake_context();
-        let ctx = Arc::new(tc.ctx);
-        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:50051".parse().unwrap(),
+        ));
+        let svc = make_service(Arc::clone(&services));
 
         let first = svc
             .submit_pipeline(Request::new(pb::SubmitPipelineRequest {
@@ -286,8 +352,12 @@ mod tests {
     #[tokio::test]
     async fn submit_options_default_when_missing() {
         let tc = fake_context();
-        let ctx = Arc::new(tc.ctx);
-        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:50051".parse().unwrap(),
+        ));
+        let svc = make_service(Arc::clone(&services));
 
         let resp = svc
             .submit_pipeline(Request::new(pb::SubmitPipelineRequest {
@@ -315,8 +385,12 @@ mod tests {
     #[tokio::test]
     async fn list_runs_page_size_zero_defaults_to_twenty() {
         let tc = fake_context();
-        let ctx = Arc::new(tc.ctx);
-        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:50051".parse().unwrap(),
+        ));
+        let svc = make_service(Arc::clone(&services));
 
         // Submit 25 runs
         for _ in 0..25 {
@@ -345,8 +419,12 @@ mod tests {
     #[tokio::test]
     async fn list_runs_page_size_clamped_to_thousand() {
         let tc = fake_context();
-        let ctx = Arc::new(tc.ctx);
-        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:50051".parse().unwrap(),
+        ));
+        let svc = make_service(Arc::clone(&services));
 
         // Submit one run so the response is not empty
         svc.submit_pipeline(Request::new(pb::SubmitPipelineRequest {
@@ -374,8 +452,12 @@ mod tests {
     #[tokio::test]
     async fn list_runs_unknown_state_filter_returns_invalid_argument() {
         let tc = fake_context();
-        let ctx = Arc::new(tc.ctx);
-        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:50051".parse().unwrap(),
+        ));
+        let svc = make_service(services);
 
         let status = svc
             .list_runs(Request::new(pb::ListRunsRequest {
@@ -392,8 +474,12 @@ mod tests {
     #[tokio::test]
     async fn cancel_run_returns_accepted_field() {
         let tc = fake_context();
-        let ctx = Arc::new(tc.ctx);
-        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:50051".parse().unwrap(),
+        ));
+        let svc = make_service(Arc::clone(&services));
 
         // Submit a pipeline (Pending)
         let submit = svc
@@ -431,7 +517,12 @@ mod tests {
     async fn watch_run_dedup_skips_exact_snapshot_match() {
         let tc = fake_context();
         let ctx = Arc::new(tc.ctx);
-        let svc = PipelineGrpcService::new(Arc::clone(&ctx));
+        let services = Arc::new(AppServices::new(
+            Arc::clone(&ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:50051".parse().unwrap(),
+        ));
+        let svc = make_service(Arc::clone(&services));
 
         // Submit a pipeline
         let submit = svc

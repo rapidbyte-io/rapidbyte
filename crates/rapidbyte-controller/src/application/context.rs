@@ -2,8 +2,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::domain::ports::clock::Clock;
+use crate::domain::ports::connection_tester::ConnectionTester;
+use crate::domain::ports::cursor_store::CursorStore;
 use crate::domain::ports::event_bus::EventBus;
+use crate::domain::ports::log_store::LogStore;
 use crate::domain::ports::pipeline_store::PipelineStore;
+use crate::domain::ports::plugin_registry::PluginRegistry;
 use crate::domain::ports::repository::{AgentRepository, RunRepository, TaskRepository};
 use crate::domain::ports::secrets::SecretResolver;
 
@@ -21,6 +25,8 @@ pub struct AppConfig {
     pub agent_reap_interval: Duration,
     pub default_max_retries: u32,
     pub registry: Option<RegistryConfig>,
+    /// When `true`, requests without a valid bearer token are permitted.
+    pub allow_unauthenticated: bool,
 }
 
 impl AppConfig {
@@ -39,6 +45,10 @@ pub struct AppContext {
     pub event_bus: Arc<dyn EventBus>,
     pub secrets: Arc<dyn SecretResolver>,
     pub clock: Arc<dyn Clock>,
+    pub cursor_store: Arc<dyn CursorStore>,
+    pub log_store: Arc<dyn LogStore>,
+    pub connection_tester: Arc<dyn ConnectionTester>,
+    pub plugin_registry: Arc<dyn PluginRegistry>,
     pub config: AppConfig,
 }
 

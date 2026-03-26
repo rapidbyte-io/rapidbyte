@@ -14,14 +14,27 @@ use crate::domain::agent::Agent;
 use crate::domain::event::DomainEvent;
 use crate::domain::lease::Lease;
 use crate::domain::ports::clock::Clock;
+use crate::domain::ports::connection_tester::{
+    ConnectionTestError, ConnectionTester, DiscoveryResult, TestResult,
+};
+use crate::domain::ports::cursor_store::{
+    CursorError, CursorStore, PipelineState, StreamCursor, SyncTimestamp,
+};
 use crate::domain::ports::event_bus::{EventBus, EventBusError, EventStream};
+use crate::domain::ports::log_store::{
+    LogError, LogFilter, LogStore, LogStreamFilter, StoredLogEntry,
+};
 use crate::domain::ports::pipeline_store::PipelineStore;
+use crate::domain::ports::plugin_registry::{
+    InstalledPlugin, PluginMetadata, PluginRegistry, RegistryEntry, RegistryError,
+};
 use crate::domain::ports::repository::{
     AgentRepository, Pagination, RepositoryError, RunFilter, RunPage, RunRepository, TaskRepository,
 };
 use crate::domain::ports::secrets::{SecretError, SecretResolver};
 use crate::domain::run::Run;
 use crate::domain::task::{Task, TaskState};
+use crate::traits::{EventStream as TraitEventStream, PaginatedList};
 
 // ---------------------------------------------------------------------------
 // Shared backing store
@@ -100,6 +113,12 @@ impl RunRepository for FakeRunRepository {
                     .state
                     .as_ref()
                     .is_none_or(|state| r.state() == *state)
+            })
+            .filter(|r| {
+                filter
+                    .pipeline
+                    .as_ref()
+                    .is_none_or(|name| r.pipeline_name() == name)
             })
             .cloned()
             .collect();
@@ -507,6 +526,214 @@ impl Clock for FakeClock {
 }
 
 // ---------------------------------------------------------------------------
+// FakeCursorStore
+// ---------------------------------------------------------------------------
+
+pub struct FakeCursorStore {
+    cursors: Mutex<HashMap<String, Vec<StreamCursor>>>,
+    pipeline_states: Mutex<HashMap<String, PipelineState>>,
+}
+
+impl FakeCursorStore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            cursors: Mutex::new(HashMap::new()),
+            pipeline_states: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl Default for FakeCursorStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl CursorStore for FakeCursorStore {
+    async fn get_cursors(&self, pipeline: &str) -> Result<Vec<StreamCursor>, CursorError> {
+        Ok(self
+            .cursors
+            .lock()
+            .unwrap()
+            .get(pipeline)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn clear(&self, pipeline: &str, stream: Option<&str>) -> Result<u64, CursorError> {
+        let mut map = self.cursors.lock().unwrap();
+        if let Some(cursors) = map.get_mut(pipeline) {
+            let before = cursors.len();
+            if let Some(s) = stream {
+                cursors.retain(|c| c.stream != s);
+            } else {
+                cursors.clear();
+            }
+            Ok((before - cursors.len()) as u64)
+        } else {
+            Ok(0)
+        }
+    }
+
+    async fn last_sync_times(
+        &self,
+        pipelines: &[String],
+    ) -> Result<Vec<SyncTimestamp>, CursorError> {
+        Ok(pipelines
+            .iter()
+            .map(|p| SyncTimestamp {
+                pipeline: p.clone(),
+                last_sync_at: None,
+            })
+            .collect())
+    }
+
+    async fn get_pipeline_state(
+        &self,
+        pipeline: &str,
+    ) -> Result<Option<PipelineState>, CursorError> {
+        Ok(self.pipeline_states.lock().unwrap().get(pipeline).copied())
+    }
+
+    async fn set_pipeline_state(
+        &self,
+        pipeline: &str,
+        state: PipelineState,
+    ) -> Result<(), CursorError> {
+        self.pipeline_states
+            .lock()
+            .unwrap()
+            .insert(pipeline.to_string(), state);
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakeLogStore
+// ---------------------------------------------------------------------------
+
+pub struct FakeLogStore;
+
+impl FakeLogStore {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for FakeLogStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl LogStore for FakeLogStore {
+    async fn query(&self, filter: LogFilter) -> Result<PaginatedList<StoredLogEntry>, LogError> {
+        // Validate cursor format even in the fake, so REST tests catch malformed cursors.
+        if let Some(ref cursor) = filter.cursor {
+            let parts: Vec<&str> = cursor.splitn(2, '|').collect();
+            if parts.len() != 2 {
+                return Err(LogError::BadInput("invalid log cursor format".into()));
+            }
+            parts[0]
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .map_err(|_| LogError::BadInput("invalid cursor timestamp".into()))?;
+            parts[1]
+                .parse::<i64>()
+                .map_err(|_| LogError::BadInput("invalid cursor id".into()))?;
+        }
+        Ok(PaginatedList {
+            items: vec![],
+            next_cursor: None,
+        })
+    }
+
+    async fn subscribe(
+        &self,
+        _filter: LogStreamFilter,
+    ) -> Result<TraitEventStream<StoredLogEntry>, LogError> {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakeConnectionTester
+// ---------------------------------------------------------------------------
+
+/// A no-op `ConnectionTester` for use in unit and integration tests.
+/// Both methods always return a successful "ok" result.
+pub struct FakeConnectionTester;
+
+#[async_trait]
+impl ConnectionTester for FakeConnectionTester {
+    async fn test(
+        &self,
+        _connection_config: &serde_json::Value,
+    ) -> Result<TestResult, ConnectionTestError> {
+        Ok(TestResult {
+            status: "ok".into(),
+            latency_ms: Some(1),
+            details: None,
+            error: None,
+        })
+    }
+
+    async fn discover(
+        &self,
+        _connection_config: &serde_json::Value,
+        _table: Option<&str>,
+    ) -> Result<DiscoveryResult, ConnectionTestError> {
+        Ok(DiscoveryResult {
+            connection: "fake".into(),
+            streams: vec![],
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakePluginRegistry
+// ---------------------------------------------------------------------------
+
+/// A no-op `PluginRegistry` for use in unit and integration tests.
+/// All mutating operations return an `Internal` error; read operations
+/// return empty results.
+pub struct FakePluginRegistry;
+
+#[async_trait]
+impl PluginRegistry for FakePluginRegistry {
+    async fn list_installed(&self) -> Result<Vec<InstalledPlugin>, RegistryError> {
+        Ok(vec![])
+    }
+
+    async fn search(
+        &self,
+        _query: &str,
+        _plugin_type: Option<&str>,
+    ) -> Result<Vec<RegistryEntry>, RegistryError> {
+        Ok(vec![])
+    }
+
+    async fn info(&self, plugin_ref: &str) -> Result<PluginMetadata, RegistryError> {
+        Err(RegistryError::NotFound(plugin_ref.to_string()))
+    }
+
+    async fn install(&self, _plugin_ref: &str) -> Result<InstalledPlugin, RegistryError> {
+        Err(RegistryError::Unavailable(
+            "plugin installation requires engine context".into(),
+        ))
+    }
+
+    async fn remove(&self, _plugin_ref: &str) -> Result<(), RegistryError> {
+        Err(RegistryError::Unavailable(
+            "plugin removal requires engine context".into(),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TestContext + factory
 // ---------------------------------------------------------------------------
 
@@ -563,6 +790,9 @@ pub fn fake_context() -> TestContext {
     let event_bus = Arc::new(FakeEventBus::new());
     let clock = Arc::new(FakeClock::new(Utc::now()));
 
+    let cursor_store = Arc::new(FakeCursorStore::new());
+    let log_store = Arc::new(FakeLogStore::new());
+
     let ctx = AppContext {
         runs: Arc::new(FakeRunRepository::new(storage.clone())),
         tasks: Arc::new(FakeTaskRepository::new(storage.clone())),
@@ -571,6 +801,10 @@ pub fn fake_context() -> TestContext {
         event_bus: Arc::clone(&event_bus) as Arc<dyn EventBus>,
         secrets: Arc::new(FakeSecretResolver),
         clock: Arc::clone(&clock) as Arc<dyn Clock>,
+        cursor_store,
+        log_store,
+        connection_tester: Arc::new(FakeConnectionTester),
+        plugin_registry: Arc::new(FakePluginRegistry),
         config: AppConfig {
             default_lease_duration: Duration::from_secs(300),
             lease_check_interval: Duration::from_secs(30),
@@ -578,6 +812,7 @@ pub fn fake_context() -> TestContext {
             agent_reap_interval: Duration::from_secs(30),
             default_max_retries: 0,
             registry: None,
+            allow_unauthenticated: true,
         },
     };
 
@@ -587,4 +822,19 @@ pub fn fake_context() -> TestContext {
         event_bus,
         clock,
     }
+}
+
+/// Create `AppServices` backed by fakes for unit testing.
+///
+/// Returns an Arc-wrapped `AppServices` bound to in-memory test repositories.
+/// # Panics
+/// Never panics; uses hardcoded test address and current UTC time.
+#[must_use]
+pub fn fake_app_services() -> Arc<crate::application::services::AppServices> {
+    let tc = fake_context();
+    Arc::new(crate::application::services::AppServices::new(
+        Arc::new(tc.ctx),
+        chrono::Utc::now(),
+        "0.0.0.0:8080".parse().unwrap(),
+    ))
 }

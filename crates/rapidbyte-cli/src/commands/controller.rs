@@ -19,6 +19,7 @@ pub async fn execute(
     metrics_listen: Option<&str>,
     registry_url: Option<&str>,
     registry_insecure: bool,
+    rest_listen: Option<&str>,
     otel_guard: rapidbyte_metrics::OtelGuard,
     secrets: rapidbyte_secrets::SecretProviders,
 ) -> Result<()> {
@@ -35,8 +36,9 @@ pub async fn execute(
         metrics_listen,
         registry_url,
         registry_insecure,
+        rest_listen,
     )?;
-    rapidbyte_controller::run(config, Arc::new(otel_guard), secrets).await
+    rapidbyte_controller::serve(config, Arc::new(otel_guard), secrets).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -53,6 +55,7 @@ fn build_config(
     metrics_listen: Option<&str>,
     registry_url: Option<&str>,
     registry_insecure: bool,
+    rest_listen: Option<&str>,
 ) -> Result<rapidbyte_controller::ControllerConfig> {
     fn validate_auth_token(token: &str) -> Result<()> {
         if token.trim().is_empty() {
@@ -119,6 +122,12 @@ fn build_config(
         (None, None) => {}
         _ => anyhow::bail!("controller TLS requires both --tls-cert and --tls-key"),
     }
+    if let Some(rest) = rest_listen {
+        config.rest_listen_addr = Some(
+            rest.parse()
+                .map_err(|e| anyhow::anyhow!("Invalid REST listen address: {e}"))?,
+        );
+    }
     Ok(config)
 }
 
@@ -142,6 +151,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .unwrap();
         assert_eq!(config.auth.tokens, vec!["secret".to_string()]);
@@ -163,6 +173,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .err()
         .unwrap();
@@ -184,6 +195,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .unwrap();
         assert!(config.auth.tokens.is_empty());
@@ -205,6 +217,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .err()
         .unwrap();
@@ -226,6 +239,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .err()
         .unwrap();
@@ -247,6 +261,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .err()
         .unwrap();
@@ -270,6 +285,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .unwrap();
         assert!(config.auth.allow_insecure_default_signing_key);
@@ -290,6 +306,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .err()
         .unwrap();
@@ -319,6 +336,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .unwrap();
 
@@ -341,6 +359,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .err()
         .unwrap();
@@ -364,6 +383,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -387,9 +407,56 @@ mod tests {
             None,
             Some("registry.example.com"),
             true,
+            None,
         )
         .unwrap();
         assert_eq!(config.registry.url.as_deref(), Some("registry.example.com"));
         assert!(config.registry.insecure);
+    }
+
+    #[test]
+    fn controller_execute_wires_rest_listen_addr() {
+        let config = build_config(
+            "[::]:9090",
+            Some("postgresql://localhost/controller"),
+            Some("signing"),
+            Some("secret"),
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("0.0.0.0:8080"),
+        )
+        .unwrap();
+        assert_eq!(
+            config.rest_listen_addr,
+            Some("0.0.0.0:8080".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn controller_execute_rejects_invalid_rest_listen_addr() {
+        let err = build_config(
+            "[::]:9090",
+            Some("postgresql://localhost/controller"),
+            Some("signing"),
+            Some("secret"),
+            false,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("not-an-addr"),
+        )
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains("Invalid REST listen address"));
     }
 }

@@ -66,7 +66,10 @@ mod tests {
 
         let page = list_runs(
             &tc.ctx,
-            RunFilter { state: None },
+            RunFilter {
+                state: None,
+                pipeline: None,
+            },
             Pagination {
                 page_size: 10,
                 page_token: None,
@@ -90,6 +93,7 @@ mod tests {
             &tc.ctx,
             RunFilter {
                 state: Some(RunState::Pending),
+                pipeline: None,
             },
             Pagination {
                 page_size: 10,
@@ -104,6 +108,7 @@ mod tests {
             &tc.ctx,
             RunFilter {
                 state: Some(RunState::Running),
+                pipeline: None,
             },
             Pagination {
                 page_size: 10,
@@ -121,7 +126,10 @@ mod tests {
 
         let page = list_runs(
             &tc.ctx,
-            RunFilter { state: None },
+            RunFilter {
+                state: None,
+                pipeline: None,
+            },
             Pagination {
                 page_size: 10,
                 page_token: None,
@@ -150,7 +158,10 @@ mod tests {
 
         let page = list_runs(
             &tc.ctx,
-            RunFilter { state: None },
+            RunFilter {
+                state: None,
+                pipeline: None,
+            },
             Pagination {
                 page_size: 2,
                 page_token: None,
@@ -170,7 +181,10 @@ mod tests {
         // page_size=0 should work (returns empty result since 0 items requested)
         let page = list_runs(
             &tc.ctx,
-            RunFilter { state: None },
+            RunFilter {
+                state: None,
+                pipeline: None,
+            },
             Pagination {
                 page_size: 0,
                 page_token: None,
