@@ -11,7 +11,6 @@ pub mod sse;
 
 use axum::routing::{get, post};
 use axum::Router;
-use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use extractors::RestState;
@@ -80,9 +79,11 @@ pub fn router(state: RestState) -> Router {
             get(plugins::info).delete(plugins::remove),
         );
 
+    // No CORS layer: browser cross-origin requests are blocked by default.
+    // API clients (CLI, agents) don't need CORS. If a web dashboard is
+    // added later, configure explicit allowed origins via ControllerConfig.
     public
         .merge(protected)
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
         .with_state(state)
 }

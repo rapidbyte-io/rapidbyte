@@ -348,12 +348,28 @@ pub async fn serve(
             auth_config: components.config.auth.clone(),
         };
         let rest_router = crate::adapter::rest::router(rest_state);
-        let rest_listener = tokio::net::TcpListener::bind(rest_addr).await?;
-        tracing::info!(addr = %rest_addr, "controller REST listening");
 
-        tokio::select! {
-            result = grpc_server => result?,
-            result = axum::serve(rest_listener, rest_router) => result?,
+        if let Some(ref tls) = components.config.tls {
+            // TLS mode — use axum_server with rustls
+            let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem(
+                tls.cert_pem.clone(),
+                tls.key_pem.clone(),
+            )
+            .await?;
+            tracing::info!(addr = %rest_addr, tls = true, "controller REST listening");
+            tokio::select! {
+                result = grpc_server => result?,
+                result = axum_server::bind_rustls(rest_addr, rustls_config)
+                    .serve(rest_router.into_make_service()) => result?,
+            }
+        } else {
+            // Plaintext mode
+            let rest_listener = tokio::net::TcpListener::bind(rest_addr).await?;
+            tracing::info!(addr = %rest_addr, tls = false, "controller REST listening");
+            tokio::select! {
+                result = grpc_server => result?,
+                result = axum::serve(rest_listener, rest_router) => result?,
+            }
         }
     } else {
         grpc_server.await?;

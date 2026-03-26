@@ -105,3 +105,61 @@ async fn mixed_case_bearer_accepted_e2e() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn runs_endpoint_requires_auth() {
+    let app = test_app_with_auth();
+    let resp = app
+        .oneshot(Request::get("/api/v1/runs").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn pipelines_endpoint_requires_auth() {
+    let app = test_app_with_auth();
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/pipelines")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn connections_endpoint_requires_auth() {
+    let app = test_app_with_auth();
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/connections")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn plugins_endpoint_requires_auth() {
+    let app = test_app_with_auth();
+    let resp = app
+        .oneshot(Request::get("/api/v1/plugins").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn status_endpoint_requires_auth() {
+    let app = test_app_with_auth();
+    let resp = app
+        .oneshot(Request::get("/api/v1/status").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
