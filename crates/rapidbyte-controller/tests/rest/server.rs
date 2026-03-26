@@ -75,3 +75,33 @@ async fn config_returns_auth_required_flag() {
     let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["auth_required"], true);
 }
+
+#[tokio::test]
+async fn lowercase_bearer_accepted_e2e() {
+    let app = test_app_with_auth();
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/server/version")
+                .header("authorization", "bearer test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn mixed_case_bearer_accepted_e2e() {
+    let app = test_app_with_auth();
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/server/version")
+                .header("authorization", "BEARER test-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+}

@@ -51,7 +51,7 @@ async fn install_plugin_returns_error() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     let body = parse_json(resp).await;
-    assert_eq!(body["error"]["code"], "internal_error");
+    assert_eq!(body["error"]["code"], "not_implemented");
 }

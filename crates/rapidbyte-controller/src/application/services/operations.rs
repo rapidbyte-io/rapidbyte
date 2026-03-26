@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use crate::domain::ports::cursor_store::PipelineState;
-use crate::domain::ports::log_store::{LogFilter, LogStreamFilter, StoredLogEntry};
+use crate::domain::ports::log_store::{LogFilter, StoredLogEntry};
 use crate::traits::error::{EventStream, ServiceError};
 use crate::traits::operations::{
     FreshnessFilter, FreshnessStatus, LogsRequest, LogsResult, LogsStreamFilter, OperationsService,
@@ -157,22 +157,14 @@ impl OperationsService for AppServices {
 
     async fn logs_stream(
         &self,
-        filter: LogsStreamFilter,
+        _filter: LogsStreamFilter,
     ) -> Result<EventStream<StoredLogEntry>, ServiceError> {
-        let domain_filter = LogStreamFilter {
-            pipeline: filter.pipeline,
-        };
-
-        let stream = self
-            .ctx
-            .log_store
-            .subscribe(domain_filter)
-            .await
-            .map_err(|e| ServiceError::Internal {
-                message: e.to_string(),
-            })?;
-
-        Ok(stream)
+        // Log streaming via LISTEN/NOTIFY is not yet implemented.
+        // Return 501 so clients know this is explicitly unavailable,
+        // rather than silently returning an empty stream.
+        Err(ServiceError::NotImplemented {
+            feature: "real-time log streaming".into(),
+        })
     }
 }
 

@@ -16,9 +16,16 @@ fn registry_error_to_service(err: RegistryError, plugin_ref: &str) -> ServiceErr
             resource: "plugin".into(),
             id: plugin_ref.to_string(),
         },
-        RegistryError::Registry(msg) | RegistryError::Io(msg) => {
-            ServiceError::Internal { message: msg }
+        RegistryError::Registry(msg) => {
+            // Registry errors from NoOpPluginRegistry indicate the operation
+            // requires engine context that isn't available in this mode.
+            if msg.contains("requires engine context") {
+                ServiceError::NotImplemented { feature: msg }
+            } else {
+                ServiceError::Internal { message: msg }
+            }
         }
+        RegistryError::Io(msg) => ServiceError::Internal { message: msg },
     }
 }
 
@@ -138,9 +145,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn install_returns_error() {
+    async fn install_returns_not_implemented() {
         let services = fake_app_services();
         let result = services.install("rapidbyte/source-postgres:1.0.0").await;
-        assert!(matches!(result, Err(ServiceError::Internal { .. })));
+        assert!(matches!(result, Err(ServiceError::NotImplemented { .. })));
     }
 }

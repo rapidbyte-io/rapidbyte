@@ -247,3 +247,19 @@ async fn internal_error_does_not_leak_details() {
         .unwrap()
         .contains("postgres://"));
 }
+
+#[tokio::test]
+async fn logs_stream_returns_501_not_implemented() {
+    let app = test_app();
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/logs/stream")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = parse_json(resp).await;
+    assert_eq!(body["error"]["code"], "not_implemented");
+}
