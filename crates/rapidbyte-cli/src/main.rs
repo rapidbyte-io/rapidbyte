@@ -207,6 +207,9 @@ enum Commands {
         /// Use HTTP instead of HTTPS for the plugin registry
         #[arg(long)]
         registry_insecure: bool,
+        /// REST API listen address (e.g. 0.0.0.0:8080). If not set, REST is disabled.
+        #[arg(long, env = "RAPIDBYTE_REST_LISTEN")]
+        rest_listen: Option<String>,
     },
     /// Start an agent worker (long-running)
     Agent {
@@ -549,6 +552,7 @@ async fn main() -> ExitCode {
             metrics_listen,
             registry_url,
             registry_insecure,
+            rest_listen,
         } => {
             // Controller-subcommand registry flags override global ones.
             let ctrl_registry_url = registry_url
@@ -568,6 +572,7 @@ async fn main() -> ExitCode {
                 metrics_listen.as_deref(),
                 ctrl_registry_url,
                 ctrl_registry_insecure,
+                rest_listen.as_deref(),
                 otel_guard,
                 match try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id) {
                     Some(s) => s,
