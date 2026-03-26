@@ -631,7 +631,20 @@ impl Default for FakeLogStore {
 
 #[async_trait]
 impl LogStore for FakeLogStore {
-    async fn query(&self, _filter: LogFilter) -> Result<PaginatedList<StoredLogEntry>, LogError> {
+    async fn query(&self, filter: LogFilter) -> Result<PaginatedList<StoredLogEntry>, LogError> {
+        // Validate cursor format even in the fake, so REST tests catch malformed cursors.
+        if let Some(ref cursor) = filter.cursor {
+            let parts: Vec<&str> = cursor.splitn(2, '|').collect();
+            if parts.len() != 2 {
+                return Err(LogError::BadInput("invalid log cursor format".into()));
+            }
+            parts[0]
+                .parse::<chrono::DateTime<chrono::Utc>>()
+                .map_err(|_| LogError::BadInput("invalid cursor timestamp".into()))?;
+            parts[1]
+                .parse::<i64>()
+                .map_err(|_| LogError::BadInput("invalid cursor id".into()))?;
+        }
         Ok(PaginatedList {
             items: vec![],
             next_cursor: None,

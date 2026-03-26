@@ -21,11 +21,18 @@ impl BearerAuthInterceptor {
 
 impl Interceptor for BearerAuthInterceptor {
     fn call(&mut self, req: Request<()>) -> Result<Request<()>, Status> {
+        // RFC 7235: auth scheme is case-insensitive.
         let token = req
             .metadata()
             .get("authorization")
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "));
+            .and_then(|s| {
+                if s.len() > 7 && s[..7].eq_ignore_ascii_case("bearer ") {
+                    Some(&s[7..])
+                } else {
+                    None
+                }
+            });
 
         match token {
             Some(raw) => validate_token(&self.auth_config, raw)
@@ -121,5 +128,19 @@ mod tests {
         let req = make_request(Some("Bearer something"));
         let result = interceptor.call(req);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn lowercase_bearer_accepted() {
+        let mut interceptor = interceptor_with_tokens(vec!["secret-token"], false);
+        let req = make_request(Some("bearer secret-token"));
+        assert!(interceptor.call(req).is_ok());
+    }
+
+    #[test]
+    fn mixed_case_bearer_accepted() {
+        let mut interceptor = interceptor_with_tokens(vec!["secret-token"], false);
+        let req = make_request(Some("BEARER secret-token"));
+        assert!(interceptor.call(req).is_ok());
     }
 }

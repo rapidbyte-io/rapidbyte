@@ -32,6 +32,8 @@ pub struct LogStreamFilter {
 pub enum LogError {
     #[error("database error: {0}")]
     Database(String),
+    #[error("invalid input: {0}")]
+    BadInput(String),
 }
 
 #[async_trait]

@@ -135,8 +135,18 @@ impl OperationsService for AppServices {
             .log_store
             .query(filter)
             .await
-            .map_err(|e| ServiceError::Internal {
-                message: e.to_string(),
+            .map_err(|e| match e {
+                crate::domain::ports::log_store::LogError::BadInput(msg) => {
+                    ServiceError::ValidationFailed {
+                        details: vec![crate::traits::FieldError {
+                            field: "cursor".into(),
+                            reason: msg,
+                        }],
+                    }
+                }
+                crate::domain::ports::log_store::LogError::Database(msg) => {
+                    ServiceError::Internal { message: msg }
+                }
             })?;
 
         Ok(LogsResult {

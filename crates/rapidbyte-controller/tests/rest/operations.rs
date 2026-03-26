@@ -192,11 +192,8 @@ async fn logs_returns_empty() {
 }
 
 #[tokio::test]
-async fn logs_invalid_cursor_returns_200_empty() {
-    // The FakeLogStore always returns empty, so an invalid cursor doesn't
-    // reach the Postgres parser. This test confirms the endpoint doesn't
-    // crash on malformed cursor values. The real PgLogStore cursor parsing
-    // is covered by unit tests in adapter::postgres::log_store::tests.
+async fn logs_invalid_cursor_returns_422() {
+    // Malformed cursors should be rejected as validation errors, not 500.
     let app = test_app();
     let resp = app
         .oneshot(
@@ -206,7 +203,24 @@ async fn logs_invalid_cursor_returns_200_empty() {
         )
         .await
         .unwrap();
-    // FakeLogStore ignores cursor, returns empty — no crash
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = parse_json(resp).await;
+    assert_eq!(body["error"]["code"], "validation_failed");
+    assert_eq!(body["error"]["details"][0]["field"], "cursor");
+}
+
+#[tokio::test]
+async fn logs_valid_cursor_format_returns_200() {
+    // A well-formed cursor should not error even if no data matches.
+    let app = test_app();
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/logs?pipeline=test&cursor=2025-03-19T14:30:00Z|42")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 }
 

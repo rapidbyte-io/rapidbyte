@@ -42,9 +42,12 @@ fn extract_bearer(headers: &axum::http::HeaderMap) -> Result<String, AuthError> 
         .and_then(|v| v.to_str().ok())
         .ok_or(AuthError::MissingToken)?;
 
-    let token = value
-        .strip_prefix("Bearer ")
-        .ok_or(AuthError::InvalidToken)?;
+    // RFC 7235: auth scheme is case-insensitive. Accept "Bearer", "bearer", "BEARER", etc.
+    let token = if value.len() > 7 && value[..7].eq_ignore_ascii_case("bearer ") {
+        &value[7..]
+    } else {
+        return Err(AuthError::InvalidToken);
+    };
 
     if token.is_empty() {
         return Err(AuthError::InvalidToken);
@@ -83,5 +86,19 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer ".parse().unwrap());
         assert!(extract_bearer(&headers).is_err());
+    }
+
+    #[test]
+    fn lowercase_bearer_accepted() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "bearer tok-abc".parse().unwrap());
+        assert_eq!(extract_bearer(&headers).unwrap(), "tok-abc");
+    }
+
+    #[test]
+    fn mixed_case_bearer_accepted() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "BEARER tok-abc".parse().unwrap());
+        assert_eq!(extract_bearer(&headers).unwrap(), "tok-abc");
     }
 }

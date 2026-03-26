@@ -12,14 +12,14 @@ use crate::traits::{EventStream, PaginatedList};
 fn parse_log_cursor(cursor: &str) -> Result<(chrono::DateTime<chrono::Utc>, i64), LogError> {
     let parts: Vec<&str> = cursor.splitn(2, '|').collect();
     if parts.len() != 2 {
-        return Err(LogError::Database("invalid log cursor format".into()));
+        return Err(LogError::BadInput("invalid log cursor format".into()));
     }
     let ts = parts[0]
         .parse::<chrono::DateTime<chrono::Utc>>()
-        .map_err(|_| LogError::Database("invalid cursor timestamp".into()))?;
+        .map_err(|_| LogError::BadInput("invalid cursor timestamp".into()))?;
     let id = parts[1]
         .parse::<i64>()
-        .map_err(|_| LogError::Database("invalid cursor id".into()))?;
+        .map_err(|_| LogError::BadInput("invalid cursor id".into()))?;
     Ok((ts, id))
 }
 
