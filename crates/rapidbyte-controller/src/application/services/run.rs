@@ -1,9 +1,12 @@
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use async_trait::async_trait;
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 
 use crate::application::{cancel, query};
+use crate::domain::ports::event_bus::EventBus;
 use crate::domain::ports::repository::{Pagination, RunFilter as DomainRunFilter};
 use crate::domain::run::{Run, RunState};
 use crate::traits::error::{EventStream, PaginatedList, ServiceError};
@@ -13,6 +16,34 @@ use crate::traits::run::{
 };
 
 use super::{app_error_to_service, AppServices};
+
+/// Stream wrapper that calls `event_bus.cleanup()` when dropped.
+/// Prevents subscriber-map growth in `PgEventBus` when REST SSE
+/// connections close.
+struct CleanupStream {
+    inner: Pin<Box<dyn Stream<Item = ProgressEvent> + Send>>,
+    event_bus: Option<Arc<dyn EventBus>>,
+    run_id: String,
+}
+
+impl Stream for CleanupStream {
+    type Item = ProgressEvent;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+impl Drop for CleanupStream {
+    fn drop(&mut self) {
+        if let Some(bus) = self.event_bus.take() {
+            let run_id = self.run_id.clone();
+            tokio::spawn(async move {
+                bus.cleanup(&run_id).await;
+            });
+        }
+    }
+}
 
 #[async_trait]
 impl RunService for AppServices {
@@ -70,7 +101,15 @@ impl RunService for AppServices {
             let pipeline = Arc::clone(&pipeline_name);
             async move { domain_event_to_progress(event, &pipeline) }
         });
-        Ok(Box::pin(mapped))
+
+        // Wrap in a cleanup stream that removes the event_bus subscriber
+        // entry when the SSE connection drops, preventing subscriber-map growth.
+        let cleanup = CleanupStream {
+            inner: Box::pin(mapped) as Pin<Box<dyn Stream<Item = ProgressEvent> + Send>>,
+            event_bus: Some(Arc::clone(&self.ctx.event_bus)),
+            run_id: run_id.to_string(),
+        };
+        Ok(Box::pin(cleanup))
     }
 
     async fn cancel(&self, run_id: &str) -> Result<RunDetail, ServiceError> {

@@ -22,16 +22,14 @@ impl BearerAuthInterceptor {
 impl Interceptor for BearerAuthInterceptor {
     fn call(&mut self, req: Request<()>) -> Result<Request<()>, Status> {
         // RFC 7235: auth scheme is case-insensitive.
+        // Use get() for boundary-safe slicing — avoids panic on multi-byte UTF-8.
         let token = req
             .metadata()
             .get("authorization")
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| {
-                if s.len() > 7 && s[..7].eq_ignore_ascii_case("bearer ") {
-                    Some(&s[7..])
-                } else {
-                    None
-                }
+            .and_then(|s| match s.get(..7) {
+                Some(prefix) if prefix.eq_ignore_ascii_case("bearer ") => Some(&s[7..]),
+                _ => None,
             });
 
         match token {
