@@ -81,14 +81,8 @@ impl RunService for AppServices {
     }
 
     async fn events(&self, run_id: &str) -> Result<EventStream<ProgressEvent>, ServiceError> {
-        // Verify run exists and capture pipeline name for Started events.
-        let run = query::get_run(&self.ctx, run_id)
-            .await
-            .map_err(app_error_to_service)?;
-        // Use Arc<str> so each event only pays an atomic ref-count increment
-        // rather than a heap allocation for the pipeline name clone.
-        let pipeline_name: Arc<str> = Arc::from(run.pipeline_name());
-
+        // Subscribe FIRST to avoid missing events between fetch and subscribe.
+        // This matches the gRPC watch_run pattern.
         let stream =
             self.ctx
                 .event_bus
@@ -97,6 +91,16 @@ impl RunService for AppServices {
                 .map_err(|e| ServiceError::Internal {
                     message: e.to_string(),
                 })?;
+
+        // Then verify run exists and capture pipeline name.
+        let run = query::get_run(&self.ctx, run_id)
+            .await
+            .map_err(app_error_to_service)?;
+        // Use Arc<str> so each event only pays an atomic ref-count increment
+        // rather than a heap allocation for the pipeline name clone.
+        let pipeline_name: Arc<str> = Arc::from(run.pipeline_name());
+
+        // Map DomainEvent -> ProgressEvent, filtering out None
         let mapped = stream.filter_map(move |event| {
             let pipeline = Arc::clone(&pipeline_name);
             async move { domain_event_to_progress(event, &pipeline) }
@@ -104,6 +108,8 @@ impl RunService for AppServices {
 
         // Wrap in a cleanup stream that removes the event_bus subscriber
         // entry when the SSE connection drops, preventing subscriber-map growth.
+        // If the run doesn't exist, get_run returns NotFound and the subscription
+        // is dropped here (CleanupStream's Drop handles cleanup).
         let cleanup = CleanupStream {
             inner: Box::pin(mapped) as Pin<Box<dyn Stream<Item = ProgressEvent> + Send>>,
             event_bus: Some(Arc::clone(&self.ctx.event_bus)),
