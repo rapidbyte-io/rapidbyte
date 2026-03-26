@@ -721,13 +721,13 @@ impl PluginRegistry for FakePluginRegistry {
     }
 
     async fn install(&self, _plugin_ref: &str) -> Result<InstalledPlugin, RegistryError> {
-        Err(RegistryError::Registry(
+        Err(RegistryError::Unavailable(
             "plugin installation requires engine context".into(),
         ))
     }
 
     async fn remove(&self, _plugin_ref: &str) -> Result<(), RegistryError> {
-        Err(RegistryError::Registry(
+        Err(RegistryError::Unavailable(
             "plugin removal requires engine context".into(),
         ))
     }

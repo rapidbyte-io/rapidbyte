@@ -43,6 +43,9 @@ pub enum RegistryError {
     Registry(String),
     #[error("io error: {0}")]
     Io(String),
+    /// The operation requires engine context that is not available in this mode.
+    #[error("operation unavailable: {0}")]
+    Unavailable(String),
 }
 
 /// Driven port for plugin lifecycle management.

@@ -86,19 +86,19 @@ impl PluginRegistry for NoOpPluginRegistry {
     }
 
     async fn info(&self, _plugin_ref: &str) -> Result<PluginMetadata, RegistryError> {
-        Err(RegistryError::Registry(
+        Err(RegistryError::Unavailable(
             "plugin info requires engine context".into(),
         ))
     }
 
     async fn install(&self, _plugin_ref: &str) -> Result<InstalledPlugin, RegistryError> {
-        Err(RegistryError::Registry(
+        Err(RegistryError::Unavailable(
             "plugin installation requires engine context".into(),
         ))
     }
 
     async fn remove(&self, _plugin_ref: &str) -> Result<(), RegistryError> {
-        Err(RegistryError::Registry(
+        Err(RegistryError::Unavailable(
             "plugin removal requires engine context".into(),
         ))
     }

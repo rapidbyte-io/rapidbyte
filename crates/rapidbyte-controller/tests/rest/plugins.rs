@@ -55,3 +55,37 @@ async fn install_plugin_returns_error() {
     let body = parse_json(resp).await;
     assert_eq!(body["error"]["code"], "not_implemented");
 }
+
+#[tokio::test]
+async fn get_plugin_info_returns_404_for_unknown() {
+    // FakePluginRegistry returns NotFound for unknown plugins.
+    let app = test_app();
+    let resp = app
+        .oneshot(
+            Request::get("/api/v1/plugins/rapidbyte/source-postgres:1.0.0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = parse_json(resp).await;
+    assert_eq!(body["error"]["code"], "plugin_not_found");
+}
+
+#[tokio::test]
+async fn remove_plugin_returns_501() {
+    // FakePluginRegistry::remove returns Unavailable.
+    let app = test_app();
+    let resp = app
+        .oneshot(
+            Request::delete("/api/v1/plugins/rapidbyte/source-postgres:1.0.0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = parse_json(resp).await;
+    assert_eq!(body["error"]["code"], "not_implemented");
+}

@@ -16,16 +16,10 @@ fn registry_error_to_service(err: RegistryError, plugin_ref: &str) -> ServiceErr
             resource: "plugin".into(),
             id: plugin_ref.to_string(),
         },
-        RegistryError::Registry(msg) => {
-            // Registry errors from NoOpPluginRegistry indicate the operation
-            // requires engine context that isn't available in this mode.
-            if msg.contains("requires engine context") {
-                ServiceError::NotImplemented { feature: msg }
-            } else {
-                ServiceError::Internal { message: msg }
-            }
+        RegistryError::Unavailable(feature) => ServiceError::NotImplemented { feature },
+        RegistryError::Registry(msg) | RegistryError::Io(msg) => {
+            ServiceError::Internal { message: msg }
         }
-        RegistryError::Io(msg) => ServiceError::Internal { message: msg },
     }
 }
 
