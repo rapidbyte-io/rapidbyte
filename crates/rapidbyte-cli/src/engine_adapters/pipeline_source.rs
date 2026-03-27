@@ -84,7 +84,7 @@ impl PipelineSource for FsPipelineSource {
             let path = self.project_dir.join(filename);
             match tokio::fs::read_to_string(&path).await {
                 Ok(contents) => return Ok(Some(contents)),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(PipelineSourceError::Io(e.to_string())),
             }
         }

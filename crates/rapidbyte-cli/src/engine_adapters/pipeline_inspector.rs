@@ -8,6 +8,7 @@ use rapidbyte_controller::domain::ports::pipeline_inspector::{
 /// This is a stub implementation — the real delegation to `check_pipeline()`
 /// requires `EngineContext` which is not yet wired. The struct exists so it
 /// can be imported and wired once `EngineContext` is available.
+#[allow(dead_code)]
 pub struct EnginePipelineInspector;
 
 #[async_trait]
