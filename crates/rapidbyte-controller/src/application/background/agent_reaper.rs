@@ -33,7 +33,7 @@ mod tests {
     use crate::domain::agent::AgentCapabilities;
     use crate::domain::ports::clock::Clock;
     use crate::domain::run::RunState;
-    use crate::domain::task::TaskState;
+    use crate::domain::task::{TaskOperation, TaskState};
 
     fn caps() -> AgentCapabilities {
         AgentCapabilities {
@@ -48,9 +48,16 @@ mod tests {
         register(&tc.ctx, "agent-1", caps()).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, None)
-            .await
-            .unwrap();
+        let submit = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            2,
+            None,
+            TaskOperation::Sync,
+        )
+        .await
+        .unwrap();
         let assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
 
         // Advance clock past agent_reap_timeout (60s)

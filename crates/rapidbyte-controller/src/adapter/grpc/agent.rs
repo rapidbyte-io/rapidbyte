@@ -229,10 +229,16 @@ mod tests {
         ctx.agents.save(&agent).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let _submit =
-            crate::application::submit::submit_pipeline(ctx, None, yaml.to_string(), 2, Some(60))
-                .await
-                .unwrap();
+        let _submit = crate::application::submit::submit_pipeline(
+            ctx,
+            None,
+            yaml.to_string(),
+            2,
+            Some(60),
+            crate::domain::task::TaskOperation::Sync,
+        )
+        .await
+        .unwrap();
 
         let assignment = crate::application::poll::poll_task(ctx, agent_id)
             .await
@@ -261,9 +267,16 @@ mod tests {
 
         // Submit a pipeline and poll — max_concurrent_tasks=1 should allow one task
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        crate::application::submit::submit_pipeline(&ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        crate::application::submit::submit_pipeline(
+            &ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            crate::domain::task::TaskOperation::Sync,
+        )
+        .await
+        .unwrap();
 
         let resp = svc
             .poll_task(Request::new(pb::PollTaskRequest {
@@ -300,9 +313,16 @@ mod tests {
 
         // Submit and poll
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        crate::application::submit::submit_pipeline(&ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        crate::application::submit::submit_pipeline(
+            &ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            crate::domain::task::TaskOperation::Sync,
+        )
+        .await
+        .unwrap();
 
         let resp = svc
             .poll_task(Request::new(pb::PollTaskRequest {
@@ -451,12 +471,26 @@ mod tests {
 
         // Submit and poll 2 tasks
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        crate::application::submit::submit_pipeline(&ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
-        crate::application::submit::submit_pipeline(&ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        crate::application::submit::submit_pipeline(
+            &ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            crate::domain::task::TaskOperation::Sync,
+        )
+        .await
+        .unwrap();
+        crate::application::submit::submit_pipeline(
+            &ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            crate::domain::task::TaskOperation::Sync,
+        )
+        .await
+        .unwrap();
 
         let a1 = crate::application::poll::poll_task(&ctx, "agent-1")
             .await

@@ -72,7 +72,7 @@ mod tests {
     use crate::application::testing::{fake_context, setup_running_task};
     use crate::domain::agent::{Agent, AgentCapabilities};
     use crate::domain::ports::clock::Clock;
-    use crate::domain::task::TaskState;
+    use crate::domain::task::{TaskOperation, TaskState};
 
     #[tokio::test]
     async fn handle_timeout_cancel_requested() {
@@ -168,9 +168,16 @@ mod tests {
         tc.ctx.agents.save(&agent).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let submit = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+        )
+        .await
+        .unwrap();
         let assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
 
         let mut task = tc
@@ -256,9 +263,16 @@ mod tests {
         tc.ctx.agents.save(&agent).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let submit = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+        )
+        .await
+        .unwrap();
         let assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
 
         let mut task = tc

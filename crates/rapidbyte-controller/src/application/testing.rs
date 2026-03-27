@@ -804,6 +804,7 @@ pub async fn setup_running_task(tc: &TestContext) -> (String, String, u64) {
     use crate::application::submit::submit_pipeline;
     use crate::domain::agent::{Agent, AgentCapabilities};
     use crate::domain::ports::clock::Clock;
+    use crate::domain::task::TaskOperation;
 
     let now = tc.clock.now();
     let agent = Agent::new(
@@ -817,9 +818,16 @@ pub async fn setup_running_task(tc: &TestContext) -> (String, String, u64) {
     tc.ctx.agents.save(&agent).await.unwrap();
 
     let yaml = "pipeline: test-pipe\nversion: '1.0'";
-    let _submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, Some(60))
-        .await
-        .unwrap();
+    let _submit = submit_pipeline(
+        &tc.ctx,
+        None,
+        yaml.to_string(),
+        2,
+        Some(60),
+        TaskOperation::Sync,
+    )
+    .await
+    .unwrap();
 
     let assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
     (

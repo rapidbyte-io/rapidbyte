@@ -39,7 +39,7 @@ mod tests {
     use crate::domain::agent::AgentCapabilities;
     use crate::domain::event::DomainEvent;
     use crate::domain::run::RunState;
-    use crate::domain::task::TaskState;
+    use crate::domain::task::{TaskOperation, TaskState};
 
     fn caps() -> AgentCapabilities {
         AgentCapabilities {
@@ -54,9 +54,16 @@ mod tests {
         register(&tc.ctx, "agent-1", caps()).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, None)
-            .await
-            .unwrap();
+        let submit = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            2,
+            None,
+            TaskOperation::Sync,
+        )
+        .await
+        .unwrap();
         let assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
 
         // Advance clock past lease expiry (default_lease_duration = 300s)
@@ -99,9 +106,16 @@ mod tests {
         register(&tc.ctx, "agent-1", caps()).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let submit = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+        )
+        .await
+        .unwrap();
         let _assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
 
         tc.clock.advance(chrono::Duration::seconds(301));
@@ -143,9 +157,16 @@ mod tests {
         register(&tc.ctx, "agent-1", caps()).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, None)
-            .await
-            .unwrap();
+        let submit = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            2,
+            None,
+            TaskOperation::Sync,
+        )
+        .await
+        .unwrap();
         let _assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
 
         // Request cancel
@@ -187,15 +208,36 @@ mod tests {
         register(&tc.ctx, "agent-1", multi_caps).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let s1 = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, None)
-            .await
-            .unwrap();
-        let s2 = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, None)
-            .await
-            .unwrap();
-        let s3 = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, None)
-            .await
-            .unwrap();
+        let s1 = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            2,
+            None,
+            TaskOperation::Sync,
+        )
+        .await
+        .unwrap();
+        let s2 = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            2,
+            None,
+            TaskOperation::Sync,
+        )
+        .await
+        .unwrap();
+        let s3 = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            2,
+            None,
+            TaskOperation::Sync,
+        )
+        .await
+        .unwrap();
 
         let a1 = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
         let a2 = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();

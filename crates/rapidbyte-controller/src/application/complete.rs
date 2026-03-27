@@ -121,7 +121,7 @@ mod tests {
     use crate::domain::event::DomainEvent;
     use crate::domain::ports::clock::Clock;
     use crate::domain::run::{RunMetrics, RunState};
-    use crate::domain::task::TaskState;
+    use crate::domain::task::{TaskOperation, TaskState};
 
     fn sample_metrics() -> RunMetrics {
         RunMetrics {
@@ -275,9 +275,16 @@ mod tests {
         tc.ctx.agents.save(&agent).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let submit = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+        )
+        .await
+        .unwrap();
         let assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
 
         complete_task(
