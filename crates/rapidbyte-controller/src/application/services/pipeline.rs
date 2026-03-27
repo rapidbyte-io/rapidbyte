@@ -181,6 +181,12 @@ impl PipelineService for AppServices {
             });
         }
 
+        if runs.is_empty() && !all.is_empty() {
+            return Err(ServiceError::Internal {
+                message: "all pipeline submissions failed".into(),
+            });
+        }
+
         Ok(BatchRunHandle {
             batch_id: format!("batch_{}", uuid::Uuid::new_v4()),
             runs,
@@ -339,23 +345,45 @@ impl PipelineService for AppServices {
             });
         }
 
+        let batch = request.pipeline.is_none();
         let mut results = Vec::new();
         for name in &pipelines {
-            let yaml = self
-                .ctx
-                .pipeline_source
-                .get(name)
-                .await
-                .map_err(source_error_to_service)?;
-            let result =
-                submit::submit_pipeline(&self.ctx, None, yaml, 0, None, TaskOperation::Assert)
-                    .await
-                    .map_err(app_error_to_service)?;
+            let yaml = match self.ctx.pipeline_source.get(name).await {
+                Ok(y) => y,
+                Err(e) if batch => {
+                    tracing::warn!(pipeline = %name, error = %e, "skipping pipeline in batch assert due to error");
+                    continue;
+                }
+                Err(e) => return Err(source_error_to_service(e)),
+            };
+            let result = match submit::submit_pipeline(
+                &self.ctx,
+                None,
+                yaml,
+                0,
+                None,
+                TaskOperation::Assert,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) if batch => {
+                    tracing::warn!(pipeline = %name, error = %e, "failed to submit pipeline in batch assert");
+                    continue;
+                }
+                Err(e) => return Err(app_error_to_service(e)),
+            };
             results.push(serde_json::json!({
                 "pipeline": name,
                 "run_id": result.run_id,
                 "status": "pending",
             }));
+        }
+
+        if results.is_empty() && batch && !pipelines.is_empty() {
+            return Err(ServiceError::Internal {
+                message: "all pipeline assert submissions failed".into(),
+            });
         }
 
         Ok(AssertResult {

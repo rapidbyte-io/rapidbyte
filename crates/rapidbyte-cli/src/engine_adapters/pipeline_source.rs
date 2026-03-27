@@ -62,7 +62,16 @@ impl PipelineSource for FsPipelineSource {
 
             let yaml = Self::read_file(&path).await?;
             match rapidbyte_pipeline_config::extract_pipeline_name(&yaml) {
-                Ok(name) => pipelines.push(PipelineInfo { name, path }),
+                Ok(name) if name != "unknown" && !name.is_empty() => {
+                    if pipelines.iter().any(|p: &PipelineInfo| p.name == name) {
+                        tracing::warn!(path = %path.display(), name = %name, "skipping duplicate pipeline name");
+                    } else {
+                        pipelines.push(PipelineInfo { name, path });
+                    }
+                }
+                Ok(name) => {
+                    tracing::warn!(path = %path.display(), name = %name, "skipping pipeline with invalid name");
+                }
                 Err(e) => {
                     // Skip invalid YAML files rather than failing the entire listing.
                     tracing::warn!(path = %path.display(), error = %e, "skipping invalid pipeline file");
@@ -101,7 +110,8 @@ impl PipelineSource for FsPipelineSource {
 
             let yaml = Self::read_file(&path).await?;
             if let Ok(pipeline_name) = rapidbyte_pipeline_config::extract_pipeline_name(&yaml) {
-                if pipeline_name == name {
+                if pipeline_name != "unknown" && !pipeline_name.is_empty() && pipeline_name == name
+                {
                     return Ok(yaml);
                 }
             }

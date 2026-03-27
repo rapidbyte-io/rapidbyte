@@ -325,6 +325,10 @@ pub async fn run(
 /// If `ctx.task_executor` is `Some`, an embedded agent is spawned in the
 /// background and will begin polling for and executing tasks immediately.
 ///
+/// # Panics
+///
+/// Panics if the SIGTERM signal handler cannot be installed (Unix only).
+///
 /// # Errors
 ///
 /// Returns an error if the database connection, migration, TLS setup, gRPC
@@ -341,7 +345,20 @@ pub async fn serve(config: ControllerConfig, ctx: ServeContext) -> Result<()> {
     // Handle SIGTERM / Ctrl-C by cancelling the shutdown token.
     let shutdown_signal = shutdown.clone();
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await.ok();
+        }
         shutdown_signal.cancel();
     });
 

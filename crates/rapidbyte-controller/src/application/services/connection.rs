@@ -189,16 +189,24 @@ async fn raw_connection_config(
     Ok((connector, config))
 }
 
+const SENSITIVE_PATTERNS: &[&str] = &[
+    "password",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "private_key",
+    "access_key",
+    "auth",
+    "credential",
+];
+
 fn redact_sensitive_fields(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(obj) => {
             for (key, val) in obj.iter_mut() {
                 let lower = key.to_lowercase();
-                if lower.contains("password")
-                    || lower.contains("secret")
-                    || lower.contains("token")
-                    || lower.contains("api_key")
-                {
+                if SENSITIVE_PATTERNS.iter().any(|p| lower.contains(p)) {
                     *val = serde_json::Value::String("***REDACTED***".into());
                 } else {
                     redact_sensitive_fields(val);
@@ -362,17 +370,40 @@ my_other:
     fn redact_nested_secrets() {
         let mut val = serde_json::json!({
             "host": "db.example.com",
-            "auth": {
+            "tls_config": {
                 "username": "admin",
                 "password": "secret123"
             },
             "headers": [{"api_key": "key123"}]
         });
         super::redact_sensitive_fields(&mut val);
-        assert_eq!(val["auth"]["password"], "***REDACTED***");
-        assert_eq!(val["auth"]["username"], "admin"); // not redacted
+        // password inside a non-sensitive parent is still redacted (recursive)
+        assert_eq!(val["tls_config"]["password"], "***REDACTED***");
+        assert_eq!(val["tls_config"]["username"], "admin"); // not redacted
         assert_eq!(val["headers"][0]["api_key"], "***REDACTED***");
         assert_eq!(val["host"], "db.example.com"); // not redacted
+    }
+
+    #[test]
+    fn redact_expanded_sensitive_patterns() {
+        let mut val = serde_json::json!({
+            "apikey": "ak_live_123",
+            "private_key": "-----BEGIN RSA PRIVATE KEY-----",
+            "access_key": "AKIAIOSFODNN7EXAMPLE",
+            "auth_token": "bearer_xyz",
+            "credentials": "base64encodedcreds",
+            "host": "localhost",
+            "username": "admin",
+        });
+        super::redact_sensitive_fields(&mut val);
+        assert_eq!(val["apikey"], "***REDACTED***");
+        assert_eq!(val["private_key"], "***REDACTED***");
+        assert_eq!(val["access_key"], "***REDACTED***");
+        assert_eq!(val["auth_token"], "***REDACTED***");
+        assert_eq!(val["credentials"], "***REDACTED***");
+        // non-sensitive fields are preserved
+        assert_eq!(val["host"], "localhost");
+        assert_eq!(val["username"], "admin");
     }
 
     #[tokio::test]
