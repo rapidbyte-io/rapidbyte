@@ -74,12 +74,40 @@ impl PipelineSource for FsPipelineSource {
     }
 
     async fn get(&self, name: &str) -> Result<String, PipelineSourceError> {
-        let infos = self.list().await?;
-        let info = infos
-            .into_iter()
-            .find(|i| i.name == name)
-            .ok_or_else(|| PipelineSourceError::NotFound(name.to_string()))?;
-        Self::read_file(&info.path).await
+        let mut read_dir = tokio::fs::read_dir(&self.project_dir)
+            .await
+            .map_err(|e| PipelineSourceError::Io(e.to_string()))?;
+
+        while let Some(entry) = read_dir
+            .next_entry()
+            .await
+            .map_err(|e| PipelineSourceError::Io(e.to_string()))?
+        {
+            let path = entry.path();
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or_default();
+            if ext != "yml" && ext != "yaml" {
+                continue;
+            }
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if stem == "connections" {
+                continue;
+            }
+
+            let yaml = Self::read_file(&path).await?;
+            if let Ok(pipeline_name) = rapidbyte_pipeline_config::extract_pipeline_name(&yaml) {
+                if pipeline_name == name {
+                    return Ok(yaml);
+                }
+            }
+        }
+
+        Err(PipelineSourceError::NotFound(name.to_string()))
     }
 
     async fn connections_yaml(&self) -> Result<Option<String>, PipelineSourceError> {

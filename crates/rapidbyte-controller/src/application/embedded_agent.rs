@@ -158,7 +158,6 @@ pub async fn run_embedded_agent(
 
             let task_id = assignment.task_id.clone();
             let lease_epoch = assignment.lease_epoch;
-            let pipeline_yaml = assignment.pipeline_yaml.clone();
 
             let outcome = dispatch(&exec, &assignment, &task_cancel).await;
 
@@ -189,7 +188,6 @@ pub async fn run_embedded_agent(
                 error!(
                     task_id = %task_id,
                     error = %e,
-                    pipeline_yaml = %pipeline_yaml,
                     "complete_task failed"
                 );
             }
@@ -197,8 +195,19 @@ pub async fn run_embedded_agent(
     }
 
     // 5. Drain in-flight tasks by waiting for the semaphore to reach full
-    //    capacity (all permits returned).
-    let _ = semaphore.acquire_many(config.max_concurrent_tasks).await;
+    //    capacity (all permits returned), with a timeout to avoid hanging.
+    let drain_timeout = Duration::from_secs(30);
+    if tokio::time::timeout(
+        drain_timeout,
+        semaphore.acquire_many(config.max_concurrent_tasks),
+    )
+    .await
+    .is_ok()
+    {
+        info!("embedded agent drained all tasks");
+    } else {
+        warn!("embedded agent drain timed out after {drain_timeout:?}");
+    }
 
     // 6. Deregister.
     if let Err(e) = crate::application::register::deregister(&app_ctx, &agent_id).await {

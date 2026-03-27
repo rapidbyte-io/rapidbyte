@@ -318,6 +318,51 @@ async fn assert_known_pipeline_returns_200() {
 }
 
 #[tokio::test]
+async fn assert_batch_with_no_pipeline_param_submits_all() {
+    // When no pipeline is specified, all known pipelines should be submitted for assertion.
+    let app = test_app_with_two_pipelines();
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/pipelines/assert")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = parse_json(resp).await;
+    // passed is false because execution is pending
+    assert_eq!(body["passed"], false);
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2, "expected one result per pipeline");
+    for r in results {
+        assert_eq!(r["status"], "pending");
+        assert!(r["run_id"].is_string());
+        assert!(r["pipeline"].is_string());
+    }
+}
+
+#[tokio::test]
+async fn assert_batch_with_no_pipelines_returns_vacuously_true() {
+    // When no pipelines exist, assert should return passed: true with empty results.
+    let app = test_app();
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/pipelines/assert")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = parse_json(resp).await;
+    assert_eq!(body["passed"], true);
+    assert_eq!(body["results"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn sync_batch_returns_202() {
     let app = test_app_with_two_pipelines();
     let resp = app

@@ -335,10 +335,20 @@ pub async fn serve(config: ControllerConfig, ctx: ServeContext) -> Result<()> {
     let components = setup(config, ctx).await?;
     let grpc_server = build_grpc_server(&components)?;
 
-    // Spawn the embedded agent if a TaskExecutor was provided.
+    // Create a unified shutdown token for the whole server.
+    let shutdown = CancellationToken::new();
+
+    // Handle SIGTERM / Ctrl-C by cancelling the shutdown token.
+    let shutdown_signal = shutdown.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        shutdown_signal.cancel();
+    });
+
+    // Spawn the embedded agent if a TaskExecutor was provided, linked to shutdown.
     if let Some(executor) = task_executor {
         let agent_ctx = components.ctx.clone();
-        let agent_cancel = CancellationToken::new();
+        let agent_cancel = shutdown.child_token();
         tokio::spawn(async move {
             if let Err(e) = crate::application::embedded_agent::run_embedded_agent(
                 agent_ctx,
@@ -374,6 +384,7 @@ pub async fn serve(config: ControllerConfig, ctx: ServeContext) -> Result<()> {
             .await?;
             tracing::info!(addr = %rest_addr, tls = true, "controller REST listening");
             tokio::select! {
+                () = shutdown.cancelled() => {},
                 result = grpc_server => result?,
                 result = axum_server::bind_rustls(rest_addr, rustls_config)
                     .serve(rest_router.into_make_service()) => result?,
@@ -383,12 +394,16 @@ pub async fn serve(config: ControllerConfig, ctx: ServeContext) -> Result<()> {
             let rest_listener = tokio::net::TcpListener::bind(rest_addr).await?;
             tracing::info!(addr = %rest_addr, tls = false, "controller REST listening");
             tokio::select! {
+                () = shutdown.cancelled() => {},
                 result = grpc_server => result?,
                 result = axum::serve(rest_listener, rest_router) => result?,
             }
         }
     } else {
-        grpc_server.await?;
+        tokio::select! {
+            () = shutdown.cancelled() => {},
+            result = grpc_server => result?,
+        }
     }
 
     Ok(())

@@ -152,18 +152,29 @@ impl PipelineService for AppServices {
                 }
             }
 
-            let yaml = self
-                .ctx
-                .pipeline_source
-                .get(&pipeline.name)
-                .await
-                .map_err(|e| ServiceError::Internal {
-                    message: e.to_string(),
-                })?;
-            let result =
-                submit::submit_pipeline(&self.ctx, None, yaml, 0, None, TaskOperation::Sync)
-                    .await
-                    .map_err(app_error_to_service)?;
+            let yaml = match self.ctx.pipeline_source.get(&pipeline.name).await {
+                Ok(y) => y,
+                Err(e) => {
+                    tracing::warn!(pipeline = %pipeline.name, error = %e, "skipping pipeline in batch sync due to error");
+                    continue;
+                }
+            };
+            let result = match submit::submit_pipeline(
+                &self.ctx,
+                None,
+                yaml,
+                0,
+                None,
+                TaskOperation::Sync,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(pipeline = %pipeline.name, error = %e, "failed to submit pipeline in batch sync");
+                    continue;
+                }
+            };
             runs.push(BatchRunRef {
                 pipeline: pipeline.name.clone(),
                 run_id: result.run_id,
@@ -304,7 +315,32 @@ impl PipelineService for AppServices {
     }
 
     async fn assert(&self, request: AssertRequest) -> Result<AssertResult, ServiceError> {
-        if let Some(ref name) = request.pipeline {
+        // Determine which pipelines to assert
+        let pipelines = if let Some(ref name) = request.pipeline {
+            vec![name.clone()]
+        } else {
+            // No specific pipeline specified — assert all pipelines
+            let all =
+                self.ctx
+                    .pipeline_source
+                    .list()
+                    .await
+                    .map_err(|e| ServiceError::Internal {
+                        message: e.to_string(),
+                    })?;
+            all.into_iter().map(|p| p.name).collect()
+        };
+
+        if pipelines.is_empty() {
+            // No pipelines to assert — vacuously true
+            return Ok(AssertResult {
+                passed: true,
+                results: vec![],
+            });
+        }
+
+        let mut results = Vec::new();
+        for name in &pipelines {
             let yaml = self
                 .ctx
                 .pipeline_source
@@ -315,21 +351,16 @@ impl PipelineService for AppServices {
                 submit::submit_pipeline(&self.ctx, None, yaml, 0, None, TaskOperation::Assert)
                     .await
                     .map_err(app_error_to_service)?;
-            // Assertions are executed asynchronously. Return the run_id so the client
-            // can track execution via GET /api/v1/runs/{id}. The actual pass/fail
-            // result is available when the run completes.
-            return Ok(AssertResult {
-                passed: false, // unknown — execution pending
-                results: vec![serde_json::json!({
-                    "run_id": result.run_id,
-                    "status": "pending",
-                    "message": "Assertions submitted for async execution. Track via GET /api/v1/runs/{run_id}"
-                })],
-            });
+            results.push(serde_json::json!({
+                "pipeline": name,
+                "run_id": result.run_id,
+                "status": "pending",
+            }));
         }
+
         Ok(AssertResult {
-            passed: true,
-            results: vec![],
+            passed: false, // unknown — execution pending
+            results,
         })
     }
 

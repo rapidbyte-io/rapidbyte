@@ -190,17 +190,27 @@ async fn raw_connection_config(
 }
 
 fn redact_sensitive_fields(value: &mut serde_json::Value) {
-    if let Some(obj) = value.as_object_mut() {
-        for (key, val) in obj.iter_mut() {
-            let lower = key.to_lowercase();
-            if lower.contains("password")
-                || lower.contains("secret")
-                || lower.contains("token")
-                || lower.contains("api_key")
-            {
-                *val = serde_json::Value::String("***REDACTED***".into());
+    match value {
+        serde_json::Value::Object(obj) => {
+            for (key, val) in obj.iter_mut() {
+                let lower = key.to_lowercase();
+                if lower.contains("password")
+                    || lower.contains("secret")
+                    || lower.contains("token")
+                    || lower.contains("api_key")
+                {
+                    *val = serde_json::Value::String("***REDACTED***".into());
+                } else {
+                    redact_sensitive_fields(val);
+                }
             }
         }
+        serde_json::Value::Array(arr) => {
+            for val in arr.iter_mut() {
+                redact_sensitive_fields(val);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -346,6 +356,23 @@ my_other:
         assert_eq!(val["SECRET_KEY"], "***REDACTED***");
         assert_eq!(val["access_token"], "***REDACTED***");
         assert_eq!(val["normal"], "value");
+    }
+
+    #[test]
+    fn redact_nested_secrets() {
+        let mut val = serde_json::json!({
+            "host": "db.example.com",
+            "auth": {
+                "username": "admin",
+                "password": "secret123"
+            },
+            "headers": [{"api_key": "key123"}]
+        });
+        super::redact_sensitive_fields(&mut val);
+        assert_eq!(val["auth"]["password"], "***REDACTED***");
+        assert_eq!(val["auth"]["username"], "admin"); // not redacted
+        assert_eq!(val["headers"][0]["api_key"], "***REDACTED***");
+        assert_eq!(val["host"], "db.example.com"); // not redacted
     }
 
     #[tokio::test]
