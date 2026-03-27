@@ -29,7 +29,13 @@ pub async fn handle_task_timeout(
     } else if run.can_retry_after_timeout() {
         let new_attempt = run.retry()?;
         let new_task_id = uuid::Uuid::new_v4().to_string();
-        let new_task = Task::new(new_task_id, run.id().to_string(), new_attempt, now);
+        let new_task = Task::new(
+            new_task_id,
+            run.id().to_string(),
+            new_attempt,
+            task.operation(),
+            now,
+        );
         ctx.store
             .timeout_and_retry(task, run, Some(&new_task))
             .await?;

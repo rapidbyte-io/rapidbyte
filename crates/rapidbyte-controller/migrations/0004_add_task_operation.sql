@@ -1,0 +1,1 @@
+ALTER TABLE tasks ADD COLUMN operation TEXT NOT NULL DEFAULT 'sync';

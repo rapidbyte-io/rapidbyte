@@ -365,6 +365,7 @@ impl PipelineStore for FakePipelineStore {
             task.id().to_string(),
             task.run_id().to_string(),
             task.attempt(),
+            task.operation(),
             TaskState::Running,
             Some(agent_id.to_string()),
             Some(lease),

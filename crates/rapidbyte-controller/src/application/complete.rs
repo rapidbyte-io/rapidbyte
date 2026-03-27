@@ -64,7 +64,13 @@ pub async fn complete_task(
                 task.fail()?;
                 let new_attempt = run.retry()?;
                 let new_task_id = uuid::Uuid::new_v4().to_string();
-                let new_task = Task::new(new_task_id, run.id().to_string(), new_attempt, now);
+                let new_task = Task::new(
+                    new_task_id,
+                    run.id().to_string(),
+                    new_attempt,
+                    task.operation(),
+                    now,
+                );
                 ctx.store.fail_and_retry(&task, &run, &new_task).await?;
                 ctx.event_bus
                     .publish(DomainEvent::RunStateChanged {

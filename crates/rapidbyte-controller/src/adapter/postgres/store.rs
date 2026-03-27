@@ -127,12 +127,13 @@ async fn insert_task(conn: &mut PgConnection, task: &Task) -> Result<(), Reposit
     let (lease_epoch, lease_expires_at) = extract_task_lease(task);
 
     sqlx::query(
-        "INSERT INTO tasks (id, run_id, attempt, state, agent_id, lease_epoch, lease_expires_at, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        "INSERT INTO tasks (id, run_id, attempt, operation, state, agent_id, lease_epoch, lease_expires_at, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(task.id())
     .bind(task.run_id())
     .bind(task.attempt().cast_signed())
+    .bind(task.operation().as_str())
     .bind(task_state_to_str(task.state()))
     .bind(task.agent_id())
     .bind(lease_epoch)
@@ -272,6 +273,7 @@ impl PipelineStore for PgPipelineStore {
             task.id().to_string(),
             task.run_id().to_string(),
             task.attempt(),
+            task.operation(),
             crate::domain::task::TaskState::Running,
             Some(agent_id.to_string()),
             Some(lease),

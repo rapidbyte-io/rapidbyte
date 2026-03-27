@@ -3,7 +3,7 @@ use crate::application::error::AppError;
 use crate::domain::error::DomainError;
 use crate::domain::event::DomainEvent;
 use crate::domain::run::{Run, RunState};
-use crate::domain::task::Task;
+use crate::domain::task::{Task, TaskOperation};
 
 #[derive(Debug)]
 pub struct SubmitResult {
@@ -63,7 +63,7 @@ pub async fn submit_pipeline(
     );
 
     // 8. Create Task
-    let task = Task::new(task_id, run_id.clone(), 1, now);
+    let task = Task::new(task_id, run_id.clone(), 1, TaskOperation::Sync, now);
 
     // 9. Persist atomically
     match ctx.store.submit_run(&run, &task).await {
