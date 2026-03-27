@@ -24,6 +24,7 @@ use crate::config::ControllerConfig;
 use crate::domain::ports::connection_tester::{
     ConnectionTestError, ConnectionTester, DiscoveryResult, TestResult,
 };
+use crate::domain::ports::pipeline_source::{PipelineInfo, PipelineSource, PipelineSourceError};
 use crate::domain::ports::plugin_registry::{
     InstalledPlugin, PluginMetadata, PluginRegistry, RegistryEntry, RegistryError,
 };
@@ -101,6 +102,32 @@ impl PluginRegistry for NoOpPluginRegistry {
         Err(RegistryError::Unavailable(
             "plugin removal requires engine context".into(),
         ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NoOpPipelineSource
+// ---------------------------------------------------------------------------
+
+/// Placeholder `PipelineSource` used by the standalone controller server.
+///
+/// The real implementation lives in the CLI crate where the project directory
+/// is accessible.  This no-op returns empty lists so the controller can start
+/// without engine context.
+struct NoOpPipelineSource;
+
+#[async_trait::async_trait]
+impl PipelineSource for NoOpPipelineSource {
+    async fn list(&self) -> Result<Vec<PipelineInfo>, PipelineSourceError> {
+        Ok(vec![])
+    }
+
+    async fn get(&self, name: &str) -> Result<String, PipelineSourceError> {
+        Err(PipelineSourceError::NotFound(name.to_string()))
+    }
+
+    async fn connections_yaml(&self) -> Result<Option<String>, PipelineSourceError> {
+        Ok(None)
     }
 }
 
@@ -221,6 +248,7 @@ async fn setup(
         log_store,
         connection_tester: Arc::new(NoOpConnectionTester),
         plugin_registry: Arc::new(NoOpPluginRegistry),
+        pipeline_source: Arc::new(NoOpPipelineSource),
         config: app_config,
     });
 

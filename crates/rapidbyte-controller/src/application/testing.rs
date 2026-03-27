@@ -24,6 +24,7 @@ use crate::domain::ports::event_bus::{EventBus, EventBusError, EventStream};
 use crate::domain::ports::log_store::{
     LogError, LogFilter, LogStore, LogStreamFilter, StoredLogEntry,
 };
+use crate::domain::ports::pipeline_source::{PipelineInfo, PipelineSource, PipelineSourceError};
 use crate::domain::ports::pipeline_store::PipelineStore;
 use crate::domain::ports::plugin_registry::{
     InstalledPlugin, PluginMetadata, PluginRegistry, RegistryEntry, RegistryError,
@@ -695,6 +696,60 @@ impl ConnectionTester for FakeConnectionTester {
 }
 
 // ---------------------------------------------------------------------------
+// FakePipelineSource
+// ---------------------------------------------------------------------------
+
+pub struct FakePipelineSource {
+    pipelines: std::collections::HashMap<String, String>,
+}
+
+impl FakePipelineSource {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            pipelines: std::collections::HashMap::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_pipeline(mut self, name: &str, yaml: &str) -> Self {
+        self.pipelines.insert(name.to_string(), yaml.to_string());
+        self
+    }
+}
+
+impl Default for FakePipelineSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl PipelineSource for FakePipelineSource {
+    async fn list(&self) -> Result<Vec<PipelineInfo>, PipelineSourceError> {
+        Ok(self
+            .pipelines
+            .keys()
+            .map(|name| PipelineInfo {
+                name: name.clone(),
+                path: std::path::PathBuf::from(format!("{name}.yml")),
+            })
+            .collect())
+    }
+
+    async fn get(&self, name: &str) -> Result<String, PipelineSourceError> {
+        self.pipelines
+            .get(name)
+            .cloned()
+            .ok_or_else(|| PipelineSourceError::NotFound(name.to_string()))
+    }
+
+    async fn connections_yaml(&self) -> Result<Option<String>, PipelineSourceError> {
+        Ok(None)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FakePluginRegistry
 // ---------------------------------------------------------------------------
 
@@ -806,6 +861,7 @@ pub fn fake_context() -> TestContext {
         log_store,
         connection_tester: Arc::new(FakeConnectionTester),
         plugin_registry: Arc::new(FakePluginRegistry),
+        pipeline_source: Arc::new(FakePipelineSource::new()),
         config: AppConfig {
             default_lease_duration: Duration::from_secs(300),
             lease_check_interval: Duration::from_secs(30),
