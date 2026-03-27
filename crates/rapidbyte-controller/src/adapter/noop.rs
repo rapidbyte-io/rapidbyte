@@ -3,6 +3,9 @@ use async_trait::async_trait;
 use crate::domain::ports::connection_tester::{
     ConnectionTestError, ConnectionTester, DiscoveryResult, TestResult,
 };
+use crate::domain::ports::pipeline_inspector::{
+    CheckOutput, DiffOutput, InspectorError, PipelineInspector,
+};
 use crate::domain::ports::plugin_registry::{
     InstalledPlugin, PluginMetadata, PluginRegistry, RegistryEntry, RegistryError,
 };
@@ -33,6 +36,27 @@ impl ConnectionTester for NoOpConnectionTester {
         Err(ConnectionTestError::Plugin(
             "connection discovery requires engine context".into(),
         ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// NoOpPipelineInspector
+// ---------------------------------------------------------------------------
+
+/// Placeholder [`PipelineInspector`] used when engine context is unavailable.
+///
+/// Both methods return a [`InspectorError::Plugin`] error so callers know
+/// that pipeline inspection requires a real engine-backed implementation.
+pub struct NoOpPipelineInspector;
+
+#[async_trait]
+impl PipelineInspector for NoOpPipelineInspector {
+    async fn check(&self, _pipeline_yaml: &str) -> Result<CheckOutput, InspectorError> {
+        Err(InspectorError::Plugin("requires engine context".into()))
+    }
+
+    async fn diff(&self, _pipeline_yaml: &str) -> Result<DiffOutput, InspectorError> {
+        Err(InspectorError::Plugin("requires engine context".into()))
     }
 }
 

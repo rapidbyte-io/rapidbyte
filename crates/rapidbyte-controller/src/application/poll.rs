@@ -305,6 +305,7 @@ mod tests {
             connection_tester: Arc::new(FakeConnectionTester),
             plugin_registry: Arc::new(FakePluginRegistry),
             pipeline_source: Arc::new(FakePipelineSource::new()),
+            pipeline_inspector: Arc::new(crate::application::testing::FakePipelineInspector),
             config: AppConfig {
                 default_lease_duration: Duration::from_secs(300),
                 lease_check_interval: Duration::from_secs(30),

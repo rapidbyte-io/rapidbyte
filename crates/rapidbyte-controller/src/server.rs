@@ -10,7 +10,7 @@ use crate::adapter::clock::SystemClock;
 use crate::adapter::grpc::agent::AgentGrpcService;
 use crate::adapter::grpc::auth::BearerAuthInterceptor;
 use crate::adapter::grpc::pipeline::PipelineGrpcService;
-use crate::adapter::noop::{NoOpConnectionTester, NoOpPluginRegistry};
+use crate::adapter::noop::{NoOpConnectionTester, NoOpPipelineInspector, NoOpPluginRegistry};
 use crate::adapter::postgres::agent::PgAgentRepository;
 use crate::adapter::postgres::cursor_store::PgCursorStore;
 use crate::adapter::postgres::event_bus::PgEventBus;
@@ -25,6 +25,7 @@ use crate::application::embedded_agent::{EmbeddedAgentConfig, TaskExecutor};
 use crate::application::services::AppServices;
 use crate::config::ControllerConfig;
 use crate::domain::ports::connection_tester::ConnectionTester;
+use crate::domain::ports::pipeline_inspector::PipelineInspector;
 use crate::domain::ports::pipeline_source::{PipelineInfo, PipelineSource, PipelineSourceError};
 use crate::domain::ports::plugin_registry::PluginRegistry;
 use crate::proto::rapidbyte::v1::agent_service_server::AgentServiceServer;
@@ -73,6 +74,8 @@ pub struct ServeContext {
     pub connection_tester: Arc<dyn ConnectionTester>,
     /// Registry for listing, installing, and removing plugins.
     pub plugin_registry: Arc<dyn PluginRegistry>,
+    /// Inspector for synchronous pipeline operations (check, diff).
+    pub pipeline_inspector: Arc<dyn PipelineInspector>,
     /// When `Some`, an embedded agent is spawned alongside the server that
     /// executes tasks using this executor.
     pub task_executor: Option<Arc<dyn TaskExecutor>>,
@@ -198,6 +201,7 @@ async fn setup(config: ControllerConfig, ctx: ServeContext) -> Result<ServerComp
         connection_tester: ctx.connection_tester,
         plugin_registry: ctx.plugin_registry,
         pipeline_source: ctx.pipeline_source,
+        pipeline_inspector: ctx.pipeline_inspector,
         config: app_config,
     });
 
@@ -301,6 +305,7 @@ pub async fn run(
         pipeline_source: Arc::new(NoOpPipelineSource),
         connection_tester: Arc::new(NoOpConnectionTester),
         plugin_registry: Arc::new(NoOpPluginRegistry),
+        pipeline_inspector: Arc::new(NoOpPipelineInspector),
         task_executor: None,
     };
     serve(config, ctx).await

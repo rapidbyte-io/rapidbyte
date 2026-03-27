@@ -3,6 +3,7 @@ pub mod connection_tester;
 pub mod cursor_store;
 pub mod event_bus;
 pub mod log_store;
+pub mod pipeline_inspector;
 pub mod pipeline_source;
 pub mod pipeline_store;
 pub mod plugin_registry;

@@ -5,7 +5,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rapidbyte_controller::adapter::noop::{NoOpConnectionTester, NoOpPluginRegistry};
+use rapidbyte_controller::adapter::noop::{
+    NoOpConnectionTester, NoOpPipelineInspector, NoOpPluginRegistry,
+};
 use rapidbyte_controller::ServeContext;
 
 use crate::engine_adapters::pipeline_source::FsPipelineSource;
@@ -49,6 +51,7 @@ pub async fn execute(
         pipeline_source: Arc::new(FsPipelineSource::new(std::env::current_dir()?)),
         connection_tester: Arc::new(NoOpConnectionTester),
         plugin_registry: Arc::new(NoOpPluginRegistry),
+        pipeline_inspector: Arc::new(NoOpPipelineInspector),
         task_executor: None, // embedded agent not yet wired (needs EngineTaskExecutor)
     };
     rapidbyte_controller::serve(config, serve_ctx).await

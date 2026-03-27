@@ -24,6 +24,9 @@ use crate::domain::ports::event_bus::{EventBus, EventBusError, EventStream};
 use crate::domain::ports::log_store::{
     LogError, LogFilter, LogStore, LogStreamFilter, StoredLogEntry,
 };
+use crate::domain::ports::pipeline_inspector::{
+    CheckOutput, DiffOutput, InspectorError, PipelineInspector,
+};
 use crate::domain::ports::pipeline_source::{PipelineInfo, PipelineSource, PipelineSourceError};
 use crate::domain::ports::pipeline_store::PipelineStore;
 use crate::domain::ports::plugin_registry::{
@@ -701,6 +704,7 @@ impl ConnectionTester for FakeConnectionTester {
 
 pub struct FakePipelineSource {
     pipelines: std::collections::HashMap<String, String>,
+    connections_yaml: Option<String>,
 }
 
 impl FakePipelineSource {
@@ -708,12 +712,21 @@ impl FakePipelineSource {
     pub fn new() -> Self {
         Self {
             pipelines: std::collections::HashMap::new(),
+            connections_yaml: None,
         }
     }
 
     #[must_use]
     pub fn with_pipeline(mut self, name: &str, yaml: &str) -> Self {
         self.pipelines.insert(name.to_string(), yaml.to_string());
+        self
+    }
+
+    /// Pre-load the fake with connections YAML content, as if a `connections.yml`
+    /// file exists in the project directory.
+    #[must_use]
+    pub fn with_connections_yaml(mut self, yaml: &str) -> Self {
+        self.connections_yaml = Some(yaml.to_string());
         self
     }
 }
@@ -745,7 +758,30 @@ impl PipelineSource for FakePipelineSource {
     }
 
     async fn connections_yaml(&self) -> Result<Option<String>, PipelineSourceError> {
-        Ok(None)
+        Ok(self.connections_yaml.clone())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakePipelineInspector
+// ---------------------------------------------------------------------------
+
+/// A no-op [`PipelineInspector`] for use in unit and integration tests.
+/// `check` always returns `passed: true` with an empty checks object.
+/// `diff` always returns an empty stream list.
+pub struct FakePipelineInspector;
+
+#[async_trait]
+impl PipelineInspector for FakePipelineInspector {
+    async fn check(&self, _pipeline_yaml: &str) -> Result<CheckOutput, InspectorError> {
+        Ok(CheckOutput {
+            passed: true,
+            checks: serde_json::json!({}),
+        })
+    }
+
+    async fn diff(&self, _pipeline_yaml: &str) -> Result<DiffOutput, InspectorError> {
+        Ok(DiffOutput { streams: vec![] })
     }
 }
 
@@ -870,6 +906,7 @@ pub fn fake_context() -> TestContext {
         connection_tester: Arc::new(FakeConnectionTester),
         plugin_registry: Arc::new(FakePluginRegistry),
         pipeline_source: Arc::new(FakePipelineSource::new()),
+        pipeline_inspector: Arc::new(FakePipelineInspector),
         config: AppConfig {
             default_lease_duration: Duration::from_secs(300),
             lease_check_interval: Duration::from_secs(30),
