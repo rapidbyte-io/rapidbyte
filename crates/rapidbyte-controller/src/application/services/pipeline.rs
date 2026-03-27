@@ -1,5 +1,8 @@
 use async_trait::async_trait;
 
+use crate::application::submit;
+use crate::domain::ports::pipeline_source::PipelineSourceError;
+use crate::domain::task::TaskOperation;
 use crate::traits::pipeline::{
     AssertRequest, AssertResult, BatchRunHandle, CheckResult, DiffResult, PipelineDetail,
     PipelineFilter, PipelineService, PipelineSummary, ResolvedConfig, RunHandle, SyncBatchRequest,
@@ -7,7 +10,7 @@ use crate::traits::pipeline::{
 };
 use crate::traits::{PaginatedList, ServiceError};
 
-use super::AppServices;
+use super::{app_error_to_service, AppServices};
 
 #[async_trait]
 impl PipelineService for AppServices {
@@ -28,9 +31,39 @@ impl PipelineService for AppServices {
         })
     }
 
-    async fn sync(&self, _request: SyncRequest) -> Result<RunHandle, ServiceError> {
-        Err(ServiceError::NotImplemented {
-            feature: "REST pipeline sync (requires pipeline YAML resolution)".into(),
+    async fn sync(&self, request: SyncRequest) -> Result<RunHandle, ServiceError> {
+        // Resolve pipeline YAML from PipelineSource
+        let yaml = self
+            .ctx
+            .pipeline_source
+            .get(&request.pipeline)
+            .await
+            .map_err(|e| match e {
+                PipelineSourceError::NotFound(name) => ServiceError::NotFound {
+                    resource: "pipeline".into(),
+                    id: name,
+                },
+                other => ServiceError::Internal {
+                    message: other.to_string(),
+                },
+            })?;
+
+        // Submit as async task
+        let result = submit::submit_pipeline(
+            &self.ctx,
+            None, // no idempotency key from REST
+            yaml,
+            0,    // default max_retries
+            None, // no timeout
+            TaskOperation::Sync,
+        )
+        .await
+        .map_err(app_error_to_service)?;
+
+        Ok(RunHandle {
+            run_id: result.run_id,
+            status: "pending".into(),
+            links: None,
         })
     }
 
@@ -79,25 +112,11 @@ impl PipelineService for AppServices {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
-    use crate::application::testing::fake_app_services;
-
-    #[tokio::test]
-    async fn sync_returns_not_implemented() {
-        let services = fake_app_services();
-
-        let request = SyncRequest {
-            pipeline: "pipeline: test-pipe\nversion: '1.0'".into(),
-            stream: None,
-            full_refresh: false,
-            cursor_start: None,
-            cursor_end: None,
-            dry_run: false,
-        };
-
-        let result = services.sync(request).await;
-        assert!(matches!(result, Err(ServiceError::NotImplemented { .. })));
-    }
+    use crate::application::services::AppServices;
+    use crate::application::testing::{fake_app_services, fake_context, FakePipelineSource};
 
     #[tokio::test]
     async fn list_returns_empty() {
@@ -114,5 +133,54 @@ mod tests {
 
         let result = services.get("any-pipeline").await;
         assert!(matches!(result, Err(ServiceError::NotImplemented { .. })));
+    }
+
+    #[tokio::test]
+    async fn sync_known_pipeline_returns_handle() {
+        let mut tc = fake_context();
+        tc.ctx.pipeline_source = Arc::new(
+            FakePipelineSource::new()
+                .with_pipeline("test-pipe", "pipeline: test-pipe\nversion: '1.0'"),
+        );
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:8080".parse().unwrap(),
+        ));
+
+        let result = services
+            .sync(SyncRequest {
+                pipeline: "test-pipe".into(),
+                stream: None,
+                full_refresh: false,
+                cursor_start: None,
+                cursor_end: None,
+                dry_run: false,
+            })
+            .await;
+
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let handle = result.unwrap();
+        assert_eq!(handle.status, "pending");
+        assert!(!handle.run_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn sync_unknown_pipeline_returns_not_found() {
+        // fake_context uses FakePipelineSource::new() — empty, no pipelines
+        let services = fake_app_services();
+
+        let result = services
+            .sync(SyncRequest {
+                pipeline: "nonexistent".into(),
+                stream: None,
+                full_refresh: false,
+                cursor_start: None,
+                cursor_end: None,
+                dry_run: false,
+            })
+            .await;
+
+        assert!(matches!(result, Err(ServiceError::NotFound { .. })));
     }
 }
