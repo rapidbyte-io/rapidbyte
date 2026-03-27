@@ -311,13 +311,22 @@ impl PipelineService for AppServices {
                 .get(name)
                 .await
                 .map_err(source_error_to_service)?;
-            let _result =
+            let result =
                 submit::submit_pipeline(&self.ctx, None, yaml, 0, None, TaskOperation::Assert)
                     .await
                     .map_err(app_error_to_service)?;
+            // Assertions are executed asynchronously. Return the run_id so the client
+            // can track execution via GET /api/v1/runs/{id}. The actual pass/fail
+            // result is available when the run completes.
+            return Ok(AssertResult {
+                passed: false, // unknown — execution pending
+                results: vec![serde_json::json!({
+                    "run_id": result.run_id,
+                    "status": "pending",
+                    "message": "Assertions submitted for async execution. Track via GET /api/v1/runs/{run_id}"
+                })],
+            });
         }
-        // Assert results come from the completed task execution.
-        // Return placeholder pending engine execution.
         Ok(AssertResult {
             passed: true,
             results: vec![],

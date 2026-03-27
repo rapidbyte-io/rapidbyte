@@ -308,8 +308,13 @@ async fn assert_known_pipeline_returns_200() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = parse_json(resp).await;
-    assert_eq!(body["passed"], true);
-    assert!(body["results"].is_array());
+    // Assertions are async: passed is false (unknown/pending) and results
+    // contains a pending entry with the run_id to track execution.
+    assert_eq!(body["passed"], false);
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["status"], "pending");
+    assert!(results[0]["run_id"].is_string());
 }
 
 #[tokio::test]

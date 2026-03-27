@@ -61,10 +61,13 @@ impl PipelineSource for FsPipelineSource {
             }
 
             let yaml = Self::read_file(&path).await?;
-            let name = rapidbyte_pipeline_config::extract_pipeline_name(&yaml)
-                .map_err(|e| PipelineSourceError::InvalidYaml(e.to_string()))?;
-
-            pipelines.push(PipelineInfo { name, path });
+            match rapidbyte_pipeline_config::extract_pipeline_name(&yaml) {
+                Ok(name) => pipelines.push(PipelineInfo { name, path }),
+                Err(e) => {
+                    // Skip invalid YAML files rather than failing the entire listing.
+                    tracing::warn!(path = %path.display(), error = %e, "skipping invalid pipeline file");
+                }
+            }
         }
 
         Ok(pipelines)

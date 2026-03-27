@@ -92,6 +92,7 @@ impl AgentService for AgentGrpcService {
                     lease_epoch: a.lease_epoch,
                     lease_expires_at,
                     attempt: a.attempt,
+                    operation: a.operation.as_str().to_string(),
                 })
             }
             None => pb::poll_task_response::Result::NoTask(pb::NoTask {}),

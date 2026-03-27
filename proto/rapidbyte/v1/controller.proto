@@ -193,6 +193,7 @@ message TaskAssignment {
   uint64 lease_epoch = 5;
   google.protobuf.Timestamp lease_expires_at = 6;
   uint32 attempt = 7;
+  string operation = 8;
 }
 
 message RegistryInfo {

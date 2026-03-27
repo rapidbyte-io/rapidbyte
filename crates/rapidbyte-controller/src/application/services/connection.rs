@@ -94,12 +94,12 @@ impl ConnectionService for AppServices {
     }
 
     async fn test(&self, name: &str) -> Result<ConnectionTestResponse, ServiceError> {
-        let detail = self.get(name).await?;
+        let (_connector, config) = raw_connection_config(&self.ctx, name).await?;
 
         let result = self
             .ctx
             .connection_tester
-            .test(&detail.config)
+            .test(&config)
             .await
             .map_err(|e| ServiceError::Internal {
                 message: e.to_string(),
@@ -124,12 +124,12 @@ impl ConnectionService for AppServices {
         name: &str,
         table: Option<&str>,
     ) -> Result<ConnectionDiscoverResponse, ServiceError> {
-        let detail = self.get(name).await?;
+        let (_connector, config) = raw_connection_config(&self.ctx, name).await?;
 
         let result = self
             .ctx
             .connection_tester
-            .discover(&detail.config, table)
+            .discover(&config, table)
             .await
             .map_err(|e| ServiceError::Internal {
                 message: e.to_string(),
@@ -151,6 +151,42 @@ impl ConnectionService for AppServices {
                 .collect(),
         })
     }
+}
+
+/// Parse raw (unredacted) connection config for a named connection.
+/// Used internally by test/discover which need real credentials.
+async fn raw_connection_config(
+    ctx: &crate::application::context::AppContext,
+    name: &str,
+) -> Result<(String, serde_json::Value), ServiceError> {
+    let yaml =
+        ctx.pipeline_source
+            .connections_yaml()
+            .await
+            .map_err(|e| ServiceError::Internal {
+                message: e.to_string(),
+            })?;
+    let yaml = yaml.ok_or_else(|| ServiceError::NotFound {
+        resource: "connection".into(),
+        id: name.to_string(),
+    })?;
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(&yaml).map_err(|e| ServiceError::Internal {
+            message: e.to_string(),
+        })?;
+    let conn = value.get(name).ok_or_else(|| ServiceError::NotFound {
+        resource: "connection".into(),
+        id: name.to_string(),
+    })?;
+    let connector = conn
+        .get("connector")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let config = serde_json::to_value(conn).map_err(|e| ServiceError::Internal {
+        message: e.to_string(),
+    })?;
+    Ok((connector, config))
 }
 
 fn redact_sensitive_fields(value: &mut serde_json::Value) {
@@ -310,5 +346,73 @@ my_other:
         assert_eq!(val["SECRET_KEY"], "***REDACTED***");
         assert_eq!(val["access_token"], "***REDACTED***");
         assert_eq!(val["normal"], "value");
+    }
+
+    #[tokio::test]
+    async fn test_connection_passes_unredacted_config() {
+        use std::sync::{Arc, Mutex};
+
+        use async_trait::async_trait;
+
+        use crate::domain::ports::connection_tester::{
+            ConnectionTestError, ConnectionTester, DiscoveryResult, TestResult,
+        };
+
+        // A recording ConnectionTester that captures the config it received.
+        struct RecordingTester {
+            captured: Mutex<Option<serde_json::Value>>,
+        }
+
+        #[async_trait]
+        impl ConnectionTester for RecordingTester {
+            async fn test(
+                &self,
+                connection_config: &serde_json::Value,
+            ) -> Result<TestResult, ConnectionTestError> {
+                *self.captured.lock().unwrap() = Some(connection_config.clone());
+                Ok(TestResult {
+                    status: "ok".into(),
+                    latency_ms: Some(1),
+                    details: None,
+                    error: None,
+                })
+            }
+
+            async fn discover(
+                &self,
+                _connection_config: &serde_json::Value,
+                _table: Option<&str>,
+            ) -> Result<DiscoveryResult, ConnectionTestError> {
+                Ok(DiscoveryResult {
+                    connection: "fake".into(),
+                    streams: vec![],
+                })
+            }
+        }
+
+        let recorder = Arc::new(RecordingTester {
+            captured: Mutex::new(None),
+        });
+
+        let mut tc = fake_context();
+        tc.ctx.pipeline_source = Arc::new(FakePipelineSource::new().with_connections_yaml(
+            "db:\n  connector: postgres\n  password: real_secret\n  host: localhost\n",
+        ));
+        tc.ctx.connection_tester = Arc::clone(&recorder) as Arc<dyn ConnectionTester>;
+        let services = Arc::new(crate::application::services::AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:8080".parse().unwrap(),
+        ));
+
+        services.test("db").await.unwrap();
+
+        let captured = recorder.captured.lock().unwrap().clone().unwrap();
+        // The tester must receive the real password, not the redacted placeholder.
+        assert_eq!(
+            captured["password"],
+            serde_json::Value::String("real_secret".into()),
+            "connection tester must receive unredacted credentials"
+        );
     }
 }
