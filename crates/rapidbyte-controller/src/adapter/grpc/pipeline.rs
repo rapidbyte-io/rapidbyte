@@ -52,6 +52,7 @@ impl PipelineService for PipelineGrpcService {
             req.pipeline_yaml,
             max_retries,
             timeout_seconds,
+            crate::domain::task::TaskOperation::Sync,
         )
         .await
         .map_err(convert::app_error_to_status)?;

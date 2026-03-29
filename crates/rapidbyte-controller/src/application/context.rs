@@ -6,6 +6,8 @@ use crate::domain::ports::connection_tester::ConnectionTester;
 use crate::domain::ports::cursor_store::CursorStore;
 use crate::domain::ports::event_bus::EventBus;
 use crate::domain::ports::log_store::LogStore;
+use crate::domain::ports::pipeline_inspector::PipelineInspector;
+use crate::domain::ports::pipeline_source::PipelineSource;
 use crate::domain::ports::pipeline_store::PipelineStore;
 use crate::domain::ports::plugin_registry::PluginRegistry;
 use crate::domain::ports::repository::{AgentRepository, RunRepository, TaskRepository};
@@ -49,6 +51,8 @@ pub struct AppContext {
     pub log_store: Arc<dyn LogStore>,
     pub connection_tester: Arc<dyn ConnectionTester>,
     pub plugin_registry: Arc<dyn PluginRegistry>,
+    pub pipeline_source: Arc<dyn PipelineSource>,
+    pub pipeline_inspector: Arc<dyn PipelineInspector>,
     pub config: AppConfig,
 }
 

@@ -2,6 +2,7 @@ pub mod background;
 pub mod cancel;
 pub mod complete;
 pub mod context;
+pub mod embedded_agent;
 pub mod error;
 pub mod heartbeat;
 pub mod poll;

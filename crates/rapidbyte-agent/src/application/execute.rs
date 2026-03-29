@@ -32,9 +32,17 @@ pub async fn execute_task(
         task_id = assignment.task_id,
         run_id = assignment.run_id,
         attempt = assignment.attempt,
-        lease_epoch = assignment.lease_epoch,
+        operation = assignment.operation,
         "Received task"
     );
+
+    if assignment.operation != "sync" && !assignment.operation.is_empty() {
+        tracing::warn!(
+            operation = %assignment.operation,
+            task_id = %assignment.task_id,
+            "non-sync operation received; falling back to sync execution"
+        );
+    }
 
     // 1. Parse YAML -> PipelineConfig
     let config = match parse_pipeline(&assignment.pipeline_yaml).await {
@@ -227,6 +235,7 @@ mod tests {
             pipeline_yaml: String::new(), // invalid — will fail parse
             lease_epoch: 1,
             attempt: 1,
+            operation: "sync".to_string(),
         }
     }
 

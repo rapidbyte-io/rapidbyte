@@ -3,12 +3,14 @@ use std::sync::Arc;
 use anyhow::Result;
 use rapidbyte_secrets::SecretProviders;
 use sqlx::PgPool;
+use tokio_util::sync::CancellationToken;
 use tonic::transport::Server;
 
 use crate::adapter::clock::SystemClock;
 use crate::adapter::grpc::agent::AgentGrpcService;
 use crate::adapter::grpc::auth::BearerAuthInterceptor;
 use crate::adapter::grpc::pipeline::PipelineGrpcService;
+use crate::adapter::noop::{NoOpConnectionTester, NoOpPipelineInspector, NoOpPluginRegistry};
 use crate::adapter::postgres::agent::PgAgentRepository;
 use crate::adapter::postgres::cursor_store::PgCursorStore;
 use crate::adapter::postgres::event_bus::PgEventBus;
@@ -19,91 +21,68 @@ use crate::adapter::postgres::task::PgTaskRepository;
 use crate::adapter::rest::extractors::RestState;
 use crate::adapter::secrets::VaultSecretResolver;
 use crate::application::context::{AppConfig, AppContext, RegistryConfig};
+use crate::application::embedded_agent::{EmbeddedAgentConfig, TaskExecutor};
 use crate::application::services::AppServices;
 use crate::config::ControllerConfig;
-use crate::domain::ports::connection_tester::{
-    ConnectionTestError, ConnectionTester, DiscoveryResult, TestResult,
-};
-use crate::domain::ports::plugin_registry::{
-    InstalledPlugin, PluginMetadata, PluginRegistry, RegistryEntry, RegistryError,
-};
+use crate::domain::ports::connection_tester::ConnectionTester;
+use crate::domain::ports::pipeline_inspector::PipelineInspector;
+use crate::domain::ports::pipeline_source::{PipelineInfo, PipelineSource, PipelineSourceError};
+use crate::domain::ports::plugin_registry::PluginRegistry;
 use crate::proto::rapidbyte::v1::agent_service_server::AgentServiceServer;
 use crate::proto::rapidbyte::v1::pipeline_service_server::PipelineServiceServer;
 
 // ---------------------------------------------------------------------------
-// NoOpConnectionTester
+// NoOpPipelineSource (private — only used by run() backwards-compat shim)
 // ---------------------------------------------------------------------------
 
-/// Placeholder `ConnectionTester` used by the standalone controller server.
-///
-/// The real implementation lives in the CLI crate where Wasmtime plugins are
-/// available.  This no-op returns a `Plugin` error so callers know that
-/// connection testing requires engine context.
-struct NoOpConnectionTester;
+/// Placeholder `PipelineSource` used when no project directory is available.
+struct NoOpPipelineSource;
 
 #[async_trait::async_trait]
-impl ConnectionTester for NoOpConnectionTester {
-    async fn test(&self, _config: &serde_json::Value) -> Result<TestResult, ConnectionTestError> {
-        Err(ConnectionTestError::Plugin(
-            "connection testing requires engine context".into(),
-        ))
+impl PipelineSource for NoOpPipelineSource {
+    async fn list(&self) -> Result<Vec<PipelineInfo>, PipelineSourceError> {
+        Ok(vec![])
     }
 
-    async fn discover(
-        &self,
-        _config: &serde_json::Value,
-        _table: Option<&str>,
-    ) -> Result<DiscoveryResult, ConnectionTestError> {
-        Err(ConnectionTestError::Plugin(
-            "connection discovery requires engine context".into(),
-        ))
+    async fn get(&self, name: &str) -> Result<String, PipelineSourceError> {
+        Err(PipelineSourceError::NotFound(name.to_string()))
+    }
+
+    async fn connections_yaml(&self) -> Result<Option<String>, PipelineSourceError> {
+        Ok(None)
     }
 }
 
 // ---------------------------------------------------------------------------
-// NoOpPluginRegistry
+// ServeContext
 // ---------------------------------------------------------------------------
 
-/// Placeholder `PluginRegistry` used by the standalone controller server.
+/// Context provided by the caller for engine-backed operations.
 ///
-/// The real implementation lives in the CLI crate where the local plugin
-/// store and remote registry are accessible.  This no-op returns a `Registry`
-/// error so callers know that plugin operations require engine context.
-struct NoOpPluginRegistry;
-
-#[async_trait::async_trait]
-impl PluginRegistry for NoOpPluginRegistry {
-    async fn list_installed(&self) -> Result<Vec<InstalledPlugin>, RegistryError> {
-        Ok(vec![])
-    }
-
-    async fn search(
-        &self,
-        _query: &str,
-        _plugin_type: Option<&str>,
-    ) -> Result<Vec<RegistryEntry>, RegistryError> {
-        Ok(vec![])
-    }
-
-    async fn info(&self, _plugin_ref: &str) -> Result<PluginMetadata, RegistryError> {
-        Err(RegistryError::Unavailable(
-            "plugin info requires engine context".into(),
-        ))
-    }
-
-    async fn install(&self, _plugin_ref: &str) -> Result<InstalledPlugin, RegistryError> {
-        Err(RegistryError::Unavailable(
-            "plugin installation requires engine context".into(),
-        ))
-    }
-
-    async fn remove(&self, _plugin_ref: &str) -> Result<(), RegistryError> {
-        Err(RegistryError::Unavailable(
-            "plugin removal requires engine context".into(),
-        ))
-    }
+/// Contains driven-port implementations and optionally a [`TaskExecutor`]
+/// for the embedded agent.  The CLI supplies real implementations; the
+/// standalone `run()` shim uses no-op stubs.
+pub struct ServeContext {
+    /// Guard that keeps the OpenTelemetry exporter alive for the server
+    /// lifetime.
+    pub otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
+    /// Secret provider backends (Vault, env-var, …).
+    pub secrets: SecretProviders,
+    /// Source of pipeline YAML definitions (e.g. filesystem or in-memory).
+    pub pipeline_source: Arc<dyn PipelineSource>,
+    /// Driver for testing connector reachability and schema discovery.
+    pub connection_tester: Arc<dyn ConnectionTester>,
+    /// Registry for listing, installing, and removing plugins.
+    pub plugin_registry: Arc<dyn PluginRegistry>,
+    /// Inspector for synchronous pipeline operations (check, diff).
+    pub pipeline_inspector: Arc<dyn PipelineInspector>,
+    /// When `Some`, an embedded agent is spawned alongside the server that
+    /// executes tasks using this executor.
+    pub task_executor: Option<Arc<dyn TaskExecutor>>,
 }
 
+// ---------------------------------------------------------------------------
+// ServerComponents
 // ---------------------------------------------------------------------------
 
 /// Shared server components produced by [`setup`].
@@ -113,6 +92,10 @@ struct ServerComponents {
     started_at: chrono::DateTime<chrono::Utc>,
 }
 
+// ---------------------------------------------------------------------------
+// setup
+// ---------------------------------------------------------------------------
+
 /// Perform shared setup: metrics, auth validation, DB pool + migrations, adapters,
 /// event bus listener, `AppContext`, and background tasks.
 ///
@@ -121,21 +104,17 @@ struct ServerComponents {
 /// Returns an error if auth config is invalid, the database connection or
 /// migration fails, or the event bus listener cannot be started.
 #[allow(clippy::too_many_lines)]
-async fn setup(
-    config: ControllerConfig,
-    otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
-    secrets: SecretProviders,
-) -> Result<ServerComponents> {
+async fn setup(config: ControllerConfig, ctx: ServeContext) -> Result<ServerComponents> {
     let started_at = chrono::Utc::now();
 
     // 0. Optionally bind Prometheus metrics endpoint.
     //    The otel_guard is kept alive for the server lifetime regardless.
-    let _otel_keep = otel_guard.clone();
+    let _otel_keep = ctx.otel_guard.clone();
     if let Some(ref metrics_addr) = config.metrics_listen {
         tracing::info!(addr = %metrics_addr, "Prometheus metrics endpoint");
         let metrics_listener = rapidbyte_metrics::bind_prometheus(metrics_addr).await?;
         tokio::spawn(rapidbyte_metrics::serve_prometheus(
-            otel_guard,
+            ctx.otel_guard,
             metrics_listener,
         ));
     }
@@ -186,7 +165,7 @@ async fn setup(
     let event_bus = Arc::new(PgEventBus::new(pool.clone()));
     let cursor_store = Arc::new(PgCursorStore::new(pool.clone()));
     let log_store = Arc::new(PgLogStore::new(pool.clone()));
-    let secrets_resolver = Arc::new(VaultSecretResolver::new(secrets));
+    let secrets_resolver = Arc::new(VaultSecretResolver::new(ctx.secrets));
     let clock = Arc::new(SystemClock);
 
     // 3. Start PG LISTEN listener for real-time event dispatch
@@ -208,8 +187,8 @@ async fn setup(
         allow_unauthenticated: config.auth.allow_unauthenticated,
     };
 
-    // 5. Compose AppContext
-    let ctx = Arc::new(AppContext {
+    // 5. Compose AppContext — use the driven-port implementations from ServeContext
+    let app_ctx = Arc::new(AppContext {
         runs,
         tasks,
         agents,
@@ -219,13 +198,15 @@ async fn setup(
         clock,
         cursor_store,
         log_store,
-        connection_tester: Arc::new(NoOpConnectionTester),
-        plugin_registry: Arc::new(NoOpPluginRegistry),
+        connection_tester: ctx.connection_tester,
+        plugin_registry: ctx.plugin_registry,
+        pipeline_source: ctx.pipeline_source,
+        pipeline_inspector: ctx.pipeline_inspector,
         config: app_config,
     });
 
     // 6. Spawn background tasks
-    let ctx_sweep = ctx.clone();
+    let ctx_sweep = app_ctx.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(ctx_sweep.config.lease_check_interval);
         loop {
@@ -238,7 +219,7 @@ async fn setup(
         }
     });
 
-    let ctx_reaper = ctx.clone();
+    let ctx_reaper = app_ctx.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(ctx_reaper.config.agent_reap_interval);
         loop {
@@ -252,11 +233,15 @@ async fn setup(
     });
 
     Ok(ServerComponents {
-        ctx,
+        ctx: app_ctx,
         config,
         started_at,
     })
 }
+
+// ---------------------------------------------------------------------------
+// build_grpc_server
+// ---------------------------------------------------------------------------
 
 /// Build the gRPC server future from shared components.
 fn build_grpc_server(
@@ -295,11 +280,14 @@ fn build_grpc_server(
         .serve(listen_addr))
 }
 
+// ---------------------------------------------------------------------------
+// run  (backwards-compatible shim)
+// ---------------------------------------------------------------------------
+
 /// Start the controller gRPC server.
 ///
-/// This is the composition root: it builds adapters from configuration, wires
-/// them into the application context, spawns background tasks, and starts
-/// serving gRPC requests.
+/// This is a backwards-compatible shim that builds a [`ServeContext`] with
+/// no-op driven-port stubs and delegates to [`serve`].
 ///
 /// # Errors
 ///
@@ -311,31 +299,86 @@ pub async fn run(
     otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
     secrets: SecretProviders,
 ) -> Result<()> {
-    let components = setup(config, otel_guard, secrets).await?;
-    let grpc_server = build_grpc_server(&components)?;
-    grpc_server.await?;
-    Ok(())
+    let ctx = ServeContext {
+        otel_guard,
+        secrets,
+        pipeline_source: Arc::new(NoOpPipelineSource),
+        connection_tester: Arc::new(NoOpConnectionTester),
+        plugin_registry: Arc::new(NoOpPluginRegistry),
+        pipeline_inspector: Arc::new(NoOpPipelineInspector),
+        task_executor: None,
+    };
+    serve(config, ctx).await
 }
+
+// ---------------------------------------------------------------------------
+// serve
+// ---------------------------------------------------------------------------
 
 /// Start the controller gRPC server and REST API server.
 ///
 /// This is the full composition root for `rapidbyte serve`: it wires all
 /// adapters, spawns background tasks, and starts both the gRPC server and
-/// the REST HTTP server in parallel. If `config.rest_listen_addr` is `None`,
+/// the REST HTTP server in parallel.  If `config.rest_listen_addr` is `None`,
 /// only the gRPC server is started (identical to [`run`]).
+///
+/// If `ctx.task_executor` is `Some`, an embedded agent is spawned in the
+/// background and will begin polling for and executing tasks immediately.
+///
+/// # Panics
+///
+/// Panics if the SIGTERM signal handler cannot be installed (Unix only).
 ///
 /// # Errors
 ///
 /// Returns an error if the database connection, migration, TLS setup, gRPC
 /// server startup, or REST server startup fails.
 #[allow(clippy::similar_names, clippy::too_many_lines)]
-pub async fn serve(
-    config: ControllerConfig,
-    otel_guard: Arc<rapidbyte_metrics::OtelGuard>,
-    secrets: SecretProviders,
-) -> Result<()> {
-    let components = setup(config, otel_guard, secrets).await?;
+pub async fn serve(config: ControllerConfig, ctx: ServeContext) -> Result<()> {
+    let task_executor = ctx.task_executor.clone();
+    let components = setup(config, ctx).await?;
     let grpc_server = build_grpc_server(&components)?;
+
+    // Create a unified shutdown token for the whole server.
+    let shutdown = CancellationToken::new();
+
+    // Handle SIGTERM / Ctrl-C by cancelling the shutdown token.
+    let shutdown_signal = shutdown.clone();
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            tokio::signal::ctrl_c().await.ok();
+        }
+        shutdown_signal.cancel();
+    });
+
+    // Spawn the embedded agent if a TaskExecutor was provided, linked to shutdown.
+    if let Some(executor) = task_executor {
+        let agent_ctx = components.ctx.clone();
+        let agent_cancel = shutdown.child_token();
+        tokio::spawn(async move {
+            if let Err(e) = crate::application::embedded_agent::run_embedded_agent(
+                agent_ctx,
+                executor,
+                EmbeddedAgentConfig::default(),
+                agent_cancel,
+            )
+            .await
+            {
+                tracing::error!(error = %e, "embedded agent failed");
+            }
+        });
+    }
 
     if let Some(rest_addr) = components.config.rest_listen_addr {
         let services = Arc::new(AppServices::new(
@@ -358,6 +401,7 @@ pub async fn serve(
             .await?;
             tracing::info!(addr = %rest_addr, tls = true, "controller REST listening");
             tokio::select! {
+                () = shutdown.cancelled() => {},
                 result = grpc_server => result?,
                 result = axum_server::bind_rustls(rest_addr, rustls_config)
                     .serve(rest_router.into_make_service()) => result?,
@@ -367,12 +411,16 @@ pub async fn serve(
             let rest_listener = tokio::net::TcpListener::bind(rest_addr).await?;
             tracing::info!(addr = %rest_addr, tls = false, "controller REST listening");
             tokio::select! {
+                () = shutdown.cancelled() => {},
                 result = grpc_server => result?,
                 result = axum::serve(rest_listener, rest_router) => result?,
             }
         }
     } else {
-        grpc_server.await?;
+        tokio::select! {
+            () = shutdown.cancelled() => {},
+            result = grpc_server => result?,
+        }
     }
 
     Ok(())

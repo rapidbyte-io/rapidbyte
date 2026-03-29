@@ -3,6 +3,45 @@ use chrono::{DateTime, Utc};
 use super::error::DomainError;
 use super::lease::Lease;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TaskOperation {
+    Sync,
+    CheckApply,
+    Teardown,
+    Assert,
+}
+
+impl TaskOperation {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sync => "sync",
+            Self::CheckApply => "check_apply",
+            Self::Teardown => "teardown",
+            Self::Assert => "assert",
+        }
+    }
+}
+
+impl std::str::FromStr for TaskOperation {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "sync" => Ok(Self::Sync),
+            "check_apply" => Ok(Self::CheckApply),
+            "teardown" => Ok(Self::Teardown),
+            "assert" => Ok(Self::Assert),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for TaskOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {
     Pending,
@@ -32,6 +71,7 @@ pub struct Task {
     id: String,
     run_id: String,
     attempt: u32,
+    operation: TaskOperation,
     state: TaskState,
     agent_id: Option<String>,
     lease: Option<Lease>,
@@ -41,11 +81,18 @@ pub struct Task {
 
 impl Task {
     #[must_use]
-    pub fn new(id: String, run_id: String, attempt: u32, now: DateTime<Utc>) -> Self {
+    pub fn new(
+        id: String,
+        run_id: String,
+        attempt: u32,
+        operation: TaskOperation,
+        now: DateTime<Utc>,
+    ) -> Self {
         Self {
             id,
             run_id,
             attempt,
+            operation,
             state: TaskState::Pending,
             agent_id: None,
             lease: None,
@@ -61,6 +108,7 @@ impl Task {
         id: String,
         run_id: String,
         attempt: u32,
+        operation: TaskOperation,
         state: TaskState,
         agent_id: Option<String>,
         lease: Option<Lease>,
@@ -71,6 +119,7 @@ impl Task {
             id,
             run_id,
             attempt,
+            operation,
             state,
             agent_id,
             lease,
@@ -238,6 +287,11 @@ impl Task {
     }
 
     #[must_use]
+    pub fn operation(&self) -> TaskOperation {
+        self.operation
+    }
+
+    #[must_use]
     pub fn run_id(&self) -> &str {
         &self.run_id
     }
@@ -291,7 +345,13 @@ mod tests {
     }
 
     fn make_task() -> Task {
-        Task::new("task-1".into(), "run-1".into(), 1, now())
+        Task::new(
+            "task-1".into(),
+            "run-1".into(),
+            1,
+            TaskOperation::Sync,
+            now(),
+        )
     }
 
     fn make_lease() -> Lease {
@@ -546,6 +606,7 @@ mod tests {
             "t-1".into(),
             "r-1".into(),
             3,
+            TaskOperation::CheckApply,
             TaskState::Running,
             Some("agent-x".into()),
             Some(lease.clone()),
@@ -555,6 +616,7 @@ mod tests {
         assert_eq!(task.id(), "t-1");
         assert_eq!(task.run_id(), "r-1");
         assert_eq!(task.attempt(), 3);
+        assert_eq!(task.operation(), TaskOperation::CheckApply);
         assert_eq!(task.state(), TaskState::Running);
         assert_eq!(task.agent_id(), Some("agent-x"));
         assert_eq!(task.lease().unwrap(), &lease);
@@ -618,6 +680,7 @@ mod tests {
             "t-2".into(),
             "r-2".into(),
             1,
+            TaskOperation::Sync,
             TaskState::Pending,
             None,
             None,

@@ -127,6 +127,7 @@ impl ControllerGateway for GrpcControllerGateway {
                 pipeline_yaml: task.pipeline_yaml,
                 lease_epoch: task.lease_epoch,
                 attempt: task.attempt,
+                operation: task.operation,
             }),
             Some(poll_task_response::Result::NoTask(_)) | None => None,
         })

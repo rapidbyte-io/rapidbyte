@@ -24,6 +24,10 @@ use crate::domain::ports::event_bus::{EventBus, EventBusError, EventStream};
 use crate::domain::ports::log_store::{
     LogError, LogFilter, LogStore, LogStreamFilter, StoredLogEntry,
 };
+use crate::domain::ports::pipeline_inspector::{
+    CheckOutput, DiffOutput, InspectorError, PipelineInspector,
+};
+use crate::domain::ports::pipeline_source::{PipelineInfo, PipelineSource, PipelineSourceError};
 use crate::domain::ports::pipeline_store::PipelineStore;
 use crate::domain::ports::plugin_registry::{
     InstalledPlugin, PluginMetadata, PluginRegistry, RegistryEntry, RegistryError,
@@ -365,6 +369,7 @@ impl PipelineStore for FakePipelineStore {
             task.id().to_string(),
             task.run_id().to_string(),
             task.attempt(),
+            task.operation(),
             TaskState::Running,
             Some(agent_id.to_string()),
             Some(lease),
@@ -694,6 +699,93 @@ impl ConnectionTester for FakeConnectionTester {
 }
 
 // ---------------------------------------------------------------------------
+// FakePipelineSource
+// ---------------------------------------------------------------------------
+
+pub struct FakePipelineSource {
+    pipelines: std::collections::HashMap<String, String>,
+    connections_yaml: Option<String>,
+}
+
+impl FakePipelineSource {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            pipelines: std::collections::HashMap::new(),
+            connections_yaml: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_pipeline(mut self, name: &str, yaml: &str) -> Self {
+        self.pipelines.insert(name.to_string(), yaml.to_string());
+        self
+    }
+
+    /// Pre-load the fake with connections YAML content, as if a `connections.yml`
+    /// file exists in the project directory.
+    #[must_use]
+    pub fn with_connections_yaml(mut self, yaml: &str) -> Self {
+        self.connections_yaml = Some(yaml.to_string());
+        self
+    }
+}
+
+impl Default for FakePipelineSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl PipelineSource for FakePipelineSource {
+    async fn list(&self) -> Result<Vec<PipelineInfo>, PipelineSourceError> {
+        Ok(self
+            .pipelines
+            .keys()
+            .map(|name| PipelineInfo {
+                name: name.clone(),
+                path: std::path::PathBuf::from(format!("{name}.yml")),
+            })
+            .collect())
+    }
+
+    async fn get(&self, name: &str) -> Result<String, PipelineSourceError> {
+        self.pipelines
+            .get(name)
+            .cloned()
+            .ok_or_else(|| PipelineSourceError::NotFound(name.to_string()))
+    }
+
+    async fn connections_yaml(&self) -> Result<Option<String>, PipelineSourceError> {
+        Ok(self.connections_yaml.clone())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakePipelineInspector
+// ---------------------------------------------------------------------------
+
+/// A no-op [`PipelineInspector`] for use in unit and integration tests.
+/// `check` always returns `passed: true` with an empty checks object.
+/// `diff` always returns an empty stream list.
+pub struct FakePipelineInspector;
+
+#[async_trait]
+impl PipelineInspector for FakePipelineInspector {
+    async fn check(&self, _pipeline_yaml: &str) -> Result<CheckOutput, InspectorError> {
+        Ok(CheckOutput {
+            passed: true,
+            checks: serde_json::json!({}),
+        })
+    }
+
+    async fn diff(&self, _pipeline_yaml: &str) -> Result<DiffOutput, InspectorError> {
+        Ok(DiffOutput { streams: vec![] })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FakePluginRegistry
 // ---------------------------------------------------------------------------
 
@@ -748,6 +840,7 @@ pub async fn setup_running_task(tc: &TestContext) -> (String, String, u64) {
     use crate::application::submit::submit_pipeline;
     use crate::domain::agent::{Agent, AgentCapabilities};
     use crate::domain::ports::clock::Clock;
+    use crate::domain::task::TaskOperation;
 
     let now = tc.clock.now();
     let agent = Agent::new(
@@ -761,9 +854,16 @@ pub async fn setup_running_task(tc: &TestContext) -> (String, String, u64) {
     tc.ctx.agents.save(&agent).await.unwrap();
 
     let yaml = "pipeline: test-pipe\nversion: '1.0'";
-    let _submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, Some(60))
-        .await
-        .unwrap();
+    let _submit = submit_pipeline(
+        &tc.ctx,
+        None,
+        yaml.to_string(),
+        2,
+        Some(60),
+        TaskOperation::Sync,
+    )
+    .await
+    .unwrap();
 
     let assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
     (
@@ -805,6 +905,8 @@ pub fn fake_context() -> TestContext {
         log_store,
         connection_tester: Arc::new(FakeConnectionTester),
         plugin_registry: Arc::new(FakePluginRegistry),
+        pipeline_source: Arc::new(FakePipelineSource::new()),
+        pipeline_inspector: Arc::new(FakePipelineInspector),
         config: AppConfig {
             default_lease_duration: Duration::from_secs(300),
             lease_check_interval: Duration::from_secs(30),
