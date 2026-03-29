@@ -242,6 +242,8 @@ async fn dispatch(
             })
         }
         TaskOperation::Teardown => {
+            // TODO: Pass the actual teardown reason once Run entity supports metadata.
+            // The reason is logged by the service layer at submission time.
             executor
                 .execute_teardown(&assignment.pipeline_yaml, "api")
                 .await?;

@@ -97,6 +97,27 @@ impl PipelineService for AppServices {
     }
 
     async fn sync(&self, request: SyncRequest) -> Result<RunHandle, ServiceError> {
+        // Reject unsupported options that would change execution behavior.
+        if request.dry_run {
+            return Err(ServiceError::NotImplemented {
+                feature: "dry run mode".into(),
+            });
+        }
+        if request.stream.is_some() {
+            return Err(ServiceError::NotImplemented {
+                feature: "single stream sync".into(),
+            });
+        }
+        if request.cursor_start.is_some() || request.cursor_end.is_some() {
+            return Err(ServiceError::NotImplemented {
+                feature: "cursor range sync".into(),
+            });
+        }
+        // full_refresh is safe to accept but not yet forwarded to the engine.
+        if request.full_refresh {
+            tracing::warn!(pipeline = %request.pipeline, "full_refresh flag is accepted but not yet forwarded to engine");
+        }
+
         // Resolve pipeline YAML from PipelineSource
         let yaml = self
             .ctx
@@ -393,6 +414,13 @@ impl PipelineService for AppServices {
     }
 
     async fn teardown(&self, request: TeardownRequest) -> Result<RunHandle, ServiceError> {
+        tracing::info!(
+            pipeline = %request.pipeline,
+            reason = %request.reason,
+            "teardown requested"
+        );
+        // TODO: Store reason as run metadata once Run entity supports a metadata field.
+        // Currently the reason is captured in the tracing log above.
         let yaml = self
             .ctx
             .pipeline_source
@@ -592,5 +620,59 @@ mod tests {
 
         let result = services.check_apply("nonexistent").await;
         assert!(matches!(result, Err(ServiceError::NotFound { .. })));
+    }
+
+    #[tokio::test]
+    async fn sync_dry_run_returns_not_implemented() {
+        let services = fake_app_services();
+
+        let result = services
+            .sync(SyncRequest {
+                pipeline: "any-pipe".into(),
+                stream: None,
+                full_refresh: false,
+                cursor_start: None,
+                cursor_end: None,
+                dry_run: true,
+            })
+            .await;
+
+        assert!(matches!(result, Err(ServiceError::NotImplemented { .. })));
+    }
+
+    #[tokio::test]
+    async fn sync_stream_filter_returns_not_implemented() {
+        let services = fake_app_services();
+
+        let result = services
+            .sync(SyncRequest {
+                pipeline: "any-pipe".into(),
+                stream: Some("users".into()),
+                full_refresh: false,
+                cursor_start: None,
+                cursor_end: None,
+                dry_run: false,
+            })
+            .await;
+
+        assert!(matches!(result, Err(ServiceError::NotImplemented { .. })));
+    }
+
+    #[tokio::test]
+    async fn sync_cursor_range_returns_not_implemented() {
+        let services = fake_app_services();
+
+        let result = services
+            .sync(SyncRequest {
+                pipeline: "any-pipe".into(),
+                stream: None,
+                full_refresh: false,
+                cursor_start: Some("2024-01-01".into()),
+                cursor_end: None,
+                dry_run: false,
+            })
+            .await;
+
+        assert!(matches!(result, Err(ServiceError::NotImplemented { .. })));
     }
 }

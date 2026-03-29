@@ -20,6 +20,7 @@ pub struct TaskAssignment {
     pub pipeline_yaml: String,
     pub lease_epoch: u64,
     pub attempt: u32,
+    pub operation: String, // "sync", "check_apply", "teardown", "assert"
 }
 
 /// Heartbeat request payload.
