@@ -36,12 +36,28 @@ pub async fn execute_task(
         "Received task"
     );
 
-    if assignment.operation != "sync" && !assignment.operation.is_empty() {
-        tracing::warn!(
+    // Fail fast for unsupported operations — executing a teardown as a sync
+    // would be a correctness bug. Empty operation is treated as "sync" for
+    // backwards compatibility with controllers that predate the operation field.
+    if !assignment.operation.is_empty() && assignment.operation != "sync" {
+        warn!(
             operation = %assignment.operation,
             task_id = %assignment.task_id,
-            "non-sync operation received; falling back to sync execution"
+            "unsupported operation; failing task"
         );
+        let result = TaskExecutionResult {
+            outcome: TaskOutcomeKind::Failed(TaskErrorInfo {
+                code: "UNSUPPORTED_OPERATION".into(),
+                message: format!(
+                    "agent does not support operation '{}'; only 'sync' is supported",
+                    assignment.operation
+                ),
+                retryable: false,
+                commit_state: CommitState::BeforeCommit,
+            }),
+            metrics: TaskMetrics::default(),
+        };
+        return report_completion(ctx, agent_id, assignment, result, shutdown).await;
     }
 
     // 1. Parse YAML -> PipelineConfig

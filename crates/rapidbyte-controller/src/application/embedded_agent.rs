@@ -95,6 +95,12 @@ pub async fn run_embedded_agent(
     config: EmbeddedAgentConfig,
     cancel_token: CancellationToken,
 ) -> Result<()> {
+    // 0. Validate configuration.
+    anyhow::ensure!(
+        config.max_concurrent_tasks > 0,
+        "max_concurrent_tasks must be > 0"
+    );
+
     // 1. Generate stable agent id for this process lifetime.
     let agent_id = format!("embedded-{}", uuid::Uuid::new_v4());
 
