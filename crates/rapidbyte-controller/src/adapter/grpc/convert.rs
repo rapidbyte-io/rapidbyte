@@ -271,6 +271,7 @@ mod tests {
             } else {
                 None
             },
+            None,
             now(),
             now(),
         )

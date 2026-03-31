@@ -143,6 +143,7 @@ impl PipelineService for AppServices {
             0,    // default max_retries
             None, // no timeout
             TaskOperation::Sync,
+            None,
         )
         .await
         .map_err(app_error_to_service)?;
@@ -201,6 +202,7 @@ impl PipelineService for AppServices {
                 0,
                 None,
                 TaskOperation::Sync,
+                None,
             )
             .await
             {
@@ -271,10 +273,17 @@ impl PipelineService for AppServices {
             .await
             .map_err(source_error_to_service)?;
 
-        let result =
-            submit::submit_pipeline(&self.ctx, None, yaml, 0, None, TaskOperation::CheckApply)
-                .await
-                .map_err(app_error_to_service)?;
+        let result = submit::submit_pipeline(
+            &self.ctx,
+            None,
+            yaml,
+            0,
+            None,
+            TaskOperation::CheckApply,
+            None,
+        )
+        .await
+        .map_err(app_error_to_service)?;
 
         Ok(RunHandle {
             run_id: result.run_id,
@@ -406,6 +415,7 @@ impl PipelineService for AppServices {
                 0,
                 None,
                 TaskOperation::Assert,
+                None,
             )
             .await
             {
@@ -441,8 +451,6 @@ impl PipelineService for AppServices {
             reason = %request.reason,
             "teardown requested"
         );
-        // TODO: Store reason as run metadata once Run entity supports a metadata field.
-        // Currently the reason is captured in the tracing log above.
         let yaml = self
             .ctx
             .pipeline_source
@@ -450,10 +458,18 @@ impl PipelineService for AppServices {
             .await
             .map_err(source_error_to_service)?;
 
-        let result =
-            submit::submit_pipeline(&self.ctx, None, yaml, 0, None, TaskOperation::Teardown)
-                .await
-                .map_err(app_error_to_service)?;
+        let metadata = serde_json::json!({ "reason": request.reason });
+        let result = submit::submit_pipeline(
+            &self.ctx,
+            None,
+            yaml,
+            0,
+            None,
+            TaskOperation::Teardown,
+            Some(metadata),
+        )
+        .await
+        .map_err(app_error_to_service)?;
 
         Ok(RunHandle {
             run_id: result.run_id,

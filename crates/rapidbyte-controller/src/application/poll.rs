@@ -20,6 +20,7 @@ pub struct TaskAssignment {
     pub lease_expires_at: DateTime<Utc>,
     pub attempt: u32,
     pub operation: TaskOperation,
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Agent polls for a task to execute.
@@ -111,6 +112,7 @@ pub async fn poll_task(
         lease_expires_at: lease_ref.expires_at(),
         attempt: task.attempt(),
         operation: task.operation(),
+        metadata: run.metadata().cloned(),
     }))
 }
 
@@ -147,6 +149,7 @@ mod tests {
             2,
             Some(60),
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();
@@ -338,6 +341,7 @@ mod tests {
             2,
             None,
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();
@@ -386,6 +390,7 @@ mod tests {
             0,
             None,
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();
@@ -396,6 +401,7 @@ mod tests {
             0,
             None,
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();
@@ -428,6 +434,7 @@ mod tests {
             0,
             None,
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();
@@ -438,6 +445,7 @@ mod tests {
             0,
             None,
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();

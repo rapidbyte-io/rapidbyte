@@ -55,6 +55,7 @@ mod tests {
             2,
             None,
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();

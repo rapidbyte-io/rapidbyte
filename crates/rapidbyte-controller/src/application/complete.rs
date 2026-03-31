@@ -282,6 +282,7 @@ mod tests {
             0,
             None,
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();

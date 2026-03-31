@@ -237,6 +237,7 @@ mod tests {
             2,
             Some(60),
             crate::domain::task::TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();
@@ -275,6 +276,7 @@ mod tests {
             0,
             None,
             crate::domain::task::TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();
@@ -321,6 +323,7 @@ mod tests {
             0,
             None,
             crate::domain::task::TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();
@@ -479,6 +482,7 @@ mod tests {
             0,
             None,
             crate::domain::task::TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();
@@ -489,6 +493,7 @@ mod tests {
             0,
             None,
             crate::domain::task::TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();

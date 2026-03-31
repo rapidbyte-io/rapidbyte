@@ -861,6 +861,7 @@ pub async fn setup_running_task(tc: &TestContext) -> (String, String, u64) {
         2,
         Some(60),
         TaskOperation::Sync,
+        None,
     )
     .await
     .unwrap();

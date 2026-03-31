@@ -66,8 +66,8 @@ async fn insert_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
         extract_run_metrics(run);
 
     sqlx::query(
-        "INSERT INTO runs (id, idempotency_key, pipeline_name, pipeline_yaml, state, cancel_requested, attempt, max_retries, timeout_seconds, error_code, error_message, rows_read, rows_written, bytes_read, bytes_written, duration_ms, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
+        "INSERT INTO runs (id, idempotency_key, pipeline_name, pipeline_yaml, state, cancel_requested, attempt, max_retries, timeout_seconds, error_code, error_message, rows_read, rows_written, bytes_read, bytes_written, duration_ms, metadata, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)",
     )
     .bind(run.id())
     .bind(run.idempotency_key())
@@ -85,6 +85,7 @@ async fn insert_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
     .bind(bytes_read)
     .bind(bytes_written)
     .bind(duration_ms)
+    .bind(run.metadata())
     .bind(run.created_at())
     .bind(run.updated_at())
     .execute(&mut *conn)
@@ -100,7 +101,7 @@ async fn update_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
         extract_run_metrics(run);
 
     sqlx::query(
-        "UPDATE runs SET state = $1, cancel_requested = $2, attempt = $3, max_retries = $4, timeout_seconds = $5, error_code = $6, error_message = $7, rows_read = $8, rows_written = $9, bytes_read = $10, bytes_written = $11, duration_ms = $12, updated_at = $13 WHERE id = $14",
+        "UPDATE runs SET state = $1, cancel_requested = $2, attempt = $3, max_retries = $4, timeout_seconds = $5, error_code = $6, error_message = $7, rows_read = $8, rows_written = $9, bytes_read = $10, bytes_written = $11, duration_ms = $12, metadata = $13, updated_at = $14 WHERE id = $15",
     )
     .bind(run_state_to_str(run.state()))
     .bind(run.is_cancel_requested())
@@ -114,6 +115,7 @@ async fn update_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
     .bind(bytes_read)
     .bind(bytes_written)
     .bind(duration_ms)
+    .bind(run.metadata())
     .bind(run.updated_at())
     .bind(run.id())
     .execute(&mut *conn)

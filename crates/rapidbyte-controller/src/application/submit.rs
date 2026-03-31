@@ -27,6 +27,7 @@ pub async fn submit_pipeline(
     max_retries: u32,
     timeout_seconds: Option<u64>,
     operation: TaskOperation,
+    metadata: Option<serde_json::Value>,
 ) -> Result<SubmitResult, AppError> {
     // 1. Idempotency check
     if let Some(ref key) = idempotency_key {
@@ -53,7 +54,7 @@ pub async fn submit_pipeline(
     let idempotency_key_clone = idempotency_key.clone();
 
     // 7. Create Run
-    let run = Run::new(
+    let mut run = Run::new(
         run_id.clone(),
         idempotency_key,
         pipeline_name,
@@ -62,6 +63,9 @@ pub async fn submit_pipeline(
         timeout_seconds,
         now,
     );
+    if let Some(meta) = metadata {
+        run.set_metadata(meta);
+    }
 
     // 8. Create Task
     let task = Task::new(task_id, run_id.clone(), 1, operation, now);
@@ -117,6 +121,7 @@ mod tests {
             2,
             Some(60),
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();
@@ -153,6 +158,7 @@ mod tests {
             0,
             None,
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();
@@ -165,6 +171,7 @@ mod tests {
             0,
             None,
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();
@@ -184,6 +191,7 @@ mod tests {
             0,
             None,
             TaskOperation::Sync,
+            None,
         )
         .await;
         assert!(result.is_err());
@@ -206,6 +214,7 @@ mod tests {
             0,
             None,
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();
@@ -238,6 +247,7 @@ mod tests {
             0,
             None,
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();
@@ -259,6 +269,7 @@ mod tests {
             0,
             Some(60),
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();
@@ -281,6 +292,7 @@ mod tests {
             0,
             None,
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();
@@ -293,6 +305,7 @@ mod tests {
             0,
             None,
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();

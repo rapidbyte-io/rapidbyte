@@ -175,6 +175,7 @@ mod tests {
             0,
             None,
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();
@@ -270,6 +271,7 @@ mod tests {
             0,
             None,
             TaskOperation::Sync,
+            None,
         )
         .await
         .unwrap();

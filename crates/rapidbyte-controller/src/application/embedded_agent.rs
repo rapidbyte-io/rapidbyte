@@ -248,10 +248,14 @@ async fn dispatch(
             })
         }
         TaskOperation::Teardown => {
-            // TODO: Pass the actual teardown reason once Run entity supports metadata.
-            // The reason is logged by the service layer at submission time.
+            let reason = assignment
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("reason"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("api");
             executor
-                .execute_teardown(&assignment.pipeline_yaml, "api")
+                .execute_teardown(&assignment.pipeline_yaml, reason)
                 .await?;
             Ok(TaskOutcome::Completed {
                 metrics: empty_metrics(),
@@ -330,9 +334,17 @@ mod tests {
 
         // 1. Submit a pipeline run.
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let result = submit_pipeline(&ctx, None, yaml.to_string(), 0, None, TaskOperation::Sync)
-            .await
-            .unwrap();
+        let result = submit_pipeline(
+            &ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
         let run_id = result.run_id;
 
         // 2. Verify run is Pending.
