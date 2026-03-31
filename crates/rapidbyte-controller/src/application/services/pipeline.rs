@@ -113,9 +113,10 @@ impl PipelineService for AppServices {
                 feature: "cursor range sync".into(),
             });
         }
-        // full_refresh is safe to accept but not yet forwarded to the engine.
         if request.full_refresh {
-            tracing::warn!(pipeline = %request.pipeline, "full_refresh flag is accepted but not yet forwarded to engine");
+            return Err(ServiceError::NotImplemented {
+                feature: "full refresh sync".into(),
+            });
         }
 
         // Resolve pipeline YAML from PipelineSource
@@ -154,6 +155,17 @@ impl PipelineService for AppServices {
     }
 
     async fn sync_batch(&self, request: SyncBatchRequest) -> Result<BatchRunHandle, ServiceError> {
+        if request.full_refresh {
+            return Err(ServiceError::NotImplemented {
+                feature: "full refresh batch sync".into(),
+            });
+        }
+        if request.tag.is_some() {
+            return Err(ServiceError::NotImplemented {
+                feature: "tag-filtered batch sync".into(),
+            });
+        }
+
         let all = self
             .ctx
             .pipeline_source
@@ -163,15 +175,17 @@ impl PipelineService for AppServices {
                 message: e.to_string(),
             })?;
 
-        // TODO: filter by tags when pipeline YAML includes tag metadata
         let mut runs = Vec::new();
+        let mut attempted = 0usize;
         for pipeline in &all {
-            // Skip excluded pipelines
+            // Skip excluded pipelines — not a failure
             if let Some(ref exclude) = request.exclude {
                 if exclude.contains(&pipeline.name) {
                     continue;
                 }
             }
+
+            attempted += 1;
 
             let yaml = match self.ctx.pipeline_source.get(&pipeline.name).await {
                 Ok(y) => y,
@@ -202,7 +216,9 @@ impl PipelineService for AppServices {
             });
         }
 
-        if runs.is_empty() && !all.is_empty() {
+        // Only error if we attempted submissions and all of them failed.
+        // An empty result because everything was excluded (or no pipelines exist) is fine.
+        if runs.is_empty() && attempted > 0 {
             return Err(ServiceError::Internal {
                 message: "all pipeline submissions failed".into(),
             });
@@ -342,6 +358,12 @@ impl PipelineService for AppServices {
     }
 
     async fn assert(&self, request: AssertRequest) -> Result<AssertResult, ServiceError> {
+        if request.tag.is_some() {
+            return Err(ServiceError::NotImplemented {
+                feature: "tag-filtered assertions".into(),
+            });
+        }
+
         // Determine which pipelines to assert
         let pipelines = if let Some(ref name) = request.pipeline {
             vec![name.clone()]
@@ -670,6 +692,98 @@ mod tests {
                 cursor_start: Some("2024-01-01".into()),
                 cursor_end: None,
                 dry_run: false,
+            })
+            .await;
+
+        assert!(matches!(result, Err(ServiceError::NotImplemented { .. })));
+    }
+
+    #[tokio::test]
+    async fn sync_full_refresh_returns_not_implemented() {
+        let services = fake_app_services();
+
+        let result = services
+            .sync(SyncRequest {
+                pipeline: "test-pipe".into(),
+                stream: None,
+                full_refresh: true,
+                cursor_start: None,
+                cursor_end: None,
+                dry_run: false,
+            })
+            .await;
+
+        assert!(matches!(result, Err(ServiceError::NotImplemented { .. })));
+    }
+
+    #[tokio::test]
+    async fn sync_batch_full_refresh_returns_not_implemented() {
+        let services = fake_app_services();
+
+        let result = services
+            .sync_batch(SyncBatchRequest {
+                tag: None,
+                exclude: None,
+                full_refresh: true,
+            })
+            .await;
+
+        assert!(matches!(result, Err(ServiceError::NotImplemented { .. })));
+    }
+
+    #[tokio::test]
+    async fn sync_batch_tag_filter_returns_not_implemented() {
+        let services = fake_app_services();
+
+        let result = services
+            .sync_batch(SyncBatchRequest {
+                tag: Some(vec!["production".into()]),
+                exclude: None,
+                full_refresh: false,
+            })
+            .await;
+
+        assert!(matches!(result, Err(ServiceError::NotImplemented { .. })));
+    }
+
+    #[tokio::test]
+    async fn sync_batch_exclude_all_returns_empty_ok() {
+        let mut tc = fake_context();
+        tc.ctx.pipeline_source = Arc::new(
+            FakePipelineSource::new()
+                .with_pipeline("pipe-a", "pipeline: pipe-a\nversion: '1.0'")
+                .with_pipeline("pipe-b", "pipeline: pipe-b\nversion: '1.0'"),
+        );
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:8080".parse().unwrap(),
+        ));
+
+        let result = services
+            .sync_batch(SyncBatchRequest {
+                tag: None,
+                exclude: Some(vec!["pipe-a".into(), "pipe-b".into()]),
+                full_refresh: false,
+            })
+            .await;
+
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let handle = result.unwrap();
+        assert!(
+            handle.runs.is_empty(),
+            "expected empty runs when all pipelines excluded"
+        );
+    }
+
+    #[tokio::test]
+    async fn assert_tag_filter_returns_not_implemented() {
+        let services = fake_app_services();
+
+        let result = services
+            .assert(AssertRequest {
+                pipeline: None,
+                tag: Some(vec!["production".into()]),
             })
             .await;
 

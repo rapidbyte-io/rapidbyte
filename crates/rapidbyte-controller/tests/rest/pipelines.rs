@@ -398,3 +398,95 @@ async fn sync_batch_with_exclude_skips_pipeline() {
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0]["pipeline"], "pipe-a");
 }
+
+#[tokio::test]
+async fn sync_batch_exclude_all_returns_200_empty() {
+    // Excluding all pipelines is a valid operation — should return 202 with empty runs.
+    let app = test_app_with_two_pipelines();
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/pipelines/sync")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"exclude":["pipe-a","pipe-b"]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let body = parse_json(resp).await;
+    let runs = body["runs"].as_array().unwrap();
+    assert!(runs.is_empty(), "expected empty runs when all excluded");
+}
+
+#[tokio::test]
+async fn sync_full_refresh_returns_501() {
+    let app = test_app_with_pipeline("test-pipeline");
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/pipelines/test-pipeline/sync")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"full_refresh":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = parse_json(resp).await;
+    assert_eq!(body["error"]["code"], "not_implemented");
+}
+
+#[tokio::test]
+async fn sync_batch_full_refresh_returns_501() {
+    let app = test_app_with_two_pipelines();
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/pipelines/sync")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"full_refresh":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = parse_json(resp).await;
+    assert_eq!(body["error"]["code"], "not_implemented");
+}
+
+#[tokio::test]
+async fn sync_batch_tag_filter_returns_501() {
+    let app = test_app_with_two_pipelines();
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/pipelines/sync")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"tag":["production"]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    let body = parse_json(resp).await;
+    assert_eq!(body["error"]["code"], "not_implemented");
+}
+
+#[tokio::test]
+async fn teardown_with_reason_returns_202() {
+    // Verify that a teardown request carrying a reason field is accepted and
+    // returns 202 with a pending run handle.
+    let app = test_app_with_pipeline("my-pipeline");
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/pipelines/my-pipeline/teardown")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"reason":"scheduled maintenance decommission"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::ACCEPTED);
+    let body = parse_json(resp).await;
+    assert!(body["run_id"].is_string(), "expected run_id in body");
+    assert_eq!(body["status"], "pending");
+}
