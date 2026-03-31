@@ -132,7 +132,7 @@ impl ConnectionService for AppServices {
             // debug level gets the full message for operators who need it.
             Err(ConnectionTestError::Connection(msg)) => {
                 tracing::warn!(connection = %name, "connection test failed");
-                tracing::debug!(connection = %name, error = %msg, "connection test failure details");
+                tracing::trace!(connection = %name, error = %msg, "connection test failure details (may contain secrets)");
                 Ok(ConnectionTestResponse {
                     name: name.to_string(),
                     status: "failed".into(),
@@ -147,7 +147,7 @@ impl ConnectionService for AppServices {
             // Plugin-level errors are infrastructure faults — also log, don't expose.
             Err(ConnectionTestError::Plugin(msg)) => {
                 tracing::error!(connection = %name, "connection test plugin error");
-                tracing::debug!(connection = %name, error = %msg, "connection test plugin error details");
+                tracing::trace!(connection = %name, error = %msg, "connection test plugin error details (may contain secrets)");
                 Err(ServiceError::Internal {
                     message: "connection test failed due to a plugin error".into(),
                 })
@@ -182,7 +182,7 @@ impl ConnectionService for AppServices {
             // DSNs/secrets); debug level gets full message for operators.
             Err(ConnectionTestError::Connection(msg)) => {
                 tracing::warn!(connection = %name, "connection discover failed");
-                tracing::debug!(connection = %name, error = %msg, "connection discover failure details");
+                tracing::trace!(connection = %name, error = %msg, "connection discover failure details (may contain secrets)");
                 Err(ServiceError::ValidationFailed {
                     details: vec![crate::traits::FieldError {
                         field: "connection".into(),
@@ -192,7 +192,7 @@ impl ConnectionService for AppServices {
             }
             Err(ConnectionTestError::Plugin(msg)) => {
                 tracing::error!(connection = %name, "connection discover plugin error");
-                tracing::debug!(connection = %name, error = %msg, "connection discover plugin error details");
+                tracing::trace!(connection = %name, error = %msg, "connection discover plugin error details (may contain secrets)");
                 Err(ServiceError::Internal {
                     message: "discovery failed due to a plugin error".into(),
                 })

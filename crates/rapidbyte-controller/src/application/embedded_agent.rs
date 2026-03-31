@@ -188,23 +188,35 @@ pub async fn run_embedded_agent(
     // 5. Drain in-flight tasks by waiting for the semaphore to reach full
     //    capacity (all permits returned), with a timeout to avoid hanging.
     let drain_timeout = Duration::from_secs(30);
-    if tokio::time::timeout(
+    let drained = tokio::time::timeout(
         drain_timeout,
         semaphore.acquire_many(config.max_concurrent_tasks),
     )
     .await
-    .is_ok()
-    {
+    .is_ok();
+
+    if drained {
         info!("embedded agent drained all tasks");
     } else {
-        warn!("embedded agent drain timed out after {drain_timeout:?}");
+        warn!("embedded agent drain timed out after {drain_timeout:?}, tasks still in-flight");
     }
 
-    // 6. Deregister.
-    if let Err(e) = crate::application::register::deregister(&app_ctx, &agent_id).await {
-        warn!(agent_id = %agent_id, error = %e, "deregister failed");
+    // 6. Deregister only if all tasks drained successfully.
+    //    If tasks are still running, deregistration would force-timeout them
+    //    and potentially trigger retries while original execution continues,
+    //    causing duplicate side effects. Let the agent_reaper handle cleanup
+    //    after heartbeats stop.
+    if drained {
+        if let Err(e) = crate::application::register::deregister(&app_ctx, &agent_id).await {
+            warn!(agent_id = %agent_id, error = %e, "deregister failed");
+        } else {
+            info!(agent_id = %agent_id, "embedded agent deregistered");
+        }
     } else {
-        info!(agent_id = %agent_id, "embedded agent deregistered");
+        warn!(
+            agent_id = %agent_id,
+            "skipping deregister — tasks still in-flight; agent_reaper will clean up after heartbeats stop"
+        );
     }
 
     Ok(())
