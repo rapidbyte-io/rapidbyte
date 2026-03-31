@@ -159,7 +159,10 @@ pub async fn run_embedded_agent(
         // Spawn execution + heartbeat for this assignment.
         let ctx = Arc::clone(&app_ctx);
         let exec = Arc::clone(&executor);
-        let task_cancel = cancel_token.clone();
+        // Per-task child token: cancelling it stops only this task, not the agent.
+        // The agent shutdown token is the parent — when it fires, all children
+        // (including this one) are also cancelled.
+        let task_cancel = cancel_token.child_token();
         let agent_id_owned = agent_id.clone();
 
         tokio::spawn(async move {
