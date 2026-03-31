@@ -127,19 +127,29 @@ impl ConnectionService for AppServices {
                 }),
             }),
             // Connection-level failures (bad creds, unreachable host) are expected
-            // outcomes, not server faults — return 200 with status: "failed"
-            Err(ConnectionTestError::Connection(msg)) => Ok(ConnectionTestResponse {
-                name: name.to_string(),
-                status: "failed".into(),
-                latency_ms: None,
-                details: None,
-                error: Some(serde_json::json!({
-                    "code": "connection_failed",
-                    "message": sanitize_connection_error(&msg),
-                })),
-            }),
-            // Plugin-level errors are infrastructure faults
-            Err(ConnectionTestError::Plugin(msg)) => Err(ServiceError::Internal { message: msg }),
+            // outcomes, not server faults — return 200 with status: "failed".
+            // Log the full error for operators but return only a safe summary
+            // to clients (raw messages can contain DSNs, secrets, etc.).
+            Err(ConnectionTestError::Connection(msg)) => {
+                tracing::warn!(connection = %name, error = %msg, "connection test failed");
+                Ok(ConnectionTestResponse {
+                    name: name.to_string(),
+                    status: "failed".into(),
+                    latency_ms: None,
+                    details: None,
+                    error: Some(serde_json::json!({
+                        "code": "connection_failed",
+                        "message": format!("Connection to '{name}' failed"),
+                    })),
+                })
+            }
+            // Plugin-level errors are infrastructure faults — also log, don't expose.
+            Err(ConnectionTestError::Plugin(msg)) => {
+                tracing::error!(connection = %name, error = %msg, "connection test plugin error");
+                Err(ServiceError::Internal {
+                    message: "connection test failed due to a plugin error".into(),
+                })
+            }
         }
     }
 
@@ -166,22 +176,28 @@ impl ConnectionService for AppServices {
                     })
                     .collect(),
             }),
-            // Connection-level failures during discover are semantically invalid/unreachable
-            // config — return 422 so clients know the connection config needs fixing.
-            Err(ConnectionTestError::Connection(msg)) => Err(ServiceError::ValidationFailed {
-                details: vec![crate::traits::FieldError {
-                    field: "connection".into(),
-                    reason: sanitize_connection_error(&msg),
-                }],
-            }),
-            // Plugin-level errors are infrastructure faults
-            Err(ConnectionTestError::Plugin(msg)) => Err(ServiceError::Internal { message: msg }),
+            // Connection-level failures during discover — log full error, return safe summary.
+            Err(ConnectionTestError::Connection(msg)) => {
+                tracing::warn!(connection = %name, error = %msg, "connection discover failed");
+                Err(ServiceError::ValidationFailed {
+                    details: vec![crate::traits::FieldError {
+                        field: "connection".into(),
+                        reason: format!("Connection to '{name}' failed"),
+                    }],
+                })
+            }
+            Err(ConnectionTestError::Plugin(msg)) => {
+                tracing::error!(connection = %name, error = %msg, "connection discover plugin error");
+                Err(ServiceError::Internal {
+                    message: "discovery failed due to a plugin error".into(),
+                })
+            }
         }
     }
 }
 
-/// Parse raw (unredacted) connection config for a named connection.
-/// Used internally by test/discover which need real credentials.
+/// Parse raw (unredacted, secrets-resolved) connection config for a named
+/// connection.  Used internally by test/discover which need real credentials.
 async fn raw_connection_config(
     ctx: &crate::application::context::AppContext,
     name: &str,
@@ -197,8 +213,18 @@ async fn raw_connection_config(
         resource: "connection".into(),
         id: name.to_string(),
     })?;
+
+    // Resolve secret placeholders (e.g., ${vault:path#key}) before parsing.
+    let resolved = ctx
+        .secrets
+        .resolve(&yaml)
+        .await
+        .map_err(|e| ServiceError::Internal {
+            message: e.to_string(),
+        })?;
+
     let value: serde_yaml::Value =
-        serde_yaml::from_str(&yaml).map_err(|e| ServiceError::Internal {
+        serde_yaml::from_str(&resolved).map_err(|e| ServiceError::Internal {
             message: e.to_string(),
         })?;
     let connections_map = value
@@ -224,42 +250,6 @@ async fn raw_connection_config(
         message: e.to_string(),
     })?;
     Ok((connector, config))
-}
-
-/// Sanitize a connection error message to prevent credential leakage.
-///
-/// If the message contains URL-style credential patterns (e.g.
-/// `postgres://user:pass@host/db`), the credentials are redacted so the
-/// sanitized message is safe to return to callers.
-fn sanitize_connection_error(msg: &str) -> String {
-    if !msg.contains("://") || !msg.contains('@') {
-        return msg.to_string();
-    }
-
-    msg.split_whitespace()
-        .map(|word| {
-            if word.contains("://") && word.contains('@') {
-                if let Some(scheme_end) = word.find("://") {
-                    if let Some(at_pos) = word.find('@') {
-                        // Only redact when @ is in the authority (before the first path /)
-                        let authority_candidate = &word[scheme_end + 3..];
-                        // authority ends at the first '/'
-                        let authority = authority_candidate
-                            .split('/')
-                            .next()
-                            .unwrap_or(authority_candidate);
-                        if authority.contains('@') {
-                            let scheme = &word[..scheme_end + 3];
-                            let after_at = &word[at_pos..];
-                            return format!("{scheme}***{after_at}");
-                        }
-                    }
-                }
-            }
-            word.to_string()
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 const SENSITIVE_PATTERNS: &[&str] = &[
@@ -340,36 +330,6 @@ mod tests {
     }
 
     // --- no connections.yml (default fake) ---
-
-    #[test]
-    fn sanitize_connection_error_redacts_credentials() {
-        let msg = "connection refused: postgres://admin:secret123@db.example.com:5432/prod";
-        let sanitized = super::sanitize_connection_error(msg);
-        assert!(
-            !sanitized.contains("secret123"),
-            "expected secret redacted, got: {sanitized}"
-        );
-        assert!(
-            sanitized.contains("db.example.com"),
-            "expected host preserved, got: {sanitized}"
-        );
-    }
-
-    #[test]
-    fn sanitize_connection_error_no_url_passthrough() {
-        let msg = "connection refused by db.example.com port 5432";
-        let sanitized = super::sanitize_connection_error(msg);
-        assert_eq!(sanitized, msg);
-    }
-
-    #[test]
-    fn sanitize_connection_error_at_in_path_not_redacted() {
-        // @ in path/query should not be treated as credentials
-        let msg = "request failed: https://hooks.example.com/notify?user=admin@example.com";
-        let sanitized = super::sanitize_connection_error(msg);
-        // Should not redact since @ is in query, not authority
-        assert_eq!(sanitized, msg);
-    }
 
     #[tokio::test]
     async fn list_returns_empty_when_no_connections_yaml() {
@@ -663,7 +623,8 @@ connections:
         assert!(resp.error.is_some());
         let err = resp.error.unwrap();
         assert_eq!(err["code"], "connection_failed");
-        assert_eq!(err["message"], "connection refused");
+        // Error message should be generic — not the raw error from the tester
+        assert_eq!(err["message"], "Connection to 'my_pg' failed");
     }
 
     #[tokio::test]
