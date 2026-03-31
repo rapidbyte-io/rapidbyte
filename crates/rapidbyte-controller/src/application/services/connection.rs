@@ -210,6 +210,12 @@ const SENSITIVE_PATTERNS: &[&str] = &[
     "access_key",
     "auth",
     "credential",
+    "dsn",
+    "connection_string",
+    "conn_string",
+    "jdbc_url",
+    "database_url",
+    "connection_url",
 ];
 
 fn redact_sensitive_fields(value: &mut serde_json::Value) {
@@ -415,6 +421,46 @@ my_other:
         // non-sensitive fields are preserved
         assert_eq!(val["host"], "localhost");
         assert_eq!(val["username"], "admin");
+    }
+
+    #[test]
+    fn redact_dsn_url_patterns() {
+        let mut val = serde_json::json!({
+            "dsn": "postgres://user:pass@localhost/db",
+            "connection_string": "host=localhost;user=sa;password=secret",
+            "conn_string": "Server=myserver;Database=mydb",
+            "jdbc_url": "jdbc:postgresql://localhost/mydb",
+            "database_url": "postgresql://user:pass@db.example.com/prod",
+            "connection_url": "postgresql://admin:pw@host:5432/db",
+            "host": "localhost",
+            "port": 5432,
+        });
+        super::redact_sensitive_fields(&mut val);
+        assert_eq!(val["dsn"], "***REDACTED***");
+        assert_eq!(val["connection_string"], "***REDACTED***");
+        assert_eq!(val["conn_string"], "***REDACTED***");
+        assert_eq!(val["jdbc_url"], "***REDACTED***");
+        assert_eq!(val["database_url"], "***REDACTED***");
+        assert_eq!(val["connection_url"], "***REDACTED***");
+        // non-sensitive fields are preserved
+        assert_eq!(val["host"], "localhost");
+        assert_eq!(val["port"], 5432);
+    }
+
+    #[test]
+    fn redact_dsn_url_patterns_do_not_match_base_url_or_callback_url() {
+        // "url" is deliberately NOT in SENSITIVE_PATTERNS to avoid false positives
+        // on fields like "base_url", "callback_url", "webhook_url".
+        let mut val = serde_json::json!({
+            "base_url": "https://api.example.com",
+            "callback_url": "https://app.example.com/callback",
+            "webhook_url": "https://hooks.example.com/notify",
+        });
+        super::redact_sensitive_fields(&mut val);
+        // None of these generic *_url fields should be redacted
+        assert_ne!(val["base_url"], "***REDACTED***");
+        assert_ne!(val["callback_url"], "***REDACTED***");
+        assert_ne!(val["webhook_url"], "***REDACTED***");
     }
 
     #[tokio::test]
