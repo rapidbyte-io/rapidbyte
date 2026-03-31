@@ -135,7 +135,7 @@ impl ConnectionService for AppServices {
                 details: None,
                 error: Some(serde_json::json!({
                     "code": "connection_failed",
-                    "message": msg,
+                    "message": sanitize_connection_error(&msg),
                 })),
             }),
             // Plugin-level errors are infrastructure faults
@@ -171,7 +171,7 @@ impl ConnectionService for AppServices {
             Err(ConnectionTestError::Connection(msg)) => Err(ServiceError::ValidationFailed {
                 details: vec![crate::traits::FieldError {
                     field: "connection".into(),
-                    reason: msg,
+                    reason: sanitize_connection_error(&msg),
                 }],
             }),
             // Plugin-level errors are infrastructure faults
@@ -224,6 +224,42 @@ async fn raw_connection_config(
         message: e.to_string(),
     })?;
     Ok((connector, config))
+}
+
+/// Sanitize a connection error message to prevent credential leakage.
+///
+/// If the message contains URL-style credential patterns (e.g.
+/// `postgres://user:pass@host/db`), the credentials are redacted so the
+/// sanitized message is safe to return to callers.
+fn sanitize_connection_error(msg: &str) -> String {
+    if !msg.contains("://") || !msg.contains('@') {
+        return msg.to_string();
+    }
+
+    msg.split_whitespace()
+        .map(|word| {
+            if word.contains("://") && word.contains('@') {
+                if let Some(scheme_end) = word.find("://") {
+                    if let Some(at_pos) = word.find('@') {
+                        // Only redact when @ is in the authority (before the first path /)
+                        let authority_candidate = &word[scheme_end + 3..];
+                        // authority ends at the first '/'
+                        let authority = authority_candidate
+                            .split('/')
+                            .next()
+                            .unwrap_or(authority_candidate);
+                        if authority.contains('@') {
+                            let scheme = &word[..scheme_end + 3];
+                            let after_at = &word[at_pos..];
+                            return format!("{scheme}***{after_at}");
+                        }
+                    }
+                }
+            }
+            word.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 const SENSITIVE_PATTERNS: &[&str] = &[
@@ -304,6 +340,36 @@ mod tests {
     }
 
     // --- no connections.yml (default fake) ---
+
+    #[test]
+    fn sanitize_connection_error_redacts_credentials() {
+        let msg = "connection refused: postgres://admin:secret123@db.example.com:5432/prod";
+        let sanitized = super::sanitize_connection_error(msg);
+        assert!(
+            !sanitized.contains("secret123"),
+            "expected secret redacted, got: {sanitized}"
+        );
+        assert!(
+            sanitized.contains("db.example.com"),
+            "expected host preserved, got: {sanitized}"
+        );
+    }
+
+    #[test]
+    fn sanitize_connection_error_no_url_passthrough() {
+        let msg = "connection refused by db.example.com port 5432";
+        let sanitized = super::sanitize_connection_error(msg);
+        assert_eq!(sanitized, msg);
+    }
+
+    #[test]
+    fn sanitize_connection_error_at_in_path_not_redacted() {
+        // @ in path/query should not be treated as credentials
+        let msg = "request failed: https://hooks.example.com/notify?user=admin@example.com";
+        let sanitized = super::sanitize_connection_error(msg);
+        // Should not redact since @ is in query, not authority
+        assert_eq!(sanitized, msg);
+    }
 
     #[tokio::test]
     async fn list_returns_empty_when_no_connections_yaml() {
