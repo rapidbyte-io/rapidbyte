@@ -5,12 +5,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rapidbyte_controller::adapter::noop::{
-    NoOpConnectionTester, NoOpPipelineInspector, NoOpPluginRegistry,
-};
+use rapidbyte_controller::adapter::noop::NoOpPluginRegistry;
 use rapidbyte_controller::ServeContext;
 
+use crate::engine_adapters::connection_tester::EngineConnectionTester;
+use crate::engine_adapters::pipeline_inspector::EnginePipelineInspector;
 use crate::engine_adapters::pipeline_source::FsPipelineSource;
+use crate::engine_adapters::task_executor::EngineTaskExecutor;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn execute(
@@ -45,14 +46,22 @@ pub async fn execute(
         registry_insecure,
         rest_listen,
     )?;
+
+    // Build engine registry config from the controller's registry flags.
+    let engine_registry = rapidbyte_registry::RegistryConfig {
+        insecure: registry_insecure,
+        default_registry: rapidbyte_registry::normalize_registry_url_option(registry_url),
+        ..Default::default()
+    };
+
     let serve_ctx = ServeContext {
         otel_guard: Arc::new(otel_guard),
         secrets,
         pipeline_source: Arc::new(FsPipelineSource::new(std::env::current_dir()?)),
-        connection_tester: Arc::new(NoOpConnectionTester),
+        connection_tester: Arc::new(EngineConnectionTester::new(engine_registry.clone())),
         plugin_registry: Arc::new(NoOpPluginRegistry),
-        pipeline_inspector: Arc::new(NoOpPipelineInspector),
-        task_executor: None, // embedded agent not yet wired (needs EngineTaskExecutor)
+        pipeline_inspector: Arc::new(EnginePipelineInspector::new(engine_registry.clone())),
+        task_executor: Some(Arc::new(EngineTaskExecutor::new(engine_registry))),
     };
     rapidbyte_controller::serve(config, serve_ctx).await
 }
