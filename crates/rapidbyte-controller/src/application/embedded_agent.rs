@@ -296,6 +296,11 @@ async fn dispatch(
     assignment: &crate::application::poll::TaskAssignment,
     cancel: &CancellationToken,
 ) -> Result<TaskOutcome> {
+    // Check cancellation before starting any operation.
+    if cancel.is_cancelled() {
+        return Ok(TaskOutcome::Cancelled);
+    }
+
     match assignment.operation {
         TaskOperation::Sync => {
             let metrics = executor
@@ -304,9 +309,16 @@ async fn dispatch(
             Ok(TaskOutcome::Completed { metrics })
         }
         TaskOperation::CheckApply => {
-            executor
-                .execute_check_apply(&assignment.pipeline_yaml)
-                .await?;
+            // Run in a select against the cancel token so cancellation
+            // is observed even for operations that don't take a token parameter.
+            tokio::select! {
+                result = executor.execute_check_apply(&assignment.pipeline_yaml) => {
+                    result?;
+                }
+                () = cancel.cancelled() => {
+                    return Ok(TaskOutcome::Cancelled);
+                }
+            }
             Ok(TaskOutcome::Completed {
                 metrics: empty_metrics(),
             })
@@ -318,15 +330,27 @@ async fn dispatch(
                 .and_then(|m| m.get("reason"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("api");
-            executor
-                .execute_teardown(&assignment.pipeline_yaml, reason)
-                .await?;
+            tokio::select! {
+                result = executor.execute_teardown(&assignment.pipeline_yaml, reason) => {
+                    result?;
+                }
+                () = cancel.cancelled() => {
+                    return Ok(TaskOutcome::Cancelled);
+                }
+            }
             Ok(TaskOutcome::Completed {
                 metrics: empty_metrics(),
             })
         }
         TaskOperation::Assert => {
-            executor.execute_assert(&assignment.pipeline_yaml).await?;
+            tokio::select! {
+                result = executor.execute_assert(&assignment.pipeline_yaml) => {
+                    result?;
+                }
+                () = cancel.cancelled() => {
+                    return Ok(TaskOutcome::Cancelled);
+                }
+            }
             Ok(TaskOutcome::Completed {
                 metrics: empty_metrics(),
             })

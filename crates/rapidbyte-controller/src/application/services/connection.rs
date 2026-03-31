@@ -246,8 +246,16 @@ const SENSITIVE_PATTERNS: &[&str] = &[
 
 /// Returns true if a string value looks like a credential-bearing URL
 /// (e.g., `postgres://user:pass@host/db`).
+///
+/// The heuristic checks that `@` appears in the authority portion of the URL
+/// (between `://` and the next `/`), not in path, query, or fragment.
 fn looks_like_credential_url(s: &str) -> bool {
-    s.contains("://") && s.contains('@')
+    let Some(after_scheme) = s.split_once("://").map(|(_, rest)| rest) else {
+        return false;
+    };
+    // The authority is everything before the first `/` (or end of string)
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+    authority.contains('@')
 }
 
 fn redact_sensitive_fields(value: &mut serde_json::Value) {
@@ -506,7 +514,7 @@ connections:
 
     #[test]
     fn redact_credential_bearing_url_values() {
-        // URLs with user:pass@host are redacted regardless of key name
+        // URLs with user:pass@host in the authority are redacted
         let mut val = serde_json::json!({
             "url": "postgres://admin:s3cret@db.example.com:5432/prod",
             "uri": "mongodb://user:pass@cluster.example.com/mydb",
@@ -514,16 +522,25 @@ connections:
             "base_url": "https://api.example.com/v1",
             "callback_url": "https://app.example.com/callback",
             "host": "db.example.com",
+            // @ in path/query is NOT a credential — should NOT be redacted
+            "webhook": "https://hooks.example.com/notify?user=admin@example.com",
+            "link": "https://app.example.com/users/@admin/profile",
         });
         super::redact_sensitive_fields(&mut val);
-        // Credential-bearing URLs are redacted (contain :// and @)
+        // Credential-bearing URLs are redacted (@ in authority)
         assert_eq!(val["url"], "***REDACTED***");
         assert_eq!(val["uri"], "***REDACTED***");
         assert_eq!(val["endpoint"], "***REDACTED***");
-        // Non-credential URLs are preserved (no @)
+        // Non-credential URLs are preserved (no @ in authority)
         assert_eq!(val["base_url"], "https://api.example.com/v1");
         assert_eq!(val["callback_url"], "https://app.example.com/callback");
-        // Plain strings are preserved
+        // @ in path or query is NOT authority — preserved
+        assert_eq!(
+            val["webhook"],
+            "https://hooks.example.com/notify?user=admin@example.com"
+        );
+        assert_eq!(val["link"], "https://app.example.com/users/@admin/profile");
+        // Plain strings preserved
         assert_eq!(val["host"], "db.example.com");
     }
 
