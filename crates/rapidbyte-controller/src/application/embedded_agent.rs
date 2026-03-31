@@ -152,51 +152,27 @@ pub async fn run_embedded_agent(
             }
         };
 
-        // Spawn execution.
+        // Compute heartbeat interval here so config.poll_interval is not moved
+        // into the spawned closure.
+        let heartbeat_interval = config.poll_interval * 2;
+
+        // Spawn execution + heartbeat for this assignment.
         let ctx = Arc::clone(&app_ctx);
         let exec = Arc::clone(&executor);
         let task_cancel = cancel_token.clone();
         let agent_id_owned = agent_id.clone();
 
         tokio::spawn(async move {
-            // The permit is held for the lifetime of the spawned task.
             let _permit = permit;
-
-            let task_id = assignment.task_id.clone();
-            let lease_epoch = assignment.lease_epoch;
-
-            let outcome = dispatch(&exec, &assignment, &task_cancel).await;
-
-            let report_outcome = match outcome {
-                Ok(task_outcome) => task_outcome,
-                Err(e) => {
-                    error!(task_id = %task_id, error = %e, "task execution failed");
-                    TaskOutcome::Failed {
-                        error: TaskError {
-                            code: "EXECUTION_ERROR".to_string(),
-                            message: e.to_string(),
-                            retryable: true,
-                            commit_state: CommitState::BeforeCommit,
-                        },
-                    }
-                }
-            };
-
-            if let Err(e) = crate::application::complete::complete_task(
-                &ctx,
-                &agent_id_owned,
-                &task_id,
-                lease_epoch,
-                report_outcome,
+            run_task_with_heartbeat(
+                ctx,
+                exec,
+                agent_id_owned,
+                assignment,
+                task_cancel,
+                heartbeat_interval,
             )
-            .await
-            {
-                error!(
-                    task_id = %task_id,
-                    error = %e,
-                    "complete_task failed"
-                );
-            }
+            .await;
         });
     }
 
@@ -223,6 +199,76 @@ pub async fn run_embedded_agent(
     }
 
     Ok(())
+}
+
+/// Execute a single task alongside a heartbeat loop, then report the outcome.
+async fn run_task_with_heartbeat(
+    ctx: Arc<AppContext>,
+    exec: Arc<dyn TaskExecutor>,
+    agent_id: String,
+    assignment: crate::application::poll::TaskAssignment,
+    task_cancel: CancellationToken,
+    heartbeat_interval: Duration,
+) {
+    let task_id = assignment.task_id.clone();
+    let lease_epoch = assignment.lease_epoch;
+
+    // Child token cancelled when this task finishes (success or failure).
+    let task_done = CancellationToken::new();
+
+    // Spawn heartbeat loop.
+    let hb_ctx = Arc::clone(&ctx);
+    let hb_agent_id = agent_id.clone();
+    let hb_task_id = task_id.clone();
+    let hb_done = task_done.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                () = hb_done.cancelled() => break,
+                () = tokio::time::sleep(heartbeat_interval) => {}
+            }
+            let input = crate::application::heartbeat::TaskHeartbeatInput {
+                task_id: hb_task_id.clone(),
+                lease_epoch,
+                progress_message: None,
+                progress_pct: None,
+            };
+            let _ =
+                crate::application::heartbeat::heartbeat(&hb_ctx, &hb_agent_id, vec![input]).await;
+        }
+    });
+
+    let outcome = dispatch(&exec, &assignment, &task_cancel).await;
+
+    // Signal the heartbeat loop to stop.
+    task_done.cancel();
+
+    let report_outcome = match outcome {
+        Ok(task_outcome) => task_outcome,
+        Err(e) => {
+            error!(task_id = %task_id, error = %e, "task execution failed");
+            TaskOutcome::Failed {
+                error: TaskError {
+                    code: "EXECUTION_ERROR".to_string(),
+                    message: e.to_string(),
+                    retryable: true,
+                    commit_state: CommitState::BeforeCommit,
+                },
+            }
+        }
+    };
+
+    if let Err(e) = crate::application::complete::complete_task(
+        &ctx,
+        &agent_id,
+        &task_id,
+        lease_epoch,
+        report_outcome,
+    )
+    .await
+    {
+        error!(task_id = %task_id, error = %e, "complete_task failed");
+    }
 }
 
 /// Dispatch a task to the appropriate executor method and wrap the result in

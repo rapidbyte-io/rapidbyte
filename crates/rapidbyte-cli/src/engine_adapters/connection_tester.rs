@@ -28,12 +28,16 @@ impl ConnectionTester for EngineConnectionTester {
             ConnectionTestError::Connection("missing 'use' field in connection config".into())
         })?;
 
+        // Extract the nested "config" object — engine expects plugin-specific config,
+        // not the whole connection entry
+        let plugin_config = config.get("config");
+
         let start = std::time::Instant::now();
         let engine_ctx = rapidbyte_engine::build_discover_context(&self.registry_config)
             .await
             .map_err(|e| ConnectionTestError::Plugin(e.to_string()))?;
 
-        rapidbyte_engine::discover_plugin(&engine_ctx, source_ref, Some(config))
+        rapidbyte_engine::discover_plugin(&engine_ctx, source_ref, plugin_config)
             .await
             .map_err(|e| ConnectionTestError::Connection(e.to_string()))?;
 
@@ -54,11 +58,15 @@ impl ConnectionTester for EngineConnectionTester {
             ConnectionTestError::Connection("missing 'use' field in connection config".into())
         })?;
 
+        // Extract the nested "config" object — engine expects plugin-specific config,
+        // not the whole connection entry
+        let plugin_config = config.get("config");
+
         let engine_ctx = rapidbyte_engine::build_discover_context(&self.registry_config)
             .await
             .map_err(|e| ConnectionTestError::Plugin(e.to_string()))?;
 
-        let streams = rapidbyte_engine::discover_plugin(&engine_ctx, source_ref, Some(config))
+        let streams = rapidbyte_engine::discover_plugin(&engine_ctx, source_ref, plugin_config)
             .await
             .map_err(|e| ConnectionTestError::Connection(e.to_string()))?;
 

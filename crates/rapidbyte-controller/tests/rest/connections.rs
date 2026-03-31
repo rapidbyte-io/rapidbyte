@@ -18,14 +18,17 @@ use super::helpers::{parse_json, test_app};
 // ---------------------------------------------------------------------------
 
 const CONNECTIONS_YAML: &str = "\
-my_pg:
-  connector: postgres
-  host: localhost
-  port: 5432
-  password: hunter2
-my_redis:
-  connector: redis
-  host: redis-host
+connections:
+  my_pg:
+    use: postgres
+    config:
+      host: localhost
+      port: 5432
+      password: hunter2
+  my_redis:
+    use: redis
+    config:
+      host: redis-host
 ";
 
 fn test_app_with_connections() -> axum::Router {
@@ -159,8 +162,8 @@ async fn get_connection_returns_detail_with_redacted_password() {
     let body = parse_json(resp).await;
     assert_eq!(body["name"], "my_pg");
     assert_eq!(body["connector"], "postgres");
-    assert_eq!(body["config"]["password"], "***REDACTED***");
-    assert_eq!(body["config"]["host"], "localhost");
+    assert_eq!(body["config"]["config"]["password"], "***REDACTED***");
+    assert_eq!(body["config"]["config"]["host"], "localhost");
 }
 
 #[tokio::test]

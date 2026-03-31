@@ -30,21 +30,27 @@ impl ConnectionService for AppServices {
                 message: e.to_string(),
             })?;
 
+        // connections.yml has a top-level "connections:" key
+        let connections_map = value
+            .get("connections")
+            .and_then(|v| v.as_mapping())
+            .ok_or_else(|| ServiceError::Internal {
+                message: "connections.yml missing 'connections' key or not a mapping".into(),
+            })?;
+
         let mut connections = Vec::new();
-        if let Some(map) = value.as_mapping() {
-            for (key, val) in map {
-                if let Some(name) = key.as_str() {
-                    let connector = val
-                        .get("connector")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    connections.push(ConnectionSummary {
-                        name: name.to_string(),
-                        connector,
-                        used_by: vec![],
-                    });
-                }
+        for (key, val) in connections_map {
+            if let Some(name) = key.as_str() {
+                let connector = val
+                    .get("use")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                connections.push(ConnectionSummary {
+                    name: name.to_string(),
+                    connector,
+                    used_by: vec![],
+                });
             }
         }
         Ok(connections)
@@ -70,13 +76,23 @@ impl ConnectionService for AppServices {
                 message: e.to_string(),
             })?;
 
-        let conn = value.get(name).ok_or_else(|| ServiceError::NotFound {
-            resource: "connection".into(),
-            id: name.to_string(),
-        })?;
+        let connections_map = value
+            .get("connections")
+            .and_then(|v| v.as_mapping())
+            .ok_or_else(|| ServiceError::Internal {
+                message: "connections.yml missing 'connections' key".into(),
+            })?;
+
+        let conn_key = serde_yaml::Value::String(name.to_string());
+        let conn = connections_map
+            .get(&conn_key)
+            .ok_or_else(|| ServiceError::NotFound {
+                resource: "connection".into(),
+                id: name.to_string(),
+            })?;
 
         let connector = conn
-            .get("connector")
+            .get("use")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string();
@@ -185,12 +201,22 @@ async fn raw_connection_config(
         serde_yaml::from_str(&yaml).map_err(|e| ServiceError::Internal {
             message: e.to_string(),
         })?;
-    let conn = value.get(name).ok_or_else(|| ServiceError::NotFound {
-        resource: "connection".into(),
-        id: name.to_string(),
-    })?;
+    let connections_map = value
+        .get("connections")
+        .and_then(|v| v.as_mapping())
+        .ok_or_else(|| ServiceError::Internal {
+            message: "connections.yml missing 'connections' key".into(),
+        })?;
+
+    let conn_key = serde_yaml::Value::String(name.to_string());
+    let conn = connections_map
+        .get(&conn_key)
+        .ok_or_else(|| ServiceError::NotFound {
+            resource: "connection".into(),
+            id: name.to_string(),
+        })?;
     let connector = conn
-        .get("connector")
+        .get("use")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
         .to_string();
@@ -290,15 +316,18 @@ mod tests {
     // --- with connections.yml content ---
 
     const CONNECTIONS_YAML: &str = "\
-my_pg:
-  connector: postgres
-  host: localhost
-  port: 5432
-  password: secret123
-my_other:
-  connector: mysql
-  host: other-host
-  api_key: abc123
+connections:
+  my_pg:
+    use: postgres
+    config:
+      host: localhost
+      port: 5432
+      password: secret123
+  my_other:
+    use: mysql
+    config:
+      host: other-host
+      api_key: abc123
 ";
 
     #[tokio::test]
@@ -319,17 +348,17 @@ my_other:
         let detail = services.get("my_pg").await.unwrap();
         assert_eq!(detail.name, "my_pg");
         assert_eq!(detail.connector, "postgres");
-        assert_eq!(detail.config["password"], "***REDACTED***");
+        assert_eq!(detail.config["config"]["password"], "***REDACTED***");
         // non-sensitive fields are preserved
-        assert_eq!(detail.config["host"], "localhost");
+        assert_eq!(detail.config["config"]["host"], "localhost");
     }
 
     #[tokio::test]
     async fn get_redacts_api_key() {
         let services = services_with_connections(CONNECTIONS_YAML);
         let detail = services.get("my_other").await.unwrap();
-        assert_eq!(detail.config["api_key"], "***REDACTED***");
-        assert_eq!(detail.config["host"], "other-host");
+        assert_eq!(detail.config["config"]["api_key"], "***REDACTED***");
+        assert_eq!(detail.config["config"]["host"], "other-host");
     }
 
     #[tokio::test]
@@ -666,7 +695,7 @@ my_other:
 
         let mut tc = fake_context();
         tc.ctx.pipeline_source = Arc::new(FakePipelineSource::new().with_connections_yaml(
-            "db:\n  connector: postgres\n  password: real_secret\n  host: localhost\n",
+            "connections:\n  db:\n    use: postgres\n    config:\n      password: real_secret\n      host: localhost\n",
         ));
         tc.ctx.connection_tester = Arc::clone(&recorder) as Arc<dyn ConnectionTester>;
         let services = Arc::new(crate::application::services::AppServices::new(
@@ -680,7 +709,7 @@ my_other:
         let captured = recorder.captured.lock().unwrap().clone().unwrap();
         // The tester must receive the real password, not the redacted placeholder.
         assert_eq!(
-            captured["password"],
+            captured["config"]["password"],
             serde_json::Value::String("real_secret".into()),
             "connection tester must receive unredacted credentials"
         );
