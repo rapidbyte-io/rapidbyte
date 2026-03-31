@@ -69,6 +69,7 @@ async fn assign_task_happy_path() {
         AgentCapabilities {
             plugins: vec![],
             max_concurrent_tasks: 2,
+            supported_operations: vec![],
         },
         Utc::now(),
     );
@@ -79,7 +80,10 @@ async fn assign_task_happy_path() {
     store.submit_run(&run, &task).await.unwrap();
 
     let lease = sample_lease(1);
-    let result = store.assign_task("agent-assign", 2, lease).await.unwrap();
+    let result = store
+        .assign_task("agent-assign", 2, lease, &[])
+        .await
+        .unwrap();
     assert!(result.is_some());
 
     let (assigned_task, assigned_run) = result.unwrap();
@@ -100,6 +104,7 @@ async fn assign_task_respects_capacity() {
         AgentCapabilities {
             plugins: vec![],
             max_concurrent_tasks: 1,
+            supported_operations: vec![],
         },
         Utc::now(),
     );
@@ -116,12 +121,18 @@ async fn assign_task_respects_capacity() {
 
     // First assign should succeed
     let lease1 = sample_lease(10);
-    let result1 = store.assign_task("agent-cap", 1, lease1).await.unwrap();
+    let result1 = store
+        .assign_task("agent-cap", 1, lease1, &[])
+        .await
+        .unwrap();
     assert!(result1.is_some());
 
     // Second assign should return None (capacity exceeded)
     let lease2 = sample_lease(11);
-    let result2 = store.assign_task("agent-cap", 1, lease2).await.unwrap();
+    let result2 = store
+        .assign_task("agent-cap", 1, lease2, &[])
+        .await
+        .unwrap();
     assert!(result2.is_none());
 }
 
@@ -146,7 +157,7 @@ async fn assign_task_concurrent_cancelled_run_rolls_back() {
 
     // assign_task should return None because the run is no longer pending
     let lease = sample_lease(20);
-    let result = store.assign_task("agent-x", 10, lease).await.unwrap();
+    let result = store.assign_task("agent-x", 10, lease, &[]).await.unwrap();
     assert!(result.is_none());
 }
 
@@ -169,8 +180,8 @@ async fn assign_task_skip_locked() {
     let lease2 = Lease::new(31, Utc::now() + chrono::Duration::seconds(300));
 
     let (r1, r2) = tokio::join!(
-        store.assign_task("agent-a", 10, lease1),
-        store.assign_task("agent-b", 10, lease2),
+        store.assign_task("agent-a", 10, lease1, &[]),
+        store.assign_task("agent-b", 10, lease2, &[]),
     );
 
     let assigned1 = r1.unwrap();
@@ -199,7 +210,7 @@ async fn complete_run_atomic() {
     // Assign
     let lease = sample_lease(40);
     let (mut assigned_task, mut assigned_run) = store
-        .assign_task("agent-c", 5, lease)
+        .assign_task("agent-c", 5, lease, &[])
         .await
         .unwrap()
         .unwrap();
@@ -251,7 +262,7 @@ async fn fail_and_retry_creates_new_task() {
     // Assign
     let lease = sample_lease(50);
     let (mut assigned_task, mut assigned_run) = store
-        .assign_task("agent-d", 5, lease)
+        .assign_task("agent-d", 5, lease, &[])
         .await
         .unwrap()
         .unwrap();
@@ -361,7 +372,7 @@ async fn timeout_and_retry_with_none_new_task() {
     // Assign
     let lease = sample_lease(60);
     let (mut assigned_task, mut assigned_run) = store
-        .assign_task("agent-e", 5, lease)
+        .assign_task("agent-e", 5, lease, &[])
         .await
         .unwrap()
         .unwrap();

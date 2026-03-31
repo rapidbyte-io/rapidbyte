@@ -17,6 +17,8 @@ fn agent_from_row(row: &sqlx::postgres::PgRow) -> Result<Agent, RepositoryError>
     let capabilities = AgentCapabilities {
         plugins,
         max_concurrent_tasks: max_concurrent_tasks.cast_unsigned(),
+        // Not stored in DB — empty means "all operations" (backwards compatibility)
+        supported_operations: vec![],
     };
 
     Ok(Agent::from_row(

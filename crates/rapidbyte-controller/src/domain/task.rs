@@ -12,6 +12,10 @@ pub enum TaskOperation {
 }
 
 impl TaskOperation {
+    /// All known task operations — used as a fallback when an agent has no
+    /// `supported_operations` set (backwards compatibility).
+    pub const ALL: &'static [Self] = &[Self::Sync, Self::CheckApply, Self::Teardown, Self::Assert];
+
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {

@@ -8,7 +8,7 @@ use crate::domain::lease::Lease;
 use crate::domain::ports::pipeline_store::PipelineStore;
 use crate::domain::ports::repository::RepositoryError;
 use crate::domain::run::Run;
-use crate::domain::task::Task;
+use crate::domain::task::{Task, TaskOperation};
 
 use super::error::box_err;
 use super::run::{run_from_row, run_state_to_str};
@@ -183,6 +183,7 @@ impl PipelineStore for PgPipelineStore {
         agent_id: &str,
         max_concurrent_tasks: u32,
         lease: Lease,
+        supported_operations: &[TaskOperation],
     ) -> Result<Option<(Task, Run)>, RepositoryError> {
         let mut tx = self.pool.begin().await.map_err(box_err)?;
 
@@ -213,10 +214,25 @@ impl PipelineStore for PgPipelineStore {
             return Ok(None);
         }
 
-        // Poll next pending task
+        // Build operation filter: empty supported_operations means "all operations"
+        // (backwards compatibility with agents that registered before this field existed).
+        let ops: Vec<String> = if supported_operations.is_empty() {
+            TaskOperation::ALL
+                .iter()
+                .map(|op| op.as_str().to_string())
+                .collect()
+        } else {
+            supported_operations
+                .iter()
+                .map(|op| op.as_str().to_string())
+                .collect()
+        };
+
+        // Poll next pending task filtered by supported operations
         let row = sqlx::query(
-            "SELECT * FROM tasks WHERE state = 'pending' ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
+            "SELECT * FROM tasks WHERE state = 'pending' AND operation = ANY($1) ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
         )
+        .bind(&ops)
         .fetch_optional(&mut *tx)
         .await
         .map_err(box_err)?;

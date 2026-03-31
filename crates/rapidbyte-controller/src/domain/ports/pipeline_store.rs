@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use crate::domain::lease::Lease;
 use crate::domain::run::Run;
-use crate::domain::task::Task;
+use crate::domain::task::{Task, TaskOperation};
 
 use super::repository::RepositoryError;
 
@@ -13,11 +13,16 @@ pub trait PipelineStore: Send + Sync {
     /// Returns the assigned task and updated run if one was available and the agent has
     /// capacity, `None` otherwise. Combines capacity check, task assignment, and run
     /// state transition in a single transaction to prevent races.
+    ///
+    /// Only tasks whose `operation` is included in `supported_operations` will be
+    /// considered. An empty slice is treated as "all operations" for backwards
+    /// compatibility with agents that registered before this field existed.
     async fn assign_task(
         &self,
         agent_id: &str,
         max_concurrent_tasks: u32,
         lease: Lease,
+        supported_operations: &[TaskOperation],
     ) -> Result<Option<(Task, Run)>, RepositoryError>;
     async fn complete_run(&self, task: &Task, run: &Run) -> Result<(), RepositoryError>;
     async fn fail_run(&self, task: &Task, run: &Run) -> Result<(), RepositoryError>;

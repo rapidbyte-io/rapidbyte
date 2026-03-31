@@ -301,6 +301,7 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
@@ -368,6 +369,7 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
@@ -424,6 +426,7 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );

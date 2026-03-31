@@ -72,6 +72,7 @@ mod tests {
         AgentCapabilities {
             plugins: vec!["source-postgres".to_string()],
             max_concurrent_tasks: 4,
+            supported_operations: vec![TaskOperation::Sync],
         }
     }
 
@@ -95,6 +96,7 @@ mod tests {
         let new_caps = AgentCapabilities {
             plugins: vec!["dest-postgres".to_string()],
             max_concurrent_tasks: 8,
+            supported_operations: vec![TaskOperation::Sync],
         };
         register(&tc.ctx, "agent-1", new_caps).await.unwrap();
 
@@ -268,6 +270,7 @@ mod tests {
         let zero_caps = AgentCapabilities {
             plugins: vec![],
             max_concurrent_tasks: 0,
+            supported_operations: vec![TaskOperation::Sync],
         };
         register(&tc.ctx, "agent-zero", zero_caps).await.unwrap();
 
@@ -282,6 +285,7 @@ mod tests {
         let multi_caps = AgentCapabilities {
             plugins: vec![],
             max_concurrent_tasks: 3,
+            supported_operations: vec![TaskOperation::Sync],
         };
         register(&tc.ctx, "agent-1", multi_caps).await.unwrap();
 

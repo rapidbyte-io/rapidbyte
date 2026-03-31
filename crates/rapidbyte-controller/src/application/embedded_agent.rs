@@ -108,6 +108,12 @@ pub async fn run_embedded_agent(
     let caps = AgentCapabilities {
         plugins: vec![],
         max_concurrent_tasks: config.max_concurrent_tasks,
+        supported_operations: vec![
+            TaskOperation::Sync,
+            TaskOperation::CheckApply,
+            TaskOperation::Teardown,
+            TaskOperation::Assert,
+        ],
     };
     crate::application::register::register(&app_ctx, &agent_id, caps).await?;
     info!(agent_id = %agent_id, "embedded agent registered");

@@ -33,6 +33,7 @@ async fn save_upsert() {
         AgentCapabilities {
             plugins: vec!["pg".to_string(), "mysql".to_string()],
             max_concurrent_tasks: 5,
+            supported_operations: vec![],
         },
         Utc::now(),
     );
@@ -70,6 +71,7 @@ async fn find_stale() {
         AgentCapabilities {
             plugins: vec![],
             max_concurrent_tasks: 1,
+            supported_operations: vec![],
         },
         now,
     );
@@ -82,6 +84,7 @@ async fn find_stale() {
         AgentCapabilities {
             plugins: vec![],
             max_concurrent_tasks: 1,
+            supported_operations: vec![],
         },
         stale_time,
         stale_time,

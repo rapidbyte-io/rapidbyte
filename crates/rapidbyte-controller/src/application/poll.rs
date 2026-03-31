@@ -59,10 +59,26 @@ pub async fn poll_task(
     // 5. Create lease
     let lease = Lease::new(epoch, expires_at);
 
-    // 6. Atomically assign task and transition run to Running
+    // 6. Resolve supported operations with backwards-compat fallback
+    let supported_ops: Vec<crate::domain::task::TaskOperation> = {
+        let caps = agent.capabilities();
+        if caps.supported_operations.is_empty() {
+            // Legacy agent — assume sync only for safety
+            vec![crate::domain::task::TaskOperation::Sync]
+        } else {
+            caps.supported_operations.clone()
+        }
+    };
+
+    // 7. Atomically assign task and transition run to Running
     let Some((task, mut run)) = ctx
         .store
-        .assign_task(agent_id, agent.capabilities().max_concurrent_tasks, lease)
+        .assign_task(
+            agent_id,
+            agent.capabilities().max_concurrent_tasks,
+            lease,
+            &supported_ops,
+        )
         .await?
     else {
         return Ok(None);
@@ -136,6 +152,7 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
@@ -188,6 +205,7 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
@@ -214,6 +232,7 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
@@ -327,6 +346,7 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
@@ -377,6 +397,7 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
@@ -421,6 +442,7 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 1,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );

@@ -1,9 +1,12 @@
 use chrono::{DateTime, Duration, Utc};
 
+use super::task::TaskOperation;
+
 #[derive(Debug, Clone)]
 pub struct AgentCapabilities {
     pub plugins: Vec<String>,
     pub max_concurrent_tasks: u32,
+    pub supported_operations: Vec<TaskOperation>,
 }
 
 #[derive(Clone)]
@@ -88,6 +91,7 @@ mod tests {
         AgentCapabilities {
             plugins: vec!["source-postgres".into(), "dest-postgres".into()],
             max_concurrent_tasks: 4,
+            supported_operations: vec![TaskOperation::Sync],
         }
     }
 

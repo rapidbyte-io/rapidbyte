@@ -88,6 +88,7 @@ mod postgres {
             AgentCapabilities {
                 plugins: vec!["pg".to_string()],
                 max_concurrent_tasks: 2,
+                supported_operations: vec![],
             },
             Utc::now(),
         )

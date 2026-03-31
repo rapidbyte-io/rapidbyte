@@ -45,6 +45,7 @@ mod tests {
         AgentCapabilities {
             plugins: vec![],
             max_concurrent_tasks: 4,
+            supported_operations: vec![TaskOperation::Sync],
         }
     }
 
@@ -207,6 +208,7 @@ mod tests {
         let multi_caps = AgentCapabilities {
             plugins: vec![],
             max_concurrent_tasks: 4,
+            supported_operations: vec![TaskOperation::Sync],
         };
         register(&tc.ctx, "agent-1", multi_caps).await.unwrap();
 

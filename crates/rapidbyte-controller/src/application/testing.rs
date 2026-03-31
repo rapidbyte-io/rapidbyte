@@ -339,7 +339,10 @@ impl PipelineStore for FakePipelineStore {
         agent_id: &str,
         max_concurrent_tasks: u32,
         lease: Lease,
+        supported_operations: &[crate::domain::task::TaskOperation],
     ) -> Result<Option<(Task, Run)>, RepositoryError> {
+        use crate::domain::task::TaskOperation;
+
         let mut tasks = self.storage.tasks.lock().unwrap();
         let mut runs = self.storage.runs.lock().unwrap();
 
@@ -352,10 +355,17 @@ impl PipelineStore for FakePipelineStore {
             return Ok(None);
         }
 
-        // 2. Find first pending task by created_at
+        // Build effective operation filter — empty means "all operations" (backwards compat)
+        let effective_ops: &[TaskOperation] = if supported_operations.is_empty() {
+            TaskOperation::ALL
+        } else {
+            supported_operations
+        };
+
+        // 2. Find first pending task by created_at that matches a supported operation
         let pending_id = tasks
             .values()
-            .filter(|t| t.state() == TaskState::Pending)
+            .filter(|t| t.state() == TaskState::Pending && effective_ops.contains(&t.operation()))
             .min_by_key(|t| t.created_at())
             .map(|t| t.id().to_string());
 
@@ -848,6 +858,7 @@ pub async fn setup_running_task(tc: &TestContext) -> (String, String, u64) {
         AgentCapabilities {
             plugins: vec![],
             max_concurrent_tasks: 4,
+            supported_operations: vec![TaskOperation::Sync],
         },
         now,
     );

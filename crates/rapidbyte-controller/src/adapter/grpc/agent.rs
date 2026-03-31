@@ -8,6 +8,7 @@ use crate::adapter::grpc::convert;
 use crate::application::context::AppContext;
 use crate::application::heartbeat::TaskHeartbeatInput;
 use crate::domain::run::CommitState;
+use crate::domain::task::TaskOperation;
 use crate::proto::rapidbyte::v1 as pb;
 use crate::proto::rapidbyte::v1::agent_service_server::AgentService;
 
@@ -43,6 +44,8 @@ impl AgentService for AgentGrpcService {
             crate::domain::agent::AgentCapabilities {
                 plugins: caps.plugins,
                 max_concurrent_tasks: max_tasks,
+                // External agents only support sync for now
+                supported_operations: vec![TaskOperation::Sync],
             },
         )
         .await
@@ -206,6 +209,7 @@ mod tests {
     use tonic::Request;
 
     use crate::application::testing::fake_context;
+    use crate::domain::task::TaskOperation;
     use crate::proto::rapidbyte::v1 as pb;
     use crate::proto::rapidbyte::v1::agent_service_server::AgentService;
 
@@ -224,6 +228,7 @@ mod tests {
             crate::domain::agent::AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
@@ -468,6 +473,7 @@ mod tests {
             crate::domain::agent::AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 2,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
