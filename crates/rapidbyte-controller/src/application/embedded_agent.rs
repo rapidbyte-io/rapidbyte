@@ -257,14 +257,21 @@ async fn run_task_with_heartbeat(
     let report_outcome = match outcome {
         Ok(task_outcome) => task_outcome,
         Err(e) => {
-            error!(task_id = %task_id, error = %e, "task execution failed");
-            TaskOutcome::Failed {
-                error: TaskError {
-                    code: "EXECUTION_ERROR".to_string(),
-                    message: e.to_string(),
-                    retryable: true,
-                    commit_state: CommitState::BeforeCommit,
-                },
+            // If the task was cancelled (via heartbeat or shutdown), report
+            // Cancelled — not Failed — so the run transitions correctly.
+            if task_cancel.is_cancelled() {
+                info!(task_id = %task_id, "task cancelled");
+                TaskOutcome::Cancelled
+            } else {
+                error!(task_id = %task_id, error = %e, "task execution failed");
+                TaskOutcome::Failed {
+                    error: TaskError {
+                        code: "EXECUTION_ERROR".to_string(),
+                        message: e.to_string(),
+                        retryable: true,
+                        commit_state: CommitState::BeforeCommit,
+                    },
+                }
             }
         }
     };

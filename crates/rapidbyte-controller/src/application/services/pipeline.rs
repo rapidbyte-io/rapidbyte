@@ -285,30 +285,11 @@ impl PipelineService for AppServices {
         })
     }
 
-    async fn check_apply(&self, name: &str) -> Result<RunHandle, ServiceError> {
-        let yaml = self
-            .ctx
-            .pipeline_source
-            .get(name)
-            .await
-            .map_err(source_error_to_service)?;
-
-        let result = submit::submit_pipeline(
-            &self.ctx,
-            None,
-            yaml,
-            0,
-            None,
-            TaskOperation::CheckApply,
-            None,
-        )
-        .await
-        .map_err(app_error_to_service)?;
-
-        Ok(RunHandle {
-            run_id: result.run_id,
-            status: "pending".into(),
-            links: None,
+    async fn check_apply(&self, _name: &str) -> Result<RunHandle, ServiceError> {
+        // Resource provisioning (apply phase) is not yet implemented in the engine.
+        // Reject upfront rather than creating a task that will always fail.
+        Err(ServiceError::NotImplemented {
+            feature: "check --apply (resource provisioning)".into(),
         })
     }
 
@@ -386,82 +367,11 @@ impl PipelineService for AppServices {
         })
     }
 
-    async fn assert(&self, request: AssertRequest) -> Result<AssertResult, ServiceError> {
-        if request.tag.is_some() {
-            return Err(ServiceError::NotImplemented {
-                feature: "tag-filtered assertions".into(),
-            });
-        }
-
-        // Determine which pipelines to assert
-        let pipelines = if let Some(ref name) = request.pipeline {
-            vec![name.clone()]
-        } else {
-            // No specific pipeline specified — assert all pipelines
-            let all =
-                self.ctx
-                    .pipeline_source
-                    .list()
-                    .await
-                    .map_err(|e| ServiceError::Internal {
-                        message: e.to_string(),
-                    })?;
-            all.into_iter().map(|p| p.name).collect()
-        };
-
-        if pipelines.is_empty() {
-            // No pipelines to assert — vacuously true
-            return Ok(AssertResult {
-                passed: true,
-                results: vec![],
-            });
-        }
-
-        let batch = request.pipeline.is_none();
-        let mut results = Vec::new();
-        for name in &pipelines {
-            let yaml = match self.ctx.pipeline_source.get(name).await {
-                Ok(y) => y,
-                Err(e) if batch => {
-                    tracing::warn!(pipeline = %name, error = %e, "skipping pipeline in batch assert due to error");
-                    continue;
-                }
-                Err(e) => return Err(source_error_to_service(e)),
-            };
-            let result = match submit::submit_pipeline(
-                &self.ctx,
-                None,
-                yaml,
-                0,
-                None,
-                TaskOperation::Assert,
-                None,
-            )
-            .await
-            {
-                Ok(r) => r,
-                Err(e) if batch => {
-                    tracing::warn!(pipeline = %name, error = %e, "failed to submit pipeline in batch assert");
-                    continue;
-                }
-                Err(e) => return Err(app_error_to_service(e)),
-            };
-            results.push(serde_json::json!({
-                "pipeline": name,
-                "run_id": result.run_id,
-                "status": "pending",
-            }));
-        }
-
-        if results.is_empty() && batch && !pipelines.is_empty() {
-            return Err(ServiceError::Internal {
-                message: "all pipeline assert submissions failed".into(),
-            });
-        }
-
-        Ok(AssertResult {
-            passed: false, // unknown — execution pending
-            results,
+    async fn assert(&self, _request: AssertRequest) -> Result<AssertResult, ServiceError> {
+        // Data quality assertions are not yet implemented in the engine.
+        // Reject upfront rather than creating tasks that will always fail.
+        Err(ServiceError::NotImplemented {
+            feature: "data quality assertions".into(),
         })
     }
 
@@ -738,29 +648,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn check_apply_known_pipeline_returns_handle() {
-        let mut tc = fake_context();
-        tc.ctx.pipeline_source = Arc::new(
-            FakePipelineSource::new()
-                .with_pipeline("apply-pipe", "pipeline: apply-pipe\nversion: '1.0'"),
-        );
-        let services = Arc::new(AppServices::new(
-            Arc::new(tc.ctx),
-            chrono::Utc::now(),
-            "0.0.0.0:8080".parse().unwrap(),
-        ));
-
-        let result = services.check_apply("apply-pipe").await.unwrap();
-        assert_eq!(result.status, "pending");
-        assert!(!result.run_id.is_empty());
-    }
-
-    #[tokio::test]
-    async fn check_apply_unknown_pipeline_returns_not_found() {
+    async fn check_apply_returns_not_implemented() {
         let services = fake_app_services();
-
-        let result = services.check_apply("nonexistent").await;
-        assert!(matches!(result, Err(ServiceError::NotFound { .. })));
+        let result = services.check_apply("any-pipe").await;
+        assert!(matches!(result, Err(ServiceError::NotImplemented { .. })));
     }
 
     #[tokio::test]
