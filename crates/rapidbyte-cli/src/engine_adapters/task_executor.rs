@@ -59,8 +59,9 @@ impl TaskExecutor for EngineTaskExecutor {
         let engine_ctx =
             rapidbyte_engine::build_lightweight_context(&self.registry_config, &config).await?;
         let _result = rapidbyte_engine::check_pipeline(&engine_ctx, &config).await?;
-        // TODO: apply phase (provision resources) — check passes, apply not yet implemented
-        Ok(())
+        // Apply phase (resource provisioning) is not yet implemented in the engine.
+        // Fail explicitly rather than reporting false success.
+        anyhow::bail!("check passed but apply phase (resource provisioning) is not yet implemented")
     }
 
     async fn execute_teardown(&self, pipeline_yaml: &str, reason: &str) -> Result<()> {
@@ -73,7 +74,6 @@ impl TaskExecutor for EngineTaskExecutor {
     }
 
     async fn execute_assert(&self, _pipeline_yaml: &str) -> Result<()> {
-        // TODO: assertion execution not yet implemented in engine
-        Ok(())
+        anyhow::bail!("assertion execution is not yet implemented in the engine")
     }
 }

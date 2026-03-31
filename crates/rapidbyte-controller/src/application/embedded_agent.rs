@@ -221,6 +221,7 @@ async fn run_task_with_heartbeat(
     let hb_agent_id = agent_id.clone();
     let hb_task_id = task_id.clone();
     let hb_done = task_done.clone();
+    let hb_cancel = task_cancel.clone();
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -233,8 +234,15 @@ async fn run_task_with_heartbeat(
                 progress_message: None,
                 progress_pct: None,
             };
-            let _ =
+            let directives =
                 crate::application::heartbeat::heartbeat(&hb_ctx, &hb_agent_id, vec![input]).await;
+            if let Ok(directives) = directives {
+                if directives.iter().any(|d| d.cancel_requested) {
+                    tracing::info!(task_id = %hb_task_id, "cancel requested via heartbeat");
+                    hb_cancel.cancel();
+                    break;
+                }
+            }
         }
     });
 
