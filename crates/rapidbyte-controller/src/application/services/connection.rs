@@ -244,6 +244,12 @@ const SENSITIVE_PATTERNS: &[&str] = &[
     "connection_url",
 ];
 
+/// Returns true if a string value looks like a credential-bearing URL
+/// (e.g., `postgres://user:pass@host/db`).
+fn looks_like_credential_url(s: &str) -> bool {
+    s.contains("://") && s.contains('@')
+}
+
 fn redact_sensitive_fields(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(obj) => {
@@ -251,6 +257,12 @@ fn redact_sensitive_fields(value: &mut serde_json::Value) {
                 let lower = key.to_lowercase();
                 if SENSITIVE_PATTERNS.iter().any(|p| lower.contains(p)) {
                     *val = serde_json::Value::String("***REDACTED***".into());
+                } else if let Some(s) = val.as_str() {
+                    // Redact string values that look like credential-bearing URLs
+                    // regardless of key name (e.g., "url": "postgres://user:pass@host/db")
+                    if looks_like_credential_url(s) {
+                        *val = serde_json::Value::String("***REDACTED***".into());
+                    }
                 } else {
                     redact_sensitive_fields(val);
                 }
@@ -490,6 +502,29 @@ connections:
         assert_ne!(val["base_url"], "***REDACTED***");
         assert_ne!(val["callback_url"], "***REDACTED***");
         assert_ne!(val["webhook_url"], "***REDACTED***");
+    }
+
+    #[test]
+    fn redact_credential_bearing_url_values() {
+        // URLs with user:pass@host are redacted regardless of key name
+        let mut val = serde_json::json!({
+            "url": "postgres://admin:s3cret@db.example.com:5432/prod",
+            "uri": "mongodb://user:pass@cluster.example.com/mydb",
+            "endpoint": "https://user:key@api.example.com/v1",
+            "base_url": "https://api.example.com/v1",
+            "callback_url": "https://app.example.com/callback",
+            "host": "db.example.com",
+        });
+        super::redact_sensitive_fields(&mut val);
+        // Credential-bearing URLs are redacted (contain :// and @)
+        assert_eq!(val["url"], "***REDACTED***");
+        assert_eq!(val["uri"], "***REDACTED***");
+        assert_eq!(val["endpoint"], "***REDACTED***");
+        // Non-credential URLs are preserved (no @)
+        assert_eq!(val["base_url"], "https://api.example.com/v1");
+        assert_eq!(val["callback_url"], "https://app.example.com/callback");
+        // Plain strings are preserved
+        assert_eq!(val["host"], "db.example.com");
     }
 
     #[tokio::test]
