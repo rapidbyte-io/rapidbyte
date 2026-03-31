@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use crate::domain::ports::connection_tester::ConnectionTestError;
 use crate::traits::connection::{
     ConnectionDetail, ConnectionDiscoverResponse, ConnectionService, ConnectionSummary,
     ConnectionTestResponse,
@@ -96,27 +97,34 @@ impl ConnectionService for AppServices {
     async fn test(&self, name: &str) -> Result<ConnectionTestResponse, ServiceError> {
         let (_connector, config) = raw_connection_config(&self.ctx, name).await?;
 
-        let result = self
-            .ctx
-            .connection_tester
-            .test(&config)
-            .await
-            .map_err(|e| ServiceError::Internal {
-                message: e.to_string(),
-            })?;
-
-        Ok(ConnectionTestResponse {
-            name: name.to_string(),
-            status: result.status,
-            latency_ms: result.latency_ms,
-            details: result.details,
-            error: result.error.map(|e| {
-                serde_json::json!({
-                    "code": e.code,
-                    "message": e.message,
-                })
+        match self.ctx.connection_tester.test(&config).await {
+            Ok(result) => Ok(ConnectionTestResponse {
+                name: name.to_string(),
+                status: result.status,
+                latency_ms: result.latency_ms,
+                details: result.details,
+                error: result.error.map(|e| {
+                    serde_json::json!({
+                        "code": e.code,
+                        "message": e.message,
+                    })
+                }),
             }),
-        })
+            // Connection-level failures (bad creds, unreachable host) are expected
+            // outcomes, not server faults — return 200 with status: "failed"
+            Err(ConnectionTestError::Connection(msg)) => Ok(ConnectionTestResponse {
+                name: name.to_string(),
+                status: "failed".into(),
+                latency_ms: None,
+                details: None,
+                error: Some(serde_json::json!({
+                    "code": "connection_failed",
+                    "message": msg,
+                })),
+            }),
+            // Plugin-level errors are infrastructure faults
+            Err(ConnectionTestError::Plugin(msg)) => Err(ServiceError::Internal { message: msg }),
+        }
     }
 
     async fn discover(
@@ -126,30 +134,33 @@ impl ConnectionService for AppServices {
     ) -> Result<ConnectionDiscoverResponse, ServiceError> {
         let (_connector, config) = raw_connection_config(&self.ctx, name).await?;
 
-        let result = self
-            .ctx
-            .connection_tester
-            .discover(&config, table)
-            .await
-            .map_err(|e| ServiceError::Internal {
-                message: e.to_string(),
-            })?;
-
-        Ok(ConnectionDiscoverResponse {
-            connection: name.to_string(),
-            streams: result
-                .streams
-                .into_iter()
-                .map(|s| {
-                    serde_json::json!({
-                        "schema": s.schema,
-                        "table": s.table,
-                        "estimated_rows": s.estimated_rows,
-                        "columns": s.columns,
+        match self.ctx.connection_tester.discover(&config, table).await {
+            Ok(result) => Ok(ConnectionDiscoverResponse {
+                connection: name.to_string(),
+                streams: result
+                    .streams
+                    .into_iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "schema": s.schema,
+                            "table": s.table,
+                            "estimated_rows": s.estimated_rows,
+                            "columns": s.columns,
+                        })
                     })
-                })
-                .collect(),
-        })
+                    .collect(),
+            }),
+            // Connection-level failures during discover are semantically invalid/unreachable
+            // config — return 422 so clients know the connection config needs fixing.
+            Err(ConnectionTestError::Connection(msg)) => Err(ServiceError::ValidationFailed {
+                details: vec![crate::traits::FieldError {
+                    field: "connection".into(),
+                    reason: msg,
+                }],
+            }),
+            // Plugin-level errors are infrastructure faults
+            Err(ConnectionTestError::Plugin(msg)) => Err(ServiceError::Internal { message: msg }),
+        }
     }
 }
 
@@ -404,6 +415,161 @@ my_other:
         // non-sensitive fields are preserved
         assert_eq!(val["host"], "localhost");
         assert_eq!(val["username"], "admin");
+    }
+
+    #[tokio::test]
+    async fn test_connection_failure_returns_200_with_failed_status() {
+        use std::sync::Arc;
+
+        use async_trait::async_trait;
+
+        use crate::domain::ports::connection_tester::{
+            ConnectionTestError, ConnectionTester, DiscoveryResult, TestResult,
+        };
+
+        struct FailingConnectionTester;
+
+        #[async_trait]
+        impl ConnectionTester for FailingConnectionTester {
+            async fn test(
+                &self,
+                _connection_config: &serde_json::Value,
+            ) -> Result<TestResult, ConnectionTestError> {
+                Err(ConnectionTestError::Connection("connection refused".into()))
+            }
+
+            async fn discover(
+                &self,
+                _connection_config: &serde_json::Value,
+                _table: Option<&str>,
+            ) -> Result<DiscoveryResult, ConnectionTestError> {
+                Ok(DiscoveryResult {
+                    connection: "fake".into(),
+                    streams: vec![],
+                })
+            }
+        }
+
+        let mut tc = fake_context();
+        tc.ctx.pipeline_source =
+            Arc::new(FakePipelineSource::new().with_connections_yaml(CONNECTIONS_YAML));
+        tc.ctx.connection_tester = Arc::new(FailingConnectionTester) as Arc<dyn ConnectionTester>;
+        let services = Arc::new(crate::application::services::AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:8080".parse().unwrap(),
+        ));
+
+        let result = services.test("my_pg").await;
+        // Connection failures must return Ok, not Err
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
+        let resp = result.unwrap();
+        assert_eq!(resp.name, "my_pg");
+        assert_eq!(resp.status, "failed");
+        assert!(resp.latency_ms.is_none());
+        assert!(resp.error.is_some());
+        let err = resp.error.unwrap();
+        assert_eq!(err["code"], "connection_failed");
+        assert_eq!(err["message"], "connection refused");
+    }
+
+    #[tokio::test]
+    async fn test_plugin_error_returns_500() {
+        use std::sync::Arc;
+
+        use async_trait::async_trait;
+
+        use crate::domain::ports::connection_tester::{
+            ConnectionTestError, ConnectionTester, DiscoveryResult, TestResult,
+        };
+
+        struct PluginErrorTester;
+
+        #[async_trait]
+        impl ConnectionTester for PluginErrorTester {
+            async fn test(
+                &self,
+                _connection_config: &serde_json::Value,
+            ) -> Result<TestResult, ConnectionTestError> {
+                Err(ConnectionTestError::Plugin("wasm trap".into()))
+            }
+
+            async fn discover(
+                &self,
+                _connection_config: &serde_json::Value,
+                _table: Option<&str>,
+            ) -> Result<DiscoveryResult, ConnectionTestError> {
+                Ok(DiscoveryResult {
+                    connection: "fake".into(),
+                    streams: vec![],
+                })
+            }
+        }
+
+        let mut tc = fake_context();
+        tc.ctx.pipeline_source =
+            Arc::new(FakePipelineSource::new().with_connections_yaml(CONNECTIONS_YAML));
+        tc.ctx.connection_tester = Arc::new(PluginErrorTester) as Arc<dyn ConnectionTester>;
+        let services = Arc::new(crate::application::services::AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:8080".parse().unwrap(),
+        ));
+
+        let result = services.test("my_pg").await;
+        assert!(matches!(result, Err(ServiceError::Internal { .. })));
+    }
+
+    #[tokio::test]
+    async fn discover_connection_failure_returns_validation_error() {
+        use std::sync::Arc;
+
+        use async_trait::async_trait;
+
+        use crate::domain::ports::connection_tester::{
+            ConnectionTestError, ConnectionTester, DiscoveryResult, TestResult,
+        };
+
+        struct FailingDiscoverTester;
+
+        #[async_trait]
+        impl ConnectionTester for FailingDiscoverTester {
+            async fn test(
+                &self,
+                _connection_config: &serde_json::Value,
+            ) -> Result<TestResult, ConnectionTestError> {
+                Ok(TestResult {
+                    status: "ok".into(),
+                    latency_ms: None,
+                    details: None,
+                    error: None,
+                })
+            }
+
+            async fn discover(
+                &self,
+                _connection_config: &serde_json::Value,
+                _table: Option<&str>,
+            ) -> Result<DiscoveryResult, ConnectionTestError> {
+                Err(ConnectionTestError::Connection("host unreachable".into()))
+            }
+        }
+
+        let mut tc = fake_context();
+        tc.ctx.pipeline_source =
+            Arc::new(FakePipelineSource::new().with_connections_yaml(CONNECTIONS_YAML));
+        tc.ctx.connection_tester = Arc::new(FailingDiscoverTester) as Arc<dyn ConnectionTester>;
+        let services = Arc::new(crate::application::services::AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:8080".parse().unwrap(),
+        ));
+
+        let result = services.discover("my_pg", None).await;
+        assert!(
+            matches!(result, Err(ServiceError::ValidationFailed { .. })),
+            "expected ValidationFailed, got {result:?}"
+        );
     }
 
     #[tokio::test]
