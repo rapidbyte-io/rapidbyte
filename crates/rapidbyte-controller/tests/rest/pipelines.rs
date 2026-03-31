@@ -59,6 +59,7 @@ async fn list_pipelines_returns_empty() {
 
 #[tokio::test]
 async fn list_pipelines_with_tag_query_returns_empty() {
+    // Tag-filtered list is not yet implemented — expect 501 Not Implemented.
     let app = test_app();
     let resp = app
         .oneshot(
@@ -68,9 +69,7 @@ async fn list_pipelines_with_tag_query_returns_empty() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = parse_json(resp).await;
-    assert_eq!(body["items"], serde_json::json!([]));
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
 }
 
 #[tokio::test]

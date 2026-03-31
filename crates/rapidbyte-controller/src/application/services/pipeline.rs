@@ -28,8 +28,20 @@ use super::{app_error_to_service, AppServices};
 impl PipelineService for AppServices {
     async fn list(
         &self,
-        _filter: PipelineFilter,
+        filter: PipelineFilter,
     ) -> Result<PaginatedList<PipelineSummary>, ServiceError> {
+        // Reject unsupported filter options so callers get a clear error.
+        if filter.tag.is_some() {
+            return Err(ServiceError::NotImplemented {
+                feature: "tag-filtered pipeline list".into(),
+            });
+        }
+        if filter.cursor.is_some() {
+            return Err(ServiceError::NotImplemented {
+                feature: "cursor-paginated pipeline list".into(),
+            });
+        }
+
         let pipelines =
             self.ctx
                 .pipeline_source
@@ -39,8 +51,16 @@ impl PipelineService for AppServices {
                     message: e.to_string(),
                 })?;
 
-        let items = pipelines
+        // Apply limit: clamp to [1, 100]; a limit of 0 means "use default 20".
+        let effective_limit = if filter.limit == 0 {
+            20
+        } else {
+            filter.limit.clamp(1, 100)
+        } as usize;
+
+        let items: Vec<PipelineSummary> = pipelines
             .into_iter()
+            .take(effective_limit)
             .map(|p| PipelineSummary {
                 name: p.name,
                 description: None,
@@ -513,6 +533,89 @@ mod tests {
         let result = services.list(PipelineFilter::default()).await.unwrap();
         assert_eq!(result.items.len(), 2);
         assert!(result.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_applies_limit() {
+        let mut tc = fake_context();
+        tc.ctx.pipeline_source = Arc::new(
+            FakePipelineSource::new()
+                .with_pipeline("pipe-a", "pipeline: pipe-a\nversion: '1.0'")
+                .with_pipeline("pipe-b", "pipeline: pipe-b\nversion: '1.0'")
+                .with_pipeline("pipe-c", "pipeline: pipe-c\nversion: '1.0'"),
+        );
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:8080".parse().unwrap(),
+        ));
+
+        let result = services
+            .list(PipelineFilter {
+                limit: 2,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.items.len(), 2);
+        assert!(result.next_cursor.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_zero_limit_uses_default_20() {
+        let mut tc = fake_context();
+        // Add 25 pipelines
+        let mut source = FakePipelineSource::new();
+        for i in 0..25 {
+            source = source.with_pipeline(
+                &format!("pipe-{i}"),
+                &format!("pipeline: pipe-{i}\nversion: '1.0'"),
+            );
+        }
+        tc.ctx.pipeline_source = Arc::new(source);
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:8080".parse().unwrap(),
+        ));
+
+        // limit=0 means default of 20
+        let result = services
+            .list(PipelineFilter {
+                limit: 0,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.items.len(), 20);
+    }
+
+    #[tokio::test]
+    async fn list_tag_filter_returns_not_implemented() {
+        let services = fake_app_services();
+
+        let result = services
+            .list(PipelineFilter {
+                tag: Some(vec!["production".into()]),
+                ..Default::default()
+            })
+            .await;
+
+        assert!(matches!(result, Err(ServiceError::NotImplemented { .. })));
+    }
+
+    #[tokio::test]
+    async fn list_cursor_filter_returns_not_implemented() {
+        let services = fake_app_services();
+
+        let result = services
+            .list(PipelineFilter {
+                cursor: Some("some-cursor".into()),
+                ..Default::default()
+            })
+            .await;
+
+        assert!(matches!(result, Err(ServiceError::NotImplemented { .. })));
     }
 
     #[tokio::test]
