@@ -421,6 +421,77 @@ impl TaskExecutor for ImmediateExecutor {
 }
 
 // ---------------------------------------------------------------------------
+// RecordingExecutor (test-only)
+// ---------------------------------------------------------------------------
+
+/// Executor that records which methods were called and with what arguments.
+/// Returns Ok for sync and teardown; returns Err for `check_apply` and assert,
+/// matching the behaviour of the real `EngineTaskExecutor` for unsupported ops.
+#[cfg(test)]
+pub struct RecordingExecutor {
+    calls: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
+
+#[cfg(test)]
+type CallLog = std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>;
+
+#[cfg(test)]
+impl RecordingExecutor {
+    #[must_use]
+    pub fn new() -> (Self, CallLog) {
+        let calls: CallLog = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        (
+            Self {
+                calls: calls.clone(),
+            },
+            calls,
+        )
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl TaskExecutor for RecordingExecutor {
+    async fn execute_sync(&self, yaml: &str, _cancel: &CancellationToken) -> Result<RunMetrics> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("sync".into(), yaml.into()));
+        Ok(RunMetrics {
+            rows_read: 1,
+            rows_written: 1,
+            bytes_read: 1,
+            bytes_written: 1,
+            duration_ms: 1,
+        })
+    }
+
+    async fn execute_check_apply(&self, yaml: &str) -> Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("check_apply".into(), yaml.into()));
+        anyhow::bail!("check_apply not implemented")
+    }
+
+    async fn execute_teardown(&self, yaml: &str, reason: &str) -> Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("teardown".into(), format!("{yaml}|reason={reason}")));
+        Ok(())
+    }
+
+    async fn execute_assert(&self, yaml: &str) -> Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(("assert".into(), yaml.into()));
+        anyhow::bail!("assert not implemented")
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -544,6 +615,163 @@ mod tests {
             stale.is_empty(),
             "expected no agents after deregister, got {count}",
             count = stale.len()
+        );
+    }
+
+    /// Helper: start an agent with a `RecordingExecutor`, wait for the run to
+    /// leave the `Pending` state (or reach a terminal state), then stop the agent.
+    async fn run_agent_until_terminal(
+        ctx: Arc<crate::application::context::AppContext>,
+        run_id: &str,
+    ) -> (CallLog, RunState) {
+        let (executor, calls) = RecordingExecutor::new();
+        let executor: Arc<dyn TaskExecutor> = Arc::new(executor);
+        let cancel = CancellationToken::new();
+        let agent_cancel = cancel.clone();
+        let agent_ctx = Arc::clone(&ctx);
+
+        let handle = tokio::spawn(async move {
+            run_embedded_agent(
+                agent_ctx,
+                executor,
+                EmbeddedAgentConfig {
+                    poll_interval: Duration::from_millis(20),
+                    max_concurrent_tasks: 1,
+                },
+                agent_cancel,
+            )
+            .await
+        });
+
+        // Wait for the run to leave Pending (i.e. the agent picked it up and
+        // completed/failed it), with a 5-second guard.
+        let check_ctx = Arc::clone(&ctx);
+        let check_run_id = run_id.to_string();
+        let final_state = tokio::time::timeout(Duration::from_secs(5), async move {
+            loop {
+                let run = query::get_run(&check_ctx, &check_run_id).await.unwrap();
+                match run.state() {
+                    RunState::Pending | RunState::Running => {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    terminal => return terminal,
+                }
+            }
+        })
+        .await
+        .expect("run did not reach a terminal state within 5 seconds");
+
+        cancel.cancel();
+        handle.await.unwrap().unwrap();
+
+        (calls, final_state)
+    }
+
+    #[tokio::test]
+    async fn embedded_agent_executes_teardown_with_reason() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+
+        // Submit a teardown task with a reason in the metadata.
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        let metadata = serde_json::json!({ "reason": "pipeline_deleted" });
+        let result = submit_pipeline(
+            &ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Teardown,
+            Some(metadata),
+        )
+        .await
+        .unwrap();
+
+        let (calls, final_state) = run_agent_until_terminal(Arc::clone(&ctx), &result.run_id).await;
+
+        // Teardown with a successful executor should complete.
+        assert_eq!(final_state, RunState::Completed);
+
+        // The executor should have been called with `reason=pipeline_deleted`.
+        let recorded = calls.lock().unwrap();
+        assert!(
+            recorded
+                .iter()
+                .any(|(method, args)| method == "teardown"
+                    && args.contains("reason=pipeline_deleted")),
+            "expected teardown call with reason, got: {recorded:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_agent_marks_check_apply_as_failed() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+
+        // Submit a check_apply task. RecordingExecutor always returns Err for this.
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        let result = submit_pipeline(
+            &ctx,
+            None,
+            yaml.to_string(),
+            0, // no retries — fail immediately
+            None,
+            TaskOperation::CheckApply,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (calls, final_state) = run_agent_until_terminal(Arc::clone(&ctx), &result.run_id).await;
+
+        // The run must be Failed because the executor bailed.
+        assert_eq!(
+            final_state,
+            RunState::Failed,
+            "expected run to be Failed, got {final_state:?}"
+        );
+
+        // Confirm check_apply was actually called.
+        let recorded = calls.lock().unwrap();
+        assert!(
+            recorded.iter().any(|(method, _)| method == "check_apply"),
+            "expected check_apply call, got: {recorded:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_agent_marks_assert_as_failed() {
+        let tc = fake_context();
+        let ctx = Arc::new(tc.ctx);
+
+        // Submit an assert task. RecordingExecutor always returns Err for this.
+        let yaml = "pipeline: test-pipe\nversion: '1.0'";
+        let result = submit_pipeline(
+            &ctx,
+            None,
+            yaml.to_string(),
+            0, // no retries — fail immediately
+            None,
+            TaskOperation::Assert,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let (calls, final_state) = run_agent_until_terminal(Arc::clone(&ctx), &result.run_id).await;
+
+        // The run must be Failed because the executor bailed.
+        assert_eq!(
+            final_state,
+            RunState::Failed,
+            "expected run to be Failed, got {final_state:?}"
+        );
+
+        // Confirm assert was actually called.
+        let recorded = calls.lock().unwrap();
+        assert!(
+            recorded.iter().any(|(method, _)| method == "assert"),
+            "expected assert call, got: {recorded:?}"
         );
     }
 }

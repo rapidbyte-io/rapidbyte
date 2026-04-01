@@ -952,3 +952,142 @@ pub fn fake_app_services() -> Arc<crate::application::services::AppServices> {
         "0.0.0.0:8080".parse().unwrap(),
     ))
 }
+
+// ---------------------------------------------------------------------------
+// FakePipelineStore — assign_task operation-filter unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod fake_pipeline_store_tests {
+    use super::*;
+    use crate::domain::lease::Lease;
+    use crate::domain::ports::pipeline_store::PipelineStore;
+    use crate::domain::run::Run;
+    use crate::domain::task::{Task, TaskOperation, TaskState};
+
+    fn make_run(id: &str) -> Run {
+        let now = Utc::now();
+        Run::new(
+            id.to_string(),
+            None,
+            "test-pipe".to_string(),
+            "pipeline: test-pipe\nversion: '1.0'".to_string(),
+            0,
+            None,
+            now,
+        )
+    }
+
+    fn make_task(id: &str, run_id: &str, operation: TaskOperation) -> Task {
+        Task::new(id.to_string(), run_id.to_string(), 1, operation, Utc::now())
+    }
+
+    fn sample_lease(epoch: u64) -> Lease {
+        Lease::new(epoch, Utc::now() + chrono::Duration::seconds(300))
+    }
+
+    /// A sync-only agent must not receive a teardown task.
+    #[tokio::test]
+    async fn sync_only_agent_cannot_get_teardown_task() {
+        let storage = FakeStorage::new();
+        let store = FakePipelineStore::new(storage.clone());
+
+        let run = make_run("run-1");
+        let task = make_task("task-1", "run-1", TaskOperation::Teardown);
+        store.submit_run(&run, &task).await.unwrap();
+
+        let result = store
+            .assign_task("agent-sync", 4, sample_lease(1), &[TaskOperation::Sync])
+            .await
+            .unwrap();
+
+        assert!(
+            result.is_none(),
+            "sync-only agent should not receive a teardown task"
+        );
+    }
+
+    /// An agent that supports all operations must receive a teardown task.
+    #[tokio::test]
+    async fn all_ops_agent_gets_teardown_task() {
+        let storage = FakeStorage::new();
+        let store = FakePipelineStore::new(storage.clone());
+
+        let run = make_run("run-2");
+        let task = make_task("task-2", "run-2", TaskOperation::Teardown);
+        store.submit_run(&run, &task).await.unwrap();
+
+        let result = store
+            .assign_task("agent-all", 4, sample_lease(2), TaskOperation::ALL)
+            .await
+            .unwrap();
+
+        assert!(
+            result.is_some(),
+            "all-ops agent should receive the teardown task"
+        );
+        let (assigned_task, _) = result.unwrap();
+        assert_eq!(assigned_task.operation(), TaskOperation::Teardown);
+        assert_eq!(assigned_task.state(), TaskState::Running);
+    }
+
+    /// A sync task must be assigned to a sync-only agent.
+    #[tokio::test]
+    async fn sync_task_assigned_to_sync_only_agent() {
+        let storage = FakeStorage::new();
+        let store = FakePipelineStore::new(storage.clone());
+
+        let run = make_run("run-3");
+        let task = make_task("task-3", "run-3", TaskOperation::Sync);
+        store.submit_run(&run, &task).await.unwrap();
+
+        let result = store
+            .assign_task("agent-s", 4, sample_lease(3), &[TaskOperation::Sync])
+            .await
+            .unwrap();
+
+        assert!(
+            result.is_some(),
+            "sync-only agent should receive a sync task"
+        );
+        let (assigned_task, _) = result.unwrap();
+        assert_eq!(assigned_task.operation(), TaskOperation::Sync);
+    }
+
+    /// When there are multiple pending tasks with different operations, the
+    /// agent only picks up tasks whose operation it supports.
+    #[tokio::test]
+    async fn agent_skips_unsupported_ops_picks_supported_one() {
+        let storage = FakeStorage::new();
+        let store = FakePipelineStore::new(storage.clone());
+
+        // Submit a teardown task first (older created_at due to insert order),
+        // then a sync task.
+        let run_td = make_run("run-td");
+        // Use a slightly earlier timestamp so teardown sorts first.
+        let earlier = Utc::now() - chrono::Duration::milliseconds(10);
+        let task_td = Task::new(
+            "task-td".to_string(),
+            "run-td".to_string(),
+            1,
+            TaskOperation::Teardown,
+            earlier,
+        );
+        store.submit_run(&run_td, &task_td).await.unwrap();
+
+        let run_sync = make_run("run-sync");
+        let task_sync = make_task("task-sync", "run-sync", TaskOperation::Sync);
+        store.submit_run(&run_sync, &task_sync).await.unwrap();
+
+        // Sync-only agent should skip the teardown task and pick the sync one.
+        let result = store
+            .assign_task("agent-sync2", 4, sample_lease(4), &[TaskOperation::Sync])
+            .await
+            .unwrap();
+
+        assert!(result.is_some(), "should get the sync task");
+        let (assigned_task, _) = result.unwrap();
+        assert_eq!(assigned_task.operation(), TaskOperation::Sync);
+        assert_eq!(assigned_task.id(), "task-sync");
+    }
+}
