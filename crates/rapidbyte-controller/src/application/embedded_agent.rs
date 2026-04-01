@@ -245,6 +245,12 @@ async fn run_task_with_heartbeat(
         loop {
             tokio::select! {
                 () = hb_done.cancelled() => break,
+                () = hb_cancel.cancelled() => {
+                    // Shutdown/cancel requested — stop renewing the lease so
+                    // the controller's lease_sweep can time out and handle the task.
+                    tracing::debug!(task_id = %hb_task_id, "heartbeat loop stopping on cancel");
+                    break;
+                },
                 () = tokio::time::sleep(heartbeat_interval) => {}
             }
             let input = crate::application::heartbeat::TaskHeartbeatInput {

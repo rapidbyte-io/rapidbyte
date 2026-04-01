@@ -5,6 +5,20 @@ use rapidbyte_controller::domain::ports::connection_tester::{
     ConnectionTestError, ConnectionTester, DiscoveredStream, DiscoveryResult, TestResult,
 };
 
+/// Classify an engine `PipelineError` into the correct `ConnectionTestError` variant.
+///
+/// `Plugin` errors are connector-level (bad credentials, host unreachable) and map
+/// to `Connection`. `Infrastructure` errors are runtime/WASM faults and map to `Plugin`.
+fn classify_engine_error(e: &rapidbyte_engine::PipelineError) -> ConnectionTestError {
+    match e {
+        rapidbyte_engine::PipelineError::Plugin(_) => {
+            ConnectionTestError::Connection(e.to_string())
+        }
+        rapidbyte_engine::PipelineError::Infrastructure(_)
+        | rapidbyte_engine::PipelineError::Cancelled => ConnectionTestError::Plugin(e.to_string()),
+    }
+}
+
 /// Engine-backed [`ConnectionTester`] that delegates to the engine runtime.
 pub struct EngineConnectionTester {
     registry_config: rapidbyte_registry::RegistryConfig,
@@ -39,7 +53,7 @@ impl ConnectionTester for EngineConnectionTester {
 
         rapidbyte_engine::discover_plugin(&engine_ctx, source_ref, plugin_config)
             .await
-            .map_err(|e| ConnectionTestError::Connection(e.to_string()))?;
+            .map_err(|e| classify_engine_error(&e))?;
 
         Ok(TestResult {
             status: "connected".into(),
@@ -68,7 +82,7 @@ impl ConnectionTester for EngineConnectionTester {
 
         let streams = rapidbyte_engine::discover_plugin(&engine_ctx, source_ref, plugin_config)
             .await
-            .map_err(|e| ConnectionTestError::Connection(e.to_string()))?;
+            .map_err(|e| classify_engine_error(&e))?;
 
         let discovered = streams
             .into_iter()
