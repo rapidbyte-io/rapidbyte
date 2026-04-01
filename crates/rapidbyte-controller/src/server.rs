@@ -363,10 +363,11 @@ pub async fn serve(config: ControllerConfig, ctx: ServeContext) -> Result<()> {
     });
 
     // Spawn the embedded agent if a TaskExecutor was provided, linked to shutdown.
-    if let Some(executor) = task_executor {
+    // Store the JoinHandle so we can await drain on shutdown.
+    let agent_handle = if let Some(executor) = task_executor {
         let agent_ctx = components.ctx.clone();
         let agent_cancel = shutdown.child_token();
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             if let Err(e) = crate::application::embedded_agent::run_embedded_agent(
                 agent_ctx,
                 executor,
@@ -377,8 +378,10 @@ pub async fn serve(config: ControllerConfig, ctx: ServeContext) -> Result<()> {
             {
                 tracing::error!(error = %e, "embedded agent failed");
             }
-        });
-    }
+        }))
+    } else {
+        None
+    };
 
     if let Some(rest_addr) = components.config.rest_listen_addr {
         let services = Arc::new(AppServices::new(
@@ -420,6 +423,16 @@ pub async fn serve(config: ControllerConfig, ctx: ServeContext) -> Result<()> {
         tokio::select! {
             () = shutdown.cancelled() => {},
             result = grpc_server => result?,
+        }
+    }
+
+    // Wait for the embedded agent to complete its drain/deregister sequence
+    // before the runtime exits. This prevents in-flight tasks from being
+    // interrupted before complete_task is reported.
+    if let Some(handle) = agent_handle {
+        tracing::info!("waiting for embedded agent to drain");
+        if let Err(e) = handle.await {
+            tracing::error!(error = %e, "embedded agent task panicked");
         }
     }
 
