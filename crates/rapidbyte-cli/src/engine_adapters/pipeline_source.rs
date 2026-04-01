@@ -79,6 +79,8 @@ impl PipelineSource for FsPipelineSource {
             }
         }
 
+        // Sort by path for deterministic ordering across runs.
+        pipelines.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(pipelines)
     }
 
@@ -86,6 +88,8 @@ impl PipelineSource for FsPipelineSource {
         let mut read_dir = tokio::fs::read_dir(&self.project_dir)
             .await
             .map_err(|e| PipelineSourceError::Io(e.to_string()))?;
+
+        let mut matches: Vec<(std::path::PathBuf, String)> = Vec::new();
 
         while let Some(entry) = read_dir
             .next_entry()
@@ -112,12 +116,25 @@ impl PipelineSource for FsPipelineSource {
             if let Ok(pipeline_name) = rapidbyte_pipeline_config::extract_pipeline_name(&yaml) {
                 if pipeline_name != "unknown" && !pipeline_name.is_empty() && pipeline_name == name
                 {
-                    return Ok(yaml);
+                    matches.push((path, yaml));
                 }
             }
         }
 
-        Err(PipelineSourceError::NotFound(name.to_string()))
+        match matches.len() {
+            0 => Err(PipelineSourceError::NotFound(name.to_string())),
+            1 => Ok(matches.into_iter().next().unwrap().1),
+            n => {
+                let paths: Vec<String> = matches
+                    .iter()
+                    .map(|(p, _)| p.display().to_string())
+                    .collect();
+                Err(PipelineSourceError::InvalidYaml(format!(
+                    "pipeline '{name}' defined in {n} files: {}; rename to make names unique",
+                    paths.join(", ")
+                )))
+            }
+        }
     }
 
     async fn connections_yaml(&self) -> Result<Option<String>, PipelineSourceError> {

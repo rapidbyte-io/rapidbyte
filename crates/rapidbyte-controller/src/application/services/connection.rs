@@ -203,6 +203,10 @@ impl ConnectionService for AppServices {
 
 /// Parse raw (unredacted, secrets-resolved) connection config for a named
 /// connection.  Used internally by test/discover which need real credentials.
+///
+/// Secrets are resolved only for the selected connection entry, not the
+/// entire file — a broken secret in an unrelated connection won't cause
+/// this to fail.
 async fn raw_connection_config(
     ctx: &crate::application::context::AppContext,
     name: &str,
@@ -219,17 +223,9 @@ async fn raw_connection_config(
         id: name.to_string(),
     })?;
 
-    // Resolve secret placeholders (e.g., ${vault:path#key}) before parsing.
-    let resolved = ctx
-        .secrets
-        .resolve(&yaml)
-        .await
-        .map_err(|e| ServiceError::Internal {
-            message: e.to_string(),
-        })?;
-
+    // Parse without resolving secrets first — extract only the target connection.
     let value: serde_yaml::Value =
-        serde_yaml::from_str(&resolved).map_err(|e| ServiceError::Internal {
+        serde_yaml::from_str(&yaml).map_err(|e| ServiceError::Internal {
             message: e.to_string(),
         })?;
     let connections_map = value
@@ -246,12 +242,31 @@ async fn raw_connection_config(
             resource: "connection".into(),
             id: name.to_string(),
         })?;
-    let connector = conn
+
+    // Serialize just this connection entry back to YAML, then resolve secrets
+    // on that fragment only. This avoids failing on broken secrets in other
+    // connections.
+    let conn_yaml = serde_yaml::to_string(conn).map_err(|e| ServiceError::Internal {
+        message: e.to_string(),
+    })?;
+    let resolved = ctx
+        .secrets
+        .resolve(&conn_yaml)
+        .await
+        .map_err(|e| ServiceError::Internal {
+            message: e.to_string(),
+        })?;
+    let resolved_conn: serde_yaml::Value =
+        serde_yaml::from_str(&resolved).map_err(|e| ServiceError::Internal {
+            message: e.to_string(),
+        })?;
+
+    let connector = resolved_conn
         .get("use")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
         .to_string();
-    let config = serde_json::to_value(conn).map_err(|e| ServiceError::Internal {
+    let config = serde_json::to_value(&resolved_conn).map_err(|e| ServiceError::Internal {
         message: e.to_string(),
     })?;
     Ok((connector, config))
