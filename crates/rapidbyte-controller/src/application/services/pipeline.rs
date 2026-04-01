@@ -99,6 +99,13 @@ impl PipelineService for AppServices {
                 message: e.to_string(),
             })?;
 
+        let mut source = serde_json::to_value(value.get("source")).unwrap_or_default();
+        let mut destination = serde_json::to_value(value.get("destination")).unwrap_or_default();
+        // Redact sensitive fields (passwords, tokens, credential URLs) from
+        // source/destination blocks before returning to API clients.
+        super::connection::redact_sensitive_fields(&mut source);
+        super::connection::redact_sensitive_fields(&mut destination);
+
         Ok(PipelineDetail {
             name: name.to_string(),
             description: value
@@ -110,8 +117,8 @@ impl PipelineService for AppServices {
                 .get("schedule")
                 .and_then(serde_yaml::Value::as_str)
                 .map(String::from),
-            source: serde_json::to_value(value.get("source")).unwrap_or_default(),
-            destination: serde_json::to_value(value.get("destination")).unwrap_or_default(),
+            source,
+            destination,
             state: "active".into(),
         })
     }
@@ -318,10 +325,15 @@ impl PipelineService for AppServices {
                     message: e.to_string(),
                 })?;
 
-        let value: serde_json::Value =
+        let mut value: serde_json::Value =
             serde_yaml::from_str(&resolved).map_err(|e| ServiceError::Internal {
                 message: e.to_string(),
             })?;
+
+        // Redact sensitive fields from the resolved config before returning
+        // to API clients. The compile endpoint shows the effective config
+        // with env vars substituted, but credentials must still be hidden.
+        super::connection::redact_sensitive_fields(&mut value);
 
         Ok(ResolvedConfig {
             pipeline: name.to_string(),
@@ -545,6 +557,62 @@ mod tests {
         // source and destination are populated from YAML
         assert!(detail.source.is_object() || !detail.source.is_null());
         assert!(detail.destination.is_object() || !detail.destination.is_null());
+    }
+
+    #[tokio::test]
+    async fn get_redacts_credentials_in_source_destination() {
+        let yaml = r#"
+pipeline: pipe
+version: '1.0'
+source:
+  plugin: postgres
+  password: supersecret
+  url: "postgres://admin:pass@db.example.com/prod"
+destination:
+  plugin: s3
+  api_key: mykey123
+"#;
+        let mut tc = fake_context();
+        tc.ctx.pipeline_source = Arc::new(FakePipelineSource::new().with_pipeline("pipe", yaml));
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:8080".parse().unwrap(),
+        ));
+
+        let detail = services.get("pipe").await.unwrap();
+        // Sensitive fields must be redacted
+        assert_eq!(detail.source["password"], "***REDACTED***");
+        assert_eq!(detail.source["url"], "***REDACTED***"); // credential-bearing URL
+        assert_eq!(detail.destination["api_key"], "***REDACTED***");
+        // Non-sensitive fields preserved
+        assert_eq!(detail.source["plugin"], "postgres");
+        assert_eq!(detail.destination["plugin"], "s3");
+    }
+
+    #[tokio::test]
+    async fn compile_redacts_credentials_in_resolved_config() {
+        let yaml = r"
+pipeline: pipe
+version: '1.0'
+source:
+  plugin: postgres
+  password: supersecret
+";
+        let mut tc = fake_context();
+        tc.ctx.pipeline_source = Arc::new(FakePipelineSource::new().with_pipeline("pipe", yaml));
+        let services = Arc::new(AppServices::new(
+            Arc::new(tc.ctx),
+            chrono::Utc::now(),
+            "0.0.0.0:8080".parse().unwrap(),
+        ));
+
+        let result = services.compile("pipe").await.unwrap();
+        assert_eq!(
+            result.resolved_config["source"]["password"],
+            "***REDACTED***"
+        );
+        assert_eq!(result.resolved_config["source"]["plugin"], "postgres");
     }
 
     #[tokio::test]

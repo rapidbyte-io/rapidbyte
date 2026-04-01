@@ -304,7 +304,7 @@ fn looks_like_credential_url(s: &str) -> bool {
     authority.contains('@')
 }
 
-fn redact_sensitive_fields(value: &mut serde_json::Value) {
+pub(crate) fn redact_sensitive_fields(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(obj) => {
             for (key, val) in obj.iter_mut() {
