@@ -105,15 +105,13 @@ pub async fn run_embedded_agent(
     let agent_id = format!("embedded-{}", uuid::Uuid::new_v4());
 
     // 2. Register with the controller.
+    // Only advertise operations the executor can actually complete successfully.
+    // CheckApply and Assert are not yet implemented in the engine — advertising
+    // them would cause the scheduler to assign work guaranteed to fail/retry.
     let caps = AgentCapabilities {
         plugins: vec![],
         max_concurrent_tasks: config.max_concurrent_tasks,
-        supported_operations: vec![
-            TaskOperation::Sync,
-            TaskOperation::CheckApply,
-            TaskOperation::Teardown,
-            TaskOperation::Assert,
-        ],
+        supported_operations: vec![TaskOperation::Sync, TaskOperation::Teardown],
     };
     crate::application::register::register(&app_ctx, &agent_id, caps).await?;
     info!(agent_id = %agent_id, "embedded agent registered");
@@ -703,75 +701,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn embedded_agent_marks_check_apply_as_failed() {
-        let tc = fake_context();
-        let ctx = Arc::new(tc.ctx);
-
-        // Submit a check_apply task. RecordingExecutor always returns Err for this.
-        let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let result = submit_pipeline(
-            &ctx,
-            None,
-            yaml.to_string(),
-            0, // no retries — fail immediately
-            None,
-            TaskOperation::CheckApply,
-            None,
-        )
-        .await
-        .unwrap();
-
-        let (calls, final_state) = run_agent_until_terminal(Arc::clone(&ctx), &result.run_id).await;
-
-        // The run must be Failed because the executor bailed.
-        assert_eq!(
-            final_state,
-            RunState::Failed,
-            "expected run to be Failed, got {final_state:?}"
-        );
-
-        // Confirm check_apply was actually called.
-        let recorded = calls.lock().unwrap();
-        assert!(
-            recorded.iter().any(|(method, _)| method == "check_apply"),
-            "expected check_apply call, got: {recorded:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn embedded_agent_marks_assert_as_failed() {
-        let tc = fake_context();
-        let ctx = Arc::new(tc.ctx);
-
-        // Submit an assert task. RecordingExecutor always returns Err for this.
-        let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let result = submit_pipeline(
-            &ctx,
-            None,
-            yaml.to_string(),
-            0, // no retries — fail immediately
-            None,
-            TaskOperation::Assert,
-            None,
-        )
-        .await
-        .unwrap();
-
-        let (calls, final_state) = run_agent_until_terminal(Arc::clone(&ctx), &result.run_id).await;
-
-        // The run must be Failed because the executor bailed.
-        assert_eq!(
-            final_state,
-            RunState::Failed,
-            "expected run to be Failed, got {final_state:?}"
-        );
-
-        // Confirm assert was actually called.
-        let recorded = calls.lock().unwrap();
-        assert!(
-            recorded.iter().any(|(method, _)| method == "assert"),
-            "expected assert call, got: {recorded:?}"
-        );
-    }
+    // Note: check_apply and assert tests were removed because the service layer
+    // now returns 501 NotImplemented for those operations, so tasks are never
+    // created and the agent never sees them. The embedded agent only advertises
+    // Sync and Teardown operations.
 }
