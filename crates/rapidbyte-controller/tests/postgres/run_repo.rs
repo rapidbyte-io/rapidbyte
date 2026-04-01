@@ -5,6 +5,33 @@ use rapidbyte_controller::domain::run::RunState;
 use super::{sample_run, sample_run_with_key, setup_db};
 
 #[tokio::test]
+async fn save_and_read_metadata() {
+    let (pool, _container) = setup_db().await;
+    let repo = PgRunRepository::new(pool);
+
+    let mut run = sample_run("run-metadata-1");
+    run.set_metadata(serde_json::json!({ "reason": "pipeline_deleted", "tags": ["tier-1"] }));
+    repo.save(&run).await.unwrap();
+
+    let found = repo.find_by_id("run-metadata-1").await.unwrap().unwrap();
+    let metadata = found.metadata().expect("metadata should be Some");
+    assert_eq!(metadata["reason"], "pipeline_deleted");
+    assert_eq!(metadata["tags"][0], "tier-1");
+}
+
+#[tokio::test]
+async fn save_without_metadata_reads_none() {
+    let (pool, _container) = setup_db().await;
+    let repo = PgRunRepository::new(pool);
+
+    let run = sample_run("run-no-metadata-1");
+    repo.save(&run).await.unwrap();
+
+    let found = repo.find_by_id("run-no-metadata-1").await.unwrap().unwrap();
+    assert!(found.metadata().is_none());
+}
+
+#[tokio::test]
 async fn save_and_find_by_id() {
     let (pool, _container) = setup_db().await;
     let repo = PgRunRepository::new(pool);

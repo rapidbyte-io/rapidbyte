@@ -10,12 +10,88 @@ use rapidbyte_controller::domain::ports::repository::{
     AgentRepository, RunRepository, TaskRepository,
 };
 use rapidbyte_controller::domain::run::{RunMetrics, RunState};
-use rapidbyte_controller::domain::task::TaskState;
+use rapidbyte_controller::domain::task::{Task, TaskOperation, TaskState};
 
 use super::{
     sample_lease, sample_run, sample_run_with_key, sample_run_with_retries, sample_task,
     sample_task_with_attempt, setup_db,
 };
+
+#[tokio::test]
+async fn assign_task_filters_by_supported_operations() {
+    let (pool, _container) = setup_db().await;
+    let store = PgPipelineStore::new(pool.clone());
+    let agent_repo = PgAgentRepository::new(pool);
+
+    // Register agent that supports only Sync
+    let agent = Agent::new(
+        "agent-ops-1".to_string(),
+        AgentCapabilities {
+            plugins: vec![],
+            max_concurrent_tasks: 2,
+            supported_operations: vec![TaskOperation::Sync],
+        },
+        Utc::now(),
+    );
+    agent_repo.save(&agent).await.unwrap();
+
+    // Submit a teardown task
+    let run = sample_run("run-ops-1");
+    let task = Task::new(
+        "task-ops-1".into(),
+        "run-ops-1".into(),
+        1,
+        TaskOperation::Teardown,
+        Utc::now(),
+    );
+    store.submit_run(&run, &task).await.unwrap();
+
+    // Agent with Sync-only should NOT get the teardown task
+    let lease = sample_lease(1);
+    let result = store
+        .assign_task("agent-ops-1", 2, lease.clone(), &[TaskOperation::Sync])
+        .await
+        .unwrap();
+    assert!(
+        result.is_none(),
+        "sync-only agent should not get teardown task"
+    );
+
+    // Same agent with ALL ops should get it
+    let result = store
+        .assign_task("agent-ops-1", 2, lease, TaskOperation::ALL)
+        .await
+        .unwrap();
+    assert!(result.is_some(), "all-ops agent should get teardown task");
+}
+
+#[tokio::test]
+async fn supported_operations_round_trip() {
+    let (pool, _container) = setup_db().await;
+    let agent_repo = PgAgentRepository::new(pool);
+
+    let agent = Agent::new(
+        "agent-ops-rt".to_string(),
+        AgentCapabilities {
+            plugins: vec!["postgres".into()],
+            max_concurrent_tasks: 4,
+            supported_operations: vec![TaskOperation::Sync, TaskOperation::Teardown],
+        },
+        Utc::now(),
+    );
+    agent_repo.save(&agent).await.unwrap();
+
+    // Read back and verify operations persisted
+    let found = agent_repo
+        .find_by_id("agent-ops-rt")
+        .await
+        .unwrap()
+        .unwrap();
+    let ops = &found.capabilities().supported_operations;
+    assert_eq!(ops.len(), 2);
+    assert!(ops.contains(&TaskOperation::Sync));
+    assert!(ops.contains(&TaskOperation::Teardown));
+}
 
 #[tokio::test]
 async fn submit_run_atomic() {
