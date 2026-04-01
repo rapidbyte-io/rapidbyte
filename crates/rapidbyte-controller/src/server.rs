@@ -383,58 +383,64 @@ pub async fn serve(config: ControllerConfig, ctx: ServeContext) -> Result<()> {
         None
     };
 
-    if let Some(rest_addr) = components.config.rest_listen_addr {
-        let services = Arc::new(AppServices::new(
-            components.ctx.clone(),
-            components.started_at,
-            rest_addr,
-        ));
-        let rest_state = RestState {
-            services,
-            auth_config: components.config.auth.clone(),
-        };
-        let rest_router = crate::adapter::rest::router(rest_state);
+    // Run the servers, capturing any error rather than returning early with `?`.
+    // This ensures the embedded agent drain runs even on server error paths.
+    let server_result: Result<()> = async {
+        if let Some(rest_addr) = components.config.rest_listen_addr {
+            let services = Arc::new(AppServices::new(
+                components.ctx.clone(),
+                components.started_at,
+                rest_addr,
+            ));
+            let rest_state = RestState {
+                services,
+                auth_config: components.config.auth.clone(),
+            };
+            let rest_router = crate::adapter::rest::router(rest_state);
 
-        if let Some(ref tls) = components.config.tls {
-            // TLS mode — use axum_server with rustls
-            let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem(
-                tls.cert_pem.clone(),
-                tls.key_pem.clone(),
-            )
-            .await?;
-            tracing::info!(addr = %rest_addr, tls = true, "controller REST listening");
-            tokio::select! {
-                () = shutdown.cancelled() => {},
-                result = grpc_server => result?,
-                result = axum_server::bind_rustls(rest_addr, rustls_config)
-                    .serve(rest_router.into_make_service()) => result?,
+            if let Some(ref tls) = components.config.tls {
+                let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem(
+                    tls.cert_pem.clone(),
+                    tls.key_pem.clone(),
+                )
+                .await?;
+                tracing::info!(addr = %rest_addr, tls = true, "controller REST listening");
+                tokio::select! {
+                    () = shutdown.cancelled() => {},
+                    result = grpc_server => result?,
+                    result = axum_server::bind_rustls(rest_addr, rustls_config)
+                        .serve(rest_router.into_make_service()) => result?,
+                }
+            } else {
+                let rest_listener = tokio::net::TcpListener::bind(rest_addr).await?;
+                tracing::info!(addr = %rest_addr, tls = false, "controller REST listening");
+                tokio::select! {
+                    () = shutdown.cancelled() => {},
+                    result = grpc_server => result?,
+                    result = axum::serve(rest_listener, rest_router) => result?,
+                }
             }
         } else {
-            // Plaintext mode
-            let rest_listener = tokio::net::TcpListener::bind(rest_addr).await?;
-            tracing::info!(addr = %rest_addr, tls = false, "controller REST listening");
             tokio::select! {
                 () = shutdown.cancelled() => {},
                 result = grpc_server => result?,
-                result = axum::serve(rest_listener, rest_router) => result?,
             }
         }
-    } else {
-        tokio::select! {
-            () = shutdown.cancelled() => {},
-            result = grpc_server => result?,
-        }
+        Ok(())
     }
+    .await;
 
-    // Wait for the embedded agent to complete its drain/deregister sequence
-    // before the runtime exits. This prevents in-flight tasks from being
-    // interrupted before complete_task is reported.
+    // Always drain the embedded agent, even if the server exited with an error.
+    // This prevents in-flight tasks from being interrupted before complete_task
+    // is reported, avoiding duplicate retries/side effects.
     if let Some(handle) = agent_handle {
         tracing::info!("waiting for embedded agent to drain");
+        // Trigger shutdown in case the server error path didn't already cancel.
+        shutdown.cancel();
         if let Err(e) = handle.await {
             tracing::error!(error = %e, "embedded agent task panicked");
         }
     }
 
-    Ok(())
+    server_result
 }
