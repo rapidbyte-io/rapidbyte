@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use crate::application::context::AppContext;
 use crate::domain::ports::connection_tester::ConnectionTestError;
 use crate::traits::connection::{
     ConnectionDetail, ConnectionDiscoverResponse, ConnectionService, ConnectionSummary,
@@ -9,34 +10,44 @@ use crate::traits::ServiceError;
 
 use super::AppServices;
 
-#[async_trait]
-impl ConnectionService for AppServices {
-    async fn list(&self) -> Result<Vec<ConnectionSummary>, ServiceError> {
-        let yaml = self
-            .ctx
-            .pipeline_source
+/// Parse the `connections` mapping from `connections.yml`.
+///
+/// Returns `Ok(None)` when the file does not exist.  Returns
+/// `Ok(Some(map))` on success.  All parse/IO errors become
+/// `ServiceError::Internal`.
+async fn parse_connections_map(
+    ctx: &AppContext,
+) -> Result<Option<serde_yaml::Mapping>, ServiceError> {
+    let yaml =
+        ctx.pipeline_source
             .connections_yaml()
             .await
             .map_err(|e| ServiceError::Internal {
                 message: e.to_string(),
             })?;
+    let Some(yaml) = yaml else {
+        return Ok(None);
+    };
+    let value: serde_yaml::Value =
+        serde_yaml::from_str(&yaml).map_err(|e| ServiceError::Internal {
+            message: e.to_string(),
+        })?;
+    let map = value
+        .get("connections")
+        .and_then(|v| v.as_mapping())
+        .cloned()
+        .ok_or_else(|| ServiceError::Internal {
+            message: "connections.yml missing 'connections' key".into(),
+        })?;
+    Ok(Some(map))
+}
 
-        let Some(yaml) = yaml else {
+#[async_trait]
+impl ConnectionService for AppServices {
+    async fn list(&self) -> Result<Vec<ConnectionSummary>, ServiceError> {
+        let Some(connections_map) = parse_connections_map(&self.ctx).await? else {
             return Ok(vec![]);
         };
-
-        let value: serde_yaml::Value =
-            serde_yaml::from_str(&yaml).map_err(|e| ServiceError::Internal {
-                message: e.to_string(),
-            })?;
-
-        // connections.yml has a top-level "connections:" key
-        let connections_map = value
-            .get("connections")
-            .and_then(|v| v.as_mapping())
-            .ok_or_else(|| ServiceError::Internal {
-                message: "connections.yml missing 'connections' key or not a mapping".into(),
-            })?;
 
         let mut connections = Vec::new();
         for (key, val) in connections_map {
@@ -57,31 +68,13 @@ impl ConnectionService for AppServices {
     }
 
     async fn get(&self, name: &str) -> Result<ConnectionDetail, ServiceError> {
-        let yaml = self
-            .ctx
-            .pipeline_source
-            .connections_yaml()
-            .await
-            .map_err(|e| ServiceError::Internal {
-                message: e.to_string(),
-            })?;
-
-        let yaml = yaml.ok_or_else(|| ServiceError::NotFound {
-            resource: "connection".into(),
-            id: name.to_string(),
-        })?;
-
-        let value: serde_yaml::Value =
-            serde_yaml::from_str(&yaml).map_err(|e| ServiceError::Internal {
-                message: e.to_string(),
-            })?;
-
-        let connections_map = value
-            .get("connections")
-            .and_then(|v| v.as_mapping())
-            .ok_or_else(|| ServiceError::Internal {
-                message: "connections.yml missing 'connections' key".into(),
-            })?;
+        let connections_map =
+            parse_connections_map(&self.ctx)
+                .await?
+                .ok_or_else(|| ServiceError::NotFound {
+                    resource: "connection".into(),
+                    id: name.to_string(),
+                })?;
 
         let conn_key = serde_yaml::Value::String(name.to_string());
         let conn = connections_map
@@ -208,32 +201,17 @@ impl ConnectionService for AppServices {
 /// entire file — a broken secret in an unrelated connection won't cause
 /// this to fail.
 async fn raw_connection_config(
-    ctx: &crate::application::context::AppContext,
+    ctx: &AppContext,
     name: &str,
 ) -> Result<(String, serde_json::Value), ServiceError> {
-    let yaml =
-        ctx.pipeline_source
-            .connections_yaml()
-            .await
-            .map_err(|e| ServiceError::Internal {
-                message: e.to_string(),
-            })?;
-    let yaml = yaml.ok_or_else(|| ServiceError::NotFound {
-        resource: "connection".into(),
-        id: name.to_string(),
-    })?;
-
     // Parse without resolving secrets first — extract only the target connection.
-    let value: serde_yaml::Value =
-        serde_yaml::from_str(&yaml).map_err(|e| ServiceError::Internal {
-            message: e.to_string(),
-        })?;
-    let connections_map = value
-        .get("connections")
-        .and_then(|v| v.as_mapping())
-        .ok_or_else(|| ServiceError::Internal {
-            message: "connections.yml missing 'connections' key".into(),
-        })?;
+    let connections_map =
+        parse_connections_map(ctx)
+            .await?
+            .ok_or_else(|| ServiceError::NotFound {
+                resource: "connection".into(),
+                id: name.to_string(),
+            })?;
 
     let conn_key = serde_yaml::Value::String(name.to_string());
     let conn = connections_map

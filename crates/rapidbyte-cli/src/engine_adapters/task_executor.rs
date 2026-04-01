@@ -53,15 +53,8 @@ impl TaskExecutor for EngineTaskExecutor {
         })
     }
 
-    async fn execute_check_apply(&self, pipeline_yaml: &str) -> Result<()> {
-        let config: rapidbyte_pipeline_config::PipelineConfig =
-            serde_yaml::from_str(pipeline_yaml)?;
-        let engine_ctx =
-            rapidbyte_engine::build_lightweight_context(&self.registry_config, &config).await?;
-        let _result = rapidbyte_engine::check_pipeline(&engine_ctx, &config).await?;
-        // Apply phase (resource provisioning) is not yet implemented in the engine.
-        // Fail explicitly rather than reporting false success.
-        anyhow::bail!("check passed but apply phase (resource provisioning) is not yet implemented")
+    async fn execute_check_apply(&self, _pipeline_yaml: &str) -> Result<()> {
+        anyhow::bail!("check --apply (resource provisioning) is not yet implemented in the engine")
     }
 
     async fn execute_teardown(&self, pipeline_yaml: &str, reason: &str) -> Result<()> {

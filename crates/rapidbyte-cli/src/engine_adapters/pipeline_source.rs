@@ -37,6 +37,7 @@ impl PipelineSource for FsPipelineSource {
             .map_err(|e| PipelineSourceError::Io(e.to_string()))?;
 
         let mut pipelines = Vec::new();
+        let mut seen_names = std::collections::HashSet::new();
 
         while let Some(entry) = read_dir
             .next_entry()
@@ -63,9 +64,10 @@ impl PipelineSource for FsPipelineSource {
             let yaml = Self::read_file(&path).await?;
             match rapidbyte_pipeline_config::extract_pipeline_name(&yaml) {
                 Ok(name) if name != "unknown" && !name.is_empty() => {
-                    if pipelines.iter().any(|p: &PipelineInfo| p.name == name) {
+                    if seen_names.contains(&name) {
                         tracing::warn!(path = %path.display(), name = %name, "skipping duplicate pipeline name");
                     } else {
+                        seen_names.insert(name.clone());
                         pipelines.push(PipelineInfo { name, path });
                     }
                 }

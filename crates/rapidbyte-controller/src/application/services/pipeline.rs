@@ -84,15 +84,7 @@ impl PipelineService for AppServices {
             .pipeline_source
             .get(name)
             .await
-            .map_err(|e| match e {
-                PipelineSourceError::NotFound(n) => ServiceError::NotFound {
-                    resource: "pipeline".into(),
-                    id: n,
-                },
-                other => ServiceError::Internal {
-                    message: other.to_string(),
-                },
-            })?;
+            .map_err(source_error_to_service)?;
 
         let value: serde_yaml::Value =
             serde_yaml::from_str(&yaml).map_err(|e| ServiceError::Internal {
@@ -152,15 +144,7 @@ impl PipelineService for AppServices {
             .pipeline_source
             .get(&request.pipeline)
             .await
-            .map_err(|e| match e {
-                PipelineSourceError::NotFound(name) => ServiceError::NotFound {
-                    resource: "pipeline".into(),
-                    id: name,
-                },
-                other => ServiceError::Internal {
-                    message: other.to_string(),
-                },
-            })?;
+            .map_err(source_error_to_service)?;
 
         // Submit as async task
         let result = submit::submit_pipeline(
@@ -194,6 +178,10 @@ impl PipelineService for AppServices {
             });
         }
 
+        // TODO: `PipelineSource` only exposes `list()` + `get(name)`, so each
+        // `get()` re-scans the directory making this O(N²) for large projects.
+        // Fix by extending the trait to return YAML content from `list()`, or
+        // by adding a `list_with_content()` variant.
         let all = self
             .ctx
             .pipeline_source
@@ -306,15 +294,7 @@ impl PipelineService for AppServices {
             .pipeline_source
             .get(name)
             .await
-            .map_err(|e| match e {
-                PipelineSourceError::NotFound(n) => ServiceError::NotFound {
-                    resource: "pipeline".into(),
-                    id: n,
-                },
-                other => ServiceError::Internal {
-                    message: other.to_string(),
-                },
-            })?;
+            .map_err(source_error_to_service)?;
 
         let resolved =
             self.ctx
