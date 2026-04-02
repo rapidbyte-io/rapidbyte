@@ -15,7 +15,7 @@ mod postgres {
     use rapidbyte_controller::domain::agent::{Agent, AgentCapabilities};
     use rapidbyte_controller::domain::lease::Lease;
     use rapidbyte_controller::domain::run::Run;
-    use rapidbyte_controller::domain::task::Task;
+    use rapidbyte_controller::domain::task::{Task, TaskOperation};
 
     pub async fn setup_db() -> (PgPool, testcontainers::ContainerAsync<Postgres>) {
         let container = Postgres::default().start().await.unwrap();
@@ -63,11 +63,23 @@ mod postgres {
     }
 
     pub fn sample_task(id: &str, run_id: &str) -> Task {
-        Task::new(id.to_string(), run_id.to_string(), 1, Utc::now())
+        Task::new(
+            id.to_string(),
+            run_id.to_string(),
+            1,
+            TaskOperation::Sync,
+            Utc::now(),
+        )
     }
 
     pub fn sample_task_with_attempt(id: &str, run_id: &str, attempt: u32) -> Task {
-        Task::new(id.to_string(), run_id.to_string(), attempt, Utc::now())
+        Task::new(
+            id.to_string(),
+            run_id.to_string(),
+            attempt,
+            TaskOperation::Sync,
+            Utc::now(),
+        )
     }
 
     pub fn sample_agent(id: &str) -> Agent {
@@ -76,6 +88,7 @@ mod postgres {
             AgentCapabilities {
                 plugins: vec!["pg".to_string()],
                 max_concurrent_tasks: 2,
+                supported_operations: vec![],
             },
             Utc::now(),
         )

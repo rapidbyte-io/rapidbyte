@@ -283,12 +283,28 @@ mod tests {
         // Submit two runs with different pipeline names
         let yaml_a = "pipeline: pipe-a\nversion: '1.0'";
         let yaml_b = "pipeline: pipe-b\nversion: '1.0'";
-        crate::application::submit::submit_pipeline(&tc.ctx, None, yaml_a.to_string(), 0, None)
-            .await
-            .unwrap();
-        crate::application::submit::submit_pipeline(&tc.ctx, None, yaml_b.to_string(), 0, None)
-            .await
-            .unwrap();
+        crate::application::submit::submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml_a.to_string(),
+            0,
+            None,
+            crate::domain::task::TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
+        crate::application::submit::submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml_b.to_string(),
+            0,
+            None,
+            crate::domain::task::TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         let services = AppServices::new(
             Arc::new(tc.ctx),

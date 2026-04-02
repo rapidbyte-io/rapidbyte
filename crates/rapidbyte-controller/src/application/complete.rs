@@ -64,7 +64,13 @@ pub async fn complete_task(
                 task.fail()?;
                 let new_attempt = run.retry()?;
                 let new_task_id = uuid::Uuid::new_v4().to_string();
-                let new_task = Task::new(new_task_id, run.id().to_string(), new_attempt, now);
+                let new_task = Task::new(
+                    new_task_id,
+                    run.id().to_string(),
+                    new_attempt,
+                    task.operation(),
+                    now,
+                );
                 ctx.store.fail_and_retry(&task, &run, &new_task).await?;
                 ctx.event_bus
                     .publish(DomainEvent::RunStateChanged {
@@ -115,7 +121,7 @@ mod tests {
     use crate::domain::event::DomainEvent;
     use crate::domain::ports::clock::Clock;
     use crate::domain::run::{RunMetrics, RunState};
-    use crate::domain::task::TaskState;
+    use crate::domain::task::{TaskOperation, TaskState};
 
     fn sample_metrics() -> RunMetrics {
         RunMetrics {
@@ -263,15 +269,24 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
         tc.ctx.agents.save(&agent).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let submit = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
         let assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
 
         complete_task(

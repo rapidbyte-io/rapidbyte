@@ -8,7 +8,7 @@ use crate::domain::lease::Lease;
 use crate::domain::ports::pipeline_store::PipelineStore;
 use crate::domain::ports::repository::RepositoryError;
 use crate::domain::run::Run;
-use crate::domain::task::Task;
+use crate::domain::task::{Task, TaskOperation};
 
 use super::error::box_err;
 use super::run::{run_from_row, run_state_to_str};
@@ -66,8 +66,8 @@ async fn insert_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
         extract_run_metrics(run);
 
     sqlx::query(
-        "INSERT INTO runs (id, idempotency_key, pipeline_name, pipeline_yaml, state, cancel_requested, attempt, max_retries, timeout_seconds, error_code, error_message, rows_read, rows_written, bytes_read, bytes_written, duration_ms, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)",
+        "INSERT INTO runs (id, idempotency_key, pipeline_name, pipeline_yaml, state, cancel_requested, attempt, max_retries, timeout_seconds, error_code, error_message, rows_read, rows_written, bytes_read, bytes_written, duration_ms, metadata, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)",
     )
     .bind(run.id())
     .bind(run.idempotency_key())
@@ -85,6 +85,7 @@ async fn insert_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
     .bind(bytes_read)
     .bind(bytes_written)
     .bind(duration_ms)
+    .bind(run.metadata())
     .bind(run.created_at())
     .bind(run.updated_at())
     .execute(&mut *conn)
@@ -100,7 +101,7 @@ async fn update_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
         extract_run_metrics(run);
 
     sqlx::query(
-        "UPDATE runs SET state = $1, cancel_requested = $2, attempt = $3, max_retries = $4, timeout_seconds = $5, error_code = $6, error_message = $7, rows_read = $8, rows_written = $9, bytes_read = $10, bytes_written = $11, duration_ms = $12, updated_at = $13 WHERE id = $14",
+        "UPDATE runs SET state = $1, cancel_requested = $2, attempt = $3, max_retries = $4, timeout_seconds = $5, error_code = $6, error_message = $7, rows_read = $8, rows_written = $9, bytes_read = $10, bytes_written = $11, duration_ms = $12, metadata = $13, updated_at = $14 WHERE id = $15",
     )
     .bind(run_state_to_str(run.state()))
     .bind(run.is_cancel_requested())
@@ -114,6 +115,7 @@ async fn update_run(conn: &mut PgConnection, run: &Run) -> Result<(), Repository
     .bind(bytes_read)
     .bind(bytes_written)
     .bind(duration_ms)
+    .bind(run.metadata())
     .bind(run.updated_at())
     .bind(run.id())
     .execute(&mut *conn)
@@ -127,12 +129,13 @@ async fn insert_task(conn: &mut PgConnection, task: &Task) -> Result<(), Reposit
     let (lease_epoch, lease_expires_at) = extract_task_lease(task);
 
     sqlx::query(
-        "INSERT INTO tasks (id, run_id, attempt, state, agent_id, lease_epoch, lease_expires_at, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        "INSERT INTO tasks (id, run_id, attempt, operation, state, agent_id, lease_epoch, lease_expires_at, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(task.id())
     .bind(task.run_id())
     .bind(task.attempt().cast_signed())
+    .bind(task.operation().as_str())
     .bind(task_state_to_str(task.state()))
     .bind(task.agent_id())
     .bind(lease_epoch)
@@ -180,6 +183,7 @@ impl PipelineStore for PgPipelineStore {
         agent_id: &str,
         max_concurrent_tasks: u32,
         lease: Lease,
+        supported_operations: &[TaskOperation],
     ) -> Result<Option<(Task, Run)>, RepositoryError> {
         let mut tx = self.pool.begin().await.map_err(box_err)?;
 
@@ -210,10 +214,20 @@ impl PipelineStore for PgPipelineStore {
             return Ok(None);
         }
 
-        // Poll next pending task
+        // Build operation filter. The caller (poll_task) is responsible for
+        // backwards-compat fallback (empty caps → sync-only). If an empty
+        // slice reaches here, no tasks will match — this is correct behavior,
+        // not a bug.
+        let ops: Vec<String> = supported_operations
+            .iter()
+            .map(|op| op.as_str().to_string())
+            .collect();
+
+        // Poll next pending task filtered by supported operations
         let row = sqlx::query(
-            "SELECT * FROM tasks WHERE state = 'pending' ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
+            "SELECT * FROM tasks WHERE state = 'pending' AND operation = ANY($1) ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED",
         )
+        .bind(&ops)
         .fetch_optional(&mut *tx)
         .await
         .map_err(box_err)?;
@@ -272,6 +286,7 @@ impl PipelineStore for PgPipelineStore {
             task.id().to_string(),
             task.run_id().to_string(),
             task.attempt(),
+            task.operation(),
             crate::domain::task::TaskState::Running,
             Some(agent_id.to_string()),
             Some(lease),

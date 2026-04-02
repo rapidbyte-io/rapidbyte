@@ -4,7 +4,7 @@ use sqlx::{PgPool, Row};
 
 use crate::domain::lease::Lease;
 use crate::domain::ports::repository::{RepositoryError, TaskRepository};
-use crate::domain::task::{Task, TaskState};
+use crate::domain::task::{Task, TaskOperation, TaskState};
 
 use super::error::box_err;
 
@@ -37,6 +37,7 @@ pub(super) fn task_from_row(row: &sqlx::postgres::PgRow) -> Result<Task, Reposit
     let id: String = row.try_get("id").map_err(box_err)?;
     let run_id: String = row.try_get("run_id").map_err(box_err)?;
     let attempt: i32 = row.try_get("attempt").map_err(box_err)?;
+    let operation_str: String = row.try_get("operation").map_err(box_err)?;
     let state_str: String = row.try_get("state").map_err(box_err)?;
     let agent_id: Option<String> = row.try_get("agent_id").map_err(box_err)?;
     let lease_epoch: Option<i64> = row.try_get("lease_epoch").map_err(box_err)?;
@@ -45,6 +46,11 @@ pub(super) fn task_from_row(row: &sqlx::postgres::PgRow) -> Result<Task, Reposit
     let created_at: DateTime<Utc> = row.try_get("created_at").map_err(box_err)?;
     let updated_at: DateTime<Utc> = row.try_get("updated_at").map_err(box_err)?;
 
+    let operation = operation_str.parse::<TaskOperation>().map_err(|()| {
+        RepositoryError::Other(Box::from(format!(
+            "unknown task operation in database: {operation_str}"
+        )))
+    })?;
     let state = parse_task_state(&state_str)?;
 
     let lease = match (lease_epoch, lease_expires_at) {
@@ -56,6 +62,7 @@ pub(super) fn task_from_row(row: &sqlx::postgres::PgRow) -> Result<Task, Reposit
         id,
         run_id,
         attempt.cast_unsigned(),
+        operation,
         state,
         agent_id,
         lease,
@@ -94,8 +101,8 @@ impl TaskRepository for PgTaskRepository {
         };
 
         sqlx::query(
-            "INSERT INTO tasks (id, run_id, attempt, state, agent_id, lease_epoch, lease_expires_at, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "INSERT INTO tasks (id, run_id, attempt, operation, state, agent_id, lease_epoch, lease_expires_at, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              ON CONFLICT (id) DO UPDATE SET
                 state = EXCLUDED.state,
                 agent_id = EXCLUDED.agent_id,
@@ -106,6 +113,7 @@ impl TaskRepository for PgTaskRepository {
         .bind(task.id())
         .bind(task.run_id())
         .bind(task.attempt().cast_signed())
+        .bind(task.operation().as_str())
         .bind(task_state_to_str(task.state()))
         .bind(task.agent_id())
         .bind(lease_epoch)

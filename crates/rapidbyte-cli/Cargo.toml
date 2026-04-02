@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 rapidbyte-agent = { path = "../rapidbyte-agent" }
 rapidbyte-controller = { path = "../rapidbyte-controller" }
+async-trait = { workspace = true }
 rapidbyte-metrics = { path = "../rapidbyte-metrics" }
 rapidbyte-dev = { path = "../rapidbyte-dev" }
 rapidbyte-engine = { path = "../rapidbyte-engine" }

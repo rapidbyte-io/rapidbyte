@@ -7,6 +7,7 @@ use crate::application::timeout::handle_task_timeout;
 use crate::domain::event::DomainEvent;
 use crate::domain::lease::Lease;
 use crate::domain::run::RunState;
+use crate::domain::task::TaskOperation;
 
 #[derive(Debug)]
 pub struct TaskAssignment {
@@ -18,6 +19,8 @@ pub struct TaskAssignment {
     pub lease_epoch: u64,
     pub lease_expires_at: DateTime<Utc>,
     pub attempt: u32,
+    pub operation: TaskOperation,
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Agent polls for a task to execute.
@@ -56,10 +59,26 @@ pub async fn poll_task(
     // 5. Create lease
     let lease = Lease::new(epoch, expires_at);
 
-    // 6. Atomically assign task and transition run to Running
+    // 6. Resolve supported operations with backwards-compat fallback
+    let supported_ops: Vec<crate::domain::task::TaskOperation> = {
+        let caps = agent.capabilities();
+        if caps.supported_operations.is_empty() {
+            // Legacy agent — assume sync only for safety
+            vec![crate::domain::task::TaskOperation::Sync]
+        } else {
+            caps.supported_operations.clone()
+        }
+    };
+
+    // 7. Atomically assign task and transition run to Running
     let Some((task, mut run)) = ctx
         .store
-        .assign_task(agent_id, agent.capabilities().max_concurrent_tasks, lease)
+        .assign_task(
+            agent_id,
+            agent.capabilities().max_concurrent_tasks,
+            lease,
+            &supported_ops,
+        )
         .await?
     else {
         return Ok(None);
@@ -108,6 +127,8 @@ pub async fn poll_task(
         lease_epoch: lease_ref.epoch(),
         lease_expires_at: lease_ref.expires_at(),
         attempt: task.attempt(),
+        operation: task.operation(),
+        metadata: run.metadata().cloned(),
     }))
 }
 
@@ -131,15 +152,24 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
         tc.ctx.agents.save(&agent).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let result = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, Some(60))
-            .await
-            .unwrap();
+        let result = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            2,
+            Some(60),
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         ("agent-1".to_string(), result.run_id)
     }
@@ -175,6 +205,7 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
@@ -201,6 +232,7 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
@@ -263,8 +295,8 @@ mod tests {
         use crate::application::context::{AppConfig, AppContext};
         use crate::application::testing::{
             FakeAgentRepository, FakeClock, FakeConnectionTester, FakeCursorStore, FakeEventBus,
-            FakeLogStore, FakePipelineStore, FakePluginRegistry, FakeRunRepository, FakeStorage,
-            FakeTaskRepository,
+            FakeLogStore, FakePipelineSource, FakePipelineStore, FakePluginRegistry,
+            FakeRunRepository, FakeStorage, FakeTaskRepository,
         };
         use crate::domain::ports::secrets::{SecretError, SecretResolver};
         use std::sync::Arc;
@@ -294,6 +326,8 @@ mod tests {
             log_store: Arc::new(FakeLogStore::new()),
             connection_tester: Arc::new(FakeConnectionTester),
             plugin_registry: Arc::new(FakePluginRegistry),
+            pipeline_source: Arc::new(FakePipelineSource::new()),
+            pipeline_inspector: Arc::new(crate::application::testing::FakePipelineInspector),
             config: AppConfig {
                 default_lease_duration: Duration::from_secs(300),
                 lease_check_interval: Duration::from_secs(30),
@@ -312,6 +346,7 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
@@ -319,10 +354,17 @@ mod tests {
 
         // Submit pipeline with max_retries=2
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let submit =
-            crate::application::submit::submit_pipeline(&ctx, None, yaml.to_string(), 2, None)
-                .await
-                .unwrap();
+        let submit = crate::application::submit::submit_pipeline(
+            &ctx,
+            None,
+            yaml.to_string(),
+            2,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         // Poll should return error due to secret resolution failure
         let result = poll_task(&ctx, "agent-1").await;
@@ -355,18 +397,35 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
         tc.ctx.agents.save(&agent).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
-        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
+        submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         let a1 = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
         let a2 = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
@@ -383,18 +442,35 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 1,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
         tc.ctx.agents.save(&agent).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
-        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
+        submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         let first = poll_task(&tc.ctx, "agent-1").await.unwrap();
         assert!(first.is_some());

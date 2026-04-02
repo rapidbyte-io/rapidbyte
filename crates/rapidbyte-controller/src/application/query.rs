@@ -31,14 +31,23 @@ mod tests {
     use crate::application::submit::submit_pipeline;
     use crate::application::testing::fake_context;
     use crate::domain::run::RunState;
+    use crate::domain::task::TaskOperation;
 
     #[tokio::test]
     async fn get_run_found() {
         let tc = fake_context();
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let submit = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         let run = get_run(&tc.ctx, &submit.run_id).await.unwrap();
         assert_eq!(run.id(), submit.run_id);
@@ -57,12 +66,28 @@ mod tests {
     async fn list_runs_returns_results() {
         let tc = fake_context();
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
-        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
+        submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         let page = list_runs(
             &tc.ctx,
@@ -85,9 +110,17 @@ mod tests {
     async fn list_runs_with_state_filter() {
         let tc = fake_context();
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         let page = list_runs(
             &tc.ctx,
@@ -146,15 +179,39 @@ mod tests {
     async fn list_runs_pagination() {
         let tc = fake_context();
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
-        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
-        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
+        submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
+        submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         let page = list_runs(
             &tc.ctx,

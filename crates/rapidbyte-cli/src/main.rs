@@ -4,6 +4,7 @@
 #![recursion_limit = "256"]
 
 mod commands;
+pub(crate) mod engine_adapters;
 mod logging;
 pub(crate) mod output;
 

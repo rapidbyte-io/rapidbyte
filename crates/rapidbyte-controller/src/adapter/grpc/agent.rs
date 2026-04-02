@@ -8,6 +8,7 @@ use crate::adapter::grpc::convert;
 use crate::application::context::AppContext;
 use crate::application::heartbeat::TaskHeartbeatInput;
 use crate::domain::run::CommitState;
+use crate::domain::task::TaskOperation;
 use crate::proto::rapidbyte::v1 as pb;
 use crate::proto::rapidbyte::v1::agent_service_server::AgentService;
 
@@ -43,6 +44,8 @@ impl AgentService for AgentGrpcService {
             crate::domain::agent::AgentCapabilities {
                 plugins: caps.plugins,
                 max_concurrent_tasks: max_tasks,
+                // External agents only support sync for now
+                supported_operations: vec![TaskOperation::Sync],
             },
         )
         .await
@@ -92,6 +95,7 @@ impl AgentService for AgentGrpcService {
                     lease_epoch: a.lease_epoch,
                     lease_expires_at,
                     attempt: a.attempt,
+                    operation: a.operation.as_str().to_string(),
                 })
             }
             None => pb::poll_task_response::Result::NoTask(pb::NoTask {}),
@@ -205,6 +209,7 @@ mod tests {
     use tonic::Request;
 
     use crate::application::testing::fake_context;
+    use crate::domain::task::TaskOperation;
     use crate::proto::rapidbyte::v1 as pb;
     use crate::proto::rapidbyte::v1::agent_service_server::AgentService;
 
@@ -223,16 +228,24 @@ mod tests {
             crate::domain::agent::AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
         ctx.agents.save(&agent).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let _submit =
-            crate::application::submit::submit_pipeline(ctx, None, yaml.to_string(), 2, Some(60))
-                .await
-                .unwrap();
+        let _submit = crate::application::submit::submit_pipeline(
+            ctx,
+            None,
+            yaml.to_string(),
+            2,
+            Some(60),
+            crate::domain::task::TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         let assignment = crate::application::poll::poll_task(ctx, agent_id)
             .await
@@ -261,9 +274,17 @@ mod tests {
 
         // Submit a pipeline and poll — max_concurrent_tasks=1 should allow one task
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        crate::application::submit::submit_pipeline(&ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        crate::application::submit::submit_pipeline(
+            &ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            crate::domain::task::TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         let resp = svc
             .poll_task(Request::new(pb::PollTaskRequest {
@@ -300,9 +321,17 @@ mod tests {
 
         // Submit and poll
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        crate::application::submit::submit_pipeline(&ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        crate::application::submit::submit_pipeline(
+            &ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            crate::domain::task::TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         let resp = svc
             .poll_task(Request::new(pb::PollTaskRequest {
@@ -444,6 +473,7 @@ mod tests {
             crate::domain::agent::AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 2,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
@@ -451,12 +481,28 @@ mod tests {
 
         // Submit and poll 2 tasks
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        crate::application::submit::submit_pipeline(&ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
-        crate::application::submit::submit_pipeline(&ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        crate::application::submit::submit_pipeline(
+            &ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            crate::domain::task::TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
+        crate::application::submit::submit_pipeline(
+            &ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            crate::domain::task::TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         let a1 = crate::application::poll::poll_task(&ctx, "agent-1")
             .await

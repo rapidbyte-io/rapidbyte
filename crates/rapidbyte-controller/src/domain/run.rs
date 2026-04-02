@@ -75,6 +75,7 @@ pub struct Run {
     cancel_requested: bool,
     error: Option<RunError>,
     metrics: Option<RunMetrics>,
+    metadata: Option<serde_json::Value>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -102,6 +103,7 @@ impl Run {
             cancel_requested: false,
             error: None,
             metrics: None,
+            metadata: None,
             created_at: now,
             updated_at: now,
         }
@@ -122,6 +124,7 @@ impl Run {
         cancel_requested: bool,
         error: Option<RunError>,
         metrics: Option<RunMetrics>,
+        metadata: Option<serde_json::Value>,
         created_at: DateTime<Utc>,
         updated_at: DateTime<Utc>,
     ) -> Self {
@@ -137,6 +140,7 @@ impl Run {
             cancel_requested,
             error,
             metrics,
+            metadata,
             created_at,
             updated_at,
         }
@@ -310,6 +314,15 @@ impl Run {
     #[must_use]
     pub fn metrics(&self) -> Option<&RunMetrics> {
         self.metrics.as_ref()
+    }
+
+    #[must_use]
+    pub fn metadata(&self) -> Option<&serde_json::Value> {
+        self.metadata.as_ref()
+    }
+
+    pub fn set_metadata(&mut self, metadata: serde_json::Value) {
+        self.metadata = Some(metadata);
     }
 
     #[must_use]
@@ -662,6 +675,7 @@ mod tests {
             false,
             None,
             None,
+            None,
             now(),
             now(),
         );
@@ -686,6 +700,7 @@ mod tests {
             2,
             None,
             false,
+            None,
             None,
             None,
             now(),
@@ -735,6 +750,7 @@ mod tests {
                 bytes_written: 4,
                 duration_ms: 5,
             }),
+            None,
             now(),
             now(),
         );
@@ -897,6 +913,7 @@ mod tests {
             0,
             None,
             false,
+            None,
             None,
             None,
             now(),

@@ -126,6 +126,7 @@ mod tests {
     use crate::domain::agent::{Agent, AgentCapabilities};
     use crate::domain::event::DomainEvent;
     use crate::domain::ports::clock::Clock;
+    use crate::domain::task::TaskOperation;
 
     #[tokio::test]
     async fn agent_liveness_updated() {
@@ -300,18 +301,35 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
         tc.ctx.agents.save(&agent).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
-        submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
+        submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         let a1 = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
         let a2 = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
@@ -351,6 +369,7 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
@@ -407,6 +426,7 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );

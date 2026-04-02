@@ -10,12 +10,88 @@ use rapidbyte_controller::domain::ports::repository::{
     AgentRepository, RunRepository, TaskRepository,
 };
 use rapidbyte_controller::domain::run::{RunMetrics, RunState};
-use rapidbyte_controller::domain::task::TaskState;
+use rapidbyte_controller::domain::task::{Task, TaskOperation, TaskState};
 
 use super::{
     sample_lease, sample_run, sample_run_with_key, sample_run_with_retries, sample_task,
     sample_task_with_attempt, setup_db,
 };
+
+#[tokio::test]
+async fn assign_task_filters_by_supported_operations() {
+    let (pool, _container) = setup_db().await;
+    let store = PgPipelineStore::new(pool.clone());
+    let agent_repo = PgAgentRepository::new(pool);
+
+    // Register agent that supports only Sync
+    let agent = Agent::new(
+        "agent-ops-1".to_string(),
+        AgentCapabilities {
+            plugins: vec![],
+            max_concurrent_tasks: 2,
+            supported_operations: vec![TaskOperation::Sync],
+        },
+        Utc::now(),
+    );
+    agent_repo.save(&agent).await.unwrap();
+
+    // Submit a teardown task
+    let run = sample_run("run-ops-1");
+    let task = Task::new(
+        "task-ops-1".into(),
+        "run-ops-1".into(),
+        1,
+        TaskOperation::Teardown,
+        Utc::now(),
+    );
+    store.submit_run(&run, &task).await.unwrap();
+
+    // Agent with Sync-only should NOT get the teardown task
+    let lease = sample_lease(1);
+    let result = store
+        .assign_task("agent-ops-1", 2, lease.clone(), &[TaskOperation::Sync])
+        .await
+        .unwrap();
+    assert!(
+        result.is_none(),
+        "sync-only agent should not get teardown task"
+    );
+
+    // Same agent with ALL ops should get it
+    let result = store
+        .assign_task("agent-ops-1", 2, lease, TaskOperation::ALL)
+        .await
+        .unwrap();
+    assert!(result.is_some(), "all-ops agent should get teardown task");
+}
+
+#[tokio::test]
+async fn supported_operations_round_trip() {
+    let (pool, _container) = setup_db().await;
+    let agent_repo = PgAgentRepository::new(pool);
+
+    let agent = Agent::new(
+        "agent-ops-rt".to_string(),
+        AgentCapabilities {
+            plugins: vec!["postgres".into()],
+            max_concurrent_tasks: 4,
+            supported_operations: vec![TaskOperation::Sync, TaskOperation::Teardown],
+        },
+        Utc::now(),
+    );
+    agent_repo.save(&agent).await.unwrap();
+
+    // Read back and verify operations persisted
+    let found = agent_repo
+        .find_by_id("agent-ops-rt")
+        .await
+        .unwrap()
+        .unwrap();
+    let ops = &found.capabilities().supported_operations;
+    assert_eq!(ops.len(), 2);
+    assert!(ops.contains(&TaskOperation::Sync));
+    assert!(ops.contains(&TaskOperation::Teardown));
+}
 
 #[tokio::test]
 async fn submit_run_atomic() {
@@ -69,6 +145,7 @@ async fn assign_task_happy_path() {
         AgentCapabilities {
             plugins: vec![],
             max_concurrent_tasks: 2,
+            supported_operations: vec![],
         },
         Utc::now(),
     );
@@ -79,7 +156,10 @@ async fn assign_task_happy_path() {
     store.submit_run(&run, &task).await.unwrap();
 
     let lease = sample_lease(1);
-    let result = store.assign_task("agent-assign", 2, lease).await.unwrap();
+    let result = store
+        .assign_task("agent-assign", 2, lease, &[TaskOperation::Sync])
+        .await
+        .unwrap();
     assert!(result.is_some());
 
     let (assigned_task, assigned_run) = result.unwrap();
@@ -100,6 +180,7 @@ async fn assign_task_respects_capacity() {
         AgentCapabilities {
             plugins: vec![],
             max_concurrent_tasks: 1,
+            supported_operations: vec![],
         },
         Utc::now(),
     );
@@ -116,12 +197,18 @@ async fn assign_task_respects_capacity() {
 
     // First assign should succeed
     let lease1 = sample_lease(10);
-    let result1 = store.assign_task("agent-cap", 1, lease1).await.unwrap();
+    let result1 = store
+        .assign_task("agent-cap", 1, lease1, &[TaskOperation::Sync])
+        .await
+        .unwrap();
     assert!(result1.is_some());
 
     // Second assign should return None (capacity exceeded)
     let lease2 = sample_lease(11);
-    let result2 = store.assign_task("agent-cap", 1, lease2).await.unwrap();
+    let result2 = store
+        .assign_task("agent-cap", 1, lease2, &[TaskOperation::Sync])
+        .await
+        .unwrap();
     assert!(result2.is_none());
 }
 
@@ -146,7 +233,10 @@ async fn assign_task_concurrent_cancelled_run_rolls_back() {
 
     // assign_task should return None because the run is no longer pending
     let lease = sample_lease(20);
-    let result = store.assign_task("agent-x", 10, lease).await.unwrap();
+    let result = store
+        .assign_task("agent-x", 10, lease, &[TaskOperation::Sync])
+        .await
+        .unwrap();
     assert!(result.is_none());
 }
 
@@ -169,8 +259,8 @@ async fn assign_task_skip_locked() {
     let lease2 = Lease::new(31, Utc::now() + chrono::Duration::seconds(300));
 
     let (r1, r2) = tokio::join!(
-        store.assign_task("agent-a", 10, lease1),
-        store.assign_task("agent-b", 10, lease2),
+        store.assign_task("agent-a", 10, lease1, &[TaskOperation::Sync]),
+        store.assign_task("agent-b", 10, lease2, &[TaskOperation::Sync]),
     );
 
     let assigned1 = r1.unwrap();
@@ -199,7 +289,7 @@ async fn complete_run_atomic() {
     // Assign
     let lease = sample_lease(40);
     let (mut assigned_task, mut assigned_run) = store
-        .assign_task("agent-c", 5, lease)
+        .assign_task("agent-c", 5, lease, &[TaskOperation::Sync])
         .await
         .unwrap()
         .unwrap();
@@ -251,7 +341,7 @@ async fn fail_and_retry_creates_new_task() {
     // Assign
     let lease = sample_lease(50);
     let (mut assigned_task, mut assigned_run) = store
-        .assign_task("agent-d", 5, lease)
+        .assign_task("agent-d", 5, lease, &[TaskOperation::Sync])
         .await
         .unwrap()
         .unwrap();
@@ -361,7 +451,7 @@ async fn timeout_and_retry_with_none_new_task() {
     // Assign
     let lease = sample_lease(60);
     let (mut assigned_task, mut assigned_run) = store
-        .assign_task("agent-e", 5, lease)
+        .assign_task("agent-e", 5, lease, &[TaskOperation::Sync])
         .await
         .unwrap()
         .unwrap();

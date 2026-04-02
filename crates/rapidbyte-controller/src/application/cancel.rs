@@ -100,15 +100,23 @@ mod tests {
     use crate::domain::event::DomainEvent;
     use crate::domain::ports::clock::Clock;
     use crate::domain::run::RunState;
-    use crate::domain::task::TaskState;
+    use crate::domain::task::{TaskOperation, TaskState};
 
     #[tokio::test]
     async fn cancel_pending_run() {
         let tc = fake_context();
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let submit = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         let result = cancel_run(&tc.ctx, &submit.run_id).await.unwrap();
         assert!(result.accepted);
@@ -145,15 +153,24 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
         tc.ctx.agents.save(&agent).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let submit = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
         let _assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
 
         let result = cancel_run(&tc.ctx, &submit.run_id).await.unwrap();
@@ -183,9 +200,17 @@ mod tests {
     async fn cancel_terminal_rejected() {
         let tc = fake_context();
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let submit = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         // Cancel it first
         cancel_run(&tc.ctx, &submit.run_id).await.unwrap();
@@ -207,9 +232,17 @@ mod tests {
     async fn cancel_pending_race_falls_through() {
         let tc = fake_context();
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let submit = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         // Manually change the task state to Running (simulating concurrent poll)
         {
@@ -219,6 +252,7 @@ mod tests {
                 AgentCapabilities {
                     plugins: vec![],
                     max_concurrent_tasks: 4,
+                    supported_operations: vec![TaskOperation::Sync],
                 },
                 now,
             );
@@ -251,15 +285,24 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
         tc.ctx.agents.save(&agent).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let submit = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
         let assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
 
         // Cancel (sets flag)
@@ -296,15 +339,24 @@ mod tests {
             AgentCapabilities {
                 plugins: vec![],
                 max_concurrent_tasks: 4,
+                supported_operations: vec![TaskOperation::Sync],
             },
             now,
         );
         tc.ctx.agents.save(&agent).await.unwrap();
 
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
-        let submit = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let submit = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
         let _assignment = poll_task(&tc.ctx, "agent-1").await.unwrap().unwrap();
 
         // Cancel twice — both should succeed

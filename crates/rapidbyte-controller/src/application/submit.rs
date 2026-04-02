@@ -3,7 +3,7 @@ use crate::application::error::AppError;
 use crate::domain::error::DomainError;
 use crate::domain::event::DomainEvent;
 use crate::domain::run::{Run, RunState};
-use crate::domain::task::Task;
+use crate::domain::task::{Task, TaskOperation};
 
 #[derive(Debug)]
 pub struct SubmitResult {
@@ -26,6 +26,8 @@ pub async fn submit_pipeline(
     pipeline_yaml: String,
     max_retries: u32,
     timeout_seconds: Option<u64>,
+    operation: TaskOperation,
+    metadata: Option<serde_json::Value>,
 ) -> Result<SubmitResult, AppError> {
     // 1. Idempotency check
     if let Some(ref key) = idempotency_key {
@@ -52,7 +54,7 @@ pub async fn submit_pipeline(
     let idempotency_key_clone = idempotency_key.clone();
 
     // 7. Create Run
-    let run = Run::new(
+    let mut run = Run::new(
         run_id.clone(),
         idempotency_key,
         pipeline_name,
@@ -61,9 +63,12 @@ pub async fn submit_pipeline(
         timeout_seconds,
         now,
     );
+    if let Some(meta) = metadata {
+        run.set_metadata(meta);
+    }
 
     // 8. Create Task
-    let task = Task::new(task_id, run_id.clone(), 1, now);
+    let task = Task::new(task_id, run_id.clone(), 1, operation, now);
 
     // 9. Persist atomically
     match ctx.store.submit_run(&run, &task).await {
@@ -109,9 +114,17 @@ mod tests {
         let tc = fake_context();
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
 
-        let result = submit_pipeline(&tc.ctx, None, yaml.to_string(), 2, Some(60))
-            .await
-            .unwrap();
+        let result = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            2,
+            Some(60),
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert!(!result.already_exists);
         assert!(!result.run_id.is_empty());
@@ -138,14 +151,30 @@ mod tests {
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
         let key = "idem-key-1".to_string();
 
-        let first = submit_pipeline(&tc.ctx, Some(key.clone()), yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let first = submit_pipeline(
+            &tc.ctx,
+            Some(key.clone()),
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(!first.already_exists);
 
-        let second = submit_pipeline(&tc.ctx, Some(key.clone()), yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let second = submit_pipeline(
+            &tc.ctx,
+            Some(key.clone()),
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(second.already_exists);
         assert_eq!(second.run_id, first.run_id);
     }
@@ -155,7 +184,16 @@ mod tests {
         let tc = fake_context();
         let bad_yaml = "not: [valid: yaml: {{{}}}";
 
-        let result = submit_pipeline(&tc.ctx, None, bad_yaml.to_string(), 0, None).await;
+        let result = submit_pipeline(
+            &tc.ctx,
+            None,
+            bad_yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(
@@ -169,9 +207,17 @@ mod tests {
         let tc = fake_context();
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
 
-        let result = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let result = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         let events = tc.event_bus.published_events();
         assert_eq!(events.len(), 1);
@@ -194,9 +240,17 @@ mod tests {
         let tc = fake_context();
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
 
-        let result = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let result = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         let runs = tc.storage.runs.lock().unwrap();
         let run = runs.get(&result.run_id).unwrap();
@@ -208,9 +262,17 @@ mod tests {
         let tc = fake_context();
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
 
-        let result = submit_pipeline(&tc.ctx, None, yaml.to_string(), 0, Some(60))
-            .await
-            .unwrap();
+        let result = submit_pipeline(
+            &tc.ctx,
+            None,
+            yaml.to_string(),
+            0,
+            Some(60),
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
 
         let runs = tc.storage.runs.lock().unwrap();
         let run = runs.get(&result.run_id).unwrap();
@@ -223,14 +285,30 @@ mod tests {
         let yaml = "pipeline: test-pipe\nversion: '1.0'";
         let key = "dedup-key".to_string();
 
-        let first = submit_pipeline(&tc.ctx, Some(key.clone()), yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let first = submit_pipeline(
+            &tc.ctx,
+            Some(key.clone()),
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(!first.already_exists);
 
-        let second = submit_pipeline(&tc.ctx, Some(key.clone()), yaml.to_string(), 0, None)
-            .await
-            .unwrap();
+        let second = submit_pipeline(
+            &tc.ctx,
+            Some(key.clone()),
+            yaml.to_string(),
+            0,
+            None,
+            TaskOperation::Sync,
+            None,
+        )
+        .await
+        .unwrap();
         assert!(second.already_exists);
         assert_eq!(second.run_id, first.run_id);
     }

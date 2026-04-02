@@ -287,6 +287,7 @@ mod tests {
             pipeline_yaml: VALID_YAML.into(),
             lease_epoch: 1,
             attempt: 1,
+            operation: "sync".to_string(),
         })));
 
         // Enqueue executor result.
