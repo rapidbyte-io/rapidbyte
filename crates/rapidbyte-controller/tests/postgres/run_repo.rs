@@ -129,6 +129,7 @@ async fn list_with_state_filter() {
         .list(
             RunFilter {
                 state: Some(RunState::Pending),
+                pipeline: None,
             },
             Pagination {
                 page_size: 10,
@@ -156,7 +157,10 @@ async fn list_pagination_cursor() {
 
     let page1 = repo
         .list(
-            RunFilter { state: None },
+            RunFilter {
+                state: None,
+                pipeline: None,
+            },
             Pagination {
                 page_size: 2,
                 page_token: None,
@@ -170,7 +174,10 @@ async fn list_pagination_cursor() {
 
     let page2 = repo
         .list(
-            RunFilter { state: None },
+            RunFilter {
+                state: None,
+                pipeline: None,
+            },
             Pagination {
                 page_size: 2,
                 page_token: page1.next_page_token,
@@ -197,7 +204,10 @@ async fn list_default_page_size() {
 
     let page = repo
         .list(
-            RunFilter { state: None },
+            RunFilter {
+                state: None,
+                pipeline: None,
+            },
             Pagination {
                 page_size: 0,
                 page_token: None,
