@@ -123,20 +123,26 @@ impl PipelineSource for FsPipelineSource {
             }
         }
 
-        match matches.len() {
-            0 => Err(PipelineSourceError::NotFound(name.to_string())),
-            1 => Ok(matches.into_iter().next().unwrap().1),
-            n => {
-                let paths: Vec<String> = matches
-                    .iter()
-                    .map(|(p, _)| p.display().to_string())
-                    .collect();
-                Err(PipelineSourceError::InvalidYaml(format!(
-                    "pipeline '{name}' defined in {n} files: {}; rename to make names unique",
-                    paths.join(", ")
-                )))
-            }
+        if matches.is_empty() {
+            return Err(PipelineSourceError::NotFound(name.to_string()));
         }
+
+        // Sort by path for deterministic selection, matching list() behavior.
+        matches.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+        if matches.len() > 1 {
+            let paths: Vec<String> = matches
+                .iter()
+                .map(|(p, _)| p.display().to_string())
+                .collect();
+            tracing::warn!(
+                name = %name,
+                files = %paths.join(", "),
+                "duplicate pipeline name found; using first by path order"
+            );
+        }
+
+        Ok(matches.into_iter().next().unwrap().1)
     }
 
     async fn connections_yaml(&self) -> Result<Option<String>, PipelineSourceError> {
