@@ -15,8 +15,8 @@ pub trait PipelineStore: Send + Sync {
     /// state transition in a single transaction to prevent races.
     ///
     /// Only tasks whose `operation` is included in `supported_operations` will be
-    /// considered. An empty slice is treated as "all operations" for backwards
-    /// compatibility with agents that registered before this field existed.
+    /// considered. An empty slice means no tasks match — the caller (`poll_task`)
+    /// is responsible for backwards-compat fallback (empty caps → sync-only).
     async fn assign_task(
         &self,
         agent_id: &str,

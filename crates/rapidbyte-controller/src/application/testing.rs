@@ -355,12 +355,8 @@ impl PipelineStore for FakePipelineStore {
             return Ok(None);
         }
 
-        // Build effective operation filter — empty means "all operations" (backwards compat)
-        let effective_ops: &[TaskOperation] = if supported_operations.is_empty() {
-            TaskOperation::ALL
-        } else {
-            supported_operations
-        };
+        // Empty means no tasks match. Caller (poll_task) handles backwards-compat.
+        let effective_ops: &[TaskOperation] = supported_operations;
 
         // 2. Find first pending task by created_at that matches a supported operation
         let pending_id = tasks

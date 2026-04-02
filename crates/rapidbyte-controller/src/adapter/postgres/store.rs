@@ -214,19 +214,14 @@ impl PipelineStore for PgPipelineStore {
             return Ok(None);
         }
 
-        // Build operation filter: empty supported_operations means "all operations"
-        // (backwards compatibility with agents that registered before this field existed).
-        let ops: Vec<String> = if supported_operations.is_empty() {
-            TaskOperation::ALL
-                .iter()
-                .map(|op| op.as_str().to_string())
-                .collect()
-        } else {
-            supported_operations
-                .iter()
-                .map(|op| op.as_str().to_string())
-                .collect()
-        };
+        // Build operation filter. The caller (poll_task) is responsible for
+        // backwards-compat fallback (empty caps → sync-only). If an empty
+        // slice reaches here, no tasks will match — this is correct behavior,
+        // not a bug.
+        let ops: Vec<String> = supported_operations
+            .iter()
+            .map(|op| op.as_str().to_string())
+            .collect();
 
         // Poll next pending task filtered by supported operations
         let row = sqlx::query(

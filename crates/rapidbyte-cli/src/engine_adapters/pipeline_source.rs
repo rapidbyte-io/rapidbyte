@@ -52,6 +52,16 @@ impl PipelineSource for FsPipelineSource {
                 continue;
             }
 
+            // Skip non-files (directories, symlinks, etc.)
+            let is_file = entry
+                .file_type()
+                .await
+                .map(|ft| ft.is_file())
+                .unwrap_or(false);
+            if !is_file {
+                continue;
+            }
+
             // Skip connections files — they are not pipelines.
             let stem = path
                 .file_stem()
@@ -61,7 +71,13 @@ impl PipelineSource for FsPipelineSource {
                 continue;
             }
 
-            let yaml = Self::read_file(&path).await?;
+            let yaml = match Self::read_file(&path).await {
+                Ok(y) => y,
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "skipping unreadable pipeline file");
+                    continue;
+                }
+            };
             match rapidbyte_pipeline_config::extract_pipeline_name(&yaml) {
                 Ok(name) if name != "unknown" && !name.is_empty() => {
                     if seen_names.contains(&name) {
@@ -106,6 +122,14 @@ impl PipelineSource for FsPipelineSource {
             if ext != "yml" && ext != "yaml" {
                 continue;
             }
+            let is_file = entry
+                .file_type()
+                .await
+                .map(|ft| ft.is_file())
+                .unwrap_or(false);
+            if !is_file {
+                continue;
+            }
             let stem = path
                 .file_stem()
                 .and_then(|s| s.to_str())
@@ -114,7 +138,9 @@ impl PipelineSource for FsPipelineSource {
                 continue;
             }
 
-            let yaml = Self::read_file(&path).await?;
+            let Ok(yaml) = Self::read_file(&path).await else {
+                continue; // skip unreadable files
+            };
             if let Ok(pipeline_name) = rapidbyte_pipeline_config::extract_pipeline_name(&yaml) {
                 if pipeline_name != "unknown" && !pipeline_name.is_empty() && pipeline_name == name
                 {
