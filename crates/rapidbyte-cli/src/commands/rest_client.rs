@@ -90,7 +90,10 @@ impl RestClient {
         let status = resp.status();
         if !status.is_success() {
             // Read as text first — error responses may not be valid JSON
-            let text = resp.text().await.unwrap_or_default();
+            let text = match resp.text().await {
+                Ok(t) => t,
+                Err(e) => format!("failed to read response body: {e}"),
+            };
             let msg = serde_json::from_str::<serde_json::Value>(&text)
                 .ok()
                 .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
@@ -169,4 +172,38 @@ pub fn resolve_controller_and_token(
     });
 
     Ok((url, token))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn url_encode_preserves_safe_chars() {
+        assert_eq!(
+            url_encode("hello-world_123.test~ok"),
+            "hello-world_123.test~ok"
+        );
+    }
+
+    #[test]
+    fn url_encode_encodes_space_and_slash() {
+        let encoded = url_encode("my pipeline/test");
+        assert!(encoded.contains("%20"), "space should be encoded as %20");
+        assert!(encoded.contains("%2F"), "slash should be encoded as %2F");
+        assert!(!encoded.contains(' '), "raw space must not appear");
+        assert!(!encoded.contains('/'), "raw slash must not appear");
+    }
+
+    #[test]
+    fn url_encode_encodes_query_chars() {
+        let encoded = url_encode("tag=tier-1&extra");
+        assert!(encoded.contains("%3D"), "= should be encoded as %3D");
+        assert!(encoded.contains("%26"), "& should be encoded as %26");
+    }
+
+    #[test]
+    fn url_encode_empty_string() {
+        assert_eq!(url_encode(""), "");
+    }
 }

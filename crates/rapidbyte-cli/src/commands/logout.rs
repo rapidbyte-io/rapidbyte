@@ -59,3 +59,20 @@ pub fn execute(controller_url: Option<&str>) -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn yaml_key_creates_string_value() {
+        let key = yaml_key("test");
+        assert_eq!(key, serde_yaml::Value::String("test".to_string()));
+    }
+
+    #[test]
+    fn yaml_key_empty_string() {
+        let key = yaml_key("");
+        assert_eq!(key, serde_yaml::Value::String(String::new()));
+    }
+}

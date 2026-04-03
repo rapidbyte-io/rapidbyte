@@ -91,3 +91,96 @@ pub fn write_config(value: &serde_yaml::Value) -> Result<()> {
     })?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// All tests that mutate the `HOME` environment variable must hold this
+    /// lock for their entire duration so they do not race with each other.
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Set `HOME` to `new_value`, returning the previous value so the caller
+    /// can restore it later.
+    fn set_home(new_value: &std::path::Path) -> Option<String> {
+        let original = std::env::var("HOME").ok();
+        // SAFETY: guarded by HOME_LOCK; no other thread may touch HOME while
+        // the lock is held.
+        unsafe { std::env::set_var("HOME", new_value) };
+        original
+    }
+
+    /// Restore `HOME` to `original` (or remove it if it was unset).
+    fn restore_home(original: Option<String>) {
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn config_path_succeeds_when_home_is_set() {
+        // HOME is always set in CI/dev environments, so config_path() must
+        // return Ok and the tail of the path must be the expected file.
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let result = config_path();
+        assert!(
+            result.is_ok(),
+            "config_path should succeed when HOME is set"
+        );
+        let path = result.unwrap();
+        assert!(
+            path.ends_with(".rapidbyte/config.yaml"),
+            "expected path to end with .rapidbyte/config.yaml, got: {path:?}"
+        );
+    }
+
+    #[test]
+    fn read_config_returns_empty_mapping_when_no_file() {
+        // Point HOME at a freshly-created empty tempdir so no config file
+        // exists; read_config must return an empty mapping rather than Err.
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original = set_home(dir.path());
+        let result = read_config();
+        restore_home(original);
+
+        let cfg = result.unwrap();
+        assert!(
+            cfg.as_mapping().is_some(),
+            "expected empty mapping, got: {cfg:?}"
+        );
+    }
+
+    #[test]
+    fn write_and_read_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let _guard = HOME_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original = set_home(dir.path());
+
+        let mut mapping = serde_yaml::Mapping::new();
+        mapping.insert("key".into(), "value".into());
+        let value = serde_yaml::Value::Mapping(mapping);
+
+        let write_result = write_config(&value);
+        let read_result = read_config();
+        restore_home(original);
+
+        write_result.expect("write_config failed");
+        let read_back = read_result.expect("read_config failed");
+        assert_eq!(
+            read_back.get("key").and_then(|v| v.as_str()),
+            Some("value"),
+            "round-trip value mismatch"
+        );
+    }
+}
