@@ -35,6 +35,71 @@ impl Verbosity {
     }
 }
 
+// ── Flag group structs ────────────────────────────────────────────────────────
+
+/// Controller connection flags (distributed mode).
+#[derive(Debug, Clone, clap::Args)]
+pub(crate) struct ControllerFlags {
+    /// Controller gRPC endpoint (enables distributed mode)
+    #[arg(long, env = "RAPIDBYTE_CONTROLLER")]
+    pub controller: Option<String>,
+
+    /// Bearer token for authenticated controller RPCs
+    #[arg(long, env = "RAPIDBYTE_AUTH_TOKEN")]
+    pub auth_token: Option<String>,
+
+    /// Custom CA certificate for TLS controller/Flight connections
+    #[arg(long, env = "RAPIDBYTE_TLS_CA_CERT")]
+    pub tls_ca_cert: Option<PathBuf>,
+
+    /// Optional TLS server name override for controller/Flight connections
+    #[arg(long, env = "RAPIDBYTE_TLS_DOMAIN")]
+    pub tls_domain: Option<String>,
+}
+
+/// Vault secret-provider flags.
+#[derive(Debug, Clone, clap::Args)]
+#[allow(clippy::struct_field_names)]
+pub(crate) struct VaultFlags {
+    /// Vault server address for secret resolution
+    #[arg(long, env = "VAULT_ADDR")]
+    pub vault_addr: Option<String>,
+
+    /// Vault authentication token
+    #[arg(long, env = "VAULT_TOKEN")]
+    pub vault_token: Option<String>,
+
+    /// Vault `AppRole` role ID
+    #[arg(long, env = "VAULT_ROLE_ID")]
+    pub vault_role_id: Option<String>,
+
+    /// Vault `AppRole` secret ID
+    #[arg(long, env = "VAULT_SECRET_ID")]
+    pub vault_secret_id: Option<String>,
+}
+
+/// OCI plugin-registry flags.
+#[derive(Debug, Clone, clap::Args)]
+pub(crate) struct RegistryFlags {
+    /// Default OCI registry for plugin resolution (e.g. registry.example.com/plugins)
+    #[arg(long, env = "RAPIDBYTE_REGISTRY_URL")]
+    pub registry_url: Option<String>,
+
+    /// Use HTTP instead of HTTPS for plugin registry (for local dev registries)
+    #[arg(long, env = "RAPIDBYTE_REGISTRY_INSECURE")]
+    pub registry_insecure: bool,
+
+    /// Plugin signature trust policy (skip, warn, verify)
+    #[arg(long, env = "RAPIDBYTE_TRUST_POLICY", default_value = "skip")]
+    pub trust_policy: String,
+
+    /// Trusted Ed25519 public key files for plugin verification (can be repeated)
+    #[arg(long, action = clap::ArgAction::Append)]
+    pub trust_key: Vec<PathBuf>,
+}
+
+// ── Top-level CLI ─────────────────────────────────────────────────────────────
+
 #[derive(Parser)]
 #[command(
     name = "rapidbyte",
@@ -44,22 +109,6 @@ impl Verbosity {
 struct Cli {
     #[command(subcommand)]
     command: Commands,
-
-    /// Controller gRPC endpoint (enables distributed mode)
-    #[arg(long, global = true, env = "RAPIDBYTE_CONTROLLER")]
-    controller: Option<String>,
-
-    /// Bearer token for authenticated controller RPCs
-    #[arg(long, global = true, env = "RAPIDBYTE_AUTH_TOKEN")]
-    auth_token: Option<String>,
-
-    /// Custom CA certificate for TLS controller/Flight connections
-    #[arg(long, global = true, env = "RAPIDBYTE_TLS_CA_CERT")]
-    tls_ca_cert: Option<PathBuf>,
-
-    /// Optional TLS server name override for controller/Flight connections
-    #[arg(long, global = true, env = "RAPIDBYTE_TLS_DOMAIN")]
-    tls_domain: Option<String>,
 
     /// Log level (error, warn, info, debug, trace)
     #[arg(long, default_value = "info", global = true)]
@@ -72,43 +121,6 @@ struct Cli {
     /// Suppress all output (exit code only, errors on stderr)
     #[arg(short, long, global = true)]
     quiet: bool,
-
-    /// Default OCI registry for plugin resolution (e.g. registry.example.com/plugins)
-    #[arg(long, global = true, env = "RAPIDBYTE_REGISTRY_URL")]
-    registry_url: Option<String>,
-
-    /// Use HTTP instead of HTTPS for plugin registry (for local dev registries)
-    #[arg(long, global = true, env = "RAPIDBYTE_REGISTRY_INSECURE")]
-    registry_insecure: bool,
-
-    /// Plugin signature trust policy (skip, warn, verify)
-    #[arg(
-        long,
-        global = true,
-        env = "RAPIDBYTE_TRUST_POLICY",
-        default_value = "skip"
-    )]
-    trust_policy: String,
-
-    /// Trusted Ed25519 public key files for plugin verification (can be repeated)
-    #[arg(long, global = true, action = clap::ArgAction::Append)]
-    trust_key: Vec<PathBuf>,
-
-    /// Vault server address for secret resolution
-    #[arg(long, global = true, env = "VAULT_ADDR")]
-    vault_addr: Option<String>,
-
-    /// Vault authentication token
-    #[arg(long, global = true, env = "VAULT_TOKEN")]
-    vault_token: Option<String>,
-
-    /// Vault `AppRole` role ID
-    #[arg(long, global = true, env = "VAULT_ROLE_ID")]
-    vault_role_id: Option<String>,
-
-    /// Vault `AppRole` secret ID
-    #[arg(long, global = true, env = "VAULT_SECRET_ID")]
-    vault_secret_id: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -117,16 +129,26 @@ enum Commands {
     Run {
         /// Path to pipeline YAML file
         pipeline: PathBuf,
+        #[command(flatten)]
+        ctrl: ControllerFlags,
+        #[command(flatten)]
+        vault: VaultFlags,
+        #[command(flatten)]
+        registry: RegistryFlags,
     },
     /// Show the current status of a distributed run
     Status {
         /// Controller run ID
         run_id: String,
+        #[command(flatten)]
+        ctrl: ControllerFlags,
     },
     /// Stream progress for a distributed run until it reaches a terminal state
     Watch {
         /// Controller run ID
         run_id: String,
+        #[command(flatten)]
+        ctrl: ControllerFlags,
     },
     /// List recent distributed runs
     ListRuns {
@@ -136,6 +158,8 @@ enum Commands {
         /// Optional state filter (pending, running, completed, failed, cancelled)
         #[arg(long)]
         state: Option<String>,
+        #[command(flatten)]
+        ctrl: ControllerFlags,
     },
     /// Validate pipeline configuration and connectivity
     Check {
@@ -144,11 +168,19 @@ enum Commands {
         /// Run apply phase after validation passes (provision resources)
         #[arg(long)]
         apply: bool,
+        #[command(flatten)]
+        vault: VaultFlags,
+        #[command(flatten)]
+        registry: RegistryFlags,
     },
     /// Discover available streams from a source plugin
     Discover {
         /// Path to pipeline YAML file
         pipeline: PathBuf,
+        #[command(flatten)]
+        vault: VaultFlags,
+        #[command(flatten)]
+        registry: RegistryFlags,
     },
     /// Tear down resources provisioned by a pipeline
     Teardown {
@@ -157,11 +189,17 @@ enum Commands {
         /// Reason for teardown (forwarded to plugins)
         #[arg(long, default_value = "pipeline_deleted")]
         reason: String,
+        #[command(flatten)]
+        vault: VaultFlags,
+        #[command(flatten)]
+        registry: RegistryFlags,
     },
     /// Manage plugins (pull, push, inspect, list, remove, scaffold)
     Plugin {
         #[command(subcommand)]
         command: PluginCommands,
+        #[command(flatten)]
+        registry: RegistryFlags,
     },
     /// Launch interactive dev shell
     Dev,
@@ -176,6 +214,9 @@ enum Commands {
         /// Shared signing key for preview tickets (hex or raw string)
         #[arg(long, env = "RAPIDBYTE_SIGNING_KEY")]
         signing_key: Option<String>,
+        /// Bearer token for authenticated controller RPCs
+        #[arg(long, env = "RAPIDBYTE_AUTH_TOKEN")]
+        auth_token: Option<String>,
         /// Explicitly disable controller auth for local development only
         #[arg(long)]
         allow_unauthenticated: bool,
@@ -203,6 +244,8 @@ enum Commands {
         /// REST API listen address (e.g. 0.0.0.0:8080). If not set, REST is disabled.
         #[arg(long, env = "RAPIDBYTE_REST_LISTEN")]
         rest_listen: Option<String>,
+        #[command(flatten)]
+        vault: VaultFlags,
     },
     /// Start an agent worker (long-running)
     Agent {
@@ -215,6 +258,17 @@ enum Commands {
         /// Prometheus metrics listen address (e.g. 127.0.0.1:9191)
         #[arg(long, env = "RAPIDBYTE_METRICS_LISTEN")]
         metrics_listen: Option<String>,
+        /// Bearer token for authenticated RPCs
+        #[arg(long, env = "RAPIDBYTE_AUTH_TOKEN")]
+        auth_token: Option<String>,
+        /// Custom CA certificate for TLS controller connections
+        #[arg(long, env = "RAPIDBYTE_TLS_CA_CERT")]
+        tls_ca_cert: Option<PathBuf>,
+        /// Optional TLS server name override
+        #[arg(long, env = "RAPIDBYTE_TLS_DOMAIN")]
+        tls_domain: Option<String>,
+        #[command(flatten)]
+        registry: RegistryFlags,
     },
 }
 
@@ -297,6 +351,8 @@ pub(crate) enum PluginCommands {
         output: Option<String>,
     },
 }
+
+// ── Helper functions ──────────────────────────────────────────────────────────
 
 /// Resolve controller URL from config file (`~/.rapidbyte/config.yaml`).
 /// CLI flag and env var are already handled by clap's `env` attribute.
@@ -399,6 +455,44 @@ fn build_secret_providers(
     Ok(providers)
 }
 
+/// Build a `TlsClientConfig` from `ControllerFlags`, returning `None` if not configured.
+fn make_tls_config(ctrl: &ControllerFlags) -> Option<commands::transport::TlsClientConfig> {
+    let tls = commands::transport::TlsClientConfig {
+        ca_cert_path: ctrl.tls_ca_cert.clone(),
+        domain_name: ctrl.tls_domain.clone(),
+    };
+    tls.is_configured().then_some(tls)
+}
+
+/// Parse `RegistryFlags` into a `RegistryConfig`, returning an error if the
+/// trust policy name is invalid.
+fn build_registry_config(
+    reg: &RegistryFlags,
+) -> anyhow::Result<rapidbyte_registry::RegistryConfig> {
+    let trust_policy = rapidbyte_registry::TrustPolicy::from_str_name(&reg.trust_policy)?;
+    Ok(rapidbyte_registry::RegistryConfig {
+        insecure: reg.registry_insecure,
+        default_registry: rapidbyte_registry::normalize_registry_url_option(
+            reg.registry_url.as_deref(),
+        ),
+        trust_policy,
+        trusted_key_paths: reg.trust_key.clone(),
+        ..Default::default()
+    })
+}
+
+/// Build `SecretProviders` from `VaultFlags`.
+fn try_build_secrets_from_vault(vault: &VaultFlags) -> Option<rapidbyte_secrets::SecretProviders> {
+    try_build_secrets(
+        vault.vault_addr.as_deref(),
+        vault.vault_token.as_deref(),
+        vault.vault_role_id.as_deref(),
+        vault.vault_secret_id.as_deref(),
+    )
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────────
+
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
 async fn main() -> ExitCode {
@@ -424,54 +518,37 @@ async fn main() -> ExitCode {
     };
     logging::init(verbosity, &cli.log_level, Some(&otel_guard));
 
-    let tls = commands::transport::TlsClientConfig {
-        ca_cert_path: cli.tls_ca_cert.clone(),
-        domain_name: cli.tls_domain.clone(),
-    };
-    let tls = tls.is_configured().then_some(tls);
-
-    let trust_policy = match rapidbyte_registry::TrustPolicy::from_str_name(&cli.trust_policy) {
-        Ok(policy) => policy,
-        Err(e) => {
-            eprintln!("{} {e:#}", console::style("\u{2718}").red().bold(),);
-            return ExitCode::FAILURE;
-        }
-    };
-    let registry_config = rapidbyte_registry::RegistryConfig {
-        insecure: cli.registry_insecure,
-        default_registry: rapidbyte_registry::normalize_registry_url_option(
-            cli.registry_url.as_deref(),
-        ),
-        trust_policy,
-        trusted_key_paths: cli.trust_key.clone(),
-        ..Default::default()
-    };
-
-    let vault_addr = cli.vault_addr.as_deref();
-    let vault_token = cli.vault_token.as_deref();
-    let vault_role_id = cli.vault_role_id.as_deref();
-    let vault_secret_id = cli.vault_secret_id.as_deref();
-
     let result = match cli.command {
-        Commands::Run { pipeline } => {
-            let controller_url = resolve_controller_url(cli.controller.clone(), false);
+        Commands::Run {
+            pipeline,
+            ctrl,
+            vault,
+            registry,
+        } => {
+            let registry_config = match build_registry_config(&registry) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("{} {e:#}", console::style("\u{2718}").red().bold());
+                    return ExitCode::FAILURE;
+                }
+            };
+            let controller_url = resolve_controller_url(ctrl.controller.clone(), false);
             // Only build secret providers for local mode — distributed mode
             // delegates secret resolution to the controller.
             let secrets = if controller_url.is_none() {
-                let Some(s) =
-                    try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id)
-                else {
+                let Some(s) = try_build_secrets_from_vault(&vault) else {
                     return ExitCode::FAILURE;
                 };
                 s
             } else {
                 rapidbyte_secrets::SecretProviders::new()
             };
+            let tls = make_tls_config(&ctrl);
             commands::run::execute(
                 &pipeline,
                 verbosity,
                 controller_url.as_deref(),
-                cli.auth_token.as_deref(),
+                ctrl.auth_token.as_deref(),
                 tls.as_ref(),
                 &otel_guard,
                 &registry_config,
@@ -479,71 +556,113 @@ async fn main() -> ExitCode {
             )
             .await
         }
-        Commands::Status { run_id } => {
-            let controller_url = resolve_controller_url(cli.controller.clone(), true);
+        Commands::Status { run_id, ctrl } => {
+            let controller_url = resolve_controller_url(ctrl.controller.clone(), true);
+            let tls = make_tls_config(&ctrl);
             commands::status::execute(
                 controller_url.as_deref(),
                 &run_id,
                 verbosity,
-                cli.auth_token.as_deref(),
+                ctrl.auth_token.as_deref(),
                 tls.as_ref(),
             )
             .await
         }
-        Commands::Watch { run_id } => {
-            let controller_url = resolve_controller_url(cli.controller.clone(), true);
+        Commands::Watch { run_id, ctrl } => {
+            let controller_url = resolve_controller_url(ctrl.controller.clone(), true);
+            let tls = make_tls_config(&ctrl);
             commands::watch::execute(
                 controller_url.as_deref(),
                 &run_id,
                 verbosity,
-                cli.auth_token.as_deref(),
+                ctrl.auth_token.as_deref(),
                 tls.as_ref(),
             )
             .await
         }
-        Commands::ListRuns { limit, state } => {
-            let controller_url = resolve_controller_url(cli.controller.clone(), true);
+        Commands::ListRuns { limit, state, ctrl } => {
+            let controller_url = resolve_controller_url(ctrl.controller.clone(), true);
+            let tls = make_tls_config(&ctrl);
             commands::list_runs::execute(
                 controller_url.as_deref(),
                 limit,
                 state.as_deref(),
                 verbosity,
-                cli.auth_token.as_deref(),
+                ctrl.auth_token.as_deref(),
                 tls.as_ref(),
             )
             .await
         }
-        Commands::Check { pipeline, apply } => {
-            let Some(secrets) =
-                try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id)
-            else {
+        Commands::Check {
+            pipeline,
+            apply,
+            vault,
+            registry,
+        } => {
+            let registry_config = match build_registry_config(&registry) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("{} {e:#}", console::style("\u{2718}").red().bold());
+                    return ExitCode::FAILURE;
+                }
+            };
+            let Some(secrets) = try_build_secrets_from_vault(&vault) else {
                 return ExitCode::FAILURE;
             };
             commands::check::execute(&pipeline, verbosity, &registry_config, &secrets, apply).await
         }
-        Commands::Discover { pipeline } => {
-            let Some(secrets) =
-                try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id)
-            else {
+        Commands::Discover {
+            pipeline,
+            vault,
+            registry,
+        } => {
+            let registry_config = match build_registry_config(&registry) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("{} {e:#}", console::style("\u{2718}").red().bold());
+                    return ExitCode::FAILURE;
+                }
+            };
+            let Some(secrets) = try_build_secrets_from_vault(&vault) else {
                 return ExitCode::FAILURE;
             };
             commands::discover::execute(&pipeline, verbosity, &registry_config, &secrets).await
         }
-        Commands::Teardown { pipeline, reason } => {
-            let Some(secrets) =
-                try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id)
-            else {
+        Commands::Teardown {
+            pipeline,
+            reason,
+            vault,
+            registry,
+        } => {
+            let registry_config = match build_registry_config(&registry) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("{} {e:#}", console::style("\u{2718}").red().bold());
+                    return ExitCode::FAILURE;
+                }
+            };
+            let Some(secrets) = try_build_secrets_from_vault(&vault) else {
                 return ExitCode::FAILURE;
             };
             commands::teardown::execute(&pipeline, &reason, verbosity, &registry_config, &secrets)
                 .await
         }
-        Commands::Plugin { command } => commands::plugin::execute(command, &registry_config).await,
+        Commands::Plugin { command, registry } => {
+            let registry_config = match build_registry_config(&registry) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("{} {e:#}", console::style("\u{2718}").red().bold());
+                    return ExitCode::FAILURE;
+                }
+            };
+            commands::plugin::execute(command, &registry_config).await
+        }
         Commands::Dev => commands::dev::execute().await,
         Commands::Controller {
             listen,
             metadata_database_url,
             signing_key,
+            auth_token,
             allow_unauthenticated,
             allow_insecure_signing_key,
             reconciliation_timeout_seconds,
@@ -553,28 +672,24 @@ async fn main() -> ExitCode {
             registry_url,
             registry_insecure,
             rest_listen,
+            vault,
         } => {
-            // Controller-subcommand registry flags override global ones.
-            let ctrl_registry_url = registry_url
-                .as_deref()
-                .or(registry_config.default_registry.as_deref());
-            let ctrl_registry_insecure = registry_insecure || registry_config.insecure;
             commands::controller::execute(
                 &listen,
                 metadata_database_url.as_deref(),
                 signing_key.as_deref(),
-                cli.auth_token.as_deref(),
+                auth_token.as_deref(),
                 allow_unauthenticated,
                 allow_insecure_signing_key,
                 reconciliation_timeout_seconds.map(std::time::Duration::from_secs),
                 tls_cert.as_deref(),
                 tls_key.as_deref(),
                 metrics_listen.as_deref(),
-                ctrl_registry_url,
-                ctrl_registry_insecure,
+                registry_url.as_deref(),
+                registry_insecure,
                 rest_listen.as_deref(),
                 otel_guard,
-                match try_build_secrets(vault_addr, vault_token, vault_role_id, vault_secret_id) {
+                match try_build_secrets_from_vault(&vault) {
                     Some(s) => s,
                     None => return ExitCode::FAILURE,
                 },
@@ -585,9 +700,20 @@ async fn main() -> ExitCode {
             controller,
             max_tasks,
             metrics_listen,
+            auth_token,
+            tls_ca_cert,
+            tls_domain,
+            registry,
         } => {
-            let mut trusted_key_pems = Vec::with_capacity(cli.trust_key.len());
-            for path in &cli.trust_key {
+            let registry_config = match build_registry_config(&registry) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("{} {e:#}", console::style("\u{2718}").red().bold());
+                    return ExitCode::FAILURE;
+                }
+            };
+            let mut trusted_key_pems = Vec::with_capacity(registry.trust_key.len());
+            for path in &registry.trust_key {
                 match std::fs::read_to_string(path) {
                     Ok(pem) => trusted_key_pems.push(pem),
                     Err(e) => {
@@ -603,13 +729,13 @@ async fn main() -> ExitCode {
             commands::agent::execute(
                 &controller,
                 max_tasks,
-                cli.auth_token.as_deref(),
-                cli.tls_ca_cert.as_deref(),
-                cli.tls_domain.as_deref(),
+                auth_token.as_deref(),
+                tls_ca_cert.as_deref(),
+                tls_domain.as_deref(),
                 metrics_listen.as_deref(),
-                cli.registry_url.as_deref(),
-                cli.registry_insecure,
-                &cli.trust_policy,
+                registry_config.default_registry.as_deref(),
+                registry_config.insecure,
+                &registry.trust_policy,
                 trusted_key_pems,
                 otel_guard,
             )
@@ -657,7 +783,7 @@ mod tests {
 
     #[test]
     fn controller_registry_url_falls_back_to_global() {
-        // Simulates: rapidbyte --registry-url X controller (no --registry-url on controller)
+        // Controller variant still has its own registry_url field.
         let subcommand_url: Option<&str> = None;
         let global_url: Option<&str> = Some("registry.example.com");
         let effective = subcommand_url.or(global_url);
@@ -689,5 +815,65 @@ mod tests {
     fn check_command_rejects_dry_run_flag() {
         let parsed = Cli::try_parse_from(["rapidbyte", "check", "pipe.yaml", "--dry-run"]);
         assert!(parsed.is_err());
+    }
+
+    // ── New per-command flag placement tests ──────────────────────────
+
+    #[test]
+    fn run_accepts_vault_flags_after_subcommand() {
+        let parsed = Cli::try_parse_from([
+            "rapidbyte",
+            "run",
+            "pipe.yaml",
+            "--vault-addr",
+            "http://vault:8200",
+        ]);
+        assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn status_accepts_controller_flag_after_subcommand() {
+        let parsed = Cli::try_parse_from([
+            "rapidbyte",
+            "status",
+            "abc123",
+            "--controller",
+            "http://ctrl:9090",
+        ]);
+        assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn dev_rejects_vault_flag() {
+        // dev has no vault flags
+        let parsed = Cli::try_parse_from(["rapidbyte", "dev", "--vault-addr", "http://vault:8200"]);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn plugin_accepts_registry_url_flag() {
+        let parsed = Cli::try_parse_from([
+            "rapidbyte",
+            "plugin",
+            "--registry-url",
+            "registry.example.com",
+            "list",
+        ]);
+        assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn agent_accepts_registry_and_auth_flags() {
+        let parsed = Cli::try_parse_from([
+            "rapidbyte",
+            "agent",
+            "--controller",
+            "http://ctrl:9090",
+            "--auth-token",
+            "tok",
+            "--registry-url",
+            "registry.example.com",
+        ]);
+        assert!(parsed.is_ok());
     }
 }
