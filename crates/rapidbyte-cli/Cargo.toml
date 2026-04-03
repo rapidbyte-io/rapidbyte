@@ -32,6 +32,7 @@ tonic = { workspace = true }
 rustls = { workspace = true }
 uuid = { workspace = true }
 serde_yaml = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 arrow = { version = "53", features = ["prettyprint"] }
 arrow-flight = { workspace = true }
 tokio-stream = { workspace = true }
