@@ -1,6 +1,6 @@
 //! `rapidbyte version` — print version information.
 
-/// Print the binary version to stderr.
+/// Print the binary version to stdout.
 pub fn execute() {
-    eprintln!("rapidbyte {}", env!("CARGO_PKG_VERSION"));
+    println!("rapidbyte {}", env!("CARGO_PKG_VERSION"));
 }

@@ -37,6 +37,7 @@ impl RestClient {
     /// Returns `Err` if the underlying HTTP client cannot be constructed.
     pub fn new(base_url: &str, auth_token: Option<&str>) -> Result<Self> {
         let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
             .build()
             .context("failed to create HTTP client")?;
         Ok(Self {
@@ -157,9 +158,12 @@ pub fn resolve_controller_and_token(
         // Only use the stored token when the URL matches the one in config, or
         // when no explicit URL was provided (meaning the URL itself came from
         // config and therefore matches).
+        let normalize = |u: &str| u.trim_end_matches('/').to_lowercase();
         match &ctrl.controller {
             None => Some(stored_token),
-            Some(explicit_url) if explicit_url == stored_url => Some(stored_token),
+            Some(explicit_url) if normalize(explicit_url) == normalize(stored_url) => {
+                Some(stored_token)
+            }
             Some(_) => None, // Different URL — don't leak credentials
         }
     });
