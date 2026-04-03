@@ -203,6 +203,72 @@ enum Commands {
     },
     /// Launch interactive dev shell
     Dev,
+    /// Pause scheduled runs for a pipeline
+    Pause {
+        /// Pipeline name
+        #[arg(long)]
+        pipeline: String,
+        #[command(flatten)]
+        ctrl: ControllerFlags,
+    },
+    /// Resume scheduled runs for a pipeline
+    Resume {
+        /// Pipeline name
+        #[arg(long)]
+        pipeline: String,
+        #[command(flatten)]
+        ctrl: ControllerFlags,
+    },
+    /// Clear sync state (cursors). Next run = full refresh
+    Reset {
+        /// Pipeline name
+        #[arg(long)]
+        pipeline: String,
+        /// Restrict reset to a single stream
+        #[arg(long)]
+        stream: Option<String>,
+        #[command(flatten)]
+        ctrl: ControllerFlags,
+    },
+    /// Check data freshness for pipelines
+    Freshness {
+        /// Filter by tag
+        #[arg(long)]
+        tag: Option<String>,
+        #[command(flatten)]
+        ctrl: ControllerFlags,
+    },
+    /// View pipeline logs
+    Logs {
+        /// Pipeline name
+        #[arg(long)]
+        pipeline: String,
+        /// Filter by run ID
+        #[arg(long)]
+        run_id: Option<String>,
+        /// Maximum number of entries to return
+        #[arg(long, default_value_t = 20)]
+        limit: u32,
+        #[command(flatten)]
+        ctrl: ControllerFlags,
+    },
+    /// Store authentication token for a controller
+    Login {
+        /// Controller URL
+        #[arg(long)]
+        controller: String,
+        /// Bearer token (prompts if omitted)
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Remove stored authentication token
+    Logout {
+        /// Controller URL (removes default if omitted)
+        #[arg(long)]
+        controller: Option<String>,
+    },
+    /// Print version information
+    Version,
     /// Start the controller server (long-running)
     Controller {
         /// gRPC listen address
@@ -356,7 +422,7 @@ pub(crate) enum PluginCommands {
 
 /// Resolve controller URL from config file (`~/.rapidbyte/config.yaml`).
 /// CLI flag and env var are already handled by clap's `env` attribute.
-fn controller_url_from_config() -> Option<String> {
+pub(crate) fn controller_url_from_config() -> Option<String> {
     let home = std::env::var("HOME").ok()?;
     let config_path = std::path::PathBuf::from(home)
         .join(".rapidbyte")
@@ -658,6 +724,30 @@ async fn main() -> ExitCode {
             commands::plugin::execute(command, &registry_config).await
         }
         Commands::Dev => commands::dev::execute().await,
+        Commands::Pause { pipeline, ctrl } => commands::pause::execute(&ctrl, &pipeline).await,
+        Commands::Resume { pipeline, ctrl } => commands::resume::execute(&ctrl, &pipeline).await,
+        Commands::Reset {
+            pipeline,
+            stream,
+            ctrl,
+        } => commands::reset::execute(&ctrl, &pipeline, stream.as_deref()).await,
+        Commands::Freshness { tag, ctrl } => {
+            commands::freshness::execute(&ctrl, tag.as_deref()).await
+        }
+        Commands::Logs {
+            pipeline,
+            run_id,
+            limit,
+            ctrl,
+        } => commands::logs::execute(&ctrl, &pipeline, run_id.as_deref(), limit).await,
+        Commands::Login { controller, token } => {
+            commands::login::execute(&controller, token.as_deref())
+        }
+        Commands::Logout { controller } => commands::logout::execute(controller.as_deref()),
+        Commands::Version => {
+            commands::version_cmd::execute();
+            Ok(())
+        }
         Commands::Controller {
             listen,
             metadata_database_url,
