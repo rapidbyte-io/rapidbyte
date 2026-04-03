@@ -28,11 +28,21 @@ pub fn execute(controller_url: Option<&str>) -> Result<()> {
 
     let mut modified = false;
 
-    if controller_url.is_some() {
+    if let Some(target_url) = controller_url {
+        // Only remove token if the stored URL matches the target
         if let Some(ctrl) = map.get_mut(yaml_key("controller")) {
             if let Some(ctrl_map) = ctrl.as_mapping_mut() {
-                if ctrl_map.remove(yaml_key("token")).is_some() {
-                    modified = true;
+                let stored_url = ctrl_map
+                    .get(yaml_key("url"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if stored_url.trim_end_matches('/') == target_url.trim_end_matches('/') {
+                    if ctrl_map.remove(yaml_key("token")).is_some() {
+                        modified = true;
+                    }
+                } else {
+                    eprintln!("Stored controller URL ({stored_url}) does not match {target_url}");
+                    return Ok(());
                 }
             }
         }

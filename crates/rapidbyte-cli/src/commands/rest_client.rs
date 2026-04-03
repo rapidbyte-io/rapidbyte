@@ -23,7 +23,7 @@ pub(crate) fn url_encode(s: &str) -> String {
 }
 
 /// A thin wrapper around `reqwest::Client` with base URL and optional auth.
-pub struct RestClient {
+pub(crate) struct RestClient {
     base_url: String,
     client: reqwest::Client,
     auth_token: Option<String>,
@@ -87,16 +87,22 @@ impl RestClient {
 
     async fn handle_response(&self, resp: reqwest::Response) -> Result<serde_json::Value> {
         let status = resp.status();
-        let body: serde_json::Value = resp.json().await.context("failed to parse JSON")?;
         if !status.is_success() {
-            let msg = body
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("unknown error");
+            // Read as text first — error responses may not be valid JSON
+            let text = resp.text().await.unwrap_or_default();
+            let msg = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("error")?.get("message")?.as_str().map(String::from))
+                .unwrap_or_else(|| {
+                    if text.is_empty() {
+                        "unknown error".to_string()
+                    } else {
+                        text.chars().take(200).collect()
+                    }
+                });
             bail!("{msg} (HTTP {status})");
         }
-        Ok(body)
+        resp.json().await.context("failed to parse response JSON")
     }
 }
 

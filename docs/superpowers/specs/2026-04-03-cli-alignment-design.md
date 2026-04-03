@@ -146,7 +146,7 @@ controller:
 New shared module: `commands/config.rs`
 
 ```rust
-pub fn config_path() -> PathBuf;
+pub fn config_path() -> Result<PathBuf>;
 pub fn read_config() -> Result<serde_yaml::Value>;
 pub fn write_config(value: &serde_yaml::Value) -> Result<()>;
 ```
