@@ -158,7 +158,7 @@ pub fn resolve_controller_and_token(
         // Only use the stored token when the URL matches the one in config, or
         // when no explicit URL was provided (meaning the URL itself came from
         // config and therefore matches).
-        let normalize = |u: &str| u.trim_end_matches('/').to_lowercase();
+        let normalize = |u: &str| u.trim_end_matches('/').to_owned();
         match &ctrl.controller {
             None => Some(stored_token),
             Some(explicit_url) if normalize(explicit_url) == normalize(stored_url) => {

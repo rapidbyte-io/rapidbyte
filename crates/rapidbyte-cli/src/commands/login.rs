@@ -1,8 +1,6 @@
 //! `rapidbyte login` — store an authentication token for a controller.
 
-use std::io::BufRead as _;
-
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use super::config;
 
@@ -23,9 +21,10 @@ pub fn execute(controller_url: &str, token: Option<&str>) -> Result<()> {
         t
     } else {
         eprint!("Token: ");
-        let mut input = String::new();
-        std::io::stdin().lock().read_line(&mut input)?;
-        let t = input.trim().to_string();
+        let t = rpassword::read_password()
+            .context("failed to read token")?
+            .trim()
+            .to_string();
         if t.is_empty() {
             bail!("token cannot be empty");
         }
@@ -45,5 +44,7 @@ pub fn execute(controller_url: &str, token: Option<&str>) -> Result<()> {
     map.insert("controller".into(), controller);
     config::write_config(&cfg)?;
     eprintln!("Logged in to {controller_url}");
+    eprintln!("Note: this URL is used by REST commands (pause/resume/reset/freshness/logs).");
+    eprintln!("      gRPC commands (status/watch/list-runs) may use a different port.");
     Ok(())
 }
