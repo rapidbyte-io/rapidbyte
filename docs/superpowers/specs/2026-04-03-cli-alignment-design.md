@@ -232,7 +232,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 | `commands/logs.rs` | Logs command |
 | `commands/login.rs` | Login command |
 | `commands/logout.rs` | Logout command |
-| `commands/version.rs` | Version command |
+| `commands/version_cmd.rs` | Version command |
 
 ### Deleted files
 

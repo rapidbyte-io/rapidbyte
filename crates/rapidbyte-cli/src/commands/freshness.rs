@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use super::rest_client::{resolve_controller_and_token, RestClient};
+use super::rest_client::{resolve_controller_and_token, url_encode, RestClient};
 
 /// Query freshness data via the controller REST API.
 ///
@@ -13,7 +13,7 @@ pub async fn execute(ctrl: &crate::ControllerFlags, tag: Option<&str>) -> Result
     let (url, token) = resolve_controller_and_token(ctrl)?;
     let client = RestClient::new(&url, token.as_deref())?;
     let path = match tag {
-        Some(t) => format!("/api/v1/freshness?tag={t}"),
+        Some(t) => format!("/api/v1/freshness?tag={}", url_encode(t)),
         None => "/api/v1/freshness".to_string(),
     };
     let resp = client.get(&path).await?;

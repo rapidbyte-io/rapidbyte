@@ -28,7 +28,7 @@
 5. [Environment Variables](#5-environment-variables)
 6. [CLI Reference](#6-cli-reference)
    - [Pipeline commands](#pipeline-commands)
-   - [Controller commands](#server-commands)
+   - [Controller commands](#controller-commands)
    - [Operational commands](#operational-commands)
    - [Plugin management](#plugin-management)
    - [Project commands](#project-commands)
@@ -841,7 +841,7 @@ rapidbyte teardown --pipeline salesforce-crm
 rapidbyte teardown --pipeline salesforce-crm --reason pipeline_deleted
 ```
 
-### Server commands
+### Controller commands
 
 ```bash
 # ── controller (long-running daemon) ──────────────────────────────

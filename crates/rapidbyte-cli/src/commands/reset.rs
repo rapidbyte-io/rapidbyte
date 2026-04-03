@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 
-use super::rest_client::{resolve_controller_and_token, RestClient};
+use super::rest_client::{resolve_controller_and_token, url_encode, RestClient};
 
 /// Reset cursor state for a pipeline via the controller REST API.
 ///
@@ -17,11 +17,9 @@ pub async fn execute(
     let (url, token) = resolve_controller_and_token(ctrl)?;
     let client = RestClient::new(&url, token.as_deref())?;
     let body = stream.map(|s| serde_json::json!({ "stream": s }));
+    let encoded = url_encode(pipeline);
     let resp = client
-        .post(
-            &format!("/api/v1/pipelines/{pipeline}/reset"),
-            body.as_ref(),
-        )
+        .post(&format!("/api/v1/pipelines/{encoded}/reset"), body.as_ref())
         .await?;
     let cleared = resp
         .get("cursors_cleared")

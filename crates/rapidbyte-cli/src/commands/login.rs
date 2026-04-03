@@ -16,7 +16,11 @@ use super::config;
 /// read, or the updated config cannot be written.
 pub fn execute(controller_url: &str, token: Option<&str>) -> Result<()> {
     let token = if let Some(t) = token {
-        t.to_string()
+        let t = t.trim().to_string();
+        if t.is_empty() {
+            bail!("token cannot be empty");
+        }
+        t
     } else {
         eprint!("Token: ");
         let mut input = String::new();

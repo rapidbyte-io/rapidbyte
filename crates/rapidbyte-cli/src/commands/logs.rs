@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use anyhow::Result;
 
-use super::rest_client::{resolve_controller_and_token, RestClient};
+use super::rest_client::{resolve_controller_and_token, url_encode, RestClient};
 
 /// Fetch and display pipeline log entries from the controller REST API.
 ///
@@ -19,9 +19,11 @@ pub async fn execute(
 ) -> Result<()> {
     let (url, token) = resolve_controller_and_token(ctrl)?;
     let client = RestClient::new(&url, token.as_deref())?;
-    let mut path = format!("/api/v1/logs?pipeline={pipeline}&limit={limit}");
+    let encoded_pipeline = url_encode(pipeline);
+    let mut path = format!("/api/v1/logs?pipeline={encoded_pipeline}&limit={limit}");
     if let Some(id) = run_id {
-        write!(path, "&run_id={id}").expect("writing to String is infallible");
+        let encoded_id = url_encode(id);
+        write!(path, "&run_id={encoded_id}").expect("writing to String is infallible");
     }
     let resp = client.get(&path).await?;
     let empty = vec![];

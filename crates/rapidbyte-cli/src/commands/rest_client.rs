@@ -2,6 +2,26 @@
 
 use anyhow::{bail, Context, Result};
 
+/// Percent-encode characters that are unsafe in URL path segments or query
+/// values.  Only the characters that are most likely to appear in user-supplied
+/// pipeline names, run IDs, and tags are encoded; this avoids adding a new
+/// dependency for a narrow use-case.
+pub(crate) fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                use std::fmt::Write as _;
+                write!(out, "%{b:02X}").expect("writing to String is infallible");
+            }
+        }
+    }
+    out
+}
+
 /// A thin wrapper around `reqwest::Client` with base URL and optional auth.
 pub struct RestClient {
     base_url: String,
@@ -92,8 +112,9 @@ pub async fn pipeline_action(
 ) -> anyhow::Result<()> {
     let (url, token) = resolve_controller_and_token(ctrl)?;
     let client = RestClient::new(&url, token.as_deref())?;
+    let encoded = url_encode(pipeline);
     let resp = client
-        .post(&format!("/api/v1/pipelines/{pipeline}/{action}"), None)
+        .post(&format!("/api/v1/pipelines/{encoded}/{action}"), None)
         .await?;
     let state = resp.get("state").and_then(|v| v.as_str()).unwrap_or(action);
     eprintln!("Pipeline '{pipeline}' {state}");
@@ -123,12 +144,18 @@ pub fn resolve_controller_and_token(
         })?;
 
     let token = ctrl.auth_token.clone().or_else(|| {
-        super::config::read_config().ok().and_then(|v| {
-            v.get("controller")?
-                .get("token")?
-                .as_str()
-                .map(String::from)
-        })
+        let cfg = super::config::read_config().ok()?;
+        let ctrl_section = cfg.get("controller")?;
+        let stored_url = ctrl_section.get("url")?.as_str()?;
+        let stored_token = ctrl_section.get("token")?.as_str()?.to_string();
+        // Only use the stored token when the URL matches the one in config, or
+        // when no explicit URL was provided (meaning the URL itself came from
+        // config and therefore matches).
+        match &ctrl.controller {
+            None => Some(stored_token),
+            Some(explicit_url) if explicit_url == stored_url => Some(stored_token),
+            Some(_) => None, // Different URL — don't leak credentials
+        }
     });
 
     Ok((url, token))
