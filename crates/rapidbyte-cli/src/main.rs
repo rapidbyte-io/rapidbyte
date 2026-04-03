@@ -125,8 +125,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Run a data pipeline
-    Run {
+    /// Sync a data pipeline
+    Sync {
         /// Path to pipeline YAML file
         pipeline: PathBuf,
         #[command(flatten)]
@@ -519,7 +519,7 @@ async fn main() -> ExitCode {
     logging::init(verbosity, &cli.log_level, Some(&otel_guard));
 
     let result = match cli.command {
-        Commands::Run {
+        Commands::Sync {
             pipeline,
             ctrl,
             vault,
@@ -544,7 +544,7 @@ async fn main() -> ExitCode {
                 rapidbyte_secrets::SecretProviders::new()
             };
             let tls = make_tls_config(&ctrl);
-            commands::run::execute(
+            commands::sync::execute(
                 &pipeline,
                 verbosity,
                 controller_url.as_deref(),
@@ -820,10 +820,10 @@ mod tests {
     // ── New per-command flag placement tests ──────────────────────────
 
     #[test]
-    fn run_accepts_vault_flags_after_subcommand() {
+    fn sync_accepts_vault_flags_after_subcommand() {
         let parsed = Cli::try_parse_from([
             "rapidbyte",
-            "run",
+            "sync",
             "pipe.yaml",
             "--vault-addr",
             "http://vault:8200",

@@ -5092,6 +5092,7 @@ dependencies = [
  "rapidbyte-runtime",
  "rapidbyte-secrets",
  "rapidbyte-types",
+ "reqwest 0.12.28",
  "rustls 0.23.37",
  "serde_json",
  "serde_yaml",
