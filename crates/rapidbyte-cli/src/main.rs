@@ -158,18 +158,10 @@ enum Commands {
         #[arg(long, default_value = "pipeline_deleted")]
         reason: String,
     },
-    /// Manage plugins (pull, push, inspect, list, remove)
+    /// Manage plugins (pull, push, inspect, list, remove, scaffold)
     Plugin {
         #[command(subcommand)]
         command: PluginCommands,
-    },
-    /// Scaffold a new plugin project
-    Scaffold {
-        /// Plugin name (e.g., "source-mysql", "dest-snowflake")
-        name: String,
-        /// Output directory (default: `./plugins/<kind>/<name>`)
-        #[arg(short, long)]
-        output: Option<String>,
     },
     /// Launch interactive dev shell
     Dev,
@@ -295,6 +287,14 @@ pub(crate) enum PluginCommands {
         /// Output directory for key files (default: current directory)
         #[arg(long, default_value = ".")]
         output: PathBuf,
+    },
+    /// Scaffold a new plugin project
+    Scaffold {
+        /// Plugin name (e.g., "source-mysql", "dest-snowflake")
+        name: String,
+        /// Output directory (default: `./plugins/<kind>/<name>`)
+        #[arg(short, long)]
+        output: Option<String>,
     },
 }
 
@@ -539,7 +539,6 @@ async fn main() -> ExitCode {
                 .await
         }
         Commands::Plugin { command } => commands::plugin::execute(command, &registry_config).await,
-        Commands::Scaffold { name, output } => commands::scaffold::run(&name, output.as_deref()),
         Commands::Dev => commands::dev::execute().await,
         Commands::Controller {
             listen,
