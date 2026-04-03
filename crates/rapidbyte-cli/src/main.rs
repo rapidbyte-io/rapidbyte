@@ -423,13 +423,9 @@ pub(crate) enum PluginCommands {
 /// Resolve controller URL from config file (`~/.rapidbyte/config.yaml`).
 /// CLI flag and env var are already handled by clap's `env` attribute.
 pub(crate) fn controller_url_from_config() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let config_path = std::path::PathBuf::from(home)
-        .join(".rapidbyte")
-        .join("config.yaml");
-    let contents = std::fs::read_to_string(config_path).ok()?;
-    let val: serde_yaml::Value = serde_yaml::from_str(&contents).ok()?;
-    val.get("controller")?
+    commands::config::read_config()
+        .ok()?
+        .get("controller")?
         .get("url")?
         .as_str()
         .map(String::from)

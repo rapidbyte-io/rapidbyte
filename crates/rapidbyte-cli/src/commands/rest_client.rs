@@ -80,6 +80,26 @@ impl RestClient {
     }
 }
 
+/// Perform a simple pipeline state-change action (pause, resume, etc.).
+///
+/// # Errors
+///
+/// Returns `Err` if the controller URL cannot be resolved or the request fails.
+pub async fn pipeline_action(
+    ctrl: &crate::ControllerFlags,
+    pipeline: &str,
+    action: &str,
+) -> anyhow::Result<()> {
+    let (url, token) = resolve_controller_and_token(ctrl)?;
+    let client = RestClient::new(&url, token.as_deref())?;
+    let resp = client
+        .post(&format!("/api/v1/pipelines/{pipeline}/{action}"), None)
+        .await?;
+    let state = resp.get("state").and_then(|v| v.as_str()).unwrap_or(action);
+    eprintln!("Pipeline '{pipeline}' {state}");
+    Ok(())
+}
+
 /// Resolve the controller URL and auth token for REST commands.
 ///
 /// Priority order:
@@ -103,16 +123,12 @@ pub fn resolve_controller_and_token(
         })?;
 
     let token = ctrl.auth_token.clone().or_else(|| {
-        let path = super::config::config_path();
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_yaml::from_str::<serde_yaml::Value>(&s).ok())
-            .and_then(|v| {
-                v.get("controller")?
-                    .get("token")?
-                    .as_str()
-                    .map(String::from)
-            })
+        super::config::read_config().ok().and_then(|v| {
+            v.get("controller")?
+                .get("token")?
+                .as_str()
+                .map(String::from)
+        })
     });
 
     Ok((url, token))
