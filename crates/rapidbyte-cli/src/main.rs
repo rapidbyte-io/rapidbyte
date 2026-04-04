@@ -305,7 +305,7 @@ enum Commands {
         #[arg(long, env = "RAPIDBYTE_REGISTRY_URL")]
         registry_url: Option<String>,
         /// Use HTTP instead of HTTPS for the plugin registry
-        #[arg(long)]
+        #[arg(long, env = "RAPIDBYTE_REGISTRY_INSECURE")]
         registry_insecure: bool,
         /// REST API listen address (e.g. 0.0.0.0:8080). If not set, REST is disabled.
         #[arg(long, env = "RAPIDBYTE_REST_LISTEN")]
