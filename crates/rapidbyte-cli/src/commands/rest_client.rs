@@ -143,31 +143,41 @@ pub async fn pipeline_action(
 pub fn resolve_controller_and_token(
     ctrl: &crate::ControllerFlags,
 ) -> Result<(String, Option<String>)> {
+    // REST commands read `rest_url` from config (written by `login`).
+    // This is separate from `url` which is used by gRPC commands.
+    let rest_url_from_config = || -> Option<String> {
+        let cfg = super::config::read_config().ok()?;
+        cfg.get("controller")?
+            .get("rest_url")?
+            .as_str()
+            .map(String::from)
+    };
+
     let url = ctrl
         .controller
         .clone()
-        .or_else(crate::controller_url_from_config)
+        .or_else(rest_url_from_config)
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "controller URL required: use --controller, RAPIDBYTE_CONTROLLER, or `rapidbyte login`"
             )
         })?;
 
+    // Token resolution: CLI flag/env → config file.
+    // Only reuse stored token if no explicit URL was given (URL came from config)
+    // or if the explicit URL matches the stored rest_url.
     let token = ctrl.auth_token.clone().or_else(|| {
         let cfg = super::config::read_config().ok()?;
         let ctrl_section = cfg.get("controller")?;
-        let stored_url = ctrl_section.get("url")?.as_str()?;
+        let stored_rest_url = ctrl_section.get("rest_url")?.as_str()?;
         let stored_token = ctrl_section.get("token")?.as_str()?.to_string();
-        // Only use the stored token when the URL matches the one in config, or
-        // when no explicit URL was provided (meaning the URL itself came from
-        // config and therefore matches).
         let normalize = |u: &str| u.trim_end_matches('/').to_owned();
         match &ctrl.controller {
             None => Some(stored_token),
-            Some(explicit_url) if normalize(explicit_url) == normalize(stored_url) => {
+            Some(explicit_url) if normalize(explicit_url) == normalize(stored_rest_url) => {
                 Some(stored_token)
             }
-            Some(_) => None, // Different URL — don't leak credentials
+            Some(_) => None,
         }
     });
 

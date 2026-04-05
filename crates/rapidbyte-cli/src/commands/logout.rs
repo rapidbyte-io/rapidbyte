@@ -33,7 +33,8 @@ pub fn execute(controller_url: Option<&str>) -> Result<()> {
         if let Some(ctrl) = map.get_mut(yaml_key("controller")) {
             if let Some(ctrl_map) = ctrl.as_mapping_mut() {
                 let stored_url = ctrl_map
-                    .get(yaml_key("url"))
+                    .get(yaml_key("rest_url"))
+                    .or_else(|| ctrl_map.get(yaml_key("url")))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 if stored_url.trim_end_matches('/') == target_url.trim_end_matches('/') {
