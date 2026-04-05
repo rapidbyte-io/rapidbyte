@@ -459,6 +459,21 @@ fn resolve_controller_url(
     )
 }
 
+/// Resolve auth token from CLI flag/env, then config file fallback.
+/// Used by gRPC commands that need the stored token from `login`.
+fn resolve_auth_token(explicit: Option<&str>) -> Option<String> {
+    if let Some(t) = explicit {
+        return Some(t.to_string());
+    }
+    // Fall back to stored token in config
+    commands::config::read_config()
+        .ok()?
+        .get("controller")?
+        .get("token")?
+        .as_str()
+        .map(String::from)
+}
+
 fn try_build_secrets(
     vault_addr: Option<&str>,
     vault_token: Option<&str>,
@@ -605,12 +620,13 @@ async fn main() -> ExitCode {
             } else {
                 rapidbyte_secrets::SecretProviders::new()
             };
+            let auth = resolve_auth_token(ctrl.auth_token.as_deref());
             let tls = make_tls_config(&ctrl);
             commands::sync::execute(
                 &pipeline,
                 verbosity,
                 controller_url.as_deref(),
-                ctrl.auth_token.as_deref(),
+                auth.as_deref(),
                 tls.as_ref(),
                 &otel_guard,
                 &registry_config,
@@ -620,37 +636,40 @@ async fn main() -> ExitCode {
         }
         Commands::Status { run_id, ctrl } => {
             let controller_url = resolve_controller_url(ctrl.controller.clone(), true);
+            let auth = resolve_auth_token(ctrl.auth_token.as_deref());
             let tls = make_tls_config(&ctrl);
             commands::status::execute(
                 controller_url.as_deref(),
                 &run_id,
                 verbosity,
-                ctrl.auth_token.as_deref(),
+                auth.as_deref(),
                 tls.as_ref(),
             )
             .await
         }
         Commands::Watch { run_id, ctrl } => {
             let controller_url = resolve_controller_url(ctrl.controller.clone(), true);
+            let auth = resolve_auth_token(ctrl.auth_token.as_deref());
             let tls = make_tls_config(&ctrl);
             commands::watch::execute(
                 controller_url.as_deref(),
                 &run_id,
                 verbosity,
-                ctrl.auth_token.as_deref(),
+                auth.as_deref(),
                 tls.as_ref(),
             )
             .await
         }
         Commands::ListRuns { limit, state, ctrl } => {
             let controller_url = resolve_controller_url(ctrl.controller.clone(), true);
+            let auth = resolve_auth_token(ctrl.auth_token.as_deref());
             let tls = make_tls_config(&ctrl);
             commands::list_runs::execute(
                 controller_url.as_deref(),
                 limit,
                 state.as_deref(),
                 verbosity,
-                ctrl.auth_token.as_deref(),
+                auth.as_deref(),
                 tls.as_ref(),
             )
             .await

@@ -36,7 +36,8 @@ pub fn execute(controller_url: &str, token: Option<&str>) -> Result<()> {
         .as_mapping_mut()
         .ok_or_else(|| anyhow::anyhow!("config is not a mapping"))?;
     // Store under `rest_url` to distinguish from gRPC endpoint.
-    // gRPC commands use `url` (legacy) or `grpc_url`.
+    // gRPC commands fall back to `url` in config (set manually if needed).
+    // Token is shared by both REST and gRPC commands.
     let existing = map
         .get(serde_yaml::Value::String("controller".into()))
         .and_then(|v| v.as_mapping())
