@@ -10,17 +10,26 @@ use rapidbyte_secrets::SecretProviders;
 
 pub mod agent;
 pub mod check;
+pub mod config;
 pub mod controller;
 pub mod dev;
 pub mod discover;
-pub mod distributed_run;
+pub mod freshness;
 pub mod list_runs;
+pub mod login;
+pub mod logout;
+pub mod logs;
+pub mod pause;
 pub mod plugin;
-pub mod run;
+pub mod reset;
+pub mod rest_client;
+pub mod resume;
 pub mod scaffold;
 pub mod status;
+pub mod sync;
 pub mod teardown;
 pub mod transport;
+pub mod version_cmd;
 pub mod watch;
 
 /// Parse and validate a pipeline YAML file.

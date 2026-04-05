@@ -66,6 +66,9 @@ pub async fn execute(command: crate::PluginCommands, global_config: &RegistryCon
             .await
         }
         crate::PluginCommands::Keygen { output } => keygen(&output),
+        crate::PluginCommands::Scaffold { name, output } => {
+            super::scaffold::run(&name, output.as_deref())
+        }
     }
 }
 

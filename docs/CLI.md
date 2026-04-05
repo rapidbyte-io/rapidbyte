@@ -28,7 +28,7 @@
 5. [Environment Variables](#5-environment-variables)
 6. [CLI Reference](#6-cli-reference)
    - [Pipeline commands](#pipeline-commands)
-   - [Server commands](#server-commands)
+   - [Controller commands](#controller-commands)
    - [Operational commands](#operational-commands)
    - [Plugin management](#plugin-management)
    - [Project commands](#project-commands)
@@ -801,7 +801,7 @@ rapidbyte check                             # validate all pipeline configs
 rapidbyte check --pipeline salesforce-crm   # validate one
 rapidbyte check --apply                     # provision resources after validation
 
-# ── discover (implemented) ───────────────────────────────────────
+# ── discover (deferred — design divergence to resolve: connection-based vs pipeline-based) ──
 rapidbyte discover --connection postgres_app
 rapidbyte discover --connection postgres_app --table users
 # OUTPUT:
@@ -815,11 +815,11 @@ rapidbyte discover --connection postgres_app --table users
 #     primary_key: [id]
 #     cursor_field: updated_at
 
-# ── compile (planned) ────────────────────────────────────────────
+# ── compile (deferred — YAGNI, security concern with exposing resolved secrets) ──
 # Resolve all env vars and defaults. Show final effective config.
 rapidbyte compile --pipeline salesforce-crm
 
-# ── diff (planned) ───────────────────────────────────────────────
+# ── diff (deferred — needs engine schema comparison support) ──────
 # Show what changed since last sync (schema drift detection).
 rapidbyte diff --pipeline postgres-product
 # OUTPUT:
@@ -829,7 +829,7 @@ rapidbyte diff --pipeline postgres-product
 #   STREAM: orders
 #     (no changes)
 
-# ── assert (planned) ─────────────────────────────────────────────
+# ── assert (deferred — needs engine assertion execution) ──────────
 # Run data quality assertions.
 rapidbyte assert                            # run all assertions
 rapidbyte assert --pipeline salesforce-crm  # one pipeline
@@ -841,24 +841,24 @@ rapidbyte teardown --pipeline salesforce-crm
 rapidbyte teardown --pipeline salesforce-crm --reason pipeline_deleted
 ```
 
-### Server commands
+### Controller commands
 
 ```bash
-# ── serve (long-running daemon) ───────────────────────────────────
-# Starts the server. Mode depends on configuration:
+# ── controller (long-running daemon) ──────────────────────────────
+# Starts the gRPC + REST server. Mode depends on configuration:
 #   - No --metadata-database-url: standalone (embedded engine, local execution)
 #   - With --metadata-database-url: distributed coordinator (agents execute)
 
-rapidbyte serve                             # standalone (embedded engine)
-rapidbyte serve --port 8080                 # custom listen port (planned)
-rapidbyte serve --metrics-listen 0.0.0.0:9090  # Prometheus metrics
+rapidbyte controller                             # standalone (embedded engine)
+rapidbyte controller --port 8080                 # custom listen port
+rapidbyte controller --metrics-listen 0.0.0.0:9090  # Prometheus metrics
 
 # Distributed mode (coordinator)
-rapidbyte serve --metadata-database-url postgres://...
-rapidbyte serve --listen [::]:9090 --metadata-database-url postgres://...
+rapidbyte controller --metadata-database-url postgres://...
+rapidbyte controller --listen [::]:9090 --metadata-database-url postgres://...
 
 # ── agent (distributed worker) ────────────────────────────────────
-# Start a worker that connects to a serve instance via gRPC.
+# Start a worker that connects to a controller instance via gRPC.
 
 rapidbyte agent --controller http://coordinator:9090
 rapidbyte agent --controller http://coordinator:9090 --max-tasks 4
@@ -867,7 +867,7 @@ rapidbyte agent --metrics-listen 0.0.0.0:9191
 
 ### Operational commands
 
-These commands query or control a running system (`serve`).
+These commands query or control a running system (`controller`).
 
 ```bash
 # ── status (implemented) ─────────────────────────────────────────
@@ -907,13 +907,15 @@ rapidbyte list-runs --state failed         # filter by state
 rapidbyte sync --failed                     # retry all failed from last run
 rapidbyte sync --stale                      # run anything past freshness SLA
 
-# ── Pipeline control (planned) ───────────────────────────────────
+# ── pause / resume ───────────────────────────────────────────────
 rapidbyte pause --pipeline salesforce-crm   # pause scheduled runs
 rapidbyte resume --pipeline salesforce-crm  # resume
+
+# ── reset ─────────────────────────────────────────────────────────
 rapidbyte reset --pipeline salesforce-crm   # clear state (next run = full refresh)
 rapidbyte reset --pipeline salesforce-crm --stream events  # per-stream
 
-# ── Freshness (planned) ──────────────────────────────────────────
+# ── freshness ─────────────────────────────────────────────────────
 rapidbyte freshness                         # check all pipelines
 rapidbyte freshness --tag tier-1
 # OUTPUT:
@@ -921,10 +923,10 @@ rapidbyte freshness --tag tier-1
 #   postgres-product    last sync: 8h ago    SLA: 6h    ✗ stale
 #   stripe-payments     last sync: 45m ago   SLA: 1h    ✓ fresh
 
-# ── Logs (planned) ───────────────────────────────────────────────
+# ── logs ──────────────────────────────────────────────────────────
 rapidbyte logs --pipeline salesforce-crm    # recent logs
-rapidbyte logs --pipeline salesforce-crm --run latest
-rapidbyte logs --pipeline salesforce-crm --run 2025-03-19T14:30:00Z
+rapidbyte logs --pipeline salesforce-crm --run-id latest
+rapidbyte logs --pipeline salesforce-crm --limit 50
 rapidbyte logs --follow                     # tail all pipeline logs
 ```
 
@@ -950,9 +952,9 @@ rapidbyte plugin keygen                     # generate signing keypair
 rapidbyte dev                               # interactive dev shell (REPL)
 
 # ── scaffold (implemented) ───────────────────────────────────────
-rapidbyte scaffold <name>                   # scaffold a new plugin project
+rapidbyte plugin scaffold <name>            # scaffold a new plugin project
 
-# ── init (planned) ───────────────────────────────────────────────
+# ── init (deferred — low priority, one-time use) ─────────────────
 rapidbyte init                              # scaffold new project
 rapidbyte init --template minimal           # just pipeline.yml
 rapidbyte init --template standard          # full project structure
@@ -962,10 +964,11 @@ rapidbyte version
 # rapidbyte 0.1.0 (rustc 1.82.0, wasmtime 41.0.0)
 # plugins: postgres@1.2.3, salesforce@1.5.1, snowflake@2.0.0
 
-# ── login / logout (planned) ─────────────────────────────────────
-rapidbyte login --controller http://localhost:8080   # store auth token
-rapidbyte logout                                     # remove stored token
-rapidbyte logout --controller http://localhost:8080  # remove token for specific controller
+# ── login / logout ────────────────────────────────────────────────
+rapidbyte login --controller http://localhost:8080              # store auth token
+rapidbyte login --controller http://localhost:8080 --token rb_tok_abc123
+rapidbyte logout                                                # remove stored token
+rapidbyte logout --controller http://localhost:8080             # remove token for specific controller
 ```
 
 ### Global flags
@@ -993,7 +996,7 @@ rapidbyte [command] \
 
 `rapidbyte sync` always executes through a controller. Without
 `--controller`, an embedded controller runs in-process. With
-`--controller <url>`, it connects to a running `rapidbyte serve`
+`--controller <url>`, it connects to a running `rapidbyte controller`
 instance. The execution path is identical either way.
 
 Controller endpoint resolution order:
@@ -1034,16 +1037,16 @@ Works everywhere: laptop, CI runner, Docker, cron job.
 
 ### Long-running server
 
-`rapidbyte serve` starts a persistent controller with built-in
-scheduler (planned), REST API (planned), metrics endpoint. Pipelines
-can execute locally (embedded engine) or be delegated to agents.
+`rapidbyte controller` starts a persistent gRPC + REST server with
+built-in scheduler, metrics endpoint. Pipelines can execute locally
+(embedded engine) or be delegated to agents.
 
 ```bash
 # Single node — embedded engine, no agents needed
-rapidbyte serve --metrics-listen 0.0.0.0:9090
+rapidbyte controller --metrics-listen 0.0.0.0:9090
 
 # Multi-node — add agents for distributed execution
-rapidbyte serve --metadata-database-url postgres://... \
+rapidbyte controller --metadata-database-url postgres://... \
   --listen [::]:9090
 
 rapidbyte agent --controller http://coordinator:9090 --max-tasks 4
@@ -1059,8 +1062,8 @@ rapidbyte status <run_id> --controller http://localhost:9090
 ### Progression
 
 ```
-rapidbyte sync              →  rapidbyte serve        →  serve + agents
-(embedded controller)          (persistent controller)    (distributed)
+rapidbyte sync              →  rapidbyte controller        →  controller + agents
+(embedded controller)          (persistent controller)         (distributed)
 ```
 
 Same pipeline files at every stage. No config migration.
@@ -1305,7 +1308,7 @@ rapidbyte sync --env-file .env.dev
 
 # Production (Kubernetes)
 # Env vars injected via Secret/ConfigMap — zero config change.
-rapidbyte serve
+rapidbyte controller
 ```
 
 ---
@@ -1320,7 +1323,7 @@ rapidbyte serve
 | Transforms | Closed set of operations, not SQL | Keep boundary clean — dbt does transforms |
 | Assertions | Stream properties, not separate contracts | Same inheritance as all other config. One mental model |
 | Pipeline routing | Always through controller (embedded or remote) | One execution path, zero surprises scaling up |
-| Deployment modes | sync (embedded) → serve → serve + agents | Same config at every stage, progressive complexity |
+| Deployment modes | sync (embedded) → controller → controller + agents | Same config at every stage, progressive complexity |
 | REST API | Lives in controller; same surface everywhere | CLI doesn't care where pipelines execute |
 | Schema evolution | First-class declarative block | THE differentiator vs Airbyte/Fivetran |
 | Config inheritance | Project defaults → pipeline → stream overrides | Three levels max. No directory-level cascading |
